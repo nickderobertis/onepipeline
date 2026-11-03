@@ -151,6 +151,10 @@ sources:
     config: { root: ./plans }
 ```
 
+A qualified id reads its tasks from the source it names, whatever the store's
+`default_sources` (or `ONETASKGRAPH_DEFAULT_SOURCES`) are, and each member project
+the home names joins from its own source.
+
 `examples/plan-store/` is a complete store of that shape, holding the two example
 plans this repository ships. Nothing here special-cases a remote source, so a
 `local-md` project runs directly — author locally, run it, and copy it up only

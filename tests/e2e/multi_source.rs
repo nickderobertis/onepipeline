@@ -150,7 +150,7 @@ fn read_plan_tasks(world: &World, home: &str) -> Result<BTreeMap<String, Value>,
     world.store_call(|engine| async move {
         let answer = engine
             .tasks(&onetaskgraph_core::TaskRequest {
-                sources: Vec::new(),
+                sources: vec![id.source.clone()],
                 filters: onetaskgraph_core::Filters::default(),
                 priorities: Vec::new(),
                 metadata: Vec::new(),
@@ -1436,12 +1436,7 @@ fn a_combined_world(name: &str, combined: bool) -> World {
             &format!("ONETASKGRAPH_SOURCES__{plans}__VISIBILITY"),
             "public",
         )
-        .with_env("ONETASKGRAPH_SOURCES__MEMBERS__VISIBILITY", "private")
-        // The home lands in the member source, so a run reads its plan there.
-        .with_env(
-            "ONETASKGRAPH_DEFAULT_SOURCES",
-            &format!("{STORE_SOURCE},{MEMBERS}"),
-        );
+        .with_env("ONETASKGRAPH_SOURCES__MEMBERS__VISIBILITY", "private");
     if combined {
         world = world
             .with_env(

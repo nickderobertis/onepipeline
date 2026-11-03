@@ -1163,6 +1163,9 @@ impl World {
             }
         }
         command
+            // The world's own store configuration, as an operator's declares it: its plans
+            // source is the default every read that names no source addresses. A qualified
+            // plan id needs no default to be read; see `Store::tasks`.
             .env("ONETASKGRAPH_DEFAULT_SOURCES", STORE_SOURCE)
             .envs(self.plans_source())
             .env(
@@ -1309,7 +1312,7 @@ impl World {
             let mut seen = std::collections::HashSet::new();
             loop {
                 let request = onetaskgraph_core::TaskRequest {
-                    sources: Vec::new(),
+                    sources: vec![id.source.clone()],
                     filters: onetaskgraph_core::Filters::default(),
                     priorities: Vec::new(),
                     metadata: Vec::new(),
@@ -1382,6 +1385,7 @@ impl World {
                 path_text(&self.root.join("xdg")),
             ),
             ("HOME".to_owned(), path_text(&self.root)),
+            // The same default the binary under test is configured with, above.
             (
                 "ONETASKGRAPH_DEFAULT_SOURCES".to_owned(),
                 STORE_SOURCE.to_owned(),

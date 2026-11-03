@@ -1130,6 +1130,190 @@ fn export_base_holds(home: Home) {
     );
 }
 
+/// Each end of an export edge retried over a live run's channel, under a new id with a
+/// full replacement node: the producer alone, the producer beside a retry of a node on no
+/// export edge, the consumer alone, and the consumer beside an unrelated `add` — each in one
+/// envelope, each committed, and the edge the run reads afterwards naming the replacement.
+///
+/// The paired envelopes are the defect this holds: a `retry` replaced its node in the graph a
+/// later command of the same envelope is compiled against, but the frontier that command's
+/// export edges were mapped from still named the node it removed, so the whole envelope was
+/// refused as carrying a dangling export edge.
+#[test]
+fn export_edge_ends_retried_alone_and_beside_other_commands_follow_their_replacements() {
+    retried_export_ends(Home::Shared);
+}
+
+/// The same retries over a private canonical home, the shape the paired envelope was first
+/// refused in.
+#[test]
+fn export_edge_ends_retried_alone_and_beside_other_commands_follow_their_replacements_in_a_private_home(
+) {
+    retried_export_ends(Home::Private);
+}
+
+/// The `edit-committed` record of `run`'s accepted `op` naming `id`, by the command it carried.
+fn committed(world: &World, run: &str, op: &str, id: &str) -> Value {
+    world
+        .events_of(run, "edit-committed")
+        .into_iter()
+        .find(|event| {
+            let command = &event["payload"]["command"];
+            command["op"] == op && (command["id"] == id || command["node"]["id"] == id)
+        })
+        .unwrap_or_else(|| panic!("no committed `{op}` of {id}\n{}", world.dump()))
+}
+
+fn retried_export_ends(home: Home) {
+    let run = "retried";
+    let (world, _, library) = home.world(match home {
+        Home::Shared => "boundary-retried-ends",
+        Home::Private => "boundary-retried-ends-private",
+    });
+    // Two producers fail before a third keeps the example; `other`, on no export edge, fails
+    // beside the second.
+    world.script("generalize.fail", "1");
+    world.script("generalize-2.fail", "1");
+    world.script("generalize-3.work-at", "examples/generic/sample.md");
+    world.script(
+        "generalize-3.work",
+        "the third producer's generic example\n",
+    );
+    world.script("other.fail", "1");
+    // Two consumers fail before a third builds on the export.
+    world.script("examples.fail", "1");
+    world.script("examples-2.fail", "1");
+    world.script("examples-3.work", "built on the export\n");
+    // Held open so the driver attends the run while each failure waits for its retry.
+    world.script("keep.wait", "hold");
+    let mut plan = home.exported_plan(run);
+    let nodes = plan["tasks"].as_array_mut().expect("the plan's nodes");
+    nodes.push(crate::harness::agent("other", &[]));
+    nodes.push(crate::harness::agent("keep", &[]));
+    let project = home.project(&world, run, &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+
+    // The producer, alone.
+    until_settled(&world, run, "generalize");
+    reply(
+        &world,
+        run,
+        json!([{"op": "retry", "id": "generalize", "node": home.producer("generalize-2", &[])}]),
+    );
+    committed(&world, run, "retry", "generalize");
+
+    // The producer, beside a retry of a node no export edge names.
+    until_settled(&world, run, "generalize-2");
+    until_settled(&world, run, "other");
+    reply(
+        &world,
+        run,
+        json!([
+            {"op": "retry", "id": "generalize-2", "node": home.producer("generalize-3", &[])},
+            {"op": "retry", "id": "other", "node": crate::harness::agent("other-2", &[])},
+        ]),
+    );
+    committed(&world, run, "retry", "generalize-2");
+    committed(&world, run, "retry", "other");
+
+    // The consumer, alone.
+    until_settled(&world, run, "examples");
+    reply(
+        &world,
+        run,
+        json!([{"op": "retry", "id": "examples", "node": home.public("examples-2", &[])}]),
+    );
+    committed(&world, run, "retry", "examples");
+
+    // The consumer, beside an unrelated command.
+    until_settled(&world, run, "examples-2");
+    reply(
+        &world,
+        run,
+        json!([
+            {"op": "retry", "id": "examples-2", "node": home.public("examples-3", &[])},
+            {"op": "add", "node": crate::harness::agent("aside", &[])},
+        ]),
+    );
+    committed(&world, run, "retry", "examples-2");
+    committed(&world, run, "add", "aside");
+
+    until_settled(&world, run, "examples-3");
+    until_settled(&world, run, "aside");
+    until_settled(&world, run, "other-2");
+    world.release("keep.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    for node in ["generalize-3", "other-2", "examples-3", "aside"] {
+        let settled = settled(&world, run, node);
+        assert_eq!(settled["status"], "done", "{settled}\n{}", world.dump());
+    }
+
+    // Every producer replacement was dispatched as the edge's producer, and every consumer
+    // replacement as its consumer: the edge each read named it.
+    for producer in ["generalize-2", "generalize-3"] {
+        let tasks = tasks_of(&world, producer);
+        assert!(!tasks.is_empty(), "{producer} was not dispatched");
+        for task in &tasks {
+            assert!(
+                task.contains("This node is an export producer."),
+                "{producer} was not told it produces the export:\n{task}"
+            );
+        }
+    }
+    for consumer in ["examples-2", "examples-3"] {
+        let tasks = tasks_of(&world, consumer);
+        assert!(!tasks.is_empty(), "{consumer} was not dispatched");
+        for task in &tasks {
+            assert!(
+                task.contains("its branch starts from one neutral commit"),
+                "{consumer} was not told it consumes the export:\n{task}"
+            );
+        }
+    }
+
+    // One export, of the last producer's kept work, and every consumer session opened on it.
+    let recorded = world.run_json(run, "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["producer"], "generalize-3", "{recorded:?}");
+    let exported = recorded[0]["exported"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    let opened: Vec<Value> = world
+        .events_of(run, "session-opened")
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event["labels"]["node"].as_str(),
+                Some("examples" | "examples-2" | "examples-3")
+            )
+        })
+        .collect();
+    for consumer in ["examples", "examples-2", "examples-3"] {
+        assert!(
+            opened
+                .iter()
+                .any(|event| event["labels"]["node"] == consumer),
+            "{consumer} opened no session: {opened:?}"
+        );
+    }
+    for event in &opened {
+        assert_eq!(event["payload"]["branch"], exported, "{event}");
+    }
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:examples/sample.md"]
+        ),
+        "the third producer's generic example"
+    );
+}
+
 #[test]
 fn an_export_that_changes_a_path_outside_its_directory_is_refused_and_its_consumer_never_starts() {
     let (world, _, library) = mixed_world("boundary-outside");
@@ -2726,6 +2910,82 @@ fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_expor
         .expect("the consumer's projection");
     assert!(view.contains("title: 'feat: add examples'"), "{view}");
     assert!(view.contains("status: done"), "{view}");
+}
+
+/// A private coordinating plan homed on a source the default sources leave out reads its
+/// home's tasks from that source and its members' from theirs, so it checks and launches with
+/// every node. The reader once asked the defaults, which the store narrows to the home's own
+/// source — so a home they did not name was dropped, and the plan read as the neutral view of
+/// its public task alone, refused as an export edge whose producer is no node of the plan.
+#[test]
+fn a_private_coordinating_plan_homed_off_the_default_sources_checks_and_launches_every_node() {
+    let (world, _, library) = private_home_world("boundary-home-off-defaults");
+    // Every source but the home's.
+    let world = world.with_env("ONETASKGRAPH_DEFAULT_SOURCES", "draft,views");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work-at", "consumer.md");
+    world.script("examples.work", "what the public task built on it\n");
+    let run = "off-defaults";
+    let project = routed_into_private_home(&world, run, &Home::Private.exported_plan(run));
+    assert!(project.starts_with("plans:"), "{project}");
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(0);
+    let answered: Value = serde_json::from_str(checked.stdout.trim()).expect("one JSON object");
+    assert_eq!(answered["accepted"], json!(true), "{answered}");
+    assert_eq!(answered["refusals"], json!([]), "{answered}");
+
+    world.run(&["start", &project, "--attach"]).settled();
+    let launched = world.run_json(run, "plan.json");
+    let ids: Vec<&str> = launched["tasks"]
+        .as_array()
+        .expect("the launched nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["generalize", "examples"], "{launched}");
+    let repositories: Vec<&Value> = launched["tasks"]
+        .as_array()
+        .expect("the launched nodes")
+        .iter()
+        .map(|node| &node["repo"])
+        .collect();
+    assert_ne!(repositories[0], repositories[1], "{launched}");
+
+    for node in ["generalize", "examples"] {
+        let settled = settled(&world, run, node);
+        assert_eq!(settled["status"], "done", "{settled}\n{}", world.dump());
+    }
+    // Each was dispatched in its own repository: the producer kept its branch in the private
+    // one, and the consumer's session opened on the export into the public one.
+    let recorded = world.run_json(run, "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["producer"], "generalize", "{recorded:?}");
+    assert_ne!(recorded[0]["from"], recorded[0]["to"], "{recorded:?}");
+    let exported = recorded[0]["exported"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    let opened: Vec<Value> = world
+        .events_of(run, "session-opened")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "examples")
+        .collect();
+    assert!(!opened.is_empty(), "{}", world.dump());
+    for event in &opened {
+        assert_eq!(event["payload"]["branch"], exported, "{event}");
+    }
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:consumer.md"]
+        ),
+        "what the public task built on it"
+    );
 }
 
 /// A private plan whose public task carries an anchor naming only itself — `<a id="…"></a>`,
