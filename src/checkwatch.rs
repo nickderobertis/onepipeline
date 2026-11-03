@@ -426,7 +426,7 @@ pub(crate) struct CheckWatch {
     considered: BTreeSet<(String, String)>,
     /// The change requests followed, by node.
     followed: BTreeMap<String, Followed>,
-    /// When each repository was last read.
+    /// When each repository was last asked, or, once it answered, answered.
     read_at: BTreeMap<String, Instant>,
     /// The repositories with a read in flight.
     reading: BTreeSet<String>,
@@ -610,6 +610,9 @@ impl CheckWatch {
         self.take_up_answers();
         for (repo, nodes, answer) in std::mem::take(&mut self.taken) {
             self.reading.remove(&repo);
+            // The interval runs from the answer, not the ask: a read the host was slow
+            // to receive would otherwise sit closer to the next than the interval.
+            self.read_at.insert(repo.clone(), Instant::now());
             self.apply(paths, journal, state, &nodes, answer, filter)?;
         }
         let now = crate::sys::now_millis();

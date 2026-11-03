@@ -800,7 +800,7 @@ pub(crate) struct Watch {
     /// What holds each awaited identity's release, as its last holdup read said —
     /// one answer shared by every node awaiting that identity.
     holdups: BTreeMap<String, Holdup>,
-    /// When each identity's holdup was last asked for.
+    /// When each identity's holdup was last asked for, or, once it answered, answered.
     holdup_asked: BTreeMap<String, Instant>,
     /// The identities with a holdup read in flight.
     holdup_reading: BTreeSet<String>,
@@ -958,6 +958,9 @@ impl Watch {
         for (identity, answer) in holdups {
             arrived = true;
             self.holdup_reading.remove(&identity);
+            // The interval runs from the answer, not the ask: a read the host was slow
+            // to receive would otherwise sit closer to the next than the interval.
+            self.holdup_asked.insert(identity.clone(), Instant::now());
             match answer {
                 Ok(answer) => {
                     self.holdups.insert(
