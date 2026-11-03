@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.99.0](https://github.com/nickderobertis/onepipeline/compare/v0.98.4...v0.99.0) - 2026-11-03
+
+### Added
+
+- *(deps)* [**breaking**] link the onetaskgraph release that lands section links on their headings ([#1385](https://github.com/nickderobertis/onepipeline/pull/1385))
+
 ## [0.98.4](https://github.com/nickderobertis/onepipeline/compare/v0.98.3...v0.98.4) - 2026-11-03
 
 ### Fixed
