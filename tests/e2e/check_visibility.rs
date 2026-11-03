@@ -1403,3 +1403,74 @@ fn a_launch_filtering_out_change_checks_relays_and_raises_nothing_its_follow_rea
     assert!(raised(&world, run, "check-failed").is_empty());
     assert_eq!(settlement(&world, run, "service").0, "done");
 }
+
+/// A driver adopting a run whose checks the timeout already stopped following does not
+/// follow them again nor name them twice, and the run's end still lists them once.
+#[cfg(unix)]
+#[test]
+fn an_adopting_driver_does_not_follow_again_what_the_timeout_stopped_following() {
+    let world = world_following(
+        "unfollowed-adopted",
+        "lint completed success required\nslow in_progress - advisory",
+    )
+    .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "3");
+    let run = "unfollowedadopted";
+    launch(&world, run);
+    world.until("the follow to stop", |world| {
+        !world.events_of(run, "checks-unfollowed").is_empty()
+    });
+    crate::harness::end_driver(&world, run);
+    let mut adopting = world
+        .cmd(&["adopt", run])
+        .env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW)
+        .env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "3")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the adoption starts");
+    world.until("the adopting driver to take the run", |world| {
+        !world.events_of(run, "driver-adopted").is_empty()
+    });
+    // Past the adoption's own first pass, whose readjustment reads the draft's standing
+    // through the same query a follow read is; a follow would read every 0.2 s after it.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let reads = follow_reads(&world).len();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(
+        follow_reads(&world).len(),
+        reads,
+        "the adopting driver followed again: {:?}\nsettled: {:?}\npushes: {:?}",
+        world.events_of(run, "checks-unfollowed"),
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .map(|e| (
+                e["payload"]["head"].clone(),
+                e["payload"]["change_url"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        world
+            .events_of(run, "push")
+            .iter()
+            .map(|e| e["payload"]["head"].clone())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(world.events_of(run, "checks-unfollowed").len(), 1);
+    assert_eq!(raised(&world, run, "checks-unfollowed").len(), 1);
+
+    world.script("after.go", "");
+    let ended = adopting.wait().expect("the adoption ends");
+    assert!(ended.success(), "adopt exited {ended}: {}", world.dump());
+    let exited = last_exit(&world, run);
+    assert_eq!(
+        listed(&exited, "checks_unfollowed"),
+        [(
+            "slow".to_owned(),
+            "not required — does not block".to_owned()
+        )]
+    );
+    assert!(
+        exited["payload"].get("checks_running").is_none(),
+        "{exited}"
+    );
+}

@@ -2900,7 +2900,6 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
     ExitCode::SUCCESS
 }
 
-/// Append one line to `path`, creating it.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {

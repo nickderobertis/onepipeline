@@ -68,6 +68,9 @@ function readRecord() {
   }
   held.phases.forEach((phase, n) => {
     if (!Array.isArray(phase.calls)) fail(`phases[${n}].calls must be a list`);
+    // The workload follows six changes and holds two nodes on a release, so a record with
+    // no read of either kind is not a recording of it.
+    if (phase.calls.length === 0) fail(`phases[${n}].calls must not be empty: the workload makes ${phase.phase} reads`);
     phase.calls.forEach((call, m) => {
       const at = `phases[${n}].calls[${m}]`;
       if (call === null || typeof call !== "object") fail(`${at} must be a call`);

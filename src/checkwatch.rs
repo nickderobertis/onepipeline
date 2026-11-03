@@ -72,7 +72,6 @@ pub const FAILED_SURFACE_KIND: &str = "check-failed";
 /// The surface kind checks the driver stopped following are named under.
 pub const UNFOLLOWED_SURFACE_KIND: &str = "checks-unfollowed";
 
-/// What a missing check address reads as.
 const NO_ADDRESS: &str = "the host reported no address for this check";
 
 /// A duration read from `name` in seconds, fractions allowed; `default` for an unset
@@ -98,7 +97,10 @@ pub(crate) struct Reading {
 }
 
 impl Reading {
-    /// The reading a relayed `change-check` carries, or `None` for any other record.
+    /// The reading a relayed `change-check` carries, or `None` for any other record and
+    /// for one that does not say what it read: a name, a state this stack names, and
+    /// whether the check is required. A relayed record is another process's output, so a
+    /// field missing or of another type is not read as a pending advisory check.
     pub(crate) fn of(event: &Envelope) -> Option<Self> {
         if event.source != Source::Vcs || event.kind.0 != "change-check" {
             return None;
@@ -110,20 +112,24 @@ impl Reading {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
-        let name = text("name")?;
-        let state = text("state").unwrap_or_else(|| "pending".to_owned());
-        let settled = text("status").map_or(state != "pending", |status| {
-            status.eq_ignore_ascii_case("completed")
-        });
+        let name = text("name").filter(|name| !name.is_empty())?;
+        let state = text("state").filter(|state| {
+            matches!(
+                state.as_str(),
+                "passed" | "failed" | "skipped" | "pending" | "no-verdict"
+            )
+        })?;
+        let required = event.payload.get("required").and_then(Value::as_bool)?;
+        let settled = match event.payload.get("status") {
+            Some(Value::String(status)) => status.eq_ignore_ascii_case("completed"),
+            None | Some(Value::Null) => state != "pending",
+            Some(_) => return None,
+        };
         Some(Self {
             name,
             settled,
             conclusion: text("conclusion"),
-            required: event
-                .payload
-                .get("required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            required,
             url: text("url"),
             state,
         })
@@ -586,9 +592,15 @@ impl CheckWatch {
             let status = statuses.get(node);
             if !returned(status) {
                 // A node running again is followed by its own publication's watch.
+                // llmlint: ignore-block[changed_behavior_has_e2e] no command a user can type
+                // dispatches a settled node again under its own id — `requeue` is refused for
+                // any node that is not parked, and `retry` replaces it under a new id — so this
+                // is the guard for a fold that ever answers it `running` again, with no journey
+                // to drive it.
                 if matches!(status, Some(NodeStatus::Running)) {
                     self.followed.remove(node);
                 }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 continue;
             }
             if !self
@@ -1031,6 +1043,29 @@ mod tests {
             change_check_line(&bare).as_deref(),
             Some("change-check 'lint' passed (required — blocks the merge) [progress]")
         );
+    }
+
+    #[test]
+    fn a_change_check_that_does_not_say_what_it_read_is_no_reading() {
+        for payload in [
+            json!({"state": "failed", "required": false}),
+            json!({"name": "slow", "state": "exploded", "required": false}),
+            json!({"name": "slow", "state": "failed"}),
+            json!({"name": "slow", "state": "failed", "required": "no"}),
+            json!({"name": "slow", "state": "failed", "required": false, "status": 3}),
+        ] {
+            assert_eq!(
+                Reading::of(&check(payload.clone(), "attention")),
+                None,
+                "{payload}"
+            );
+        }
+        let read = Reading::of(&check(
+            json!({"name": "slow", "state": "pending", "required": false, "status": null}),
+            "progress",
+        ))
+        .expect("a reading");
+        assert!(!read.settled);
     }
 
     #[test]
