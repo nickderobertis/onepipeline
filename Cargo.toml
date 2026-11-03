@@ -1315,6 +1315,16 @@ onevcs-testing = "0.19.26"
 # the repositories its plan's tasks name, so the store's human-task routes classify and place
 # it (`src/human_items/projection.rs`); `tests/e2e/human_board_projection.rs` drives a public,
 # a private, a mixed and an organization's plan through it.
+# **0.13.2 is the floor for a plan copied again after an undo** (`otg-linear-create`): a copy
+# refused partway is undone, which deletes the project it created, and Linear never lets a
+# create take a deleted record's id again — so a re-copy, which sends the same create key and so
+# the same project id, is refused `conflict on insert of Project`. 0.13.1 then read that id for
+# an earlier attempt's project, took Linear's `Entity not found: Project` answer for a failure,
+# and reported it in place of the refusal; 0.13.2 reads an absent id as absent and creates the
+# project under its key's next candidate id (onetaskgraph #3867). A fresh copy into an empty
+# Linear lands on either release. The loopback Linear answers both as Linear does, and
+# `tests/e2e/linear_launch.rs` copies a plan into it fresh, with its project create's answer
+# lost, and again after such an undo — the last being the journey 0.13.1 fails.
 # **0.13.3 translates section links on copy** (`onetaskgraph-section-links`): a link to a
 # heading in a copied document or task lands on that section in each destination's own
 # heading form, so a design document's budget link resolves on GitHub and Linear.
