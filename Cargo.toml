@@ -1581,6 +1581,7 @@ windows-sys = { workspace = true, features = [
 # the `model-mismatch` reason to that library's own spellings rather than to
 # strings restated here.
 [dev-dependencies]
+url = "2"
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 # The store's Linear plugin, at the release `onetaskgraph-core` links — see

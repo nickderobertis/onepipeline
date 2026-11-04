@@ -825,7 +825,9 @@ fn track_export_samples(world: &World, public: &Repository) {
         &[
             "config",
             "lfs.url",
-            &format!("file://{}", public.origin.display()),
+            url::Url::from_file_path(&public.origin)
+                .expect("the public origin is an absolute path")
+                .as_str(),
         ],
     );
 }
