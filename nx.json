@@ -5,13 +5,21 @@
   "namedInputs": {
     "sharedGlobals": [
       "{workspaceRoot}/nx.json",
-      "{workspaceRoot}/package.json",
-      "{workspaceRoot}/package-lock.json",
-      "{workspaceRoot}/justfile"
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+      },
+      "{workspaceRoot}/justfile",
+      "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+      "{workspaceRoot}/.github/nx-version-files",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem files"
+      }
     ],
     "default": [
       "{projectRoot}/**/*",
-      "sharedGlobals"
+      "sharedGlobals",
+      "!{projectRoot}/CHANGELOG.md",
+      "!{projectRoot}/**/CHANGELOG.md"
     ],
     "wholeWorkspace": [
       "{workspaceRoot}/**/*"
@@ -20,12 +28,14 @@
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/crates/**/*",
       "{workspaceRoot}/schemas/**/*",
-      "{workspaceRoot}/Cargo.toml",
-      "{workspaceRoot}/Cargo.lock",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+      },
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
       "{workspaceRoot}/.config/nextest.toml",
-      "sharedGlobals"
+      "sharedGlobals",
+      "{workspaceRoot}/scripts/ensure-test-archive.sh"
     ],
     "crateSource": [
       "rustBuild",
@@ -62,14 +72,16 @@
       "{workspaceRoot}/.github/**/*",
       "{workspaceRoot}/AGENTS.md",
       "{workspaceRoot}/CODEOWNERS",
-      "{workspaceRoot}/biome.json",
+      "{workspaceRoot}/biome.jsonc",
       "{workspaceRoot}/budgets.yaml",
       "{workspaceRoot}/deny.toml",
       "{workspaceRoot}/gh-secrets.json",
       "{workspaceRoot}/llmlint.yml",
       "{workspaceRoot}/oneharness.toml",
       "{workspaceRoot}/project.json",
-      "{workspaceRoot}/pyproject.toml",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
+      },
       "{workspaceRoot}/release-plz.toml",
       "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/screencomp.toml"
@@ -164,12 +176,12 @@
     ],
     "codexServerSource": [
       "{workspaceRoot}/tests/codex_server/**/*",
-      "{workspaceRoot}/crates/testfakes/Cargo.toml",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+      },
       "{workspaceRoot}/crates/testfakes/src/lib.rs",
       "{workspaceRoot}/crates/testfakes/src/codex_app_server.rs",
       "{workspaceRoot}/crates/testfakes/src/bin/fake-codex.rs",
-      "{workspaceRoot}/Cargo.toml",
-      "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
       "{workspaceRoot}/.config/nextest.toml",
@@ -191,53 +203,122 @@
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/tests/e2e/pool_support.rs",
       "{workspaceRoot}/tests/e2e/pool_hand_back.rs"
+    ],
+    "cargoSelection": [
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/**/Cargo.toml"
+    ],
+    "npmSelection": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/package-lock.json",
+      "{workspaceRoot}/**/package.json",
+      "{workspaceRoot}/**/package-lock.json"
+    ],
+    "pythonSelection": [
+      "{workspaceRoot}/pyproject.toml"
     ]
   },
   "targetDefaults": {
     "bootstrap": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "build": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "format": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "format-check": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "lint": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "coverage-clean": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test-archive": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test-quick-archive": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test-rest": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "test": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "test-quick": {
       "cache": true,
@@ -245,32 +326,82 @@
         "default",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
+        },
+        {
+          "runtime": "node -p process.platform"
         }
-      ]
+      ],
+      "outputs": []
     },
     "doc": {
       "cache": true,
       "inputs": [
-        "default"
-      ]
+        "default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "msrv": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "deps-check": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "smoke": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "release-compat": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "release-journeys": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "workload": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "lint-llm-diff": {
       "cache": true,
@@ -281,8 +412,12 @@
         },
         {
           "runtime": "llmlint fingerprint"
+        },
+        {
+          "runtime": "node -p process.platform"
         }
-      ]
+      ],
+      "outputs": []
     },
     "check": {
       "cache": false,
@@ -290,22 +425,57 @@
         "format-check",
         "lint",
         "test"
+      ],
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "screenshots": {
       "cache": true,
       "inputs": [
-        "visualDocsSource"
-      ]
+        "visualDocsSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "outputs": []
     },
     "screenshots-bless": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "budgets": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "budgets-host": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     }
-  }
+  },
+  "plugins": [
+    "./scripts/nx-remote-cache.mjs"
+  ]
 }

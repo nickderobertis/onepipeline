@@ -1,8 +1,10 @@
 name: Release-plz
 
 # Conventional-commit release automation. On every push to main, one job:
-#   * guard       — without the RELEASE_PLZ_TOKEN secret, every later step is
+#   * guard       — without the RELEASE_PLZ_TOKEN secret, release automation is
 #                   skipped and the job says how to enable it.
+#   * promote     — copy trusted merged-PR results before opening a release PR;
+#                   cache-promote/<PR> pushes only promote into their own scope.
 #   * release     — if a merged version-bump PR left Cargo.toml at a version with
 #                   no tag yet, tag vX.Y.Z and cut the GitHub Release.
 #   * release-pr  — open/update a "release vX.Y.Z" PR that bumps the version and
@@ -30,7 +32,7 @@ name: Release-plz
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'cache-promote/**']
 
 permissions:
   contents: read
@@ -44,17 +46,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Every write — the checkout's pushes, release-plz, auto-merge — authenticates
-    # with RELEASE_PLZ_TOKEN, so the job's own token needs nothing more.
+    # with RELEASE_PLZ_TOKEN. Cache promotion reads metadata with the job token
+    # and writes the cache with the runner runtime token.
     permissions:
       contents: read
+      pull-requests: read
+      actions: read
     concurrency:
       group: release-plz
       cancel-in-progress: false
     steps:
       # `secrets` cannot be read in an `if:`, so the token's presence becomes an
-      # output every later step is conditioned on.
+      # output the main-only release steps are conditioned on.
       - name: Guard on the release token
         id: guard
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: |
@@ -68,19 +74,62 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
-        if: steps.guard.outputs.enabled == 'true'
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
 
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
+      - name: Promote the merged pull request's cache entries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            pr="${GITHUB_REF_NAME##*/}"
+            node scripts/nx-remote-cache.mjs promote --pr "$pr" --workflow ci.yml
+          else
+            node scripts/nx-remote-cache.mjs promote --sha "$GITHUB_SHA" --workflow ci.yml
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nx-cache-promotion-${{ github.sha }}
+          path: ${{ runner.temp }}/nx-cache-promotion
+          retention-days: 7
+      - cancel: nx-cache
       - uses: Swatinem/rust-cache@v2
-        if: steps.guard.outputs.enabled == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true'
 
       # taiki-e/install-action verifies the downloaded archive's checksum before
       # unpacking it; a `curl | tar` pipeline would execute an unauthenticated
       # download.
       - uses: taiki-e/install-action@v2
-        if: steps.guard.outputs.enabled == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true'
         with:
           tool: release-plz@${{ env.RELEASE_PLZ_VERSION }},cargo-semver-checks
 
@@ -89,7 +138,7 @@ jobs:
       # because release-plz shells out to cargo-semver-checks and off PATH the
       # check does not run — and does not say so.
       - name: The toolchain honours release-plz.toml's semver_check
-        if: steps.guard.outputs.enabled == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true'
         run: |
           if grep -Eq '^[[:space:]]*semver_check[[:space:]]*=[[:space:]]*true' release-plz.toml \
              && ! command -v cargo-semver-checks >/dev/null; then
@@ -98,7 +147,7 @@ jobs:
           fi
 
       - name: Tag and publish a merged version bump
-        if: steps.guard.outputs.enabled == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: release-plz release --git-token "$GITHUB_TOKEN"
@@ -109,7 +158,7 @@ jobs:
       # and opening yet another release PR — a self-sustaining release loop.
       - name: Use the latest release tag as the version baseline
         id: baseline
-        if: steps.guard.outputs.enabled == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true'
         run: |
           tag="$(git tag --list 'v*' --sort=-version:refname | head -n1)"
           if [ -n "$tag" ]; then
@@ -125,7 +174,7 @@ jobs:
       # itself a merged release commit.
       # llmlint: ignore[changed_behavior_has_e2e] `release-pr` pushes a branch and opens a PR on the real forge, and the release-plz journey (tests/release_journeys/release-plz.journey.mjs) must write no remote, so it runs this step's own command line with `release-pr` mapped to release-plz's local `update`, which prepares the same bump and changelog; the auto-merge step after it is driven against the local forge.
       - name: Open or update the release PR
-        if: "${{ steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
+        if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           BASELINE: ${{ steps.baseline.outputs.arg }}
@@ -135,7 +184,7 @@ jobs:
           release-plz release-pr $BASELINE --git-token "$GITHUB_TOKEN"
 
       - name: Merge the release PR automatically once its required checks pass
-        if: "${{ steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
+        if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guard.outputs.enabled == 'true' && !startsWith(github.event.head_commit.message, 'chore: release') }}"
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
         run: bash release/release-pr-auto-merge.sh

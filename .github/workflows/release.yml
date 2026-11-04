@@ -236,6 +236,8 @@ jobs:
       pull-requests: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -278,7 +280,7 @@ jobs:
           WINDOWS_PUBLISHED: ${{ needs.build-windows.outputs.published }}
           WINDOWS_VERIFIED: ${{ needs.build-windows.outputs.verified }}
         run: just release-outcome
-      # The release tail: the seven `release-tail` budgets of budgets.yaml, measured after
+      # The release tail: the eight `release-tail` budgets of budgets.yaml, measured after
       # everything above has published, by scripts/actions-budget-figures.sh from onevcs's
       # read-only answers. Reporting only: an over figure turns this last step red with each
       # figure's breakdown in its log, and nothing reads its result, so it never blocks, demotes

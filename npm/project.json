@@ -14,8 +14,13 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
-        "{workspaceRoot}/Cargo.toml",
-        "sharedGlobals"
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+        },
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "outputs": ["{workspaceRoot}/dist/npm"]
     },
@@ -50,7 +55,9 @@
         "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
         "{workspaceRoot}/tests/e2e/*.rs",
         "{workspaceRoot}/budgets.yaml",
-        "{workspaceRoot}/package-lock.json",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+        },
         "{workspaceRoot}/scripts/nx-affected.sh",
         "{workspaceRoot}/scripts/setup-llmlint.sh",
         "{workspaceRoot}/scripts/release-probe.sh",
@@ -58,27 +65,49 @@
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/src/**/*",
-        "{workspaceRoot}/Cargo.toml",
-        "{workspaceRoot}/Cargo.lock",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+        },
         "{workspaceRoot}/crates/**/*",
         "{workspaceRoot}/schemas/**/*",
         "{workspaceRoot}/rust-toolchain.toml",
         "{workspaceRoot}/.cargo/config.toml",
         "{workspaceRoot}/.config/nextest.toml",
-        "{workspaceRoot}/pyproject.toml",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
+        },
         "sharedGlobals",
         "{workspaceRoot}/scripts/build-staged-release.py",
-        "{workspaceRoot}/release/release.py"
+        "{workspaceRoot}/release/release.py",
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        }
       ]
     },
     "test-launcher": {
       "command": "just npm-launcher",
-      "//": "The launcher's process-tree journeys alone, for the Windows and macOS test jobs, where `test` never runs and the launcher takes paths Linux cannot reach (`just npm-launcher` says why). Linux runs them inside `test`. Uncached: the engine it builds is the crate's, which this project's inputs do not hash.",
-      "cache": false
+      "//": "The launcher's process-tree journeys alone, for the Windows and macOS test jobs, where `test` never runs and the launcher takes paths Linux cannot reach (`just npm-launcher` says why). Linux runs them inside `test`.",
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["cargoSelection", "npmSelection", "pythonSelection"]
     }
   }
 }
