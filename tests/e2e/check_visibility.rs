@@ -271,6 +271,15 @@ fn listed(exited: &Value, key: &str) -> Vec<(String, String)> {
 /// check again and raises nothing more; an attempt on a new commit raises a new one.
 #[test]
 fn a_required_check_that_fails_is_shown_once_per_head_and_rules_as_before() {
+    let red_readings = |world: &World, run: &str| {
+        world
+            .events_of(run, "change-check")
+            .into_iter()
+            .filter(|event| {
+                event["payload"]["name"] == "lint" && event["payload"]["state"] == "failed"
+            })
+            .count()
+    };
     // Each retry republishes a new commit: three heads, three surfaces. In the second
     // world a check that blocks nothing is still running when the last publication
     // returns, and the host re-runs the red check on that same head while it is
@@ -297,8 +306,11 @@ fn a_required_check_that_fails_is_shown_once_per_head_and_rules_as_before() {
                 &plan_of(&run, vec![lifecycle("service", &[]), agent("beside", &[])]),
             );
             world.run_from(&world.project, &["start", path.as_str(), "--detach"]);
-            world.until("the re-run to be read", |world| {
-                follow_reads(world).len() >= 2
+            // The host logs a follow read before returning its response. Keep the
+            // run alive until that response has been relayed into the run journal:
+            // the three publication readings alone do not prove a re-reading.
+            world.until("the red check's re-reading to be journalled", |world| {
+                red_readings(world, &run) > 3
             });
             release_node(&world, &run, "beside");
         } else {
@@ -316,13 +328,7 @@ fn a_required_check_that_fails_is_shown_once_per_head_and_rules_as_before() {
             .count();
         assert_eq!(dispatched, 3, "the retry budget moved: {}", world.dump());
 
-        let readings = world
-            .events_of(&run, "change-check")
-            .into_iter()
-            .filter(|event| {
-                event["payload"]["name"] == "lint" && event["payload"]["state"] == "failed"
-            })
-            .count();
+        let readings = red_readings(&world, &run);
         let records = world.events_of(&run, "check-failed");
         let distinct: std::collections::BTreeSet<String> = records
             .iter()
