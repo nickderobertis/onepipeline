@@ -1200,11 +1200,14 @@ echo "$1" >> "$JUST_CALLS"
       const calls = join(repo.path, "just.calls");
       writeFileSync(calls, "");
       const result = run(
-        ["scripts/nx.sh", "run", "onepipeline-npm:test"],
+        ["scripts/nx.sh", "run", "onepipeline-npm:test", "--outputStyle=static"],
         {
           PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
           JUST_CALLS: calls,
           BREAK_BUILD: "1",
+          // A parent Nx streams its tasks and passes this into the suite.
+          // Static output must still save the failed build's task report.
+          NX_STREAM_OUTPUT: "true",
           ONEPIPELINE_NX_SHOW_OUTPUT: undefined,
         },
         repo.path,
