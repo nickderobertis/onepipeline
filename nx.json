@@ -5,6 +5,9 @@
   "namedInputs": {
     "sharedGlobals": [
       "{workspaceRoot}/nx.json",
+      "{workspaceRoot}/.github/ci-tool-versions.json",
+      "{workspaceRoot}/.github/read-ci-tool-versions.mjs",
+      "{workspaceRoot}/.github/onevcs-cli-version",
       {
         "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
       },

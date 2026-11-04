@@ -163,7 +163,10 @@ Every other check of the root `budgets.yaml` excludes both labels.
 The release-PR shortcut and macOS release-branch skip remain: the demonstration
 found promoted results evicted under build-cache pressure, so replay does not yet
 justify retiring them. The four CI jobs share small Nx test results through
-the pinned create-repo scripts. Same-repository PRs store named reports and terminal output;
+the pinned create-repo scripts. CI reads exact test/task tools, Node, Python and
+uv versions from `.github/ci-tool-versions.json`; cached targets hash those pins.
+Existing Rust toolchain and CLI pins keep their own tracked sources.
+Same-repository PRs store named reports and terminal output;
 forks and Dependabot read only. `release-plz.yml` promotes trusted merged-PR
 results to the base scope before release automation, without running tests on
 `main`; a `cache-promote/<PR>` push promotes only into that branch's scope.
@@ -203,9 +206,9 @@ an earlier attempt rather than uploading over it, and the Release's archive
 follows them (`release/release.py`'s `publish` says how); verify reports a
 platform its registries serve as more than one build.
 
-**Where each tier runs follows from that release model.** Every pull request,
-the release PR included, runs its affected tier against its merge base, and with
-no derivable base every project; affected selection is a speed optimisation, so
+**Where each tier runs follows from that release model.** Each selected CI job runs
+its affected tier against its merge base, under the release safeguards above,
+and with no derivable base every project; affected selection is a speed optimisation, so
 it fails closed. Nothing re-sweeps at release time or on a push to `main`. A
 Release made by hand — the documented fallback — is refused when its tag does not
 name `Cargo.toml`'s version, and is otherwise trusted to name a commit `main`

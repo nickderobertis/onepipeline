@@ -217,6 +217,49 @@ describe("just lint-llm-diff", () => {
     replayed(ws, "judged-base", summary);
   });
 
+  it("replays unchanged tool pins and re-judges a changed CI tool version", (t) => {
+    const ws = new Workspace(t);
+    const summary = judged(ws, "judged-base");
+    replayed(ws, "judged-base", summary);
+    const path = ".github/ci-tool-versions.json";
+    const tools = JSON.parse(readFileSync(join(ws.root, path), "utf8"));
+    const version = tools.nextest.split(".").map(Number);
+    version[2] += 1;
+    ws.write(path, JSON.stringify({ ...tools, nextest: version.join(".") }, null, 2) + "\n");
+    const after = judged(ws, "judged-base");
+    replayed(ws, "judged-base", after);
+  });
+
+  it("refuses a failed real fingerprint and recovers the proven judgement", (t) => {
+    const unavailable = { STANDIN_FAIL_VERSION: "true" };
+    const refuses = (ws) => {
+      const before = ws.judgeCalls();
+      const run = ws.lint("judged-base", unavailable);
+      assert.notEqual(run.status, 0, `a failed fingerprint must fail the task:\n${run.output}`);
+      assert.doesNotMatch(run.output, CACHE_HIT);
+      assert.match(run.output, /version unavailable/);
+      assert.equal(ws.judgeCalls(), before);
+    };
+    const ws = new Workspace(t);
+    const good = judged(ws, "judged-base");
+    replayed(ws, "judged-base", good);
+    assert.throws(() => ws.fingerprint(unavailable), /oneharness|fingerprint/);
+    refuses(ws);
+    refuses(ws);
+    replayed(ws, "judged-base", good);
+
+    // Counterfactual: without the fingerprint input, an unavailable runner
+    // replays the successful judgement. The same refusal assertion detects it.
+    const broken = new Workspace(t);
+    const nx = JSON.parse(readFileSync(join(broken.root, "nx.json"), "utf8"));
+    nx.targetDefaults["lint-llm-diff"].inputs = nx.targetDefaults["lint-llm-diff"].inputs.filter(
+      (input) => input.runtime !== "llmlint fingerprint",
+    );
+    broken.write("nx.json", JSON.stringify(nx));
+    judged(broken, "judged-base");
+    assert.throws(() => refuses(broken), /a failed fingerprint must fail the task/);
+  });
+
   it("forwards --skip-nx-cache to Nx, judging a cached pass again", (t) => {
     const ws = new Workspace(t);
     const summary = judged(ws, "judged-base");

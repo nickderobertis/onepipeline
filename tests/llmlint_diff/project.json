@@ -23,6 +23,7 @@
     "test": {
       "command": "node --test tests/llmlint_diff/*.test.mjs",
       "inputs": [
+        "sharedGlobals",
         "{projectRoot}/**/*",
         "{workspaceRoot}/nx.json",
         "{workspaceRoot}/project.json",

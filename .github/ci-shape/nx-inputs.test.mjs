@@ -28,7 +28,8 @@ function fixture(revision) {
 }
 function capture(dir, tasks) {
   rmSync(join(dir, ".nx/workspace-data"), { recursive: true, force: true });
-  const out = join(dir, "hashes.json");
+  mkdirSync(join(dir, ".nx"), { recursive: true });
+  const out = join(dir, ".nx/hash-details.json");
   run(dir, process.execPath, [helper, "capture", dir, ...tasks, "--out", out]);
   return JSON.parse(readFileSync(out, "utf8")).tasks;
 }
@@ -262,5 +263,38 @@ test("the recorded release hash check survives a later package version", { timeo
     setOwnVersion(dir, `${major}.${minor + 1}.0`);
     writeFileSync(join(dir, "CHANGELOG.md"), "## A later release\n\n" + readFileSync(join(dir, "CHANGELOG.md"), "utf8"));
     assertRecordedRelease(dir, ["onepipeline-contract:test-quick", "onepipeline-version-contract:test-quick"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("every cached CI task hashes exact tool pins and rejects a missing runner input", { timeout: 240000 }, () => {
+  const dir = fixture();
+  try {
+    const selected = new Set();
+    for (const job of ["lint", "test-linux", "test-windows", "test-macos"]) {
+      const line = run(dir, "bash", ["scripts/ci-job.sh", job, "--plan"]).split("\n").find((line) => line.startsWith("ci-job:"));
+      for (const id of line.split("task(s): ")[1].split(" ")) selected.add(id);
+    }
+    const definitions = new Map(JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--json"])).map((name) => [name, JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "project", name, "--json"]))]));
+    const tasks = [...selected].filter((id) => { const [project, target] = id.split(":"); return definitions.get(project).targets[target].cache === true; });
+    const before = capture(dir, tasks);
+    const file = ".github/ci-tool-versions.json";
+    const guard = (values) => {
+      const missing = tasks.filter((id) => !values[id].sourceFiles.includes(file));
+      assert.deepEqual(missing, [], `${missing.join(", ")} lost the exact tool-version input`);
+    };
+    guard(before);
+    assert.ok(Object.values(before).every((task) => task.sourceFiles.every((path) => !path.startsWith(".nx/"))), "hash details must not hash themselves");
+    const path = join(dir, file), original = readFileSync(path, "utf8"), tools = JSON.parse(original);
+    for (const tool of Object.keys(tools)) {
+      const version = tools[tool].split(".").map(Number); version[2] += 1;
+      writeFileSync(path, JSON.stringify({ ...tools, [tool]: version.join(".") }, null, 2) + "\n");
+      const changed = capture(dir, tasks);
+      for (const id of tasks) assert.notEqual(changed[id].hash, before[id].hash, `${id} lost ${tool}'s version`);
+    }
+    writeFileSync(path, original);
+    const nxPath = join(dir, "nx.json"), nxText = readFileSync(nxPath, "utf8"), nx = JSON.parse(nxText);
+    nx.namedInputs.sharedGlobals = nx.namedInputs.sharedGlobals.filter((input) => input !== `{workspaceRoot}/${file}`);
+    writeFileSync(nxPath, JSON.stringify(nx));
+    assert.throws(() => guard(capture(dir, tasks)), /lost the exact tool-version input/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

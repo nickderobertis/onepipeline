@@ -130,14 +130,22 @@ jobs:
         env:
           SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
         run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-deny,cargo-machete
+          tool: ${{ steps.ci-tools.outputs.lint_tools }}
       # The judged lint's toolchain installs through uv.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ steps.ci-tools.outputs.uv }}
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # Whether the lock still resolves the sibling engines the manifest permits
@@ -159,7 +167,12 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2.1.220
       - name: Install llmlint toolchain
         if: ${{ !cancelled() }}
-        run: just setup-llmlint
+        run: just setup-llmlint-ci
+      - name: Verify the judged lint fingerprint
+        if: ${{ !cancelled() }}
+        run: |
+          llmlint fingerprint
+          printf 'llmlint fingerprint exited 0\n'
       - name: Validate llmlint config
         if: ${{ !cancelled() }}
         run: just lint-llm-validate --diff-base origin/main
@@ -318,6 +331,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        if: steps.shortcut.outputs.skip != 'true'
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2.9.2
         if: steps.shortcut.outputs.skip != 'true'
         with:
@@ -341,17 +358,19 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          node-version: "22"
+          node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          tool: just,nextest,cargo-llvm-cov
+          tool: ${{ steps.ci-tools.outputs.linux_tools }}
       - uses: actions/setup-python@v5
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          python-version: "3.12"
+          python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
         if: steps.shortcut.outputs.skip != 'true'
+        with:
+          version: ${{ steps.ci-tools.outputs.uv }}
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
@@ -485,6 +504,10 @@ jobs:
       # the checkout and the temp directory every journey writes its scratch
       # repositories into, trusted so the Defender filter does not scan it,
       # and Defender's real-time scan kept off the toolchain's directories too.
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        if: steps.shortcut.outputs.skip != 'true'
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: samypr100/setup-dev-drive@v3
         if: steps.shortcut.outputs.skip != 'true'
         with:
@@ -511,17 +534,19 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          node-version: "22"
+          node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          tool: just,nextest
+          tool: ${{ steps.ci-tools.outputs.quick_tools }}
       - uses: actions/setup-python@v5
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          python-version: "3.12"
+          python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
         if: steps.shortcut.outputs.skip != 'true'
+        with:
+          version: ${{ steps.ci-tools.outputs.uv }}
       - name: What the bootstrap tools are built from
         if: steps.shortcut.outputs.skip != 'true'
         id: pins
@@ -636,6 +661,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        if: steps.shortcut.outputs.skip != 'true'
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2.9.2
         if: steps.shortcut.outputs.skip != 'true'
         with:
@@ -644,17 +673,19 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          node-version: "22"
+          node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          tool: just,nextest
+          tool: ${{ steps.ci-tools.outputs.quick_tools }}
       - uses: actions/setup-python@v5
         if: steps.shortcut.outputs.skip != 'true'
         with:
-          python-version: "3.12"
+          python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
         if: steps.shortcut.outputs.skip != 'true'
+        with:
+          version: ${{ steps.ci-tools.outputs.uv }}
       - name: What the bootstrap tools are built from
         if: steps.shortcut.outputs.skip != 'true'
         id: pins

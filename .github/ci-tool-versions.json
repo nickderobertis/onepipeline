@@ -1,0 +1,12 @@
+{
+  "node": "22.23.4",
+  "python": "3.12.16",
+  "uv": "0.13.7",
+  "just": "1.59.0",
+  "nextest": "0.9.150",
+  "cargo-llvm-cov": "0.9.1",
+  "cargo-deny": "0.20.2",
+  "cargo-machete": "0.9.2",
+  "llmlint": "0.4.12",
+  "oneharness": "0.27.2"
+}

@@ -899,7 +899,11 @@ session-setup:
 
 # Install/refresh the llmlint toolchain (oneharness + llmlint). Idempotent.
 setup-llmlint:
-    ./scripts/setup-llmlint.sh
+    @if [ "${GITHUB_ACTIONS:-}" = true ]; then just setup-llmlint-ci; else ./scripts/setup-llmlint.sh; fi
+
+# CI installs the exact lint and harness versions declared in its tracked tool pins.
+setup-llmlint-ci:
+    bash .github/setup-llmlint.sh
 
 # Out of the gate for the reason `deps-check` is: these need third-party tools
 # `just check` deliberately does not install.
