@@ -9,49 +9,90 @@
   ],
   "targets": {
     "bootstrap": {
-      "command": "just _crate-bootstrap"
+      "command": "just _crate-bootstrap",
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "build": {
       "command": "just _crate-build",
       "inputs": [
-        "crateSource"
+        "crateSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
-      "command": "just _crate-format"
+      "command": "just _crate-format",
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "format-check": {
       "command": "just _crate-fmt-check",
       "inputs": [
-        "crateSource"
+        "crateSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
       "command": "just _crate-lint",
       "inputs": [
-        "crateSource"
+        "crateSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "coverage-clean": {
-      "command": "just _crate-coverage-clean"
+      "command": "just _crate-coverage-clean",
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test-archive": {
       "command": "just _crate-test-archive",
       "dependsOn": [
         "coverage-clean"
+      ],
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateTestSource"
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "dependsOn": [
-        "test-archive"
+        "coverage-clean"
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test": {
       "command": "just _crate-coverage",
@@ -61,9 +102,12 @@
         "contractSource",
         "noteJourneySource",
         "codexServerSource",
-        "pooledSlotSource"
+        "pooledSlotSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every tier's profiles, so this report depends on each tier's `test`. An unchanged tier replays only where the Nx cache is warm: a CI runner starts cold, so there a tier-only change re-runs every tier under this aggregate. That cost is accepted for now because selection stays per tier; restoring the Nx cache in CI is recorded as a follow-up.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's profiles, including the separate version-reading tests, so this report depends on each tier's test. LLVM profiles belong to the versioned binary, so the coverage tiers and this aggregate stay uncached; quick tiers replay separately and archives build when a tier runs.",
       "dependsOn": [
         "test-rest",
         {
@@ -75,12 +119,28 @@
             "onepipeline-pooled-slot"
           ],
           "target": "test"
+        },
+        {
+          "projects": [
+            "onepipeline-version-contract",
+            "onepipeline-version-e2e",
+            "onepipeline-version-package"
+          ],
+          "target": "test"
         }
       ],
-      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
+      "cache": false
     },
     "test-quick-archive": {
-      "command": "just _crate-test-quick-archive"
+      "command": "just _crate-test-quick-archive",
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test-quick": {
       "command": "just _crate-test-quick",
@@ -88,17 +148,21 @@
         "crateTestSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
+        },
+        {
+          "runtime": "node -p process.platform"
         }
       ],
-      "dependsOn": [
-        "test-quick-archive"
-      ],
+      "dependsOn": [],
       "parallelism": false
     },
     "doc": {
       "command": "just _crate-doc",
       "inputs": [
-        "crateSource"
+        "crateSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
@@ -109,11 +173,18 @@
         "test",
         "doc",
         "budgets"
+      ],
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "budgets": {
       "command": "just budgets",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split, and the same warm-cache replay and cold-CI cost apply as for `test` above. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that producing tier the same way; Nx restores its records, invocation manifest and producing binary together, and the reader refuses any that disagree.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split; the uncached coverage tier produces fresh records for the reader. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that uncached producing tier; its records, invocation manifest and producing executable stay together, and the reader refuses any that disagree.",
       "dependsOn": [
         {
           "projects": [
@@ -130,7 +201,9 @@
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/scripts/review-round-quota-budget.*",
         "{workspaceRoot}/scripts/check-visibility-quota-budget.*",
-        "{workspaceRoot}/package-lock.json",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+        },
         "{workspaceRoot}/scripts/store-operations-budget.mjs",
         "{workspaceRoot}/scripts/settlement-latency-budget.sh",
         "{workspaceRoot}/scripts/stop-guard-unpublished-*",
@@ -141,38 +214,80 @@
         {
           "dependentTasksOutputFiles": "target/budget-records/**/*",
           "transitive": false
+        },
+        {
+          "runtime": "node -p process.platform"
         }
       ]
     },
     "msrv": {
       "command": "just _crate-msrv",
       "inputs": [
-        "crateSource"
+        "crateSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "deps-check": {
       "command": "just _crate-deps-check",
       "inputs": [
         "rustBuild",
-        "{workspaceRoot}/deny.toml"
+        "{workspaceRoot}/deny.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "install-smoke": {
       "command": "bash scripts/install-proof.sh path",
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier] these three are ci.yml's `install`, `install-documented` and `wheel` jobs, which ran on every pull request `changes.outputs.crate` answered `true` for: the crate project being affected, which is what selects them here. A narrower edge would be a new rule for when an install is proven, which nobody has agreed; and the documented install reaches the remote default branch on every pull request because the old `install-documented` job did, on every one, as a required check. This one is the install proof of this revision, a target so it runs beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh); uncached, because what it proves is that the install works on the host it runs on.",
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "install-documented": {
       "command": "bash scripts/install-proof.sh documented",
       "//": "README.md's `cargo install --git` one-liner. Uncached and network: it resolves the remote's default branch, which no input of this tree names.",
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "wheel-smoke": {
       "command": "bash scripts/install-proof.sh wheel",
       "//": "The x86_64 Linux wheel, built by the release's own script in its manylinux image (Docker), installed into a venv and smoke-tested. Uncached for the reason install-smoke is. After install-smoke, whose Linux run times the host-view-time budget's reads: the image pull and the container's release compile starve the 4-vCPU runner, and test-linux's run 41316119034 read 192 ms against its 100 ms when the pull overlapped them, where every other run read 17 to 70 ms. The wheel ends well inside the job's critical path, so the order costs it nothing.",
-      "dependsOn": ["install-smoke"],
+      "dependsOn": [
+        "install-smoke"
+      ],
       "cache": false,
-      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]"
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]",
+      "inputs": [
+        "default",
+        "^default",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection",
+        "pythonSelection"
+      ]
     }
   },
   "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier \u2014 a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it.",
@@ -184,5 +299,17 @@
     "onepipeline-release-compat",
     "onepipeline-stop-verdict",
     "onepipeline-pooled-slot"
-  ]
+  ],
+  "namedInputs": {
+    "default": [
+      "{projectRoot}/**/*",
+      "!{projectRoot}/CHANGELOG.md",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+      },
+      "sharedGlobals",
+      "!{projectRoot}/Cargo.toml",
+      "!{projectRoot}/Cargo.lock"
+    ]
+  }
 }

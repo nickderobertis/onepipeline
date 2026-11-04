@@ -118,8 +118,8 @@ export function classify(
     }
     return {
       isReleaseOnly: true,
-      macosRequired: false,
-      reason: "same-repository release-plz branch; semantic version/changelog-only diff",
+      macosRequired: true,
+      reason: "release PR runs the Mac job and replays proven quick tiers",
     };
   } catch (error) {
     return required(`unreadable classification: ${error.message}`);

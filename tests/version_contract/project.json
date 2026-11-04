@@ -1,0 +1,117 @@
+{
+  "name": "onepipeline-version-contract",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "test": {
+      "command": "just _version-contract-test",
+      "cache": false,
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "coverage-clean"
+        }
+      ],
+      "parallelism": false,
+      "outputs": [
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-version-contract-*.profraw"
+      ]
+    },
+    "test-quick": {
+      "command": "just _version-contract-test-quick",
+      "cache": true,
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
+      ],
+      "dependsOn": [],
+      "parallelism": false,
+      "outputs": []
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
+      ]
+    },
+    "bootstrap": {
+      "executor": "nx:noop",
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "build": {
+      "command": "just _tier-build contract",
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/contract.rs",
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/contract.rs",
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint contract",
+      "inputs": [
+        "contractSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}

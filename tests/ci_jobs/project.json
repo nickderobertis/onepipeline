@@ -22,14 +22,13 @@
     },
     "test": {
       "command": "node --test tests/ci_jobs/*.test.mjs",
-      "//": "ci.yml's four job recipes, the release pull request's shortcut and the refusals of the scripts the jobs run around them, driven over scratch copies of this workspace. Keyed on everything the recipes read to select and run: a project declaration or the Nx configuration changes what they select.",
+      "//": "ci.yml's four job recipes, the refusals of the scripts the jobs run around them, driven over scratch copies of this workspace. Keyed on everything the recipes read to select and run: a project declaration or the Nx configuration changes what they select.",
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/ci-job.sh",
         "{workspaceRoot}/scripts/ci-job-tasks.mjs",
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/scripts/nx-affected.sh",
-        "{workspaceRoot}/scripts/release-pr-shortcut.mjs",
         "{workspaceRoot}/scripts/install-proof.sh",
         "{workspaceRoot}/scripts/warm-rust-cache.sh",
         "{workspaceRoot}/tests/e2e/harness.rs",
@@ -39,13 +38,22 @@
         "{workspaceRoot}/.github/workflows/ci.yml",
         "{workspaceRoot}/README.md",
         "{workspaceRoot}/**/project.json",
-        "{workspaceRoot}/biome.json",
-        "sharedGlobals"
+        "{workspaceRoot}/biome.jsonc",
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["npmSelection"]
     }
   }
 }

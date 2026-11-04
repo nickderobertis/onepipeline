@@ -64,12 +64,9 @@ fn is_required(name: &str) -> bool {
 /// The conditions a required job may carry. Each one either always holds on a
 /// pull request or skips the job — and a skipped job reports its context as
 /// passed — so none of them can leave a context unreported. A new condition is
-/// a new way to be unreported, and has to be argued for here. The second is
-/// `test-macos`'s: it skips release-plz's own release pull request.
-const ALLOWED_CONDITIONS: &[&str] = &[
-    "github.event_name == 'pull_request'",
-    "github.event_name == 'pull_request' && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)",
-];
+/// a new way to be unreported, and has to be argued for here. Release branches
+/// use the same condition as every other branch.
+const ALLOWED_CONDITIONS: &[&str] = &["github.event_name == 'pull_request'"];
 
 fn triggers(parsed: &Value) -> &Value {
     parsed
@@ -505,7 +502,7 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
 }
 
 /// The e2e project's test targets declare the records their run writes as Nx
-/// outputs, at the directory the harness writes them to, so a cached run
+/// outputs, as JSON file patterns under the harness directory, so a cached run
 /// restores them: an output naming any other path would restore nothing.
 #[test]
 fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
@@ -514,7 +511,7 @@ fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
     let project: Value = serde_json::from_str(&text).expect("tests/e2e/project.json parses");
-    let records = format!("{{workspaceRoot}}/{RECORD_DIR}/e2e");
+    let records = format!("{{workspaceRoot}}/{RECORD_DIR}/e2e/*.json");
     for target in ["test", "test-quick"] {
         let outputs = project["targets"][target]["outputs"]
             .as_array()

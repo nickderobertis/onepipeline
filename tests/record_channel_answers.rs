@@ -40,14 +40,14 @@ fn dry_run_of_test_e2e(filter: Option<&str>) -> String {
 }
 
 #[test]
-fn the_e2e_recipe_narrows_the_binary_to_a_filter_and_runs_all_of_it_without_one() {
+fn the_e2e_recipe_narrows_its_tier_to_a_filter_and_runs_that_tier_without_one() {
     assert_eq!(
         dry_run_of_test_e2e(Some("test(/^recorded_channel::/)")),
-        "just _strace-preflight\njust _onetaskgraph-preflight\ncargo nextest run --locked -E 'binary(e2e) and (test(/^recorded_channel::/))'"
+        "just _strace-preflight\njust _onetaskgraph-preflight\ncargo nextest run --locked -E 'binary(e2e) and not test(=surface::version_reports_the_crate_version) and (test(/^recorded_channel::/))'"
     );
     assert_eq!(
         dry_run_of_test_e2e(None),
-        "just _strace-preflight\njust _onetaskgraph-preflight\ncargo nextest run --locked -E 'binary(e2e)'"
+        "just _strace-preflight\njust _onetaskgraph-preflight\ncargo nextest run --locked -E 'binary(e2e) and not test(=surface::version_reports_the_crate_version)'"
     );
 }
 

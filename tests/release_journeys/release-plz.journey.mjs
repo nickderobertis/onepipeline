@@ -126,7 +126,12 @@ async function runJob({ repo, base, github, token, headCommit }) {
   releasePlzShim(bin, github, log);
   const runnerTemp = mkdtempSync(join(base, "runner-temp-"));
   const context = {
-    github: { event: { head_commit: { message: headCommit } }, repository: github.repository },
+    github: {
+      event_name: "push",
+      ref: "refs/heads/main",
+      event: { head_commit: { message: headCommit } },
+      repository: github.repository,
+    },
     env: { ...workflow.env },
     secrets: { RELEASE_PLZ_TOKEN: token },
     steps: {},
@@ -134,6 +139,15 @@ async function runJob({ repo, base, github, token, headCommit }) {
   const ran = [];
   for (const [index, step] of job.steps.entries()) {
     const name = step.name ?? step.uses;
+    // The production sidecar and promotion are driven in ci-shape's cache
+    // journey. This journey owns release-plz's real executable boundary.
+    if (
+      step.id?.startsWith("nx-cache") ||
+      step.cancel ||
+      step.run?.includes("nx-remote-cache.mjs") ||
+      step.with?.name?.startsWith("nx-cache-")
+    )
+      continue;
     if (step.if !== undefined && !evaluate(String(step.if), context)) {
       ran.push({ name, skipped: true });
       continue;
@@ -198,10 +212,12 @@ describe("release-plz.yml's job", () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  it("is one job whose first step is the guard every other step is conditioned on", () => {
+  it("is one job whose release automation is conditioned on the main-push token guard", () => {
     assert.deepEqual(Object.keys(workflow.jobs), ["release-plz"]);
     assert.equal(job.steps[0].id, "guard");
-    for (const step of job.steps.slice(1)) {
+    for (const step of job.steps.filter(
+      (s) => s.run?.includes("release-plz ") || s.run?.includes("release-pr-auto-merge.sh"),
+    )) {
       assert.match(
         String(step.if),
         /steps\.guard\.outputs\.enabled == 'true'/,
@@ -224,10 +240,10 @@ describe("release-plz.yml's job", () => {
     assert.deepEqual(
       ran
         .slice(1)
-        .filter((step) => !step.skipped)
+        .filter((step) => !step.skipped && !step.name?.startsWith("actions/checkout"))
         .map((step) => step.name),
       [],
-      "every step after the guard is skipped",
+      "release automation after the guard is skipped",
     );
     assert.deepEqual(calls, [], "release-plz never ran");
     assert.deepEqual(github.writes(), []);

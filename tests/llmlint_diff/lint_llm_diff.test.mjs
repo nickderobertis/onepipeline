@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -86,7 +87,7 @@ class Workspace {
     for (const [name, value] of Object.entries(process.env)) {
       // Whatever launched this suite — an outer Nx, a git hook, a CI runner, an
       // agent — says nothing about the run under test; a journey sets its own.
-      if (/^(NX_|GIT_|LLMLINT_|ONEHARNESS_)/.test(name)) continue;
+      if (/^(NX_|GIT_|GITHUB_|ACTIONS_|LLMLINT_|ONEHARNESS_)/.test(name)) continue;
       if (["CI", "CLAUDECODE", "CODEX_THREAD_ID", "FORCE_COLOR", "NO_COLOR"].includes(name))
         continue;
       env[name] = value;
@@ -184,6 +185,26 @@ function replayed(ws, base, summary, env = {}) {
 }
 
 describe("just lint-llm-diff", () => {
+  it("keeps fixture telemetry out of the enclosing CI job", (t) => {
+    const temp = mkdtempSync(
+      join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "llmlint-parent-"),
+    );
+    t.after(() => rmSync(temp, { recursive: true, force: true }));
+    const values = { GITHUB_ACTIONS: "true", GITHUB_JOB: "enclosing-ci", RUNNER_TEMP: temp };
+    const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    try {
+      const ws = new Workspace(t);
+      judged(ws, ws.base);
+      assert.equal(existsSync(join(temp, "nx-cache-recording")), false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("judges a first pass against the resolved base, then replays it unchanged", (t) => {
     const ws = new Workspace(t);
     const first = ws.lint("judged-base");

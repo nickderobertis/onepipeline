@@ -39,14 +39,24 @@
         "{workspaceRoot}/scripts/linked-engines.sh",
         "{workspaceRoot}/scripts/release-outcome.mjs",
         "{workspaceRoot}/justfile",
-        "{workspaceRoot}/Cargo.toml",
-        "{workspaceRoot}/Cargo.lock",
-        "sharedGlobals"
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+        },
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["cargoSelection", "npmSelection"]
     }
   }
 }

@@ -1,0 +1,27 @@
+{
+  "repository": "actions/checkout",
+  "event": {
+    "pull_request": {
+      "number": 2565,
+      "head": {
+        "sha": "528c77bd3727b8e152d36b9e9439f8682f6e36ba",
+        "repo": {
+          "full_name": "actions/checkout"
+        }
+      },
+      "base": {
+        "sha": "f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a",
+        "repo": {
+          "full_name": "actions/checkout"
+        }
+      },
+      "user": {
+        "login": "dependabot[bot]"
+      }
+    }
+  },
+  "recorded": {
+    "request": "repos/actions/checkout/pulls/2565",
+    "projection": "Only fields read by trust, wrapped in GitHub pull_request event shape."
+  }
+}

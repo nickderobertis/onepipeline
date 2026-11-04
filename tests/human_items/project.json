@@ -19,7 +19,10 @@
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -30,7 +33,10 @@
       "inputs": [
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
@@ -40,7 +46,10 @@
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
@@ -61,12 +70,24 @@
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "parallelism": false,
       "cache": false,
       "outputs": [
         "{workspaceRoot}/target/budget-records/human-items.json"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }
