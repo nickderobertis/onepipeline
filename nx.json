@@ -62,7 +62,7 @@
       "{workspaceRoot}/.github/**/*",
       "{workspaceRoot}/AGENTS.md",
       "{workspaceRoot}/CODEOWNERS",
-      "{workspaceRoot}/biome.json",
+      "{workspaceRoot}/biome.jsonc",
       "{workspaceRoot}/budgets.yaml",
       "{workspaceRoot}/deny.toml",
       "{workspaceRoot}/gh-secrets.json",

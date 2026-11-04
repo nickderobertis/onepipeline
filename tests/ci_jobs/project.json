@@ -39,7 +39,7 @@
         "{workspaceRoot}/.github/workflows/ci.yml",
         "{workspaceRoot}/README.md",
         "{workspaceRoot}/**/project.json",
-        "{workspaceRoot}/biome.json",
+        "{workspaceRoot}/biome.jsonc",
         "sharedGlobals"
       ]
     },
