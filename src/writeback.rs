@@ -746,7 +746,10 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::ProjectionRefused { .. } => decided("projection-refused"),
         // The public boundary's refusals, in the store's own words for each: every one of
         // them is decided before the write's first mutation, so none is worth asking again.
-        EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
+        // The settlement write-back journey edits an existing public-board item to name a
+        // private repository, and asserts the Predates guidance, this kind and no mutation.
+        EngineError::NotPrivateDestination { .. }
+        | EngineError::NotPrivateDestinationPredates { .. } => decided("not-private-destination"),
         // llmlint: ignore-block[changed_behavior_has_e2e] a source declared private whose
         // backend answers, at the write, that it is not — or cannot answer — is a hosted
         // backend's own visibility read (GitHub Projects, Linear); `local-md`, the backend
@@ -756,8 +759,20 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
             ("visibility-unreadable".to_owned(), Some(error))
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        EngineError::BoundaryRefused { .. } => decided("boundary-refused"),
+        // Existing-body refusals use the store's Predates variant: publication_boundary's
+        // settlement body journey asserts its distinct pre-existing-term guidance and
+        // this boundary-refused kind through the real engine's records.
+        EngineError::BoundaryRefused { .. } | EngineError::BoundaryRefusedPredates { .. } => {
+            decided("boundary-refused")
+        }
         EngineError::BoundaryUnavailable { .. } => decided("boundary-unavailable"),
+        // llmlint: ignore[changed_behavior_has_e2e] this exhaustive adapter only names the released store's kind, held against Failure::from_engine by every_engine_failure_is_named_as_the_store_names_it. A real SanitizeConflict requires an external writer to move the item twice between the store's reads and conditional writes; the engine serializes its own projections, and local-md has no rendezvous in those windows, so an offline journey would race rather than prove this classification.
+        EngineError::SanitizeConflict { .. } => decided("sanitize-conflict"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] the engine never requests a dry run or a source sweep; these released store variants must still be classified exhaustively, and the mapping test holds their kinds to the store's own Failure.
+        EngineError::SanitizeDryRun { .. } => decided("sanitize-dry-run"),
+        EngineError::TermsUnlisted { .. } => decided("terms-unlisted"),
+        EngineError::TermsUndecided { .. } => decided("boundary-unavailable"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back, and
         // named here because the match is exhaustive: the store raises these for a write that
         // *states* a reference or files an item, and a write-back's copy withholds a private
@@ -6660,7 +6675,7 @@ mod tests {
             EngineError::GraphGroupNotText {
                 task: id(),
                 key: onetaskgraph_core::GroupKey::new("phase").expect("a group key"),
-                value: serde_json::json!(3),
+                value: Box::new(serde_json::json!(3)),
             },
             EngineError::DependencyCycle {
                 tasks: vec![id(), id()],
@@ -6684,6 +6699,26 @@ mod tests {
                 item: "plans:a".into(),
                 destination: "plans".into(),
                 reason: words(),
+            },
+            EngineError::NotPrivateDestinationPredates {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                declared: onetaskgraph_core::config::SourceVisibility::Public,
+            },
+            EngineError::SanitizeConflict {
+                item: "plans:a".into(),
+            },
+            EngineError::SanitizeDryRun {
+                item: "plans:a".into(),
+                would_pass: true,
+            },
+            EngineError::TermsUnlisted {
+                name: "plans".into(),
+                why: words(),
+            },
+            EngineError::TermsUndecided {
+                name: "plans".into(),
+                why: words(),
             },
             EngineError::BoundaryUnavailable {
                 item: "plans:a".into(),
