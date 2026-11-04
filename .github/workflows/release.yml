@@ -289,7 +289,8 @@ jobs:
       # .github/tests/release-tail.test.mjs runs both steps as written here over recorded answers.
       - name: Install onevcs and onebudgetspec for the release tail
         run: |
-          npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$RUNNER_TEMP/release-tail" onevcs-cli@0.57.4 @onebudgetspec/cli@0.1.5
+          onevcs_version="$(bash .github/read-onevcs-cli-version.sh)"
+          npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$RUNNER_TEMP/release-tail" "onevcs-cli@$onevcs_version" @onebudgetspec/cli@0.1.5
           echo "$RUNNER_TEMP/release-tail/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Report the release-tail budgets
         env:

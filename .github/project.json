@@ -5,7 +5,7 @@
   "tags": ["scope:tooling", "lang:js"],
   "targets": {
     "bootstrap": {
-      "command": "npm ci --prefix .github --ignore-scripts",
+      "command": "bash .github/bootstrap.sh",
       "cache": false
     },
     "test": {

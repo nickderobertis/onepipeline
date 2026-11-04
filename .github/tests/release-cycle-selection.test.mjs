@@ -1,20 +1,43 @@
 import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const fixture = join(root, ".github/tests/fixtures/release-tail-v0.76.0");
 
-test("recorded onepipeline v0.76.0 excludes carried CI-only PR #983 from release-cycle time", {
+test("recorded onepipeline v0.76.0 excludes CI-only PR #983 using the provisioned CLI without onevcs on PATH", {
   timeout: 60000,
 }, () => {
   const dir = mkdtempSync(
     join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "recorded-cycle-"),
   );
   try {
+    const onevcs = join(root, ".github/node_modules/.onevcs-cli/node_modules/.bin/onevcs");
+    assert.ok(existsSync(onevcs), "github-workflows:bootstrap must install the real onevcs CLI");
+    const budgetspec = execFileSync("bash", ["-c", "command -v onebudgetspec"], {
+      encoding: "utf8",
+    }).trim();
+    const path = process.env.PATH.split(delimiter)
+      .filter((dir) => !existsSync(join(dir, "onevcs")))
+      .join(delimiter);
+    const env = { ...process.env, PATH: path };
+    assert.equal(spawnSync("onevcs", ["--version"], { env }).error?.code, "ENOENT");
+    const version = readFileSync(join(root, ".github/onevcs-cli-version"), "utf8").trim();
+    assert.equal(
+      execFileSync(onevcs, ["--version"], { env, encoding: "utf8" }).trim(),
+      `onevcs ${version}`,
+    );
     mkdirSync(join(dir, "scripts"));
     mkdirSync(join(dir, ".github"));
     mkdirSync(join(dir, "temp"));
@@ -48,13 +71,14 @@ appendFileSync(process.env.REPLAY_SERVED,request+'\\n');writeFileSync(1,record.r
     const served = join(dir, "served");
     const started = Math.floor(Date.now() / 1000);
     const measured = spawnSync(
-      "onebudgetspec",
+      budgetspec,
       ["check", "budgets.yaml", "--id", "onepipeline-release-cycle-time", "--json"],
       {
         cwd: dir,
         encoding: "utf8",
         env: {
-          ...process.env,
+          ...env,
+          ONEVCS: onevcs,
           GH_TOKEN: "recorded-token",
           ONEVCS_GH: gh,
           RECORDED_GITHUB: join(fixture, "github.json"),

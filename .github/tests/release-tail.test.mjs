@@ -28,7 +28,7 @@ import { parse, stringify } from "yaml";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 // The onevcs release this repository adopts: the one carrying `onevcs host`'s read-only queries.
-const ADOPTED_ONEVCS = "0.57.4";
+const ADOPTED_ONEVCS = readFileSync(join(root, ".github/onevcs-cli-version"), "utf8").trim();
 const REPOSITORY = "nickderobertis/onepipeline";
 const RELEASE = "v0.97.1";
 // The Release run whose publish job runs the tail.
@@ -104,9 +104,11 @@ export function tailProblems(workflow) {
   const install = steps.slice(0, -1).find((step) => /\bonevcs-cli@/.test(step.run ?? ""));
   if (!install) problems.push("no step of publish before its last installs the onevcs CLI");
   else {
-    const version = install.run.match(/\bonevcs-cli@(\S+)/)[1];
-    if (version !== ADOPTED_ONEVCS)
-      problems.push(`publish installs onevcs-cli@${version}, not the adopted ${ADOPTED_ONEVCS}`);
+    if (
+      !install.run.startsWith('onevcs_version="$(bash .github/read-onevcs-cli-version.sh)"\n') ||
+      !install.run.includes('"onevcs-cli@$onevcs_version"')
+    )
+      problems.push(`publish does not read the adopted onevcs ${ADOPTED_ONEVCS} pin`);
     const cli = install.run.match(/@onebudgetspec\/cli@(\S+)/)?.[1];
     if (cli !== PINNED_ONEBUDGETSPEC)
       problems.push(`publish installs @onebudgetspec/cli@${cli}, not the justfile's pin`);
@@ -149,9 +151,9 @@ test("a tail that moves, is read, may fail quietly or installs another onevcs is
     "installs the onevcs CLI": (w) => {
       w.jobs.publish.steps.splice(-2, 1);
     },
-    "not the adopted": (w) => {
+    "does not read the adopted": (w) => {
       const install = w.jobs.publish.steps.at(-2);
-      install.run = install.run.replace(`onevcs-cli@${ADOPTED_ONEVCS}`, "onevcs-cli@0.56.2");
+      install.run = install.run.replace('"onevcs-cli@$onevcs_version"', "onevcs-cli@0.56.2");
     },
     "not the justfile's pin": (w) => {
       const install = w.jobs.publish.steps.at(-2);
