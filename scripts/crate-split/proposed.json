@@ -101,6 +101,8 @@
         "tests/e2e/driver.rs",
         "tests/e2e/linear_loopback.rs",
         "tests/e2e/linear_writeback.rs",
+        "tests/e2e/private_github_home.rs",
+        "tests/e2e/github_world.py",
         "tests/e2e/github_loopback.py",
         "tests/e2e/maintenance.rs",
         "tests/e2e/declared_maintain.sh",
