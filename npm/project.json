@@ -14,13 +14,8 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
-        {
-          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
-        },
-        "sharedGlobals",
-        {
-          "runtime": "node -p process.platform"
-        }
+        "{workspaceRoot}/Cargo.toml",
+        "sharedGlobals"
       ],
       "outputs": ["{workspaceRoot}/dist/npm"]
     },

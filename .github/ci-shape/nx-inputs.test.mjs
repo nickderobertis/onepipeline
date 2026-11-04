@@ -33,12 +33,21 @@ function capture(dir, tasks) {
   return JSON.parse(readFileSync(out, "utf8")).tasks;
 }
 const versionReaders = new Set([
-  "onepipeline-npm:test", "onepipeline-stop-verdict:test", "onepipeline-stop-verdict:test-build",
+  "onepipeline-npm:build", "onepipeline-npm:test", "onepipeline-stop-verdict:test", "onepipeline-stop-verdict:test-build",
   ...["contract", "e2e", "package"].flatMap((name) => ["test", "test-quick"].map((target) => `onepipeline-version-${name}:${target}`)),
 ]);
 
 function ownVersion(dir) {
   return readFileSync(join(dir, "Cargo.toml"), "utf8").match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1];
+}
+function assertLauncherVersion(dir, version) {
+  // Exercise the user's cached build while keeping fixture entries out of CI's
+  // shared store. The second call must rebuild a newly versioned launcher.
+  const output = run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "run", "onepipeline-npm:build", "--skipRemoteCache", "--outputStyle=static"]);
+  const manifest = JSON.parse(readFileSync(join(dir, "dist/npm/onepipeline-cli/package.json"), "utf8"));
+  assert.equal(manifest.version, version, "Nx replayed a launcher carrying the previous version");
+  for (const pin of Object.values(manifest.optionalDependencies)) assert.equal(pin, version);
+  return output;
 }
 function setOwnVersion(dir, version) {
   const old = ownVersion(dir);
@@ -70,6 +79,19 @@ function assertRecordedRelease(dir, ids) {
   } finally { for (const [file, bytes] of original) writeFileSync(join(dir, file), bytes); }
 }
 
+test("version-only edits rebuild the cached npm launcher through Nx", { timeout: 120000 }, () => {
+  const dir = fixture();
+  try {
+    const version = ownVersion(dir);
+    assertLauncherVersion(dir, version);
+    assert.match(assertLauncherVersion(dir, version), /\[local cache\]/, "the repeated launcher build did not replay");
+    const [major, minor] = version.split(".").map(Number);
+    const next = `${major}.${minor + 1}.0`;
+    setOwnVersion(dir, next);
+    assertLauncherVersion(dir, next);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("real Nx hashes preserve proven results across the recorded release edits", { timeout: 1800000 }, () => {
   const dir = fixture();
   try {
@@ -88,6 +110,9 @@ test("real Nx hashes preserve proven results across the recorded release edits",
       return id === "onepipeline:test" || definitions.get(project).targets[target].outputs?.some((path) => /\.prof(?:raw|data)$/.test(path));
     });
     assert.ok(tasks.length > 0 && tasks.length + profiled.length >= 63, `only ${tasks.length} cached and ${profiled.length} uncached coverage tasks were exercised`);
+    // This artifact-producing target is outside CI's selection, but unlike a
+    // compilation proof its cached output must retain the package version.
+    tasks.push("onepipeline-npm:build");
     const before = capture(dir, tasks);
     // The recorded release-plz update at spike main changed precisely these
     // fields and the changelog. Reproduce the same edits for the next version.
@@ -191,7 +216,7 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     const originals = capture(base, [...ids]);
     const cached = [...ids].filter((id) => originals[id].cacheable);
     assert.equal(cached.length, 63, "the pinned pre-change workspace no longer has the audited 63 cacheable tasks");
-    const extra = [...versionReaders].filter((id) => id.startsWith("onepipeline-version-"));
+    const extra = ["onepipeline-npm:build", ...[...versionReaders].filter((id) => id.startsWith("onepipeline-version-"))];
     const now = capture(current, [...new Set([...cached, ...extra])]);
     assertRecordedRelease(current, [...new Set([...cached, ...extra])]);
     // These two executable inputs are deliberately retired with their release
