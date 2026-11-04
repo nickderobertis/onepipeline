@@ -80,7 +80,7 @@ function builder(dir, env, mode = "quick") {
 }
 for (const scenario of ["successful holder", "failed holder", "SIGTERM", "SIGINT"]) {
   test(`competing archive callers recover after a ${scenario}`, { timeout: 60000 }, async () => {
-    const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "archive-contention-"));
+    const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "archive-contention-"));
     const owned = [];
     try {
       copyFileSync(new URL("../../justfile", import.meta.url), join(dir, "justfile"));
@@ -124,7 +124,7 @@ for (const scenario of ["successful holder", "failed holder", "SIGTERM", "SIGINT
 }
 
 test("coverage mode archives and executes the real instrumented test", { timeout: 120000 }, () => {
-  const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "archive-coverage-"));
+  const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "archive-coverage-"));
   try {
     copyFileSync(new URL("../../justfile", import.meta.url), join(dir, "justfile"));
     mkdirSync(join(dir, "src"));

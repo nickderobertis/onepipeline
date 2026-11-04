@@ -9,7 +9,7 @@ import { test } from "node:test";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const helper = fileURLToPath(new URL("./support/nx-hashes.mjs", import.meta.url));
 const env = { ...process.env, NX_DAEMON: "false", CI: "true" };
-for (const key of Object.keys(env)) if (key.startsWith("GITHUB_")) delete env[key];
+for (const key of Object.keys(env)) if (key.startsWith("GITHUB_") || key === "NX_BASE" || key === "NX_HEAD") delete env[key];
 const run = (cwd, cmd, args) => execFileSync(cmd, args, { cwd, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 function fixture(revision) {
   const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "nx-inputs-"));

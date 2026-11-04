@@ -186,7 +186,9 @@ function replayed(ws, base, summary, env = {}) {
 
 describe("just lint-llm-diff", () => {
   it("keeps fixture telemetry out of the enclosing CI job", (t) => {
-    const temp = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "llmlint-parent-"));
+    const temp = mkdtempSync(
+      join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "llmlint-parent-"),
+    );
     t.after(() => rmSync(temp, { recursive: true, force: true }));
     const values = { GITHUB_ACTIONS: "true", GITHUB_JOB: "enclosing-ci", RUNNER_TEMP: temp };
     const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));

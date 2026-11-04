@@ -16,7 +16,7 @@ export function command(cwd, cmd, args, env) {
     // Fixture Nx runs must not inherit the enclosing CI job's sidecar or
     // telemetry identity. Cache journeys supply their own explicit context.
     const inherited = { ...process.env };
-    for (const key of Object.keys(inherited)) if (key.startsWith("GITHUB_") || key.startsWith("ACTIONS_") || key.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_")) delete inherited[key];
+    for (const key of Object.keys(inherited)) if (key.startsWith("GITHUB_") || key.startsWith("ACTIONS_") || key.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_") || key === "NX_BASE" || key === "NX_HEAD") delete inherited[key];
     const child = spawn(cmd, args, { cwd, env: { ...inherited, ...env }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (data) => { stdout += data; });

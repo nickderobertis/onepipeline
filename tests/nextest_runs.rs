@@ -1479,19 +1479,13 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
     }
 } // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// The gate's instrumented suite archives the build it is about to run, under
-/// the same flags, before any tier runs it, and only when CI names where.
-///
-/// The suite runs as one Nx project per tier, so "before" is the project
-/// graph's to hold: every tier's instrumented `test` waits on the crate's
-/// `test-archive` target, and every uninstrumented `test-quick` on its
-/// `test-quick-archive`. A tier that did not would race the archive, and a test
-/// it failed could be missing from the build the re-run step extracts.
-// llmlint: ignore-block[changed_behavior_has_e2e] running this line needs
-// cargo-llvm-cov, which the cross legs that run every test do not install, so a
-// test executing it could only pass there by skipping. The uninstrumented
-// archive line is executed above; this one is held to the same shape, and the
-// gate job runs it for real on every run.
+/// A tier builds the archive with the same flags before it consumes it,
+/// after that tier's cache miss and only when CI names an archive path.
+/// An eager project edge would rebuild even when the quick tier replays.
+// llmlint: ignore-block[changed_behavior_has_e2e] The quick legs do not install
+// cargo-llvm-cov, so this cross-platform guard checks the instrumented recipe's
+// shape. .github/ci-shape/archive.test.mjs executes that real recipe and archive
+// under coverage in the Linux workflow tier; no cross leg skips a test here.
 #[test]
 fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
     let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
@@ -1508,6 +1502,12 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
     };
     let archive = body("_crate-test-archive");
     let run = body("_tier-test");
+    assert!(run
+        .iter()
+        .any(|line| line.contains("bash scripts/ensure-test-archive.sh coverage")));
+    assert!(body("_tier-test-quick")
+        .iter()
+        .any(|line| line.contains("bash scripts/ensure-test-archive.sh quick")));
     let flags = "RUSTFLAGS=\"-D warnings\" cargo llvm-cov --no-report nextest";
     assert!(
         run.iter()
@@ -1552,8 +1552,8 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
                 })
             });
             assert!(
-                waits,
-                "{name}:{target} does not wait on onepipeline:{archive}, so it can run before the build is archived: {needs}"
+                !waits,
+                "{name}:{target} eagerly builds onepipeline:{archive} even when the tier replays: {needs}"
             );
         }
     }
@@ -1726,6 +1726,10 @@ fn a_single_test_tier_accepts_its_empty_shard_but_refuses_an_empty_filter() {
             (
                 "scripts/test-partition.sh",
                 include_str!("../scripts/test-partition.sh"),
+            ),
+            (
+                "scripts/ensure-test-archive.sh",
+                include_str!("../scripts/ensure-test-archive.sh"),
             ),
             (
                 "scripts/nextest-run.sh",

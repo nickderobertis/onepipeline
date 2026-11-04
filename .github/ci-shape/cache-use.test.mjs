@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -60,7 +61,7 @@ test("simulated release selection measures real retry and promoted replay throug
     api.metadata.set(`${prefix}/commits/v-fixture`, { sha: ws.head });
     api.metadata.set(`${prefix}/compare/v-before...v-fixture`, { commits: [{ sha: sourceHead }, { sha: ws.head }] });
     const measure = async () => {
-      const temp = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "cache-figure-"));
+      const temp = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "cache-figure-"));
       return command(ws.dir, "onebudgetspec", ["check", "budgets.yaml", "--id", "onepipeline-nx-cache-use", "--json"], {
         GITHUB_REPOSITORY: repo.full_name, GITHUB_REF_NAME: "v-fixture", GITHUB_API_URL: api.url.replace(/\/$/, ""),
         GH_TOKEN: "fixture-token", GITHUB_TOKEN: "fixture-token", RUNNER_TEMP: temp,

@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +11,9 @@ const fixture = join(root, ".github/tests/fixtures/release-tail-v0.76.0");
 test("recorded onepipeline v0.76.0 excludes carried CI-only PR #983 from release-cycle time", {
   timeout: 60000,
 }, () => {
-  const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "recorded-cycle-"));
+  const dir = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "recorded-cycle-"),
+  );
   try {
     mkdirSync(join(dir, "scripts"));
     mkdirSync(join(dir, ".github"));

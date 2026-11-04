@@ -20,7 +20,7 @@
 // driven through the commands they declare rather than through `just build`.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
 import {
   appendFileSync,
   copyFileSync,
@@ -87,7 +87,7 @@ const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
  * whichever shell launched the gate rather than about the script — a run with
  * `ONEPIPELINE_NX_SHOW_OUTPUT` already exported failed here for that reason.
  */
-function run(args, env = {}, cwd = root) {
+function fixtureEnvironment(env = {}) {
   // Local fixture tasks must never write into the enclosing CI job's shared
   // cache or recording stream. Explicit event cases below supply their context.
   const inherited = { ...process.env };
@@ -95,7 +95,9 @@ function run(args, env = {}, cwd = root) {
     if (
       name.startsWith("GITHUB_") ||
       name.startsWith("ACTIONS_") ||
-      name.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_")
+      name.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_") ||
+      name === "NX_BASE" ||
+      name === "NX_HEAD"
     )
       delete inherited[name];
   }
@@ -103,13 +105,24 @@ function run(args, env = {}, cwd = root) {
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete inherited[name];
   }
+  return inherited;
+}
+
+function run(args, env = {}, cwd = root) {
   const result = spawnSync("bash", args, {
     cwd,
     encoding: "utf8",
-    env: inherited,
+    env: fixtureEnvironment(env),
   });
   assert.equal(result.error, undefined, `could not run ${args.join(" ")}`);
   return result;
+}
+
+function spawnSync(command, args, options = {}) {
+  return rawSpawnSync(command, args, { ...options, env: fixtureEnvironment(options.env) });
+}
+function execFileSync(command, args, options = {}) {
+  return rawExecFileSync(command, args, { ...options, env: fixtureEnvironment(options.env) });
 }
 
 // The verbs whose comment in the justfile promises every project, so a project
@@ -488,21 +501,36 @@ describe("the Rust targets' cache inputs", () => {
 });
 
 describe("fixture cache isolation", () => {
+  it("keeps ambient environment access behind the shared fixture sanitizer", () => {
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const outsideSanitizer = source.replace(
+      /function fixtureEnvironment[\s\S]*?\n}\n\nfunction run/,
+      "function run",
+    );
+    assert.doesNotMatch(outsideSanitizer, /\bprocess\.env\b(?!\s*[.\[])/);
+    assert.equal((source.match(/\brawSpawnSync\(/g) ?? []).length, 1);
+    assert.equal((source.match(/\brawExecFileSync\(/g) ?? []).length, 1);
+  });
   it("runs real fixture Nx without inheriting its enclosing CI identity or sidecar", (t) => {
     const repo = scratchRepository(t);
     const inherited = {
       GITHUB_ACTIONS: "true",
+      NX_BASE: "a".repeat(40),
+      NX_HEAD: "b".repeat(40),
       NX_SELF_HOSTED_REMOTE_CACHE_SERVER: "http://127.0.0.1:1",
       NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: "enclosing-token",
     };
     const previous = Object.fromEntries(
       Object.keys(inherited).map((key) => [key, process.env[key]]),
     );
-    Object.assign(process.env, inherited);
+    for (const [key, value] of Object.entries(inherited)) process.env[key] = value;
     try {
       const script =
-        '[ -z "$GITHUB_ACTIONS" ] && [ -z "$NX_SELF_HOSTED_REMOTE_CACHE_SERVER" ] && bash scripts/nx.sh run onepipeline-npm:format-check';
-      const leaking = spawnSync("bash", ["-c", script], { cwd: repo.path, env: process.env });
+        '[ -z "$GITHUB_ACTIONS" ] && [ -z "$NX_BASE" ] && [ -z "$NX_HEAD" ] && [ -z "$NX_SELF_HOSTED_REMOTE_CACHE_SERVER" ] && bash scripts/nx.sh run onepipeline-npm:format-check';
+      const leaking = spawnSync("bash", ["-c", script], {
+        cwd: repo.path,
+        env: fixtureEnvironment(inherited),
+      });
       assert.notEqual(leaking.status, 0, "the guard must detect inherited CI state");
       const isolated = run(["-c", script], { NX_DAEMON: "false" }, repo.path);
       assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
@@ -1235,7 +1263,7 @@ echo "$1" >> "$JUST_CALLS"
         ["run", "onepipeline-npm:test", `--graph=${graphPath}`],
         {
           cwd: repo.path,
-          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
           encoding: "utf8",
         },
       ),
@@ -1301,12 +1329,11 @@ describe("the build targets", () => {
         // escape codes the line matches below would never see past — the
         // `Compiling` check would pass on anything. Colour does not enter
         // cargo's fingerprint, so this reads the same tree.
-        env: {
-          ...process.env,
+        env: fixtureEnvironment({
           ...GATE_DEBUG_BUILD.env,
           CARGO_TERM_QUIET: "false",
           CARGO_TERM_COLOR: "never",
-        },
+        }),
       },
     );
     assert.equal(result.status, 0, result.stderr);
@@ -1420,7 +1447,7 @@ describe("release-only workload selection", () => {
           [...args, `--graph=${graphPath}`],
           {
             cwd: repo.path,
-            env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+            env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
             encoding: "utf8",
           },
         ),

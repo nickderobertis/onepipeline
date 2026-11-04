@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { githubCache } from "./support/github-cache.mjs";
@@ -40,7 +41,7 @@ test("nested fixture Nx tasks cannot store or record against the enclosing CI jo
   const { join } = await import("node:path");
   const { workspace, command } = await import("./support/cache-workspace.mjs");
   const ws = workspace();
-  const temp = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR, "parent-ci-"));
+  const temp = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "parent-ci-"));
   let requests = 0;
   const parent = createServer((req, res) => { requests++; req.resume(); res.writeHead(req.method === "PUT" ? 409 : 404).end(); });
   await new Promise((resolve) => parent.listen(0, "127.0.0.1", resolve));
