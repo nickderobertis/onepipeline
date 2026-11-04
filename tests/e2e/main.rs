@@ -112,6 +112,7 @@ mod dispatch_env_hook;
 // `onevcs`'s draft lifecycle over a real origin, so the narrowest edge they can honestly
 // sit behind is the crate itself, which is this target's — the same grounds as `mod
 // lifecycle` below, whose journeys these extend.
+mod check_visibility;
 mod draft_lifecycle;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod driver;

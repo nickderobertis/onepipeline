@@ -2278,7 +2278,9 @@ fn recalled_whole(state: &RunState, event: &Envelope) -> bool {
             | K::ScratchRetained
             | K::LandingClosures
             | K::DriverTakenOver
-            | K::HomeStatus,
+            | K::HomeStatus
+            | K::CheckFailed
+            | K::ChecksUnfollowed,
         ) => true,
         Some(K::EditRejected) => event.payload.contains_key("envelope"),
         Some(K::NodeSettled) => event.payload.contains_key("continued"),

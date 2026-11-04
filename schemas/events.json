@@ -1,5 +1,5 @@
 {
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -556,6 +556,11 @@
                 "type": "string",
                 "const": "progress",
                 "description": "Ordinary running or successful detail."
+              },
+              {
+                "type": "string",
+                "const": "attention",
+                "description": "A person should look at it, and it blocks nothing: a check that is not required\nfailed or ended with no verdict."
               }
             ],
             "description": "How much attention an event asks of its consumer, stamped by its producer."
@@ -2228,6 +2233,20 @@
             "format": "uint64",
             "minimum": 0,
             "description": "The highest command envelope id this driver wrote an outcome line for, or\n`null` where it answered none."
+          },
+          "checks_running": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/EndingCheck"
+            },
+            "description": "Every check still followed on a change request the run published when this\ndriver let go. Omitted when there is none, so an older reader is unaffected."
+          },
+          "checks_unfollowed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/EndingCheck"
+            },
+            "description": "Every check a `checks-unfollowed` record named. Omitted when there is none."
           }
         },
         "required": [
@@ -2262,6 +2281,44 @@
               }
             ],
             "description": "The settlement a driver let go of a run at: the attached settlement word it\nreturns, or `error` for a driver-side error it reported."
+          },
+          "EndingCheck": {
+            "type": "object",
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "The node whose publication carries it."
+              },
+              "change": {
+                "type": "string",
+                "description": "The change request, by URL."
+              },
+              "head": {
+                "type": "string",
+                "description": "The head commit it runs on."
+              },
+              "check": {
+                "type": "string",
+                "description": "The check's name."
+              },
+              "required": {
+                "type": "boolean",
+                "description": "Whether it blocks the merge."
+              },
+              "requirement": {
+                "type": "string",
+                "description": "`required` in words."
+              }
+            },
+            "required": [
+              "node",
+              "change",
+              "head",
+              "check",
+              "required",
+              "requirement"
+            ],
+            "description": "One check a run's ending names: still running, or no longer followed."
           }
         }
       }
@@ -5487,6 +5544,151 @@
           "AbsolutePath": {
             "type": "string",
             "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.check-failed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose publication carries the check."
+          },
+          "change": {
+            "type": "string",
+            "description": "The change request, by URL."
+          },
+          "head": {
+            "type": "string",
+            "description": "The head commit the check ran on."
+          },
+          "check": {
+            "type": "string",
+            "description": "The check's name."
+          },
+          "state": {
+            "$ref": "#/$defs/FailingState",
+            "description": "`failed` or `no-verdict`."
+          },
+          "conclusion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How it concluded, `null` where the host said nothing."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether it blocks the merge."
+          },
+          "requirement": {
+            "type": "string",
+            "description": "`required` in words: `onepipeline::vocabulary::requirement_label`."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where its log is, `null` where the host gave no address."
+          }
+        },
+        "required": [
+          "node",
+          "change",
+          "head",
+          "check",
+          "state",
+          "required",
+          "requirement"
+        ],
+        "description": "`check-failed`: one failing check on a change request the run published, and its\none non-blocking surface.",
+        "title": "CheckFailed",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "FailingState": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "no-verdict"
+            ],
+            "description": "The two states a check is raised in: it failed, or it ended with no verdict."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.checks-unfollowed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose publication carries the checks."
+          },
+          "change": {
+            "type": "string",
+            "description": "The change request, by URL."
+          },
+          "head": {
+            "type": "string",
+            "description": "The head commit the checks run on."
+          },
+          "reason": {
+            "$ref": "#/$defs/UnfollowedReason",
+            "description": "Why it stopped: `timeout`."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/UnfollowedCheck"
+            },
+            "description": "Each check still running."
+          }
+        },
+        "required": [
+          "node",
+          "change",
+          "head",
+          "reason",
+          "checks"
+        ],
+        "description": "`checks-unfollowed`: the checks the driver stopped following on one change request.",
+        "title": "ChecksUnfollowed",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "UnfollowedReason": {
+            "type": "string",
+            "enum": [
+              "timeout"
+            ],
+            "description": "Why the driver stopped following a change request's checks: onevcs's checks timeout\npassed since its publication returned."
+          },
+          "UnfollowedCheck": {
+            "type": "object",
+            "properties": {
+              "check": {
+                "type": "string",
+                "description": "The check's name."
+              },
+              "required": {
+                "type": "boolean",
+                "description": "Whether it blocks the merge."
+              },
+              "requirement": {
+                "type": "string",
+                "description": "`required` in words."
+              }
+            },
+            "required": [
+              "check",
+              "required",
+              "requirement"
+            ],
+            "description": "One check a `checks-unfollowed` names."
           }
         }
       }

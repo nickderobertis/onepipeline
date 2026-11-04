@@ -62,6 +62,7 @@
         "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json",
         "{workspaceRoot}/target/budget-records/host-view-debug.json",
         "{workspaceRoot}/target/budget-records/review-round-quota.json",
+        "{workspaceRoot}/target/budget-records/check-visibility-quota.json",
         "{workspaceRoot}/target/budget-records/store-operations/*.json",
         "{workspaceRoot}/target/test-profile/e2e/*.json"
       ],

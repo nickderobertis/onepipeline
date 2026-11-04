@@ -1153,11 +1153,16 @@ fn record_exit(
     reason: Option<String>,
     answered_from: usize,
 ) {
+    // What the run's checks stood at as this driver let go: read off the run's own
+    // record, which is what the next driver would resume following from.
+    let (checks_running, checks_unfollowed) = crate::checkwatch::ending(paths);
     let exited = crate::payload::DriverExited {
         pid: sys::pid(),
         settlement,
         reason,
         last_answered_command: ChannelState::new(paths).highest_answered_after(answered_from),
+        checks_running,
+        checks_unfollowed,
     };
     let written = match serde_json::to_value(&exited) {
         Ok(Value::Object(payload)) => Journal::open(paths).emit(
@@ -1661,6 +1666,10 @@ fn converge(
     // target's answer is a probe, and a slow one asked inline would stall the
     // loop every other node in the run depends on.
     let mut releases = crate::release::Watch::of_run(paths);
+    // Every failing check on a change this run published, raised once, and the
+    // checks still running after a publication returned, followed until they settle.
+    // Seeded from the run's own record, so an adopting driver raises nothing twice.
+    let mut checks = crate::checkwatch::CheckWatch::of_run(paths);
     // What each lifecycle node's identity admits, read before the node comes
     // forward, and the nodes held on that reading. Nothing is seeded from the
     // journal: a workspace hold is decided by a read this driver makes, so a
@@ -1887,6 +1896,15 @@ fn converge(
             launch.filters.vcs.as_ref(),
         )?);
         took_up_releases = Some(Instant::now());
+        // The checks a returned publication left running: read, relayed and reported,
+        // and never a reason to move a node, a dependent or a publication.
+        checks.pass(
+            paths,
+            journal,
+            state,
+            &statuses,
+            launch.filters.vcs.as_ref(),
+        )?;
         // Every landing the journal relayed, a readjustment found, or a catch-up reads off the
         // run's sessions, handed to the write-back's closure thread: none of it waits here.
         if let Some(writeback) = &writeback {
@@ -2322,6 +2340,8 @@ fn converge(
                 Duration::MAX
             },
             next_quiet(&in_flight, stall_after),
+            // A followed change request's next read, or its timeout.
+            checks.next_due(),
             if watching_merge_paths.is_empty() {
                 Duration::MAX
             } else {
@@ -2364,6 +2384,9 @@ fn converge(
             // finds none of them goes straight back to waiting.
             let mut outside = || {
                 if releases.take_up_answers() {
+                    return true;
+                }
+                if checks.take_up_answers() {
                     return true;
                 }
                 // A human item recorded since the last pass may hold or release
@@ -2492,6 +2515,8 @@ fn converge(
                     if !journalled {
                         journal.relay(&envelope)?;
                     }
+                    // A failing check is told to the manager once, whatever it blocks.
+                    checks.observe(paths, journal, state, &envelope)?;
                     // A branch a node of this run pushed is a branch every draft
                     // stacked on it may now owe a restack against, and that is
                     // decided from the record — so the record is read again here,

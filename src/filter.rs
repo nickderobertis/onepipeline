@@ -1014,6 +1014,9 @@ fn shipped_profile(name: &str) -> Option<EventFilter> {
                 },
                 stamped(Source::Vcs, crate::vocabulary::Significance::Milestone),
                 stamped(Source::Vcs, crate::vocabulary::Significance::Blocker),
+                // A check that blocks nothing and failed: a person should look, and
+                // it is the one place a manager reading the default view sees it.
+                stamped(Source::Vcs, crate::vocabulary::Significance::Attention),
             ],
             exclude: vec![stamped(
                 Source::Pipeline,

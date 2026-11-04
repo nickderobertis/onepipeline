@@ -198,6 +198,7 @@
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/scripts/review-round-quota-budget.*",
+        "{workspaceRoot}/scripts/check-visibility-quota-budget.*",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
         },

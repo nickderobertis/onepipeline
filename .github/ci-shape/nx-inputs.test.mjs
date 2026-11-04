@@ -160,7 +160,8 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     // approximating its changelog layout. This is the recorded release
     // 0.98.4 -> 0.99.0 at the pinned starting revision.
     const releaseFiles = ["Cargo.toml", "Cargo.lock", "CHANGELOG.md"];
-    for (const file of releaseFiles) writeFileSync(join(current, file), run(root, "git", ["show", `96c876ab^:${file}`]));
+    const releasePatch = run(root, "git", ["diff", "96c876ab^", "96c876ab", "--", ...releaseFiles]);
+    execFileSync("git", ["apply", "--reverse", "-"], { cwd: current, env, input: releasePatch });
     const priorRelease = capture(current, [...new Set([...cached, ...extra])]);
     for (const id of [...cached, ...extra]) {
       if (!now[id].cacheable) continue; // Stop-verdict is deliberately uncached.
