@@ -1076,6 +1076,13 @@ pub fn reply(
     envelope_json: &str,
 ) -> Result<Receipt> {
     let text = envelope_json.trim();
+    if serde_json::from_str::<serde_json::Value>(text)
+        .as_ref()
+        .is_ok_and(crate::boundary::launch_export_declaration)
+    {
+        return Err(Error::Refused(crate::boundary::LAUNCH_EXPORT_ONLY.into()));
+    }
+
     // A reply this schema refuses is read a second time, leniently, to see
     // whether a retired plan field is why — an `add` carrying one is the same
     // planner mistake as a task carrying one, and deserves the same answer.

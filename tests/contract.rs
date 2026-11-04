@@ -1787,6 +1787,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             to: "consumer".into(),
             source_directory: "examples/generic".into(),
             target_directory: "examples".into(),
+            accepted_opaque: Vec::new(),
         }],
     })
     .expect("a plan serialises");
@@ -10831,6 +10832,13 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
     let plan: Plan = serde_json::from_value(block["boundary_plan"].clone())
         .expect("the boundary plan is a plan of this schema");
     assert_eq!(plan.export_edges.len(), 1);
+    assert!(plan.export_edges[0].accepted_opaque.is_empty());
+    let mut with_patterns = block["boundary_plan"].clone();
+    with_patterns["export_edges"][0]["accepted_opaque"] = block["boundary_accepted_opaque"].clone();
+    let accepted: Plan = serde_json::from_value(with_patterns.clone())
+        .expect("the launch plan accepts opaque patterns");
+    assert_eq!(serde_json::to_value(accepted).unwrap(), with_patterns);
+
     let edge = &plan.export_edges[0];
     assert_eq!(
         (

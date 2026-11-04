@@ -425,6 +425,11 @@ pub struct ExportEdge {
     pub source_directory: String,
     /// Where that directory's contents land in the consumer's repository.
     pub target_directory: String,
+    /// Glob patterns, relative to `source_directory`, naming files a person has accepted
+    /// as opaque content (onevcs's `ExportRequest::accepted_opaque`). Read from the launch
+    /// plan only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_opaque: Vec<String>,
 }
 
 /// The default when a plan states no `concurrency`.
