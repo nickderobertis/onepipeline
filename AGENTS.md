@@ -160,8 +160,9 @@ telemetry the run already produced, never measured afresh:
 
 Every other check of the root `budgets.yaml` excludes both labels.
 
-The four CI jobs share small Nx test results through the pinned create-repo
-scripts. Same-repository PRs store profiles, named reports and terminal output;
+The four CI jobs run on release branches under the same conditions as other
+branches, with no release shortcut. They share small Nx test results through
+the pinned create-repo scripts. Same-repository PRs store profiles, named reports and terminal output;
 forks and Dependabot read only. `release-plz.yml` promotes trusted merged-PR
 results to the base scope before release automation, without running tests on
 `main`; a `cache-promote/<PR>` push promotes only into that branch's scope.

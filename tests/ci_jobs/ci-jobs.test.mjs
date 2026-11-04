@@ -99,6 +99,38 @@ describe("the Linux recipes run what they select and nothing else", () => {
     });
   }
 
+  it("isolates nested task execution from the enclosing CI cache and telemetry", (t) => {
+    const dir = scratchWorkspace(t);
+    commit(
+      dir,
+      "pool-maintenance/ci-environment.test.mjs",
+      `import assert from "node:assert/strict";
+import { it } from "node:test";
+it("uses a fixture context", () => {
+  for (const key of ["GITHUB_ACTIONS", "NX_SELF_HOSTED_REMOTE_CACHE_SERVER", "NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN"])
+    assert.equal(process.env[key], undefined, key);
+});
+`,
+    );
+    const values = {
+      GITHUB_ACTIONS: "true",
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: "http://127.0.0.1:1",
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: "enclosing-token",
+    };
+    const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    try {
+      const result = run(dir, "just", ["ci-test-linux"], { ONEPIPELINE_NX_BASE_REF: "main" });
+      assert.equal(result.status, 0, result.log);
+      assert.deepEqual(ran(result.log), ["pool-maintenance:test"], result.log);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("ci-test-linux hands its tasks none of the Nx wrapper's own switches", (t) => {
     // A suite that drives Nx itself, as the npm suite does, must meet the
     // wrapper as a developer does, not switched by the recipe that started it.

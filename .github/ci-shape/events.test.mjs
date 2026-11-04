@@ -3,8 +3,8 @@
 // `if:` expressions, its reusable-workflow expansion):
 //
 // - a pull request's last commit (`opened`, `synchronize`, `reopened`) runs exactly ci.yml's
-//   `lint`, `test-linux`, `test-windows` and `test-macos` across every workflow — `test-macos`
-//   skipped on release-plz's own release pull request — and nothing else starts;
+//   `lint`, `test-linux`, `test-windows` and `test-macos` across every workflow,
+//   including release-plz's own release pull request — and nothing else starts;
 // - its closing runs visual-docs.yml alone, to delete its preview;
 // - a push to main starts release-plz.yml, visual-docs.yml and rust-cache-warm.yml alone, and
 //   the release commit runs release-plz's job and the warmer's Linux and Windows legs, with
@@ -91,10 +91,7 @@ export function eventProblems(all) {
         const files = runs.map((run) => run.file).sort();
         if (JSON.stringify(files) !== JSON.stringify(["ci.yml"]))
           problems.push(`${label} starts ${files.join(", ")}, not ci.yml alone`);
-        const releasePlz = branch.startsWith("release-plz-") && !fork;
-        const want = FOUR.filter((job) => !(releasePlz && job === "test-macos")).map(
-          (job) => `ci.yml:${job}`,
-        );
+        const want = FOUR.map((job) => `ci.yml:${job}`);
         const got = ran(runs).sort();
         if (JSON.stringify(got) !== JSON.stringify(want))
           problems.push(`${label} runs ${got.join(", ")}, not ${want.join(", ")}`);

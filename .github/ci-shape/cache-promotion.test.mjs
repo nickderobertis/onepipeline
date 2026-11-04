@@ -57,10 +57,11 @@ for (const cause of ["fork", "Dependabot", "expired artifact", "missing artifact
 }
 
 
-test("a real push to the dedicated promotion branch writes its scope and runs no release-plz command", { timeout: 180000 }, async () => {
+test("a real push to the dedicated promotion branch promotes an open draft and runs no release-plz command", { timeout: 180000 }, async () => {
   const ws = workspace(); const api = await githubCache();
   try {
     const pr = pull(ws);
+    pr.merged_at = null; pr.state = "open"; pr.draft = true;
     const source = await sourceRun(ws, api, pr, 1);
     sourceMetadata(api, ws, source.report, { id: 1, pr });
     const done = await releaseJob(ws, api, "refs/heads/cache-promote/1");

@@ -168,6 +168,13 @@ test("Nx's own expanded inputs cover every original cached task's files after th
       else assert.equal(priorRelease[id].hash, now[id].hash, `${id} moved on recorded release-plz PR #1387`);
     }
     for (const file of releaseFiles) writeFileSync(join(current, file), readFileSync(join(root, file)));
+    // These two executable inputs are deliberately retired with their release
+    // shortcut. Every other original input remains required; there is no
+    // general exception for deleted files.
+    const retired = new Set(["scripts/release-pr-shortcut.mjs", "tests/ci_jobs/release-pr-shortcut.test.mjs"]);
+    for (const path of retired) assert.equal(existsSync(join(current, path)), false, `${path} was not retired`);
+    const retiredReaders = Object.fromEntries(cached.map((id) => [id, originals[id].sourceFiles.filter((file) => retired.has(file))]).filter(([, files]) => files.length));
+    console.error(`Retired Nx input readers: ${JSON.stringify(retiredReaders)}`);
     for (const id of cached) {
       const union = new Set([...now[id].sourceFiles, ...now[id].runtimeFiles]);
       const split = id.startsWith("onepipeline-contract:") ? "contract" : id.startsWith("onepipeline-e2e:") ? "e2e" : id.startsWith("onepipeline:") ? "package" : null;
@@ -176,6 +183,7 @@ test("Nx's own expanded inputs cover every original cached task's files after th
         for (const file of [...moved.sourceFiles, ...moved.runtimeFiles]) union.add(file);
       }
       for (const file of originals[id].sourceFiles) {
+        if (retired.has(file)) continue;
         if (file === "CHANGELOG.md" && !versionReaders.has(id)) continue;
         assert.ok(union.has(file === "biome.json" ? "biome.jsonc" : file), `${id} lost the input ${file}`);
       }

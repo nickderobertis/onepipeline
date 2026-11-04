@@ -89,6 +89,12 @@ export function plain(text) {
  */
 export function run(dir, command, args, env = {}) {
   const inherited = { ...process.env, ...GIT_ENV, ...env };
+  // Nested fixture tasks have their own local cache and must not record or
+  // store against the enclosing CI job. Explicit event cases keep their context.
+  for (const name of Object.keys(inherited)) {
+    if (/^(GITHUB_|ACTIONS_|NX_SELF_HOSTED_REMOTE_CACHE_)/.test(name) && !(name in env))
+      delete inherited[name];
+  }
   // `NODE_TEST_CONTEXT` is this runner's: a `node --test` a recipe starts would
   // read it as a nested call and skip every file it was given.
   for (const name of [
