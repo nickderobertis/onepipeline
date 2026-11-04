@@ -59,7 +59,8 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-contract-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test-quick": {
       "command": "just _contract-test-quick",

@@ -9,8 +9,10 @@ const { createTaskHasher } = require("nx/src/hasher/create-task-hasher.js");
 const { hashTask, getTaskDetails } = require("nx/src/hasher/hash-task.js");
 const { DbCache } = require("nx/src/tasks-runner/cache.js");
 const projectGraph = await createProjectGraphAsync({ exitOnError: true });
-const projects = Object.keys(projectGraph.nodes).filter((p) => p === "onepipeline" || projectGraph.nodes[p].data.root.startsWith("tests/"));
-const graph = createTaskGraph(projectGraph, {}, projects, ["test", "test-quick"], undefined, {});
+const projects = Object.keys(projectGraph.nodes).filter((p) =>
+  (p === "onepipeline" || projectGraph.nodes[p].data.root.startsWith("tests/")) &&
+  projectGraph.nodes[p].data.targets["test-quick"]?.cache === true);
+const graph = createTaskGraph(projectGraph, {}, projects, ["test-quick"], undefined, {});
 const hasher = createTaskHasher(projectGraph, readNxJson());
 const cache = new DbCache({ skipRemoteCache: true });
 await cache.init();
@@ -20,4 +22,4 @@ for (const task of Object.values(graph.tasks)) {
   await hashTask(hasher, projectGraph, graph, task, process.env, getTaskDetails());
   await cache.put(task, `proven fixture result: ${task.id}\n`, [], 0);
 }
-console.log(JSON.stringify(projects.filter((p) => projectGraph.nodes[p].data.targets.test?.cache === true)));
+console.log(JSON.stringify(projects.filter((p) => projectGraph.nodes[p].data.targets["test-quick"]?.cache === true)));

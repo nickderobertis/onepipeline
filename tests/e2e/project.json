@@ -66,7 +66,8 @@
         "{workspaceRoot}/target/budget-records/store-operations/*.json",
         "{workspaceRoot}/target/test-profile/e2e/*.json"
       ],
-      "parallelism": false
+      "parallelism": false,
+      "cache": false
     },
     "test-quick": {
       "command": "just _e2e-test-quick",

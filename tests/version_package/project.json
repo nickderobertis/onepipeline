@@ -9,7 +9,7 @@
   "targets": {
     "test": {
       "command": "just _version-package-test",
-      "cache": true,
+      "cache": false,
       "inputs": [
         "crateTestSource",
         {

@@ -87,10 +87,10 @@ test("simulated release selection measures real retry and promoted replay throug
     api.metadata.set(membershipPath, membership);
     const ancestryPath = `${prefix}/compare/${ws.base}...${firstMetadata.run.head_sha}`;
     const ancestry = api.metadata.get(ancestryPath);
-    api.metadata.set(ancestryPath, { ...ancestry, status: "behind" });
+    api.metadata.set(ancestryPath, { ...ancestry, status: "behind", merge_base_commit: { ...ancestry.merge_base_commit, sha: "invalid" } });
     const invalidBase = await measure();
     assert.notEqual(invalidBase.code, 0);
-    assert.match(invalidBase.stdout + invalidBase.stderr, /selection base is not an ancestor/);
+    assert.match(invalidBase.stdout + invalidBase.stderr, /missing effective selection merge-base/);
     api.metadata.set(ancestryPath, ancestry);
 
     // Eviction does not erase eligibility: the same proven hash executing

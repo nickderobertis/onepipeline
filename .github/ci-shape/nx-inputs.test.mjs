@@ -33,9 +33,42 @@ function capture(dir, tasks) {
   return JSON.parse(readFileSync(out, "utf8")).tasks;
 }
 const versionReaders = new Set([
-  "onepipeline-npm:test", "onepipeline-stop-verdict:test-build",
+  "onepipeline-npm:test", "onepipeline-stop-verdict:test", "onepipeline-stop-verdict:test-build",
   ...["contract", "e2e", "package"].flatMap((name) => ["test", "test-quick"].map((target) => `onepipeline-version-${name}:${target}`)),
 ]);
+
+function ownVersion(dir) {
+  return readFileSync(join(dir, "Cargo.toml"), "utf8").match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1];
+}
+function setOwnVersion(dir, version) {
+  const old = ownVersion(dir);
+  for (const file of ["Cargo.toml", "Cargo.lock"]) {
+    const path = join(dir, file);
+    const text = readFileSync(path, "utf8");
+    writeFileSync(path, file === "Cargo.toml"
+      ? text.replace(/(\[package\][\s\S]*?\nversion = ")[^"]+"/, `$1${version}"`)
+      : text.replace(`name = "onepipeline"\nversion = "${old}"`, `name = "onepipeline"\nversion = "${version}"`));
+  }
+}
+function assertRecordedRelease(dir, ids) {
+  const files = ["Cargo.toml", "Cargo.lock", "CHANGELOG.md"];
+  const original = new Map(files.map((file) => [file, readFileSync(join(dir, file))]));
+  try {
+    // Reproduce the recorded release's own version and changelog, while keeping
+    // this workspace's dependency entries, sources and input definition.
+    const recordedManifest = run(root, "git", ["show", "96c876ab:Cargo.toml"]);
+    setOwnVersion(dir, recordedManifest.match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1]);
+    writeFileSync(join(dir, "CHANGELOG.md"), run(root, "git", ["show", "96c876ab:CHANGELOG.md"]));
+    const after = capture(dir, ids);
+    const patch = run(root, "git", ["diff", "96c876ab^", "96c876ab", "--", ...files]);
+    execFileSync("git", ["apply", "--reverse", "-"], { cwd: dir, env, input: patch });
+    const before = capture(dir, ids);
+    for (const id of ids) {
+      if (versionReaders.has(id)) assert.notEqual(before[id].hash, after[id].hash, `${id} lost recorded-release version input`);
+      else assert.equal(before[id].hash, after[id].hash, `${id} moved on recorded release-plz PR #1387`);
+    }
+  } finally { for (const [file, bytes] of original) writeFileSync(join(dir, file), bytes); }
+}
 
 test("real Nx hashes preserve proven results across the recorded release edits", { timeout: 1800000 }, () => {
   const dir = fixture();
@@ -50,7 +83,11 @@ test("real Nx hashes preserve proven results across the recorded release edits",
     const projects = JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--json"]));
     const definitions = new Map(projects.map((name) => [name, JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "project", name, "--json"]))]));
     const tasks = [...selected].filter((id) => { const [project, target] = id.split(":"); return definitions.get(project).targets[target].cache === true; });
-    assert.ok(tasks.length >= 63, `only ${tasks.length} cacheable tasks were exercised`);
+    const profiled = [...selected].filter((id) => {
+      const [project, target] = id.split(":");
+      return id === "onepipeline:test" || definitions.get(project).targets[target].outputs?.some((path) => /\.prof(?:raw|data)$/.test(path));
+    });
+    assert.ok(tasks.length > 0 && tasks.length + profiled.length >= 63, `only ${tasks.length} cached and ${profiled.length} uncached coverage tasks were exercised`);
     const before = capture(dir, tasks);
     // The recorded release-plz update at spike main changed precisely these
     // fields and the changelog. Reproduce the same edits for the next version.
@@ -156,19 +193,7 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     assert.equal(cached.length, 63, "the pinned pre-change workspace no longer has the audited 63 cacheable tasks");
     const extra = [...versionReaders].filter((id) => id.startsWith("onepipeline-version-"));
     const now = capture(current, [...new Set([...cached, ...extra])]);
-    // Reproduce release-plz PR #1387's exact three-file edit, rather than
-    // approximating its changelog layout. This is the recorded release
-    // 0.98.4 -> 0.99.0 at the pinned starting revision.
-    const releaseFiles = ["Cargo.toml", "Cargo.lock", "CHANGELOG.md"];
-    const releasePatch = run(root, "git", ["diff", "96c876ab^", "96c876ab", "--", ...releaseFiles]);
-    execFileSync("git", ["apply", "--reverse", "-"], { cwd: current, env, input: releasePatch });
-    const priorRelease = capture(current, [...new Set([...cached, ...extra])]);
-    for (const id of [...cached, ...extra]) {
-      if (!now[id].cacheable) continue; // Stop-verdict is deliberately uncached.
-      if (versionReaders.has(id)) assert.notEqual(priorRelease[id].hash, now[id].hash, `${id} lost recorded-release version input`);
-      else assert.equal(priorRelease[id].hash, now[id].hash, `${id} moved on recorded release-plz PR #1387`);
-    }
-    for (const file of releaseFiles) writeFileSync(join(current, file), readFileSync(join(root, file)));
+    assertRecordedRelease(current, [...new Set([...cached, ...extra])]);
     // These two executable inputs are deliberately retired with their release
     // shortcut. Every other original input remains required; there is no
     // general exception for deleted files.
@@ -210,4 +235,15 @@ test("every quick tier's real Nx hash retains the selected nextest partition", {
     else env.ONEPIPELINE_TEST_PARTITION = previous;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test("the recorded release hash check survives a later package version", { timeout: 120000 }, () => {
+  const dir = fixture();
+  try {
+    const [major, minor] = ownVersion(dir).split(".").map(Number);
+    setOwnVersion(dir, `${major}.${minor + 1}.0`);
+    writeFileSync(join(dir, "CHANGELOG.md"), "## A later release\n\n" + readFileSync(join(dir, "CHANGELOG.md"), "utf8"));
+    assertRecordedRelease(dir, ["onepipeline-contract:test-quick", "onepipeline-version-contract:test-quick"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

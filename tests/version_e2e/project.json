@@ -9,7 +9,7 @@
   "targets": {
     "test": {
       "command": "just _version-e2e-test",
-      "cache": true,
+      "cache": false,
       "inputs": [
         "e2eSource",
         {

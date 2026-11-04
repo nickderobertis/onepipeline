@@ -59,7 +59,8 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-note-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test-quick": {
       "command": "just _note-test-quick",

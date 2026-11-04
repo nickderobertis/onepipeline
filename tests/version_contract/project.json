@@ -9,7 +9,7 @@
   "targets": {
     "test": {
       "command": "just _version-contract-test",
-      "cache": true,
+      "cache": false,
       "inputs": [
         "contractSource",
         {

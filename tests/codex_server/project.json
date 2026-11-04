@@ -60,7 +60,8 @@
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-codex_server-*.profraw"
       ],
-      "parallelism": false
+      "parallelism": false,
+      "cache": false
     },
     "test-quick": {
       "command": "just _codex-server-test-quick",

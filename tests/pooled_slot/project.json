@@ -59,7 +59,8 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-pooled_slot-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test-quick": {
       "command": "just _pooled_slot-test-quick",

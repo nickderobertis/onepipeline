@@ -91,7 +91,8 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test": {
       "command": "just _crate-coverage",
@@ -106,7 +107,7 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every tier's profiles, so this report depends on each tier's `test`, including the separate version-reading tests. Nx restores each proven tier's declared profiles from the shared cache; a missing tier builds the shared test archive lazily.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's profiles, including the separate version-reading tests, so this report depends on each tier's test. LLVM profiles belong to the versioned binary, so the coverage tiers and this aggregate stay uncached; quick tiers replay separately and archives build when a tier runs.",
       "dependsOn": [
         "test-rest",
         {
@@ -128,7 +129,8 @@
           "target": "test"
         }
       ],
-      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
+      "cache": false
     },
     "test-quick-archive": {
       "command": "just _crate-test-quick-archive",
@@ -182,7 +184,7 @@
     },
     "budgets": {
       "command": "just budgets",
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split, and the same shared-cache replay applies as for `test` above. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that uncached producing tier; its records, invocation manifest and producing executable stay together, and the reader refuses any that disagree.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the stacked-spikes budget reads the record the e2e tier writes, so it runs after that tier, as it ran after `test-rest` when that target held the e2e binary. The edge is narrower than before the split; the uncached coverage tier produces fresh records for the reader. The stop-verdict budgets read the records `onepipeline-stop-verdict:test` writes, so they follow that uncached producing tier; its records, invocation manifest and producing executable stay together, and the reader refuses any that disagree.",
       "dependsOn": [
         {
           "projects": [

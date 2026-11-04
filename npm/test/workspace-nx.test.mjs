@@ -507,7 +507,7 @@ describe("fixture cache isolation", () => {
       /function fixtureEnvironment[\s\S]*?\n}\n\nfunction run/,
       "function run",
     );
-    assert.doesNotMatch(outsideSanitizer, /\bprocess\.env\b(?!\s*[.\[])/);
+    assert.doesNotMatch(outsideSanitizer, /\bprocess\.env\b(?!\s*(?:\.|\[))/);
     assert.equal((source.match(/\brawSpawnSync\(/g) ?? []).length, 1);
     assert.equal((source.match(/\brawExecFileSync\(/g) ?? []).length, 1);
   });
@@ -919,20 +919,17 @@ describe("affected selection over real commits", () => {
   }
 });
 
-describe("a tier replayed from the cache", () => {
-  // The floor is one report over every tier's profiles, and `coverage-clean`
-  // empties the tree those profiles sit in before any tier runs. So a tier Nx
-  // replays has to put its profiles back, or the aggregate measures the suite
-  // without it. Driven through the real Nx and the committed project graph in a
-  // scratch repository; only `just` is a double, standing in for the
-  // instrumented runs: each tier recipe writes one profile under the name the
-  // real `_tier-test` gives it, and the aggregate lists what it would merge.
+describe("coverage execution and quick-tier replay", () => {
+  // Coverage profiles belong to the versioned binary, so every instrumented
+  // tier and the aggregate run again. Quick tiers still replay. Real Nx and
+  // the committed graph run here; the existing just double records invocations
+  // and produces the named profile/report files the aggregate consumes.
   const DOUBLE = `#!/usr/bin/env bash
 echo "$1" >> "$JUST_CALLS"
 tree=target/llvm-cov-target
 case "$1" in
   _crate-coverage-clean) rm -rf "$tree" ;;
-  _crate-test-archive | _crate-lint) ;;
+  _crate-test-archive | _crate-lint | *-test-quick) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
     tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_-]*\\)\\".*/\\1/p" justfile)"
@@ -958,7 +955,7 @@ esac
     "_version-package-test",
   ];
 
-  it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
+  it("reruns every coverage tier and the aggregate after release version edits", (t) => {
     const repo = scratchRepository(t);
     mkdirSync(join(repo.path, "bin"));
     writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
@@ -1000,15 +997,27 @@ esac
       "version-package",
     ]);
 
-    // Only the note tier's inputs change; the budget record the e2e tier
-    // writes is gone, as it is on a fresh runner.
     rmSync(join(repo.path, "target", "budget-records"), { recursive: true, force: true });
-    repo.change("tests/note/main.rs");
+    const manifestPath = join(repo.path, "Cargo.toml");
+    const manifest = readFileSync(manifestPath, "utf8");
+    const version = manifest.match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1];
+    const [major, minor] = version.split(".").map(Number);
+    const next = `${major}.${minor + 1}.0`;
+    writeFileSync(manifestPath, manifest.replace(`version = "${version}"`, `version = "${next}"`));
+    const lockPath = join(repo.path, "Cargo.lock");
+    writeFileSync(
+      lockPath,
+      readFileSync(lockPath, "utf8").replace(
+        `name = "onepipeline"\nversion = "${version}"`,
+        `name = "onepipeline"\nversion = "${next}"`,
+      ),
+    );
+    repo.change("Cargo.toml");
     const warm = aggregate();
     assert.deepEqual(
-      warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)),
-      ["_note-test"],
-      `only the changed tier runs: ${warm.ran.join(" ")}`,
+      warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)).sort(),
+      [...TIER_RECIPES].sort(),
+      `every instrumented tier must rerun: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
     assert.deepEqual(tiersIn(warm.merged), [
@@ -1024,7 +1033,7 @@ esac
     ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
-      "the replayed e2e tier did not restore the budget record `budgets` reads",
+      "the fresh e2e tier did not produce the budget record `budgets` reads",
     );
   });
 
@@ -1043,7 +1052,8 @@ esac
       assert.equal(result.status, 0, result.stderr);
       return readFileSync(calls, "utf8").split("\n").includes(recipe);
     };
-    const tierRan = () => ranRecipe("onepipeline-codex-server:test", "_codex-server-test");
+    const tierRan = () =>
+      ranRecipe("onepipeline-codex-server:test-quick", "_codex-server-test-quick");
     const lintRan = () => ranRecipe("onepipeline:lint", "_crate-lint");
     assert.equal(tierRan(), true);
     assert.equal(lintRan(), true);
@@ -1076,7 +1086,7 @@ esac
     const tierRan = () => {
       writeFileSync(calls, "");
       const result = run(
-        ["scripts/nx.sh", "run", "onepipeline-contract:test"],
+        ["scripts/nx.sh", "run", "onepipeline-contract:test-quick"],
         {
           PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
           JUST_CALLS: calls,
@@ -1085,7 +1095,7 @@ esac
         repo.path,
       );
       assert.equal(result.status, 0, result.stderr);
-      return readFileSync(calls, "utf8").split("\n").includes("_contract-test");
+      return readFileSync(calls, "utf8").split("\n").includes("_contract-test-quick");
     };
 
     assert.ok(tierRan(), "a cold cache did not run the tier");

@@ -162,14 +162,15 @@ Every other check of the root `budgets.yaml` excludes both labels.
 
 The four CI jobs run on release branches under the same conditions as other
 branches, with no release shortcut. They share small Nx test results through
-the pinned create-repo scripts. Same-repository PRs store profiles, named reports and terminal output;
+the pinned create-repo scripts. Same-repository PRs store named reports and terminal output;
 forks and Dependabot read only. `release-plz.yml` promotes trusted merged-PR
 results to the base scope before release automation, without running tests on
 `main`; a `cache-promote/<PR>` push promotes only into that branch's scope.
 Version-free inputs retain sources, dependency versions and toolchains. The
 three version-reading Rust tests have separate targets; npm tests retain the
-version. Stop-verdict journeys stay uncached because their proof requires the
-producing executable. Test archives build lazily when a tier actually runs.
+version. Rust coverage tiers and their aggregate stay uncached: LLVM profiles
+are tied to the versioned binary. Quick tiers retain remote replay. Stop-verdict
+journeys stay uncached because their proof requires the producing executable. Test archives build lazily when a tier actually runs.
 The cache-use figure reads saved executions and promotion receipts, never
 re-runs tests, and treats unavailable evidence as missing data.
 

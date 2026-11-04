@@ -42,7 +42,7 @@ test("a tier miss builds a real nextest archive, reuses it, and recovers after a
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("real Nx runs no archive builder when every selected tier replays", { timeout: 120000 }, async () => {
+test("real Nx runs no archive builder when every selected quick tier replays", { timeout: 120000 }, async () => {
   const { workspace, command } = await import("./support/cache-workspace.mjs");
   const ws = workspace();
   try {
@@ -51,7 +51,7 @@ test("real Nx runs no archive builder when every selected tier replays", { timeo
     const seeded = await command(ws.dir, process.execPath, [".github/ci-shape/support/seed-tier-cache.mjs"], env);
     assert.equal(seeded.code, 0, seeded.stdout + seeded.stderr);
     const projects = JSON.parse(seeded.stdout.trim().split("\n").at(-1));
-    const run = await command(ws.dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "run-many", "--targets=test,test-quick", `--projects=${projects.join(",")}`, "--outputStyle=static"], env);
+    const run = await command(ws.dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "run-many", "--targets=test-quick", `--projects=${projects.join(",")}`, "--outputStyle=static"], env);
     assert.equal(run.code, 0, run.stdout + run.stderr);
     assert.match(run.stdout, /read the output from the cache/);
     assert.doesNotMatch(run.stdout + run.stderr, /onepipeline:test-(?:quick-)?archive|just _crate-test-(?:quick-)?archive|Creating archive/);

@@ -91,3 +91,22 @@ test("visual capture retains the raw manifest path inputs its guard reconciles",
   assert.ok(paths.every((entry) => typeof entry === "string"), "visualDocsSource must remain path strings for screenshots/capture.py");
   for (const path of ["Cargo.toml", "Cargo.lock"]) assert.ok(paths.includes(`{workspaceRoot}/${path}`), `visual capture lost ${path}`);
 });
+
+test("Rust coverage profiles and their aggregate stay uncached while quick tiers replay", () => {
+  const nx = JSON.parse(readFileSync(new URL("../../nx.json", import.meta.url)));
+  const paths = execFileSync("git", ["ls-files", "*project.json"], { encoding: "utf8" }).trim().split("\n");
+  let profiled = 0;
+  for (const path of paths) {
+    const project = JSON.parse(readFileSync(path, "utf8"));
+    for (const [name, target] of Object.entries(project.targets)) {
+      const effective = { ...nx.targetDefaults[name], ...target };
+      if (effective.outputs?.some((output) => /\.prof(?:raw|data)$/.test(output))) {
+        profiled++;
+        assert.equal(effective.cache, false, `${project.name}:${name} replays binary-bound coverage profiles`);
+      }
+      if (name === "test-quick") assert.equal(effective.cache, true, `${project.name}:test-quick lost replay`);
+    }
+    if (project.name === "onepipeline") assert.equal(project.targets.test.cache, false, "the coverage aggregate must rerun");
+  }
+  assert.ok(profiled >= 9, `only ${profiled} coverage tiers were checked`);
+});

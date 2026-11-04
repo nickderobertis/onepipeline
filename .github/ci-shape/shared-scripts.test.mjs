@@ -1,4 +1,4 @@
-// Upstream-owned copies: cache reader at dero-skills 25025c5c7a26a438192299ce32e4dcdb24eb0d78;
+// Upstream-owned copies: cache reader at dero-skills df8c475b520de2a40f7e3b55967cad1d9e7487ac;
 // version-free inputs and figures at 63e071b72420bd6737226a50cb8a7a7760cc73a4.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 const upstream = {
   "scripts/actions-budget-figures.sh": "a3606ff3d00be139d52a7cbb2905f45e2ade99383417be31cc74cc7ce6c39eba",
-  "scripts/nx-remote-cache.mjs": "3c9fb8af9550d6497f6717ab22e14857c139ef8988f9896ebcf3a4bbde30bdaf",
+  "scripts/nx-remote-cache.mjs": "0b67a164d73e14ca1fdba807ac7858cf0674179ec502ad6ae63e5026f3f415ac",
   "scripts/nx-version-free-inputs.mjs": "fdd4f59fc98a0073dbefdbaa0f08f4b58432bbf8e55d315865f951e0151b19b2",
 };
 for (const [path, digest] of Object.entries(upstream)) {
