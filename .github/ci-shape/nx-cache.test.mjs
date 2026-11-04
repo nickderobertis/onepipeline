@@ -84,3 +84,10 @@ test("cancel steps are bare controls, rejecting the properties GitHub rejected",
     assert.throws(() => validateWorkflow(invalid), /invalid cancel step/);
   }
 });
+
+test("visual capture retains the raw manifest path inputs its guard reconciles", () => {
+  const nx = JSON.parse(readFileSync(new URL("../../nx.json", import.meta.url)));
+  const paths = nx.namedInputs.visualDocsSource;
+  assert.ok(paths.every((entry) => typeof entry === "string"), "visualDocsSource must remain path strings for screenshots/capture.py");
+  for (const path of ["Cargo.toml", "Cargo.lock"]) assert.ok(paths.includes(`{workspaceRoot}/${path}`), `visual capture lost ${path}`);
+});

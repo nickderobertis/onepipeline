@@ -167,9 +167,8 @@
       "{workspaceRoot}/screenshots/**/*",
       "{workspaceRoot}/screencomp.toml",
       "{workspaceRoot}/.github/workflows/visual-docs.yml",
-      {
-        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
-      },
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
       "{workspaceRoot}/.config/nextest.toml",
