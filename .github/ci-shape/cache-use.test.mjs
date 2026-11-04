@@ -54,7 +54,7 @@ test("simulated release selection measures real retry and promoted replay throug
     release.merged_at = new Date().toISOString();
     sourceMetadata(api, ws, replay.report, { id: 3, pr: release });
     const prefix = `/repos/${repo.full_name}`;
-    const published = new Date(Date.now() + 60000).toISOString();
+    const published = new Date(Date.now() + 3600000).toISOString();
     api.metadata.set(`${prefix}/releases`, [{ tag_name: "v-fixture", published_at: published, draft: false },
       { tag_name: "v-before", published_at: "2020-01-01T00:00:00.000Z", draft: false }]);
     api.metadata.set(`${prefix}/commits/v-fixture`, { sha: ws.head });
