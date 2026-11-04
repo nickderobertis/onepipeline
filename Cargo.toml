@@ -888,7 +888,9 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.9.0"
-onevcs = "0.58.0"
+# 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
+# onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.
+onevcs = "0.60.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1163,7 +1165,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.29"
+onevcs-testing = "0.20.0"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1339,14 +1341,17 @@ onevcs-testing = "0.19.29"
 # **0.13.3 translates section links on copy** (`onetaskgraph-section-links`): a link to a
 # heading in a copied document or task lands on that section in each destination's own
 # heading form, so a design document's budget link resolves on GitHub and Linear.
-onetaskgraph-core = "=0.13.3"
-onetaskgraph-plugin-api = "=0.13.3"
-onetaskgraph-local-md = "=0.13.3"
+# **0.13.4 keeps private canonical addresses out of same-record section links** in
+# public projections and reader content; the engine journey in `linear_writeback.rs`
+# holds both the dispatched fragment and its public GitHub heading form.
+onetaskgraph-core = "=0.13.4"
+onetaskgraph-plugin-api = "=0.13.4"
+onetaskgraph-local-md = "=0.13.4"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.13.3"
+onetaskgraph-linear = "=0.13.4"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1364,7 +1369,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.100.0"
+version = "0.101.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1579,6 +1584,7 @@ windows-sys = { workspace = true, features = [
 # the `model-mismatch` reason to that library's own spellings rather than to
 # strings restated here.
 [dev-dependencies]
+url = "2"
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
 # The store's Linear plugin, at the release `onetaskgraph-core` links — see

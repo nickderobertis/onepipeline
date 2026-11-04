@@ -2160,3 +2160,155 @@ fn a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projec
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// Same-record sections stay local when a private Linear home projects public work to GitHub.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this single compiled-CLI journey composes taskgraph reads, store copy, driver dispatch and write-back across Linear and GitHub, so the existing e2e crate is its narrowest code edge, as for the hosted-source journeys above; measured at 3.72 seconds.
+#[test]
+fn a_private_linear_home_keeps_section_links_local_in_dispatch_and_on_the_public_board() {
+    let name = "linear-private-sections";
+    let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(KEY_ENV, "loopback-key")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "private")
+        .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.script("examples.wait", "hold");
+    let linear = Linear::serve_empty(&every_mapped_state(), STATUSES);
+    let body = "## What\nShip examples.\n\nRead [the budget](#budget-details).\n\n## Budget details\nUse one request.\n\n## Why\nKeep links private.\n\n## Acceptance criteria\n- The examples ship.";
+    let github = crate::private_github_home::GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner", "repositories": {"owner/library": "public"},
+            "boards": {"2": {"public": true}}, "issues": []
+        }),
+    );
+    let launch = world.root.clone();
+    let config = configuration(&linear).replacen("    plugin: linear",
+        "    visibility: private\n    routes:\n      - to: site\n        repositories: [github.com/owner/library]\n    plugin: linear", 1);
+    std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+        "{config}  site:\n    plugin: github-projects\n    visibility: public\n    config:\n      owner: owner\n      project_number: 2\n      repository: owner/library\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n", github.board(2))).unwrap();
+    let mut anchor = crate::harness::agent("anchor", &[]);
+    anchor["repo"] = json!("github.com/owner/service");
+    anchor["classification"] = json!("private");
+    anchor["parked"] = json!(true);
+    anchor["title"] = json!("chore: anchor");
+    let mut node = crate::harness::agent("examples", &[]);
+    node["repo"] = json!("github.com/owner/library");
+    node["classification"] = json!("public");
+    node["task"] = json!(body);
+    node["title"] = json!("fix: examples");
+    let plan = crate::publication_boundary::mixed_plan(name, vec![anchor, node], vec![]);
+    let draft = world.plan(name, &plan);
+    let item = crate::harness::global(&draft);
+    // The host files its draft through the real store before launching the canonical plan.
+    // The store owns Linear's section rendering, including its fallback without a heading id.
+    world.on_onevcs(|| {
+        world.store_call_with(
+            &[
+                (KEY_ENV, "loopback-key"),
+                ("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token"),
+            ],
+            |engine| async move {
+                engine
+                    .copy(&onetaskgraph_core::CopyRequest {
+                        items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one draft"),
+                        scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                        destination: onetaskgraph_plugin_api::SourceName::new(SOURCE).unwrap(),
+                        status_policy: onetaskgraph_core::StatusPolicy::Source,
+                        target_task: None,
+                        match_by: None,
+                        recreate: false,
+                        create: false,
+                        dry_run: false,
+                        comments: false,
+                        no_link: false,
+                        expect: None,
+                        statuses: Vec::new(),
+                        conditions: onetaskgraph_core::CopyConditions::default(),
+                    })
+                    .await
+                    .expect("the linked store files the plan in private Linear")
+            },
+        )
+    });
+    let canonical = linear
+        .issues()
+        .into_iter()
+        .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == "examples")
+        .expect("the public task has a private canonical record")
+        .0;
+    let start = from_the_launch_directory(
+        &world,
+        &launch,
+        &[
+            "start",
+            &format!("{SOURCE}:{}", linear.project_id()),
+            "--detach",
+        ],
+    );
+    world
+        .run_on(start, "start copied private Linear sections")
+        .exited(0);
+    world.until("public GitHub projection", |_| {
+        github.state()["issues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|issue| {
+                issue["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains("Ship examples."))
+            })
+    });
+    world.until("public task to dispatch", |world| {
+        !crate::publication_boundary::tasks_of(world, "examples").is_empty()
+    });
+    let tasks = crate::publication_boundary::tasks_of(&world, "examples");
+    let dispatched = tasks.last().unwrap();
+    assert!(
+        dispatched.contains("[the budget](#budget-details)"),
+        "{dispatched}"
+    );
+    world.until("the engine write-back to land", |world| {
+        projection_records(world, name)
+            .iter()
+            .any(|record| record["outcome"] == "projected")
+    });
+    let state = github.state();
+    let public = state["boards"]["2"]["items"]
+        .as_array()
+        .expect("the public board has items")
+        .iter()
+        .find_map(|item| {
+            let issue = state["items"][item.as_str()?]["content"].as_str()?;
+            let body = state["issues"][issue]["body"].as_str()?;
+            body.contains("Ship examples.").then_some(body)
+        })
+        .unwrap();
+    assert!(
+        public.contains("[the budget](#user-content-budget-details)"),
+        "{public}"
+    );
+    for text in [dispatched.as_str(), public] {
+        assert!(
+            !text.contains(&canonical),
+            "private canonical id leaked: {text}"
+        );
+        assert!(!text.contains("linear.app"), "private URL leaked: {text}");
+        assert!(
+            !text.contains(&format!("{SOURCE}:")),
+            "private source leaked: {text}"
+        );
+    }
+    world.release("examples.go");
+}

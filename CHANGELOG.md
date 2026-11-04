@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.0](https://github.com/nickderobertis/onepipeline/compare/v0.100.0...v0.101.0) - 2026-11-04
+
+### Added
+
+- *(boundary)* [**breaking**] link the onevcs whose export carries every file, and carry its opaque patterns ([#1396](https://github.com/nickderobertis/onepipeline/pull/1396))
+
+### Fixed
+
+- *(deps)* link the onetaskgraph release that keeps private homes out of section links ([#1395](https://github.com/nickderobertis/onepipeline/pull/1395))
+
 ## [0.100.0](https://github.com/nickderobertis/onepipeline/compare/v0.99.0...v0.100.0) - 2026-11-04
 
 ### Added

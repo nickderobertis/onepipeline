@@ -491,23 +491,19 @@ jobs:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
         run: node scripts/nx-remote-cache.mjs ready
-      # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
-      # the checkout and the temp directory every journey writes its scratch
-      # repositories into, trusted so the Defender filter does not scan it,
-      # and Defender's real-time scan kept off the toolchain's directories too.
       - name: Whether this pull request's tests are already proven
         id: shortcut
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
-      # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
-      # the checkout and the temp directory every journey writes its scratch
-      # repositories into, trusted so the Defender filter does not scan it,
-      # and Defender's real-time scan kept off the toolchain's directories too.
       - name: Read the exact CI tool versions
         id: ci-tools
         if: steps.shortcut.outputs.skip != 'true'
         run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
+      # the checkout and the temp directory every journey writes its scratch
+      # repositories into, trusted so the Defender filter does not scan it,
+      # and Defender's real-time scan kept off the toolchain's directories too.
       - uses: samypr100/setup-dev-drive@v3
         if: steps.shortcut.outputs.skip != 'true'
         with:

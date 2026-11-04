@@ -341,8 +341,9 @@ budgets:
     timeout_seconds: 30
 
   # Workload: every crate-touching push of the release's carried PRs, across all
-  # four jobs and up to 63 original cacheable tasks, including coverage. Count
-  # preceding failed/throttled attempts too; unavailable evidence is missing data.
+  # four jobs. Instrumented coverage runs uncached. Count every current cacheable
+  # execution and its
+  # preceding failed/throttled attempts; unavailable evidence is missing data.
   - id: onepipeline-nx-cache-use
     description: >-
       Remote hits as a percentage of attempt-qualified cacheable task/OS/hash

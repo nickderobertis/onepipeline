@@ -27,6 +27,7 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/nx.json",
         "{workspaceRoot}/project.json",
+        "{workspaceRoot}/lint-llm/project.json",
         "{workspaceRoot}/justfile",
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/llmlint.yml",
