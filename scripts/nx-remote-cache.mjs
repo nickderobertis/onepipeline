@@ -1,7 +1,7 @@
 // Copied from dero-skills' create-repo skill; edit only the source.
 // source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/nx-remote-cache.mjs
-// version: 6
-// sha256: 4f8c6453390a78485d0ca44438d82e5331ded65eded366afca764144531901cc
+// version: 7
+// sha256: 81030246b3f063d3e79b8234781e1fcbfe420c6fef3676159da921339e38b83c
 import {
   appendFileSync,
   readFileSync,
@@ -769,7 +769,7 @@ function attemptRun(gh, id, attempt) {
   );
   return run;
 }
-function artifactsFor(gh, run, detail = []) {
+function artifactsFor(gh, run, detail = [], allowEmptyJobs = false) {
   const all = gh.pages(
     `repos/${gh.repo}/actions/runs/${run.id}/artifacts`,
     'artifacts',
@@ -784,6 +784,12 @@ function artifactsFor(gh, run, detail = []) {
     `repos/${gh.repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
     'jobs',
   );
+  if (allowEmptyJobs && jobs.length === 0) {
+    detail.push(
+      `run ${run.id}/${run.run_attempt} started no job (conclusion: ${run.conclusion})`,
+    );
+    return [];
+  }
   const expected = jobs.filter(
     (j) => j.name === 'lint' || /^test-(linux|windows|macos)$/.test(j.name),
   );
@@ -1445,7 +1451,7 @@ async function cacheUse(opts) {
     } else for (const r of attempts) r.observe = r.in_interval;
     check(attempts.length > 0, `missing CI attempts for #${pr.number}`);
     for (const run of attempts)
-      for (const record of artifactsFor(gh, run, detail)) {
+      for (const record of artifactsFor(gh, run, detail, true)) {
         validateSelection(gh, record.execution, run);
         storedBytes += record.manifest.stored_bytes;
         evidence.push({
