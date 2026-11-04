@@ -14,7 +14,7 @@ test("simulated release selection measures real retry and promoted replay throug
   try {
     const pr = pull(ws);
     const first = await sourceRun(ws, api, pr, 1);
-    sourceMetadata(api, ws, first.report, { id: 1, pr });
+    const firstMetadata = sourceMetadata(api, ws, first.report, { id: 1, pr });
     const retry = await sourceRun(ws, api, pr, 2);
     pr.merged_at = new Date().toISOString();
     sourceMetadata(api, ws, retry.report, { id: 2, pr });
@@ -74,6 +74,24 @@ test("simulated release selection measures real retry and promoted replay throug
     assert.match(result.stdout + result.stderr, /aggregate: 3\/3 remote hits/);
     assert.match(result.stdout + result.stderr, /release PR: 1\/1/);
     assert.match(result.stdout + result.stderr, /same-PR retry\/push: 2\/2/);
+    assert.notEqual(firstMetadata.run.head_sha, sourceHead);
+    assert.equal(firstMetadata.run.pull_requests[0].head.sha, sourceHead);
+    assert.equal(firstMetadata.run.pull_requests[0].head.repo.full_name, undefined);
+    const membershipPath = `${prefix}/commits/${firstMetadata.run.head_sha}/pulls`;
+    const membership = api.metadata.get(membershipPath);
+    api.metadata.set(membershipPath, []);
+    const unrelated = await measure();
+    assert.notEqual(unrelated.code, 0);
+    assert.match(unrelated.stdout + unrelated.stderr, /run head is not a commit of the source PR/);
+    api.metadata.set(membershipPath, membership);
+    const ancestryPath = `${prefix}/compare/${ws.base}...${firstMetadata.run.head_sha}`;
+    const ancestry = api.metadata.get(ancestryPath);
+    api.metadata.set(ancestryPath, { ...ancestry, status: "behind" });
+    const invalidBase = await measure();
+    assert.notEqual(invalidBase.code, 0);
+    assert.match(invalidBase.stdout + invalidBase.stderr, /selection base is not an ancestor/);
+    api.metadata.set(ancestryPath, ancestry);
+
     // Eviction does not erase eligibility: the same proven hash executing
     // again is a measured miss, with comparison left to onebudgetspec.
     api.entries.clear();

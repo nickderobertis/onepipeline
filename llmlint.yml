@@ -31,7 +31,7 @@ files:
     # own `sha256` line. It is judged where it is written; a finding here could only be answered
     # by editing a copy the contract forbids editing.
     - "scripts/actions-budget-figures.sh"
-    # Upstream-owned copies from dero-skills 63e071b, held byte-identical by
+    # Upstream-owned copies pinned by the manager, held byte-identical by
     # .github/ci-shape/shared-scripts.test.mjs; their directives name upstream rules.
     - "scripts/nx-remote-cache.mjs"
     - "scripts/nx-version-free-inputs.mjs"

@@ -25,9 +25,12 @@ export function command(cwd, cmd, args, env) {
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 }
-export function workspace() {
+export function workspace(revision) {
   const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "cache-journey-"));
-  for (const path of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean)) {
+  if (revision) {
+    const archive = execFileSync("git", ["archive", revision], { cwd: root, maxBuffer: 128 * 1024 * 1024 });
+    execFileSync("tar", ["-xf", "-", "-C", dir], { input: archive });
+  } else for (const path of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean)) {
     if (!existsSync(join(root, path))) continue;
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     cpSync(join(root, path), join(dir, path), { dereference: false });

@@ -206,11 +206,14 @@
     ],
     "cargoSelection": [
       "{workspaceRoot}/Cargo.toml",
-      "{workspaceRoot}/Cargo.lock"
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/**/Cargo.toml"
     ],
     "npmSelection": [
       "{workspaceRoot}/package.json",
-      "{workspaceRoot}/package-lock.json"
+      "{workspaceRoot}/package-lock.json",
+      "{workspaceRoot}/**/package.json",
+      "{workspaceRoot}/**/package-lock.json"
     ],
     "pythonSelection": [
       "{workspaceRoot}/pyproject.toml"

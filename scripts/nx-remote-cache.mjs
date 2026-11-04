@@ -1,7 +1,7 @@
 // Copied from dero-skills' create-repo skill; edit only the source.
 // source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/nx-remote-cache.mjs
-// version: 1
-// sha256: 33d3d3e3056854956c3268bc726053121b5fe3bf78fc3e28b8ee18b0153f31df
+// version: 3
+// sha256: daadb26df896e42535abb648f463961435dfb6926f6c91438e569e7ef1974f13
 import {
   appendFileSync,
   readFileSync,
@@ -560,6 +560,7 @@ class Github {
     this.repo = repo;
     this.requests = 0;
     this.downloads = 0;
+    this.selectionComparisons = new Set();
     this.root = join(
       env.RUNNER_TEMP || '.nx',
       'nx-cache-evidence',
@@ -796,7 +797,7 @@ function artifactsFor(gh, run) {
       check(
         associatedPrs(gh, run).some(
           (pr) =>
-            pr.number === execution.pr && pr.head.sha === execution.head_sha,
+            pr.number === execution.pr,
         ),
         'execution PR mismatches source workflow',
       );
@@ -1123,7 +1124,6 @@ function associatedPrs(gh, run) {
     .filter(
       (pr) =>
         pr.merged_at &&
-        pr.head.sha === run.head_sha &&
         trusted(pr, gh.repo) &&
         pr.head.repo.full_name === run.head_repository.full_name &&
         pr.user.login === run.actor?.login,
@@ -1145,14 +1145,40 @@ function validateSelection(gh, doc, run) {
   );
   const pr = associatedPrs(gh, run).find((pr) => pr.number === doc.pr);
   check(
-    pr && pr.head.sha === selection.head_sha,
-    'selection does not cover the source PR head',
+    pr &&
+      (run.pull_requests.length
+        ? pr.head?.repo?.url === `https://api.github.com/repos/${gh.repo}` &&
+          pr.base?.repo?.url === `https://api.github.com/repos/${gh.repo}`
+        : pr.head?.repo?.full_name === gh.repo &&
+          pr.base?.repo?.full_name === gh.repo),
+    'untrusted source PR repository',
+  );
+  const membership = gh.pages(`repos/${gh.repo}/commits/${run.head_sha}/pulls`);
+  check(
+    membership.some(
+      (p) =>
+        p.number === doc.pr &&
+        p.head?.repo?.full_name === gh.repo &&
+        p.base?.repo?.full_name === gh.repo,
+    ),
+    'run head is not a commit of the source PR',
   );
   if (run.pull_requests.length) {
-    check(
-      pr.base.sha === selection.base_sha,
-      'selection does not cover the source PR base/head',
-    );
+    // The run's commit and the base branch retain ancestry after later pushes;
+    // the live association's head/base SHAs do not describe this run anymore.
+    for (const [tip, message] of [
+      [run.head_sha, 'selection base is not an ancestor of the run head'],
+      [pr.base.ref, 'selection base is not on the source PR base branch'],
+    ]) {
+      check(
+        typeof tip === 'string' && tip.length > 0,
+        'missing selection ancestry tip',
+      );
+      const endpoint = `repos/${gh.repo}/compare/${selection.base_sha}...${encodeURIComponent(tip)}`;
+      const ancestry = gh.read(endpoint);
+      gh.selectionComparisons.add(endpoint);
+      check(['ahead', 'identical'].includes(ancestry.status), message);
+    }
   } else {
     const merge = gh.read(`repos/${gh.repo}/commits/${pr.merge_commit_sha}`);
     const parent = merge.parents?.[0]?.sha;
@@ -1544,6 +1570,8 @@ async function cacheUse(opts) {
     }
   check(eligible > 0, 'zero eligible executions');
   const value = (100 * hits) / eligible;
+  for (const endpoint of gh.selectionComparisons)
+    detail.push(`selection evidence: GET ${endpoint}`);
   detail.push(`aggregate: ${hits}/${eligible} remote hits (${value}%)`);
   for (const [name, g] of Object.entries(groups))
     detail.push(

@@ -60,3 +60,53 @@ test("every task selected on multiple OS legs, including bootstrap and uncached 
     }
   } finally { ws.close(); }
 });
+
+test("dependency-only manifest and lock edits retain the base's real Nx affected projects", { timeout: 300000 }, async () => {
+  const original = workspace("96c876ab");
+  const current = workspace();
+  const bump = (value) => value.replace(/(\d+)(?![\s\S]*\d)/, (part) => String(Number(part) + 1));
+  const jsonDependency = (text) => {
+    const doc = JSON.parse(text);
+    const dependencies = doc.dependencies ?? doc.devDependencies ?? doc.optionalDependencies;
+    const key = Object.keys(dependencies)[0];
+    dependencies[key] = bump(dependencies[key]);
+    return JSON.stringify(doc, null, 2) + "\n";
+  };
+  const jsonLock = (text) => {
+    const doc = JSON.parse(text);
+    const key = Object.keys(doc.packages).find((name) => name && doc.packages[name].version);
+    doc.packages[key].version = bump(doc.packages[key].version);
+    return JSON.stringify(doc, null, 2) + "\n";
+  };
+  const cases = [
+    ["Cargo.toml", (text) => text.replace('async-trait = "0.1"', 'async-trait = "0.2"')],
+    ["Cargo.lock", (text) => text.replace(/(\[\[package\]\]\nname = "[^"]+"\nversion = ")([^"]+)/, (_, prefix, version) => prefix + bump(version))],
+    ["crates/testfakes/Cargo.toml", (text) => text.replace('serde_json = "1"', 'serde_json = "2"')],
+    ["pyproject.toml", (text) => text.replace("maturin>=1.7", "maturin>=1.8")],
+    ...["package.json", ".github/package.json", "npm/onepipeline-cli/package.json"].map((path) => [path, jsonDependency]),
+    ...["package-lock.json", ".github/package-lock.json"].map((path) => [path, jsonLock]),
+  ];
+  try {
+    for (const [path, mutate] of cases) {
+      const selections = [];
+      for (const ws of [original, current]) {
+        const file = join(ws.dir, path);
+        const before = readFileSync(file, "utf8");
+        const after = mutate(before);
+        assert.notEqual(after, before, `${path} fixture changed no dependency`);
+        const base = ws.git("rev-parse", "HEAD");
+        writeFileSync(file, after);
+        ws.git("add", path);
+        ws.git("-c", "user.name=Selection journey", "-c", "user.email=cache@example.invalid", "commit", "-qm", `test: change ${path} dependency`);
+        const result = await command(ws.dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--affected", `--base=${base}`, "--head=HEAD", "--json"], { NX_DAEMON: "false", NX_ISOLATE_PLUGINS: "false" });
+        assert.equal(result.code, 0, result.stdout + result.stderr);
+        selections.push(new Set(JSON.parse(result.stdout)));
+        writeFileSync(file, before);
+        ws.git("add", path);
+        ws.git("-c", "user.name=Selection journey", "-c", "user.email=cache@example.invalid", "commit", "-qm", "test: restore dependency");
+      }
+      assert.ok(selections[0].size, `${path} selected no base projects`);
+      for (const project of selections[0]) assert.ok(selections[1].has(project), `${path} lost affected project ${project}`);
+    }
+  } finally { original.close(); current.close(); }
+});
