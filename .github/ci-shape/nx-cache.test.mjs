@@ -27,8 +27,7 @@ for (const [name, job] of Object.entries(ci.jobs)) {
     assert.equal(steps[upload].if, "always() && steps.nx-cache-trust.outputs.promotable == 'true'");
     assert.equal(steps[upload].with["retention-days"], 7);
     const cancel = steps.find((s) => s.cancel === "nx-cache");
-    assert.equal(cancel.if, "always()");
-    assert.equal(cancel["continue-on-error"], true);
+    assert.deepEqual(cancel, { cancel: "nx-cache" });
   });
 }
 
@@ -38,6 +37,7 @@ test("promotion runs on merge or the dedicated branch, before main-only release 
   assert.equal(release.on.workflow_dispatch, undefined);
   assert.equal(release.jobs["release-plz"].permissions.actions, "read");
   const steps = release.jobs["release-plz"].steps;
+  assert.deepEqual(steps.find((step) => step.cancel), { cancel: "nx-cache" });
   const promote = steps.findIndex((s) => s.run?.includes("nx-remote-cache.mjs promote"));
   assert.ok(promote > 0);
   assert.match(steps[promote].run, /promote --sha "\$GITHUB_SHA" --workflow ci.yml/);
@@ -69,5 +69,18 @@ test("cached test targets retain platform isolation and only named profile or re
         assert.ok(!output.endsWith("/*"), output);
       }
     }
+  }
+});
+
+
+test("cancel steps are bare controls, rejecting the properties GitHub rejected", async () => {
+  const { validateWorkflow } = await import("../workflow-schema.mjs");
+  const valid = structuredClone(ci);
+  for (const job of Object.values(valid.jobs)) job.steps = job.steps.map((step) => step.cancel ? { cancel: step.cancel } : step);
+  assert.doesNotThrow(() => validateWorkflow(valid));
+  for (const extra of [{ if: "always()" }, { "continue-on-error": true }, { name: "stop" }, { env: {} }]) {
+    const invalid = structuredClone(valid);
+    Object.assign(invalid.jobs.lint.steps.find((step) => step.cancel), extra);
+    assert.throws(() => validateWorkflow(invalid), /invalid cancel step/);
   }
 });

@@ -253,8 +253,6 @@ jobs:
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
-        if: always()
-        continue-on-error: true
 
   test-linux:
     if: github.event_name == 'pull_request'
@@ -410,8 +408,6 @@ jobs:
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
-        if: always()
-        continue-on-error: true
 
   test-windows:
     if: github.event_name == 'pull_request'
@@ -552,8 +548,6 @@ jobs:
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
-        if: always()
-        continue-on-error: true
 
   test-macos:
     if: github.event_name == 'pull_request'
@@ -664,6 +658,4 @@ jobs:
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
-        if: always()
-        continue-on-error: true
 
