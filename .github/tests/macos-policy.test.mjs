@@ -127,9 +127,8 @@ function classify(payload, head, eventName = "pull_request") {
   classifications.set(key, result);
   return result;
 }
-test("release classification never omits a pull request Mac job", () => {
+test("real classifier admits only semantically verified same-repository automation branches", () => {
   assert.equal(classify(event(), heads.version).isReleaseOnly, true);
-  assert.equal(classify(event(), heads.version).macosRequired, true);
   for (const [payload, head] of [
     [event(), heads.source],
     [event(), heads.dependency],
@@ -306,9 +305,14 @@ test("actual workflow graph routes all events, preserves contexts and records li
                   .map((j) => ({ workflow: r.workflow, ...j })),
               );
               if (eventName === "pull_request") {
+                // `test-macos` runs on every pull request but release-plz's own,
+                // which the classifier's authorized omission covers.
+                const releasePlz =
+                  String(s.event.pull_request?.head?.ref ?? "").startsWith("release-plz-") &&
+                  s.event.pull_request?.head?.repo?.full_name === "nickderobertis/onepipeline";
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  ["test-macos"],
+                  releasePlz ? [] : ["test-macos"],
                 );
                 for (const name of required)
                   assert.equal(
@@ -463,7 +467,10 @@ test("an ordinary pull request emits every required context once, whatever its j
         for (const name of required) {
           const emitted = contexts.filter((context) => context.name === name);
           assert.equal(emitted.length, 1, `${label}: ${name} reports exactly once`);
-          assert.equal(emitted[0].selected, true, `${label}: ${name} runs`);
+          // Each of the four starts on every pull request, but `test-macos` on
+          // release-plz's own, where it reports skipped.
+          const skipped = name === "test-macos" && branch.startsWith("release-plz-");
+          assert.equal(emitted[0].selected, !skipped, `${label}: ${name} runs`);
         }
       }
 });
@@ -688,9 +695,7 @@ test("package-lock and Python metadata admit only existing version-field edits",
     writeFileSync(join(repo, path), contents);
     git("add", path);
     git("commit", "-qm", "metadata boundary fixture");
-    const result = classify(event(), git("rev-parse", "HEAD"));
-    assert.equal(result.isReleaseOnly, !required);
-    assert.equal(result.macosRequired, true);
+    assert.equal(classify(event(), git("rev-parse", "HEAD")).macosRequired, required);
   }
 });
 
@@ -817,9 +822,7 @@ test("nested npm version metadata cannot authorize a changed launcher", () => {
     writeFileSync(join(repo, "npm/onepipeline-cli/package.json"), JSON.stringify(manifest));
     git("add", "npm/onepipeline-cli/package.json");
     git("commit", "-qm", "launcher metadata");
-    const result = classify(event(), git("rev-parse", "HEAD"));
-    assert.equal(result.isReleaseOnly, !required);
-    assert.equal(result.macosRequired, true);
+    assert.equal(classify(event(), git("rev-parse", "HEAD")).macosRequired, required);
   }
 });
 
@@ -1123,8 +1126,8 @@ test("semantic version parsing rejects malformed JSON and TOML versions", () => 
       git("add", path);
       git("commit", "-qm", "version syntax");
       assert.equal(
-        classify(event(), git("rev-parse", "HEAD")).isReleaseOnly,
-        !required,
+        classify(event(), git("rev-parse", "HEAD")).macosRequired,
+        required,
         `${path}: ${JSON.stringify(version)}`,
       );
     }

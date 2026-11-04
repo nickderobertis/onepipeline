@@ -3,17 +3,18 @@
 //
 // - `lint`, `test-linux`, `test-windows` and `test-macos`, by those ids, unnamed,
 //   on the runners their names say, each bounded at its ruled timeout, each
-//   starting on every pull request, release branches included, and
+//   starting on every pull request (test-macos on all but release-plz's own) and
 //   none waiting on another job;
 // - the visual docs captured and judged as steps of `lint`, through screencomp's
 //   composite actions, and never through its reusable workflow from ci.yml;
-// - release branches run the same jobs and Nx steps as other branches;
+// - the release pull request's shortcut asked by the three test jobs, gating
+//   their work, and never by `lint`;
 // - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
 //   from main under exactly the keys the test jobs restore.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -43,8 +44,9 @@ const CONDITION = {
   lint: ON_PULL_REQUESTS,
   "test-linux": ON_PULL_REQUESTS,
   "test-windows": ON_PULL_REQUESTS,
-  "test-macos": ON_PULL_REQUESTS,
+  "test-macos": `${ON_PULL_REQUESTS} && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)`,
 };
+const TESTS = ["test-linux", "test-windows", "test-macos"];
 
 // The contexts branch protection requires, from the tree's one copy of them
 // (`required-contexts.json`, which tests/ci_workflows.rs reads too).
@@ -307,17 +309,44 @@ describe("the visual docs", () => {
   });
 });
 
-describe("release branches use the ordinary CI path", () => {
-  it("keeps all four job conditions equal and removes every release shortcut", () => {
-    for (const [id, job] of Object.entries(ci.jobs)) {
-      assert.equal(job.if, ON_PULL_REQUESTS, `${id} treats a release branch differently`);
-      for (const step of steps(job)) {
-        assert.doesNotMatch(String(step.if ?? ""), /release-plz-|shortcut/);
-        assert.doesNotMatch(runs(step), /release-pr-shortcut/);
-        assert.notEqual(step.id, "shortcut");
+describe("the release pull request's shortcut", () => {
+  for (const id of TESTS) {
+    it(`is asked first by \`${id}\`, and gates every step after it`, () => {
+      // Cache plumbing remains active even when the temporary shortcut skips tests.
+      const all = steps(ci.jobs[id]).filter((step) =>
+        !runs(step).includes("nx-remote-cache.mjs") &&
+        !uses(step).startsWith("op-nx/github-cache/") &&
+        !String(step.with?.name ?? "").startsWith("nx-cache-entries-") &&
+        step.cancel !== "nx-cache",
+      );
+      const at = all.findIndex((step) => step.id === "shortcut");
+      assert.ok(at >= 0, `\`${id}\` does not ask the shortcut`);
+      assert.match(runs(all[at]), /^node scripts\/release-pr-shortcut\.mjs /);
+      // Only the checkout, and a check that a credential is present, which a
+      // shortcut must not let a run pass without.
+      const before = all.slice(0, at);
+      assert.ok(
+        before.every(
+          (step) =>
+            uses(step).startsWith("actions/checkout@") ||
+            (uses(step) === "" && Object.keys(step.env ?? {}).every((name) => name.startsWith("HAS_"))),
+        ),
+        `\`${id}\` does work before asking whether it is owed`,
+      );
+      for (const step of all.slice(at + 1)) {
+        const gated =
+          String(step.if ?? "").includes("steps.shortcut.outputs.skip != 'true'") ||
+          String(step.if ?? "").includes("steps.gate.outcome == 'failure'");
+        assert.ok(gated, `\`${id}\`'s "${step.name ?? uses(step)}" runs on a shortcut`);
       }
+    });
+  }
+
+  it("is never asked by `lint`", () => {
+    for (const step of steps(ci.jobs.lint)) {
+      assert.ok(!runs(step).includes("release-pr-shortcut"), "`lint` asks the shortcut");
+      assert.ok(!String(step.if ?? "").includes("shortcut"), "`lint` reads the shortcut");
     }
-    assert.equal(existsSync(join(github, "../scripts/release-pr-shortcut.mjs")), false);
   });
 });
 

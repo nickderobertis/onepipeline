@@ -160,8 +160,9 @@ telemetry the run already produced, never measured afresh:
 
 Every other check of the root `budgets.yaml` excludes both labels.
 
-The four CI jobs run on release branches under the same conditions as other
-branches, with no release shortcut. They share small Nx test results through
+The release-PR shortcut and macOS release-branch skip remain: the demonstration
+found promoted results evicted under build-cache pressure, so replay does not yet
+justify retiring them. The four CI jobs share small Nx test results through
 the pinned create-repo scripts. Same-repository PRs store named reports and terminal output;
 forks and Dependabot read only. `release-plz.yml` promotes trusted merged-PR
 results to the base scope before release automation, without running tests on
