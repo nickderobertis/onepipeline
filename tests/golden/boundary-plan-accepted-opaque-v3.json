@@ -1,0 +1,43 @@
+{
+  "schema_version": 3,
+  "name": "generic-examples",
+  "concurrency": 2,
+  "tasks": [
+    {
+      "id": "generalize",
+      "repo": "service",
+      "persona": "engineer",
+      "title": "feat: generalize the example",
+      "publish": "preserve",
+      "classification": "private",
+      "task_record": {
+        "id": "generic-examples-board/000-generalize",
+        "title": "feat: generalize the example",
+        "repositories": [
+          "github.com/owner/service",
+          "github.com/owner/notes"
+        ]
+      }
+    },
+    {
+      "id": "examples",
+      "repo": "library",
+      "persona": "engineer",
+      "title": "feat: add examples",
+      "deps": [
+        "generalize"
+      ]
+    }
+  ],
+  "export_edges": [
+    {
+      "from": "generalize",
+      "to": "examples",
+      "source_directory": "examples/generic",
+      "target_directory": "examples",
+      "accepted_opaque": [
+        "*.jpg"
+      ]
+    }
+  ]
+}

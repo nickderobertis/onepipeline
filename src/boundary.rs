@@ -530,7 +530,7 @@ enum Side {
         /// The neutral name proposed for the branch its session cuts.
         branch_name: Option<String>,
         /// The export its session starts from.
-        export: Option<Export>,
+        export: Option<Box<Export>>,
     },
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -557,7 +557,7 @@ impl Dispatching {
     /// The export this consumer's session starts from.
     pub(crate) fn export(&self) -> Option<&Export> {
         match self.side.as_ref()? {
-            Side::Public { export, .. } => export.as_ref(),
+            Side::Public { export, .. } => export.as_deref(),
             Side::Private { .. } | Side::Producer { .. } => None,
         }
     }
@@ -603,6 +603,7 @@ struct Context {
 /// One export a consumer's session starts from.
 // llmlint: ignore-block[invalid_states_unrepresentable] every field but the ordinal is a
 // value handed straight to `onevcs::ExportRequest`, whose own fields are the same strings
+// and accepted pattern list
 // for the reason its own suppression states: export is the one boundary that decides
 // each — an identity, a branch git accepts, a normalized directory — and refuses one by
 // naming the step, never the value, because the value may be the very private name an
@@ -629,6 +630,8 @@ pub(crate) struct Export {
     pub(crate) target_directory: String,
     /// The consumer's position in the plan, from one, which its branch is named by.
     pub(crate) ordinal: usize,
+    /// Opaque content accepted by the launch plan, retained only privately.
+    pub(crate) accepted_opaque: Vec<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -739,7 +742,7 @@ pub(crate) fn dispatching(
                     .find(|candidate| candidate.id == edge.from)
                     .and_then(|producer| producer.repo.clone())
                     .ok_or_else(|| "its export producer names no repository".to_owned())?;
-                export = Some(Export {
+                export = Some(Box::new(Export {
                     producer: edge.from.clone(),
                     consumer: lineage_root(&node.id, superseded),
                     from: producer,
@@ -748,8 +751,9 @@ pub(crate) fn dispatching(
                     source_directory: edge.source_directory.clone(),
                     to: node.repo.clone().unwrap_or_default(),
                     target_directory: edge.target_directory.clone(),
+                    accepted_opaque: edge.accepted_opaque.clone(),
                     ordinal,
-                });
+                }));
                 lines.push(format!(
                     "This node is public, and its branch starts from one neutral commit that \
                      adds generic examples under `{}`; build on them.",
@@ -828,7 +832,8 @@ fn host_prefix() -> Result<String, String> {
 /// from, which no public renderer reads.
 // llmlint: ignore-block[invalid_states_unrepresentable] the run's own record of what it
 // asked `onevcs::export` for and what that answered, field for field — the
-// `ExportRequest` strings and the `Exported` branch and head, which are strings in the
+// `ExportRequest` strings and accepted pattern list, and the `Exported` branch and head,
+// which are strings in the
 // sibling for the reason `Export` above states. It is written only by `ensure_export`
 // and read back whole, unknown fields refused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,6 +847,8 @@ struct Recorded {
     source_directory: String,
     to: String,
     target_directory: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    accepted_opaque: Vec<String>,
     exported: String,
     exported_head: String,
 }
@@ -970,6 +977,7 @@ pub(crate) fn ensure_export(
             to: export.to.clone(),
             target_directory: export.target_directory.clone(),
             branch_name,
+            accepted_opaque: export.accepted_opaque.clone(),
             term_scope: term_scope.clone(),
         },
     )
@@ -983,6 +991,7 @@ pub(crate) fn ensure_export(
         source_directory: export.source_directory.clone(),
         to: export.to.clone(),
         target_directory: export.target_directory.clone(),
+        accepted_opaque: export.accepted_opaque.clone(),
         exported: exported.branch.clone(),
         exported_head: exported.head,
     });
@@ -1147,8 +1156,24 @@ pub(crate) enum Unknown {
     Elsewhere,
 }
 
-/// Judge one document — a reply envelope, a routed command record, a surface — against
-/// the run `state` describes.
+/// A live payload cannot change the approved export declarations.
+pub(crate) const LAUNCH_EXPORT_ONLY: &str =
+    "export declarations are read from the launch plan only";
+
+/// Launch-only export declarations are forbidden anywhere in a live payload. Walk
+/// mapping keys so prose discussing them remains ordinary text.
+pub(crate) fn launch_export_declaration(document: &serde_json::Value) -> bool {
+    match document {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            matches!(key.as_str(), "export_edges" | "accepted_opaque")
+                || launch_export_declaration(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(launch_export_declaration),
+        _ => false,
+    }
+}
+
+/// Judge one document against the run `state` describes.
 ///
 /// Only a mixed plan is judged: an all-public one derives no term and an all-private one
 /// has nowhere public for anything to reach. In one, every command addressed to a public
@@ -1163,6 +1188,9 @@ pub(crate) fn judge(
     oracle: &mut dyn Oracle,
     unknown: Unknown,
 ) -> Judged {
+    if launch_export_declaration(document) {
+        return Judged::Refuse(LAUNCH_EXPORT_ONLY.into());
+    }
     let unjudgeable = |why: &str| match unknown {
         Unknown::Unavailable => Some(Judged::Unavailable(format!(
             "the publication boundary could not judge {why}"
@@ -1289,6 +1317,9 @@ pub(crate) fn validate_envelope(
     let document: serde_json::Value = serde_json::from_str(stdin).map_err(|error| {
         crate::Error::Invalid(format!("the envelope on stdin is not JSON: {error}"))
     })?;
+    if launch_export_declaration(&document) {
+        return Ok(Judged::Refuse(LAUNCH_EXPORT_ONLY.into()));
+    }
     if let Err(why) = well_formed(&document) {
         return Ok(Judged::Unavailable(format!(
             "the publication boundary could not judge what it was handed: {why}"
@@ -1590,6 +1621,7 @@ fn example() -> GuidanceExample {
             to: EXAMPLE_CONSUMER.to_owned(),
             source_directory: "examples/generic".to_owned(),
             target_directory: "examples".to_owned(),
+            accepted_opaque: Vec::new(),
         }],
         projection: ExampleProjection {
             task: EXAMPLE_CONSUMER,
@@ -1746,6 +1778,9 @@ pub(crate) fn check_edges(plan: &Plan) -> Result<(), Refusal> {
     let mut consumers: BTreeMap<&str, usize> = BTreeMap::new();
     for (index, edge) in plan.export_edges.iter().enumerate() {
         let number = index + 1;
+        onevcs::validate_accepted_opaque(&edge.accepted_opaque).map_err(|error| {
+            refused_plan(format!("export edge {number}: {error}")).field("export_edges")
+        })?;
         for end in [&edge.from, &edge.to] {
             if !ids.contains(end.as_str()) {
                 let end = if end == &edge.from { "from" } else { "to" };
@@ -2062,6 +2097,7 @@ mod tests {
             to: to.into(),
             source_directory: "examples/generic".into(),
             target_directory: "examples".into(),
+            accepted_opaque: Vec::new(),
         }
     }
 
@@ -2403,6 +2439,7 @@ mod tests {
                     directory: directory.into(),
                     to: "elsewhere".into(),
                     target_directory: "examples".into(),
+                    accepted_opaque: Vec::new(),
                     branch_name: "topic".into(),
                     term_scope: onevcs::TermScope::Identities(Vec::new()),
                 },

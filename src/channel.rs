@@ -1194,6 +1194,12 @@ impl Claimed {
     /// outcome that is not one. Such a record is kept, never discarded: the
     /// queue's cursor has already moved past it.
     fn of(record: Value) -> Self {
+        if crate::boundary::launch_export_declaration(&record) {
+            let error = <serde_json::Error as serde::de::Error>::custom(
+                crate::boundary::LAUNCH_EXPORT_ONLY,
+            );
+            return Self::Undecodable(Undecodable::of(record, &error));
+        }
         match serde_json::from_value::<QueuedCommands>(record.clone()) {
             Ok(envelope) => Self::Envelope(envelope),
             Err(error) => Self::Undecodable(Undecodable::of(record, &error)),
