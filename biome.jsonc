@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": [
+      "npm/**/*.js",
+      "npm/**/*.mjs",
+      "npm/**/*.json",
+      "scripts/**/*.mjs",
+      "pool-maintenance/**/*.mjs",
+      "tests/release_journeys/*.mjs",
+      "release/tests/*.mjs",
+      "release/tests/support/*.mjs",
+      "release/project.json",
+      "tests/release_journeys/project.json",
+      "tests/llmlint_diff/**/*.mjs",
+      "tests/llmlint_diff/**/*.json",
+      "tests/ci_jobs/**/*.mjs",
+      "tests/ci_jobs/**/*.json",
+      // Upstream-owned copies are held byte-identical by the shared-script drift test.
+      "!!scripts/nx-remote-cache.mjs",
+      "!!scripts/nx-version-free-inputs.mjs"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true
+    }
+  },
+  "assist": {
+    "enabled": false
+  }
+}

@@ -14,7 +14,10 @@
     "build": {
       "command": "just _tier-build codex_server",
       "inputs": [
-        "codexServerSource"
+        "codexServerSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -23,32 +26,42 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/codex_server/main.rs",
       "inputs": [
-        "codexServerSource"
+        "codexServerSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
       "command": "just _tier-lint codex_server",
       "inputs": [
-        "codexServerSource"
+        "codexServerSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "test": {
       "command": "just _codex-server-test",
       "inputs": [
-        "codexServerSource"
+        "codexServerSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "dependsOn": [
         {
           "projects": [
             "onepipeline"
           ],
-          "target": "test-archive"
+          "target": "coverage-clean"
         }
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-codex_server-*.profraw"
       ],
-      "parallelism": false
+      "parallelism": false,
+      "cache": false
     },
     "test-quick": {
       "command": "just _codex-server-test-quick",
@@ -56,16 +69,12 @@
         "codexServerSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
-        }
-      ],
-      "dependsOn": [
+        },
         {
-          "projects": [
-            "onepipeline"
-          ],
-          "target": "test-quick-archive"
+          "runtime": "node -p process.platform"
         }
       ],
+      "dependsOn": [],
       "parallelism": false
     },
     "check": {
@@ -74,6 +83,15 @@
         "format-check",
         "lint",
         "test"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }

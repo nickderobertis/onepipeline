@@ -1,0 +1,36 @@
+{
+  "recordings": [
+    {
+      "path": "run.json.gz",
+      "source_url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/runs/41780837817",
+      "fetched_at": "2026-11-04T06:38:21.189309+00:00",
+      "sha256": "de5f5496925c5484af03659f5c4d2ac6e7730030edfec7e46a9bd0b81d0767ab",
+      "encoding": "gzip",
+      "sha256_covers": "exact uncompressed gh api response bytes"
+    },
+    {
+      "path": "membership.json.gz",
+      "source_url": "https://api.github.com/repos/nickderobertis/onepipeline/commits/eb4468c4ed181ec37a72aa330aae5b6a76c9f084/pulls",
+      "fetched_at": "2026-11-04T06:38:21.961769+00:00",
+      "sha256": "1b4e653a8a8a348049058ab7e4b1535fde8836b347c1e882c8a4ace32e2a09a3",
+      "encoding": "gzip",
+      "sha256_covers": "exact uncompressed gh api response bytes"
+    },
+    {
+      "path": "comparison-ahead.json.gz",
+      "source_url": "https://api.github.com/repos/nickderobertis/onepipeline/compare/c27131970b17ca828b2080e9f85c248163922802...eb4468c4ed181ec37a72aa330aae5b6a76c9f084",
+      "fetched_at": "2026-11-04T06:38:23.216895+00:00",
+      "sha256": "cda0144f1e42ee42f96bacbf477699a2a6a3d0dfedf94d57eabc4a60c3dd6984",
+      "encoding": "gzip",
+      "sha256_covers": "exact uncompressed gh api response bytes"
+    },
+    {
+      "path": "comparison-identical.json.gz",
+      "source_url": "https://api.github.com/repos/nickderobertis/onepipeline/compare/c27131970b17ca828b2080e9f85c248163922802...c27131970b17ca828b2080e9f85c248163922802",
+      "fetched_at": "2026-11-04T06:38:23.984770+00:00",
+      "sha256": "ca6ef689895424f2ca2ba7bb0306b3af71b51adfc93832d899bde14efd35196b",
+      "encoding": "gzip",
+      "sha256_covers": "exact uncompressed gh api response bytes"
+    }
+  ]
+}

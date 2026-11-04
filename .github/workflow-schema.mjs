@@ -23,6 +23,8 @@ const supportedFields = {
     "services",
   ],
   step: [
+    "background",
+    "cancel",
     "name",
     "id",
     "if",
@@ -104,10 +106,14 @@ export function validateWorkflow(workflow) {
       throw new Error(`invalid job steps: ${key}`);
     for (const [index, step] of (job.steps ?? []).entries()) {
       fields(step, supportedFields.step, `${key}.steps[${index}]`);
+      if (step.cancel !== undefined && Object.keys(step).some((field) => field !== "cancel"))
+        throw new Error(`invalid cancel step: ${key}[${index}] must contain only cancel`);
       if (
         (step.run !== undefined && (typeof step.run !== "string" || !step.run.trim())) ||
         (step.uses !== undefined && (typeof step.uses !== "string" || !step.uses.trim())) ||
-        Boolean(step.run) === Boolean(step.uses)
+        [step.run, step.uses, step.cancel].filter(Boolean).length !== 1 ||
+        (step.background !== undefined && (step.background !== true || !step.uses)) ||
+        (step.cancel !== undefined && (typeof step.cancel !== "string" || !step.cancel.trim()))
       )
         throw new Error(`invalid step command: ${key}[${index}]`);
     }
