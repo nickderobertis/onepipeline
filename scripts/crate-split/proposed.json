@@ -91,6 +91,10 @@
         "scripts/stacked-spikes-budget.mjs",
         "scripts/review-round-quota-budget.sh",
         "scripts/review-round-quota-budget.mjs",
+        "tests/e2e/check_visibility.rs",
+        "tests/fixtures/check-visibility/**",
+        "scripts/check-visibility-quota-budget.sh",
+        "scripts/check-visibility-quota-budget.mjs",
         "tests/golden/review-results-v2.json",
         "tests/e2e/budget_result.rs",
         "tests/e2e/dispatch.rs",
@@ -134,6 +138,7 @@
         "review",
         "review_reply",
         "review_round",
+        "check_visibility",
         "closures",
         "public_id"
       ]

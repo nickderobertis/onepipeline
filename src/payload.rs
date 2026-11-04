@@ -961,7 +961,33 @@ pub(crate) struct DriverExited {
     /// The highest command envelope id this driver wrote an outcome line for, or
     /// `null` where it answered none.
     pub(crate) last_answered_command: Option<u64>,
+    /// Every check still followed on a change request the run published when this
+    /// driver let go. Omitted when there is none, so an older reader is unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) checks_running: Vec<EndingCheck>,
+    /// Every check a `checks-unfollowed` record named. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) checks_unfollowed: Vec<EndingCheck>,
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] a runs-root record's payload document: the node id, change request URL, commit and check address are the plain strings every payload of this module spells them as (`ReleaseArrived.node`, `NodeSettled`'s `change_url` and `head`), each read off another process's record rather than built here, and the registered schema is the wire contract the browser view reads. `requirement` sits beside `required` because the plan's agreed contract with the browser view carries both — the boolean to decide on, the words to show — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`).
+/// One check a run's ending names: still running, or no longer followed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct EndingCheck {
+    /// The node whose publication carries it.
+    pub(crate) node: String,
+    /// The change request, by URL.
+    pub(crate) change: String,
+    /// The head commit it runs on.
+    pub(crate) head: String,
+    /// The check's name.
+    pub(crate) check: String,
+    /// Whether it blocks the merge.
+    pub(crate) required: bool,
+    /// `required` in words.
+    pub(crate) requirement: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// `dispatch-stopped`: one live dispatch a host shutdown acted on.
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root — no payload document here denies unknown fields, and a reader of this one that did would call a newer build's record unreadable. What a reader acts on is still typed and required.
@@ -2203,6 +2229,80 @@ pub(crate) enum ScratchEnding {
     Paused,
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
+/// `check-failed`: one failing check on a change request the run published, and its
+/// one non-blocking surface.
+// llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root. What a reader acts on is still typed and required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct CheckFailed {
+    /// The node whose publication carries the check.
+    pub(crate) node: String,
+    /// The change request, by URL.
+    pub(crate) change: String,
+    /// The head commit the check ran on.
+    pub(crate) head: String,
+    /// The check's name.
+    pub(crate) check: String,
+    /// `failed` or `no-verdict`.
+    pub(crate) state: FailingState,
+    /// How it concluded, `null` where the host said nothing.
+    pub(crate) conclusion: Option<String>,
+    /// Whether it blocks the merge.
+    pub(crate) required: bool,
+    /// `required` in words: `onepipeline::vocabulary::requirement_label`.
+    pub(crate) requirement: String,
+    /// Where its log is, `null` where the host gave no address.
+    pub(crate) url: Option<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
+/// `checks-unfollowed`: the checks the driver stopped following on one change request.
+// llmlint: ignore[boundary_inputs_validated] this module's own rule, as `CheckFailed` above records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ChecksUnfollowed {
+    /// The node whose publication carries the checks.
+    pub(crate) node: String,
+    /// The change request, by URL.
+    pub(crate) change: String,
+    /// The head commit the checks run on.
+    pub(crate) head: String,
+    /// Why it stopped: `timeout`.
+    pub(crate) reason: UnfollowedReason,
+    /// Each check still running.
+    pub(crate) checks: Vec<UnfollowedCheck>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The two states a check is raised in: it failed, or it ended with no verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FailingState {
+    Failed,
+    NoVerdict,
+}
+
+/// Why the driver stopped following a change request's checks: onevcs's checks timeout
+/// passed since its publication returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum UnfollowedReason {
+    Timeout,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
+/// One check a `checks-unfollowed` names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct UnfollowedCheck {
+    /// The check's name.
+    pub(crate) check: String,
+    /// Whether it blocks the merge.
+    pub(crate) required: bool,
+    /// `required` in words.
+    pub(crate) requirement: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// Declares each payload as the bus [`Message`] its kind carries, the total map
 /// from a kind to that id, and the registry every one of them is registered in.
 macro_rules! payload_messages {
@@ -2403,6 +2503,8 @@ payload_messages! {
     LandingFinished => "landing-finished";
     LandingRefused => "landing-refused";
     LandingDied => "landing-died";
+    CheckFailed => "check-failed";
+    ChecksUnfollowed => "checks-unfollowed";
 }
 
 #[cfg(test)]
@@ -2651,12 +2753,38 @@ mod tests {
                 settlement: ExitSettlementWord::Complete,
                 reason: None,
                 last_answered_command: Some(3),
+                checks_running: Vec::new(),
+                checks_unfollowed: Vec::new(),
+            },
+            DriverExited {
+                pid: 7,
+                settlement: ExitSettlementWord::Complete,
+                reason: None,
+                last_answered_command: None,
+                checks_running: vec![EndingCheck {
+                    node: "a".to_string(),
+                    change: "https://github.com/o/r/pull/1".to_string(),
+                    head: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                    check: "slow".to_string(),
+                    required: false,
+                    requirement: crate::vocabulary::requirement_label(false).to_string(),
+                }],
+                checks_unfollowed: vec![EndingCheck {
+                    node: "a".to_string(),
+                    change: "https://github.com/o/r/pull/2".to_string(),
+                    head: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                    check: "gate".to_string(),
+                    required: true,
+                    requirement: crate::vocabulary::requirement_label(true).to_string(),
+                }],
             },
             DriverExited {
                 pid: 7,
                 settlement: ExitSettlementWord::Error,
                 reason: Some("the queue could not be read".to_string()),
                 last_answered_command: None,
+                checks_running: Vec::new(),
+                checks_unfollowed: Vec::new(),
             },
         ] {
             let payload = serde_json::to_value(&written).expect("it serializes");
@@ -2726,6 +2854,21 @@ mod tests {
                 words.push(quoted.to_string());
             }
         }
+        // And the optional fields entry 146 of `docs/contract-divergences.md` adds.
+        let proposed = include_str!("../docs/contract-divergences.md")
+            .split("\n## 146.")
+            .nth(1)
+            .and_then(|entry| entry.split("```json").nth(1))
+            .and_then(|block| block.split("```").next())
+            .expect("entry 146 carries its block");
+        let proposed: serde_json::Value = serde_json::from_str(proposed).expect("JSON");
+        keys.extend(
+            proposed["driver_exited_fields"]
+                .as_array()
+                .expect("entry 146 names the driver-exited fields")
+                .iter()
+                .map(|key| key.as_str().expect("a key").to_string()),
+        );
         let id = schema_of(PipelineKind::DriverExited);
         let document = registry().schema(&id).expect("registered").clone();
         let mut declared: Vec<String> = document["properties"]

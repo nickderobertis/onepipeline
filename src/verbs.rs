@@ -765,8 +765,22 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
 }
 
 /// The line `onepipeline next` prints: one JSON object.
+///
+/// Beside the three keys `Next` carries, `check_lines` holds the one line each
+/// `change-check` event among `events` reads as — the line `monitor` and `watch`
+/// print for it — and is omitted when there is none, so a reader of the three keys
+/// is unaffected.
 pub fn render_next(next: &Next) -> String {
-    json!({"status": next.status, "surface": next.surface, "events": next.events}).to_string()
+    let mut line = json!({"status": next.status, "surface": next.surface, "events": next.events});
+    let checks: Vec<String> = next
+        .events
+        .iter()
+        .filter_map(crate::checkwatch::change_check_line)
+        .collect();
+    if !checks.is_empty() {
+        line["check_lines"] = json!(checks);
+    }
+    line.to_string()
 }
 
 /// The run's channel as it stands: every surface it has raised and where each

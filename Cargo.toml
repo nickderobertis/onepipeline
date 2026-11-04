@@ -757,6 +757,17 @@ resolver = "2"
 # item, so `^0.57` already admitted it; the requirement moves so the floor says the
 # fix is in, and `onevcs-testing` 0.19.26 requires exactly it, so the two move as one.
 #
+# `onevcs` 0.58.0 is the floor because it carries **check visibility** (onevcs #598):
+# the `attention` significance a failed or no-verdict check that blocks nothing is
+# stamped with, `url` on every `change-check`, `follow_checks` and `release_holdup`.
+# `src/checkwatch.rs` follows a returned publication's running checks through the
+# second, `src/release.rs` reads what holds an awaited release through the third, and
+# the shipped `planner` profile admits the first — which a reader built before it
+# refuses, so the floor is what lets this crate read the stamp at all.
+# `tests/e2e/check_visibility.rs` drives all three through the linked library. A
+# **requirement**, because `^0.57` admits no 0.58.x; `onevcs-testing` 0.19.29 requires
+# exactly it, so the two move together.
+#
 # `onevcs` 0.57.0 is the floor because it carries the **host public phrases**:
 # `$ONEVCS_HOME/public-phrases.yml`, read by `onevcs::public_phrases`, lists exact
 # phrases a host declares public though a private term occurs inside them, and the
@@ -877,7 +888,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.9.0"
-onevcs = "0.57.4"
+onevcs = "0.58.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1152,7 +1163,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.26"
+onevcs-testing = "0.19.29"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1349,6 +1360,7 @@ tokio = "1"
 serde-saphyr = "1.3"
 # Windows only, and for the same reason: each member names the features it calls.
 windows-sys = "0.61"
+
 
 [package]
 name = "onepipeline"

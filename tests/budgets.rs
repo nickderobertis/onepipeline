@@ -162,6 +162,75 @@ fn the_budgets_file_registers_the_host_view_budget() {
     assert!(proof.contains("just host-view-budget \"$root/bin/onepipeline\""));
 }
 
+/// The check-visibility quota budget, as `budgets.yaml` registers it: reported by its command
+/// off the record the e2e tier's workload journey writes, at most 250 quota units, unlabelled,
+/// and read by the `budgets` target only after that tier has written the record — which the
+/// tier declares among its outputs.
+#[test]
+fn the_budgets_file_registers_the_check_visibility_quota_budget() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "check-visibility-github-quota")
+        .expect("budgets.yaml registers check-visibility-github-quota");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "quota-units");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!(
+        (budget.threshold - 250.0).abs() < f64::EPSILON,
+        "{}",
+        budget.threshold
+    );
+    assert_eq!(
+        budget.command,
+        ["bash", "scripts/check-visibility-quota-budget.sh"],
+        "the budget's command is not the committed reporter"
+    );
+    assert!(budget.labels.is_empty(), "{:?}", budget.labels);
+    let journeys = std::fs::read_to_string(root().join("tests/e2e/check_visibility.rs"))
+        .expect("the journeys");
+    assert!(journeys.contains(
+        "#[test]\nfn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent()"
+    ));
+    let project: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("project.json")).expect("project.json"),
+    )
+    .expect("project.json parses");
+    assert!(project["targets"]["budgets"]["inputs"]
+        .as_array()
+        .expect("the budgets target names its inputs")
+        .contains(&serde_json::json!(
+            "{workspaceRoot}/scripts/check-visibility-quota-budget.*"
+        )));
+    let reporter =
+        std::fs::read_to_string(root().join("scripts/check-visibility-quota-budget.mjs"))
+            .expect("the reporter reads");
+    let record = reporter
+        .lines()
+        .find_map(|line| line.strip_prefix("const record = \""))
+        .and_then(|rest| rest.strip_suffix("\";"))
+        .expect("the reporter names the record it reads");
+    assert!(
+        journeys.contains(&format!("pub(crate) const RECORD: &str = \"{record}\";")),
+        "the workload journey writes a record other than {record}"
+    );
+    let e2e: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("tests/e2e/project.json"))
+            .expect("tests/e2e/project.json"),
+    )
+    .expect("tests/e2e/project.json parses");
+    assert!(
+        e2e["targets"]["test"]["outputs"]
+            .as_array()
+            .expect("the e2e tier names its outputs")
+            .contains(&serde_json::json!(format!("{{workspaceRoot}}/{record}"))),
+        "the e2e tier's outputs leave out {record}"
+    );
+}
+
 /// The review round's quota budget, as `budgets.yaml` registers it: reported by its command off
 /// the record the e2e tier's busy-round journey writes, at most 175 quota units, and read by the
 /// `budgets` target only after that tier has written the record — a record the tier declares
@@ -1869,4 +1938,200 @@ fn the_store_operations_reporter_refuses_every_record_it_cannot_vouch_for() {
     );
     assert!(!result.exists(), "a value was reported");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `scripts/check-visibility-quota-budget.sh` over a record staged under `cwd`.
+#[cfg(unix)]
+fn check_visibility_report(
+    cwd: &std::path::Path,
+    result: Option<&std::path::Path>,
+) -> std::process::Output {
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg(root().join("scripts/check-visibility-quota-budget.sh"))
+        .current_dir(cwd)
+        .env_remove("ONEBUDGETSPEC_RESULT");
+    if let Some(result) = result {
+        command.env("ONEBUDGETSPEC_RESULT", result);
+    }
+    command.output().expect("bash runs the committed reporter")
+}
+
+/// A record shaped as the workload journey writes it.
+#[cfg(unix)]
+fn check_visibility_record() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "workload": {"changes": 12, "repositories": 3, "followed_changes": 6,
+                     "running_checks_per_followed_change": 3, "running_minutes": 20,
+                     "held_nodes": 2, "held_hours": 3, "scale": 1000.0},
+        "phases": [
+            {"phase": "follow", "calls": [
+                {"at_ms": 10, "repo": "owner/service", "changes": ["1", "2"],
+                 "graphql_points": 1, "rest_requests": 0},
+                {"at_ms": 80, "repo": "owner/service", "changes": ["1"],
+                 "graphql_points": 1, "rest_requests": 0},
+            ]},
+            {"phase": "holdup", "calls": [
+                {"at_ms": 20, "query": "listing", "graphql_points": 1, "rest_requests": 0},
+                {"at_ms": 30, "query": "standings", "graphql_points": 1, "rest_requests": 0},
+            ]},
+        ],
+    })
+}
+
+/// The check-visibility reporter charges the record it is handed and reports the follow and
+/// holdup reads apart; it refuses a missing record, one that is not the stated workload, a
+/// call with no charge, and a run outside the checker.
+#[cfg(unix)]
+#[test]
+fn the_check_visibility_reporter_charges_its_record_and_refuses_what_it_cannot_vouch_for() {
+    let dir = scratch("check-visibility-report");
+    let records = dir.join("target/budget-records");
+    std::fs::create_dir_all(&records).expect("the records' directory");
+    let record = records.join("check-visibility-quota.json");
+    let result = dir.join("result.json");
+    let stderr =
+        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+
+    let missing = check_visibility_report(&dir, Some(&result));
+    assert_eq!(missing.status.code(), Some(1), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("missing")
+            && stderr(&missing).contains("the_check_visibility_workload_reads_at_its_cadence"),
+        "{}",
+        stderr(&missing)
+    );
+
+    std::fs::write(&record, check_visibility_record().to_string()).expect("a record");
+    let reported = check_visibility_report(&dir, Some(&result));
+    assert_eq!(reported.status.code(), Some(0), "{}", stderr(&reported));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the result is written"))
+            .expect("the result is JSON");
+    assert_eq!(written["value"].as_f64(), Some(4.0), "{written}");
+    let detail = written["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("follow reads: 2 calls, 2 GraphQL points, 0 REST requests")
+            && detail.contains("holdup reads: 1 reads in 2 queries, 2 GraphQL points"),
+        "{detail}"
+    );
+
+    // A REST request is charged one unit beside each GraphQL point, in either phase.
+    let mut with_rest = check_visibility_record();
+    with_rest["phases"][0]["calls"][0]["rest_requests"] = serde_json::json!(2);
+    with_rest["phases"][1]["calls"][1]["rest_requests"] = serde_json::json!(3);
+    std::fs::write(&record, with_rest.to_string()).expect("a record");
+    let reported = check_visibility_report(&dir, Some(&result));
+    assert_eq!(reported.status.code(), Some(0), "{}", stderr(&reported));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the result is written"))
+            .expect("the result is JSON");
+    assert_eq!(written["value"].as_f64(), Some(9.0), "{written}");
+    let detail = written["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("follow reads: 2 calls, 2 GraphQL points, 2 REST requests")
+            && detail
+                .contains("holdup reads: 1 reads in 2 queries, 2 GraphQL points, 3 REST requests"),
+        "{detail}"
+    );
+
+    let mut other = check_visibility_record();
+    other["workload"]["changes"] = serde_json::json!(11);
+    std::fs::write(&record, other.to_string()).expect("a record");
+    let refused = check_visibility_report(&dir, Some(&result));
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("workload.changes must be 12"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let mut uncharged = check_visibility_record();
+    uncharged["phases"][0]["calls"][0]
+        .as_object_mut()
+        .expect("a call")
+        .remove("graphql_points");
+    std::fs::write(&record, uncharged.to_string()).expect("a record");
+    let refused = check_visibility_report(&dir, Some(&result));
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("graphql_points"),
+        "{}",
+        stderr(&refused)
+    );
+
+    // Every other record it cannot vouch for, each refused naming what is wrong.
+    let staged = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut held = check_visibility_record();
+        change(&mut held);
+        held.to_string()
+    };
+    for (text, said) in [
+        ("{not json".to_owned(), "unreadable"),
+        (
+            staged(&|held| held["schema_version"] = serde_json::json!(2)),
+            "schema_version must be 1",
+        ),
+        (
+            staged(&|held| held["workload"]["extra"] = serde_json::json!(1)),
+            "workload names more",
+        ),
+        (
+            staged(&|held| {
+                let phases = held["phases"].as_array_mut().expect("phases");
+                phases.reverse();
+            }),
+            "phases must be follow, holdup",
+        ),
+        (
+            staged(&|held| held["phases"][1]["calls"] = serde_json::json!([])),
+            "must not be empty",
+        ),
+        (
+            staged(&|held| held["phases"][0]["calls"][0]["rest_requests"] = serde_json::json!(-1)),
+            "rest_requests must be a nonnegative integer",
+        ),
+        (
+            staged(&|held| held["phases"][1]["calls"][0]["query"] = serde_json::json!("other")),
+            "query must be listing or standings",
+        ),
+        (
+            staged(&|held| {
+                held["phases"][0]["calls"][0]
+                    .as_object_mut()
+                    .expect("a call")
+                    .remove("repo");
+            }),
+            "repo must name the repository read",
+        ),
+    ] {
+        std::fs::write(&record, text).expect("a record");
+        let refused = check_visibility_report(&dir, Some(&result));
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "{said}: {}",
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains(said),
+            "{said}: {}",
+            stderr(&refused)
+        );
+    }
+
+    // A result it cannot write is a failure that says how to run it.
+    std::fs::write(&record, check_visibility_record().to_string()).expect("a record");
+    let unwritable = check_visibility_report(&dir, Some(&dir.join("absent/result.json")));
+    assert_eq!(unwritable.status.code(), Some(1), "{}", stderr(&unwritable));
+    assert!(
+        stderr(&unwritable).contains("next:"),
+        "{}",
+        stderr(&unwritable)
+    );
+
+    let outside = check_visibility_report(&dir, None);
+    assert_eq!(outside.status.code(), Some(2), "{}", stderr(&outside));
+    assert!(stderr(&outside).contains("ONEBUDGETSPEC_RESULT is not set"));
 }

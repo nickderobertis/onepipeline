@@ -1274,6 +1274,57 @@ fn a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pen
     }
 }
 
+/// A check that blocks nothing failing on a landing wakes its owner's flow watch under
+/// the default wake set — stamped `attention` — and the line it prints names the
+/// check, whether it blocks the merge, and where its log is.
+#[test]
+fn a_failing_check_that_blocks_nothing_wakes_the_owners_default_flow_watch() {
+    let (world, repository) = hosted(
+        "ml-attention",
+        "lint in_progress - required\nslow in_progress - advisory",
+    );
+    // The rollup reports each check's address, as GitHub's does.
+    world.script("gh.rollup-addresses", "");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let args = words(&["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let landing = Started::spawn(&world, None, &argv);
+    let (flow, id) = the_landing(&world);
+    let opened = opened_as_draft(&world, &flow);
+    check_recorded(&world, &flow, &id, "slow", "pending");
+    let armed = Armed::arm(
+        &world,
+        &flow,
+        &["--timeout", "900", "--cursor", &opened.cursor()],
+    );
+
+    world.script(
+        "gh.checks",
+        "lint in_progress - required\nslow completed failure advisory",
+    );
+    let red = armed.returned();
+    red.progressed("change-check");
+    assert_eq!(
+        red.record["significance"],
+        json!("attention"),
+        "{}",
+        red.record
+    );
+    let line = "change-check 'slow' failed (not required — does not block) [attention] log: \
+                https://github.com/owner/service/actions/runs/1/job/2";
+    assert!(red.human.contains(line), "{line:?} is not in {}", red.human);
+
+    world.script(
+        "gh.checks",
+        "lint completed failure required\nslow completed failure advisory",
+    );
+    // Ended by its required check, as the landing beside it is: the advisory never
+    // decided anything.
+    let (code, _, said) = landing.ended();
+    assert_ne!(code, 0, "{said}");
+    assert!(said.contains("lint"), "{said}");
+}
+
 /// Run the real `onevcs` binary against `world`, answering its stdout.
 fn onevcs(world: &World, args: &[&str]) -> String {
     let output = world
