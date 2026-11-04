@@ -244,7 +244,10 @@ export function triggered(workflow, scenario) {
     if (key === "inputs") continue;
     if (
       !Array.isArray(settings[key]) ||
-      settings[key].some((value) => typeof value !== "string" || !value || /[*?[\]{}!]/.test(value))
+      settings[key].some(
+        (value) =>
+          typeof value !== "string" || !value || /[*?[\]{}!]/.test(value.replace(/\/\*\*$/, "")),
+      )
     )
       throw new Error(`unsupported trigger pattern: ${key}`);
   }
@@ -269,7 +272,13 @@ export function triggered(workflow, scenario) {
     if (tag && settings?.branches && !settings.tags) return false;
     if (branch && settings?.tags && !settings.branches) return false;
     const filter = tag ? settings?.tags : settings?.branches;
-    if (filter && !filter.includes(scenario.ref.replace(tag ? "refs/tags/" : "refs/heads/", "")))
+    if (
+      filter &&
+      !filter.some((pattern) => {
+        const name = scenario.ref.replace(tag ? "refs/tags/" : "refs/heads/", "");
+        return pattern.endsWith("/**") ? name.startsWith(pattern.slice(0, -2)) : pattern === name;
+      })
+    )
       return false;
   }
   if (

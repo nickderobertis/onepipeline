@@ -82,6 +82,32 @@ jobs:
       # clippy build. Before the capture starts: on a restore that is not a
       # full key match rust-cache prunes files under `target/`, where the
       # capture's clone of HEAD lives.
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: test-linux
@@ -213,6 +239,21 @@ jobs:
   # the live smoke, the pinned-wheel channel journeys, the workflow-shape test,
   # the install and documented-install proofs and the x86_64 wheel, in one Nx run
   # so the proofs build beside the tiers.
+      - name: Report cache entries and task executions
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
+        with:
+          name: nx-cache-entries-${{ github.job }}
+          path: ${{ runner.temp }}/nx-cache-report
+          retention-days: 7
+      - cancel: nx-cache
+        if: always()
+        continue-on-error: true
+
   test-linux:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -236,6 +277,32 @@ jobs:
           fetch-depth: 0
       # Asked before the shortcut, so a run the shortcut ends still cannot pass
       # without the live tier's credential.
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
       - name: The smoke's credential and scratch repository are present
         env:
           HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
@@ -352,6 +419,21 @@ jobs:
   # The Windows test job: clippy over the Windows build, the uninstrumented suite
   # (`check-cross` less formatting, which `lint` runs), the npm launcher's
   # process-tree journeys and the two install proofs, on a Dev Drive.
+      - name: Report cache entries and task executions
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
+        with:
+          name: nx-cache-entries-${{ github.job }}
+          path: ${{ runner.temp }}/nx-cache-report
+          retention-days: 7
+      - cancel: nx-cache
+        if: always()
+        continue-on-error: true
+
   test-windows:
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
@@ -373,6 +455,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
       - name: Whether this pull request's tests are already proven
         id: shortcut
         env:
@@ -469,6 +577,21 @@ jobs:
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
   # The macOS test job (Apple silicon): the same as Windows.
+      - name: Report cache entries and task executions
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
+        with:
+          name: nx-cache-entries-${{ github.job }}
+          path: ${{ runner.temp }}/nx-cache-report
+          retention-days: 7
+      - cancel: nx-cache
+        if: always()
+        continue-on-error: true
+
   test-macos:
     # Not on release-plz's own release pull request, whose tree only versions one
     # main already passed: a Mac slot is the account's scarcest. Its required
@@ -492,6 +615,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
       - name: Whether this pull request's tests are already proven
         id: shortcut
         env:
@@ -557,3 +706,18 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+      - name: Report cache entries and task executions
+        if: always()
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
+        with:
+          name: nx-cache-entries-${{ github.job }}
+          path: ${{ runner.temp }}/nx-cache-report
+          retention-days: 7
+      - cancel: nx-cache
+        if: always()
+        continue-on-error: true
+

@@ -312,7 +312,13 @@ describe("the visual docs", () => {
 describe("the release pull request's shortcut", () => {
   for (const id of TESTS) {
     it(`is asked first by \`${id}\`, and gates every step after it`, () => {
-      const all = steps(ci.jobs[id]);
+      // Cache plumbing remains active even when the temporary shortcut skips tests.
+      const all = steps(ci.jobs[id]).filter((step) =>
+        !runs(step).includes("nx-remote-cache.mjs") &&
+        !uses(step).startsWith("op-nx/github-cache/") &&
+        !String(step.with?.name ?? "").startsWith("nx-cache-entries-") &&
+        step.cancel !== "nx-cache",
+      );
       const at = all.findIndex((step) => step.id === "shortcut");
       assert.ok(at >= 0, `\`${id}\` does not ask the shortcut`);
       assert.match(runs(all[at]), /^node scripts\/release-pr-shortcut\.mjs /);
