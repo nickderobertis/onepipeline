@@ -772,8 +772,8 @@ fn public_stores(world: &World, public: &Repository) -> Value {
     ])
 }
 
-/// Seed the producer's real repository with the shared carriers. Its turn writes
-/// the fixture's notes, so preservation still follows actual producer work.
+/// Seed the producer's real repository with the shared carriers. Its turn adds
+/// a separate note, preserving the fixture's bytes including trailing whitespace.
 fn seed_export_samples(
     world: &World,
     private: &Repository,
@@ -783,13 +783,10 @@ fn seed_export_samples(
     let directory = private.checkout.join("examples/generic");
     std::fs::create_dir_all(&directory).unwrap();
     for (name, bytes) in &samples {
-        if name == "notes.md" {
-            world.script("generalize.work-at", "examples/generic/notes.md");
-            world.script("generalize.work", std::str::from_utf8(bytes).unwrap());
-        } else {
-            std::fs::write(directory.join(name), bytes).unwrap();
-        }
+        std::fs::write(directory.join(name), bytes).unwrap();
     }
+    world.script("generalize.work-at", "examples/generic/producer.md");
+    world.script("generalize.work", "Evidence ready for the example.");
     if plant.is_some() {
         // A clean, tracked PNG sorts before every contaminated carrier. Its
         // format and bytes still come solely from the shared fixture module.
@@ -855,9 +852,29 @@ fn full_file_export(lfs: bool) {
     let mut plan = exported_plan("files");
     plan["export_edges"][0]["accepted_opaque"] = json!(sample_opaque_patterns());
     world.script("examples.work", "built on the evidence\n");
+    world.script("examples.wait", "hold");
     let project = world.plan("files", &plan);
-    let run = world.run(&["start", &project, "--attach"]);
-    run.settled();
+    let run = world.run(&["start", &project, "--detach"]);
+    run.exited(0);
+    world.until("the consumer to start on the export", |world| {
+        !tasks_of(world, "examples").is_empty()
+    });
+    let opening = world
+        .events_of("files", "session-opened")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "examples")
+        .expect("the consumer session opened");
+    let worktree = std::path::PathBuf::from(opening["payload"]["worktree"].as_str().unwrap());
+    assert_eq!(
+        git_out(&world, &worktree, &["rev-parse", "HEAD"]),
+        world.run_json("files", "exports.json")[0]["exported_head"]
+            .as_str()
+            .unwrap()
+    );
+    world.release("examples.go");
+    world.until("the consumer to publish", |world| {
+        world.run_file("files", "result.json").is_file()
+    });
     let consumer = settled(&world, "files", "examples");
     assert_eq!(consumer["status"], "done", "{consumer}\n{}", world.dump());
     let record = world.run_json("files", "exports.json");
@@ -882,16 +899,6 @@ fn full_file_export(lfs: bool) {
             &["show", "-s", "--format=%s", head]
         ),
         "Add generic example fixtures"
-    );
-    let consumer_head = consumer["head"].as_str().expect("the published head");
-    assert_eq!(
-        git_out(
-            &world,
-            &public.origin,
-            &["rev-parse", &format!("{consumer_head}^")]
-        ),
-        head,
-        "the consumer's work must start at the export commit"
     );
     let opened = world.events_of("files", "session-opened");
     let opened = opened
@@ -945,6 +952,14 @@ fn full_file_export(lfs: bool) {
             .map(|event| event["payload"].to_string()),
     );
     surfaces.push(run.stdout);
+    surfaces.push(run.stderr);
+    surfaces.extend(
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "examples")
+            .map(|task| task.to_string()),
+    );
     surfaces.extend(world.changes_opened().iter().map(Value::to_string));
     for surface in surfaces {
         for pattern in sample_opaque_patterns() {
@@ -1018,11 +1033,25 @@ fn refused_full_file_export(
     assert_eq!(public_stores(&world, &public), before);
     assert!(tasks_of(&world, "examples").is_empty());
     assert!(world
-        .events_of("refused-files", "node-dispatched")
+        .events_of("refused-files", "session-opened")
         .iter()
         .all(|event| event["labels"]["node"] != "examples"));
     let producer = settled(&world, "refused-files", "generalize");
-    let mut surfaces = vec![run.stdout, consumer.to_string()];
+    for output in [&run.stdout, &run.stderr] {
+        for secret in ["zephyrine", "owner/service"] {
+            assert!(!output.contains(secret), "{secret} leaked: {output}");
+        }
+    }
+    // The private operator stream includes the producer's own settlement;
+    // only lines for the public consumer must also omit its producer's branch.
+    let mut surfaces = vec![consumer.to_string(), detail];
+    surfaces.extend(
+        run.stdout
+            .lines()
+            .chain(run.stderr.lines())
+            .filter(|line| line.contains("graph:examples"))
+            .map(str::to_owned),
+    );
     surfaces.extend(
         world
             .journal("refused-files")
@@ -1039,6 +1068,48 @@ fn refused_full_file_export(
             assert!(!surface.contains(secret), "{secret} leaked: {surface}");
         }
     }
+}
+
+#[test]
+fn launch_export_declarations_are_refused_in_a_single_visibility_run() {
+    let world = World::new("opaque-single-visibility");
+    world.script("work.wait", "hold");
+    let project = world.plan(
+        "single-visibility",
+        &plan_of(
+            "single-visibility",
+            vec![crate::harness::agent("work", &[])],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the private task to wait", |world| {
+        !world
+            .events_of("single-visibility", "node-dispatched")
+            .is_empty()
+    });
+    for field in ["export_edges", "accepted_opaque"] {
+        let mut command = json!({"op": "amend", "id": "work", "text": "continue"});
+        command[field] = json!([]);
+        let envelope = json!({"version": 3, "author": "planner", "commands": [command]});
+        world
+            .run_with_stdin(&["reply", "single-visibility"], &envelope.to_string())
+            .exited(REFUSED)
+            .err_has("launch plan only");
+        validated(&world, "single-visibility", &envelope)
+            .exited(exit_for("refuse"))
+            .err_has("launch plan only");
+    }
+    assert!(world
+        .events_of("single-visibility", "edit-committed")
+        .is_empty());
+    world.release("work.go");
+    world.until("the single-visibility run to settle", |world| {
+        world.run_file("single-visibility", "result.json").is_file()
+    });
+    assert_eq!(
+        settled(&world, "single-visibility", "work")["status"],
+        "done"
+    );
 }
 
 #[test]
@@ -1916,7 +1987,7 @@ fn a_producer_named_with_a_private_term_is_given_a_neutral_branch_and_exports_on
     assert_eq!(refused["outcome"], "infrastructure-failure", "{refused}");
     let detail = detail_of(&world, "zephyrine-dirty", "more-examples");
     assert!(
-        detail.contains("public output carries a term of a private repository in a commit message"),
+        detail.contains("the export is refused: it carries a private term"),
         "{detail}"
     );
     assert!(
@@ -2739,7 +2810,8 @@ fn a_run_naming_a_but_not_b_refuses_as_owner_name_and_passes_bs_through_every_ch
         "infrastructure-failure"
     );
     assert!(
-        detail_of(&world, "scoped", "cons-a").contains("public output carries a term"),
+        detail_of(&world, "scoped", "cons-a")
+            .contains("the export is refused: it carries a private term"),
         "{}",
         detail_of(&world, "scoped", "cons-a")
     );
@@ -3028,7 +3100,10 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_st
     world.release("generalize.go");
     until_settled(&world, "grown", "examples");
     let detail = detail_of(&world, "grown", "examples");
-    assert!(detail.contains("public output carries a term"), "{detail}");
+    assert!(
+        detail.contains("the export is refused: it carries a private term"),
+        "{detail}"
+    );
     assert!(tasks_of(&world, "examples").is_empty());
 }
 
@@ -4484,7 +4559,10 @@ fn the_host_branch_prefix_leads_every_public_branch_and_is_itself_screened() {
     let refused = settled(&world, "termed", "examples-t");
     assert_eq!(refused["outcome"], "infrastructure-failure", "{refused}");
     let detail = detail_of(&world, "termed", "examples-t");
-    assert!(detail.contains("public output carries a term"), "{detail}");
+    assert!(
+        detail.contains("the export is refused: it carries a private term"),
+        "{detail}"
+    );
     assert!(!detail.contains("zephyrine"), "{detail}");
 
     // And a branches file that is there and cannot be read refuses the export rather than

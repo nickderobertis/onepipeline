@@ -530,7 +530,7 @@ enum Side {
         /// The neutral name proposed for the branch its session cuts.
         branch_name: Option<String>,
         /// The export its session starts from.
-        export: Option<Export>,
+        export: Option<Box<Export>>,
     },
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -557,7 +557,7 @@ impl Dispatching {
     /// The export this consumer's session starts from.
     pub(crate) fn export(&self) -> Option<&Export> {
         match self.side.as_ref()? {
-            Side::Public { export, .. } => export.as_ref(),
+            Side::Public { export, .. } => export.as_deref(),
             Side::Private { .. } | Side::Producer { .. } => None,
         }
     }
@@ -742,7 +742,7 @@ pub(crate) fn dispatching(
                     .find(|candidate| candidate.id == edge.from)
                     .and_then(|producer| producer.repo.clone())
                     .ok_or_else(|| "its export producer names no repository".to_owned())?;
-                export = Some(Export {
+                export = Some(Box::new(Export {
                     producer: edge.from.clone(),
                     consumer: lineage_root(&node.id, superseded),
                     from: producer,
@@ -753,7 +753,7 @@ pub(crate) fn dispatching(
                     target_directory: edge.target_directory.clone(),
                     accepted_opaque: edge.accepted_opaque.clone(),
                     ordinal,
-                });
+                }));
                 lines.push(format!(
                     "This node is public, and its branch starts from one neutral commit that \
                      adds generic examples under `{}`; build on them.",
@@ -1317,6 +1317,9 @@ pub(crate) fn validate_envelope(
     let document: serde_json::Value = serde_json::from_str(stdin).map_err(|error| {
         crate::Error::Invalid(format!("the envelope on stdin is not JSON: {error}"))
     })?;
+    if launch_export_declaration(&document) {
+        return Ok(Judged::Refuse(LAUNCH_EXPORT_ONLY.into()));
+    }
     if let Err(why) = well_formed(&document) {
         return Ok(Judged::Unavailable(format!(
             "the publication boundary could not judge what it was handed: {why}"

@@ -10835,6 +10835,10 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
     assert!(plan.export_edges[0].accepted_opaque.is_empty());
     let mut with_patterns = block["boundary_plan"].clone();
     with_patterns["export_edges"][0]["accepted_opaque"] = block["boundary_accepted_opaque"].clone();
+    let golden: Value =
+        serde_json::from_str(include_str!("golden/boundary-plan-accepted-opaque-v3.json"))
+            .expect("the accepted opaque launch plan golden reads");
+    assert_eq!(with_patterns, golden);
     let accepted: Plan = serde_json::from_value(with_patterns.clone())
         .expect("the launch plan accepts opaque patterns");
     assert_eq!(serde_json::to_value(accepted).unwrap(), with_patterns);
