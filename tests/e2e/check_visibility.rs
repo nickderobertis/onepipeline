@@ -1348,8 +1348,11 @@ fn a_failing_optional_check_on_the_release_change_holds_nothing_when_the_release
 /// command to read.
 pub(crate) const RECORD: &str = "target/budget-records/check-visibility-quota.json";
 
-/// The budget's scale: every interval and duration of the workload divided by it.
-const SCALE: f64 = 1000.0;
+/// Every workload interval, duration and timeout is divided by this shared scale.
+/// Windows process startup can consume the 3.6-second timeout at scale 1000 before
+/// a follow read observes completion. The planner approved scale 100 there so the
+/// same workload and assertions allow time for the real subprocesses to answer.
+const SCALE: f64 = if cfg!(windows) { 100.0 } else { 1000.0 };
 
 /// The slack one recorded call time may carry past the engine's own clock: the double
 /// stamps a call when its process starts, a few milliseconds after the engine asked.
