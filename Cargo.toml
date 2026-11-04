@@ -1339,14 +1339,17 @@ onevcs-testing = "0.19.29"
 # **0.13.3 translates section links on copy** (`onetaskgraph-section-links`): a link to a
 # heading in a copied document or task lands on that section in each destination's own
 # heading form, so a design document's budget link resolves on GitHub and Linear.
-onetaskgraph-core = "=0.13.3"
-onetaskgraph-plugin-api = "=0.13.3"
-onetaskgraph-local-md = "=0.13.3"
+# **0.13.4 keeps private canonical addresses out of same-record section links** in
+# public projections and reader content; the engine journey in `linear_writeback.rs`
+# holds both the dispatched fragment and its public GitHub heading form.
+onetaskgraph-core = "=0.13.4"
+onetaskgraph-plugin-api = "=0.13.4"
+onetaskgraph-local-md = "=0.13.4"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.13.3"
+onetaskgraph-linear = "=0.13.4"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
