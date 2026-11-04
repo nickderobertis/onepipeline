@@ -571,6 +571,15 @@ fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
     let mut globs = Vec::new();
     while let Some(entry) = pending.pop() {
         let Some(entry) = entry.as_str() else {
+            match entry["runtime"].as_str() {
+                Some("node scripts/nx-version-free-inputs.mjs --ecosystem cargo") => {
+                    globs.extend(["Cargo.toml".to_owned(), "Cargo.lock".to_owned()]);
+                }
+                Some("node scripts/nx-version-free-inputs.mjs --ecosystem python") => {
+                    globs.extend(["pyproject.toml".to_owned(), "uv.lock".to_owned()]);
+                }
+                _ => {}
+            }
             continue;
         };
         match nx["namedInputs"][entry].as_array() {

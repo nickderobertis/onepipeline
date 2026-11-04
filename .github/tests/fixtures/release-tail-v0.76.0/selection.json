@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "repository": "nickderobertis/onepipeline",
+  "tag": "v0.76.0",
+  "commit": "9bfdc7f7461b8bfffe2f79f9d8485c52c4cc4c2e",
+  "previous_tag": "v0.75.0",
+  "previous_commit": "7da1f6b8234252fdfa71f3651fd2d51581e0da8d",
+  "commits": [
+    {
+      "sha": "214004025cb2d42ffaf556aa06d4c416313198a4",
+      "change": 985
+    },
+    {
+      "sha": "b10999c47633886d13484dca711894cc3e49b7a4",
+      "change": 983
+    },
+    {
+      "sha": "438198348a3dd0ab19de994cf3f9b937b14c489e",
+      "change": 1003
+    },
+    {
+      "sha": "54cfa4ab97960a76876e859161645b618228bd84",
+      "change": 982
+    },
+    {
+      "sha": "a27fe0ac5151239e659fcf2a03871be0bdcc3f71",
+      "change": 994
+    },
+    {
+      "sha": "4d975bcd4333782d23d12d19f3cd9a95b410135e",
+      "change": 1000
+    },
+    {
+      "sha": "726299c770eafe99c558566069a2c1d426e8bd69",
+      "change": 988
+    },
+    {
+      "sha": "9bfdc7f7461b8bfffe2f79f9d8485c52c4cc4c2e",
+      "change": 992
+    }
+  ],
+  "changes": [
+    {
+      "number": 985,
+      "title": "chore(lint): run the judged diff lint as plain llmlint under Nx's cache",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "e995ac2d8c60198830a1919d9eefc21bf8ec7a26",
+      "created_at": "2026-10-17T19:30:14Z",
+      "merged_at": "2026-10-17T22:03:55Z",
+      "merge_commit_sha": "214004025cb2d42ffaf556aa06d4c416313198a4"
+    },
+    {
+      "number": 983,
+      "title": "fix(ci): install uv in release-sweep before it bootstraps",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "fd9c32777231ba341ee266a8bc4c3a9ca9a5a554",
+      "created_at": "2026-10-17T18:09:13Z",
+      "merged_at": "2026-10-17T23:43:54Z",
+      "merge_commit_sha": "b10999c47633886d13484dca711894cc3e49b7a4"
+    },
+    {
+      "number": 1003,
+      "title": "fix(driver): stop a released driver rewriting the run's launch record",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "bb75af0a8d5582799420b04284846689eb89bc45",
+      "created_at": "2026-10-18T04:38:58Z",
+      "merged_at": "2026-10-18T09:23:31Z",
+      "merge_commit_sha": "438198348a3dd0ab19de994cf3f9b937b14c489e"
+    },
+    {
+      "number": 982,
+      "title": "fix(ci): make flaky e2e journeys deterministic and fit the Windows leg",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "03bfe90e4fa15e395bfe073c1b67a558880098f4",
+      "created_at": "2026-10-17T17:20:48Z",
+      "merged_at": "2026-10-18T14:03:34Z",
+      "merge_commit_sha": "54cfa4ab97960a76876e859161645b618228bd84"
+    },
+    {
+      "number": 994,
+      "title": "fix(driver): report a refused observer restart before the journey reads it",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "d3afcb57eb2df6dd9de6d3d7e2b0eebc73108954",
+      "created_at": "2026-10-17T22:46:49Z",
+      "merged_at": "2026-10-18T14:15:13Z",
+      "merge_commit_sha": "a27fe0ac5151239e659fcf2a03871be0bdcc3f71"
+    },
+    {
+      "number": 1000,
+      "title": "fix(smoke): start the node above a settled stack within the continuation journey's bound",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "41cf8365be5bbbba99f144a4c0b21d7deb34253d",
+      "created_at": "2026-10-18T02:01:04Z",
+      "merged_at": "2026-10-18T14:15:20Z",
+      "merge_commit_sha": "4d975bcd4333782d23d12d19f3cd9a95b410135e"
+    },
+    {
+      "number": 988,
+      "title": "ci!: drop Intel macOS and linux-arm64, release per platform",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "69714d22128ec5a360717569f338a40652752be0",
+      "created_at": "2026-10-17T20:01:05Z",
+      "merged_at": "2026-10-18T15:40:38Z",
+      "merge_commit_sha": "726299c770eafe99c558566069a2c1d426e8bd69"
+    },
+    {
+      "number": 992,
+      "title": "chore: release v0.76.0",
+      "state": "closed",
+      "base_ref": "main",
+      "head_sha": "bd5cb914e9c60e74482bfc5abd8e227c5258a4e7",
+      "created_at": "2026-10-17T22:06:07Z",
+      "merged_at": "2026-10-18T17:42:59Z",
+      "merge_commit_sha": "9bfdc7f7461b8bfffe2f79f9d8485c52c4cc4c2e"
+    }
+  ],
+  "cost": {
+    "graphql_points": 0,
+    "rest_requests": 4,
+    "requests": [
+      "repos/nickderobertis/onepipeline/releases?per_page=100",
+      "repos/nickderobertis/onepipeline/compare/v0.75.0...v0.76.0?per_page=100",
+      "repos/nickderobertis/onepipeline/pulls?state=closed&sort=updated&direction=desc&per_page=100",
+      "repositories/1327438417/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=2"
+    ]
+  }
+}

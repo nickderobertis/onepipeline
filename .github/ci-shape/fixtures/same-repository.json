@@ -1,0 +1,27 @@
+{
+  "repository": "nickderobertis/onepipeline-ui",
+  "event": {
+    "pull_request": {
+      "number": 586,
+      "head": {
+        "sha": "31997181195fb03094387ff93b9470035ca48d97",
+        "repo": {
+          "full_name": "nickderobertis/onepipeline-ui"
+        }
+      },
+      "base": {
+        "sha": "644b610e376185ce6dfc8e2b55e43bfa5ccfdd55",
+        "repo": {
+          "full_name": "nickderobertis/onepipeline-ui"
+        }
+      },
+      "user": {
+        "login": "nickderobertis"
+      }
+    }
+  },
+  "recorded": {
+    "request": "repos/nickderobertis/onepipeline-ui/pulls/586",
+    "projection": "Only fields read by trust, wrapped in GitHub pull_request event shape."
+  }
+}

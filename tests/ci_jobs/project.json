@@ -40,12 +40,21 @@
         "{workspaceRoot}/README.md",
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/biome.jsonc",
-        "sharedGlobals"
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["npmSelection"]
     }
   }
 }

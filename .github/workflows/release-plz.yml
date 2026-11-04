@@ -1,8 +1,10 @@
 name: Release-plz
 
 # Conventional-commit release automation. On every push to main, one job:
-#   * guard       — without the RELEASE_PLZ_TOKEN secret, every later step is
+#   * guard       — without the RELEASE_PLZ_TOKEN secret, release automation is
 #                   skipped and the job says how to enable it.
+#   * promote     — copy trusted merged-PR results before opening a release PR;
+#                   cache-promote/<PR> pushes only promote into their own scope.
 #   * release     — if a merged version-bump PR left Cargo.toml at a version with
 #                   no tag yet, tag vX.Y.Z and cut the GitHub Release.
 #   * release-pr  — open/update a "release vX.Y.Z" PR that bumps the version and
@@ -44,17 +46,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Every write — the checkout's pushes, release-plz, auto-merge — authenticates
-    # with RELEASE_PLZ_TOKEN, so the job's own token needs nothing more.
+    # with RELEASE_PLZ_TOKEN. Cache promotion reads metadata with the job token
+    # and writes the cache with the runner runtime token.
     permissions:
       contents: read
       pull-requests: read
-      actions: write
+      actions: read
     concurrency:
       group: release-plz
       cancel-in-progress: false
     steps:
       # `secrets` cannot be read in an `if:`, so the token's presence becomes an
-      # output every later step is conditioned on.
+      # output the main-only release steps are conditioned on.
       - name: Guard on the release token
         id: guard
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

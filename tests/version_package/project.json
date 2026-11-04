@@ -1,0 +1,118 @@
+{
+  "name": "onepipeline-version-package",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "test": {
+      "command": "just _version-package-test",
+      "cache": true,
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "coverage-clean"
+        }
+      ],
+      "parallelism": false,
+      "outputs": [
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-version-package-*.profraw"
+      ]
+    },
+    "test-quick": {
+      "command": "just _version-package-test-quick",
+      "cache": true,
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
+      ],
+      "dependsOn": [],
+      "parallelism": false,
+      "outputs": []
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection",
+        "pythonSelection"
+      ]
+    },
+    "bootstrap": {
+      "executor": "nx:noop",
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "build": {
+      "command": "just _tier-build package_bundle",
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/package_bundle.rs",
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/package_bundle.rs",
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint package_bundle",
+      "inputs": [
+        "crateTestSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}

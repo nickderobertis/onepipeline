@@ -1,0 +1,27 @@
+{
+  "repository": "cli/cli",
+  "event": {
+    "pull_request": {
+      "number": 14914,
+      "head": {
+        "sha": "8aefc2564e7fa0d6aad62418fc491e266f193931",
+        "repo": {
+          "full_name": "goransh-walia/cli"
+        }
+      },
+      "base": {
+        "sha": "c4513d446bf98cfcbe72ed83f17cd3220174d88f",
+        "repo": {
+          "full_name": "cli/cli"
+        }
+      },
+      "user": {
+        "login": "goransh-walia"
+      }
+    }
+  },
+  "recorded": {
+    "request": "repos/cli/cli/pulls/14914",
+    "projection": "Only fields read by trust, wrapped in GitHub pull_request event shape."
+  }
+}

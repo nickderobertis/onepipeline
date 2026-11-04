@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parse } from "yaml";
@@ -35,7 +36,7 @@ test("promotion runs on merge or the dedicated branch, before main-only release 
   const release = workflow("release-plz");
   assert.deepEqual(release.on.push.branches, ["main", PROMOTION_BRANCH_PATTERN]);
   assert.equal(release.on.workflow_dispatch, undefined);
-  assert.equal(release.jobs["release-plz"].permissions.actions, "write");
+  assert.equal(release.jobs["release-plz"].permissions.actions, "read");
   const steps = release.jobs["release-plz"].steps;
   const promote = steps.findIndex((s) => s.run?.includes("nx-remote-cache.mjs promote"));
   assert.ok(promote > 0);
@@ -49,6 +50,24 @@ test("promotion runs on merge or the dedicated branch, before main-only release 
     }
     for (const key of Object.keys(step.env ?? {})) {
       assert.ok(key === "GITHUB_TOKEN" || !key.startsWith("GITHUB_"), `${key} overrides a GitHub-provided variable`);
+    }
+  }
+});
+
+test("cached test targets retain platform isolation and only named profile or report outputs", () => {
+  const nx = JSON.parse(readFileSync(new URL("../../nx.json", import.meta.url)));
+  const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8" }).split("\0").filter((p) => /(^|\/)project\.json$/.test(p));
+  for (const path of files) {
+    const project = JSON.parse(readFileSync(path, "utf8"));
+    for (const [name, target] of Object.entries(project.targets)) {
+      const effective = { ...nx.targetDefaults[name], ...target };
+      if (!name.startsWith("test") || !effective.cache) continue;
+      assert.ok(effective.inputs.some((input) => input.runtime === "node -p process.platform"), `${project.name}:${name} has no platform input`);
+      assert.ok(Array.isArray(effective.outputs), `${project.name}:${name} relies on implicit directory outputs`);
+      for (const output of effective.outputs) {
+        assert.match(output, /\.(?:profraw|profdata|json|jsonl|xml|lcov|txt|md|csv)$/, `${project.name}:${name} stores a directory or executable: ${output}`);
+        assert.ok(!output.endsWith("/*"), output);
+      }
     }
   }
 });

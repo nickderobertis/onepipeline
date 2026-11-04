@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copied from dero-skills' create-repo skill and edited only there, never in a copy.
 # source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/budgets/actions-budget-figures.sh
-# version: 10
-# sha256: 13ac7d79aaa3902dc7cfe87449283a05ba397fbc0612701e9b788ed59daf438d
+# version: 11
+# sha256: 4e712406a1b09dac07d496be28d6a71141958de3259efb5c85f1dc23744fa5a4
 #
 # The GitHub Actions budget figures, measured from onevcs's read-only host answers
 # and reported to `onebudgetspec check` (a `measure: reported` budget's command).
@@ -13,9 +13,10 @@
 #
 #   scripts/actions-budget-figures.sh longest-job --stage pr|cd [--release TAG] [--repo OWNER/NAME] [--now TIMESTAMP] [--exclude-workflow NAME]...
 #   scripts/actions-budget-figures.sh job-count   --stage pr|cd [--release TAG] [--repo OWNER/NAME] [--now TIMESTAMP] [--exclude-workflow NAME]...
-#   scripts/actions-budget-figures.sh release-cycle-time        [--release TAG] [--repo OWNER/NAME] [--now TIMESTAMP]
+#   scripts/actions-budget-figures.sh release-cycle-time        [--release TAG] [--repo OWNER/NAME] [--now TIMESTAMP] --published-paths FILE
 #   scripts/actions-budget-figures.sh release-read-requests     [--release TAG] [--repo OWNER/NAME] [--exclude-workflow NAME]...
 #   scripts/actions-budget-figures.sh pr-read-requests          [--release TAG] [--repo OWNER/NAME]
+#   scripts/actions-budget-figures.sh cache-use                 [--release TAG] [--repo OWNER/NAME]
 #
 # This script names no workflow of its own: which push workflows deliver nothing is
 # each repository's to say, with --exclude-workflow in its CD budgets' commands. A
@@ -54,19 +55,25 @@ if [ -z "${ONEBUDGETSPEC_RESULT:-}" ]; then
 fi
 
 figure="${1:-}"
+if [ "$figure" = cache-use ]; then
+  shift
+  command -v node >/dev/null 2>&1 || missing "node is not on PATH" "install Node.js 24 and rerun this budget"
+  # llmlint: ignore[typescript_and_npm_launched_via_bun] This portable consumer helper uses Node built-ins and the shared contract requires node; consuming repositories need no bun package for it.
+  exec node "$(dirname "$0")/nx-remote-cache.mjs" cache-use "$@"
+fi
 case "$figure" in
   longest-job | job-count) takes="stage release repo now exclude-workflow" ;;
-  release-cycle-time) takes="release repo now" ;;
+  release-cycle-time) takes="release repo now published-paths" ;;
   release-read-requests) takes="release repo exclude-workflow" ;;
   pr-read-requests) takes="release repo" ;;
   "") usage "name a figure" ;;
   *) usage "unknown figure: $figure" ;;
 esac
 shift
-stage="" release="" repo="" now="" excludes=()
+stage="" release="" repo="" now="" published_paths="" excludes=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --stage | --release | --repo | --now | --exclude-workflow) ;;
+    --stage | --release | --repo | --now | --exclude-workflow | --published-paths) ;;
     *) usage "unknown argument: $1" ;;
   esac
   case " $takes " in
@@ -79,6 +86,7 @@ while [ $# -gt 0 ]; do
     --release) release=$2 ;;
     --repo) repo=$2 ;;
     --now) now=$2 ;;
+    --published-paths) published_paths=$2 ;;
     --exclude-workflow) excludes+=("$2") ;;
   esac
   shift 2
@@ -88,6 +96,19 @@ case "$takes" in
 esac
 [ "$stage" != pr ] || [ "${#excludes[@]}" -eq 0 ] ||
   usage "--exclude-workflow applies to the CD figures only, not --stage pr"
+
+if [ "$figure" = release-cycle-time ]; then
+  [ -n "$published_paths" ] || usage "release-cycle-time needs --published-paths FILE"
+  [ -f "$published_paths" ] && [ -r "$published_paths" ] ||
+    missing "cannot read published paths file $published_paths" "restore the repository's published artifact pathspecs file"
+  pathspecs=()
+  while IFS= read -r spec || [ -n "$spec" ]; do
+    [[ "$spec" =~ ^[[:space:]]*(#|$) ]] && continue
+    pathspecs+=("$spec")
+  done <"$published_paths"
+  [ "${#pathspecs[@]}" -gt 0 ] ||
+    missing "published paths file $published_paths is empty" "list the files each published artifact is built from"
+fi
 
 command -v jq >/dev/null 2>&1 || die "jq is not on PATH: install jq (https://jqlang.org) where this figure is measured"
 # The workflow names --exclude-workflow gave, as a JSON array. An empty array is
@@ -233,7 +254,8 @@ cd_selection() {
 }
 
 pr_selection() {
-  local rc unmapped number head merged answers=()
+  local rc unmapped number head merged merge changed answers=()
+  local omitted='[]'
   rc=$(release_changes) || exit 1
   unmapped=$(jq -r '[.commits[] | select(.change == null) | .sha] | join(", ")' "$rc")
   [ -z "$unmapped" ] ||
@@ -241,17 +263,31 @@ pr_selection() {
       "land every change by squash or merge commit through a pull request, or give this repository no pull-request budget"
   [ "$(jq '.changes | length' "$rc")" -gt 0 ] ||
     missing "$release carries no pull request" "measure a release that merged at least one pull request"
-  jq -r '.changes[] | "\(.number) \(.head_sha) \(.merged_at)"' "$rc" >"$work/changes" ||
+  jq -r '.changes[] | "\(.number) \(.head_sha) \(.merged_at) \(.merge_commit_sha)"' "$rc" >"$work/changes" ||
     die "onevcs host release-changes answered no changes"
-  while read -r number head merged; do
+  while read -r number head merged merge; do
     [[ "$number" =~ ^[1-9][0-9]*$ && "$head" =~ ^[0-9a-f]{40}$ ]] ||
       die "onevcs host release-changes answered a change with no number or head SHA: $number $head"
     [ "$merged" != null ] ||
       missing "#$number has no merged_at" "check on GitHub that #$number was merged rather than closed"
+    if [ "$figure" = release-cycle-time ]; then
+      if ! [[ "$merge" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "$merge^1" 2>/dev/null; then
+        missing "#$number merge commit $merge or its parent is absent from the local clone" "check out this repository with fetch-depth: 0"
+      fi
+      changed=$(git diff --name-only "$merge^1" "$merge" -- "${pathspecs[@]}") ||
+        missing "cannot match #$number against $published_paths" "check the file's git pathspecs and fetch-depth: 0"
+      if [ -z "$changed" ]; then
+        omitted=$(jq -c --arg n "$number" '. + ["#\($n): left out, changes no published path"]' <<<"$omitted")
+        continue
+      fi
+    fi
     answers+=("$(fetch "change-checks-$number-$head-$(safe "$merged")" change-checks \
       --change "$number" --head "$head" --merged-at "$merged")") || exit 1
   done <"$work/changes"
-  jq -n '[inputs] | {blocks: map({label: "#\(.change.number)", number: .change.number,
+  if [ "$figure" = release-cycle-time ] && [ "${#answers[@]}" -eq 0 ]; then
+    missing "$release carries no pull request that changes a published path" "measure a release that carries a published artifact change"
+  fi
+  jq -n --argjson omitted "$omitted" '[inputs] | {omitted: $omitted, blocks: map({label: "#\(.change.number)", number: .change.number,
                                    head: .change.head_sha, merged_at: .change.merged_at, runs, cost}),
                      answers: map({query: "#\(.change.number)", cost})}' "${answers[@]}"
 }
@@ -318,7 +354,7 @@ def release_cycle_time:
   | (first($rows[] | select(.missing)) // null) as $gap
   | if $gap then $gap
     else {value: ([$rows[] | .checks + .tail] | max),
-          detail: ([$rows[] | "\(.label): checks \(.checks)s + merge to release \(.tail)s"] | join("\n"))} end;
+          detail: (([$rows[] | "\(.label): checks \(.checks)s + merge to release \(.tail)s"] + (.omitted // [])) | join("\n"))} end;
 
 def requests: [.cost.requests[] | "  \(.)"];
 def release_read_requests:

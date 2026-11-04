@@ -88,7 +88,18 @@ const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
  * `ONEPIPELINE_NX_SHOW_OUTPUT` already exported failed here for that reason.
  */
 function run(args, env = {}, cwd = root) {
-  const inherited = { ...process.env, ...env };
+  // Local fixture tasks must never write into the enclosing CI job's shared
+  // cache or recording stream. Explicit event cases below supply their context.
+  const inherited = { ...process.env };
+  for (const name of Object.keys(inherited)) {
+    if (
+      name.startsWith("GITHUB_") ||
+      name.startsWith("ACTIONS_") ||
+      name.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_")
+    )
+      delete inherited[name];
+  }
+  Object.assign(inherited, env);
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete inherited[name];
   }
@@ -473,6 +484,34 @@ describe("the Rust targets' cache inputs", () => {
       !files.includes("tests/contract.rs"),
       "onepipeline-e2e:test hashes the contract binary",
     );
+  });
+});
+
+describe("fixture cache isolation", () => {
+  it("runs real fixture Nx without inheriting its enclosing CI identity or sidecar", (t) => {
+    const repo = scratchRepository(t);
+    const inherited = {
+      GITHUB_ACTIONS: "true",
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: "http://127.0.0.1:1",
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: "enclosing-token",
+    };
+    const previous = Object.fromEntries(
+      Object.keys(inherited).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, inherited);
+    try {
+      const script =
+        '[ -z "$GITHUB_ACTIONS" ] && [ -z "$NX_SELF_HOSTED_REMOTE_CACHE_SERVER" ] && bash scripts/nx.sh run onepipeline-npm:format-check';
+      const leaking = spawnSync("bash", ["-c", script], { cwd: repo.path, env: process.env });
+      assert.notEqual(leaking.status, 0, "the guard must detect inherited CI state");
+      const isolated = run(["-c", script], { NX_DAEMON: "false" }, repo.path);
+      assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 
@@ -868,7 +907,7 @@ case "$1" in
   _crate-test-archive | _crate-lint) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
-    tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_]*\\)\\".*/\\1/p" justfile)"
+    tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_-]*\\)\\".*/\\1/p" justfile)"
     [ -n "$tier" ] || { echo "just double: '$1' runs no tier" >&2; exit 1; }
     name="$(sed -n 's/.*LLVM_PROFILE_FILE_NAME="\\([^"]*\\)".*/\\1/p' justfile)"
     name="\${name//\\$1/$tier}"; name="\${name//%p/$$}"; name="\${name//%14m/0}"
@@ -886,6 +925,9 @@ esac
     "_note-test",
     "_codex-server-test",
     "_pooled_slot-test",
+    "_version-contract-test",
+    "_version-e2e-test",
+    "_version-package-test",
   ];
 
   it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
@@ -912,7 +954,9 @@ esac
       };
     };
     const tiersIn = (merged) =>
-      merged.map((profile) => profile.match(/^onepipeline-([a-z0-9_]+)-/)?.[1]).sort();
+      merged
+        .map((profile) => profile.match(/^onepipeline-([a-z0-9_-]+)-[0-9]+-[0-9]+\.profraw$/)?.[1])
+        .sort();
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
@@ -923,6 +967,9 @@ esac
       "note",
       "pooled_slot",
       "rest",
+      "version-contract",
+      "version-e2e",
+      "version-package",
     ]);
 
     // Only the note tier's inputs change; the budget record the e2e tier
@@ -943,6 +990,9 @@ esac
       "note",
       "pooled_slot",
       "rest",
+      "version-contract",
+      "version-e2e",
+      "version-package",
     ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
@@ -1111,17 +1161,23 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
       "the journeys timed a binary other than the one the build made",
     );
 
-    // Unchanged, both replay together: a warm cache builds nothing.
+    // The producer build may replay; the timed record requires its executable
+    // and remains uncached until that record contract can attest the digest.
     const warm = check(repo);
     assert.equal(warm.result.status, 0, warm.result.stderr);
-    assert.deepEqual(Object.keys(warm.spans), [], JSON.stringify(warm.spans));
+    assert.deepEqual(
+      Object.keys(warm.spans),
+      ["stop-verdict-journeys"],
+      JSON.stringify(warm.spans),
+    );
   });
 
-  it("keys the build on exactly the timed run's inputs, so the two replay or run together", () => {
+  it("keys the cached producer on the uncached timed run's build inputs", () => {
     // `test`'s inputs are held to the record fingerprint elsewhere; these are
-    // held to `test`'s, so a cached build can never stand beside a run that
-    // misses, nor a stale one beside a run that replays.
+    // held to `test`'s so a producer keyed on stale inputs cannot stand beside
+    // the uncached timed run. The journey also checks its executable locally.
     const tier = project("onepipeline-stop-verdict");
+    assert.equal(tier.targets.test.cache, false);
     assert.equal(tier.targets["test-build"].cache, true);
     assert.deepEqual(tier.targets["test-build"].inputs, tier.targets.test.inputs);
   });

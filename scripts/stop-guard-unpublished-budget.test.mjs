@@ -514,8 +514,30 @@ test("the fingerprint and the producing tier's Nx inputs name one set of files",
   const root = fileURLToPath(new URL("../", import.meta.url));
   const nx = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
   const tier = JSON.parse(readFileSync(join(root, "tests/stop_verdict/project.json"), "utf8"));
-  const expand = (input) =>
-    nx.namedInputs[input] ? nx.namedInputs[input].flatMap(expand) : [input];
+  // Runtime digests cover manifest inputs, while the platform and digest script
+  // are cache machinery rather than files compiled into the producing binary.
+  const expand = (input) => {
+    if (typeof input === "string") {
+      if (
+        [
+          "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+          "{workspaceRoot}/.github/nx-version-files",
+          "{workspaceRoot}/scripts/ensure-test-archive.sh",
+        ].includes(input)
+      )
+        return [];
+      return nx.namedInputs[input] ? nx.namedInputs[input].flatMap(expand) : [input];
+    }
+    if (
+      input.runtime === "node -p process.platform" ||
+      input.runtime?.endsWith("--ecosystem files")
+    )
+      return [];
+    if (/--ecosystem cargo(?: --keep-version)?$/.test(input.runtime ?? ""))
+      return ["Cargo.toml", "Cargo.lock"];
+    if (input.runtime?.endsWith("--ecosystem npm")) return ["package.json", "package-lock.json"];
+    assert.fail(`unrecognized build input: ${JSON.stringify(input)}`);
+  };
   const declared = new Set(
     tier.targets.test.inputs
       .flatMap(expand)

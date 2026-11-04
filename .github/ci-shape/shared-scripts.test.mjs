@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const upstream = {
+  "scripts/actions-budget-figures.sh": "a3606ff3d00be139d52a7cbb2905f45e2ade99383417be31cc74cc7ce6c39eba",
   "scripts/nx-remote-cache.mjs": "4445c0d8d5f6045bb2b14b19cd03f9600b6b98f88dc689421d98d3ef996664b6",
   "scripts/nx-version-free-inputs.mjs": "fdd4f59fc98a0073dbefdbaa0f08f4b58432bbf8e55d315865f951e0151b19b2",
 };
@@ -21,3 +22,22 @@ for (const [path, digest] of Object.entries(upstream)) {
     );
   });
 }
+
+test("formatter and linter exclusions add only the digest-guarded upstream copies", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { parse } = await import("yaml");
+  const base = (path) => execFileSync("git", ["show", `96c876ab:${path}`], { encoding: "utf8" });
+  const current = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  const exact = ["scripts/nx-remote-cache.mjs", "scripts/nx-version-free-inputs.mjs"];
+  const before = parse(base("llmlint.yml"));
+  const after = parse(current("llmlint.yml"));
+  assert.deepEqual(after.files.exclude.filter((p) => !before.files.exclude.includes(p)), exact);
+  after.files.exclude = after.files.exclude.filter((p) => !exact.includes(p));
+  assert.deepEqual(after, before, "no other lint rule or setting may be loosened");
+  const biome = JSON.parse(current("biome.jsonc").split("\n").filter((line) => !line.trim().startsWith("//")).join("\n"));
+  assert.deepEqual(biome.files.includes.filter((p) => p.startsWith("!!")), exact.map((p) => `!!${p}`));
+  biome.files.includes = biome.files.includes.filter((p) => !p.startsWith("!!"));
+  assert.deepEqual(biome, JSON.parse(base("biome.json")));
+  assert.match(current("llmlint.yml"), /Upstream-owned copies/);
+  assert.match(current("biome.jsonc"), /Upstream-owned copies/);
+});
