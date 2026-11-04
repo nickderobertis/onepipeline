@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.100.0](https://github.com/nickderobertis/onepipeline/compare/v0.99.0...v0.100.0) - 2026-11-04
+
+### Added
+
+- surface each failing check, required or not, and what holds a release ([#1382](https://github.com/nickderobertis/onepipeline/pull/1382))
+
+### Fixed
+
+- *(test)* wait for the re-read red check to be recorded before the run settles ([#1394](https://github.com/nickderobertis/onepipeline/pull/1394))
+
 ## [0.99.0](https://github.com/nickderobertis/onepipeline/compare/v0.98.4...v0.99.0) - 2026-11-03
 
 ### Added
