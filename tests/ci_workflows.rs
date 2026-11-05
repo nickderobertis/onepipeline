@@ -61,15 +61,8 @@ fn is_required(name: &str) -> bool {
     required_contexts().iter().any(|context| context == name)
 }
 
-/// The conditions a required job may carry. Each one either always holds on a
-/// pull request or skips the job — and a skipped job reports its context as
-/// passed — so none of them can leave a context unreported. A new condition is
-/// a new way to be unreported, and has to be argued for here. The second is
-/// `test-macos`'s: it skips release-plz's own release pull request.
-const ALLOWED_CONDITIONS: &[&str] = &[
-    "github.event_name == 'pull_request'",
-    "github.event_name == 'pull_request' && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)",
-];
+/// Required jobs run on every pull request, including release branches.
+const ALLOWED_CONDITIONS: &[&str] = &["github.event_name == 'pull_request'"];
 
 fn triggers(parsed: &Value) -> &Value {
     parsed

@@ -326,17 +326,10 @@ jobs:
             echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke." >&2
             exit 1
           fi
-      - name: Whether this pull request's tests are already proven
-        id: shortcut
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
       - name: Read the exact CI tool versions
         id: ci-tools
-        if: steps.shortcut.outputs.skip != 'true'
         run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2.9.2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           shared-key: test-linux
           save-if: false
@@ -345,41 +338,33 @@ jobs:
       # visual-docs capture's and left it no headroom under 30 minutes. After
       # rust-cache, so the key stays the one main's warm run saves.
       - name: Read the MSRV from Cargo.toml
-        if: steps.shortcut.outputs.skip != 'true'
         id: msrv
         run: |
           version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
           [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: actions/setup-node@v4
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           tool: ${{ steps.ci-tools.outputs.linux_tools }}
       - uses: actions/setup-python@v5
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
       - name: What the bootstrap tools are built from
-        if: steps.shortcut.outputs.skip != 'true'
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
-        if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -389,7 +374,6 @@ jobs:
       # Also provisions `strace` and the unprivileged user namespace, which the
       # Linux-only e2e journeys refuse without.
       - name: Bootstrap
-        if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
       # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
       # cannot turn a failed run green); the archive is the instrumented test
@@ -403,7 +387,6 @@ jobs:
       # reached by no `check`, its credential required above, selected by the same
       # affected answer as the rest of this job.
       - name: Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
-        if: steps.shortcut.outputs.skip != 'true'
         id: gate
         env:
           # llmlint: ignore-block[least_privilege_grants] the live smoke's PAT:
@@ -415,7 +398,7 @@ jobs:
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
       - name: Keep the per-test profile records
-        if: always() && steps.shortcut.outputs.skip != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-profile-test-linux
@@ -491,21 +474,14 @@ jobs:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
         run: node scripts/nx-remote-cache.mjs ready
-      - name: Whether this pull request's tests are already proven
-        id: shortcut
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
       - name: Read the exact CI tool versions
         id: ci-tools
-        if: steps.shortcut.outputs.skip != 'true'
         run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
       # the checkout and the temp directory every journey writes its scratch
       # repositories into, trusted so the Defender filter does not scan it,
       # and Defender's real-time scan kept off the toolchain's directories too.
       - uses: samypr100/setup-dev-drive@v3
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           drive-size: 60GB
           drive-format: ReFS
@@ -516,40 +492,32 @@ jobs:
             TEMP,{{ DEV_DRIVE }}/tmp
             TMP,{{ DEV_DRIVE }}/tmp
       - name: Keep Defender's real-time scan off the build and the suite
-        if: steps.shortcut.outputs.skip != 'true'
         shell: pwsh
         run: |
           Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
           New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
       - uses: Swatinem/rust-cache@v2.9.2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           shared-key: test-windows
           save-if: false
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
       - uses: actions/setup-node@v4
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           tool: ${{ steps.ci-tools.outputs.quick_tools }}
       - uses: actions/setup-python@v5
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
       - name: What the bootstrap tools are built from
-        if: steps.shortcut.outputs.skip != 'true'
         id: pins
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
-        if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -557,7 +525,6 @@ jobs:
             ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Bootstrap
-        if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just bootstrap
       # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
@@ -565,7 +532,6 @@ jobs:
       # README's one-liner names no ref: that is the install a user runs, so it is
       # proven on every pull request this job's affected answer selects.
       - name: Clippy, suite, launcher and install proofs (affected projects)
-        if: steps.shortcut.outputs.skip != 'true'
         id: gate
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
@@ -573,12 +539,12 @@ jobs:
       # On Windows there are no process groups to make a leaked process visible
       # afterwards, so what was still running is read while it is still true.
       - name: What was still running when it stopped
-        if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
+        if: (failure() || cancelled())
         continue-on-error: true
         shell: pwsh
         run: Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | Format-Table -AutoSize -Wrap
       - name: Keep the per-test profile records
-        if: always() && steps.shortcut.outputs.skip != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-profile-test-windows
@@ -607,7 +573,7 @@ jobs:
       - cancel: nx-cache
 
   test-macos:
-    if: github.event_name == 'pull_request' && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event_name == 'pull_request'
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
     # a cold build, with about a quarter's headroom.
@@ -652,42 +618,29 @@ jobs:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
         run: node scripts/nx-remote-cache.mjs ready
-      - name: Whether this pull request's tests are already proven
-        id: shortcut
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
       - name: Read the exact CI tool versions
         id: ci-tools
-        if: steps.shortcut.outputs.skip != 'true'
         run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2.9.2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           shared-key: test-macos
           save-if: false
       - uses: actions/setup-node@v4
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           node-version: ${{ steps.ci-tools.outputs.node }}
       - uses: taiki-e/install-action@v2
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           tool: ${{ steps.ci-tools.outputs.quick_tools }}
       - uses: actions/setup-python@v5
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
       - uses: astral-sh/setup-uv@v6
-        if: steps.shortcut.outputs.skip != 'true'
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
       - name: What the bootstrap tools are built from
-        if: steps.shortcut.outputs.skip != 'true'
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
-        if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -695,23 +648,21 @@ jobs:
             ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Bootstrap
-        if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
       # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
       # documented install it runs reaches the remote default branch, because
       # README's one-liner names no ref: that is the install a user runs, so it is
       # proven on every pull request this job's affected answer selects.
       - name: Clippy, suite, launcher and install proofs (affected projects)
-        if: steps.shortcut.outputs.skip != 'true'
         id: gate
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       - name: What was still running when it stopped
-        if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
+        if: (failure() || cancelled())
         continue-on-error: true
         run: ps -ef
       - name: Keep the per-test profile records
-        if: always() && steps.shortcut.outputs.skip != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-profile-test-macos

@@ -3,12 +3,11 @@
 //
 // - `lint`, `test-linux`, `test-windows` and `test-macos`, by those ids, unnamed,
 //   on the runners their names say, each bounded at its ruled timeout, each
-//   starting on every pull request (test-macos on all but release-plz's own) and
+//   starting on every pull request, including release branches, and
 //   none waiting on another job;
 // - the visual docs captured and judged as steps of `lint`, through screencomp's
 //   composite actions, and never through its reusable workflow from ci.yml;
-// - the release pull request's shortcut asked by the three test jobs, gating
-//   their work, and never by `lint`;
+// - release branches take the ordinary four-job path without shortcuts;
 // - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
@@ -44,7 +43,7 @@ const CONDITION = {
   lint: ON_PULL_REQUESTS,
   "test-linux": ON_PULL_REQUESTS,
   "test-windows": ON_PULL_REQUESTS,
-  "test-macos": `${ON_PULL_REQUESTS} && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)`,
+  "test-macos": ON_PULL_REQUESTS,
 };
 const TESTS = ["test-linux", "test-windows", "test-macos"];
 
@@ -309,45 +308,16 @@ describe("the visual docs", () => {
   });
 });
 
-describe("the release pull request's shortcut", () => {
-  for (const id of TESTS) {
-    it(`is asked first by \`${id}\`, and gates every step after it`, () => {
-      // Cache plumbing remains active even when the temporary shortcut skips tests.
-      const all = steps(ci.jobs[id]).filter((step) =>
-        !runs(step).includes("nx-remote-cache.mjs") &&
-        !uses(step).startsWith("op-nx/github-cache/") &&
-        !String(step.with?.name ?? "").startsWith("nx-cache-entries-") &&
-        step.cancel !== "nx-cache",
-      );
-      const at = all.findIndex((step) => step.id === "shortcut");
-      assert.ok(at >= 0, `\`${id}\` does not ask the shortcut`);
-      assert.match(runs(all[at]), /^node scripts\/release-pr-shortcut\.mjs /);
-      // Only the checkout, and a check that a credential is present, which a
-      // shortcut must not let a run pass without.
-      const before = all.slice(0, at);
-      assert.ok(
-        before.every(
-          (step) =>
-            uses(step).startsWith("actions/checkout@") ||
-            (uses(step) === "" && Object.keys(step.env ?? {}).every((name) => name.startsWith("HAS_"))),
-        ),
-        `\`${id}\` does work before asking whether it is owed`,
-      );
-      for (const step of all.slice(at + 1)) {
-        const gated =
-          String(step.if ?? "").includes("steps.shortcut.outputs.skip != 'true'") ||
-          String(step.if ?? "").includes("steps.gate.outcome == 'failure'");
-        assert.ok(gated, `\`${id}\`'s "${step.name ?? uses(step)}" runs on a shortcut`);
+describe("release branches use the ordinary four-job path", () => {
+  for (const id of Object.keys(FOUR)) {
+    it(`keeps ${id} free of release shortcuts`, () => {
+      assert.equal(ci.jobs[id].if, ON_PULL_REQUESTS);
+      for (const step of steps(ci.jobs[id])) {
+        assert.ok(!JSON.stringify(step).includes("shortcut"));
+        assert.ok(!JSON.stringify(step).includes("release-plz-"));
       }
     });
   }
-
-  it("is never asked by `lint`", () => {
-    for (const step of steps(ci.jobs.lint)) {
-      assert.ok(!runs(step).includes("release-pr-shortcut"), "`lint` asks the shortcut");
-      assert.ok(!String(step.if ?? "").includes("shortcut"), "`lint` reads the shortcut");
-    }
-  });
 });
 
 describe("the required contexts", () => {

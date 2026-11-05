@@ -160,23 +160,13 @@ telemetry the run already produced, never measured afresh:
 
 Every other check of the root `budgets.yaml` excludes both labels.
 
-The release-PR shortcut and macOS release-branch skip remain: the demonstration
-found promoted results evicted under build-cache pressure, so replay does not yet
-justify retiring them. The four CI jobs share small Nx test results through
-the pinned create-repo scripts. CI reads exact test/task tools, Node, Python and
-uv versions from `.github/ci-tool-versions.json`; cached targets hash those pins.
-Existing Rust toolchain and CLI pins keep their own tracked sources.
-Same-repository PRs store named reports and terminal output;
-forks and Dependabot read only. `release-plz.yml` promotes trusted merged-PR
-results to the base scope before release automation, without running tests on
-`main`; a `cache-promote/<PR>` push promotes only into that branch's scope.
-Version-free inputs retain sources, dependency versions and toolchains. The
-three version-reading Rust tests have separate targets; npm tests retain the
-version. Rust coverage tiers and their aggregate stay uncached: LLVM profiles
-are tied to the versioned binary. Quick tiers retain remote replay. Stop-verdict
-journeys stay uncached because their proof requires the producing executable. Test archives build lazily when a tier actually runs.
-The cache-use figure reads saved executions and promotion receipts, never
-re-runs tests, and treats unavailable evidence as missing data.
+The four CI jobs run on every pull request, including release branches.
+Cache only proofs valid for their inputs: exact tools, sources and dependencies;
+retain the version wherever a proof reads it or requires its producing binary.
+Forks and Dependabot read only. Promote trusted merged-PR results before release
+automation without testing `main`; manual promotion writes only its own branch
+scope. Cache-use reads saved executions and receipts and treats unavailable
+evidence as missing data.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `onepipeline:install-documented`, which the three test jobs run, installs the

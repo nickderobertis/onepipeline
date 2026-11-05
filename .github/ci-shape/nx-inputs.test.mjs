@@ -220,6 +220,10 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     const extra = ["onepipeline-npm:build", ...[...versionReaders].filter((id) => id.startsWith("onepipeline-version-"))];
     const now = capture(current, [...new Set([...cached, ...extra])]);
     assertRecordedRelease(current, [...new Set([...cached, ...extra])]);
+    // Manager ruling 229: the retired shortcut and its test are deliberately
+    // deleted; every other historical input still belongs in the union.
+    const retired = new Set(["scripts/release-pr-shortcut.mjs", "tests/ci_jobs/release-pr-shortcut.test.mjs"]);
+    for (const file of retired) assert.ok(!existsSync(join(current, file)), `${file} must remain retired`);
     for (const id of cached) {
       const union = new Set([...now[id].sourceFiles, ...now[id].runtimeFiles]);
       const split = id.startsWith("onepipeline-contract:") ? "contract" : id.startsWith("onepipeline-e2e:") ? "e2e" : id.startsWith("onepipeline:") ? "package" : null;
@@ -228,6 +232,7 @@ test("Nx's own expanded inputs cover every original cached task's files after th
         for (const file of [...moved.sourceFiles, ...moved.runtimeFiles]) union.add(file);
       }
       for (const file of originals[id].sourceFiles) {
+        if (retired.has(file)) continue;
         if (file === "CHANGELOG.md" && !versionReaders.has(id)) continue;
         assert.ok(union.has(file === "biome.json" ? "biome.jsonc" : file), `${id} lost the input ${file}`);
       }
