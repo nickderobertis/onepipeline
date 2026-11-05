@@ -582,6 +582,29 @@ fn a_private_drafts_section_link_lands_on_the_boards_copy_of_the_other_task_thro
     world.release("examples.go");
 }
 
+/// The store configuration in `launch`: the private board homing plans, routing the public
+/// repository's work to the public board.
+fn write_private_home_routed_to_public_board(launch: &Path, github: &GitHub) {
+    let mapping = "      status_mapping:\n        todo: Todo\n        queued: Queued\n        \
+                   in-progress: In Progress\n        unknown: Needs Attention\n        \
+                   done: Done\n        cancelled: Canceled\n";
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  board:\n    plugin: github-projects\n    visibility: private\n    \
+             routes:\n      - to: site\n        repositories: [github.com/{PUBLIC}]\n    \
+             config:\n      owner: owner\n      project_number: {HOME_BOARD}\n      \
+             repository: {PRIVATE}\n      token_env: {TOKEN_ENV}\n      endpoint: {}\n{mapping}\
+             \x20 site:\n    plugin: github-projects\n    visibility: public\n    config:\n      \
+             owner: owner\n      project_number: {PUBLIC_BOARD}\n      repository: {PUBLIC}\n      \
+             token_env: {TOKEN_ENV}\n      endpoint: {}\n{mapping}",
+            github.board(HOME_BOARD),
+            github.board(PUBLIC_BOARD),
+        ),
+    )
+    .expect("the store configuration");
+}
+
 /// A run launched from a plan homed on a private board, whose two public tasks are seen on the
 /// public board only as their neutral views. One task's body links to a heading of the other's:
 /// the view of the linking task links to the other task's view at that heading, in GitHub's
@@ -618,24 +641,7 @@ fn a_private_homes_section_link_lands_on_the_other_tasks_view_through_a_run() {
         }),
     );
     let launch = world.root.clone();
-    let mapping = "      status_mapping:\n        todo: Todo\n        queued: Queued\n        \
-                   in-progress: In Progress\n        unknown: Needs Attention\n        \
-                   done: Done\n        cancelled: Canceled\n";
-    std::fs::write(
-        launch.join("onetaskgraph.yaml"),
-        format!(
-            "sources:\n  board:\n    plugin: github-projects\n    visibility: private\n    \
-             routes:\n      - to: site\n        repositories: [github.com/{PUBLIC}]\n    \
-             config:\n      owner: owner\n      project_number: {HOME_BOARD}\n      \
-             repository: {PRIVATE}\n      token_env: {TOKEN_ENV}\n      endpoint: {}\n{mapping}\
-             \x20 site:\n    plugin: github-projects\n    visibility: public\n    config:\n      \
-             owner: owner\n      project_number: {PUBLIC_BOARD}\n      repository: {PUBLIC}\n      \
-             token_env: {TOKEN_ENV}\n      endpoint: {}\n{mapping}",
-            github.board(HOME_BOARD),
-            github.board(PUBLIC_BOARD),
-        ),
-    )
-    .expect("the store configuration");
+    write_private_home_routed_to_public_board(&launch, &github);
     let public = |id: &str, body: &str| {
         let mut node = crate::harness::agent(id, &[]);
         node["repo"] = json!(format!("github.com/{PUBLIC}"));
@@ -768,4 +774,153 @@ fn a_private_homes_section_link_lands_on_the_other_tasks_view_through_a_run() {
     }
     world.release("examples.go");
     world.release("budgets.go");
+}
+
+/// The views a run itself makes: two public tasks added live to a run of a private home land
+/// canonically in that home through the run's own write-back, which mirrors each as a neutral
+/// view on the public board. A link between them is a link to the other's view at that heading,
+/// where the home's copy of the same link names the home's own issue.
+#[test]
+fn a_section_link_between_public_tasks_a_run_adds_lands_on_the_view_the_run_mirrors() {
+    let name = "github-private-live-view-links";
+    let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(TOKEN_ENV, "loopback-token")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.script("anchor.wait", "hold");
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {PRIVATE: "private", PUBLIC: "public"},
+            "boards": {HOME_BOARD.to_string(): {"public": false},
+                       PUBLIC_BOARD.to_string(): {"public": true}},
+            "issues": [
+                {"id": "plan", "repository": PRIVATE, "title": name, "board": HOME_BOARD,
+                 "status": "Todo", "parent": null,
+                 "body": described("## Plan\n- Keep this home private.", &json!({
+                     "onetaskgraph.classification": "private",
+                     "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                     "onepipeline.concurrency": 1,
+                     "onepipeline.goal": {"text": "Deliver the plan"},
+                 }))},
+                {"id": "anchor", "repository": PRIVATE, "title": "chore: anchor",
+                 "board": HOME_BOARD, "status": "Todo", "parent": "plan",
+                 "body": described(
+                     "## What\nDo anchor.\n\n## Why\nSo the run can settle.\n\n\
+                      ## Acceptance criteria\n- anchor is done.",
+                     &json!({"onepipeline.id": "anchor", "onepipeline.persona": "engineer",
+                             "onetaskgraph.classification": "private"}))},
+            ],
+        }),
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("the launch directory");
+    write_private_home_routed_to_public_board(&launch, &github);
+    let start = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
+    world
+        .run_on(start, "start the private GitHub home")
+        .exited(0);
+    world.until("the anchor to dispatch", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+
+    let public = |id: &str, body: &str| {
+        let mut node = crate::harness::agent(id, &[]);
+        node["repo"] = json!(format!("github.com/{PUBLIC}"));
+        node["classification"] = json!("public");
+        node["parked"] = json!(true);
+        node["title"] = json!(format!("fix: {id}"));
+        node["task"] = json!(body);
+        node
+    };
+    // The write-back copies a live addition out of the run's own shadow store, a folder of
+    // Markdown holding each task under its id's hex, so this is the link's path there.
+    let target_file: String = "budgets".bytes().map(|b| format!("{b:02x}")).collect();
+    let added = [
+        public(
+            "examples",
+            &format!(
+                "## What\nShip examples.\n\nRead [the budget]({target_file}.md#budget-details).\n\n\
+                 ## Why\nKeep the link.\n\n## Acceptance criteria\n- The examples ship."
+            ),
+        ),
+        public(
+            "budgets",
+            "## What\nSet budgets.\n\n## Budget details\nUse one request.\n\n\
+             ## Why\nKeep costs down.\n\n## Acceptance criteria\n- The budgets hold.",
+        ),
+    ];
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": added[0]},
+                {"op": "add", "node": added[1]},
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the live additions' write-back to finish", |world| {
+        projection_records(world, name)
+            .iter()
+            .any(|record| record.to_string().contains("examples"))
+    });
+
+    let state = github.state();
+    let titled = |repository: &str, title: &str| {
+        issues(&state)
+            .values()
+            .find(|issue| issue["repository"] == repository && issue["title"] == title)
+            .unwrap_or_else(|| panic!("no {title} in {repository}: {:#}", state["issues"]))
+    };
+    let view = titled(PUBLIC, "fix: examples");
+    let target = titled(PUBLIC, "fix: budgets");
+    let canonical = titled(PRIVATE, "fix: examples");
+    let canonical_target = titled(PRIVATE, "fix: budgets");
+    assert!(
+        on_board(&state, PUBLIC_BOARD).contains(&view["id"].as_str().expect("an id").to_owned()),
+        "the view is not on the public board: {:#}",
+        state["boards"]
+    );
+    let body = view["body"].as_str().expect("the linking view's body");
+    let number = target["number"].as_u64().expect("the target view's number");
+    assert!(
+        body.contains(&format!(
+            "[the budget](https://www.github.com/{PUBLIC}/issues/{number}#user-content-budget-details)"
+        )),
+        "the view the run mirrored does not link to the other task's view: {body}"
+    );
+    let home_number = canonical_target["number"].as_u64().expect("its number");
+    assert!(
+        canonical["body"]
+            .as_str()
+            .expect("the canonical body")
+            .contains(&format!("{PRIVATE}/issues/{home_number}#")),
+        "the home's own copy does not link to the home's issue: {canonical:#}"
+    );
+    for private in [
+        PRIVATE,
+        "service",
+        target_file.as_str(),
+        "board:",
+        canonical["id"].as_str().expect("an id"),
+        canonical_target["id"].as_str().expect("an id"),
+    ] {
+        assert!(
+            !body.contains(private),
+            "the private {private:?} reached the public view: {body}"
+        );
+    }
+    world.release("anchor.go");
 }
