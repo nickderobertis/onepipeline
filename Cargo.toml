@@ -1350,6 +1350,8 @@ onevcs-testing = "0.20.0"
 # **0.14.1 keeps a private source's section links that a public copy carries**
 # (`onetaskgraph-private-link-counterparts`): a link to a record with a counterpart on the
 # public destination lands on that counterpart in its section form rather than as plain text.
+# `a_private_drafts_section_link_lands_on_the_boards_copy_of_the_other_task_through_a_run` in
+# `tests/e2e/private_github_home.rs` fails on 0.14.0.
 onetaskgraph-core = "=0.14.1"
 onetaskgraph-plugin-api = "=0.14.1"
 onetaskgraph-local-md = "=0.14.1"

@@ -398,3 +398,176 @@ fn a_private_github_home_files_a_live_added_public_task_in_its_private_repositor
     assert!(read.contains(&"/repos/owner/library"), "{read:?}");
     world.release("anchor.go");
 }
+
+/// A plan drafted in a local Markdown source declared private is copied by the store onto a
+/// public board, and a run is launched from that copy. A section link between two of its tasks
+/// was authored as a path in the draft; on the board it is a link to the other task's issue, at
+/// that heading, in GitHub's section-link form, and nothing there names the draft. It holds
+/// through the run's own write-back as well as the copy.
+#[test]
+fn a_private_drafts_section_link_lands_on_the_boards_copy_of_the_other_task_through_a_run() {
+    let name = "github-private-draft-links";
+    let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(TOKEN_ENV, "loopback-token")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "private")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.script("examples.wait", "hold");
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {PUBLIC: "public"},
+            "boards": {PUBLIC_BOARD.to_string(): {"public": true}},
+            "issues": [],
+        }),
+    );
+    let launch = world.root.clone();
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  site:\n    plugin: github-projects\n    visibility: public\n    config:\n      \
+             owner: owner\n      project_number: {PUBLIC_BOARD}\n      repository: {PUBLIC}\n      \
+             token_env: {TOKEN_ENV}\n      endpoint: {}\n      status_mapping:\n        \
+             todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        \
+             unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n",
+            github.board(PUBLIC_BOARD),
+        ),
+    )
+    .expect("the store configuration");
+    let public = |id: &str, body: &str| {
+        let mut node = crate::harness::agent(id, &[]);
+        node["repo"] = json!(format!("github.com/{PUBLIC}"));
+        node["classification"] = json!("public");
+        node["title"] = json!(format!("fix: {id}"));
+        node["task"] = json!(body);
+        node
+    };
+    // The draft's file names follow the plan's order, so the link is the one an author writes.
+    let plan = crate::publication_boundary::mixed_plan(
+        name,
+        vec![
+            public(
+                "examples",
+                "## What\nShip examples.\n\nRead [the budget](001-budgets.md#budget-details).\n\n\
+                 ## Why\nKeep the link.\n\n## Acceptance criteria\n- The examples ship.",
+            ),
+            public(
+                "budgets",
+                "## What\nSet budgets.\n\n## Budget details\nUse one request.\n\n\
+                 ## Why\nKeep costs down.\n\n## Acceptance criteria\n- The budgets hold.",
+            ),
+        ],
+        vec![],
+    );
+    let draft = world.plan(name, &plan);
+    let draft_root = world.store();
+    assert!(
+        draft_root
+            .join("tasks")
+            .join(crate::harness::project_id(name))
+            .join("001-budgets.md")
+            .is_file(),
+        "the authored link does not name the draft's file"
+    );
+    let item = crate::harness::global(&draft);
+    let report = world.on_onevcs(|| {
+        world.store_call_with(&[(TOKEN_ENV, "loopback-token")], |engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one draft"),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new("site")
+                        .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the store copies the draft: {error}"))
+        })
+    });
+    let board_plan = report.items[0]
+        .action
+        .destination()
+        .unwrap_or_else(|| panic!("the copy reports where the plan landed: {report:?}"))
+        .to_string();
+
+    // Launched from the board's copy, with the board as the only source this run can read.
+    let start = from_the_launch_directory(&world, &launch, &["start", &board_plan, "--detach"]);
+    world.run_on(start, "start the board's copy").exited(0);
+    world.until("the linking task to dispatch", |world| {
+        !crate::publication_boundary::tasks_of(world, "examples").is_empty()
+    });
+    world.until("the engine write-back to land", |world| {
+        projection_records(world, name)
+            .iter()
+            .any(|record| record["outcome"] == "projected")
+    });
+
+    let state = github.state();
+    let titled = |title: &str| {
+        issues(&state)
+            .values()
+            .find(|issue| issue["title"] == title)
+            .unwrap_or_else(|| panic!("no issue {title}: {:#}", state["issues"]))
+    };
+    let linking = titled("fix: examples");
+    let target = titled("fix: budgets");
+    let body = linking["body"].as_str().expect("the linking issue's body");
+    let number = target["number"].as_u64().expect("the target's number");
+    assert!(
+        body.contains(&format!(
+            "[the budget](https://www.github.com/{PUBLIC}/issues/{number}#user-content-budget-details)"
+        )),
+        "the linking issue does not link to the board's copy of the other task: {body}"
+    );
+    assert!(
+        target["body"]
+            .as_str()
+            .expect("the target's body")
+            .contains("<a id=\"budget-details\"></a>\n## Budget details"),
+        "the link's heading has no anchor on the other task's issue: {target:#}"
+    );
+    let dispatched = crate::publication_boundary::tasks_of(&world, "examples");
+    let dispatched = dispatched.last().expect("the dispatched task");
+    assert!(
+        dispatched.contains(&format!("issues/{number}#")),
+        "the dispatched task lost the link: {dispatched}"
+    );
+    let private_root = std::fs::canonicalize(&draft_root).expect("the draft's root");
+    for text in [body, dispatched.as_str()] {
+        for private in [
+            draft_root.to_string_lossy().as_ref(),
+            private_root.to_string_lossy().as_ref(),
+            "001-budgets",
+            "000-examples",
+            draft.as_str(),
+            "plans:",
+        ] {
+            assert!(
+                !text.contains(private),
+                "the private draft's {private:?} reached the board: {text}"
+            );
+        }
+    }
+    world.release("examples.go");
+}
