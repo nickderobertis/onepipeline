@@ -1347,17 +1347,8 @@ onevcs-testing = "0.20.0"
 # holds both the dispatched fragment and its public GitHub heading form.
 # 0.14.0 carries Contract 5: linked write policies return rewritten entries and screened
 # locators; src/boundary.rs delegates both decisions to the onevcs above.
-# **0.14.1 keeps a private source's section links that a public copy carries**
-# (`onetaskgraph-private-link-counterparts`): a link to a record with a counterpart on the
-# public destination lands on that counterpart in its section form rather than as plain text.
-# `a_private_drafts_section_link_lands_on_the_boards_copy_of_the_other_task_through_a_run` in
-# `tests/e2e/private_github_home.rs` fails on 0.14.0.
-# **0.14.2 keeps a section link between a private home's public tasks on their views**
-# (`onetaskgraph-view-counterpart-links`): the view of the linking task links to the other
-# task's view at that heading in the destination's form, where 0.14.1 left its text alone.
-# `a_private_homes_section_link_lands_on_the_other_tasks_view_through_a_run` and
-# `a_section_link_between_public_tasks_a_run_adds_lands_on_the_view_the_run_mirrors` in the same
-# file fail on 0.14.1.
+# **0.14.2 keeps section links between public tasks on a public board**, by copy (from 0.14.1)
+# and by a private home's view: `tests/e2e/private_github_home.rs` fails below it.
 onetaskgraph-core = "=0.14.2"
 onetaskgraph-plugin-api = "=0.14.2"
 onetaskgraph-local-md = "=0.14.2"
