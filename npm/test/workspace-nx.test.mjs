@@ -1261,6 +1261,7 @@ describe("the npm suite's debug build", () => {
   // repository, where `just` is a double that can refuse the build.
   const DOUBLE = `#!/usr/bin/env bash
 echo "$1" >> "$JUST_CALLS"
+printf '%s\n' "\${NX_RUN_COMMANDS_DIRECTLY:-unset}" > "$JUST_RUNNER_MODE"
 [ "$1" != _crate-build ] || [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
 `;
 
@@ -1299,6 +1300,8 @@ echo "$1" >> "$JUST_CALLS"
           PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
           JUST_CALLS: calls,
           BREAK_BUILD: "1",
+          JUST_RUNNER_MODE: join(repo.path, "runner-mode"),
+          NX_RUN_COMMANDS_DIRECTLY: "true",
           // A parent Nx streams its tasks and passes this into the suite.
           // Static output must still save the failed build's task report.
           NX_STREAM_OUTPUT: "true",
@@ -1315,6 +1318,13 @@ echo "$1" >> "$JUST_CALLS"
       }
       assert.equal(result.status, 1, result.stdout + result.stderr);
       assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
+      // Observe the real dependency process's configuration. The output race
+      // is intermittent, so a passing echo alone cannot guard its workaround.
+      assert.equal(
+        readFileSync(join(repo.path, "runner-mode"), "utf8").trim(),
+        "false",
+        "failed builds must bypass Nx's lossy direct-command runner (nrwl/nx#37452)",
+      );
       const cache = join(repo.path, ".nx", "cache");
       const { tasks } = JSON.parse(readFileSync(join(cache, "run.json"), "utf8"));
       const build = tasks.find((task) => task.taskId === "onepipeline:build");
