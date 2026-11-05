@@ -5855,3 +5855,313 @@ fn a_private_node_written_back_is_private_on_the_store_s_own_field() {
     );
     world.release("keep.go");
 }
+
+/// Commit the synthetic replacement declaration the linked boundary reads from the repository.
+fn declare_replacement(world: &World, repository: &Repository) {
+    std::fs::write(
+        repository.checkout.join("private-terms.toml"),
+        "schema_version = 2\nterms = [\"velvetquasar\"]\nreplacements = [{term = \"velvetquasar\", with = \"sample\"}]\n",
+    ).expect("the declaration is written");
+    crate::harness::git(world, &repository.checkout, &["add", "-A"]);
+    crate::harness::git(
+        world,
+        &repository.checkout,
+        &["commit", "-qm", "chore: declare replacement"],
+    );
+    crate::harness::git(world, &repository.checkout, &["push", "origin", "main"]);
+}
+
+#[test]
+fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_content() {
+    for level in ["repository", "ancestor", "reject", "private-item"] {
+        let (world, private, _, _) = scoped_world(&format!("sanitize-body-{level}"));
+        let world = world.with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public");
+        if level == "repository" {
+            declare_replacement(&world, &private);
+        } else if level == "ancestor" {
+            std::fs::write(private.checkout.parent().unwrap().join("private-terms.toml"),
+                "schema_version = 2\nterms = [\"velvetquasar\"]\nreplacements = [{term = \"velvetquasar\", with = \"sample\"}]\n"
+            ).unwrap();
+        }
+        if level != "private-item" {
+            world.script("work.work", "a neutral example\n");
+        }
+        let held = world.rendezvous("work");
+        let mut node = if level == "private-item" {
+            crate::harness::agent("work", &[])
+        } else {
+            lifecycle("work", &[])
+        };
+        if level != "private-item" {
+            node["task"] = json!(format!(
+                "{}\nAn operator's velvetquasar body.\n",
+                node["task"].as_str().unwrap()
+            ));
+        }
+        let project = world.plan("sanitized", &plan_of("sanitized", vec![node]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        let worker = held.arrived_within_a_step(&world, "work to start");
+        world.until_store("the dispatch's status write to land", |world| {
+            world.store_tasks(&project).iter().any(|task| {
+                task["item"]["status"]["category"] == "in-progress"
+                    && (level == "private-item"
+                        || task["item"]["metadata"]["onepipeline.dispatch"]["branch"].is_string())
+            })
+        });
+        let task = world.store_tasks(&project).remove(0);
+        let native = task["id"].as_str().unwrap().strip_prefix("plans:").unwrap();
+        let path = world.store().join("tasks").join(format!("{native}.md"));
+        let before = std::fs::read_to_string(&path).unwrap();
+        if level == "reject" {
+            declare_terms(&world, &private, &["velvetquasar"]);
+        }
+        let poisoned = if level == "private-item" {
+            // A person editing the public Markdown board adds a private repository to the item.
+            let rest = before.strip_prefix("---\n").expect("front matter");
+            let (front, body) = rest.split_once("---\n").expect("closed front matter");
+            let mut front: serde_json::Map<String, Value> =
+                onepipeline_testfakes::yaml::from_str(front).unwrap();
+            front.insert("repositories".into(), json!(["github.com/owner/service"]));
+            format!(
+                "---\n{}---\n{body}",
+                onepipeline_testfakes::yaml::to_string(&front).unwrap()
+            )
+        } else {
+            // Restore the stored spelling after the dispatch's write; the settlement must
+            // sanitize it again, through its own narrow write.
+            let held = before.replace(
+                "An operator's sample body.",
+                "An operator's velvetquasar body.",
+            );
+            assert!(held.contains("An operator's velvetquasar body."), "{held}");
+            held
+        };
+        std::fs::write(&path, &poisoned).unwrap();
+        worker.release();
+        until_settled(&world, "sanitized", "work");
+        if matches!(level, "reject" | "private-item") {
+            let kind = if level == "private-item" {
+                "not-private-destination"
+            } else {
+                "boundary-refused"
+            };
+            world.until("the settlement write to be refused", |world| {
+                projections(world, "sanitized").contains(kind)
+            });
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                poisoned,
+                "a refused write mutated the item"
+            );
+            let record = projections(&world, "sanitized");
+            if level == "private-item" {
+                assert!(
+                    record.contains("The item's `repositories` already named a private repository"),
+                    "{record}"
+                );
+            } else {
+                assert!(
+                    record.contains("it carries a term of a private repository in its text"),
+                    "{record}"
+                );
+                assert!(
+                    record.contains("The term was already on the item before this write"),
+                    "{record}"
+                );
+            }
+        } else {
+            world.until_store(
+                "the settlement to be stored with its body rewritten",
+                |world| {
+                    world.store_tasks(&project).iter().any(|task| {
+                        task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+                            && task.to_string().contains("An operator's sample body.")
+                    })
+                },
+            );
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(!written.contains("velvetquasar"), "{written}");
+        }
+    }
+}
+
+#[test]
+fn settlement_locator_refusals_and_unavailable_answers_never_repeat_the_native_id() {
+    for unavailable in [false, true] {
+        let (world, private, _, _) = scoped_world(&format!("sanitize-locator-{unavailable}"));
+        let world = world.with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public");
+        let nodes = if unavailable {
+            // A direct agent settles without a repository publication fence, so the broken
+            // level is met by its settlement write. The parked node supplies the private scope.
+            let mut anchor = lifecycle("anchor", &[]);
+            anchor["parked"] = json!(true);
+            vec![crate::harness::agent("work", &[]), anchor]
+        } else {
+            world.script("work.work", "a neutral example\n");
+            vec![lifecycle("work", &[])]
+        };
+        let held = world.rendezvous("work");
+        let project = world.plan("screened", &plan_of("screened", nodes));
+        let folder = world
+            .store()
+            .join("tasks")
+            .join(crate::harness::project_id("screened"));
+        let path = folder.join("000-velvetquasar.md");
+        std::fs::rename(folder.join("000-work.md"), &path).unwrap();
+        world.run(&["start", &project, "--detach"]).exited(0);
+        let worker = held.arrived_within_a_step(&world, "work to start");
+        world.until_store(
+            "the dispatch write to land before the declaration changes",
+            |world| {
+                world.store_tasks(&project).iter().any(|task| {
+                    task["item"]["status"]["category"] == "in-progress"
+                        && (unavailable
+                            || task["item"]["metadata"]["onepipeline.dispatch"]["branch"]
+                                .is_string())
+                })
+            },
+        );
+        let before = std::fs::read_to_string(&path).unwrap();
+        if unavailable {
+            std::fs::write(
+                private
+                    .checkout
+                    .parent()
+                    .unwrap()
+                    .join("private-terms.toml"),
+                [0xff],
+            )
+            .unwrap();
+        } else {
+            declare_replacement(&world, &private);
+        }
+        worker.release();
+        until_settled(&world, "screened", "work");
+        let kind = if unavailable {
+            "boundary-unavailable"
+        } else {
+            "boundary-refused"
+        };
+        world.until("the settlement refusal to be journaled", |world| {
+            world
+                .events_of("screened", "planner-surface-queued")
+                .iter()
+                .any(|event| {
+                    event["payload"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(kind))
+                })
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused write mutated the item"
+        );
+        let records = projections(&world, "screened");
+        let refusal: Value = records
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["kind"] == kind)
+            .expect("a refused projection");
+        assert_eq!(refusal["items"], json!(["work"]), "{refusal}");
+        let reason = refusal["reason"].as_str().expect("the store's refusal");
+        // The unavailable fallback redacts the source first, then the item in that list.
+        let locator = if unavailable {
+            "<redacted item 2>"
+        } else {
+            "<redacted item 1>"
+        };
+        assert!(reason.contains(locator), "{reason}");
+        if unavailable {
+            assert!(reason.contains("<redacted source 1>"), "{reason}");
+        } else {
+            assert!(reason.contains("source plans"), "{reason}");
+        }
+        let log = std::fs::read_to_string(world.run_file("screened", "driver.log")).unwrap();
+        let stderr = log
+            .lines()
+            .filter(|line| line.contains("onetaskgraph write-back failed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let journal = world
+            .events_of("screened", "planner-surface-queued")
+            .iter()
+            .filter_map(|event| event["payload"]["message"].as_str())
+            .filter(|message| message.contains(kind))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sink in [&stderr, reason, &journal] {
+            assert!(
+                sink.contains(locator),
+                "the screened locator is missing: {sink}"
+            );
+            assert!(
+                !sink.to_lowercase().contains("velvetquasar"),
+                "a refusal repeated the private spelling: {sink}"
+            );
+        }
+        assert!(
+            !records.to_lowercase().contains("velvetquasar"),
+            "{records}"
+        );
+    }
+}
+
+#[test]
+fn replacements_do_not_relax_publication_checks_or_public_id_derivation() {
+    for replacement in [false, true] {
+        for surface in ["branch", "commit", "title"] {
+            let (world, private, library) =
+                mixed_world(&format!("sanitize-reject-{replacement}-{surface}"));
+            if replacement {
+                declare_replacement(&world, &private);
+            } else {
+                declare_terms(&world, &private, &["velvetquasar"]);
+            }
+            let world = if surface == "branch" {
+                world.with_env("ONEVCS_BRANCH_PREFIX", "velvetquasar/")
+            } else {
+                world
+            };
+            let mut anchor = lifecycle("anchor", &[]);
+            anchor["parked"] = json!(true);
+            let mut work = public("work", &[]);
+            world.script("work.work", "a neutral example\n");
+            if surface == "commit" {
+                world.script("work.commit-saying", "feat: add velvetquasar example");
+            }
+            if surface == "title" {
+                work["title"] = json!("feat: add velvetquasar example");
+            }
+            let run = format!("velvetquasar-{surface}");
+            let project = world.plan(&run, &mixed_plan(&run, vec![anchor, work], vec![]));
+            let before = git_out(&world, &library.origin, &["rev-parse", "main"]);
+            world.run(&["start", &project, "--detach"]).exited(0);
+            until_settled(&world, &run, "work");
+            let refused = world
+                .events_of(&run, "node-settled")
+                .into_iter()
+                .find(|event| event["labels"]["node"] == "work")
+                .unwrap()["payload"]
+                .clone();
+            assert_ne!(refused["status"], "done", "{refused}");
+            let detail = refused["detail"].as_str().expect("a publication refusal");
+            assert!(
+                detail.contains("public output carries a term"),
+                "{surface}: {refused}"
+            );
+            assert!(!detail.to_lowercase().contains("velvetquasar"), "{detail}");
+            assert_eq!(
+                git_out(&world, &library.origin, &["rev-parse", "main"]),
+                before
+            );
+            let launched = world.run_json(&run, "launch.json");
+            let id = launched["public_id"].as_str().expect("a public id");
+            assert!(
+                id.starts_with("run-") && !id.contains("velvetquasar"),
+                "{launched}"
+            );
+            assert_eq!(launched["name_withheld"], true, "{launched}");
+        }
+    }
+}

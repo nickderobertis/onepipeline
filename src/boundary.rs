@@ -399,11 +399,10 @@ pub(crate) fn of_run(plan: &Plan) -> Resolved {
     resolved
 }
 
-/// The store's `WritePolicy`, answered by the linked `onevcs` rather than by the two
-/// commands a standalone store runs: the same visibility and the same check, with the
-/// verdict read through the store's own reading of a check's answer
-/// ([`onetaskgraph_core::boundary::check_verdict`]), so a write the engine makes and one
-/// the store's command line makes are refused in the same words.
+/// The store's `WritePolicy`, answered by the linked `onevcs` rather than subprocesses:
+/// the same visibility, check and sanitisation a standalone store asks for. Each
+/// verdict is read through the store's own command adapter, so writes made by the engine
+/// and the store's command line are refused in the same words.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WritePolicy;
 
@@ -469,6 +468,67 @@ impl onetaskgraph_core::boundary::WritePolicy for WritePolicy {
                 onetaskgraph_core::boundary::RepositoryVisibility::Unknown
             }
         })
+    }
+
+    async fn sanitize_public_write(
+        &self,
+        input: &onetaskgraph_core::boundary::PublicSanitizeInput,
+    ) -> Result<
+        onetaskgraph_core::boundary::SanitizeVerdict,
+        onetaskgraph_core::boundary::PolicyError,
+    > {
+        let destination = match input.destination {
+            onetaskgraph_core::boundary::RepositoryVisibility::Public => onevcs::Visibility::Public,
+            onetaskgraph_core::boundary::RepositoryVisibility::Private => {
+                onevcs::Visibility::Private
+            }
+            onetaskgraph_core::boundary::RepositoryVisibility::Unknown => {
+                onevcs::Visibility::Unknown
+            }
+        };
+        let checked = onevcs::sanitize_public_output(onevcs::SanitizeInput {
+            destination,
+            text: input.text.clone(),
+            // llmlint: ignore-block[changed_behavior_has_e2e] the_linked_sanitizer_preserves_screened_locator_order_and_fails_closed drives this WritePolicy trait through the real linked onevcs, with no substituted sanitizer. Its path, metadata and fixed-entry assertions are integration proof at this adapter's interface; the CLI journeys separately prove settlement bodies and locator refusals, and this adapter interprets none of these fields itself.
+            paths: input.paths.clone(),
+            metadata: input.metadata.clone(),
+            fixed: onevcs::boundary::FixedEntries {
+                text: input.fixed.text.clone(),
+                paths: input.fixed.paths.clone(),
+                metadata: input.fixed.metadata.clone(),
+            },
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            scope: input
+                .scope
+                .clone()
+                .map_or(onevcs::TermScope::Registry, onevcs::TermScope::Identities),
+            replacements: input.replacements.clone(),
+            locators: input
+                .locators
+                .iter()
+                .map(|locator| onevcs::boundary::LocatorInput {
+                    kind: locator.kind,
+                    value: locator.value.clone(),
+                })
+                .collect(),
+        });
+        let (code, answer) = match checked {
+            Ok(answer @ onevcs::SanitizeAnswer::Pass { .. }) => (0, answer),
+            Ok(answer @ onevcs::SanitizeAnswer::Refuse { .. }) => (1, answer),
+            Ok(answer @ onevcs::SanitizeAnswer::Unavailable { .. }) => (2, answer),
+            Err(_) => (
+                2,
+                onevcs::SanitizeAnswer::Unavailable {
+                    reason: onevcs::boundary::Unavailability::Registry,
+                },
+            ),
+        };
+        let stdout = serde_json::to_vec(&answer).unwrap_or_default();
+        Ok(onetaskgraph_core::boundary::sanitize_verdict(
+            input,
+            Some(code),
+            &stdout,
+        ))
     }
 
     async fn check_public_write(
@@ -2401,6 +2461,124 @@ mod tests {
             ),
             Judged::Pass
         );
+    }
+
+    #[test]
+    fn the_linked_sanitizer_preserves_screened_locator_order_and_fails_closed() {
+        use onetaskgraph_core::boundary::{
+            FixedEntries, LocatorEntry, PublicSanitizeInput, RepositoryVisibility,
+            WritePolicy as _, WriteVerdict,
+        };
+        let _home = crate::vcs::scratch_home_held();
+        let root = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("sanitize-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a policy home");
+        std::env::set_var("ONEVCS_HOME", &root);
+        let input = PublicSanitizeInput {
+            destination: RepositoryVisibility::Public,
+            text: vec!["velvetquasar body".into()],
+            paths: vec!["velvetquasar.md".into()],
+            metadata: vec!["velvetquasar title".into()],
+            fixed: FixedEntries::default(),
+            scope: Some(Vec::new()),
+            replacements: vec![onevcs::boundary::Replacement::Replace {
+                term: "velvetquasar".into(),
+                with: "sample".into(),
+            }],
+            locators: vec![
+                LocatorEntry {
+                    kind: onevcs::boundary::LocatorKind::Item,
+                    value: "plans:velvetquasar".into(),
+                },
+                LocatorEntry {
+                    kind: onevcs::boundary::LocatorKind::Source,
+                    value: "plans".into(),
+                },
+            ],
+        };
+        let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+        let answer = runtime
+            .block_on(WritePolicy.sanitize_public_write(&input))
+            .expect("an answer");
+        assert!(
+            matches!(answer.verdict, WriteVerdict::Refuse { .. }),
+            "{answer:?}"
+        );
+        assert_eq!(answer.text, ["sample body"]);
+        assert_eq!(answer.paths, ["sample.md"]);
+        assert_eq!(answer.metadata, ["sample title"]);
+        assert_eq!(
+            serde_json::to_value(&answer.locators).unwrap(),
+            serde_json::json!([
+                {"redacted": true, "kind": "item", "ordinal": 1}, "plans"
+            ])
+        );
+        let mut fixed = input.clone();
+        fixed.locators.clear();
+        fixed.fixed.text.push("velvetquasar fixed".into());
+        fixed.fixed.paths.push("velvetquasar.txt".into());
+        fixed.fixed.metadata.push("velvetquasar fixed title".into());
+        let answer = runtime
+            .block_on(WritePolicy.sanitize_public_write(&fixed))
+            .unwrap();
+        assert!(
+            matches!(answer.verdict, WriteVerdict::Refuse { .. }),
+            "{answer:?}"
+        );
+        assert_eq!(answer.unfixed.len(), 3, "{answer:?}");
+        assert!(answer.unfixed.iter().all(|entry| entry.fixed));
+        fixed.fixed = FixedEntries::default();
+        let answer = runtime
+            .block_on(WritePolicy.sanitize_public_write(&fixed))
+            .unwrap();
+        assert_eq!(answer.verdict, WriteVerdict::Pass);
+        assert_eq!(answer.text, ["sample body"]);
+        assert_eq!(
+            runtime
+                .block_on(WritePolicy.declared_terms(&Default::default()))
+                .unwrap(),
+            None
+        );
+
+        for destination in [RepositoryVisibility::Private, RepositoryVisibility::Unknown] {
+            let mut local = input.clone();
+            local.destination = destination;
+            let answer = runtime
+                .block_on(WritePolicy.sanitize_public_write(&local))
+                .unwrap();
+            assert_eq!(answer.verdict, WriteVerdict::Pass);
+            assert_eq!(answer.text, local.text);
+            assert_eq!(
+                serde_json::to_value(answer.locators).unwrap(),
+                serde_json::json!(["plans:velvetquasar", "plans"])
+            );
+        }
+
+        // A level file containing invalid UTF-8 cannot be read on any platform.
+        std::fs::write(root.join("private-terms.toml"), [0xff]).unwrap();
+        let mut input = input.clone();
+        input.scope = None;
+        let answer = runtime
+            .block_on(WritePolicy.sanitize_public_write(&input))
+            .unwrap();
+        assert!(
+            matches!(answer.verdict, WriteVerdict::Unavailable { .. }),
+            "{answer:?}"
+        );
+        assert!(answer.locators.is_empty(), "{answer:?}");
+        let onevcs_input = serde_json::from_value(serde_json::to_value(&input).unwrap()).unwrap();
+        let linked = onevcs::sanitize_public_output(onevcs_input).unwrap();
+        assert!(matches!(linked, onevcs::SanitizeAnswer::Unavailable { .. }));
+        let command_answer = onetaskgraph_core::boundary::sanitize_verdict(
+            &input,
+            Some(2),
+            &serde_json::to_vec(&linked).unwrap(),
+        );
+        assert_eq!(answer, command_answer);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The directory grammar an edge is refused by at load is the one `onevcs export`

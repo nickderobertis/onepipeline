@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 import { inputFiles, sourceFingerprint } from "./stop-guard-unpublished-build.mjs";
 import { readRecord, slowest } from "./stop-guard-unpublished-record.mjs";
 
@@ -92,8 +93,8 @@ test("a complete current-gate record is read, and the slowest scenario is the on
   const dir = directory();
   const read = readRecord(dir);
   assert.equal(slowest(read, 1, "warm").scenario.scenario, "unreadable");
-  assert.equal(slowest(read, 1, "warm").max, 102_009);
-  assert.equal(slowest(read, 1, "cold").max, 302_009);
+  assert.equal(slowest(read, 1, "warm").median, 102_004);
+  assert.equal(slowest(read, 1, "cold").median, 302_004);
   rmSync(dir, { recursive: true });
 });
 
@@ -317,9 +318,9 @@ const command = fileURLToPath(new URL("./stop-guard-unpublished-budget.mjs", imp
 test("the budget command reports each mode through the SDK, and refuses naming the journey", () => {
   const dir = directory();
   for (const [args, value] of [
-    [[], 0.102009],
-    [["--cold"], 0.302009],
-    [["--scale", "10"], 0.102009],
+    [[], 0.102004],
+    [["--cold"], 0.302004],
+    [["--scale", "10"], 0.102004],
     [["--journey-time"], 90],
   ]) {
     const result = join(dir, "result.json");
@@ -552,4 +553,59 @@ test("the fingerprint and the producing tier's Nx inputs name one set of files",
     ...manifest.prefixes.map(({ directory, prefix }) => `${directory}/${prefix}*`),
   ]);
   assert.deepEqual([...declared].sort(), [...fingerprinted].sort());
+});
+
+test("the latency commands tolerate one outlier but report typically slow calls over budget", () => {
+  const { budgets } = parse(readFileSync(new URL("../budgets.yaml", import.meta.url), "utf8"));
+  for (const [suffix, scale, mode] of [
+    ["", 1, "warm"],
+    ["-cold", 1, "cold"],
+    ["-10x", 10, "warm"],
+  ]) {
+    const budget = budgets.find((row) => row.id === `stop-guard-unpublished-latency${suffix}`);
+    const threshold = budget.threshold;
+    const args = budget.command.slice(2);
+    for (const slow of [false, true]) {
+      const doc = record();
+      const scenarios = doc.workloads.find((row) => row.scale === scale).scenarios;
+      for (const scenario of scenarios) {
+        const typical = slow ? threshold * 1e6 + 40_000 : 40_000;
+        scenario[mode] = {
+          calls_us: [...Array(9).fill(typical), slow ? typical * 11 : 437_000],
+          median_us: typical,
+          max_us: slow ? typical * 11 : 437_000,
+          load1: 46,
+        };
+      }
+      // A different scenario owns the largest maximum, but the last one
+      // owns the largest median and must be the one the command reports.
+      const selected = scenarios.at(-1);
+      const typical = selected[mode].median_us;
+      scenarios[0][mode].calls_us[9] = selected[mode].max_us * 2;
+      scenarios[0][mode].max_us = scenarios[0][mode].calls_us[9];
+      selected[mode].calls_us[5] = typical + 2;
+      selected[mode].calls_us[6] = typical + 2;
+      selected[mode].calls_us[7] = typical + 2;
+      selected[mode].calls_us[8] = typical + 2;
+      selected[mode].median_us = typical + 1;
+      const dir = directory(doc);
+      try {
+        const result = join(dir, "result.json");
+        const ran = spawnSync(process.execPath, [command, ...args], {
+          env: { ...process.env, ONEBUDGETSPEC_RESULT: result, ONEPIPELINE_BUDGET_RECORDS: dir },
+          encoding: "utf8",
+        });
+        assert.equal(ran.status, 0, ran.stderr);
+        const reported = JSON.parse(readFileSync(result, "utf8"));
+        assert.equal(reported.value > threshold, slow, JSON.stringify(reported));
+        assert.equal(reported.value, selected[mode].median_us / 1e6);
+        assert.ok(
+          reported.detail.includes(`slowest scenario ${selected.scenario}, median of 10 calls`),
+        );
+        assert.ok(reported.detail.includes(`(max ${selected[mode].max_us / 1e6}s)`));
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    }
+  }
 });

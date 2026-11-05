@@ -185,13 +185,13 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
   return record;
 }
 
-/** The slowest scenario of one mode at one scale, and its maximum in microseconds. */
+/** The slowest scenario of one mode at one scale, and its median in microseconds. */
 export function slowest(record, scale, mode) {
   const workload = record.workloads.find((row) => row.scale === scale);
   let worst = null;
   for (const scenario of workload.scenarios) {
-    const max = scenario[mode].max_us;
-    if (worst === null || max > worst.max) worst = { max, scenario };
+    const median = scenario[mode].median_us;
+    if (worst === null || median > worst.median) worst = { median, scenario };
   }
   return worst;
 }
