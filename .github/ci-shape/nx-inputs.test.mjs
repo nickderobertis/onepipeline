@@ -303,3 +303,27 @@ test("every cached CI task hashes exact tool pins and rejects a missing runner i
     assert.throws(() => guard(capture(dir, tasks)), /lost the exact tool-version input/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("cached workflow contract journeys hash their budget and figures inputs", { timeout: 120000 }, () => {
+  const dir = fixture();
+  try {
+    const task = "github-workflows:test-ci-shape";
+    const before = capture(dir, [task])[task].hash;
+    const unchanged = [];
+    for (const file of ["budgets.yaml", "scripts/actions-budget-figures.sh"]) {
+      const path = join(dir, file);
+      const original = readFileSync(path, "utf8");
+      // The first changes the registered command the journey asserts; the
+      // second must invalidate the upstream-copy byte-parity proof.
+      const changed = file === "budgets.yaml"
+        ? original.replace("cache-use]", "cache-use-input-probe]")
+        : `${original}\n# cache input probe\n`;
+      assert.notEqual(changed, original, `${file} probe made no edit`);
+      writeFileSync(path, changed);
+      const after = capture(dir, [task])[task].hash;
+      writeFileSync(path, original);
+      if (after === before) unchanged.push(file);
+    }
+    assert.deepEqual(unchanged, [], "workflow contract checks lost inputs they read");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

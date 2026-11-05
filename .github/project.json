@@ -39,13 +39,15 @@
     },
     "test-ci-shape": {
       "command": "node --test .github/ci-shape/*.test.mjs",
-      "//": "Workflow shape and cache journeys read the workflows, copied scripts, workspace input definitions, toolchain and the three version-reading test interfaces.",
+      "//": "Workflow shape and cache journeys read the workflows, copied scripts, budget contracts, workspace input definitions, toolchain and the three version-reading test interfaces.",
       "cache": true,
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/screencomp.toml",
         "{workspaceRoot}/scripts/nx-remote-cache.mjs",
         "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+        "{workspaceRoot}/scripts/actions-budget-figures.sh",
+        "{workspaceRoot}/budgets.yaml",
         {
           "runtime": "node -p process.platform"
         },
