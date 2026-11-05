@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.2](https://github.com/nickderobertis/onepipeline/compare/v0.101.1...v0.101.2) - 2026-11-05
+
+### Added
+
+- *(deps)* link the onevcs and plan store that rewrite declared private terms on screened writes ([#1407](https://github.com/nickderobertis/onepipeline/pull/1407))
+
 ## [0.101.1](https://github.com/nickderobertis/onepipeline/compare/v0.101.0...v0.101.1) - 2026-11-05
 
 ### Fixed
