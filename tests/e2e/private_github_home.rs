@@ -876,6 +876,14 @@ fn a_section_link_between_public_tasks_a_run_adds_lands_on_the_view_the_run_mirr
             .iter()
             .any(|record| record.to_string().contains("examples"))
     });
+    let records = projection_records(&world, name);
+    assert!(
+        records
+            .iter()
+            .any(|record| record["outcome"] == "projected"
+                && record.to_string().contains("examples")),
+        "the live additions were not projected: {records:#?}"
+    );
 
     let state = github.state();
     let titled = |repository: &str, title: &str| {
