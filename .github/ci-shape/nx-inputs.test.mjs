@@ -327,3 +327,33 @@ test("cached workflow contract journeys hash their budget and figures inputs", {
     assert.deepEqual(unchanged, [], "workflow contract checks lost inputs they read");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("cached workflow targets hash their audited transitive workspace inputs", { timeout: 180000 }, () => {
+  const dir = fixture();
+  try {
+    const shape = "github-workflows:test-ci-shape";
+    const tasks = [shape, "github-workflows:lint", "github-workflows:format-check"];
+    const before = capture(dir, tasks);
+    // Each category comes from the real command: plan wrappers, copy-parity
+    // configuration, nextest compilation/listing, and the workspace hash audit.
+    const files = [
+      "scripts/ci-job.sh", "scripts/ci-job-tasks.mjs", "scripts/nx-affected.sh", "scripts/nx.sh",
+      "llmlint.yml", "biome.jsonc", "src/lib.rs", "crates/testfakes/src/lib.rs",
+      "tests/e2e/publication_boundary.rs", "tests/fixtures/human-items.json",
+      "schemas/events.json", "docs/contract.md", ".cargo/config.toml", ".config/nextest.toml",
+      "npm/onepipeline-cli/bin/onepipeline.js", "release/release.py", "README.md",
+    ];
+    const unchanged = [];
+    for (const file of files) {
+      const path = join(dir, file);
+      const original = readFileSync(path);
+      writeFileSync(path, Buffer.concat([original, Buffer.from("\n")]));
+      const after = capture(dir, tasks);
+      writeFileSync(path, original);
+      const readers = file === "biome.jsonc" ? tasks : [shape];
+      for (const id of readers) if (after[id].hash === before[id].hash) unchanged.push(`${id}: ${file}`);
+    }
+    assert.deepEqual(unchanged, [], "cached workflow targets lost audited transitive inputs");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

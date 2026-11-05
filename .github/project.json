@@ -39,23 +39,20 @@
     },
     "test-ci-shape": {
       "command": "node --test .github/ci-shape/*.test.mjs",
-      "//": "Workflow shape and cache journeys read the workflows, copied scripts, budget contracts, workspace input definitions, toolchain and the three version-reading test interfaces.",
+      "//": "Hash and test-selection journeys read the entire workspace. Semantic ecosystem inputs omit package-version and changelog edits; ordinary source changes re-run this proof.",
       "cache": true,
       "inputs": [
-        "{projectRoot}/**/*",
-        "{workspaceRoot}/screencomp.toml",
-        "{workspaceRoot}/scripts/nx-remote-cache.mjs",
-        "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
-        "{workspaceRoot}/scripts/actions-budget-figures.sh",
-        "{workspaceRoot}/budgets.yaml",
+        "wholeWorkspace",
+        "!{workspaceRoot}/**/Cargo.toml",
+        "!{workspaceRoot}/**/Cargo.lock",
+        "!{workspaceRoot}/**/package.json",
+        "!{workspaceRoot}/**/package-lock.json",
+        "!{workspaceRoot}/pyproject.toml",
+        "!{workspaceRoot}/**/CHANGELOG.md",
+        "sharedGlobals",
         {
           "runtime": "node -p process.platform"
         },
-        "{workspaceRoot}/nx.json",
-        "{workspaceRoot}/**/project.json",
-        "{workspaceRoot}/justfile",
-        "{workspaceRoot}/rust-toolchain.toml",
-        "{workspaceRoot}/scripts/ensure-test-archive.sh",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
         },
@@ -64,15 +61,19 @@
         },
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
-        },
-        "{workspaceRoot}/tests/contract.rs",
-        "{workspaceRoot}/tests/e2e/surface.rs",
-        "{workspaceRoot}/tests/package_bundle.rs"
+        }
       ],
       "outputs": []
     },
     "lint": {
-      "command": "node node_modules/@biomejs/biome/bin/biome lint .github"
+      "command": "node node_modules/@biomejs/biome/bin/biome lint .github",
+      "inputs": [
+        "default",
+        "{workspaceRoot}/biome.jsonc",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "syntax-check": {
       "command": "bash -c 'for file in .github/*.mjs .github/tests/*.mjs .github/ci-shape/*.mjs; do node --check \"$file\" || exit; done'"
@@ -87,7 +88,14 @@
       "dependsOn": ["format-check", "lint", "syntax-check", "budgets", "test-ci-shape"]
     },
     "format-check": {
-      "command": "node node_modules/@biomejs/biome/bin/biome format .github"
+      "command": "node node_modules/@biomejs/biome/bin/biome format .github",
+      "inputs": [
+        "default",
+        "{workspaceRoot}/biome.jsonc",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "format": {
       "command": "node node_modules/@biomejs/biome/bin/biome format --write .github"
