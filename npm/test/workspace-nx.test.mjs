@@ -1192,30 +1192,50 @@ echo "$1" >> "$JUST_CALLS"
     );
   });
 
-  it("fails the gate before the suite starts when that build does", (t) => {
-    const repo = scratchRepository(t);
-    mkdirSync(join(repo.path, "bin"));
-    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
-    const calls = join(repo.path, "just.calls");
-    writeFileSync(calls, "");
-    const result = run(
-      ["scripts/nx.sh", "run", "onepipeline-npm:test"],
-      {
-        PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
-        JUST_CALLS: calls,
-        BREAK_BUILD: "1",
-      },
-      repo.path,
-    );
-    assert.equal(result.status, 1, result.stdout);
-    assert.match(result.stderr, /build: broken input/);
-    assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
-    assert.doesNotMatch(
-      result.stderr,
-      /node --test npm\/test/,
-      "the suite ran after a failed build",
-    );
-  });
+  for (const echoFailure of [true, false]) {
+    it(`fails the gate before the suite starts when that build does (terminal echo: ${echoFailure})`, (t) => {
+      const repo = scratchRepository(t);
+      mkdirSync(join(repo.path, "bin"));
+      writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+      const calls = join(repo.path, "just.calls");
+      writeFileSync(calls, "");
+      const result = run(
+        ["scripts/nx.sh", "run", "onepipeline-npm:test", "--outputStyle=static"],
+        {
+          PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+          JUST_CALLS: calls,
+          BREAK_BUILD: "1",
+          // A parent Nx streams its tasks and passes this into the suite.
+          // Static output must still save the failed build's task report.
+          NX_STREAM_OUTPUT: "true",
+          ONEPIPELINE_NX_SHOW_OUTPUT: undefined,
+        },
+        repo.path,
+      );
+      // Model the terminal dropping the task's output without touching Nx's
+      // saved task report. All assertions below must hold in either case.
+      if (!echoFailure) {
+        result.stdout = result.stdout.replaceAll("build: broken input", "");
+        result.stderr = result.stderr.replaceAll("build: broken input", "");
+        assert.doesNotMatch(result.stdout + result.stderr, /build: broken input/);
+      }
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
+      const cache = join(repo.path, ".nx", "cache");
+      const { tasks } = JSON.parse(readFileSync(join(cache, "run.json"), "utf8"));
+      const build = tasks.find((task) => task.taskId === "onepipeline:build");
+      assert.ok(build, JSON.stringify(tasks));
+      assert.equal(build.status, 1);
+      assert.ok(
+        !tasks.some((task) => task.taskId === "onepipeline-npm:test"),
+        JSON.stringify(tasks),
+      );
+      assert.match(
+        readFileSync(join(cache, "terminalOutputs", build.hash), "utf8"),
+        /build: broken input/,
+      );
+    });
+  }
 });
 
 describe("the build targets", () => {

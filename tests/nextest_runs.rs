@@ -348,26 +348,33 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
     );
 }
 
-/// The configuration as it was before its `priority` lines. That is still a run
-/// that leaves tests unrun with no reason, and what CI prints for one is the
-/// subject here. If this nextest no longer strands them, the scheduler has been
-/// fixed upstream: the note in `.config/nextest.toml` and this test are due a
-/// revisit, and the assertion says so.
+/// The wrapper and reporter must explain an incomplete run even if nextest's
+/// scheduler no longer reproduces the bug that first produced this output.
+/// A subprocess fixture supplies that boundary condition; the real scripts
+/// still own recording the exit status and explaining the run afterwards.
 #[test]
 fn a_run_ended_with_tests_unrun_and_no_reason_is_named_by_nextests_exit_status() {
-    let unordered: String = repository_config()
-        .lines()
-        .filter(|line| !line.starts_with("priority = "))
-        .map(|line| format!("{line}\n"))
-        .collect();
-    let fixture = scheduling_fixture("scheduling-unordered", &unordered);
-    let (output, log) = fixture.nextest_run(&["--test-threads", THREADS]);
+    let fixture = Fixture::new(
+        "scheduling-unrun-report",
+        RERUN_MANIFEST,
+        &[(
+            "incomplete-run.sh",
+            "printf '%s\\n' '     Summary [   1.000s] 1/2 tests run: 1 passed' 'warning: 1/2 tests were not run' 'error: test run failed' >&2\nexit 100\n",
+        )],
+    );
+    let shell = bash();
+    let (output, log) = fixture.script(
+        "nextest-run.sh",
+        &[
+            shell.to_str().expect("a UTF-8 bash path"),
+            "incomplete-run.sh",
+        ],
+        "step.log",
+    );
     let unrun = log
         .lines()
         .find(|line| line.contains("tests were not run") || line.contains("test was not run"))
-        .unwrap_or_else(|| {
-            panic!("this nextest no longer strands the queued tests; revisit the priority note:\n{log}")
-        });
+        .expect("the subprocess reports tests left unrun");
     assert!(!unrun.contains("due to"), "nextest gave a reason: {unrun}");
     assert_eq!(
         output.status.code(),
