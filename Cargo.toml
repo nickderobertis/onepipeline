@@ -1347,14 +1347,17 @@ onevcs-testing = "0.20.0"
 # holds both the dispatched fragment and its public GitHub heading form.
 # 0.14.0 carries Contract 5: linked write policies return rewritten entries and screened
 # locators; src/boundary.rs delegates both decisions to the onevcs above.
-onetaskgraph-core = "=0.14.0"
-onetaskgraph-plugin-api = "=0.14.0"
-onetaskgraph-local-md = "=0.14.0"
+# **0.14.1 keeps a private source's section links that a public copy carries**
+# (`onetaskgraph-private-link-counterparts`): a link to a record with a counterpart on the
+# public destination lands on that counterpart in its section form rather than as plain text.
+onetaskgraph-core = "=0.14.1"
+onetaskgraph-plugin-api = "=0.14.1"
+onetaskgraph-local-md = "=0.14.1"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.0"
+onetaskgraph-linear = "=0.14.1"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
