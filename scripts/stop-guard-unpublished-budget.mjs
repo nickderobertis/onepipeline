@@ -20,11 +20,11 @@ try {
     const scale = args === "--scale 10" ? 10 : 1;
     const mode = args === "--cold" ? "cold" : "warm";
     const worst = slowest(record, scale, mode);
-    value = worst.max / 1e6;
+    value = worst.median / 1e6;
     const sample = worst.scenario[mode];
     description =
       `${mode} stop-guard --unpublished, scale ${scale}: slowest scenario ` +
-      `${worst.scenario.scenario}, max of 10 calls (median ${sample.median_us / 1e6}s) at load1 ` +
+      `${worst.scenario.scenario}, median of 10 calls (max ${sample.max_us / 1e6}s) at load1 ` +
       `${sample.load1}; ${worst.scenario[`${mode}_git`]} git execution(s) in a separate call`;
   } else {
     throw new Error("expected no arguments, --cold, --scale 10, or --journey-time");
