@@ -363,13 +363,25 @@ class RealCatalog(Journey):
         self.assertEqual(len(self.host.comments), posted)
         base_files = self.host.artifact_files(base.run_id)
         pull_files = self.host.artifact_files(pull.run_id)
-        self.assertEqual(set(base_files), set(pull_files))
-        # v0.1.1 decides on the rolling file before the own command runs, so a catalog with no other
-        # runnable command starts no history, and says so. MixedCatalog proves history and comparison.
-        self.assertIn('no rolling file saved', ' '.join(self.budget_run(base).get('diagnostics') or [])
-                      + base.markdown() + base.summary)
+        self.assertEqual(set(base_files), {*pull_files, 'rolling-history.json'}, 'only history is added')
         saved = json.loads(base_files['budget-run.json'].decode())
         self.assertEqual([result['id'] for result in saved['results']['results']], [OWN_BUDGET])
+
+    def test_a_base_push_saves_the_own_budget_as_history_a_later_pull_request_reads_as_a_baseline(self):
+        base = self.base_push()
+        self.assert_every_row_stated(base)
+        files = self.host.artifact_files(base.run_id)
+        history = json.loads(files['rolling-history.json'].decode())
+        self.assertEqual([run['head_sha'] for run in history['runs']], [self.base_sha])
+        kept = {result['id']: result for result in history['runs'][0]['results']['results']}
+        self.assertEqual(list(kept), [OWN_BUDGET], 'the only measurement this catalog has is what the history holds')
+        self.assertIsNotNone(kept[OWN_BUDGET]['actual'], 'the entry was saved before the budget was measured')
+
+        pull = self.pull_request()
+        self.assertEqual(pull.exit_code, 0, pull.stdout)
+        row = pull.rows()[OWN_BUDGET]
+        self.assertEqual(row['baseline_n'], 1, row)
+        self.assertIn('minimum 5', row['unavailable'], 'one sample is read, and is too few to compare yet')
 
     def link_node_modules(self):
         (self.repository.path / 'node_modules').symlink_to(ROOT / 'node_modules')
