@@ -39,20 +39,27 @@
     },
     "test-ci-shape": {
       "command": "node --test .github/ci-shape/*.test.mjs",
-      "//": "Hash and test-selection journeys read the entire workspace. Semantic ecosystem inputs omit package-version and changelog edits; ordinary source changes re-run this proof.",
+      "//": "Hash and test-selection journeys read the entire workspace: the runtime digest binds a replay to it, version edits excluded. The named files decide which changes select this proof, because Nx's affected selection reads a file input as a project touch, and so a workspace-wide glob here would select it for every change.",
       "cache": true,
       "inputs": [
-        "wholeWorkspace",
-        "!{workspaceRoot}/**/Cargo.toml",
-        "!{workspaceRoot}/**/Cargo.lock",
-        "!{workspaceRoot}/**/package.json",
-        "!{workspaceRoot}/**/package-lock.json",
-        "!{workspaceRoot}/pyproject.toml",
-        "!{workspaceRoot}/**/CHANGELOG.md",
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/screencomp.toml",
+        "{workspaceRoot}/scripts/nx-remote-cache.mjs",
+        "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+        "{workspaceRoot}/scripts/actions-budget-figures.sh",
+        "{workspaceRoot}/budgets.yaml",
         "sharedGlobals",
         {
           "runtime": "node -p process.platform"
         },
+        {
+          "runtime": "node .github/workspace-proof-input.mjs"
+        },
+        "{workspaceRoot}/nx.json",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/rust-toolchain.toml",
+        "{workspaceRoot}/scripts/ensure-test-archive.sh",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
         },
@@ -61,7 +68,10 @@
         },
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
-        }
+        },
+        "{workspaceRoot}/tests/contract.rs",
+        "{workspaceRoot}/tests/e2e/surface.rs",
+        "{workspaceRoot}/tests/package_bundle.rs"
       ],
       "outputs": []
     },

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -355,5 +355,110 @@ test("cached workflow targets hash their audited transitive workspace inputs", {
       for (const id of readers) if (after[id].hash === before[id].hash) unchanged.push(`${id}: ${file}`);
     }
     assert.deepEqual(unchanged, [], "cached workflow targets lost audited transitive inputs");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the workspace digest moves with what a proof reads and not with version-handled files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "workspace-digest-"));
+  try {
+    const script = fileURLToPath(new URL("../workspace-proof-input.mjs", import.meta.url));
+    const digest = () => run(dir, process.execPath, [script]).trim();
+    const write = (path, content) => {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), content);
+    };
+    run(dir, "git", ["init", "-q"]);
+    const versionHandled = [
+      "Cargo.toml", "Cargo.lock", "crate/Cargo.toml", "package.json", "npm/package.json",
+      "package-lock.json", "pyproject.toml", "CHANGELOG.md", "crate/CHANGELOG.md", "vendor/node_modules/tracked.js",
+    ];
+    for (const path of [...versionHandled, "src/kept.rs", "crate/pyproject.toml", "gone.txt", "replaced.txt", "holds-deleted.txt"]) write(path, "first\n");
+    symlinkSync("src/kept.rs", join(dir, "link"));
+    run(dir, "git", ["add", "-A"]);
+    let current = digest();
+    assert.match(current, /^[0-9a-f]{64}$/);
+    for (const path of versionHandled) {
+      write(path, "second\n");
+      assert.equal(digest(), current, `${path} moved the digest`);
+    }
+    const moves = (what, change) => {
+      change();
+      const after = digest();
+      assert.notEqual(after, current, `${what} left the digest unmoved`);
+      assert.equal(digest(), after, `${what} gave an unstable digest`);
+      current = after;
+    };
+    moves("a source edit", () => write("src/kept.rs", "second\n"));
+    moves("a nested pyproject, which no version edit touches", () => write("crate/pyproject.toml", "second\n"));
+    moves("deleting a tracked file", () => rmSync(join(dir, "gone.txt")));
+    moves("a file holding a deleted file's marker", () => write("holds-deleted.txt", ""));
+    moves("retargeting a tracked link", () => { rmSync(join(dir, "link")); symlinkSync("gone.txt", join(dir, "link")); });
+    moves("replacing a file with a directory", () => { rmSync(join(dir, "replaced.txt")); write("replaced.txt/inside.txt", "first\n"); });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a failed workspace digest never yields a replayable key", { timeout: 180000 }, () => {
+  const dir = fixture();
+  try {
+    const task = "github-workflows:test-ci-shape";
+    const digest = () => spawnSync(process.execPath, [".github/workspace-proof-input.mjs"], { cwd: dir, encoding: "utf8" });
+    mkdirSync(join(dir, "probe"));
+    writeFileSync(join(dir, "probe/tracked.txt"), "tracked\n");
+    run(dir, "git", ["add", "-A"]);
+    const healthy = digest();
+    assert.equal(healthy.status, 0, healthy.stderr);
+    assert.match(healthy.stdout.trim(), /^[0-9a-f]{64}$/);
+    const healthyHash = capture(dir, [task])[task].hash;
+    assert.equal(capture(dir, [task])[task].hash, healthyHash, "a healthy tree must keep one key");
+    // The index still names the file, and lstat on it now fails with ENOTDIR.
+    rmSync(join(dir, "probe"), { recursive: true });
+    writeFileSync(join(dir, "probe"), "no longer a directory\n");
+    const [first, second] = [digest(), digest()];
+    for (const failed of [first, second]) {
+      assert.equal(failed.status, 1, failed.stdout);
+      assert.doesNotMatch(failed.stdout, /^[0-9a-f]{64}$/m);
+      assert.match(failed.stderr, /ACTION: /);
+    }
+    assert.notEqual(first.stdout, second.stdout);
+    assert.notEqual(first.stderr, second.stderr);
+    // Real Nx over that failure: no two attempts share a key, so none replays.
+    const [one, two] = [capture(dir, [task])[task].hash, capture(dir, [task])[task].hash];
+    assert.notEqual(one, two, "a failed digest repeated its key");
+    assert.notEqual(one, healthyHash);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("no project a CI job selects names a workspace-wide file input", { timeout: 180000 }, () => {
+  const dir = fixture();
+  try {
+    const script = readFileSync(join(dir, "scripts/ci-job.sh"), "utf8");
+    const jobTargets = new Set([...script.matchAll(/targets="([^"]+)"/g)].flatMap((match) => match[1].split(",")));
+    assert.ok(jobTargets.has("test-ci-shape"), "scripts/ci-job.sh's target lists were not read");
+    const namedInputs = JSON.parse(readFileSync(join(dir, "nx.json"), "utf8")).namedInputs;
+    // Nx's affected selection reads every `{workspaceRoot}/` input of every target of a
+    // project, selected or not, as "this project is touched when that file changes".
+    const expand = (inputs, named) => inputs.flatMap((input) => {
+      if (typeof input === "string" && input in named) return expand(named[input], named);
+      return [input.fileset ?? input];
+    });
+    const offenders = () => {
+      const nx = (...args) => run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", ...args]);
+      rmSync(join(dir, ".nx/workspace-data"), { recursive: true, force: true });
+      return JSON.parse(nx("show", "projects", "--json")).flatMap((name) => {
+        const project = JSON.parse(nx("show", "project", name, "--json"));
+        const targets = Object.entries(project.targets ?? {});
+        if (!targets.some(([target]) => jobTargets.has(target))) return [];
+        const named = { ...namedInputs, ...project.namedInputs };
+        return targets.flatMap(([target, definition]) => expand(definition.inputs ?? [], named)
+          .filter((input) => /^\{workspaceRoot\}\/\*\*(\/\*)?$/.test(input))
+          .map(() => `${name}:${target}`));
+      });
+    };
+    assert.deepEqual(offenders(), []);
+    const path = join(dir, ".github/project.json");
+    const project = JSON.parse(readFileSync(path, "utf8"));
+    project.targets["test-ci-shape"].inputs.unshift("wholeWorkspace");
+    writeFileSync(path, JSON.stringify(project));
+    assert.deepEqual(offenders(), ["github-workflows:test-ci-shape"], "the assertion must catch the regression");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
