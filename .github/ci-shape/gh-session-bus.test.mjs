@@ -21,12 +21,13 @@ test("the cache journeys' command environment keeps the real gh from asking for 
   const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "gh-session-bus-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const record = join(dir, "bus-calls");
-  writeFileSync(join(dir, "dbus-launch"), `#!/bin/sh\necho called >> '${record}'\nexit 1\n`);
+  writeFileSync(join(dir, "dbus-launch"), "#!/bin/sh\necho called >> \"$BUS_RECORD\"\nexit 1\n");
   chmodSync(join(dir, "dbus-launch"), 0o755);
   // One gh call, for the commit's pull requests; promotion skips once it fails.
   const promotion = [join(root, "scripts/nx-remote-cache.mjs"), "promote", "--sha", "0".repeat(40), "--repo", "example/project", "--workflow", "release-plz.yml"];
   const given = {
     PATH: `${dir}:${process.env.PATH}`,
+    BUS_RECORD: record,
     GH_TOKEN: "fixture-token",
     GITHUB_API_URL: CLOSED_PORT,
     GITHUB_EVENT_NAME: "push",
