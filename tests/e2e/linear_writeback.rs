@@ -2161,10 +2161,12 @@ fn a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projec
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// Same-record sections stay local when a private Linear home projects public work to GitHub.
+/// Same-record sections stay on their own record when a private Linear home projects public work
+/// to GitHub: a fragment alone as dispatched, and the public issue's own URL on the board, the one
+/// form that scrolls when it is clicked inside that issue.
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this single compiled-CLI journey composes taskgraph reads, store copy, driver dispatch and write-back across Linear and GitHub, so the existing e2e crate is its narrowest code edge, as for the hosted-source journeys above; measured at 3.72 seconds.
 #[test]
-fn a_private_linear_home_keeps_section_links_local_in_dispatch_and_on_the_public_board() {
+fn a_private_linear_home_keeps_section_links_on_their_record_in_dispatch_and_on_the_public_board() {
     let name = "linear-private-sections";
     let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
     let onevcs = crate::harness::onevcs_binary()
@@ -2285,18 +2287,21 @@ fn a_private_linear_home_keeps_section_links_local_in_dispatch_and_on_the_public
             .any(|record| record["outcome"] == "projected")
     });
     let state = github.state();
-    let public = state["boards"]["2"]["items"]
+    let (public, number) = state["boards"]["2"]["items"]
         .as_array()
         .expect("the public board has items")
         .iter()
         .find_map(|item| {
             let issue = state["items"][item.as_str()?]["content"].as_str()?;
             let body = state["issues"][issue]["body"].as_str()?;
-            body.contains("Ship examples.").then_some(body)
+            body.contains("Ship examples.")
+                .then_some((body, state["issues"][issue]["number"].as_u64()?))
         })
         .unwrap();
     assert!(
-        public.contains("[the budget](#user-content-budget-details)"),
+        public.contains(&format!(
+            "[the budget](https://www.github.com/owner/library/issues/{number}#user-content-budget-details)"
+        )),
         "{public}"
     );
     for text in [dispatched.as_str(), public] {
