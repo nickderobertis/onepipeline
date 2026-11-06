@@ -2,5 +2,5 @@
   "_llmlint": "llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] Recorded from an immutable release under its tag, so the pin cannot move without a new record. The gate is offline by design, so the external tier's test_budget_report_job_external.py derives the digest again from the release's source at this tag and finds the metric name in it.",
   "metric": "report-command-seconds",
   "source": "crates/onebudgetspec-github-action/src/finish.rs",
-  "source_sha256": "189995ac038dd4604335f754c81faac074a116c531d6c46cb4f3d009a74f870e"
+  "source_sha256": "efe46654ddfdcf99f2ea5007b6dac3566650a75404e0641e94786bc6cb9fe2b5"
 }

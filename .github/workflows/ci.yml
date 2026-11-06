@@ -714,7 +714,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: nickderobertis/onebudgetspec-github-action@v0.1.1
+      - uses: nickderobertis/onebudgetspec-github-action@v0.1.2
         with:
           token: ${{ github.token }}
           enforcement-exclude-labels: release-tail,host-variable
