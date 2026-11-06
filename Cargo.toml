@@ -1351,8 +1351,8 @@ onevcs-testing = "0.20.0"
 # and by a private home's view: `tests/e2e/private_github_home.rs` fails below it.
 # **0.14.3 keeps a private document's references to already-copied records** on a public
 # destination (table cells, reference-style definitions), pointing each at the counterpart
-# there; `tests/e2e/multi_source.rs`'s private-references journey fails on 0.14.0, which
-# rewrites none of them.
+# there; `tests/e2e/multi_source.rs`'s private-references journey fails on 0.14.2, which
+# rewrites one of the three and misses the one it cannot resolve.
 onetaskgraph-core = "=0.14.3"
 onetaskgraph-plugin-api = "=0.14.3"
 onetaskgraph-local-md = "=0.14.3"
