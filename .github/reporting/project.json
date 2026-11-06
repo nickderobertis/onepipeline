@@ -8,6 +8,15 @@
     "bootstrap": {
       "executor": "nx:noop"
     },
+    "build": {
+      "command": "python3 -m py_compile .github/reporting/test_report_job.py && node --check .github/reporting/ci-schedule.mjs"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write .github/reporting"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format .github/reporting"
+    },
     "test": {
       "command": "uv run --no-project --quiet --with pyyaml python .github/reporting/test_report_job.py",
       "//": "llmlint: ignore-file[external_service_suite_stays_out_of_the_affected_tier, expensive_tests_stay_behind_their_own_edge] what this drives is the one job in ci.yml, a file of github-workflows, and Nx has no edge finer than that project; the plan names this target. What it reaches is the pinned action's immutable public release, codeload and PyPI's public wheel, read anonymously with no credential, and its inputs are exactly what the job reads, so no `check` reaches it and an unrelated workflow edit replays it from Nx's cache where that cache is present.",
@@ -33,7 +42,11 @@
       "cache": false
     },
     "lint": {
-      "command": "python3 -m py_compile .github/reporting/test_report_job.py && node --check .github/reporting/ci-schedule.mjs"
+      "command": "node node_modules/@biomejs/biome/bin/biome lint .github/reporting && python3 -m py_compile .github/reporting/test_report_job.py && node --check .github/reporting/ci-schedule.mjs"
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint"]
     }
   }
 }

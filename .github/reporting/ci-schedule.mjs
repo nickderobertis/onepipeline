@@ -43,7 +43,7 @@ const refusal =
   (Object.entries(scenario.results).some(
     ([job, outcome]) => !Object.hasOwn(workflow.jobs, job) || !OUTCOMES.includes(outcome),
   ) &&
-    "results: each names a job of the workflow and one of " + OUTCOMES.join(", "));
+    `results: each names a job of the workflow and one of ${OUTCOMES.join(", ")}`);
 if (refusal) refuse(`the scenario's ${refusal} is invalid`);
 let started;
 let row;
