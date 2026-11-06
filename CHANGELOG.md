@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.4](https://github.com/nickderobertis/onepipeline/compare/v0.101.3...v0.101.4) - 2026-11-06
+
+### Fixed
+
+- *(deps)* link the plan store that keeps copied design-document references working ([#1414](https://github.com/nickderobertis/onepipeline/pull/1414))
+
 ## [0.101.3](https://github.com/nickderobertis/onepipeline/compare/v0.101.2...v0.101.3) - 2026-11-06
 
 ### Fixed
