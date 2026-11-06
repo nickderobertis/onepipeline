@@ -134,8 +134,11 @@ const COMMON = {
 };
 const LINES = {
   linux: {
-    "instrumented-tests": { recipe: `ONEPIPELINE_TEST_ARCHIVE="${ARCHIVE}" just _crate-test-archive`, units: `${LLVM}; cargo test --no-run --locked --target-dir "${COV_DIR}" --message-format=json`, cold: ["llvm-cov-target"] },
+    "instrumented-tests": { recipe: `ONEPIPELINE_TEST_ARCHIVE="${ARCHIVE}" just _crate-test-archive`, units: `${LLVM}; export RUSTFLAGS="-D warnings"; cargo test --no-run --locked --target-dir "${COV_DIR}" --message-format=json`, cold: ["llvm-cov-target"] },
     "doubles-instrumented": { recipe: "just _e2e-doubles-build instrumented", units: `${LLVM}; ${DOUBLES("", COV_DIR)}`, cold: ["llvm-cov-target"] },
+    // What a coverage tier's e2e journey asks for: the harness builds the doubles
+    // inside the tier's environment, which keeps RUSTFLAGS. Nothing to run but the ask.
+    "doubles-at-test-time": { recipe: "true", units: `${LLVM}; export RUSTFLAGS="-D warnings"; ${DOUBLES("", COV_DIR)}`, cold: [] },
     "debug-build": { recipe: "just _crate-build", units: `RUSTFLAGS="-D warnings" cargo build --locked --all-targets --message-format=json`, cold: ["debug"] },
     release: COMMON.release,
     doc: { recipe: "just _crate-doc", units: `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --message-format=json`, cold: ["debug", "doc"] },
@@ -192,6 +195,18 @@ function askUnits(script) {
         const key = unitKey(relativeToTarget(name));
         if (key) keys.add(key);
       }
+      // A binary's message names its uplifted copy rather than the deps file it is
+      // a link of, so that file is found by its name and its size.
+      if (message.executable && message.target?.name) {
+        const deps = join(message.executable, "..", "deps");
+        const size = lstatSync(message.executable).size;
+        const stem = `${message.target.name.replaceAll("-", "_")}-`;
+        for (const entry of existsSync(deps) ? readdirSync(deps) : []) {
+          if (entry.startsWith(stem) && extname(entry) !== ".d" && lstatSync(join(deps, entry)).size === size) {
+            keys.add(unitKey(relativeToTarget(join(deps, entry))));
+          }
+        }
+      }
       if (!message.fresh) stale.push(message.target?.name ?? message.package_id);
     }
     if (message.reason === "build-script-executed" && message.out_dir) {
@@ -225,6 +240,11 @@ function lines() {
   if (family === "ci-capture") return capture();
   // The tree as it was restored: what is attributed, whatever the recipes then build.
   const restored = walk(TARGET);
+  if (family === "test-linux") {
+    const env = sh(`RUSTFLAGS='-D warnings' cargo llvm-cov show-env --export-prefix 2>/dev/null | grep -E 'RUSTFLAGS|RUSTC_WRAPPER=' | cut -c1-160`);
+    for (const line of env.stdout.trim().split("\n")) out("show-env", line);
+    out("llvm-cov-version", sh("cargo llvm-cov --version").stdout.trim());
+  }
   const prune = sh("cargo-prune-superseded --keep-within 1h --dry-run --json target");
   out("prune-dry-run", prune.status, prune.stdout.trim().slice(0, 2000));
   const wanted = new Map();
@@ -275,13 +295,17 @@ function lines() {
     out("candidate", name, kept.length, sum(kept), compressed(kept));
   }
 
-  // Take away what no line named and ask each line again: a unit now not fresh is
-  // a compile a pull request would pay for. A .fingerprint stays, being `(not a unit)`.
+  // Take away what no line named, then run each line's own recipe and ask it again:
+  // a unit now not fresh is a compile a pull request would pay for, and the recipe's
+  // time says so even where its own build asks differently than the ask does. A
+  // .fingerprint stays, being `(not a unit)`.
   for (const f of unwanted) rmSync(join(TARGET, f.path), { force: true });
   for (const [name, line] of Object.entries(linesFor())) {
+    const run = timed(line.recipe);
     const units = askUnits(line.units);
-    out("after-removal", name, units.failed ? "failed" : "ok", units.stale.length, units.stale.slice(0, 25).join(" "));
+    out("after-removal", name, run.status, run.seconds, units.stale.length, units.stale.slice(0, 25).join(" "));
   }
+  rmSync(ARCHIVE, { force: true });
 }
 
 // Each compile line from cold: only the directories it builds into are removed,
@@ -303,12 +327,12 @@ function price() {
     rmSync(join(TARGET, "ci-capture-target"), { recursive: true, force: true });
   }
   const incremental = new Map();
-  for (const [name, line] of Object.entries(linesFor())) {
+  for (const [name, line] of Object.entries(linesFor()).filter(([, l]) => l.recipe !== "true")) {
     const run = timed(line.recipe);
     incremental.set(name, run.seconds);
     out("price", `${name}: from the restored family`, run.status, run.seconds);
   }
-  for (const [name, line] of Object.entries(linesFor())) {
+  for (const [name, line] of Object.entries(linesFor()).filter(([, l]) => l.recipe !== "true")) {
     for (const dir of line.cold) rmSync(join(TARGET, dir), { recursive: true, force: true });
     const run = timed(line.recipe);
     if (run.status !== 0) console.error(run.stderr.slice(-4000));
