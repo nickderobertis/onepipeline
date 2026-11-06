@@ -1,6 +1,5 @@
 # The budgets job measures itself: only that job and report-job:test hold this telemetry, which is
 # written after the main result upload. The limit is provisional until real runs have measured it.
-# llmlint: ignore-file[budgets_track_product_owner_outcomes] the issue explicitly requires the new last job to have its own latency budget beside the existing maximum-CI-job budget.
 schema_version: 1
 budgets:
   - id: onepipeline-budget-report-command-seconds

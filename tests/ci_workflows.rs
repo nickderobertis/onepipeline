@@ -218,7 +218,13 @@ fn every_required_context_is_reported_on_every_pull_request() {
     required.sort();
     assert_eq!(
         required,
-        ["budgets", "lint", "test-linux", "test-macos", "test-windows"]
+        [
+            "budgets",
+            "lint",
+            "test-linux",
+            "test-macos",
+            "test-windows"
+        ]
     );
     for context in &required {
         let (file, key) = reporters
@@ -232,7 +238,10 @@ fn every_required_context_is_reported_on_every_pull_request() {
         );
         if context == "budgets" {
             assert_eq!(condition(job).as_deref(), Some("always()"));
-            assert_eq!(needs(job), ["lint", "test-linux", "test-windows", "test-macos"]);
+            assert_eq!(
+                needs(job),
+                ["lint", "test-linux", "test-windows", "test-macos"]
+            );
             continue;
         }
         if let Some(condition) = condition(job) {
@@ -431,7 +440,13 @@ fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
     jobs.sort();
     assert_eq!(
         jobs,
-        ["budgets", "lint", "test-linux", "test-macos", "test-windows"],
+        [
+            "budgets",
+            "lint",
+            "test-linux",
+            "test-macos",
+            "test-windows"
+        ],
         "ci.yml runs a job beside the five"
     );
 }

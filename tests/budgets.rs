@@ -148,7 +148,11 @@ fn the_budgets_file_registers_the_host_view_budget() {
     );
     assert_eq!(
         budget.command,
-        ["node", "scripts/host-view-budget.mjs", "target/budget-records/host-view.json"],
+        [
+            "node",
+            "scripts/host-view-budget.mjs",
+            "target/budget-records/host-view.json"
+        ],
         "the budget's command is not the committed reporter"
     );
     // It times the release binary `test-linux`'s install proof builds, so the gate's
