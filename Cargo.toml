@@ -1349,14 +1349,18 @@ onevcs-testing = "0.20.0"
 # locators; src/boundary.rs delegates both decisions to the onevcs above.
 # **0.14.2 keeps section links between public tasks on a public board**, by copy (from 0.14.1)
 # and by a private home's view: `tests/e2e/private_github_home.rs` fails below it.
-onetaskgraph-core = "=0.14.2"
-onetaskgraph-plugin-api = "=0.14.2"
-onetaskgraph-local-md = "=0.14.2"
+# **0.14.3 keeps a private document's references to already-copied records** on a public
+# destination (table cells, reference-style definitions), pointing each at the counterpart
+# there; `tests/e2e/multi_source.rs`'s private-references journey fails on 0.14.2, which
+# rewrites one of the three and misses the one it cannot resolve.
+onetaskgraph-core = "=0.14.3"
+onetaskgraph-plugin-api = "=0.14.3"
+onetaskgraph-local-md = "=0.14.3"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.2"
+onetaskgraph-linear = "=0.14.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
