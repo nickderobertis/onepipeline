@@ -14,7 +14,7 @@ import { report } from "@onebudgetspec/sdk";
 // `tests/journal_workload/main.rs` in the same `workload` target, and reports one
 // budget's figure and its per-size detail through the SDK.
 const recording = JSON.parse(
-  readFileSync("../../target/budget-records/journal-workload.json", "utf8"),
+  readFileSync(process.argv[3], "utf8"),
 );
 const ms = (value) => `${Math.round(value)} ms`;
 const spread = (p, unit = ms) =>

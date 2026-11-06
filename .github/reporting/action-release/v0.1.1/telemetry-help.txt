@@ -1,0 +1,9 @@
+Report one saved telemetry metric as a budget's measurement
+
+Usage: onebudgetspec-github-action telemetry [OPTIONS] --metric <METRIC> --input <INPUT>
+
+Options:
+      --metric <METRIC>  The metric to report, a key of the file's `metrics`
+      --input <INPUT>    The saved telemetry file, relative to the budgets file's directory under a check
+      --label <LABEL>    The label the file must carry, proving it is this job's own telemetry [default: ci-report]
+  -h, --help             Print help

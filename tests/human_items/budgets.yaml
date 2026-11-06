@@ -6,7 +6,7 @@ schema_version: 1
 budgets:
   - id: human-items-read-seconds
     measure: reported
-    command: [node, report.mjs]
+    command: [node, report.mjs, ../../target/budget-records/human-items.json]
     unit: seconds
     direction: max
     threshold: 0.45

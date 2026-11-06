@@ -9,11 +9,14 @@
 //   composite actions, and never through its reusable workflow from ci.yml;
 // - the release pull request's shortcut asked by the three test jobs, gating
 //   their work, and never by `lint`;
+// - `budgets`, last and however the others ended, on every pull request and every push to main,
+//   through the action at the release `.github/reporting/action-release/` vendors;
 // - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
 //   from main under exactly the keys the test jobs restore.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -47,6 +50,7 @@ const CONDITION = {
   "test-macos": `${ON_PULL_REQUESTS} && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)`,
 };
 const TESTS = ["test-linux", "test-windows", "test-macos"];
+const REPORT_ACTION = "nickderobertis/onebudgetspec-github-action";
 
 // The contexts branch protection requires, from the tree's one copy of them
 // (`required-contexts.json`, which tests/ci_workflows.rs reads too).
@@ -147,6 +151,101 @@ describe("ci.yml's four jobs", () => {
       const calls = steps(ci.jobs[id]).filter((step) => runs(step).includes(recipe));
       assert.equal(calls.length, 1, `\`${id}\` calls ${recipe} ${calls.length} times, not once`);
     }
+  });
+});
+
+describe("the `budgets` job", () => {
+  const job = ci.jobs?.budgets ?? {};
+  const pinned = steps(job)
+    .map(uses)
+    .filter((name) => name.startsWith(`${REPORT_ACTION}@`));
+  const tag = pinned[0]?.split("@")[1];
+  const vendored = join(github, "reporting", "action-release", String(tag));
+
+  it("waits on every other job and runs however they ended", () => {
+    const others = Object.keys(ci.jobs).filter((id) => id !== "budgets");
+    assert.deepEqual(needs(job).sort(), others.sort());
+    assert.equal(job.if, "always()");
+    assert.equal(job.name, undefined, "`budgets` overrides its name, which renames its check");
+    assert.equal(job["runs-on"], "ubuntu-latest");
+  });
+
+  it("is the only job a push to main selects, and a push to main is never cancelled", () => {
+    const on = ci.on ?? ci[true];
+    assert.deepEqual(on.push, { branches: ["main"] });
+    assert.equal(pullRequestTrigger(ci), null, "no type, path or branch filter: drafts included");
+    assert.equal(ci.concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
+    const jobs = runGraph(ci, {
+      eventName: "push",
+      ref: "refs/heads/main",
+      head: "0".repeat(40),
+      event: { head_commit: { message: "feat: a change" } },
+    });
+    assert.deepEqual(jobs.filter((row) => row.selected).map((row) => row.job), ["budgets"]);
+  });
+
+  it("reads and writes only what the action declares, with one comment writer at a time", () => {
+    assert.deepEqual(job.permissions, {
+      contents: "read",
+      actions: "read",
+      "pull-requests": "write",
+    });
+    assert.equal(job.concurrency["cancel-in-progress"], false);
+    const [checkout] = steps(job);
+    assert.equal(checkout.with["fetch-depth"], 0, "local git proves saved commits' ancestry");
+    assert.equal(checkout.with["persist-credentials"], false);
+  });
+
+  it("pins one exact release, whose vendored definition is the bytes that release lists", () => {
+    assert.equal(pinned.length, 1);
+    assert.match(tag, /^v\d+\.\d+\.\d+$/);
+    const listed = readFileSync(join(vendored, "SHA256SUMS"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split(/\s+/));
+    const digest = createHash("sha256")
+      .update(readFileSync(join(vendored, "action.yml")))
+      .digest("hex");
+    assert.equal(Object.fromEntries(listed.map(([sum, name]) => [name, sum]))["action.yml"], digest);
+  });
+
+  it("passes only inputs the action declares, every required one, and lists release-tail as report-only", () => {
+    const declared = parse(readFileSync(join(vendored, "action.yml"), "utf8")).inputs;
+    const given = steps(job).find((step) => uses(step).startsWith(`${REPORT_ACTION}@`)).with;
+    for (const name of Object.keys(given)) assert.ok(declared[name], `undeclared input ${name}`);
+    for (const [name, spec] of Object.entries(declared))
+      if (spec.required) assert.ok(given[name], `required input ${name}`);
+    assert.deepEqual(given["enforcement-exclude-labels"].split(","), [
+      "release-tail",
+      "host-variable",
+    ]);
+    assert.equal(declared.labels.default, "ci-report");
+    assert.equal(declared["budget-files"].default, "**/budgets.yaml");
+  });
+
+  it("is held by its own budget, read through the released reader's flags and metric", () => {
+    const declared = parse(readFileSync(join(vendored, "action.yml"), "utf8")).inputs;
+    const help = readFileSync(join(vendored, "telemetry-help.txt"), "utf8");
+    const metric = JSON.parse(
+      readFileSync(join(vendored, "report-metric.source.json"), "utf8"),
+    ).metric;
+    const { budgets } = parse(readFileSync(join(github, "reporting", "budgets.yaml"), "utf8"));
+    assert.deepEqual(
+      budgets.map((budget) => budget.id),
+      ["onepipeline-budget-report-command-seconds"],
+    );
+    const [budget] = budgets;
+    assert.deepEqual(budget.labels, [declared.labels.default]);
+    assert.equal(budget.threshold, 120);
+    assert.equal(budget.unit, "seconds");
+    assert.deepEqual(budget.command.slice(0, 2), ["onebudgetspec-github-action", "telemetry"]);
+    for (const flag of budget.command.filter((arg) => arg.startsWith("--")))
+      assert.ok(help.includes(`${flag} <`), flag);
+    assert.equal(budget.command[budget.command.indexOf("--metric") + 1], metric);
+  });
+
+  it("is required by the committed governance declaration", () => {
+    assert.ok(REQUIRED.includes("budgets"));
   });
 });
 
@@ -345,8 +444,8 @@ describe("the release pull request's shortcut", () => {
 });
 
 describe("the required contexts", () => {
-  it("are exactly the four, each reported by ci.yml on a pull request", () => {
-    assert.deepEqual([...REQUIRED].sort(), Object.keys(FOUR).sort());
+  it("are exactly the four and `budgets`, each reported by ci.yml on a pull request", () => {
+    assert.deepEqual([...REQUIRED].sort(), [...Object.keys(FOUR), "budgets"].sort());
     const reported = new Set();
     for (const [id, job] of Object.entries(ci.jobs ?? {})) {
       for (const name of rendered(id, job)) reported.add(name);

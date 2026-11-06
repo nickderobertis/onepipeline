@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
-const record = "target/budget-records/check-visibility-quota.json";
+const record = process.argv[2] ?? "target/budget-records/check-visibility-quota.json";
 /** The workload the budget states, which a record must be the whole of to be charged. */
 const WORKLOAD = {
   changes: 12,

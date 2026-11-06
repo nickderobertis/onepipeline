@@ -114,8 +114,8 @@ title *is* the release-driving commit and is linted against Conventional Commits
 as a required check. PRs follow `.github/pull_request_template.md` (terse
 **What** / **Why**).
 
-Branch protection on `main` requires exactly `ci.yml`'s four jobs — `lint`,
-`test-linux`, `test-windows` and `test-macos` — by their rendered names, with
+Branch protection on `main` requires exactly `ci.yml`'s five jobs — `lint`,
+`test-linux`, `test-windows`, `test-macos` and `budgets` — by their rendered names, with
 linear history, no force-pushes, and admins able to override. It does **not**
 require a branch to be up to date (`strict: false`), by the user's decision of
 2026-10-18, and no workflow re-runs the tests on a push to `main`. That is the
@@ -128,10 +128,17 @@ job is added or renamed** — GitHub holds the required set, nothing reconciles 
 against the workflow, and a job nobody required is advisory, which auto-merge
 lands straight past.
 
-`ci.yml`'s four jobs are the whole of that set and the only jobs a pull
+`ci.yml`'s five jobs are the whole of that set and the only jobs a pull
 request's push runs, because every job slot is one of the 20 the account shares
 (`.github/ci-shape/events.test.mjs` holds it): a check another workflow used to
-run becomes a step of one of the four. The engine-currency step stays advisory —
+run becomes a step of one of the five. `budgets` runs last, however the others
+ended, and alone on a push to `main`, recording that commit's results for pull
+requests to compare with (the released `onebudgetspec-github-action`, pinned in
+the job and vendored in `.github/reporting/action-release/`). Its row for a budget
+whose command cannot run there says why, so **a budget's command names what it
+reads or the tool it needs in its argv**: `target/` and `just` are absent there, and
+an unnamed one reads as an error that fails every pull request. `release-tail` and
+`host-variable` are report-only in that job and keep their enforcement elsewhere. The engine-currency step stays advisory —
 its answer moves when the registry does, not when this tree does, so a release
 nobody here made must not block an unrelated merge; red there is closed by one
 `cargo update -p <spec>` on any branch. `visual-docs.yml` is **not** required:

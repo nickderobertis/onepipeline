@@ -2,7 +2,7 @@ schema_version: 1
 budgets:
   - id: onepipeline-macos-jobs-per-run
     measure: reported
-    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric jobs-per-run --telemetry .github/.telemetry/macos-policy.json"]
+    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric jobs-per-run --telemetry .github/$1", macos-budget, .telemetry/macos-policy.json]
     unit: jobs
     direction: max
     threshold: 1
@@ -15,7 +15,7 @@ budgets:
       per-run and a per-change ceiling, and the manager approved keeping them as separate budgets.
   - id: onepipeline-macos-runs-per-change
     measure: reported
-    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/.telemetry/macos-policy.json"]
+    command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/$1", macos-budget, .telemetry/macos-policy.json]
     unit: runs
     direction: max
     threshold: 3

@@ -8,7 +8,7 @@ import { report } from "@onebudgetspec/sdk";
 // llmlint: ignore-block[changed_behavior_has_e2e] the `onepipeline-pool-workload:workload` target drives it end to end: the journey writes the recording, then `onebudgetspec check` runs this, its only interface.
 // llmlint: ignore-block[cli_output_contract] whether `report` reached a result file is onebudgetspec's to check: the `onebudgetspec check` that runs this refuses a command that reported nothing.
 const recording = JSON.parse(
-  readFileSync("../../target/budget-records/pool-maintenance.json", "utf8"),
+  readFileSync(process.argv[2], "utf8"),
 );
 const sweep = (Date.parse(recording.journalled_at) - Date.parse(recording.started_at)) / 1000;
 const commands = recording.slot_duration_ms.reduce((sum, ms) => sum + ms, 0) / 1000;

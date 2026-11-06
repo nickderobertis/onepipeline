@@ -1,0 +1,39 @@
+{
+  "name": "report-job",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "tags": ["scope:tooling", "lang:python"],
+  "implicitDependencies": ["github-workflows"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "test": {
+      "command": "uv run --no-project --quiet --with pyyaml python .github/reporting/test_report_job.py",
+      "//": "What the job reads: its workflow, the action's pin and every budgets file and command of the catalog. Reaches the release, PyPI and codeload, so no `check` target runs it; `scripts/ci-job.sh` selects it in test-linux.",
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/.github/workflows/ci.yml",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/budgets.yaml",
+        "{workspaceRoot}/.github/budgets.yaml",
+        "{workspaceRoot}/pool-maintenance/budgets.yaml",
+        "{workspaceRoot}/tests/*/budgets.yaml",
+        "{workspaceRoot}/tests/*/*.mjs",
+        "{workspaceRoot}/scripts/*budget*",
+        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+        "{workspaceRoot}/.github/*.mjs"
+      ],
+      "outputs": ["{projectRoot}/.telemetry"]
+    },
+    "budgets": {
+      "command": "bash .github/reporting/check-budgets.sh",
+      "dependsOn": ["test"],
+      "cache": false
+    },
+    "lint": {
+      "command": "python3 -m py_compile .github/reporting/test_report_job.py"
+    }
+  }
+}

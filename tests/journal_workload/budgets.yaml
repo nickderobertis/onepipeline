@@ -6,7 +6,7 @@ schema_version: 1
 budgets:
   - id: driver-event-journal-delay
     measure: reported
-    command: [node, journal-budget.mjs, event-delay]
+    command: [node, journal-budget.mjs, event-delay, ../../target/budget-records/journal-workload.json]
     unit: milliseconds
     direction: max
     threshold: 1000
@@ -16,7 +16,7 @@ budgets:
       as it happens however long the run's journal has grown.
   - id: driver-envelope-outcome-latency
     measure: reported
-    command: [node, journal-budget.mjs, envelope-latency]
+    command: [node, journal-budget.mjs, envelope-latency, ../../target/budget-records/journal-workload.json]
     unit: milliseconds
     direction: max
     threshold: 2000
@@ -26,7 +26,7 @@ budgets:
       manager's reply answered promptly whatever the size of the run it is sent to.
   - id: driver-idle-cpu-share
     measure: reported
-    command: [node, journal-budget.mjs, idle-cpu]
+    command: [node, journal-budget.mjs, idle-cpu, ../../target/budget-records/journal-workload.json]
     unit: cores
     direction: max
     threshold: 0.05
@@ -36,7 +36,7 @@ budgets:
       carries.
   - id: driver-peak-rss
     measure: reported
-    command: [node, journal-budget.mjs, peak-rss]
+    command: [node, journal-budget.mjs, peak-rss, ../../target/budget-records/journal-workload.json]
     unit: megabytes
     direction: max
     threshold: 200
@@ -46,7 +46,7 @@ budgets:
       than to the run's history.
   - id: liveness-journal-bytes-per-member-hour
     measure: reported
-    command: [node, journal-budget.mjs, liveness-bytes]
+    command: [node, journal-budget.mjs, liveness-bytes, ../../target/budget-records/journal-workload.json]
     unit: bytes
     direction: max
     threshold: 0
