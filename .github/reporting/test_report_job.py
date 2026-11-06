@@ -55,6 +55,7 @@ CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos
 ROWS = 100
 COMMANDS_READING_REST = 12
 COMMITS = 20
+PUSH_EVENT = {'head_commit': {'message': 'feat: a change'}}
 PREDECESSORS = ('lint', 'test-linux', 'test-windows', 'test-macos')
 REQUESTS_METRIC = 'report-github-api-requests-per-run'
 SECONDS_METRIC = 'report-command-seconds'
@@ -194,7 +195,7 @@ def schedule(workflow_file, event_name, results):
             'head': {'ref': 'change', 'repo': {'full_name': 'nickderobertis/onepipeline'}}, 'base': {'ref': 'main'}}}
         ref = 'refs/pull/1/merge'
     else:
-        event = {'head_commit': {'message': 'feat: a change'}}
+        event = PUSH_EVENT
         ref = 'refs/heads/main'
     scenario = {'eventName': event_name, 'ref': ref, 'head': '0' * 40, 'event': event, 'results': results}
     answered = subprocess.run(['node', str(HERE / 'ci-schedule.mjs'), str(workflow_file), json.dumps(scenario)], cwd=ROOT,
@@ -543,13 +544,21 @@ class PredecessorOutcomes(Journey):
 
 
 class Scheduler(unittest.TestCase):
+    def test_input_it_cannot_read_is_refused_as_invalid(self):
+        script, ci = str(HERE / 'ci-schedule.mjs'), str(ROOT / '.github/workflows/ci.yml')
+        for arguments in ([ci, 'not json'], ['/no/such/workflow.yml', '{}']):
+            refused = subprocess.run(['node', script, *arguments], cwd=ROOT, capture_output=True, text=True, check=False)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn('cannot read the workflow or the scenario', refused.stderr)
+
     def test_a_scenario_it_cannot_judge_is_refused(self):
         script, ci = str(HERE / 'ci-schedule.mjs'), str(ROOT / '.github/workflows/ci.yml')
         for scenario, named in (
-            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'lint': 'passed'}}, 'results'),
-            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'no-such-job': 'failure'}}, 'results'),
-            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'toString': 'failure'}}, 'results'),
-            ({'eventName': 'schedule', 'ref': 'r', 'head': '0', 'event': {}, 'results': {}}, 'eventName'),
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': PUSH_EVENT, 'results': {'lint': 'passed'}}, 'results'),
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': PUSH_EVENT, 'results': {'no-such-job': 'failure'}}, 'results'),
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': PUSH_EVENT, 'results': {'toString': 'failure'}}, 'results'),
+            ({'eventName': 'pull_request', 'ref': 'r', 'head': '0', 'event': {}, 'results': {}}, 'event'),
+            ({'eventName': 'schedule', 'ref': 'r', 'head': '0', 'event': PUSH_EVENT, 'results': {}}, 'eventName'),
         ):
             refused = subprocess.run(['node', script, ci, json.dumps(scenario)], cwd=ROOT, capture_output=True, text=True, check=False)
             self.assertEqual(refused.returncode, 2, refused.stderr)
