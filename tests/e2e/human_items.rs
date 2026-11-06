@@ -2409,6 +2409,62 @@ fn reopen_and_note_change_a_live_item_and_reach_its_owner_and_a_holds_return() {
     assert!(watch(&world, "owner").is_empty(), "printed once");
 }
 
+/// Whoever takes an after-the-fact action is who `by` names, which need not be who
+/// resolved the item: a manager acting for a person is recorded as both, and the
+/// resolution goes on naming its resolver until a reopen takes it back.
+#[test]
+fn by_names_who_took_the_action_and_the_resolution_keeps_its_resolver() {
+    let world = World::new("human-item-by");
+    enabled(&world);
+    let id = raise(
+        &world,
+        "item",
+        &input(
+            "item",
+            "task",
+            "owner",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let as_person = |args: &[&str], session: &str, user: &str| {
+        let mut command = world.cmd(args);
+        command
+            .env("ONEPIPELINE_LAUNCHER_SESSION", session)
+            .env("USER", user);
+        world.run_on(command, &args.join(" ")).exited(0);
+    };
+    as_person(&["human-items", "complete", &id], "first", "ada");
+    as_person(
+        &["human-items", "note", &id, "--text", "Checked it."],
+        "second",
+        "grace",
+    );
+    let noted = state_of(&world, &id);
+    assert_eq!(noted["resolution"]["actor"], "session:first");
+    assert_eq!(noted["resolution"]["on_behalf_of"], "user:ada");
+    assert_eq!(noted["resolution"]["text"], "Checked it.");
+    as_person(&["human-items", "reopen", &id], "third", "linus");
+
+    let events = watch(&world, "owner");
+    let of = |kind: &str| {
+        events
+            .iter()
+            .find(|e| e["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind}"))["payload"]["by"]
+            .clone()
+    };
+    assert_eq!(
+        of("human-item-noted"),
+        json!({"actor": "session:second", "on_behalf_of": "user:grace"})
+    );
+    assert_eq!(
+        of("human-item-reopened"),
+        json!({"actor": "session:third", "on_behalf_of": "user:linus"})
+    );
+}
+
 /// A configured phase's approval with an `undo`, and a phase's without one.
 fn undo_checkout(world: &World) -> std::path::PathBuf {
     let script = |name: &str, body: &str| {

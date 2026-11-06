@@ -1194,6 +1194,36 @@ fn sample_reopen_refuses_a_version_the_authority_lost_and_restores_a_work_holds_
     assert_eq!(restored["nodes"], original["nodes"]);
 }
 
+/// With nothing else holding the same step, and for plan and host holds, a sample has no
+/// context to derive impact from: the item reopens blocking, reporting none, as a raise
+/// of those holds does.
+#[test]
+fn sample_reopen_without_a_peer_or_of_a_wider_hold_reports_no_impact() {
+    let world = World::new();
+    for (id, verb) in [
+        ("item-2", "dismiss"),
+        ("item-1", "complete"),
+        ("item-3", "dismiss"),
+    ] {
+        assert_eq!(
+            world.json(&["show", id, "--json"], "HumanItemDetail")["blocked"]["total"],
+            5
+        );
+        world.json(&[verb, id], "HumanItemReceipt");
+        let reopened = world.json(&["reopen", id], "HumanItemReceipt");
+        assert_eq!(reopened["item"]["item"]["state"], "open");
+        assert_eq!(
+            reopened["item"]["blocked"],
+            json!({"total": 0, "plans": []})
+        );
+        let shown = world.json(&["show", id, "--json"], "HumanItemDetail");
+        assert_eq!(shown["nodes"], json!([]));
+    }
+    let blocking: Value =
+        serde_json::from_str(&world.ok(&["list", "--blocking", "yes", "--json"])).unwrap();
+    assert_eq!(blocking.as_array().unwrap().len(), 3, "each hold is back");
+}
+
 /// The fixture API holds an after-the-fact action to the same actor rule as the live one.
 #[test]
 fn a_sample_reopen_or_note_names_its_actor() {

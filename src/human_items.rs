@@ -343,6 +343,7 @@ pub enum HumanItemAction {
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] The contract fixes reopen and note as flat `{id,actor,on_behalf_of}` variants of JSON strings, as Answer, Complete and Dismiss already are, and a consumer validates against that schema. A validated identity type would change the published action shape; a blank actor is refused at both apply boundaries and an unknown id answers a typed conflict.
     /// Reopen a completed or dismissed item, taking its resolution back.
     Reopen {
         /// Id.
@@ -371,6 +372,7 @@ pub enum HumanItemAction {
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Query selectors; omitted state selects open items.
