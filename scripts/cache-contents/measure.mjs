@@ -14,7 +14,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { extname, join, relative, sep } from "node:path";
 
 const [verb, ...rest] = process.argv.slice(2);
 const family = rest[rest.indexOf("--family") + 1];
@@ -104,7 +104,7 @@ function inventory() {
   const crates = new Map();
   for (const f of target.filter((f) => f.path.includes("/deps/"))) {
     const base = f.path.split("/").pop();
-    const kind = base.slice(base.indexOf(".")) || "(none)";
+    const kind = extname(base) || "(none)";
     kinds.set(kind, (kinds.get(kind) ?? 0) + f.size);
     const crate = base.replace(/^lib/, "").replace(/-[0-9a-f]{16}.*$/, "").replace(/\..*$/, "");
     const entry = crates.get(crate) ?? { bytes: 0, units: new Set() };
@@ -134,7 +134,7 @@ const COMMON = {
 };
 const LINES = {
   linux: {
-    "instrumented-tests": { recipe: `ONEPIPELINE_TEST_ARCHIVE="${ARCHIVE}" just _crate-test-archive`, units: `${LLVM}; cargo test --no-run --locked --message-format=json`, cold: ["llvm-cov-target"] },
+    "instrumented-tests": { recipe: `ONEPIPELINE_TEST_ARCHIVE="${ARCHIVE}" just _crate-test-archive`, units: `${LLVM}; cargo test --no-run --locked --target-dir "${COV_DIR}" --message-format=json`, cold: ["llvm-cov-target"] },
     "doubles-instrumented": { recipe: "just _e2e-doubles-build instrumented", units: `${LLVM}; ${DOUBLES("", COV_DIR)}`, cold: ["llvm-cov-target"] },
     "debug-build": { recipe: "just _crate-build", units: `RUSTFLAGS="-D warnings" cargo build --locked --all-targets --message-format=json`, cold: ["debug"] },
     release: COMMON.release,
@@ -203,7 +203,26 @@ function askUnits(script) {
 }
 const relativeToTarget = (file) => posix(relative(TARGET, file));
 
+// ci-capture holds one build under one set of flags, so the repository's pruner
+// answers it where it cannot answer test-linux: newest build of each unit, kept.
+function capture() {
+  const dir = join(TARGET, "ci-capture-target");
+  const before = walk(dir);
+  out("candidate", "family as restored", before.length, sum(before), compressed(before));
+  const dry = sh("cargo-prune-superseded --keep-within 1h --dry-run --json target/ci-capture-target");
+  out("prune-dry-run", dry.status, dry.stdout.trim().slice(0, 2000));
+  const apply = sh("cargo-prune-superseded --keep-within 1h --json target/ci-capture-target");
+  out("prune-applied", apply.status, apply.stdout.trim().slice(0, 2000));
+  const after = walk(dir);
+  out("candidate", "newest build of each unit", after.length, sum(after), compressed(after));
+  const run = timed("SHOTS_OUT=shots/current/x86_64 bash screenshots/ci-capture.sh 2>&1");
+  const compiling = (run.stdout.match(/^\s*Compiling /gm) ?? []).length;
+  out("capture-after-prune", run.status, run.seconds, compiling, run.stdout.split("\n").filter((l) => /^\s*Compiling /.test(l)).map((l) => l.trim().split(" ")[1]).join(" ").slice(0, 600));
+  if (run.status !== 0) console.error(run.stdout.slice(-4000));
+}
+
 function lines() {
+  if (family === "ci-capture") return capture();
   // The tree as it was restored: what is attributed, whatever the recipes then build.
   const restored = walk(TARGET);
   const prune = sh("cargo-prune-superseded --keep-within 1h --dry-run --json target");
@@ -256,13 +275,12 @@ function lines() {
     out("candidate", name, kept.length, sum(kept), compressed(kept));
   }
 
-  // What the pruner the repository already installs does to those lines: any unit
-  // now not fresh is a compile a pull request would pay for.
-  const apply = sh("cargo-prune-superseded --keep-within 1h --json target");
-  out("prune-applied", apply.status, apply.stdout.trim().slice(0, 2000));
+  // Take away what no line named and ask each line again: a unit now not fresh is
+  // a compile a pull request would pay for. A .fingerprint stays, being `(not a unit)`.
+  for (const f of unwanted) rmSync(join(TARGET, f.path), { force: true });
   for (const [name, line] of Object.entries(linesFor())) {
     const units = askUnits(line.units);
-    out("after-prune", name, units.stale.length, units.stale.slice(0, 25).join(" "));
+    out("after-removal", name, units.failed ? "failed" : "ok", units.stale.length, units.stale.slice(0, 25).join(" "));
   }
 }
 

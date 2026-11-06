@@ -123,7 +123,6 @@ jobs:
         working-directory: ${{ env.MEASURE_DIR }}
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the pruner
-        if: env.FAMILY != 'ci-capture'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -131,7 +130,7 @@ jobs:
             ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Who wants what
-        if: env.MODE == 'size' && env.FAMILY != 'ci-capture'
+        if: env.MODE == 'size'
         working-directory: ${{ env.MEASURE_DIR }}
         run: node scripts/cache-contents/measure.mjs lines --family "$FAMILY"
       - name: Each compile line from cold
