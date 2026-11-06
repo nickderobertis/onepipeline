@@ -118,17 +118,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
-      - name: What the bootstrap tools are built from
-        id: pins
+      - name: Have the pruner
         working-directory: ${{ env.MEASURE_DIR }}
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
-      - name: Restore the pruner
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ env.MEASURE_DIR }}/target/tools
-            ~/.cargo/bin/cargo-prune-superseded*
-          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+        run: just _ensure-prune-superseded
       - name: Who wants what
         if: env.MODE == 'size'
         working-directory: ${{ env.MEASURE_DIR }}
