@@ -248,7 +248,7 @@ class Journey(unittest.TestCase):
         self.counts.unlink(missing_ok=True)
         environment = {'JOURNEY_COUNTS': str(self.counts), 'PATH': self.runner,
                        'GITHUB_REPOSITORY': harness.REPOSITORY, 'GITHUB_RUN_ID': str(self.next_run),
-                       'RUNNER_NAME': 'hosted-runner'}
+                       'RUNNER_NAME': 'hosted-runner', 'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
         job = harness.Job(self.host, self.repository, event_name, sha, inputs=self.inputs(), run_id=self.next_run,
                           environment=environment, action_path=ACTION_TREE, **options)
         self.addCleanup(job.close)
