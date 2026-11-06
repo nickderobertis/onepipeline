@@ -19,8 +19,8 @@
     },
     "test": {
       "command": "uv run --no-project --quiet --with pyyaml python .github/reporting/test_report_job.py",
-      "//": "llmlint: ignore-file[external_service_suite_stays_out_of_the_affected_tier, expensive_tests_stay_behind_their_own_edge] what this drives is the one job in ci.yml, a file of github-workflows, and Nx has no edge finer than that project; the plan names this target. What it reaches is the pinned action's immutable public release, codeload and PyPI's public wheel, read anonymously with no credential, and its inputs are exactly what the job reads, so no `check` reaches it and an unrelated workflow edit replays it from Nx's cache where that cache is present.",
-      "cache": true,
+      "//": "llmlint: ignore-file[external_service_suite_stays_out_of_the_affected_tier, expensive_tests_stay_behind_their_own_edge] what this drives is the one job in ci.yml, a file of github-workflows, and Nx has no edge finer than that project; the plan names this target. What it reaches is the pinned action's immutable public release, codeload and PyPI's public wheel, read anonymously with no credential, and its inputs are exactly what the job reads, so no `check` reaches it and only a change to one of them selects it. It stays uncached because `report-job:budgets` runs the released reader this target saves beside the telemetry, and a cached test target may store neither that binary nor a directory holding it: a replay would leave the budget nothing to read with.",
+      "cache": false,
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/.github/workflows/ci.yml",
@@ -33,8 +33,7 @@
         "{workspaceRoot}/scripts/*budget*",
         "{workspaceRoot}/scripts/stop-guard-unpublished-*",
         "{workspaceRoot}/.github/*.mjs"
-      ],
-      "outputs": ["{projectRoot}/.telemetry"]
+      ]
     },
     "budgets": {
       "command": "bash .github/reporting/check-budgets.sh",

@@ -7,7 +7,9 @@ import { OP_NX_COMMIT, PROMOTION_BRANCH_PATTERN } from "../../scripts/nx-remote-
 
 const workflow = (name) => parse(readFileSync(new URL(`../workflows/${name}.yml`, import.meta.url), "utf8"));
 const ci = workflow("ci");
-for (const [name, job] of Object.entries(ci.jobs)) {
+const CACHE_JOBS = ["lint", "test-linux", "test-windows", "test-macos"];
+for (const name of CACHE_JOBS) {
+  const job = ci.jobs[name];
   test(`${name} records its real Nx run through the pinned cache sidecar`, () => {
     const steps = job.steps;
     const trust = steps.findIndex((s) => s.id === "nx-cache-trust");
@@ -30,6 +32,15 @@ for (const [name, job] of Object.entries(ci.jobs)) {
     assert.deepEqual(cancel, { cancel: "nx-cache" });
   });
 }
+
+test("no job but the four touches the cache", () => {
+  const others = Object.keys(ci.jobs).filter((name) => !CACHE_JOBS.includes(name));
+  assert.deepEqual(others, ["budgets"]);
+  for (const name of others) {
+    const text = JSON.stringify(ci.jobs[name]);
+    assert.doesNotMatch(text, /nx-remote-cache|nx-cache|start-cache-server/, `${name} touches the Nx cache`);
+  }
+});
 
 test("promotion runs on merge or the dedicated branch, before main-only release automation", () => {
   const release = workflow("release-plz");

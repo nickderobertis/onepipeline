@@ -42,7 +42,8 @@ test("every task selected on multiple OS legs, including bootstrap and uncached 
     const projects = new Map(paths.map((p) => { const project = JSON.parse(readFileSync(join(ws.dir, p))); return [project.name, project]; }));
     const ci = parse(readFileSync(join(ws.dir, ".github/workflows/ci.yml"), "utf8"));
     const legs = new Map();
-    for (const [job, config] of Object.entries(ci.jobs)) {
+    for (const job of ["lint", "test-linux", "test-windows", "test-macos"]) {
+      const config = ci.jobs[job];
       const os = job === "test-windows" ? "win32" : job === "test-macos" ? "darwin" : "linux";
       const planned = await command(ws.dir, "bash", ["scripts/ci-job.sh", job, "--plan"], { CI: "true", ONEPIPELINE_NX_BASE_SHA: "", GITHUB_BASE_REF: "", NX_DAEMON: "false" });
       assert.equal(planned.code, 0, planned.stdout + planned.stderr);

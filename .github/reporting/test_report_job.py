@@ -50,7 +50,8 @@ CATALOG_FILES = tuple(sorted(name for name in tracked() if Path(name).name == 'b
 # two ignore files that keep a job's own outputs out of discovery.
 CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_FILES
                                    if not name.startswith('.github/') and '/' in name))
-CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs', '.github/telemetry.mjs',
+CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
+                  '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
 ROWS = 100
 COMMANDS_READING_REST = 12
@@ -310,7 +311,8 @@ class RealCatalog(Journey):
             if command[0] == 'just':
                 self.assertIn('needs just', reason, budget)
             elif 'release-tail' in budgets[budget].get('labels', []):
-                self.assertIn('onevcs', reason, budget)
+                # cache-use reads GitHub itself rather than through onevcs, and refuses with no release to read.
+                self.assertIn('no release' if 'cache-use' in command else 'onevcs', reason, budget)
             elif 'host-variable' in budgets[budget].get('labels', []):
                 self.assertIn('report-only', reason, budget)
             else:

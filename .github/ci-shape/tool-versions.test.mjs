@@ -12,12 +12,20 @@ const file = ".github/ci-tool-versions.json";
 const reader = ".github/read-ci-tool-versions.mjs";
 const ci = () => parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"));
 const pins = () => JSON.parse(readFileSync(join(root, file), "utf8"));
+const INSTALLS = ["actions/setup-node@", "actions/setup-python@", "astral-sh/setup-uv@", "taiki-e/install-action@"];
+const NX_JOBS = ["lint", "test-linux", "test-windows", "test-macos"];
 function problems(workflow) {
   const found = [];
   for (const [name, job] of Object.entries(workflow.jobs)) {
+    // Only the four run Nx. Any other job installing one of these tools is new surface to pin.
+    if (!NX_JOBS.includes(name)) {
+      for (const step of job.steps)
+        if (INSTALLS.some((action) => step.uses?.startsWith(action))) found.push(`${name} installs ${step.uses} outside the four Nx jobs`);
+      continue;
+    }
     const read = job.steps.findIndex((step) => step.id === "ci-tools");
     if (read < 0 || job.steps[read].run !== `node ${reader} >> "$GITHUB_OUTPUT"`) found.push(`${name} does not read tracked tool versions`);
-    for (const action of ["actions/setup-node@", "actions/setup-python@", "astral-sh/setup-uv@", "taiki-e/install-action@"]) {
+    for (const action of INSTALLS) {
       if (job.steps.filter((step) => step.uses?.startsWith(action)).length !== 1) found.push(`${name} is missing its single pinned ${action} install`);
     }
     for (const [index, step] of job.steps.entries()) {
@@ -46,6 +54,9 @@ test("every CI tool install reads its exact tracked version", () => {
   const broken = ci();
   broken.jobs["test-linux"].steps.find((step) => step.uses?.startsWith("taiki-e/install-action@")).with.tool = "just,nextest,cargo-llvm-cov";
   assert.match(problems(broken).join("\n"), /test-linux installs.*without the tracked version/);
+  const outside = ci();
+  outside.jobs.budgets.steps.unshift({ uses: "astral-sh/setup-uv@v7" });
+  assert.match(problems(outside).join("\n"), /budgets installs astral-sh\/setup-uv@v7 outside the four Nx jobs/);
   const unwired = ci();
   unwired.jobs.lint.steps.find((step) => step.id === "ci-tools").run = `node ${reader}`;
   assert.match(problems(unwired).join("\n"), /lint does not read tracked tool versions/);
