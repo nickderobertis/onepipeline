@@ -2169,6 +2169,70 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
         .collect();
     assert_eq!(resolved.len(), 1, "{resolved:#?}");
     assert_eq!(status_of(&state, &resolved[0]), "Done");
+
+    // The store holds a settled task's terminal state immutable, so a reopen's open and
+    // a changed reason are projections it refuses: each is said, leaves the item as the
+    // person left it, and creates nothing. Completing it again owes nothing more.
+    in_repo(&["human-items", "reopen", &offline])
+        .exited(0)
+        .err_has("its projection into board failed");
+    let open = in_repo(&["human-items", "show", &offline, "--json"]).json();
+    assert_eq!(open["item"]["state"], "open");
+    let completed = in_repo(&["human-items", "complete", &offline]);
+    completed.exited(0);
+    assert!(
+        !completed
+            .stderr
+            .contains("its projection into board failed"),
+        "{}",
+        completed.stderr
+    );
+    let noted = in_repo(&["human-items", "note", &offline, "--text", "Rotated it."]);
+    noted.exited(0);
+    assert!(
+        !noted.stderr.contains("its projection into board failed"),
+        "a completed task projects as the state it is on: {}",
+        noted.stderr
+    );
+    let dismissed = json!({"schema_version": 1, "dedup_key": "dismissed", "kind": "task",
+        "title": "Rotate the other key", "body": "Rotate it.", "priority": "low",
+        "owner": {"session": "mgr", "run": null, "plan": null},
+        "block": {"scope": "nothing"}, "approval": null});
+    let other = world.root.join("other.json");
+    std::fs::write(&other, dismissed.to_string()).unwrap();
+    let raised = in_repo(&["human-items", "raise", "--input", other.to_str().unwrap()]);
+    raised.exited(0);
+    let other = raised.json()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    in_repo(&["human-items", "dismiss", &other, "--reason", "Not ours"]).exited(0);
+    in_repo(&[
+        "human-items",
+        "note",
+        &other,
+        "--text",
+        "Another team's key.",
+    ])
+    .exited(0)
+    .err_has("its projection into board failed");
+    assert_eq!(
+        in_repo(&["human-items", "show", &other, "--json"]).json()["item"]["resolution"]["reason"],
+        "Another team's key."
+    );
+    let state = github.state();
+    for title in ["Rotate the offline key", "Rotate the other key"] {
+        let tickets = state["issues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|i| i["title"] == title)
+            .count();
+        assert_eq!(
+            tickets, 1,
+            "a refused projection files nothing more: {title}"
+        );
+    }
 }
 
 /// A human step whose item could not be raised — the host refused the store —

@@ -6165,3 +6165,69 @@ fn replacements_do_not_relax_publication_checks_or_public_id_derivation() {
         }
     }
 }
+
+/// An item a person resolves wakes a mixed run's watch without carrying what its public
+/// node may not be shown: a title or text naming a private term becomes a surface naming
+/// only the item, the action and the actor, and a clean one is carried whole.
+#[test]
+fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
+    let (world, _) = held_mixed_run("item-surface", &["zephyrine"]);
+    let config = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.yaml"),
+        "human_items:\n  enabled: true\n",
+    )
+    .unwrap();
+    let raised_as = |key: &str, title: &str| {
+        let input = world.root.join(format!("{key}.json"));
+        std::fs::write(
+            &input,
+            json!({
+                "schema_version": 1,
+                "dedup_key": key,
+                "kind": "task",
+                "title": title,
+                "body": "What it needs from a person.",
+                "priority": "high",
+                "owner": {"session": "mgr", "run": "item-surface", "plan": null},
+                "block": {"scope": "nothing"},
+                "approval": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let raised = world.run(&["human-items", "raise", "--input", input.to_str().unwrap()]);
+        raised.exited(0);
+        raised.json()["item"]["item"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let item_surface = |id: &str| -> String {
+        std::fs::read_to_string(world.run_file("item-surface", "channel/surfaces.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| {
+                record["kind"] == "human-item" && record["message"].as_str().unwrap().contains(id)
+            })
+            .unwrap_or_else(|| panic!("{id} reached no surface"))["message"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let private = raised_as("private", "Tidy the zephyrine layout");
+    world.run(&["human-items", "complete", &private]).exited(0);
+    let withheld = item_surface(&private);
+    assert!(!withheld.contains("zephyrine"), "{withheld}");
+    assert!(withheld.starts_with("human-item-completed: "), "{withheld}");
+    assert!(withheld.contains("withheld"), "{withheld}");
+
+    let clean = raised_as("clean", "Tidy the plain layout");
+    world.run(&["human-items", "complete", &clean]).exited(0);
+    let carried = item_surface(&clean);
+    assert!(carried.contains("Tidy the plain layout"), "{carried}");
+    world.release("generalize.go");
+}
