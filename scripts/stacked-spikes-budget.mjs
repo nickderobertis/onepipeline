@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
-const record = "target/budget-records/stacked-spikes-stage.json";
+const record = process.argv[2] ?? "target/budget-records/stacked-spikes-stage.json";
 let next =
   "run just test-e2e 'test(publish_preserve::stacked_spikes_fan_out)' " +
   "to regenerate the record, then run 'onebudgetspec check budgets.yaml'";

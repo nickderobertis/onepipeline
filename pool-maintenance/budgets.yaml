@@ -11,7 +11,7 @@ budgets:
       service, which a host running several dispatches waits on.
     labels: [host]
     measure: reported
-    command: [./measure.sh]
+    command: [just, pool-maintenance-budget]
     unit: seconds
     direction: max
     threshold: 20

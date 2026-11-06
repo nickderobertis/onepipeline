@@ -243,6 +243,7 @@ fn analysis_reports_the_slower_ending_and_the_discard_invocation_duration() {
                         .join("tests/scratch_workload/scratch-budget.mjs"),
                 )
                 .arg(selector)
+                .arg(records.join("scratch-workload.json"))
                 .current_dir(&cwd)
                 .env("ONEBUDGETSPEC_RESULT", &report)
                 .output()

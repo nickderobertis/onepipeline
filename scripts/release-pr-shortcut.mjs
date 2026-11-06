@@ -18,7 +18,8 @@
 // Exit 2 only for a refused call; the answer is otherwise always exit 0.
 //
 // "Passed" is asked of GitHub (`gh api`, read-only): a successful `CI` run on
-// the base commit itself, or the pull request that merged it, whose head had
+// the base commit itself that a pull request started — a push to main runs only
+// `budgets`, which proves no test — or the pull request that merged it, whose head had
 // the same tree and whose `test-linux`, `test-windows` and `test-macos` checks
 // all succeeded.
 import { execFileSync } from "node:child_process";
@@ -306,7 +307,11 @@ const runs = gh(
 );
 if (
   runs.workflow_runs.some(
-    (run) => run.path === CI_WORKFLOW && run.conclusion === "success" && run.head_sha === base,
+    (run) =>
+      run.path === CI_WORKFLOW &&
+      run.event === "pull_request" &&
+      run.conclusion === "success" &&
+      run.head_sha === base,
   )
 ) {
   answer(

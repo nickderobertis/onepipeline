@@ -88,10 +88,15 @@ function answers(fake, responses) {
   }
 }
 
-const pushRunPassed = (base) => ({
+const ciRunPassed = (base) => ({
   [`repos/${REPO}/actions/runs?head_sha=${base}&status=success&per_page=100`]: {
     workflow_runs: [
-      { path: ".github/workflows/ci.yml", conclusion: "success", head_sha: base, event: "push" },
+      {
+        path: ".github/workflows/ci.yml",
+        conclusion: "success",
+        head_sha: base,
+        event: "pull_request",
+      },
     ],
   },
 });
@@ -135,7 +140,7 @@ describe("the release pull request's shortcut", () => {
   it("skips the tests for a tree main passed plus only release-plz's edits", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "skip=true\n", result.stderr);
@@ -170,7 +175,7 @@ describe("the release pull request's shortcut", () => {
       { ...RELEASE, "src/lib.rs": "pub fn answer() -> u8 { 41 }\n" },
       "chore: release v0.2.0",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /src\/lib\.rs \(M\) is not one of release-plz's/);
@@ -184,7 +189,7 @@ describe("the release pull request's shortcut", () => {
       { ...RELEASE, "Cargo.toml": MANIFEST("0.2.0", "2.0.0") },
       "chore: release v0.2.0",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /Cargo\.toml line \d+ is a version under \[dependencies\.serde\]/);
@@ -197,7 +202,7 @@ describe("the release pull request's shortcut", () => {
       { ...RELEASE, "CHANGELOG.md": "# Changelog\n\n## [0.1.0]\n\n- a rewritten release\n" },
       "chore: release v0.2.0",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /CHANGELOG\.md rewrites existing lines/);
@@ -283,7 +288,7 @@ describe("the release pull request's shortcut", () => {
     it(`skips them for a head that changes ${what}`, (t) => {
       const repo = scratch(t);
       commitAll(repo.work, files, "chore: release v0.2.0");
-      answers(repo.fake, pushRunPassed(repo.base));
+      answers(repo.fake, ciRunPassed(repo.base));
       const result = shortcut(repo);
       assert.equal(result.stdout, "skip=true\n", result.stderr);
     });
@@ -300,14 +305,14 @@ describe("the release pull request's shortcut", () => {
       },
       "chore: release v0.2.0-rc.1",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=true\n", result.stderr);
   });
 
   it("skips them for a head that is the tree main passed", (t) => {
     const repo = scratch(t);
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=true\n", result.stderr);
   });
@@ -322,7 +327,7 @@ describe("the release pull request's shortcut", () => {
     it(`runs them for a manifest that ${what}`, (t) => {
       const repo = scratch(t);
       commitAll(repo.work, { "Cargo.toml": manifest }, "chore: release v0.2.0");
-      answers(repo.fake, pushRunPassed(repo.base));
+      answers(repo.fake, ciRunPassed(repo.base));
       const result = shortcut(repo);
       assert.equal(result.stdout, "skip=false\n", result.stderr);
       assert.match(result.stderr, /Cargo\.toml changes more than a version line/);
@@ -334,7 +339,7 @@ describe("the release pull request's shortcut", () => {
       `[workspace]\nmembers = ["."]\n\n[workspace.package]\nversion = "${version}"\n\n[package]\nname = "crate"\nversion.workspace = true\nedition = "2021"\n`;
     const repo = scratch(t, { "Cargo.toml": workspace("0.1.0") });
     commitAll(repo.work, { ...RELEASE, "Cargo.toml": workspace("0.2.0") }, "chore: release v0.2.0");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=true\n", result.stderr);
   });
@@ -342,7 +347,7 @@ describe("the release pull request's shortcut", () => {
   it("refreshes the base branch from origin in CI, and answers from what it has when it cannot", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     git(repo.work, "update-ref", "-d", "refs/remotes/origin/main");
     const args = ["--repo", REPO, "--base-ref", "main"];
     const local = shortcut(repo, args);
@@ -394,7 +399,7 @@ describe("the release pull request's shortcut", () => {
     it(`runs them for ${what}`, (t) => {
       const repo = scratch(t);
       commitAll(repo.work, files, "chore: release v0.2.0");
-      answers(repo.fake, pushRunPassed(repo.base));
+      answers(repo.fake, ciRunPassed(repo.base));
       const result = shortcut(repo);
       assert.equal(result.stdout, "skip=false\n", result.stderr);
       assert.match(result.stderr, reason);
@@ -407,7 +412,7 @@ describe("the release pull request's shortcut", () => {
     chmodSync(join(repo.work, "Cargo.toml"), 0o755);
     git(repo.work, "add", "Cargo.toml");
     git(repo.work, "commit", "--quiet", "--message", "chore: make the manifest executable");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /Cargo\.toml changes mode \(100644 -> 100755\)/);
@@ -420,7 +425,7 @@ describe("the release pull request's shortcut", () => {
       { ...RELEASE, "CHANGELOG.md": `${RELEASE["CHANGELOG.md"]}\u0000` },
       "chore: release v0.2.0",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /CHANGELOG\.md changes as binary/);
@@ -433,7 +438,7 @@ describe("the release pull request's shortcut", () => {
       { ...RELEASE, "CHANGELOG.md": `${RELEASE["CHANGELOG.md"]}++ a rewritten note\n` },
       "chore: release v0.2.0",
     );
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /CHANGELOG\.md rewrites existing lines/);
@@ -444,7 +449,7 @@ describe("the release pull request's shortcut", () => {
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
     git(repo.work, "rm", "--quiet", "CHANGELOG.md");
     git(repo.work, "commit", "--quiet", "--message", "chore: drop the changelog");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /CHANGELOG\.md \(D\) is not one of release-plz's/);
@@ -482,7 +487,7 @@ describe("the release pull request's shortcut", () => {
       `${LOCK(version === "0.1.0" ? "0.1.0" : "0.2.0")}\n[[package]]\nname = "outside"\nversion = "${version}"\n`;
     const repo = scratch(t, { "Cargo.lock": outside("0.1.0") });
     commitAll(repo.work, { ...RELEASE, "Cargo.lock": outside("0.2.0") }, "chore: release v0.2.0");
-    answers(repo.fake, pushRunPassed(repo.base));
+    answers(repo.fake, ciRunPassed(repo.base));
     const result = shortcut(repo);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(
@@ -505,11 +510,11 @@ describe("the release pull request's shortcut", () => {
     };
     const member = scratch(t, base);
     commitAll(member.work, { "Cargo.lock": lock("0.2.0", "0.1.0") }, "chore: release inner");
-    answers(member.fake, pushRunPassed(member.base));
+    answers(member.fake, ciRunPassed(member.base));
     assert.equal(shortcut(member).stdout, "skip=true\n");
     const apart = scratch(t, base);
     commitAll(apart.work, { "Cargo.lock": lock("0.1.0", "0.2.0") }, "chore: release apart");
-    answers(apart.fake, pushRunPassed(apart.base));
+    answers(apart.fake, ciRunPassed(apart.base));
     const result = shortcut(apart);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /not this workspace's own package/);
@@ -524,6 +529,27 @@ describe("the release pull request's shortcut", () => {
           { path: ".github/workflows/visual-docs.yml", conclusion: "success", head_sha: repo.base },
           { path: ".github/workflows/ci.yml", conclusion: "success", head_sha: "f".repeat(40) },
           { path: ".github/workflows/ci.yml", conclusion: "failure", head_sha: repo.base },
+        ],
+      },
+      [`repos/${REPO}/commits/${repo.base}/pulls`]: [],
+    });
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /no record that main passed/);
+  });
+
+  it("is not proven by a push run of CI, which runs only `budgets`", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    answers(repo.fake, {
+      [`repos/${REPO}/actions/runs?head_sha=${repo.base}&status=success&per_page=100`]: {
+        workflow_runs: [
+          {
+            path: ".github/workflows/ci.yml",
+            conclusion: "success",
+            head_sha: repo.base,
+            event: "push",
+          },
         ],
       },
       [`repos/${REPO}/commits/${repo.base}/pulls`]: [],

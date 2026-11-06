@@ -250,7 +250,7 @@ const REPORTERS = {
 };
 
 const id = process.env.ONEBUDGETSPEC_BUDGET_ID;
-const record = `${directory}/${id}.json`;
+const record = process.argv[2] ?? `${directory}/${id}.json`;
 let next =
   "run this through 'onebudgetspec check budgets.yaml --id <budget>', which names the budget in " +
   "ONEBUDGETSPEC_BUDGET_ID";

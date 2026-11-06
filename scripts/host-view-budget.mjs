@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { report } from "@onebudgetspec/sdk";
 
-const record = "target/budget-records/host-view.json";
+const record = process.argv[2] ?? "target/budget-records/host-view.json";
 // What the budget's workload states, and so what a record has to have measured.
 export const READS = 5;
 /** The run roots the scaling reads are taken over, in order: the same live set, more ended history. */

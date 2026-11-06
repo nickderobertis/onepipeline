@@ -61,7 +61,9 @@ done
 # visual-docs capture's container build in `lint` they held it past 30 minutes.
 # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] `release-compat` and `smoke`
 # in `test-linux` are each their project's own uncached target that no `check` reaches,
-# selected on the crate being affected exactly as the `release-compat` and `smoke` jobs were.
+# selected on the crate being affected exactly as the `release-compat` and `smoke` jobs were;
+# `report-job:test`, selected by `test`, is its project's own target no `check` reaches, reading
+# the action's public release and PyPI's public wheel anonymously, cached on what it reads.
 case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;

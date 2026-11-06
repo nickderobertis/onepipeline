@@ -7,7 +7,7 @@ schema_version: 1
 budgets:
   - id: stacked-spikes-stage-time
     measure: reported
-    command: [node, scripts/stacked-spikes-budget.mjs]
+    command: [node, scripts/stacked-spikes-budget.mjs, target/budget-records/stacked-spikes-stage.json]
     unit: seconds
     direction: max
     threshold: 60
@@ -19,7 +19,7 @@ budgets:
       never re-measured; the test uses a subprocess agent double, not paid model turns.
   - id: source-hold-store-operations-per-hour
     measure: reported
-    command: [node, scripts/store-operations-budget.mjs]
+    command: [node, scripts/store-operations-budget.mjs, target/budget-records/store-operations/source-hold-store-operations-per-hour.json]
     unit: operations
     direction: max
     threshold: 5
@@ -39,7 +39,7 @@ budgets:
       (its per-dependency-read budgets).
   - id: store-operations-per-dispatch
     measure: reported
-    command: [node, scripts/store-operations-budget.mjs]
+    command: [node, scripts/store-operations-budget.mjs, target/budget-records/store-operations/store-operations-per-dispatch.json]
     unit: operations
     direction: max
     threshold: 1
@@ -55,7 +55,7 @@ budgets:
       onetaskgraph's to bound.
   - id: store-operations-per-settlement
     measure: reported
-    command: [node, scripts/store-operations-budget.mjs]
+    command: [node, scripts/store-operations-budget.mjs, target/budget-records/store-operations/store-operations-per-settlement.json]
     unit: operations
     direction: max
     threshold: 1
@@ -71,7 +71,7 @@ budgets:
       bound.
   - id: settlement-readability-latency
     measure: reported
-    command: [bash, scripts/settlement-latency-budget.sh]
+    command: [just, settlement-latency-budget]
     unit: milliseconds
     direction: max
     threshold: 1000
@@ -83,7 +83,7 @@ budgets:
       retains its original 1000 ms latency bound as a gated cost figure.
   - id: stop-guard-unpublished-latency
     measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs]
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json]
     unit: seconds
     direction: max
     threshold: 0.2
@@ -102,7 +102,7 @@ budgets:
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-latency-cold
     measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs, --cold]
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --cold]
     unit: seconds
     direction: max
     threshold: 0.5
@@ -119,7 +119,7 @@ budgets:
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-latency-10x
     measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs, --scale, '10']
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --scale, '10']
     unit: seconds
     direction: max
     threshold: 1.0
@@ -137,7 +137,7 @@ budgets:
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-journey-time
     measure: reported
-    command: [node, scripts/stop-guard-unpublished-budget.mjs, --journey-time]
+    command: [node, scripts/stop-guard-unpublished-budget.mjs, --record, target/budget-records/stop-guard-unpublished.json, --journey-time]
     unit: seconds
     direction: max
     threshold: 180
@@ -148,7 +148,7 @@ budgets:
   - id: host-view-time
     labels: [release-binary]
     measure: reported
-    command: [node, scripts/host-view-budget.mjs]
+    command: [node, scripts/host-view-budget.mjs, target/budget-records/host-view.json]
     unit: milliseconds
     direction: max
     threshold: 100
@@ -161,7 +161,7 @@ budgets:
       record it leaves; `just budgets` leaves it out, as the gate builds no release binary.
   - id: review-round-github-quota
     measure: reported
-    command: [bash, scripts/review-round-quota-budget.sh]
+    command: [bash, scripts/review-round-quota-budget.sh, target/budget-records/review-round-quota.json]
     unit: quota-units
     direction: max
     threshold: 175
@@ -188,7 +188,7 @@ budgets:
       read (#916) or the publication fence (#965); the fence's writes alone are over 45.
   - id: check-visibility-github-quota
     measure: reported
-    command: [bash, scripts/check-visibility-quota-budget.sh]
+    command: [bash, scripts/check-visibility-quota-budget.sh, target/budget-records/check-visibility-quota.json]
     unit: quota-units
     direction: max
     threshold: 250
@@ -216,7 +216,8 @@ budgets:
   # `onepipeline-gate-time`, labelled `host-variable`, is checked by `just gate` as a warning.
   # Every other check of this file excludes both labels. Each reads telemetry and measures
   # nothing fresh. The CD and release-read figures leave out the main-push Rust cache warmer
-  # (`--exclude-workflow "Rust cache warm"`), which builds caches and delivers nothing to a
+  # (`--exclude-workflow "Rust cache warm"`), which builds caches, and `budgets`' push run
+  # (`--exclude-workflow CI`), which records budget history; neither delivers anything to a
   # release.
   #
   # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
@@ -248,7 +249,7 @@ budgets:
       release takes, a slow job being the actionable unit inside the release cycle.
     labels: [release-tail]
     measure: reported
-    command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, cd, --exclude-workflow, "Rust cache warm"]
+    command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, cd, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: seconds
     direction: max
     threshold: 1800
@@ -267,19 +268,20 @@ budgets:
     direction: max
     threshold: 5400
     timeout_seconds: 300
-  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
-  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 5 CI
+  # jobs (the 4 of that window plus budgets); 80 releases and 224 merged PRs in 30 days
+  # (2026-09-15 to 10-15).
   - id: onepipeline-ci-job-count
     description: >-
       The most counted jobs any pull request of one release ran at its last commit, over every
       workflow its pull_request event started. It protects this repository's share of the
-      account-wide 20-job concurrency limit: lint plus one test job per platform.
+      account-wide 20-job concurrency limit: lint, one test job per platform and budgets.
     labels: [release-tail]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, pr]
     unit: jobs
     direction: max
-    threshold: 4
+    threshold: 5
     timeout_seconds: 300
   # Workload: one release's 6 CD jobs — release-plz, build-linux, build-linux-arm64, build-macos,
   # build-windows and publish, publish itself included as the job running the tail; 80 releases
@@ -291,7 +293,7 @@ budgets:
       release-plz, four build jobs and publish.
     labels: [release-tail]
     measure: reported
-    command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, cd, --exclude-workflow, "Rust cache warm"]
+    command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, cd, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: jobs
     direction: max
     threshold: 6
@@ -308,7 +310,7 @@ budgets:
       repository's CD shape, whatever number of pull requests a release carries.
     labels: [release-tail]
     measure: reported
-    command: [bash, scripts/actions-budget-figures.sh, release-read-requests, --exclude-workflow, "Rust cache warm"]
+    command: [bash, scripts/actions-budget-figures.sh, release-read-requests, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: requests
     direction: max
     threshold: 6

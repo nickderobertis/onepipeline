@@ -12,7 +12,7 @@ import { report } from "@onebudgetspec/sdk";
 // reported budget's command hands it; this reads only the recording the same target's
 // journey wrote, and reports one figure and its breakdown through the SDK.
 const recording = JSON.parse(
-  readFileSync(new URL("../../target/budget-records/human-items.json", import.meta.url), "utf8"),
+  readFileSync(process.argv[2], "utf8"),
 );
 const ms = (value) => `${Number(value).toFixed(2)} ms`;
 const phases = (sample) =>
