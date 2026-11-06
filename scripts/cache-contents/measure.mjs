@@ -51,9 +51,8 @@ function compressed(files) {
   for (const root of new Set(files.map((f) => f.root))) {
     const list = join(scratch, "files.txt");
     writeFileSync(list, files.filter((f) => f.root === root).map((f) => f.path).join("\n") + "\n");
-    const zstd = process.platform === "win32" ? "zstd -T0 --long=30" : "zstd -T0";
     const local = process.platform === "win32" ? "--force-local" : "";
-    const run = sh(`set -o pipefail; tar --posix ${local} -cf - -C "${posix(root)}" --files-from "${posix(list)}" | ${zstd} -c | wc -c`);
+    const run = sh(`set -o pipefail; tar --posix ${local} -cf - -C "${posix(root)}" --files-from "${posix(list)}" | zstd -T0 -c | wc -c`);
     const bytes = Number(run.stdout.trim());
     if (run.status !== 0 || !Number.isFinite(bytes)) {
       console.error(`cache-contents: tar or zstd failed over ${root}: ${run.stderr}`);
