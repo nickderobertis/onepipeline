@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.5](https://github.com/nickderobertis/onepipeline/compare/v0.101.4...v0.101.5) - 2026-11-06
+
+### Added
+
+- *(ci)* report every budget on onepipeline pull requests ([#1416](https://github.com/nickderobertis/onepipeline/pull/1416))
+
 ## [0.101.4](https://github.com/nickderobertis/onepipeline/compare/v0.101.3...v0.101.4) - 2026-11-06
 
 ### Fixed
