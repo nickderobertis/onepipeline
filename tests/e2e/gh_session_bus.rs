@@ -1,6 +1,10 @@
 //! The real `gh` under the environment a [`World`] leaves its test process with, against a
 //! recording `dbus-launch` that starts nothing, so a failing guard leaks nothing.
 
+// llmlint: ignore-file[e2e_not_mocked] the layer under test is this harness's environment and
+// the real `gh` and `onevcs` it reaches, both driven for real. The one stand-in is `dbus-launch`,
+// because the real one would start the very daemon this guard exists to keep from outliving it.
+
 use std::path::Path;
 
 use onepipeline_testfakes::profile::process::Command;
@@ -22,6 +26,7 @@ fn asks_for_a_bus(world: &World, bin: &Path, checkout: &Path, without_the_variab
         .env("ONEVCS_HOME", world.onevcs_home())
         .env("GIT_CONFIG_GLOBAL", world.gitconfig())
         .env("GH_CONFIG_DIR", bin)
+        .env("BUS_RECORD", &record)
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("PATH", path_leading_with(&[bin.to_path_buf()]))
         .env_remove("NO_PROXY")
@@ -56,10 +61,7 @@ fn a_worlds_environment_keeps_the_real_gh_from_asking_for_a_session_bus() {
     std::fs::create_dir_all(&bin).expect("a directory for the recording");
     onepipeline_testfakes::executable(
         &bin.join("dbus-launch"),
-        format!(
-            "#!/bin/sh\necho called >> '{}'\nexit 1\n",
-            bin.join("bus-calls").display()
-        ),
+        "#!/bin/sh\necho called >> \"$BUS_RECORD\"\nexit 1\n",
     );
     std::fs::write(
         bin.join("hosts.yml"),
