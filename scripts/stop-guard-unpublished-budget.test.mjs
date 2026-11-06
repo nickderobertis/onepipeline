@@ -358,6 +358,42 @@ function invoke(dir, ...program) {
   });
 }
 
+test("--record selects the record beside it, yields to the override, and refuses another file", () => {
+  const good = directory();
+  const otherwise = directory();
+  const scratch = mkdtempSync(join(tmpdir(), "stop-guard-record-"));
+  const result = join(scratch, "result.json");
+  const command = (args, env = {}) => {
+    const clean = { ...process.env, ONEBUDGETSPEC_RESULT: result, ...env };
+    if (!env.ONEPIPELINE_BUDGET_RECORDS) delete clean.ONEPIPELINE_BUDGET_RECORDS;
+    rmSync(result, { force: true });
+    return spawnSync(process.execPath, ["scripts/stop-guard-unpublished-budget.mjs", ...args], {
+      encoding: "utf8",
+      env: clean,
+    });
+  };
+  const named = join(good, "stop-guard-unpublished.json");
+  const selected = command(["--record", named, "--journey-time"]);
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.equal(JSON.parse(readFileSync(result, "utf8")).value, 90);
+
+  writeFileSync(named, "not json");
+  const garbage = command(["--record", named, "--journey-time"]);
+  assert.equal(garbage.status, 1, "the named record is the one read");
+  assert.match(garbage.stderr, /stop-guard-unpublished\.json is unreadable/);
+  const overridden = command(["--record", named, "--journey-time"], {
+    ONEPIPELINE_BUDGET_RECORDS: otherwise,
+  });
+  assert.equal(overridden.status, 0, overridden.stderr);
+
+  for (const args of [["--record", join(good, "other.json")], ["--record"]]) {
+    const refused = command(args);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /--record names .*not the journeys' stop-guard-unpublished\.json/);
+  }
+  for (const path of [good, otherwise, scratch]) rmSync(path, { recursive: true });
+});
+
 test("a producer that fails, cannot start, or is not named leaves no record a budget reads", () => {
   for (const [program, status] of [
     [[process.execPath, "-e", "process.exit(3)"], 3],

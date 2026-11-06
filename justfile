@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.14.0"
+onetaskgraph-version := "0.14.3"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -754,6 +754,17 @@ _crate-deps-check:
 # A budget labelled `release-binary` is left to `host-view-budget`: it times an installed
 # release build, which the gate does not make. One labelled `release-tail` is measured after a
 # release by release.yml's `publish`, and `host-variable` by `just gate` itself.
+# `settlement-readability-latency`'s command (budgets.yaml): the journey that writes its journal-stamp
+# delta. A budget command names `just` rather than the script, so a job without `just` reads the
+# budget as unavailable from its argv instead of starting a journey it cannot finish.
+settlement-latency-budget:
+    @bash scripts/settlement-latency-budget.sh
+
+# `onepipeline-pool-maintenance-seconds`' command (pool-maintenance/budgets.yaml), named for the same
+# reason: the pass builds this clone twice.
+pool-maintenance-budget:
+    @bash pool-maintenance/measure.sh
+
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \

@@ -1,20 +1,24 @@
 name: CI
 
-# Pull requests only. No push to main re-runs these: branch protection does not
-# require a branch to be up to date, and `rust-cache-warm.yml`'s build on each
-# push to main is what fails when a merge leaves main not building (AGENTS.md
-# "Commits, releases, and merging").
+# Pull requests, and a push to main for `budgets` alone, which records that
+# commit's results as the history pull requests compare with. No push to main
+# re-runs the other four: branch protection does not require a branch to be up to
+# date, and `rust-cache-warm.yml`'s build on each push to main is what fails when
+# a merge leaves main not building (AGENTS.md "Commits, releases, and merging").
 on:
   pull_request:
+  push:
+    branches: [main]
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
   contents: read
 
-# A pull request's newer push supersedes its older one.
+# A pull request's newer push supersedes its older one. A push to main is never
+# cancelled, since each is a commit of the base history.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,7 +26,7 @@ env:
   NX_HEAD: ${{ github.event.pull_request.head.sha }}
 
 jobs:
-  # One lint job and one test job per platform. Each of the four runs its checks
+  # One lint job and one test job per platform, then `budgets`. Each of the four runs its checks
   # through one recipe of its own — `just ci-lint`, `ci-test-linux`,
   # `ci-test-windows`, `ci-test-macos`, all of them `scripts/ci-job.sh` — as one
   # Nx invocation scoped to the projects the diff reaches, so a job's checks run
@@ -32,8 +36,8 @@ jobs:
   # account-wide limit all repositories share. `.github/ci-shape/` holds the
   # four to this shape.
   #
-  # These four are the whole workflow and exactly what branch protection on
-  # `main` requires.
+  # These four and `budgets` are the whole workflow and exactly what branch
+  # protection on `main` requires.
   #
   # Rust caches: each test job restores the build `rust-cache-warm.yml` saves on
   # `main` under the job's own key, and no pull-request run saves one, so the
@@ -687,3 +691,30 @@ jobs:
           retention-days: 7
       - cancel: nx-cache
 
+
+  # One standing budget report on the pull request, and the same saved results on
+  # a push to main, once the jobs before it have ended however they ended. It adds
+  # no build or test: a budget whose command cannot run here gets a row saying
+  # why. The full history lets local git prove each saved base commit's ancestry,
+  # and the group serializes comment writers.
+  budgets:
+    needs: [lint, test-linux, test-windows, test-macos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    concurrency:
+      group: budget-report-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: nickderobertis/onebudgetspec-github-action@v0.1.1
+        with:
+          token: ${{ github.token }}
+          enforcement-exclude-labels: release-tail,host-variable

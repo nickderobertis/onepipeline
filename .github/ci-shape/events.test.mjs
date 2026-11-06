@@ -3,12 +3,12 @@
 // `if:` expressions, its reusable-workflow expansion):
 //
 // - a pull request's last commit (`opened`, `synchronize`, `reopened`) runs exactly ci.yml's
-//   `lint`, `test-linux`, `test-windows` and `test-macos` across every workflow — `test-macos`
-//   skipped on release-plz's own release pull request — and nothing else starts;
+//   `lint`, `test-linux`, `test-windows`, `test-macos` and `budgets` across every workflow —
+//   `test-macos` skipped on release-plz's own release pull request — and nothing else starts;
 // - its closing runs visual-docs.yml alone, to delete its preview;
-// - a push to main starts release-plz.yml, visual-docs.yml and rust-cache-warm.yml alone, and
-//   the release commit runs release-plz's job and the warmer's Linux and Windows legs, with
-//   visual-docs.yml's job skipped;
+// - a push to main starts ci.yml, for `budgets` alone, and release-plz.yml, visual-docs.yml and
+//   rust-cache-warm.yml, and the release commit runs `budgets`, release-plz's job and the
+//   warmer's Linux and Windows legs, with visual-docs.yml's job skipped;
 // - visual-docs.yml keeps its `closed`, `schedule` and `workflow_dispatch` triggers;
 // - the workflows are exactly the ones this shape names, with the triggers it gives each.
 import assert from "node:assert/strict";
@@ -28,9 +28,9 @@ const load = () =>
       .map((name) => [name, parse(readFileSync(join(github, "workflows", name), "utf8"))]),
   );
 
-const FOUR = ["lint", "test-linux", "test-macos", "test-windows"];
+const PULL_REQUEST_JOBS = ["budgets", "lint", "test-linux", "test-macos", "test-windows"];
 const TRIGGERS = {
-  "ci.yml": ["pull_request"],
+  "ci.yml": ["pull_request", "push"],
   "engine-currency.yml": ["workflow_dispatch"],
   "launcher.yml": ["workflow_dispatch"],
   "release-plz.yml": ["push"],
@@ -91,7 +91,7 @@ export function eventProblems(all) {
         const files = runs.map((run) => run.file).sort();
         if (JSON.stringify(files) !== JSON.stringify(["ci.yml"]))
           problems.push(`${label} starts ${files.join(", ")}, not ci.yml alone`);
-        const want = FOUR.map((job) => `ci.yml:${job}`);
+        const want = PULL_REQUEST_JOBS.map((job) => `ci.yml:${job}`);
         const got = ran(runs).sort();
         if (JSON.stringify(got) !== JSON.stringify(want))
           problems.push(`${label} runs ${got.join(", ")}, not ${want.join(", ")}`);
@@ -105,12 +105,18 @@ export function eventProblems(all) {
     [
       "the release commit",
       RELEASE_COMMIT,
-      ["release-plz.yml:release-plz", "rust-cache-warm.yml:linux", "rust-cache-warm.yml:windows"],
+      [
+        "ci.yml:budgets",
+        "release-plz.yml:release-plz",
+        "rust-cache-warm.yml:linux",
+        "rust-cache-warm.yml:windows",
+      ],
     ],
     [
       "an ordinary merge",
       ORDINARY_MERGE,
       [
+        "ci.yml:budgets",
         "release-plz.yml:release-plz",
         "rust-cache-warm.yml:linux",
         "rust-cache-warm.yml:macos",
@@ -120,7 +126,7 @@ export function eventProblems(all) {
   ]) {
     const runs = started(all, push);
     const files = runs.map((run) => run.file).sort();
-    const pushWorkflows = ["release-plz.yml", "rust-cache-warm.yml", "visual-docs.yml"];
+    const pushWorkflows = ["ci.yml", "release-plz.yml", "rust-cache-warm.yml", "visual-docs.yml"];
     if (JSON.stringify(files) !== JSON.stringify(pushWorkflows))
       problems.push(`${what} starts ${files.join(", ")}, not ${pushWorkflows.join(", ")}`);
     const got = ran(runs).filter((job) => !job.startsWith("visual-docs.yml:"));
@@ -150,7 +156,7 @@ export function eventProblems(all) {
 }
 
 describe("the events each workflow runs on", () => {
-  it("start exactly the four on a pull request's push, and release-plz and the Linux and Windows cache warmers on the release commit", () => {
+  it("start exactly the five on a pull request's push, and budgets, release-plz and the Linux and Windows cache warmers on the release commit", () => {
     assert.deepEqual(eventProblems(load()), []);
   });
 
@@ -163,7 +169,7 @@ describe("the events each workflow runs on", () => {
           jobs: { suppressions: { "runs-on": "ubuntu-latest", steps: [{ run: "true" }] } },
         };
       },
-      "runs ci.yml:gate": (all) => {
+      "ci.yml:gate": (all) => {
         all["ci.yml"].jobs.gate = { "runs-on": "ubuntu-latest", steps: [{ run: "just check" }] };
       },
       "starts ci.yml, visual-docs.yml, not ci.yml alone": (all) => {
@@ -172,13 +178,13 @@ describe("the events each workflow runs on", () => {
       "not visual-docs.yml alone": (all) => {
         all["launcher.yml"].on.pull_request = { types: ["closed"] };
       },
-      "the release commit starts": (all) => {
-        all["ci.yml"].on = { push: { branches: ["main"] }, pull_request: null };
+      "ci.yml:test-linux, release-plz.yml:release-plz": (all) => {
+        delete all["ci.yml"].jobs["test-linux"].if;
       },
       "the release commit runs visual-docs.yml": (all) => {
         delete all["visual-docs.yml"].jobs["visual-docs"].if;
       },
-      "the release commit runs release-plz.yml:release-plz, rust-cache-warm.yml:linux, rust-cache-warm.yml:macos":
+      "the release commit runs ci.yml:budgets, release-plz.yml:release-plz, rust-cache-warm.yml:linux, rust-cache-warm.yml:macos":
         (all) => {
           delete all["rust-cache-warm.yml"].jobs.macos.if;
         },

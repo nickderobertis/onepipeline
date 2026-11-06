@@ -49,12 +49,13 @@ const budgetsFile = () => parse(readFileSync(join(root, "budgets.yaml"), "utf8")
 const TAIL_BUDGETS = () => budgetsFile().budgets.filter((budget) => TAIL_IDS.includes(budget.id));
 const excludedBy = (command) =>
   command.flatMap((arg, n) => (command[n - 1] === "--exclude-workflow" ? [arg] : []));
-// The CD and release-read figures leave out the main-push Rust cache warmer, which builds caches
-// and delivers nothing to a release.
+// The CD and release-read figures leave out the main-push Rust cache warmer, which builds caches,
+// and `budgets`' push run, which records budget history: neither delivers anything to a release.
 const WARMER = parse(
   readFileSync(join(root, ".github/workflows/rust-cache-warm.yml"), "utf8"),
 ).name;
-const EXCLUDED = [WARMER];
+const CI = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")).name;
+const EXCLUDED = [WARMER, CI];
 
 const releaseWorkflow = () =>
   parse(readFileSync(join(root, ".github/workflows/release.yml"), "utf8"));
@@ -544,7 +545,7 @@ test(`over release ${RELEASE} the tail reports all seven budgets with their brea
   assert.match(run.output, /release-changes --tag v0\.97\.1: 3 requests/);
 });
 
-test("the CD and release-read budgets name the cache warmer's workflow, and only it, with --exclude-workflow", () => {
+test("the CD and release-read budgets name the cache warmer's and the report job's workflows, and only them, with --exclude-workflow", () => {
   const excluding = {
     "onepipeline-cd-job-time": EXCLUDED,
     "onepipeline-cd-job-count": EXCLUDED,
@@ -559,6 +560,7 @@ test("the CD and release-read budgets name the cache warmer's workflow, and only
   for (const budget of TAIL_BUDGETS())
     assert.deepEqual(excludedBy(budget.command), excluding[budget.id] ?? [], budget.id);
   assert.equal(WARMER, "Rust cache warm");
+  assert.equal(CI, "CI");
   // v0.97.1 predates the warmer, so its release commit carries no run the exclusion leaves out,
   // and every push or release run there is counted.
   assert.deepEqual(
@@ -574,9 +576,16 @@ test("each onevcs read is made once across the seven figures", () => {
     servedPaths.length,
     `a read was made twice: ${servedPaths.join("\n")}`,
   );
+  // All but the jobs of the release commit's runs an exclusion leaves out, which no figure reads.
+  const leftOut = atRelease()
+    .filter((run) => EXCLUDED.includes(run.name))
+    .map((run) => jobsPath(run.id));
   assert.deepEqual(
     [...servedPaths].sort(),
-    ok.map(pathOf).sort(),
+    ok
+      .map(pathOf)
+      .filter((path) => !leftOut.includes(path))
+      .sort(),
     "every recording served, and nothing else",
   );
 });
@@ -619,6 +628,63 @@ test("the selection is the release's: the pull requests' heads and the release c
       runsAt(releaseListing, servedPaths).some((r) => r.id === run.id),
       run.name,
     );
+});
+
+// Replayed telemetry, never a live observation: the recorded release, each pull request's head
+// reshaped to the finished workflow — its one CI run, with ci.yml's jobs — and the release commit's
+// CI push run still present for the CD figures to leave out.
+function finishedWorkflowRecordings(jobNames) {
+  const reshaped = (recording, body) => ({
+    ...recording,
+    text: recording.response.head + JSON.stringify(body),
+    response: { ...recording.response, body },
+  });
+  const ciRuns = new Set();
+  for (const pr of pullRequests)
+    for (const run of body(prListing(pr)).workflow_runs) if (run.name === CI) ciRuns.add(run.id);
+  const dropped = new Set(
+    pullRequests.flatMap((pr) =>
+      body(prListing(pr))
+        .workflow_runs.filter((run) => run.name !== CI)
+        .map((run) => jobsPath(run.id)),
+    ),
+  );
+  return ok
+    .filter((recording) => !dropped.has(pathOf(recording)))
+    .map((recording) => {
+      const path = pathOf(recording);
+      if (pullRequests.some((pr) => prListing(pr) === path))
+        return reshaped(recording, {
+          ...recording.response.body,
+          workflow_runs: recording.response.body.workflow_runs.filter((run) => run.name === CI),
+        });
+      const run = [...ciRuns].find((id) => jobsPath(id) === path);
+      if (run === undefined) return recording;
+      const [template] = recording.response.body.jobs;
+      return reshaped(recording, {
+        ...recording.response.body,
+        jobs: jobNames.map((name, index) => ({ ...template, id: template.id + index, name })),
+      });
+    });
+}
+
+test("over the finished workflow's replayed pull requests, the job count is ci.yml's five, within its threshold", () => {
+  const jobs = Object.keys(
+    parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")).jobs,
+  );
+  assert.equal(jobs.length, 5);
+  const run = tail({ double: replay(finishedWorkflowRecordings(jobs)) });
+  assert.deepEqual(run.results["onepipeline-ci-job-count"], {
+    value: 5,
+    threshold: 5,
+    verdict: "within",
+  });
+  console.log(
+    `replayed onepipeline-ci-job-count: ${JSON.stringify(run.results["onepipeline-ci-job-count"])}`,
+  );
+
+  const sixth = tail({ double: replay(finishedWorkflowRecordings([...jobs, "another"])) });
+  assert.equal(sixth.results["onepipeline-ci-job-count"].verdict, "over", sixth.output);
 });
 
 test("a threshold below a recorded figure turns the step's exit non-zero naming that budget", () => {

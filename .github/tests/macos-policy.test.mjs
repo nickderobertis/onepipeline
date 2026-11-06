@@ -227,7 +227,13 @@ test("the workload models every trigger the workflows declare and every event th
 });
 const required = JSON.parse(readFileSync(".github/required-contexts.json", "utf8")).contexts;
 test("the required contexts are the list .github/required-contexts.json holds", () => {
-  assert.deepEqual([...required].sort(), ["lint", "test-linux", "test-macos", "test-windows"]);
+  assert.deepEqual([...required].sort(), [
+    "budgets",
+    "lint",
+    "test-linux",
+    "test-macos",
+    "test-windows",
+  ]);
 });
 
 function scenario(id, eventName, action, kind, fork, opt, branch = "release-plz-fixture") {

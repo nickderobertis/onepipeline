@@ -2,7 +2,7 @@ schema_version: 1
 budgets:
   - id: run-ending-scratch-seconds
     measure: reported
-    command: [node, scratch-budget.mjs, ending]
+    command: [node, scratch-budget.mjs, ending, ../../target/budget-records/scratch-workload.json]
     unit: seconds
     direction: max
     threshold: 60
@@ -11,7 +11,7 @@ budgets:
       and its retry's successful ending removing that same generated tree.
   - id: scratch-discard-seconds
     measure: reported
-    command: [node, scratch-budget.mjs, discard]
+    command: [node, scratch-budget.mjs, discard, ../../target/budget-records/scratch-workload.json]
     unit: seconds
     direction: max
     threshold: 60

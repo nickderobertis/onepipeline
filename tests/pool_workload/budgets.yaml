@@ -11,7 +11,7 @@ budgets:
   # running, stamping), which stretches with host load.
   - id: pool-maintenance-engine-seconds
     measure: reported
-    command: [node, pool-maintenance-budget.mjs]
+    command: [node, pool-maintenance-budget.mjs, ../../target/budget-records/pool-maintenance.json]
     unit: seconds
     direction: max
     threshold: 8

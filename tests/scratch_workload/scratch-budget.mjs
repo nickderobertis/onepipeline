@@ -12,7 +12,7 @@ if (selector !== "ending" && selector !== "discard") {
 // included, and reports their figures through the SDK, which owns validating them.
 // `tests/scratch_workload/main.rs` drives it over synthetic recordings.
 const recording = JSON.parse(
-  readFileSync("../../target/budget-records/scratch-workload.json", "utf8"),
+  readFileSync(process.argv[3], "utf8"),
 );
 const describe = (name, timing) =>
   `${name}: ${timing.entries} entries, ${timing.dirs} directories, ${timing.bytes} bytes, ${timing.seconds.toFixed(3)} seconds`;

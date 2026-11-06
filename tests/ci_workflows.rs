@@ -1,12 +1,13 @@
 //! What the committed workflows promise a pull request and a push to `main`,
 //! read off the workflows themselves.
 //!
-//! **The fixed context contract.** Branch protection on `main` requires four
+//! **The fixed context contract.** Branch protection on `main` requires five
 //! status-check contexts by their rendered names — `lint`, `test-linux`,
-//! `test-windows` and `test-macos` — and GitHub holds that set; nothing here can
-//! read it. What this tree can hold is the other half: a job reporting each of
-//! those names on every pull request, behind no condition or `needs` edge that
-//! could leave it unreported. A job renamed or given a new `if:` would otherwise
+//! `test-windows`, `test-macos` and `budgets` — and GitHub holds that set; nothing
+//! here can read it. What this tree can hold is the other half: a job reporting
+//! each of those names on every pull request, behind no condition or `needs` edge
+//! that could leave it unreported (`budgets` waits on the others under `always()`,
+//! which reports however they end). A job renamed or given a new `if:` would otherwise
 //! land unnoticed, and a required context that never reports blocks every merge.
 
 use std::collections::BTreeMap;
@@ -210,7 +211,13 @@ fn every_required_context_is_reported_on_every_pull_request() {
     required.sort();
     assert_eq!(
         required,
-        ["lint", "test-linux", "test-macos", "test-windows"]
+        [
+            "budgets",
+            "lint",
+            "test-linux",
+            "test-macos",
+            "test-windows"
+        ]
     );
     for context in &required {
         let (file, key) = reporters
@@ -222,6 +229,14 @@ fn every_required_context_is_reported_on_every_pull_request() {
             job.get("strategy").is_none(),
             "`{context}` is a matrix job, whose legs render under other names"
         );
+        if context == "budgets" {
+            assert_eq!(condition(job).as_deref(), Some("always()"));
+            assert_eq!(
+                needs(job),
+                ["lint", "test-linux", "test-windows", "test-macos"]
+            );
+            continue;
+        }
         if let Some(condition) = condition(job) {
             assert!(
                 ALLOWED_CONDITIONS.contains(&condition.as_str()),
@@ -238,7 +253,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
 
 /// The workflows that report no required context: each runs on no pull request's
 /// `opened`, `synchronize` or `reopened` event, so none spends a job slot beside
-/// the four, and no required job can wait on one (`needs` only reaches jobs of
+/// the five, and no required job can wait on one (`needs` only reaches jobs of
 /// the same workflow).
 #[test]
 fn no_other_workflow_reports_a_required_context() {
@@ -418,8 +433,14 @@ fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
     jobs.sort();
     assert_eq!(
         jobs,
-        ["lint", "test-linux", "test-macos", "test-windows"],
-        "ci.yml runs a job beside the four"
+        [
+            "budgets",
+            "lint",
+            "test-linux",
+            "test-macos",
+            "test-windows"
+        ],
+        "ci.yml runs a job beside the five"
     );
 }
 

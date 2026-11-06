@@ -6522,6 +6522,7 @@ pub fn end_driver(world: &World, run: &str) -> u32 {
         "pid {pid} is not the process {run}'s launch record started; refusing to end it"
     );
     end_driver_process(pid);
+    await_reaping(pid);
     pid
 }
 
@@ -6639,6 +6640,34 @@ fn start_stamp(pid: u32) -> Option<String> {
     unsafe { CloseHandle(handle) };
     (read != 0).then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
 }
+
+/// Wait until a driver [`end_driver`] ended has been reaped, not merely ended.
+///
+/// [`end_process`] stops at a zombie, but the engine reads a zombie holding the
+/// run's lock as the live driver: on a loaded host the orphan outlasts the kill
+/// until `init` reaps it, and an adoption made in that window is refused while a
+/// `reply` queues behind it and takes the run over only once its wait runs out.
+/// The state [`end_driver`] promises is the one an adoption recovers from, so it
+/// is not reached until the engine would read it that way too. Not asked of
+/// [`end_lock_holder`], whose target's launcher is still alive to be its reaper.
+#[cfg(unix)]
+fn await_reaping(pid: u32) {
+    let raw = libc::pid_t::try_from(pid).expect("a driver's pid fits this host's");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
+        let refused = unsafe { libc::kill(raw, 0) } != 0;
+        if refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+        profile::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("pid {pid} ended and nothing reaped it, so the engine still reads it as the driver");
+}
+
+/// Windows has no zombie: [`end_driver_process`] waited until the pid left the list.
+#[cfg(windows)]
+fn await_reaping(_pid: u32) {}
 
 #[cfg(unix)]
 fn end_driver_process(pid: u32) {

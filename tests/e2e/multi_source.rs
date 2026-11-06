@@ -1327,6 +1327,156 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
     );
 }
 
+/// The design document a plan's author approves is written privately beside its tasks, naming
+/// them by relative paths: a table cell, a reference-style definition, an inline link. Copied
+/// to a public board after the plan's tasks, each of those points at the board's own copy of the
+/// task rather than being blanked, and a path to a task the board does not hold is removed
+/// and counted unresolved, so the public document never names a private record.
+#[test]
+fn a_private_documents_references_point_at_the_tasks_a_public_board_already_holds() {
+    let world = a_routed_world("multi-source-private-references")
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__VISIBILITY", "private")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public")
+        .with_env("ONETASKGRAPH_SOURCES__MEMBERS__VISIBILITY", "public");
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let name = "referenced";
+    let project = project_id(name);
+    // The board already holds another plan under the draft's own id, so its copy of this one
+    // sits under another folder and a private path left as written would not reach it.
+    world.write_item(
+        &world.store().join("projects").join(format!("{project}.md")),
+        &[("title", json!("Another plan"))],
+        "",
+    );
+    let home = world.on_onevcs(|| {
+        filed(
+            &world,
+            name,
+            &plan_of(name, vec![crate::harness::agent("core", &[])]),
+        )
+    });
+    let draft = root_of(&world, DRAFT);
+    let tasks = draft.join("tasks").join(&project);
+    assert!(
+        tasks.join("000-core.md").is_file(),
+        "the draft holds no core"
+    );
+    // A record of the same private plan, drafted after the board took its copy of the tasks.
+    world.write_item(
+        &tasks.join("001-later.md"),
+        &[("title", json!("Later")), ("project", json!(project))],
+        "## What\nNot on the board yet.\n",
+    );
+    let private_core = format!("../tasks/{project}/000-core.md");
+    let private_later = format!("../tasks/{project}/001-later.md");
+    world.write_item(
+        &draft.join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        &format!(
+            "## Tasks\n\n| Task | Location |\n| --- | --- |\n| core | {private_core} |\n\
+             | later | {private_later} |\n\n\
+             See [core's budgets]({private_core}#budgets) and [the budget][budget].\n\n\
+             [budget]: {private_core}#budgets\n"
+        ),
+    );
+
+    let design = global(&format!("{DRAFT}:design"));
+    let (report, landed) = world.on_onevcs(|| {
+        world.store_call(|engine| async move {
+            let report = engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Documents,
+                    destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
+                        .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
+            let id = report
+                .items
+                .first()
+                .and_then(|item| item.action.destination())
+                .unwrap_or_else(|| panic!("the copy reports where the document landed: {report:?}"))
+                .clone();
+            let landed = engine.document(&id).await.unwrap_or_else(|error| {
+                panic!("the store reads the copied document {id}: {error}")
+            });
+            (
+                report,
+                serde_json::to_value(&landed).expect("a document renders"),
+            )
+        })
+    });
+    assert_eq!(
+        (report.references_rewritten, report.references_unresolved),
+        (3, 1),
+        "{report:?}"
+    );
+
+    let board = plan_tasks(&world, &home);
+    let core = board["core"]["item"]["location"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the filed task names no location: {}", board["core"]));
+    let document = &landed["items"][0]["item"];
+    let content = document["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document holds no content: {landed}"));
+    let location = document["location"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document names no location: {landed}"));
+    let link = content
+        .split_once("See [core's budgets](")
+        .and_then(|(_, rest)| rest.split_once("#budgets)"))
+        .map(|(path, _)| path)
+        .unwrap_or_else(|| panic!("the copied document holds no link to core: {content}"));
+    let followed = std::path::Path::new(location)
+        .parent()
+        .expect("the copied document sits in a folder")
+        .join(link);
+    assert_eq!(
+        std::fs::canonicalize(&followed)
+            .unwrap_or_else(|error| panic!("{} names no file: {error}", followed.display())),
+        std::fs::canonicalize(core).expect("the board's copy of core"),
+        "the board's link from {location} does not reach its copy of core"
+    );
+    assert_ne!(
+        link, private_core,
+        "the board's copy sits where the draft's does, so this proves no rewrite"
+    );
+    assert_eq!(
+        content,
+        format!(
+            "## Tasks\n\n| Task | Location |\n| --- | --- |\n| core | {link} |\n\
+             | later |  |\n\n\
+             See [core's budgets]({link}#budgets) and [the budget][budget].\n\n\
+             [budget]: {link}#budgets\n"
+        ),
+        "the references did not land on the board's copy, or a private path survived"
+    );
+}
+
 /// A plan drafted in a source declared private is copied onto the board, which is not: the copy
 /// records no origin there, so the board names nothing private. Its design document, copied after
 /// it with the store's document copy, still finds the board's copy of the plan — through the

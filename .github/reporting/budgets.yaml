@@ -1,0 +1,19 @@
+# The budgets job measures itself: only that job and report-job:test hold this telemetry, which is
+# written after the main result upload. The limit is provisional until real runs have measured it.
+schema_version: 1
+budgets:
+  - id: onepipeline-budget-report-command-seconds
+    description: >-
+      One budgets job with 100 catalog rows and one rolling file of up to 20 eligible base commits,
+      from its cold install through the checks, the history read, the comment and the main result
+      upload. Its own check and the saving of that verdict, and runner queueing, setup and teardown,
+      are outside the interval, which cannot include its own judgment. It protects the turnaround
+      of the check every pull request waits on. Provisional design requirement: the spike's prototype
+      took 38.55 s, including a 10.49 s install, with no typed scalar archive bytes and simulated
+      posting.
+    labels: [ci-report]
+    measure: reported
+    command: [onebudgetspec-github-action, telemetry, --metric, report-command-seconds, --input, .telemetry/report-job.json]
+    unit: seconds
+    direction: max
+    threshold: 120

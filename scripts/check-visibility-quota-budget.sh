@@ -15,4 +15,4 @@ if [ -z "${ONEBUDGETSPEC_RESULT:-}" ]; then
   exit 2
 fi
 
-exec node "$(dirname "$0")/check-visibility-quota-budget.mjs"
+exec node "$(dirname "$0")/check-visibility-quota-budget.mjs" "$@"

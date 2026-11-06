@@ -1228,6 +1228,48 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     );
 }
 
+/// A driver ended and not yet reaped — what a loaded host leaves until `init`
+/// gets to the orphan — is not yet a run nothing is driving: the engine reads a
+/// zombie as the driver it was, so an adoption made then is refused. This suite's
+/// way of ending a driver has to wait that out for the journeys built on it, so
+/// the reaping is held back here, by this process standing in for `init`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_driver_ended_on_a_host_slow_to_reap_it_leaves_a_run_an_adoption_can_take() {
+    // SAFETY: sets an attribute of this process, which runs this test alone.
+    assert_eq!(
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) },
+        0,
+        "this process could not stand in for init"
+    );
+    let world = World::new("driver-end-unreaped");
+    world.script("build.wait", "hold");
+    let (run, displaced) =
+        start_detached_announcing(&world, "slow-reap", vec![agent("build", &[])]);
+    world.until("the held node to be dispatched", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    let raw = libc::pid_t::try_from(displaced).expect("a pid");
+    let reaper = std::thread::spawn(move || {
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(2));
+        // SAFETY: a null status asks for no write, and the pid is this process's orphan.
+        unsafe { libc::waitpid(raw, std::ptr::null_mut(), 0) }
+    });
+
+    assert_eq!(end_driver(&world, &run), displaced);
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+
+    assert_eq!(reaper.join().expect("the reaper finished"), raw);
+    world.until("the fresh driver to re-dispatch the held node", |world| {
+        world.events_of(&run, "node-dispatched").len() >= 2
+    });
+    world.release("build.go");
+    world.until("the adopted run to settle", |world| {
+        world.run_file(&run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(&run, "result.json")["state"], "complete");
+}
+
 /// A detached adoption returns as soon as a driver has the run, and the driver
 /// it leaves behind is the one every claim the run records names.
 ///

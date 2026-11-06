@@ -148,7 +148,11 @@ fn the_budgets_file_registers_the_host_view_budget() {
     );
     assert_eq!(
         budget.command,
-        ["node", "scripts/host-view-budget.mjs"],
+        [
+            "node",
+            "scripts/host-view-budget.mjs",
+            "target/budget-records/host-view.json"
+        ],
         "the budget's command is not the committed reporter"
     );
     // It times the release binary `test-linux`'s install proof builds, so the gate's
@@ -186,7 +190,11 @@ fn the_budgets_file_registers_the_check_visibility_quota_budget() {
     );
     assert_eq!(
         budget.command,
-        ["bash", "scripts/check-visibility-quota-budget.sh"],
+        [
+            "bash",
+            "scripts/check-visibility-quota-budget.sh",
+            "target/budget-records/check-visibility-quota.json",
+        ],
         "the budget's command is not the committed reporter"
     );
     assert!(budget.labels.is_empty(), "{:?}", budget.labels);
@@ -205,14 +213,7 @@ fn the_budgets_file_registers_the_check_visibility_quota_budget() {
         .contains(&serde_json::json!(
             "{workspaceRoot}/scripts/check-visibility-quota-budget.*"
         )));
-    let reporter =
-        std::fs::read_to_string(root().join("scripts/check-visibility-quota-budget.mjs"))
-            .expect("the reporter reads");
-    let record = reporter
-        .lines()
-        .find_map(|line| line.strip_prefix("const record = \""))
-        .and_then(|rest| rest.strip_suffix("\";"))
-        .expect("the reporter names the record it reads");
+    let record = &budget.command[2];
     assert!(
         journeys.contains(&format!("pub(crate) const RECORD: &str = \"{record}\";")),
         "the workload journey writes a record other than {record}"
@@ -255,7 +256,11 @@ fn the_budgets_file_registers_the_review_round_quota_budget() {
     );
     assert_eq!(
         budget.command,
-        ["bash", "scripts/review-round-quota-budget.sh"],
+        [
+            "bash",
+            "scripts/review-round-quota-budget.sh",
+            "target/budget-records/review-round-quota.json",
+        ],
         "the budget's command is not the committed reporter"
     );
     assert!(budget.labels.is_empty(), "{:?}", budget.labels);
@@ -279,13 +284,7 @@ fn the_budgets_file_registers_the_review_round_quota_budget() {
         .contains(&serde_json::json!(
             "{workspaceRoot}/scripts/review-round-quota-budget.*"
         )));
-    let reporter = std::fs::read_to_string(root().join("scripts/review-round-quota-budget.mjs"))
-        .expect("the reporter reads");
-    let record = reporter
-        .lines()
-        .find_map(|line| line.strip_prefix("const record = \""))
-        .and_then(|rest| rest.strip_suffix("\";"))
-        .expect("the reporter names the record it reads");
+    let record = &budget.command[2];
     assert!(
         journeys.contains(&format!("pub(crate) const RECORD: &str = \"{record}\";")),
         "the busy-round journey writes a record other than {record}"
@@ -1223,10 +1222,7 @@ fn the_settlement_latency_budget_uses_the_journeys_journal_stamps() {
     assert_eq!(budget.unit, "milliseconds");
     assert_eq!(budget.direction, Direction::Max);
     assert!((budget.threshold - 1000.0).abs() < f64::EPSILON);
-    assert_eq!(
-        budget.command,
-        ["bash", "scripts/settlement-latency-budget.sh"]
-    );
+    assert_eq!(budget.command, ["just", "settlement-latency-budget"]);
     let journey = std::fs::read_to_string(root().join("tests/e2e/loopcost.rs"))
         .expect("the measurement journey");
     assert!(journey.contains(
@@ -1348,7 +1344,11 @@ fn the_budgets_file_registers_the_store_operation_budgets() {
         );
         assert_eq!(
             budget.command,
-            ["node", "scripts/store-operations-budget.mjs"],
+            [
+                "node".to_owned(),
+                "scripts/store-operations-budget.mjs".to_owned(),
+                format!("target/budget-records/store-operations/{id}.json"),
+            ],
             "{id}'s command is not the committed reporter"
         );
         assert!(budget.labels.is_empty(), "{id}: {:?}", budget.labels);

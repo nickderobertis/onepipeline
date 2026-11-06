@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
-const record = "target/budget-records/review-round-quota.json";
+const record = process.argv[2] ?? "target/budget-records/review-round-quota.json";
 /** What a board write costs, in GraphQL points: this host's metadata-only projections. */
 const WRITE_POINTS = 2;
 /** What a board read costs, by GitHub's published rule. */
