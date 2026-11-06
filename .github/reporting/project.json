@@ -33,7 +33,7 @@
       "cache": false
     },
     "lint": {
-      "command": "python3 -m py_compile .github/reporting/test_report_job.py"
+      "command": "python3 -m py_compile .github/reporting/test_report_job.py && node --check .github/reporting/ci-schedule.mjs"
     }
   }
 }

@@ -55,6 +55,7 @@ CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos
 ROWS = 100
 COMMANDS_READING_REST = 12
 COMMITS = 20
+PREDECESSORS = ('lint', 'test-linux', 'test-windows', 'test-macos')
 REQUESTS_METRIC = 'report-github-api-requests-per-run'
 SECONDS_METRIC = 'report-command-seconds'
 DESIGN_REQUESTS = 20
@@ -183,6 +184,22 @@ def fill_catalog(present):
     while len(entries) + present < ROWS:
         entries.append((f'synthetic-local-{len(entries)}', ['bash', '-c', WRITE % 1], {'unit': 'bytes'}))
     return harness.budgets_yaml(entries)
+
+
+def schedule(workflow_file, event_name, results):
+    """Whether the workflow file starts `budgets` for this event and these predecessor outcomes."""
+    if event_name == 'pull_request':
+        event = {'action': 'synchronize', 'repository': {'full_name': 'nickderobertis/onepipeline'}, 'pull_request': {
+            'number': 1, 'draft': False, 'title': 'feat: a change',
+            'head': {'ref': 'change', 'repo': {'full_name': 'nickderobertis/onepipeline'}}, 'base': {'ref': 'main'}}}
+        ref = 'refs/pull/1/merge'
+    else:
+        event = {'head_commit': {'message': 'feat: a change'}}
+        ref = 'refs/heads/main'
+    scenario = {'eventName': event_name, 'ref': ref, 'head': '0' * 40, 'event': event, 'results': results}
+    answered = subprocess.run(['node', str(HERE / 'ci-schedule.mjs'), str(workflow_file), json.dumps(scenario)], cwd=ROOT,
+                              capture_output=True, text=True, check=True)
+    return json.loads(answered.stdout)
 
 
 def zip_of(name, content):
@@ -447,6 +464,82 @@ class MixedCatalog(Journey):
         failed = self.pull_request_head()
         self.assertEqual(failed.exit_code, 1, failed.stdout)
         self.assertIn('not delivered', failed.summary)
+
+
+class PredecessorOutcomes(Journey):
+    """The committed job, started only if its real `needs` and `if:` start it for those outcomes."""
+
+    # Predecessors that ran and failed, were skipped, or a mix, with the action then run as the job names it.
+    OUTCOMES = {
+        'every predecessor failed': dict.fromkeys(PREDECESSORS, 'failure'),
+        'every predecessor skipped': dict.fromkeys(PREDECESSORS, 'skipped'),
+        'one failed and one skipped': {'lint': 'success', 'test-linux': 'failure', 'test-windows': 'success',
+                                       'test-macos': 'skipped'},
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.write_real_catalog()
+        self.write_mixed_catalog()
+        self.base_sha = self.repository.commit('the real catalog and a runnable one')
+
+    def run_scheduled_pull_request(self, results, bundle_size=500, workflow_file=ROOT / '.github/workflows/ci.yml'):
+        self.repository.git('checkout', '--quiet', '-B', 'change', self.base_sha)
+        self.repository.write('packages/demo/bundle-size', f'{bundle_size}\n')
+        return self.start(workflow_file, 'pull_request', results, self.pull_request_head)
+
+    def start(self, workflow_file, event_name, results, run):
+        answer = schedule(workflow_file, event_name, results)
+        self.assertTrue(answer['triggered'], f'{event_name} does not start the workflow')
+        self.assertTrue(answer['selected'], f'budgets did not start with predecessors {results}: '
+                                            f'its `needs` {answer["needs"]} and `if:` leave it skipped')
+        # The job's steps are the checkout and the action, neither of which a failed predecessor may stop.
+        self.assertEqual([step.get('if') for step in job_definition()['steps']], [None, None])
+        return run()
+
+    def assert_action_ran_and_saved(self, job):
+        for step in ('report', 'main-upload', 'finish', 'final-upload'):
+            self.assertEqual(job.outcomes[step], 'success', f'{step}: {job.stdout}')
+        saved = json.loads(self.host.artifact_files(job.run_id)['budget-run.json'].decode())
+        self.assertEqual(sorted(json.loads(self.host.artifact_files(job.run_id, 'budget-results-main')['budget-run.json'].decode())
+                                ['results']['results'][0]), sorted(saved['results']['results'][0]))
+        self.assertIn(OWN_BUDGET, {result['id'] for result in saved['results']['results']}, 'the completed verdict is saved')
+        self.assertEqual(sorted(MIXED_RUNNABLE + [OWN_BUDGET]), sorted(result['id'] for result in saved['results']['results']))
+        self.assertIn('stacked-spikes-stage-time', {entry['id'] for entry in saved['unavailable']})
+        return {result['id']: result['verdict'] for result in saved['results']['results']}
+
+    def test_the_action_runs_saves_its_results_and_keeps_enforcement_however_predecessors_end(self):
+        for name, results in self.OUTCOMES.items():
+            with self.subTest(name):
+                passing = self.run_scheduled_pull_request(results)
+                self.assertEqual(passing.exit_code, 0, passing.stdout)
+                self.assertEqual(self.assert_action_ran_and_saved(passing)['synthetic-bundle-bytes'], 'within')
+                self.assertEqual(sorted(self.executed()), MIXED_RUNNABLE, 'each ran once')
+
+                over = self.run_scheduled_pull_request(results, bundle_size=5000)
+                self.assertEqual(over.exit_code, 1, 'an enforced budget over its line still fails the job')
+                self.assertEqual(self.assert_action_ran_and_saved(over)['synthetic-bundle-bytes'], 'over')
+                self.assertEqual(len(self.host.comments), 1)
+
+    def test_a_push_to_main_runs_it_with_every_predecessor_really_skipped(self):
+        answer = schedule(ROOT / '.github/workflows/ci.yml', 'push', {})
+        self.assertTrue(answer['selected'], answer)
+        base = self.start(ROOT / '.github/workflows/ci.yml', 'push', {}, self.base_push)
+        self.assertEqual(base.exit_code, 0, base.stdout)
+        self.assert_action_ran_and_saved(base)
+
+    def test_without_always_style_scheduling_the_job_would_not_start(self):
+        """Held here so the journeys above cannot pass over a scheduler that starts it regardless."""
+        committed = (ROOT / '.github/workflows/ci.yml').read_text()
+        scheduling = '    needs: [lint, test-linux, test-windows, test-macos]\n    if: always()\n'
+        self.assertEqual(committed.count(scheduling), 1)
+        unscheduled = self.scratch / 'without-always.yml'
+        unscheduled.write_text(committed.replace(scheduling, scheduling.split('    if:')[0]))
+        for results in self.OUTCOMES.values():
+            self.assertFalse(schedule(unscheduled, 'pull_request', results)['selected'], results)
+        with self.assertRaisesRegex(AssertionError, 'budgets did not start with predecessors'):
+            self.run_scheduled_pull_request(self.OUTCOMES['every predecessor failed'], workflow_file=unscheduled)
+        self.assertTrue(schedule(unscheduled, 'pull_request', dict.fromkeys(PREDECESSORS, 'success'))['selected'])
 
 
 class NamedInputs(unittest.TestCase):
