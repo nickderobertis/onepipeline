@@ -318,13 +318,33 @@ function price() {
     rmSync(join(TARGET, "ci-capture-target"), { recursive: true, force: true });
     const cold = timed(capture);
     out("price", "capture from cold", cold.status, cold.seconds);
+    // No superseded build can be in a tree that started empty, so this is its floor.
+    const floor = walk(join(TARGET, "ci-capture-target"));
+    out("candidate", "built from cold", floor.length, sum(floor), compressed(floor));
+    const noWorkspace = floor.filter((f) => !/(^|\/)(lib)?(onepipeline|onepipeline_testfakes|testfakes)[-.]/.test(f.path.split("/").pop()));
+    out("candidate", "built from cold, less the workspace crates rust-cache would drop", noWorkspace.length, sum(noWorkspace), compressed(noWorkspace));
     return;
   }
   if (family === "test-linux") {
     const capture = timed("SHOTS_OUT=shots/current/x86_64 bash screenshots/ci-capture.sh");
     out("price", "capture from test-linux's own ci-capture-target, no ci-capture family", capture.status, capture.seconds);
     if (capture.status !== 0) console.error(capture.stderr.slice(-4000));
+    // Whether the capture's build and the release line could be one: units they share.
+    const stems = (dir) => new Set(walk(join(TARGET, dir)).map((f) => unitKey(`x/${f.path}`)).filter(Boolean));
+    const release = stems("release");
+    const shared = [...stems("ci-capture-target/release")].filter((key) => release.has(key));
+    out("capture-release-shared-units", shared.length, release.size);
     rmSync(join(TARGET, "ci-capture-target"), { recursive: true, force: true });
+    // What a coverage tier's first journey compiles because the warm line built the
+    // doubles under other flags: its seconds, and the files a warm line would have kept.
+    const archive = timed(LINES.linux["instrumented-tests"].recipe);
+    out("price", "instrumented-tests: from the restored family", archive.status, archive.seconds);
+    const before = new Set(walk(COV_DIR).map((f) => f.path));
+    const started = Date.now();
+    const asked = askUnits(LINES.linux["doubles-at-test-time"].units);
+    out("price", `doubles at test time: ${asked.stale.length} units`, asked.failed ? 1 : 0, (Date.now() - started) / 1000);
+    const fresh = walk(COV_DIR).filter((f) => !before.has(f.path));
+    out("candidate", "units doubles at test time add", fresh.length, sum(fresh), compressed(fresh));
   }
   const incremental = new Map();
   for (const [name, line] of Object.entries(linesFor()).filter(([, l]) => l.recipe !== "true")) {

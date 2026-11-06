@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cache-contents-${{ github.ref }}
+  group: cache-contents-${{ github.sha }}
   cancel-in-progress: false
 
 env:
