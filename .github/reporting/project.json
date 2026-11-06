@@ -10,7 +10,7 @@
     },
     "test": {
       "command": "uv run --no-project --quiet --with pyyaml python .github/reporting/test_report_job.py",
-      "//": "What the job reads: its workflow, the action's pin and every budgets file and command of the catalog. Reaches the release, PyPI and codeload, so no `check` target runs it; `scripts/ci-job.sh` selects it in test-linux.",
+      "//": "llmlint: ignore-file[external_service_suite_stays_out_of_the_affected_tier, expensive_tests_stay_behind_their_own_edge] what this drives is the one job in ci.yml, a file of github-workflows, and Nx has no edge finer than that project; the plan names this target. What it reaches is the pinned action's immutable public release, codeload and PyPI's public wheel, read anonymously with no credential, and its inputs are exactly what the job reads, so no `check` reaches it and an unrelated workflow edit replays it from Nx's cache where that cache is present.",
       "cache": true,
       "inputs": [
         "{projectRoot}/**/*",

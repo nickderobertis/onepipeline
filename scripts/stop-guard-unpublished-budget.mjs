@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 // Report the stop-verdict budgets from the full-workload journeys' validated
 // telemetry. This command launches nothing, builds no fixture and times nothing.
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { report } from "@onebudgetspec/sdk";
 import { journeyCommand, readRecord, slowest } from "./stop-guard-unpublished-record.mjs";
 
 try {
-  // `--record FILE` names the journeys' main record, whose directory holds its siblings, so a
-  // job without that tier's records reads the budget as unavailable from its argv alone.
+  // `--record FILE` names the journeys' main record, read with the siblings beside it, so a job
+  // without that tier's records reads the budget as unavailable from its argv alone.
   // `ONEPIPELINE_BUDGET_RECORDS` points the reader at another directory, which its tests use.
   const argv = process.argv.slice(2);
-  const named = argv[0] === "--record" ? dirname(argv.splice(0, 2)[1]) : undefined;
+  const file = argv[0] === "--record" ? argv.splice(0, 2)[1] : undefined;
+  if (file !== undefined && basename(file) !== "stop-guard-unpublished.json") {
+    throw new Error(`--record names ${file}, not the journeys' stop-guard-unpublished.json`);
+  }
+  const named = file === undefined ? undefined : dirname(file);
   const args = argv.join(" ");
   const record = readRecord(process.env.ONEPIPELINE_BUDGET_RECORDS || named || undefined);
   let value;

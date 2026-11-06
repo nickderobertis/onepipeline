@@ -477,6 +477,14 @@ class Pin(unittest.TestCase):
         self.assertEqual((vendored / 'SHA256SUMS').read_bytes(), (ACTION_TREE / 'dist/SHA256SUMS').read_bytes())
         self.assertEqual((ACTION_TREE / 'action.yml').read_bytes(), (ACTION_TREE / 'dist/action.yml').read_bytes())
 
+    def test_the_vendored_reader_help_is_what_the_released_driver_prints(self):
+        vendored = HERE / 'action-release' / TAG
+        with tempfile.TemporaryDirectory() as directory, tarfile.open(next((ACTION_TREE / 'dist').glob('*.tar.gz'))) as archive:
+            archive.extractall(directory, filter='data')
+            driver = next(Path(directory).rglob('onebudgetspec-github-action'))
+            shown = subprocess.run([str(driver), 'telemetry', '--help'], capture_output=True, check=True).stdout
+        self.assertEqual(shown, (vendored / 'telemetry-help.txt').read_bytes())
+
 
 class Workload(Journey):
     def test_record_a_complete_job(self):

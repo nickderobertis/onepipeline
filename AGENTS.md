@@ -131,14 +131,10 @@ lands straight past.
 `ci.yml`'s five jobs are the whole of that set and the only jobs a pull
 request's push runs, because every job slot is one of the 20 the account shares
 (`.github/ci-shape/events.test.mjs` holds it): a check another workflow used to
-run becomes a step of one of the five. `budgets` runs last, however the others
-ended, and alone on a push to `main`, recording that commit's results for pull
-requests to compare with (the released `onebudgetspec-github-action`, pinned in
-the job and vendored in `.github/reporting/action-release/`). Its row for a budget
-whose command cannot run there says why, so **a budget's command names what it
-reads or the tool it needs in its argv**: `target/` and `just` are absent there, and
-an unnamed one reads as an error that fails every pull request. `release-tail` and
-`host-variable` are report-only in that job and keep their enforcement elsewhere. The engine-currency step stays advisory —
+run becomes a step of one of the five. **A budget's command names what it reads or
+the tool it needs in its argv**: `budgets` has a bare checkout, and a budget that
+reads an unnamed absent input errors there and fails every pull request.
+The engine-currency step stays advisory —
 its answer moves when the registry does, not when this tree does, so a release
 nobody here made must not block an unrelated merge; red there is closed by one
 `cargo update -p <spec>` on any branch. `visual-docs.yml` is **not** required:
