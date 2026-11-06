@@ -261,14 +261,14 @@ function lines() {
   // restored files alone, so what the recipes above built counts for nothing.
   const cargo = restoredFiles().cargo;
   const gone = new Set(unwanted);
-  const capture = (f) => f.path.startsWith("ci-capture-target/");
+  const inCapture = (f) => f.path.startsWith("ci-capture-target/");
   const tools = (f) => f.path.startsWith("tools/");
   const candidates = {
     "family as restored": () => true,
     "without what no line wants": (f) => !gone.has(f),
-    "without ci-capture-target": (f) => !capture(f),
+    "without ci-capture-target": (f) => !inCapture(f),
     "without target/tools": (f) => !tools(f),
-    "without all three": (f) => !gone.has(f) && !capture(f) && !tools(f),
+    "without all three": (f) => !gone.has(f) && !inCapture(f) && !tools(f),
   };
   for (const [name, keep] of Object.entries(candidates)) {
     const kept = [...restored.filter(keep), ...cargo];
