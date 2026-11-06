@@ -470,7 +470,6 @@ class MixedCatalog(Journey):
 class PredecessorOutcomes(Journey):
     """The committed job, started only if its real `needs` and `if:` start it for those outcomes."""
 
-    # Predecessors that ran and failed, were skipped, or a mix, with the action then run as the job names it.
     OUTCOMES = {
         'every predecessor failed': dict.fromkeys(PREDECESSORS, 'failure'),
         'every predecessor skipped': dict.fromkeys(PREDECESSORS, 'skipped'),
