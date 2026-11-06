@@ -10,11 +10,12 @@ try {
   // without that tier's records reads the budget as unavailable from its argv alone.
   // `ONEPIPELINE_BUDGET_RECORDS` points the reader at another directory, which its tests use.
   const argv = process.argv.slice(2);
-  const file = argv[0] === "--record" ? argv.splice(0, 2)[1] : undefined;
-  if (file !== undefined && basename(file) !== "stop-guard-unpublished.json") {
+  const explicit = argv[0] === "--record";
+  const file = explicit ? argv.splice(0, 2)[1] : undefined;
+  if (explicit && basename(file ?? "") !== "stop-guard-unpublished.json") {
     throw new Error(`--record names ${file}, not the journeys' stop-guard-unpublished.json`);
   }
-  const named = file === undefined ? undefined : dirname(file);
+  const named = explicit ? dirname(file) : undefined;
   const args = argv.join(" ");
   const record = readRecord(process.env.ONEPIPELINE_BUDGET_RECORDS || named || undefined);
   let value;

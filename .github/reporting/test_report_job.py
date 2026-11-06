@@ -476,6 +476,10 @@ class Pin(unittest.TestCase):
         self.assertEqual((vendored / 'action.yml').read_bytes(), (ACTION_TREE / 'dist/action.yml').read_bytes())
         self.assertEqual((vendored / 'SHA256SUMS').read_bytes(), (ACTION_TREE / 'dist/SHA256SUMS').read_bytes())
         self.assertEqual((ACTION_TREE / 'action.yml').read_bytes(), (ACTION_TREE / 'dist/action.yml').read_bytes())
+        metric = json.loads((vendored / 'report-metric.source.json').read_text())
+        source = (ACTION_TREE / metric['source']).read_bytes()
+        self.assertEqual(hashlib.sha256(source).hexdigest(), metric['source_sha256'])
+        self.assertIn(f'"{metric["metric"]}"'.encode(), source)
 
     def test_the_vendored_reader_help_is_what_the_released_driver_prints(self):
         vendored = HERE / 'action-release' / TAG
