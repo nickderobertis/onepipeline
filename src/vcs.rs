@@ -2986,8 +2986,11 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("a directory for the recording");
         let record = dir.join("bus-calls");
         let stand_in = dir.join("dbus-launch");
-        let script = format!("#!/bin/sh\necho called >> '{}'\nexit 1\n", record.display());
-        std::fs::write(&stand_in, script).expect("the recording dbus-launch");
+        std::fs::write(
+            &stand_in,
+            "#!/bin/sh\necho called >> \"$BUS_RECORD\"\nexit 1\n",
+        )
+        .expect("the recording dbus-launch");
         std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
             .expect("the recording dbus-launch is executable");
         std::fs::write(
@@ -3005,6 +3008,7 @@ mod tests {
             let mut gh = std::process::Command::new("gh");
             gh.args(["api", "repos/owner/service", "--include"])
                 .env("GH_CONFIG_DIR", &dir)
+                .env("BUS_RECORD", &record)
                 .env("HTTPS_PROXY", "http://127.0.0.1:9")
                 .env("PATH", &path)
                 .env_remove("NO_PROXY")
