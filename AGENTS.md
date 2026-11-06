@@ -138,13 +138,13 @@ nobody here made must not block an unrelated merge; red there is closed by one
 a stale gallery is a thing to refresh, not a reason to hold a correct change out
 of `main`.
 
-**Eight budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
+**Nine budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
 telemetry the run already produced, never measured afresh:
 
 <!-- llmlint: ignore-block[agents_md_durable_and_terse] the change that set these budgets requires this section to name each one with its label and where it is checked, beside the required checks it holds: budgets.yaml says what each measures, and this is the one place that says which moment enforces which, and why none of them can block a release or a laptop's gate. -->
-- The seven labelled `release-tail` — `onepipeline-ci-check-time`,
+- The eight labelled `release-tail` — `onepipeline-ci-check-time`,
   `onepipeline-cd-job-time`, `onepipeline-release-cycle-time`,
-  `onepipeline-ci-job-count`, `onepipeline-cd-job-count`,
+  `onepipeline-ci-job-count`, `onepipeline-cd-job-count`, `onepipeline-nx-cache-use`,
   `onepipeline-release-read-requests` and `onepipeline-pr-read-requests` — are
   checked **after the release, reporting only**, by the last step of
   `release.yml`'s `publish`. Nothing reads that step's result, so an over figure
@@ -159,6 +159,14 @@ telemetry the run already produced, never measured afresh:
 <!-- llmlint: ignore-end[agents_md_durable_and_terse] -->
 
 Every other check of the root `budgets.yaml` excludes both labels.
+
+The four CI jobs run on every pull request, including release branches.
+Cache only proofs valid for their inputs: exact tools, sources and dependencies;
+retain the version wherever a proof reads it or requires its producing binary.
+Forks and Dependabot read only. Promote trusted merged-PR results before release
+automation without testing `main`; manual promotion writes only its own branch
+scope. Cache-use reads saved executions and receipts and treats unavailable
+evidence as missing data.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `onepipeline:install-documented`, which the three test jobs run, installs the
@@ -188,9 +196,9 @@ an earlier attempt rather than uploading over it, and the Release's archive
 follows them (`release/release.py`'s `publish` says how); verify reports a
 platform its registries serve as more than one build.
 
-**Where each tier runs follows from that release model.** Every pull request,
-the release PR included, runs its affected tier against its merge base, and with
-no derivable base every project; affected selection is a speed optimisation, so
+**Where each tier runs follows from that release model.** Each selected CI job runs
+its affected tier against its merge base, under the release safeguards above,
+and with no derivable base every project; affected selection is a speed optimisation, so
 it fails closed. Nothing re-sweeps at release time or on a push to `main`. A
 Release made by hand — the documented fallback — is refused when its tag does not
 name `Cargo.toml`'s version, and is otherwise trusted to name a commit `main`

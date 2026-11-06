@@ -15,7 +15,10 @@
     "build": {
       "command": "just _tier-build release_channel",
       "inputs": [
-        "releaseCompatSource"
+        "releaseCompatSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -24,13 +27,19 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/release_channel/main.rs",
       "inputs": [
-        "releaseCompatSource"
+        "releaseCompatSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
       "command": "just _tier-lint release_channel",
       "inputs": [
-        "releaseCompatSource"
+        "releaseCompatSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "release-compat": {
@@ -39,12 +48,17 @@
       "parallelism": false,
       "dependsOn": [
         {
-          "projects": ["onepipeline"],
+          "projects": [
+            "onepipeline"
+          ],
           "target": "build"
         }
       ],
       "inputs": [
-        "releaseCompatSource"
+        "releaseCompatSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "cache": false
     },
@@ -53,6 +67,15 @@
       "dependsOn": [
         "format-check",
         "lint"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }

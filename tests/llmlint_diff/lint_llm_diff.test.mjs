@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -86,7 +87,7 @@ class Workspace {
     for (const [name, value] of Object.entries(process.env)) {
       // Whatever launched this suite — an outer Nx, a git hook, a CI runner, an
       // agent — says nothing about the run under test; a journey sets its own.
-      if (/^(NX_|GIT_|LLMLINT_|ONEHARNESS_)/.test(name)) continue;
+      if (/^(NX_|GIT_|GITHUB_|ACTIONS_|LLMLINT_|ONEHARNESS_)/.test(name)) continue;
       if (["CI", "CLAUDECODE", "CODEX_THREAD_ID", "FORCE_COLOR", "NO_COLOR"].includes(name))
         continue;
       env[name] = value;
@@ -184,6 +185,26 @@ function replayed(ws, base, summary, env = {}) {
 }
 
 describe("just lint-llm-diff", () => {
+  it("keeps fixture telemetry out of the enclosing CI job", (t) => {
+    const temp = mkdtempSync(
+      join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "llmlint-parent-"),
+    );
+    t.after(() => rmSync(temp, { recursive: true, force: true }));
+    const values = { GITHUB_ACTIONS: "true", GITHUB_JOB: "enclosing-ci", RUNNER_TEMP: temp };
+    const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, values);
+    try {
+      const ws = new Workspace(t);
+      judged(ws, ws.base);
+      assert.equal(existsSync(join(temp, "nx-cache-recording")), false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("judges a first pass against the resolved base, then replays it unchanged", (t) => {
     const ws = new Workspace(t);
     const first = ws.lint("judged-base");
@@ -194,6 +215,49 @@ describe("just lint-llm-diff", () => {
     assert.ok(summary, first.output);
 
     replayed(ws, "judged-base", summary);
+  });
+
+  it("replays unchanged tool pins and re-judges a changed CI tool version", (t) => {
+    const ws = new Workspace(t);
+    const summary = judged(ws, "judged-base");
+    replayed(ws, "judged-base", summary);
+    const path = ".github/ci-tool-versions.json";
+    const tools = JSON.parse(readFileSync(join(ws.root, path), "utf8"));
+    const version = tools.nextest.split(".").map(Number);
+    version[2] += 1;
+    ws.write(path, JSON.stringify({ ...tools, nextest: version.join(".") }, null, 2) + "\n");
+    const after = judged(ws, "judged-base");
+    replayed(ws, "judged-base", after);
+  });
+
+  it("refuses a failed real fingerprint and recovers the proven judgement", (t) => {
+    const unavailable = { STANDIN_FAIL_VERSION: "true" };
+    const refuses = (ws) => {
+      const before = ws.judgeCalls();
+      const run = ws.lint("judged-base", unavailable);
+      assert.notEqual(run.status, 0, `a failed fingerprint must fail the task:\n${run.output}`);
+      assert.doesNotMatch(run.output, CACHE_HIT);
+      assert.match(run.output, /version unavailable/);
+      assert.equal(ws.judgeCalls(), before);
+    };
+    const ws = new Workspace(t);
+    const good = judged(ws, "judged-base");
+    replayed(ws, "judged-base", good);
+    assert.throws(() => ws.fingerprint(unavailable), /oneharness|fingerprint/);
+    refuses(ws);
+    refuses(ws);
+    replayed(ws, "judged-base", good);
+
+    // Counterfactual: without the fingerprint input, an unavailable runner
+    // replays the successful judgement. The same refusal assertion detects it.
+    const broken = new Workspace(t);
+    const nx = JSON.parse(readFileSync(join(broken.root, "nx.json"), "utf8"));
+    nx.targetDefaults["lint-llm-diff"].inputs = nx.targetDefaults["lint-llm-diff"].inputs.filter(
+      (input) => input.runtime !== "llmlint fingerprint",
+    );
+    broken.write("nx.json", JSON.stringify(nx));
+    judged(broken, "judged-base");
+    assert.throws(() => refuses(broken), /a failed fingerprint must fail the task/);
   });
 
   it("forwards --skip-nx-cache to Nx, judging a cached pass again", (t) => {

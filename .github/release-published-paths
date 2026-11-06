@@ -1,0 +1,38 @@
+# Crate sources, embedded data and files Cargo includes in the published crate.
+:(top,glob)src/**
+:(top,glob)tests/**/*.rs
+:(top,glob)tests/e2e/hook.*
+:(top,glob)tests/e2e/probe.*
+:(top,glob)tests/golden/*.json
+:(top,glob)tests/recorded/registry/*.json
+:(top,glob)tests/recorded/bus/*.ndjson
+:(top,glob)tests/recorded/bus/*.jsonl
+schemas/
+Cargo.toml
+Cargo.lock
+README.md
+LICENSE
+CHANGELOG.md
+# Cargo's current unanchored include entries also ship nested copies.
+:(top,glob)**/README.md
+:(top,glob)**/LICENSE
+package.json
+package-lock.json
+.github/package.json
+.github/package-lock.json
+docs/contract.md
+personas/
+graphs/
+examples/
+# Toolchain and recipes that compile and package the crate, wheel and npm packages.
+rust-toolchain.toml
+.cargo/config.toml
+pyproject.toml
+justfile
+release-targets.toml
+release/release.py
+scripts/build-linux-wheel.sh
+scripts/build-staged-release.py
+scripts/npm-build.mjs
+npm/onepipeline-cli/
+.github/workflows/release.yml

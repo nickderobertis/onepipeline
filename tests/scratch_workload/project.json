@@ -21,7 +21,10 @@
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -36,7 +39,10 @@
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
@@ -48,7 +54,10 @@
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
@@ -70,12 +79,24 @@
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
         "{workspaceRoot}/clippy.toml",
-        "{workspaceRoot}/rustfmt.toml"
+        "{workspaceRoot}/rustfmt.toml",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "parallelism": false,
       "cache": false,
       "outputs": [
         "{workspaceRoot}/target/budget-records/scratch-workload.json"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }

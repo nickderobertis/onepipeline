@@ -210,7 +210,7 @@ budgets:
       so 6 changes x 20 one-minute reads with no two overlapping is 120 points; a holdup read is
       at most 2 queries of 1 point, every 10 minutes and shared by both held nodes, 18 x 2 = 36;
       156 in all, and 250 leaves room for the first reads at publication and at the run's end.
-  # The CI, CD and local-gate budgets. The seven labelled `release-tail` are measured after a
+  # The CI, CD and local-gate budgets. The eight labelled `release-tail` are measured after a
   # release, from GitHub's own records of the runs it carried, by the last step of release.yml's
   # `publish` (`onebudgetspec check budgets.yaml --label release-tail`), reporting only;
   # `onepipeline-gate-time`, labelled `host-variable`, is checked by `just gate` as a warning.
@@ -257,12 +257,12 @@ budgets:
   # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
   - id: onepipeline-release-cycle-time
     description: >-
-      Per pull request one release carries, its last commit's checks plus its merge to the end of
-      publish; the maximum over the release's pull requests. It protects how soon a merged change
+      Per pull request one release carries whose merge changes a published artifact path, its last
+      commit's checks plus its merge to the end of publish; the maximum over those pull requests. It protects how soon a merged change
       reaches the people who install it.
     labels: [release-tail]
     measure: reported
-    command: [bash, scripts/actions-budget-figures.sh, release-cycle-time]
+    command: [bash, scripts/actions-budget-figures.sh, release-cycle-time, --published-paths, .github/release-published-paths]
     unit: seconds
     direction: max
     threshold: 5400
@@ -342,3 +342,21 @@ budgets:
     direction: max
     threshold: 1800
     timeout_seconds: 30
+
+  # Workload: every crate-touching push of the release's carried PRs, across all
+  # four jobs. Instrumented coverage runs uncached. Count every current cacheable
+  # execution and its
+  # preceding failed/throttled attempts; unavailable evidence is missing data.
+  - id: onepipeline-nx-cache-use
+    description: >-
+      Remote hits as a percentage of attempt-qualified cacheable task/OS/hash
+      executions, excluding local hits. Report release-PR and same-PR retry/push
+      rates, misses and receipt ages, promotion failures, bytes and GitHub reads.
+      The 100 percent design target is revisited after real release-tail observations.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, cache-use]
+    unit: percent
+    direction: min
+    threshold: 100
+    timeout_seconds: 300

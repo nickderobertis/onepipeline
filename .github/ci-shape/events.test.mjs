@@ -91,10 +91,7 @@ export function eventProblems(all) {
         const files = runs.map((run) => run.file).sort();
         if (JSON.stringify(files) !== JSON.stringify(["ci.yml"]))
           problems.push(`${label} starts ${files.join(", ")}, not ci.yml alone`);
-        const releasePlz = branch.startsWith("release-plz-") && !fork;
-        const want = FOUR.filter((job) => !(releasePlz && job === "test-macos")).map(
-          (job) => `ci.yml:${job}`,
-        );
+        const want = FOUR.map((job) => `ci.yml:${job}`);
         const got = ran(runs).sort();
         if (JSON.stringify(got) !== JSON.stringify(want))
           problems.push(`${label} runs ${got.join(", ")}, not ${want.join(", ")}`);

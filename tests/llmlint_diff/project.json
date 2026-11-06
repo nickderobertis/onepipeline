@@ -23,20 +23,35 @@
     "test": {
       "command": "node --test tests/llmlint_diff/*.test.mjs",
       "inputs": [
+        "sharedGlobals",
         "{projectRoot}/**/*",
         "{workspaceRoot}/nx.json",
         "{workspaceRoot}/project.json",
+        "{workspaceRoot}/lint-llm/project.json",
         "{workspaceRoot}/justfile",
         "{workspaceRoot}/scripts/nx.sh",
         "{workspaceRoot}/llmlint.yml",
         "{workspaceRoot}/oneharness.toml",
-        "{workspaceRoot}/package-lock.json",
-        { "runtime": "llmlint --version" }
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+        },
+        {
+          "runtime": "llmlint --version"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["npmSelection"]
     }
   }
 }

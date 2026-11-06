@@ -15,7 +15,10 @@
     "build": {
       "command": "just _tier-build smoke",
       "inputs": [
-        "smokeSource"
+        "smokeSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -24,13 +27,19 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/smoke/main.rs",
       "inputs": [
-        "smokeSource"
+        "smokeSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
       "command": "just _tier-lint smoke",
       "inputs": [
-        "smokeSource"
+        "smokeSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "smoke": {
@@ -38,7 +47,10 @@
       "//": "Alone, as the `smoke` job ran it: the journey drives the real GitHub API under nextest's 360-second bound, and beside the instrumented tiers on one runner it ran past that bound.",
       "parallelism": false,
       "inputs": [
-        "smokeSource"
+        "smokeSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "cache": false
     },
@@ -47,6 +59,15 @@
       "dependsOn": [
         "format-check",
         "lint"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }

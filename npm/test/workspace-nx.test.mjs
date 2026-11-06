@@ -20,7 +20,7 @@
 // driven through the commands they declare rather than through `just build`.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync as rawExecFileSync, spawnSync as rawSpawnSync } from "node:child_process";
 import {
   appendFileSync,
   copyFileSync,
@@ -87,18 +87,42 @@ const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
  * whichever shell launched the gate rather than about the script — a run with
  * `ONEPIPELINE_NX_SHOW_OUTPUT` already exported failed here for that reason.
  */
-function run(args, env = {}, cwd = root) {
-  const inherited = { ...process.env, ...env };
+function fixtureEnvironment(env = {}) {
+  // Local fixture tasks must never write into the enclosing CI job's shared
+  // cache or recording stream. Explicit event cases below supply their context.
+  const inherited = { ...process.env };
+  for (const name of Object.keys(inherited)) {
+    if (
+      name.startsWith("GITHUB_") ||
+      name.startsWith("ACTIONS_") ||
+      name.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_") ||
+      name === "NX_BASE" ||
+      name === "NX_HEAD"
+    )
+      delete inherited[name];
+  }
+  Object.assign(inherited, env);
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete inherited[name];
   }
+  return inherited;
+}
+
+function run(args, env = {}, cwd = root) {
   const result = spawnSync("bash", args, {
     cwd,
     encoding: "utf8",
-    env: inherited,
+    env: fixtureEnvironment(env),
   });
   assert.equal(result.error, undefined, `could not run ${args.join(" ")}`);
   return result;
+}
+
+function spawnSync(command, args, options = {}) {
+  return rawSpawnSync(command, args, { ...options, env: fixtureEnvironment(options.env) });
+}
+function execFileSync(command, args, options = {}) {
+  return rawExecFileSync(command, args, { ...options, env: fixtureEnvironment(options.env) });
 }
 
 // The verbs whose comment in the justfile promises every project, so a project
@@ -473,6 +497,49 @@ describe("the Rust targets' cache inputs", () => {
       !files.includes("tests/contract.rs"),
       "onepipeline-e2e:test hashes the contract binary",
     );
+  });
+});
+
+describe("fixture cache isolation", () => {
+  it("keeps ambient environment access behind the shared fixture sanitizer", () => {
+    const source = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const outsideSanitizer = source.replace(
+      /function fixtureEnvironment[\s\S]*?\n}\n\nfunction run/,
+      "function run",
+    );
+    assert.doesNotMatch(outsideSanitizer, /\bprocess\.env\b(?!\s*(?:\.|\[))/);
+    assert.equal((source.match(/\brawSpawnSync\(/g) ?? []).length, 1);
+    assert.equal((source.match(/\brawExecFileSync\(/g) ?? []).length, 1);
+  });
+  it("runs real fixture Nx without inheriting its enclosing CI identity or sidecar", (t) => {
+    const repo = scratchRepository(t);
+    const inherited = {
+      GITHUB_ACTIONS: "true",
+      NX_BASE: "a".repeat(40),
+      NX_HEAD: "b".repeat(40),
+      NX_SELF_HOSTED_REMOTE_CACHE_SERVER: "http://127.0.0.1:1",
+      NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: "enclosing-token",
+    };
+    const previous = Object.fromEntries(
+      Object.keys(inherited).map((key) => [key, process.env[key]]),
+    );
+    for (const [key, value] of Object.entries(inherited)) process.env[key] = value;
+    try {
+      const script =
+        '[ -z "$GITHUB_ACTIONS" ] && [ -z "$NX_BASE" ] && [ -z "$NX_HEAD" ] && [ -z "$NX_SELF_HOSTED_REMOTE_CACHE_SERVER" ] && bash scripts/nx.sh run onepipeline-npm:format-check';
+      const leaking = spawnSync("bash", ["-c", script], {
+        cwd: repo.path,
+        env: fixtureEnvironment(inherited),
+      });
+      assert.notEqual(leaking.status, 0, "the guard must detect inherited CI state");
+      const isolated = run(["-c", script], { NX_DAEMON: "false" }, repo.path);
+      assert.equal(isolated.status, 0, isolated.stdout + isolated.stderr);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 
@@ -852,23 +919,20 @@ describe("affected selection over real commits", () => {
   }
 });
 
-describe("a tier replayed from the cache", () => {
-  // The floor is one report over every tier's profiles, and `coverage-clean`
-  // empties the tree those profiles sit in before any tier runs. So a tier Nx
-  // replays has to put its profiles back, or the aggregate measures the suite
-  // without it. Driven through the real Nx and the committed project graph in a
-  // scratch repository; only `just` is a double, standing in for the
-  // instrumented runs: each tier recipe writes one profile under the name the
-  // real `_tier-test` gives it, and the aggregate lists what it would merge.
+describe("coverage execution and quick-tier replay", () => {
+  // Coverage profiles belong to the versioned binary, so every instrumented
+  // tier and the aggregate run again. Quick tiers still replay. Real Nx and
+  // the committed graph run here; the existing just double records invocations
+  // and produces the named profile/report files the aggregate consumes.
   const DOUBLE = `#!/usr/bin/env bash
 echo "$1" >> "$JUST_CALLS"
 tree=target/llvm-cov-target
 case "$1" in
   _crate-coverage-clean) rm -rf "$tree" ;;
-  _crate-test-archive | _crate-lint) ;;
+  _crate-test-archive | _crate-lint | *-test-quick) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
-    tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_]*\\)\\".*/\\1/p" justfile)"
+    tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_-]*\\)\\".*/\\1/p" justfile)"
     [ -n "$tier" ] || { echo "just double: '$1' runs no tier" >&2; exit 1; }
     name="$(sed -n 's/.*LLVM_PROFILE_FILE_NAME="\\([^"]*\\)".*/\\1/p' justfile)"
     name="\${name//\\$1/$tier}"; name="\${name//%p/$$}"; name="\${name//%14m/0}"
@@ -886,9 +950,12 @@ esac
     "_note-test",
     "_codex-server-test",
     "_pooled_slot-test",
+    "_version-contract-test",
+    "_version-e2e-test",
+    "_version-package-test",
   ];
 
-  it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
+  it("reruns every coverage tier and the aggregate after release version edits", (t) => {
     const repo = scratchRepository(t);
     mkdirSync(join(repo.path, "bin"));
     writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
@@ -912,7 +979,9 @@ esac
       };
     };
     const tiersIn = (merged) =>
-      merged.map((profile) => profile.match(/^onepipeline-([a-z0-9_]+)-/)?.[1]).sort();
+      merged
+        .map((profile) => profile.match(/^onepipeline-([a-z0-9_-]+)-[0-9]+-[0-9]+\.profraw$/)?.[1])
+        .sort();
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
@@ -923,17 +992,32 @@ esac
       "note",
       "pooled_slot",
       "rest",
+      "version-contract",
+      "version-e2e",
+      "version-package",
     ]);
 
-    // Only the note tier's inputs change; the budget record the e2e tier
-    // writes is gone, as it is on a fresh runner.
     rmSync(join(repo.path, "target", "budget-records"), { recursive: true, force: true });
-    repo.change("tests/note/main.rs");
+    const manifestPath = join(repo.path, "Cargo.toml");
+    const manifest = readFileSync(manifestPath, "utf8");
+    const version = manifest.match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1];
+    const [major, minor] = version.split(".").map(Number);
+    const next = `${major}.${minor + 1}.0`;
+    writeFileSync(manifestPath, manifest.replace(`version = "${version}"`, `version = "${next}"`));
+    const lockPath = join(repo.path, "Cargo.lock");
+    writeFileSync(
+      lockPath,
+      readFileSync(lockPath, "utf8").replace(
+        `name = "onepipeline"\nversion = "${version}"`,
+        `name = "onepipeline"\nversion = "${next}"`,
+      ),
+    );
+    repo.change("Cargo.toml");
     const warm = aggregate();
     assert.deepEqual(
-      warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)),
-      ["_note-test"],
-      `only the changed tier runs: ${warm.ran.join(" ")}`,
+      warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)).sort(),
+      [...TIER_RECIPES].sort(),
+      `every instrumented tier must rerun: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
     assert.deepEqual(tiersIn(warm.merged), [
@@ -943,10 +1027,13 @@ esac
       "note",
       "pooled_slot",
       "rest",
+      "version-contract",
+      "version-e2e",
+      "version-package",
     ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
-      "the replayed e2e tier did not restore the budget record `budgets` reads",
+      "the fresh e2e tier did not produce the budget record `budgets` reads",
     );
   });
 
@@ -965,7 +1052,8 @@ esac
       assert.equal(result.status, 0, result.stderr);
       return readFileSync(calls, "utf8").split("\n").includes(recipe);
     };
-    const tierRan = () => ranRecipe("onepipeline-codex-server:test", "_codex-server-test");
+    const tierRan = () =>
+      ranRecipe("onepipeline-codex-server:test-quick", "_codex-server-test-quick");
     const lintRan = () => ranRecipe("onepipeline:lint", "_crate-lint");
     assert.equal(tierRan(), true);
     assert.equal(lintRan(), true);
@@ -998,7 +1086,7 @@ esac
     const tierRan = () => {
       writeFileSync(calls, "");
       const result = run(
-        ["scripts/nx.sh", "run", "onepipeline-contract:test"],
+        ["scripts/nx.sh", "run", "onepipeline-contract:test-quick"],
         {
           PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
           JUST_CALLS: calls,
@@ -1007,7 +1095,7 @@ esac
         repo.path,
       );
       assert.equal(result.status, 0, result.stderr);
-      return readFileSync(calls, "utf8").split("\n").includes("_contract-test");
+      return readFileSync(calls, "utf8").split("\n").includes("_contract-test-quick");
     };
 
     assert.ok(tierRan(), "a cold cache did not run the tier");
@@ -1111,17 +1199,23 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
       "the journeys timed a binary other than the one the build made",
     );
 
-    // Unchanged, both replay together: a warm cache builds nothing.
+    // The producer build may replay; the timed record requires its executable
+    // and remains uncached until that record contract can attest the digest.
     const warm = check(repo);
     assert.equal(warm.result.status, 0, warm.result.stderr);
-    assert.deepEqual(Object.keys(warm.spans), [], JSON.stringify(warm.spans));
+    assert.deepEqual(
+      Object.keys(warm.spans),
+      ["stop-verdict-journeys"],
+      JSON.stringify(warm.spans),
+    );
   });
 
-  it("keys the build on exactly the timed run's inputs, so the two replay or run together", () => {
+  it("keys the cached producer on the uncached timed run's build inputs", () => {
     // `test`'s inputs are held to the record fingerprint elsewhere; these are
-    // held to `test`'s, so a cached build can never stand beside a run that
-    // misses, nor a stale one beside a run that replays.
+    // held to `test`'s so a producer keyed on stale inputs cannot stand beside
+    // the uncached timed run. The journey also checks its executable locally.
     const tier = project("onepipeline-stop-verdict");
+    assert.equal(tier.targets.test.cache, false);
     assert.equal(tier.targets["test-build"].cache, true);
     assert.deepEqual(tier.targets["test-build"].inputs, tier.targets.test.inputs);
   });
@@ -1167,6 +1261,7 @@ describe("the npm suite's debug build", () => {
   // repository, where `just` is a double that can refuse the build.
   const DOUBLE = `#!/usr/bin/env bash
 echo "$1" >> "$JUST_CALLS"
+printf '%s\n' "\${NX_RUN_COMMANDS_DIRECTLY:-unset}" > "$JUST_RUNNER_MODE"
 [ "$1" != _crate-build ] || [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
 `;
 
@@ -1179,7 +1274,7 @@ echo "$1" >> "$JUST_CALLS"
         ["run", "onepipeline-npm:test", `--graph=${graphPath}`],
         {
           cwd: repo.path,
-          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
           encoding: "utf8",
         },
       ),
@@ -1205,6 +1300,8 @@ echo "$1" >> "$JUST_CALLS"
           PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
           JUST_CALLS: calls,
           BREAK_BUILD: "1",
+          JUST_RUNNER_MODE: join(repo.path, "runner-mode"),
+          NX_RUN_COMMANDS_DIRECTLY: "true",
           // A parent Nx streams its tasks and passes this into the suite.
           // Static output must still save the failed build's task report.
           NX_STREAM_OUTPUT: "true",
@@ -1221,6 +1318,13 @@ echo "$1" >> "$JUST_CALLS"
       }
       assert.equal(result.status, 1, result.stdout + result.stderr);
       assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
+      // Observe the real dependency process's configuration. The output race
+      // is intermittent, so a passing echo alone cannot guard its workaround.
+      assert.equal(
+        readFileSync(join(repo.path, "runner-mode"), "utf8").trim(),
+        "false",
+        "failed builds must bypass Nx's lossy direct-command runner (nrwl/nx#37452)",
+      );
       const cache = join(repo.path, ".nx", "cache");
       const { tasks } = JSON.parse(readFileSync(join(cache, "run.json"), "utf8"));
       const build = tasks.find((task) => task.taskId === "onepipeline:build");
@@ -1265,12 +1369,11 @@ describe("the build targets", () => {
         // escape codes the line matches below would never see past — the
         // `Compiling` check would pass on anything. Colour does not enter
         // cargo's fingerprint, so this reads the same tree.
-        env: {
-          ...process.env,
+        env: fixtureEnvironment({
           ...GATE_DEBUG_BUILD.env,
           CARGO_TERM_QUIET: "false",
           CARGO_TERM_COLOR: "never",
-        },
+        }),
       },
     );
     assert.equal(result.status, 0, result.stderr);
@@ -1384,7 +1487,7 @@ describe("release-only workload selection", () => {
           [...args, `--graph=${graphPath}`],
           {
             cwd: repo.path,
-            env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+            env: fixtureEnvironment({ NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" }),
             encoding: "utf8",
           },
         ),
