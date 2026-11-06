@@ -13,6 +13,22 @@ if (!file || !scenarioJson) {
 }
 const workflow = parse(readFileSync(file, "utf8"));
 const scenario = JSON.parse(scenarioJson);
+const OUTCOMES = ["success", "failure", "skipped", "cancelled"];
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const refusal =
+  (!["pull_request", "push"].includes(scenario?.eventName) && "eventName") ||
+  (typeof scenario.ref !== "string" && "ref") ||
+  (typeof scenario.head !== "string" && "head") ||
+  (!isObject(scenario.event) && "event") ||
+  (!isObject(scenario.results) && "results") ||
+  (Object.entries(scenario.results).some(
+    ([job, outcome]) => !workflow.jobs?.[job] || !OUTCOMES.includes(outcome),
+  ) &&
+    "results: each names a job of the workflow and one of " + OUTCOMES.join(", "));
+if (refusal) {
+  console.error(`ci-schedule: the scenario's ${refusal} is invalid`);
+  process.exit(2);
+}
 const row = runGraph(workflow, scenario).find((candidate) => candidate.job === "budgets");
 if (!row) {
   console.error(`${file} has no budgets job`);

@@ -542,6 +542,19 @@ class PredecessorOutcomes(Journey):
         self.assertTrue(schedule(unscheduled, 'pull_request', dict.fromkeys(PREDECESSORS, 'success'))['selected'])
 
 
+class Scheduler(unittest.TestCase):
+    def test_a_scenario_it_cannot_judge_is_refused(self):
+        script, ci = str(HERE / 'ci-schedule.mjs'), str(ROOT / '.github/workflows/ci.yml')
+        for scenario, named in (
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'lint': 'passed'}}, 'results'),
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'no-such-job': 'failure'}}, 'results'),
+            ({'eventName': 'schedule', 'ref': 'r', 'head': '0', 'event': {}, 'results': {}}, 'eventName'),
+        ):
+            refused = subprocess.run(['node', script, ci, json.dumps(scenario)], cwd=ROOT, capture_output=True, text=True, check=False)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn(f"scenario's {named}", refused.stderr)
+
+
 class NamedInputs(unittest.TestCase):
     def test_each_input_a_command_names_is_the_one_it_reads(self):
         """A name no command reads would make the row's reason a lie, so garbage there must break it."""
