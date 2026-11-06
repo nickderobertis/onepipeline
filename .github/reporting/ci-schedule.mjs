@@ -12,6 +12,7 @@ if (!file || !scenarioJson) {
   console.error("usage: ci-schedule.mjs WORKFLOW_FILE SCENARIO_JSON");
   process.exit(2);
 }
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 function refuse(reason) {
   console.error(`ci-schedule: ${reason}`);
   process.exit(2);
@@ -24,8 +25,8 @@ try {
 } catch (error) {
   refuse(`cannot read the workflow or the scenario: ${error.message}`);
 }
+if (!isObject(workflow) || !isObject(workflow.jobs)) refuse(`${file} is not a workflow with jobs`);
 const OUTCOMES = ["success", "failure", "skipped", "cancelled"];
-const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const pullRequest = scenario?.event?.pull_request;
 const eventShaped =
   scenario?.eventName === "push"
@@ -40,19 +41,20 @@ const refusal =
   (!eventShaped && "event") ||
   (!isObject(scenario.results) && "results") ||
   (Object.entries(scenario.results).some(
-    ([job, outcome]) => !Object.hasOwn(workflow.jobs ?? {}, job) || !OUTCOMES.includes(outcome),
+    ([job, outcome]) => !Object.hasOwn(workflow.jobs, job) || !OUTCOMES.includes(outcome),
   ) &&
     "results: each names a job of the workflow and one of " + OUTCOMES.join(", "));
 if (refusal) refuse(`the scenario's ${refusal} is invalid`);
-const row = runGraph(workflow, scenario).find((candidate) => candidate.job === "budgets");
+let started;
+let row;
+try {
+  started = triggered(workflow, scenario);
+  row = runGraph(workflow, scenario).find((candidate) => candidate.job === "budgets");
+} catch (error) {
+  refuse(`cannot interpret ${file}: ${error.message}`);
+}
 if (!row) {
   console.error(`${file} has no budgets job`);
   process.exit(1);
 }
-console.log(
-  JSON.stringify({
-    triggered: triggered(workflow, scenario),
-    selected: row.selected,
-    needs: row.needs,
-  }),
-);
+console.log(JSON.stringify({ triggered: started, selected: row.selected, needs: row.needs }));

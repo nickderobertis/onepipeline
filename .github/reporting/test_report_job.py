@@ -544,6 +544,22 @@ class PredecessorOutcomes(Journey):
 
 
 class Scheduler(unittest.TestCase):
+    def test_a_workflow_it_cannot_interpret_is_refused_and_one_without_the_job_is_named(self):
+        script = str(HERE / 'ci-schedule.mjs')
+        scenario = json.dumps({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': PUSH_EVENT, 'results': {}})
+        one_job = 'jobs: {lint: {runs-on: ubuntu-latest, steps: [{run: "true"}]}}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            for name, content, code, said in (
+                ('empty.yml', '', 2, 'not a workflow with jobs'),
+                ('filtered.yml', f'name: x\non: {{push: {{paths: ["src/**"]}}}}\n{one_job}', 2, 'cannot interpret'),
+                ('no-budgets.yml', f'name: x\non: {{push: {{branches: [main]}}}}\n{one_job}', 1, 'has no budgets job'),
+            ):
+                path = Path(directory) / name
+                path.write_text(content)
+                answer = subprocess.run(['node', script, str(path), scenario], cwd=ROOT, capture_output=True, text=True, check=False)
+                self.assertEqual(answer.returncode, code, answer.stderr)
+                self.assertIn(said, answer.stderr)
+
     def test_input_it_cannot_read_is_refused_as_invalid(self):
         script, ci = str(HERE / 'ci-schedule.mjs'), str(ROOT / '.github/workflows/ci.yml')
         for arguments in ([ci, 'not json'], ['/no/such/workflow.yml', '{}']):
