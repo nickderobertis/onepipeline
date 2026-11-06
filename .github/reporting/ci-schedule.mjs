@@ -22,7 +22,7 @@ const refusal =
   (!isObject(scenario.event) && "event") ||
   (!isObject(scenario.results) && "results") ||
   (Object.entries(scenario.results).some(
-    ([job, outcome]) => !workflow.jobs?.[job] || !OUTCOMES.includes(outcome),
+    ([job, outcome]) => !Object.hasOwn(workflow.jobs ?? {}, job) || !OUTCOMES.includes(outcome),
   ) &&
     "results: each names a job of the workflow and one of " + OUTCOMES.join(", "));
 if (refusal) {

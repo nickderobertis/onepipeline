@@ -548,6 +548,7 @@ class Scheduler(unittest.TestCase):
         for scenario, named in (
             ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'lint': 'passed'}}, 'results'),
             ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'no-such-job': 'failure'}}, 'results'),
+            ({'eventName': 'push', 'ref': 'refs/heads/main', 'head': '0', 'event': {}, 'results': {'toString': 'failure'}}, 'results'),
             ({'eventName': 'schedule', 'ref': 'r', 'head': '0', 'event': {}, 'results': {}}, 'eventName'),
         ):
             refused = subprocess.run(['node', script, ci, json.dumps(scenario)], cwd=ROOT, capture_output=True, text=True, check=False)
