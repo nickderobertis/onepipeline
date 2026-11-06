@@ -845,6 +845,20 @@ pub struct World {
     pub home: Option<PathBuf>,
 }
 
+/// The variable and value that stop the real `gh` autolaunching a session bus.
+pub const NO_SESSION_BUS: (&str, &str) = ("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+
+/// What every offline journey's processes inherit, because some reach the real `gh`:
+/// [`World::register`] runs `onevcs` in this process and a bare `onevcs` helper carries
+/// no `ONEVCS_GH`, so each asks the `gh` on `PATH`. With no token, that lookup
+/// autolaunches a session bus whose daemon outlives the journey and holds one of the
+/// host's inotify instances. The credentialled tier shares this file and is left as it is.
+fn keep_real_gh_off_the_session_bus() {
+    if env!("CARGO_CRATE_NAME") != "smoke" {
+        std::env::set_var(NO_SESSION_BUS.0, NO_SESSION_BUS.1);
+    }
+}
+
 impl World {
     /// A fresh world for one test.
     ///
@@ -876,6 +890,7 @@ impl World {
     pub fn at(root: &Path, name: &str) -> Self {
         let _fixture = profile::span(profile::Category::Fixture);
         onepipeline_testfakes::containment::enrol();
+        keep_real_gh_off_the_session_bus();
         *live() += 1;
         let root = root.to_path_buf();
         let _ = profile::fs::remove_dir_all(&root);
@@ -6781,7 +6796,7 @@ fn ps_plus(question: &str, row: &str) -> String {
 /// journey composing a sibling proves only that the host had one, and says
 /// nothing about the version this crate is written against. The inherited `PATH`
 /// still follows, because git and the platform's own tools live on it.
-fn path_leading_with(dirs: &[PathBuf]) -> std::ffi::OsString {
+pub fn path_leading_with(dirs: &[PathBuf]) -> std::ffi::OsString {
     std::env::join_paths(dirs.iter().cloned().chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))
