@@ -87,3 +87,23 @@ for (const ending of ["\n", "\r\n"]) {
     }
   });
 }
+for (const pin of ["01.2.3", "1.02.3", "1.2.03", "1.2", "1.2.3-rc.1", ""]) {
+  test(`the onevcs pin reader refuses ${JSON.stringify(pin)} and names how to recover`, () => {
+    const dir = mkdtempSync(
+      join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "onevcs-pin-"),
+    );
+    try {
+      mkdirSync(join(dir, ".github"));
+      writeFileSync(join(dir, ".github/onevcs-cli-version"), `${pin}\n`);
+      const result = spawnSync("bash", [join(root, ".github/read-onevcs-cli-version.sh")], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 2, result.stdout);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /ACTION: write a published exact stable version/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
