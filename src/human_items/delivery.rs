@@ -81,7 +81,6 @@ struct OwedSurface {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// The surface kind an item event is carried to a run as.
 const SURFACE_KIND: &str = "human-item";
 
 /// The two messages an event's surface may say, if a person took it: an item's title,

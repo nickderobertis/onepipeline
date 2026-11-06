@@ -6209,10 +6209,9 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|record| {
+            .rfind(|record| {
                 record["kind"] == "human-item" && record["message"].as_str().unwrap().contains(id)
             })
-            .last()
             .unwrap_or_else(|| panic!("{id} reached no surface"))["message"]
             .as_str()
             .unwrap()

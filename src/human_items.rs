@@ -1135,7 +1135,6 @@ impl HumanItemSample {
     }
 }
 
-/// What a note on an item that is neither completed nor dismissed refuses with.
 pub(crate) const NOTE_REFUSED: &str = "only a completed or dismissed item takes a note";
 
 /// Why `item` cannot be reopened, if it cannot: the one answer the CLI, the browser and
