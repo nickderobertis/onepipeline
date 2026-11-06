@@ -406,7 +406,7 @@ def q7(store: h.Store, repo: str) -> None:
     pairs: dict[str, list[float]] = defaultdict(list)
     samples: dict[str, list[tuple]] = defaultdict(list)
     for branch, branch_runs in by_branch.items():
-        if branch not in prs or len({r["head_sha"] for r in branch_runs}) < 2:
+        if branch not in prs:
             continue
         first_sha = branch_runs[0]["head_sha"]
         times: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -424,7 +424,8 @@ def q7(store: h.Store, repo: str) -> None:
                 table[name][push] += values
             if pushes["first"] and pushes["later"]:
                 pairs[name].append(median(pushes["later"]) - median(pushes["first"]))
-    print(f"{repo}: pull-request branches with >1 push {len([b for b in by_branch if b in prs and len({r['head_sha'] for r in by_branch[b]}) > 1])}; jobs in minutes")
+    print(f"{repo}: merged pull-request branches {len([b for b in by_branch if b in prs])}, with >1 push "
+          f"{len([b for b in by_branch if b in prs and len({r['head_sha'] for r in by_branch[b]}) > 1])}; jobs in minutes")
     for name in sorted(table):
         first, later = table[name]["first"], table[name]["later"]
         if first and later:
@@ -442,7 +443,7 @@ def q7_restores(store: h.Store, repo: str) -> None:
     for name, rows in sorted(_q7_samples.items()):
         if not re.match(r"(lint|test-linux|test-windows|test-macos)/", name):
             continue
-        sampled = rows[-25:]
+        sampled = rows[-60:]
         answers: Counter[str] = Counter()
         builds: dict[str, list[float]] = defaultdict(list)
         for run_id, job_id, value, branch in sampled:
@@ -455,6 +456,38 @@ def q7_restores(store: h.Store, repo: str) -> None:
               f"{ {k: round(median(v), 1) for k, v in builds.items()} }")
 
 
+def episodes(store: h.Store, repo: str, path: Path) -> None:
+    """Each time a reading stood over 10 GiB or lost an entry: every reading through it, and the timings."""
+    rows = readings(path, repo)
+    print(f"{repo}:")
+    previous = None
+    open_episode = False
+    for row in rows:
+        if previous is not None:
+            before = {e["id"]: e for e in previous["entries"]}
+            after = {e["id"]: e for e in row["entries"]}
+            gone = [before[i] for i in before if i not in after]
+            new = sorted((after[i] for i in after if i not in before), key=lambda e: e["created_at"])
+            over = row["listed_bytes"] > GIB
+            if gone or over or open_episode:
+                running = previous["listed_bytes"]
+                crossed = None
+                for entry in new:
+                    running += entry["size_in_bytes"]
+                    if running > GIB and crossed is None:
+                        crossed = entry
+                gap = minutes(row["started_at"], previous["started_at"])
+                print(f"  {row['started_at'][11:19]} (+{gap:.0f}m) listed {row['listed_bytes'] / 1e9:.4f} usage "
+                      f"{row['usage_bytes'] / 1e9:.4f} entries {len(after)} total_count {row['total_count']}; new "
+                      f"{sum(e['size_in_bytes'] for e in new) / 1e6:.1f}MB gone {len(gone)} = "
+                      f"{sum(e['size_in_bytes'] for e in gone) / 1e6:.1f}MB"
+                      + (f"; save crossing 10 GiB at {crossed['created_at'][11:19]} ({crossed['key'][:32]})" if crossed else "")
+                      + (f"; newest gone last access {max(e['last_accessed_at'] for e in gone)[5:19]}, oldest survivor "
+                         f"{min(e['last_accessed_at'] for e in after.values())[5:19]}" if gone else ""))
+            open_episode = over
+        previous = row
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache", type=Path, required=True)
@@ -464,8 +497,8 @@ def main() -> int:
     store = h.Store(args.cache)
     for question in args.questions:
         for repo in REPOS:
-            if question == "q1":
-                q1(store, repo, args.readings)
+            if question in ("q1", "episodes"):
+                globals()[question](store, repo, args.readings)
             else:
                 globals()[question](store, repo)
     print(f"[{store.requests} requests]", file=sys.stderr)
