@@ -193,6 +193,8 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             vec!["answer", "hi-x", "--text", "yes"],
             vec!["complete", "hi-x"],
             vec!["dismiss", "hi-x"],
+            vec!["reopen", "hi-x"],
+            vec!["note", "hi-x", "--text", "said"],
             vec!["watch", "--session", "s"],
         ];
         // Exactly the contract's live verbs, so a verb it adds is driven here too.

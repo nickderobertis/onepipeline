@@ -65,13 +65,18 @@
             "items": {
               "$ref": "#/$defs/HumanItemNode"
             }
+          },
+          "reopen": {
+            "description": "Whether it can be reopened.",
+            "$ref": "#/$defs/HumanItemReopen"
           }
         },
         "additionalProperties": false,
         "required": [
           "item",
           "blocked",
-          "nodes"
+          "nodes",
+          "reopen"
         ]
       },
       "HumanItem": {
@@ -281,10 +286,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": [
-                    "completed",
-                    "dismissed"
-                  ]
+                  "const": "dismissed"
                 }
               }
             },
@@ -312,6 +314,14 @@
               "properties": {
                 "resolution": {
                   "properties": {
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
                     "reason": {
                       "type": "null"
                     }
@@ -622,6 +632,55 @@
           "title"
         ]
       },
+      "HumanItemReopen": {
+        "description": "Whether an item can be reopened, and why not when it cannot.",
+        "type": "object",
+        "properties": {
+          "available": {
+            "description": "Whether a reopen would be accepted, as far as the engine can tell without running a script.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "What a reopen refuses with: null exactly when it is available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "available": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
+        ]
+      },
       "HumanItemSampleApproval": {
         "description": "An approval written by the fixture authority, never a live design approval.",
         "type": "object",
@@ -900,10 +959,7 @@
         "if": {
           "properties": {
             "state": {
-              "enum": [
-                "completed",
-                "dismissed"
-              ]
+              "const": "dismissed"
             }
           }
         },
@@ -931,6 +987,14 @@
           "properties": {
             "resolution": {
               "properties": {
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
                 "reason": {
                   "type": "null"
                 }
@@ -1612,6 +1676,77 @@
           "actor",
           "on_behalf_of"
         ]
+      },
+      {
+        "description": "Reopen a completed or dismissed item, taking its resolution back.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "reopen"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "id",
+          "actor",
+          "on_behalf_of"
+        ]
+      },
+      {
+        "description": "Say something after the fact on a completed or dismissed item: its comment\nor its reason, replacing the stored text and leaving the resolver as it is.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "note"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "id",
+          "text",
+          "actor",
+          "on_behalf_of"
+        ]
       }
     ],
     "$defs": {
@@ -1892,12 +2027,17 @@
       "blocked": {
         "description": "Blocked.",
         "$ref": "#/$defs/HumanItemBlocked"
+      },
+      "reopen": {
+        "description": "Whether it can be reopened.",
+        "$ref": "#/$defs/HumanItemReopen"
       }
     },
     "additionalProperties": false,
     "required": [
       "item",
-      "blocked"
+      "blocked",
+      "reopen"
     ],
     "$defs": {
       "HumanItem": {
@@ -2107,10 +2247,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": [
-                    "completed",
-                    "dismissed"
-                  ]
+                  "const": "dismissed"
                 }
               }
             },
@@ -2138,6 +2275,14 @@
               "properties": {
                 "resolution": {
                   "properties": {
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
                     "reason": {
                       "type": "null"
                     }
@@ -2446,6 +2591,55 @@
           "run",
           "node",
           "title"
+        ]
+      },
+      "HumanItemReopen": {
+        "description": "Whether an item can be reopened, and why not when it cannot.",
+        "type": "object",
+        "properties": {
+          "available": {
+            "description": "Whether a reopen would be accepted, as far as the engine can tell without running a script.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "What a reopen refuses with: null exactly when it is available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "available": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
         ]
       }
     }
@@ -2470,13 +2664,18 @@
         "items": {
           "$ref": "#/$defs/HumanItemNode"
         }
+      },
+      "reopen": {
+        "description": "Whether it can be reopened.",
+        "$ref": "#/$defs/HumanItemReopen"
       }
     },
     "additionalProperties": false,
     "required": [
       "item",
       "blocked",
-      "nodes"
+      "nodes",
+      "reopen"
     ],
     "$defs": {
       "HumanItem": {
@@ -2686,10 +2885,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": [
-                    "completed",
-                    "dismissed"
-                  ]
+                  "const": "dismissed"
                 }
               }
             },
@@ -2717,6 +2913,14 @@
               "properties": {
                 "resolution": {
                   "properties": {
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
                     "reason": {
                       "type": "null"
                     }
@@ -3025,6 +3229,55 @@
           "run",
           "node",
           "title"
+        ]
+      },
+      "HumanItemReopen": {
+        "description": "Whether an item can be reopened, and why not when it cannot.",
+        "type": "object",
+        "properties": {
+          "available": {
+            "description": "Whether a reopen would be accepted, as far as the engine can tell without running a script.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "What a reopen refuses with: null exactly when it is available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "available": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
         ]
       }
     }
@@ -3061,12 +3314,17 @@
           "blocked": {
             "description": "Blocked.",
             "$ref": "#/$defs/HumanItemBlocked"
+          },
+          "reopen": {
+            "description": "Whether it can be reopened.",
+            "$ref": "#/$defs/HumanItemReopen"
           }
         },
         "additionalProperties": false,
         "required": [
           "item",
-          "blocked"
+          "blocked",
+          "reopen"
         ]
       },
       "HumanItem": {
@@ -3276,10 +3534,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": [
-                    "completed",
-                    "dismissed"
-                  ]
+                  "const": "dismissed"
                 }
               }
             },
@@ -3307,6 +3562,14 @@
               "properties": {
                 "resolution": {
                   "properties": {
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
                     "reason": {
                       "type": "null"
                     }
@@ -3615,6 +3878,55 @@
           "run",
           "node",
           "title"
+        ]
+      },
+      "HumanItemReopen": {
+        "description": "Whether an item can be reopened, and why not when it cannot.",
+        "type": "object",
+        "properties": {
+          "available": {
+            "description": "Whether a reopen would be accepted, as far as the engine can tell without running a script.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "What a reopen refuses with: null exactly when it is available.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "available": {
+                  "const": true
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "reason": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
         ]
       }
     }
@@ -3716,6 +4028,17 @@
             "type": "null"
           }
         ]
+      },
+      "by": {
+        "description": "Who acted: set only on a reopen or a note, and absent from every other kind.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemEventBy"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "additionalProperties": false,
@@ -3741,11 +4064,16 @@
             "item": {
               "properties": {
                 "state": {
-                  "const": "open"
+                  "enum": [
+                    "open"
+                  ]
                 }
               }
             },
             "resolution": {
+              "type": "null"
+            },
+            "by": {
               "type": "null"
             }
           }
@@ -3764,12 +4092,17 @@
             "item": {
               "properties": {
                 "state": {
-                  "const": "answered"
+                  "enum": [
+                    "answered"
+                  ]
                 }
               }
             },
             "resolution": {
               "type": "object"
+            },
+            "by": {
+              "type": "null"
             }
           }
         }
@@ -3787,12 +4120,17 @@
             "item": {
               "properties": {
                 "state": {
-                  "const": "completed"
+                  "enum": [
+                    "completed"
+                  ]
                 }
               }
             },
             "resolution": {
               "type": "object"
+            },
+            "by": {
+              "type": "null"
             }
           }
         }
@@ -3810,12 +4148,17 @@
             "item": {
               "properties": {
                 "state": {
-                  "const": "dismissed"
+                  "enum": [
+                    "dismissed"
+                  ]
                 }
               }
             },
             "resolution": {
               "type": "object"
+            },
+            "by": {
+              "type": "null"
             }
           }
         }
@@ -3833,14 +4176,82 @@
             "item": {
               "properties": {
                 "state": {
-                  "const": "dismissed"
+                  "enum": [
+                    "dismissed"
+                  ]
                 }
               }
             },
             "resolution": {
               "type": "object"
+            },
+            "by": {
+              "type": "null"
             }
           }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-reopened"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open"
+                  ]
+                }
+              }
+            },
+            "resolution": {
+              "type": "null"
+            },
+            "by": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "by"
+          ]
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-noted"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "resolution": {
+              "type": "object"
+            },
+            "by": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "by"
+          ]
         }
       }
     ],
@@ -3902,6 +4313,16 @@
             "description": "human-item-auto-resolved",
             "type": "string",
             "const": "human-item-auto-resolved"
+          },
+          {
+            "description": "human-item-reopened",
+            "type": "string",
+            "const": "human-item-reopened"
+          },
+          {
+            "description": "human-item-noted",
+            "type": "string",
+            "const": "human-item-noted"
           }
         ]
       },
@@ -4112,10 +4533,7 @@
             "if": {
               "properties": {
                 "state": {
-                  "enum": [
-                    "completed",
-                    "dismissed"
-                  ]
+                  "const": "dismissed"
                 }
               }
             },
@@ -4143,6 +4561,14 @@
               "properties": {
                 "resolution": {
                   "properties": {
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
                     "reason": {
                       "type": "null"
                     }
@@ -4343,6 +4769,28 @@
         "required": [
           "task",
           "url"
+        ]
+      },
+      "HumanItemEventBy": {
+        "description": "Who took a reopen or note, which neither a resolver nor a null resolution says.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of"
         ]
       }
     }

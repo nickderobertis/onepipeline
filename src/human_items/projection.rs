@@ -57,6 +57,11 @@ struct Record {
     // llmlint: ignore[changed_behavior_has_e2e] a record an earlier build wrote is one the store accepted with no repositories — a planless task, or one whose task source was its plan's own — so reading it as none replays exactly what was accepted; `a_record_an_earlier_build_wrote_reads_as_projected_with_no_repositories` holds the decoding, and the replay journeys drive the reread.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     repositories: Vec<onetaskgraph_plugin_api::Repository>,
+    /// The reason a dismissal was last projected with, which a later note replaces. Absent
+    /// from any other state, and from a record an earlier build wrote: such a dismissal is
+    /// projected once more, which the store answers from its own terminal record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -78,6 +83,14 @@ fn projected(journal: &Path) -> BTreeMap<String, Record> {
     })
 }
 
+/// The reason a task's state is projected with: a dismissal's, and only a dismissal's.
+fn dismissal_reason(item: &HumanItem) -> Option<&str> {
+    item.resolution
+        .as_ref()
+        .filter(|_| item.state == HumanItemState::Dismissed)
+        .and_then(|r| r.reason.as_deref())
+}
+
 /// The tasks whose projection is owed.
 pub(crate) fn pending<'a>(
     journal: &Path,
@@ -89,8 +102,11 @@ pub(crate) fn pending<'a>(
         // Ahead of what was projected — or projected open with no tracker bound on
         // the item, whose binding the store answers again rather than filing anew.
         .filter(|item| {
-            done.get(&item.id).map(|r| r.state) != Some(Projected::of(item.state))
+            let record = done.get(&item.id);
+            record.map(|r| r.state) != Some(Projected::of(item.state))
                 || (item.state == HumanItemState::Open && item.tracker.is_none())
+                || (item.state == HumanItemState::Dismissed
+                    && record.and_then(|r| r.reason.as_deref()) != dismissal_reason(item))
         })
         .cloned()
         .collect()
@@ -176,7 +192,6 @@ pub(crate) fn project(
     source: &str,
     item: &HumanItem,
 ) -> Result<Bound, String> {
-    let resolution = item.resolution.as_ref();
     let content = content(dir, journal, item)?;
     use onetaskgraph_core::task_projection as wire;
     let refused =
@@ -216,11 +231,7 @@ pub(crate) fn project(
             Projected::Completed => wire::ProjectionState::Completed,
             Projected::Dismissed => wire::ProjectionState::Dismissed,
         },
-        reason: if item.state == HumanItemState::Dismissed {
-            resolution.and_then(|r| r.reason.clone())
-        } else {
-            None
-        },
+        reason: dismissal_reason(item).map(str::to_owned),
     };
     let built = crate::taskgraph::Store::at(dir)
         .engine(&Default::default())
@@ -244,6 +255,7 @@ pub(crate) fn project(
             body: content.body,
             priority: content.priority,
             repositories: content.repositories,
+            reason: dismissal_reason(item).map(str::to_owned),
         },
     })
 }

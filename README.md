@@ -941,6 +941,8 @@ onepipeline human-items show ITEM            # one item and every step it blocks
 onepipeline human-items answer ITEM --text "Use the gradual rollout."
 onepipeline human-items complete ITEM
 onepipeline human-items dismiss ITEM [--reason TEXT]
+onepipeline human-items reopen ITEM          # take a completion or dismissal back
+onepipeline human-items note ITEM --text TEXT  # comment on it, or state why, afterwards
 onepipeline human-items watch                # this session's item events, once each
 ```
 

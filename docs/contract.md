@@ -783,7 +783,8 @@ and the host-local override the file `ONEPIPELINE_CONFIG` names, else
 `human_items` mapping: `enabled: boolean` (default false), `task_source: string`
 (optional), `hooks: [{phase, kind: task|question, title, body, priority, block:
 {scope: nothing|work|plan|host}, approval: {adapter} | null, aggregate?:
-ticket_review}]` and `approval_adapters: {NAME: {command: [program, args...]}}`.
+ticket_review}]` and `approval_adapters: {NAME: {command: [program, args...], undo?:
+[program, args...]}}`.
 Hooks are validated once, at load; a malformed configuration is refused by the
 verbs and the SDK, naming the files it was read from, and a launch over one says
 so and runs with human items off. Disabled, every live verb refuses nonzero with
@@ -830,12 +831,14 @@ updated in place keeps that one tracker task, and every later state is projected
 with the content it was first projected as. What was last projected is kept
 beside the journal; a task whose projection is owed is
 projected by the next write, and the store's intent, keyed by the item's id,
-answers a replay without a second ticket. A refused projection is said on
+answers a replay without a second ticket. A reopened task projects open and a note
+projects as the state it is on, by this same path. A refused projection is said on
 standard error and leaves the item and its hold as they are.
 
 The public support types are HumanItemKind, HumanItemState, HumanItemOwner,
 HumanItemBlock, HumanItemResolution, HumanItemApproval, HumanItemTracker,
-HumanItemMetadata, HumanItemNode, HumanItemBlockedPlan and HumanItemBlocked.
+HumanItemMetadata, HumanItemNode, HumanItemBlockedPlan, HumanItemBlocked,
+HumanItemReopen and HumanItemEventBy.
 HumanItems exposes query(filter), show(id), apply(action), raise_phase(phase,
 context) and run_ended(run); HumanItemSample exposes query(filter) and
 apply(action); HumanItemRefusal is Unavailable or Conflict{reason}.
@@ -855,16 +858,27 @@ nullable resolution `{actor,on_behalf_of,text,reason}`; nullable approval
 `{board_copy,key}`; nullable tracker `{task,url}`; created_at and updated_at strings.
 The input has immutable fields only: schema_version:1, dedup_key, kind, title, body, priority, owner,
 block and approval. Open records have no resolution. Answered questions require
-nonempty answer text; completed tasks and dismissed items carry a resolution.
+nonempty answer text; completed tasks and dismissed items carry a resolution, whose
+text a completed task may hold as a nonblank comment and a dismissed item's reason.
 Tasks cannot be answered; questions cannot be completed or carry approvals.
 Raising an open item's dedup key again with new title, body or priority updates
 that one item; raising it unchanged, or once resolved, answers the item as it is.
 
 HumanItemAction is the one action vocabulary, tagged by `action`: raise with the
 input fields, answer `{id,text,actor,on_behalf_of}`, complete
-`{id,actor,on_behalf_of}`, dismiss `{id,reason?,actor,on_behalf_of}`. Absent, null
-or blank dismissal reason means no reason. Complete is the only task action;
-there is no approve action or completion-time board-copy/key input. Conflicts
+`{id,actor,on_behalf_of}`, dismiss `{id,reason?,actor,on_behalf_of}`, reopen
+`{id,actor,on_behalf_of}`, note `{id,text,actor,on_behalf_of}`. Absent, null
+or blank dismissal reason means no reason. Complete is the only task action that
+resolves through an approval;
+there is no approve action or completion-time board-copy/key input.
+
+Reopen moves a completed or dismissed item to open with a null resolution; the
+item's holds return, because they derive from state. Note applies only to a completed
+or dismissed item, with nonblank text: it sets `resolution.text` on a completed item
+(a comment) and `resolution.reason` on a dismissed one (a reason). A later note
+replaces the stored text, every note stays in the journal, and `resolution.actor`
+remains who resolved it. A note of a human step's item releases nothing further.
+ Conflicts
 are typed refusals and never silently overwrite existing resolutions; an identical
 repeat of a terminal action answers the recorded receipt. A verb run under
 `ONEPIPELINE_LAUNCHER_SESSION` records actor `session:<id>` on behalf of
@@ -874,9 +888,18 @@ HumanItemFilter has optional kind, blocking:boolean, priority, state, session,
 run, plan, host:boolean. State defaults to open. Blocking is derived from open
 state and block.scope, never a stored toggle: every open host item is blocking.
 Order is blocking first, then urgent/high/medium/low, then created_at/id ascending.
-HumanItemView is `{item,blocked:{total,plans:[{plan,count,preview:[{run,node,title}]}]}}`;
+HumanItemView is `{item,blocked:{total,plans:[{plan,count,preview:[{run,node,title}]}]},reopen}`;
 counts are u64 and preview is the first three nodes per plan. HumanItemDetail
 adds nodes containing every affected step. No owner_ended field exists.
+
+`reopen` is HumanItemReopen `{available:boolean,reason:string|null}`, null exactly when
+available, computed by the engine so the CLI and a browser say the same. The reopen
+action refuses as Conflict, with that same reason, for: an open item; an answered
+question; the item of a `kind: human` node, because its completion attested the node
+and its dismissal dropped it; a resolution by actor `engine` (a run's end, an
+auto-resolved condition); and a completed item with an approval whose adapter declares
+no `undo`. A dismissed design review reopens, since dismissal ran no script, and so
+does a plain completed item with no approval.
 Mutation receipts are `{item:HumanItemView,event_id:string}`.
 
 CLI (sample switch may precede or follow the subcommand; without it every verb
@@ -889,6 +912,8 @@ onepipeline human-items --sample FILE show ID [--json]
 onepipeline human-items --sample FILE answer ID --text TEXT
 onepipeline human-items --sample FILE complete ID
 onepipeline human-items --sample FILE dismiss ID [--reason TEXT]
+onepipeline human-items --sample FILE reopen ID
+onepipeline human-items --sample FILE note ID --text TEXT
 onepipeline human-items --sample FILE report [same filters and --json as list]
 ```
 
@@ -900,8 +925,11 @@ This evidence is fixture-only; it never invokes live approve-design. If its key
 changed, completion refuses with “Re-read the current document”, dismisses the
 obsolete task, and raises one replacement with the current key; stale approval is
 never recorded. Repeating completion on the obsolete task creates no replacement.
+Reopening a design-review task the fixture completed takes its record back out of
+approvals: the fixture authority is the undo of whatever it recorded, and refuses a
+version it no longer holds.
 Sample bundles reject duplicate item ids/dedup keys and inconsistent impact counts,
-node lists or previews; previews contain at most the first three nodes.
+node lists, previews or reopen; previews contain at most the first three nodes.
 detail.nodes is grouped by blocked.plans in that order: each group has that
 plan's count nodes, and each plan's preview is the first three nodes of its group.
 This deterministic ordering applies to the contract and to sample bundles alike.
@@ -935,6 +963,14 @@ replacement for the reported version; any other answer or a nonzero exit leaves
 the task open. A manager completes on a user's behalf only after approval in that
 manager's chat, and the receipt records both.
 
+Reopening a completed task that carries an approval runs its phase's adapter's `undo`
+with the same standard input as completion, `{board_copy,key,actor,on_behalf_of}`. Exit
+0 with `{board_copy,key}` naming the stored version means undone, and the item reopens.
+A nonzero exit or any other answer refuses the reopen as Conflict, with the script's
+standard error as the reason; the item stays completed and no event is written. A
+script must be idempotent, since a crash after it succeeds leaves the item completed
+and a retry runs it again.
+
 **Runs.** Every `kind: human` node that becomes eligible gets exactly one item,
 dedup key `run:<run>#<node>`, blocking `work {run,node}`, owned by the launch's
 session, run and plan (the launched project). Only open blocks hold dispatch, and
@@ -958,14 +994,35 @@ commits its cursor only after printing, exiting 5 when nothing was pending. A
 record not yet carried is carried by the next writer or watch, so a resolution
 made while its owner is disconnected reaches the owner's next watch exactly once.
 
+`owner.session` is refused blank at raise, so an item "with no owner" is one whose
+owning session has no watcher: its event stays queued for that session, and reaches a
+manager through a tied run as below.
+
+**Reaching a manager watching a run.** Each human-item-completed, -dismissed, -reopened
+and -noted event not written by actor `engine` is also carried as a non-blocking planner
+surface of kind `human-item`, naming the item's id and title, the action, the actor and
+any text or reason, onto the channel of every run that has not ended and is tied to it:
+`owner.run`; `block.work.run`; for `block.plan`, the runs of that plan; for `block: host`,
+every such run. Its `source` is the event's id, and where a run's publication boundary
+refuses that text the surface names only the id, the action and the actor. Each event is
+carried to each run once, across retried carries and an adopted driver, by the same
+carry that fills the owner queues, so the writer may be a browser server or a CLI with
+no driver of its own; a run's driver also carries what it finds its journal holds and
+delivery has not reached. A channel that refuses its surface is said on standard error,
+keeps it owed for the next carry, and holds nobody else's events back.
+
 Event kinds: human-item-raised, human-item-answered, human-item-completed,
-human-item-dismissed, human-item-auto-resolved. Each generic onemessagebus
+human-item-dismissed, human-item-auto-resolved, human-item-reopened, human-item-noted.
+Each generic onemessagebus
 Envelope kind/payload transports HumanItemEventPayload
-`{schema_version:1,item_id,owner:{session,run,plan},action,item,resolution}`;
-action is HumanItemEventAction, a closed string enum with those same five event
+`{schema_version:1,item_id,owner:{session,run,plan},action,item,resolution,by?}`;
+action is HumanItemEventAction, a closed string enum with those same seven event
 kind spellings; unknown action ids are refused. The action matches the item's
 state, and item_id, owner and resolution match their copies in the item;
-no new bus domain types. Engine resolutions are human-item-auto-resolved.
+no new bus domain types. Engine resolutions are human-item-auto-resolved. `by` is
+HumanItemEventBy `{actor,on_behalf_of}`, set only on human-item-reopened and
+human-item-noted and absent from every other kind's serialized record, because neither
+`resolution.actor` nor a null resolution says who took that action.
 
 Text and browser priorities are Critical, High, Medium, Low; Critical serializes
 as urgent. Wire priorities remain urgent/high/medium/low; none and P1/P2/P3 are
@@ -1066,7 +1123,11 @@ all work on this host”; detail enumerates every blocked step.
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -1146,7 +1207,11 @@ all work on this host”; detail enumerates every blocked step.
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -1228,7 +1293,11 @@ all work on this host”; detail enumerates every blocked step.
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -1258,7 +1327,11 @@ all work on this host”; detail enumerates every blocked step.
         "total": 0,
         "plans": []
       },
-      "nodes": []
+      "nodes": [],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     }
   ],
   "approval_keys": {

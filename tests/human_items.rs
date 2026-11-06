@@ -573,7 +573,7 @@ fn sample_boundaries_validate_fixtures_and_cover_source_and_authority_recovery()
                 } else {
                     "completed"
                 });
-                invalid["items"][0]["item"]["resolution"] = json!({"actor":"user","on_behalf_of":null,"text":if case == "completed-reason" { Value::Null } else { json!("invalid") },"reason":if case == "completed-reason" { json!("invalid") } else { Value::Null }});
+                invalid["items"][0]["item"]["resolution"] = json!({"actor":"user","on_behalf_of":null,"text":if case == "completed-reason" { Value::Null } else if case == "completed-text" { json!(" ") } else { json!("invalid") },"reason":if case == "completed-reason" { json!("invalid") } else { Value::Null }});
             }
             _ => unreachable!(),
         }
@@ -1072,4 +1072,65 @@ fn malformed_selectors_and_blank_answers_are_refused_before_the_fixture_is_read(
         refuse(output, reason);
     }
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+}
+
+/// `--sample` carries reopen and note as every other verb: it answers the same view,
+/// refuses what the view says it refuses, keeps the fixture on a refusal, and takes
+/// the fixture authority's record back when an approval is reopened.
+#[test]
+fn sample_reopen_and_note_answer_the_engine_schema_and_refuse_what_their_view_refuses() {
+    let world = World::new();
+    let open = world.json(&["show", "item-3", "--json"], "HumanItemDetail");
+    assert_eq!(open["reopen"]["available"], false);
+    let reason = open["reopen"]["reason"].as_str().unwrap().to_owned();
+    refuse(world.run(&["reopen", "item-3"]), &reason);
+    refuse(
+        world.run(&["note", "item-3", "--text", "too soon"]),
+        "only a completed or dismissed item takes a note",
+    );
+    refuse(
+        world.run(&["note", "item-3", "--text", " "]),
+        "must not be blank",
+    );
+
+    world.json(&["complete", "item-3"], "HumanItemReceipt");
+    assert_eq!(world.state()["approvals"].as_array().unwrap().len(), 1);
+    let noted = world.json(
+        &["note", "item-3", "--text", "Read it twice."],
+        "HumanItemReceipt",
+    );
+    assert_eq!(noted["item"]["item"]["state"], "completed");
+    assert_eq!(
+        noted["item"]["item"]["resolution"]["text"],
+        "Read it twice."
+    );
+    assert_eq!(noted["item"]["reopen"]["available"], true);
+    let reopened = world.json(&["reopen", "item-3"], "HumanItemReceipt");
+    assert_eq!(reopened["item"]["item"]["state"], "open");
+    assert_eq!(reopened["item"]["item"]["resolution"], Value::Null);
+    assert_eq!(reopened["item"]["reopen"]["reason"], reason.as_str());
+    assert_eq!(world.state()["approvals"], Value::Null);
+
+    world.json(
+        &["dismiss", "item-2", "--reason", "Not now"],
+        "HumanItemReceipt",
+    );
+    let noted = world.json(&["note", "item-2", "--text", "Later"], "HumanItemReceipt");
+    assert_eq!(noted["item"]["item"]["resolution"]["reason"], "Later");
+    assert_eq!(noted["item"]["item"]["resolution"]["text"], Value::Null);
+    let answered = world.json(&["answer", "item-4", "--text", "Yes"], "HumanItemReceipt");
+    assert_eq!(answered["item"]["reopen"]["available"], false);
+    refuse(
+        world.run(&["reopen", "item-4"]),
+        "an answered question cannot be reopened",
+    );
+
+    // A bundle stating a reopen its item's state contradicts is refused whole.
+    let mut invalid = world.state();
+    invalid["items"][1]["reopen"] = json!({"available": true, "reason": "both"});
+    world.write(&invalid);
+    refuse(
+        world.run(&["list", "--json"]),
+        "reopen states a reason exactly when it is unavailable",
+    );
 }

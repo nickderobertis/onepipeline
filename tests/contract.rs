@@ -12359,11 +12359,12 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
             item.clone()
         };
         let state = match kind {
-            "human-item-raised" => "open",
+            "human-item-raised" | "human-item-reopened" => "open",
             "human-item-answered" => "answered",
-            "human-item-completed" => "completed",
+            "human-item-completed" | "human-item-noted" => "completed",
             _ => "dismissed",
         };
+        let says_who = matches!(kind, "human-item-reopened" | "human-item-noted");
         event_item["state"] = json!(state);
         event_item["resolution"] = if state == "open" {
             Value::Null
@@ -12371,6 +12372,23 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
             json!({"actor":"user","on_behalf_of":null,"text":if state == "answered" { json!("Yes") } else { Value::Null },"reason":if state == "dismissed" { json!("the run ended") } else { Value::Null }})
         };
         let payload = json!({"schema_version":1,"item_id":event_item["id"],"owner":event_item["owner"],"action":kind,"item":event_item,"resolution":event_item["resolution"]});
+        let mut payload = payload;
+        // Only a reopen and a note say who acted, and every other kind serializes
+        // without the field: each way of getting that wrong is refused.
+        let by = json!({"actor":"user:someone","on_behalf_of":null});
+        let mut misattributed = payload.clone();
+        if says_who {
+            payload["by"] = by;
+        } else {
+            misattributed["by"] = by;
+        }
+        assert!(
+            serde_json::from_value::<HumanItemEventPayload>(misattributed.clone()).is_err(),
+            "{kind}"
+        );
+        assert!(!jsonschema::validator_for(&schema["HumanItemEventPayload"])
+            .unwrap()
+            .is_valid(&misattributed));
         for field in ["item_id", "owner", "resolution"] {
             let mut inconsistent = payload.clone();
             inconsistent[field] = match field {

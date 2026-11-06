@@ -343,6 +343,34 @@ pub enum HumanItemAction {
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
     },
+    /// Reopen a completed or dismissed item, taking its resolution back.
+    Reopen {
+        /// Id.
+        id: String,
+        /// Actor.
+        actor: String,
+        /// On behalf of.
+        #[serde(deserialize_with = "required_option")]
+        #[schemars(required, schema_with = "nullable::<String>")]
+        on_behalf_of: Option<String>,
+    },
+    /// Say something after the fact on a completed or dismissed item: its comment
+    /// or its reason, replacing the stored text and leaving the resolver as it is.
+    Note {
+        /// Id.
+        id: String,
+        /// Text.
+        #[serde(deserialize_with = "nonempty")]
+        #[schemars(length(min = 1), pattern(r"\S"))]
+        // llmlint: ignore[invalid_states_unrepresentable] The authoritative Note action declares text as a JSON string on its flat public variant, as Answer does. The shared nonempty decoder and the apply boundary reject blank text without introducing another public text type.
+        text: String,
+        /// Actor.
+        actor: String,
+        /// On behalf of.
+        #[serde(deserialize_with = "required_option")]
+        #[schemars(required, schema_with = "nullable::<String>")]
+        on_behalf_of: Option<String>,
+    },
 }
 
 /// Query selectors; omitted state selects open items.
@@ -427,6 +455,21 @@ pub struct HumanItemBlocked {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes reopen as the flat `{available, reason}` record browsers and the CLI read alike. Its decoder refuses an available item with a reason and an unavailable one without, so neither reaches a consumer.
+validated_record! {
+/// Whether an item can be reopened, and why not when it cannot.
+#[schemars(extend("allOf" = reopen_constraints()))]
+pub struct HumanItemReopen, HumanItemReopenWire {
+    /// Whether a reopen would be accepted, as far as the engine can tell without running a script.
+    pub available: bool,
+    /// What a reopen refuses with: null exactly when it is available.
+    #[serde(deserialize_with = "required_option")]
+    #[schemars(required, schema_with = "nullable::<String>")]
+    pub reason: Option<String>,
+}
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 // llmlint: ignore-block[invalid_states_unrepresentable] The public view is the declared item/blocked record. Its boundary validates blocking state and totals; public Rust fields retain that fixed shape rather than introducing another state-bearing view enum.
 validated_record! {
 /// An item and its derived impact.
@@ -435,6 +478,8 @@ pub struct HumanItemView, HumanItemViewWire {
     pub item: HumanItem,
     /// Blocked.
     pub blocked: HumanItemBlocked,
+    /// Whether it can be reopened.
+    pub reopen: HumanItemReopen,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -449,6 +494,8 @@ pub struct HumanItemDetail, HumanItemDetailWire {
     pub blocked: HumanItemBlocked,
     /// Nodes.
     pub nodes: Vec<HumanItemNode>,
+    /// Whether it can be reopened.
+    pub reopen: HumanItemReopen,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -461,6 +508,18 @@ pub struct HumanItemReceipt {
     pub item: HumanItemView,
     /// Event id.
     pub event_id: String,
+}
+
+/// Who took a reopen or note, which neither a resolver nor a null resolution says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemEventBy {
+    /// Actor.
+    pub actor: String,
+    /// On behalf of.
+    #[serde(deserialize_with = "required_option")]
+    #[schemars(required, schema_with = "nullable::<String>")]
+    pub on_behalf_of: Option<String>,
 }
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The event contract publishes item_id, owner, item, resolution and a numeric version together. Keep those flat public fields; the boundary verifies the duplicated identity/resolution and action/state consistency instead of replacing the prescribed envelope payload.
@@ -484,6 +543,9 @@ pub struct HumanItemEventPayload, HumanItemEventPayloadWire {
     #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<HumanItemResolution>")]
     pub resolution: Option<HumanItemResolution>,
+    /// Who acted: set only on a reopen or a note, and absent from every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<HumanItemEventBy>,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -495,8 +557,8 @@ macro_rules! event_actions {
         pub enum HumanItemEventAction {
             $(#[doc = $wire] #[serde(rename = $wire)] $variant,)+
         }
-        /// The five human-item envelope kinds, sharing the payload action ids.
-        pub const EVENT_KINDS: [&str; 5] = [$($wire),+];
+        /// The seven human-item envelope kinds, sharing the payload action ids.
+        pub const EVENT_KINDS: [&str; 7] = [$($wire),+];
     };
 }
 event_actions! {
@@ -505,6 +567,8 @@ event_actions! {
     Completed => "human-item-completed",
     Dismissed => "human-item-dismissed",
     AutoResolved => "human-item-auto-resolved",
+    Reopened => "human-item-reopened",
+    Noted => "human-item-noted",
 }
 
 /// Export all engine-owned human-item schemas for CLI and browser conformance.
@@ -587,6 +651,20 @@ pub enum HumanItemsCommand {
         /// Optional dismissal reason.
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Reopen a completed or dismissed item, running its approval adapter's undo if it has one.
+    Reopen {
+        /// Item identifier.
+        id: String,
+    },
+    /// Comment on a completed item, or state a dismissed item's reason, after the fact.
+    Note {
+        /// Item identifier.
+        id: String,
+        /// Nonblank text; a later note replaces it.
+        #[arg(long, value_parser = parse_note)]
+        // llmlint: ignore[invalid_states_unrepresentable] This argument becomes HumanItemAction::Note's contract-declared String text; parse_note refuses blank text at the CLI boundary, so no blank note reaches the action.
+        text: String,
     },
     /// Report matching items, counting and grouping the blocking ones first:
     /// this session's own and those holding its work unless a filter or
@@ -819,13 +897,20 @@ impl HumanItemSample {
                 created_at: "sample".into(),
                 updated_at: "sample".into(),
             };
+            let reopen = reopen_availability(&item, true);
             self.items.push(HumanItemDetail {
                 item,
                 blocked,
                 nodes,
+                reopen,
             });
             return Ok(receipt(self.items.last().expect("just appended"), "raised"));
         }
+        let action = match action {
+            HumanItemAction::Reopen { id, .. } => return self.reopen(&id),
+            HumanItemAction::Note { id, text, .. } => return self.note(&id, text),
+            other => other,
+        };
         let (id, actor, on_behalf_of, state, text, reason, operation) = match action {
             HumanItemAction::Answer {
                 id,
@@ -873,7 +958,9 @@ impl HumanItemSample {
                 reason.filter(|s| !s.trim().is_empty()),
                 "dismissed",
             ),
-            HumanItemAction::Raise(_) => unreachable!(),
+            HumanItemAction::Raise(_)
+            | HumanItemAction::Reopen { .. }
+            | HumanItemAction::Note { .. } => unreachable!("answered above"),
         };
         let index = self
             .items
@@ -940,6 +1027,7 @@ impl HumanItemSample {
                         plans: vec![],
                     };
                     self.items[index].nodes.clear();
+                    self.items[index].reopen = reopen_availability(&self.items[index].item, true);
                     self.items.push(replacement);
                     return Err(conflict("Re-read the current document"));
                 }
@@ -964,7 +1052,117 @@ impl HumanItemSample {
             plans: vec![],
         };
         detail.nodes.clear();
+        detail.reopen = reopen_availability(&detail.item, true);
         Ok(receipt(detail, operation))
+    }
+
+    /// Reopen a sample item. The fixture authority is the undo of every approval it
+    /// recorded, and refuses one for a version it no longer holds, as a script may.
+    fn reopen(&mut self, id: &str) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        let index = self
+            .items
+            .iter()
+            .position(|d| d.item.id == id)
+            .ok_or_else(|| conflict("no such human item"))?;
+        let item = self.items[index].item.clone();
+        if let Some(reason) = reopen_refusal(&item, true) {
+            return Err(conflict(reason));
+        }
+        if item.state == HumanItemState::Completed {
+            if let Some(approval) = &item.approval {
+                if self.approval_keys.get(&approval.board_copy) != Some(&approval.key) {
+                    return Err(conflict(
+                        "the sample approval authority no longer holds that version",
+                    ));
+                }
+                self.approvals.retain(|held| &held.approval != approval);
+            }
+        }
+        // Resolving cleared the stored impact, so a work hold's returns the way a raise
+        // derives one: from another item holding the same step, if any does.
+        let held = self
+            .items
+            .iter()
+            .find(|d| {
+                matches!(item.block, HumanItemBlock::Work { .. })
+                    && d.item.block == item.block
+                    && !d.nodes.is_empty()
+            })
+            .map(|d| (d.blocked.clone(), d.nodes.clone()));
+        let detail = &mut self.items[index];
+        if let Some((blocked, nodes)) = held {
+            detail.blocked = blocked;
+            detail.nodes = nodes;
+        }
+        detail.item.state = HumanItemState::Open;
+        detail.item.resolution = None;
+        detail.item.updated_at = "sample-reopened".into();
+        detail.reopen = reopen_availability(&detail.item, true);
+        Ok(receipt(detail, "reopened"))
+    }
+
+    /// Set a sample item's comment or reason.
+    fn note(&mut self, id: &str, text: String) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        if text.trim().is_empty() {
+            return Err(conflict("a note's text must not be blank"));
+        }
+        let detail = self
+            .items
+            .iter_mut()
+            .find(|d| d.item.id == id)
+            .ok_or_else(|| conflict("no such human item"))?;
+        let state = detail.item.state;
+        let resolution = detail
+            .item
+            .resolution
+            .as_mut()
+            .filter(|_| matches!(state, HumanItemState::Completed | HumanItemState::Dismissed))
+            .ok_or_else(|| conflict(NOTE_REFUSED))?;
+        if state == HumanItemState::Completed {
+            resolution.text = Some(text);
+        } else {
+            resolution.reason = Some(text);
+        }
+        detail.item.updated_at = "sample-noted".into();
+        Ok(receipt(detail, "noted"))
+    }
+}
+
+/// What a note on an item that is neither completed nor dismissed refuses with.
+pub(crate) const NOTE_REFUSED: &str = "only a completed or dismissed item takes a note";
+
+/// Why `item` cannot be reopened, if it cannot: the one answer the CLI, the browser and
+/// the action itself give. `undoable` is whether a completed approval's adapter declares
+/// an undo, which only a configuration can say.
+pub(crate) fn reopen_refusal(item: &HumanItem, undoable: bool) -> Option<String> {
+    let reason = match item.state {
+        HumanItemState::Open => "the item is open, so there is nothing to reopen",
+        HumanItemState::Answered => "an answered question cannot be reopened",
+        _ if runtime::node_of(item).is_some() => {
+            "this item stands for a human step: completing it attested the step and dismissing \
+             it dropped the step, and neither can be taken back here"
+        }
+        _ if item
+            .resolution
+            .as_ref()
+            .is_some_and(|r| r.actor == "engine") =>
+        {
+            "the engine resolved this item, so no person's resolution can be taken back"
+        }
+        HumanItemState::Completed if item.approval.is_some() && !undoable => {
+            "its approval adapter declares no undo, so the recorded approval cannot be taken back"
+        }
+        _ => return None,
+    };
+    Some(reason.to_owned())
+}
+
+/// [`reopen_refusal`] as the record a view carries.
+pub(crate) fn reopen_availability(item: &HumanItem, undoable: bool) -> HumanItemReopen {
+    let reason = reopen_refusal(item, undoable);
+    HumanItemReopen {
+        available: reason.is_none(),
+        reason,
     }
 }
 
@@ -979,6 +1177,7 @@ fn view(detail: &HumanItemDetail) -> HumanItemView {
     HumanItemView {
         item: detail.item.clone(),
         blocked,
+        reopen: detail.reopen.clone(),
     }
 }
 fn receipt(detail: &HumanItemDetail, action: &str) -> HumanItemReceipt {
@@ -1049,6 +1248,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 } else {
                     vec![]
                 },
+                reopen: current.reopen,
             };
             if json {
                 println!(
@@ -1094,6 +1294,17 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
         HumanItemsCommand::Dismiss { id, reason } => HumanItemAction::Dismiss {
             id,
             reason,
+            actor: "sample-operator".into(),
+            on_behalf_of: None,
+        },
+        HumanItemsCommand::Reopen { id } => HumanItemAction::Reopen {
+            id,
+            actor: "sample-operator".into(),
+            on_behalf_of: None,
+        },
+        HumanItemsCommand::Note { id, text } => HumanItemAction::Note {
+            id,
+            text,
             actor: "sample-operator".into(),
             on_behalf_of: None,
         },
@@ -1353,6 +1564,17 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
         },
+        HumanItemsCommand::Reopen { id } => HumanItemAction::Reopen {
+            id,
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        },
+        HumanItemsCommand::Note { id, text } => HumanItemAction::Note {
+            id,
+            text,
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        },
     };
     let receipt = store.apply(action).map_err(|e| refused(&e))?;
     println!("{}", to_json(&receipt)?);
@@ -1393,7 +1615,7 @@ impl HumanItem {
                 r.text.as_ref().is_some_and(|s| !s.trim().is_empty()) && r.reason.is_none()
             }
             (HumanItemKind::Task, HumanItemState::Completed, Some(r)) => {
-                r.text.is_none() && r.reason.is_none()
+                r.text.as_ref().is_none_or(|s| !s.trim().is_empty()) && r.reason.is_none()
             }
             (_, HumanItemState::Dismissed, Some(r)) => r.text.is_none(),
             _ => false,
@@ -1432,8 +1654,8 @@ fn item_constraints() -> serde_json::Value {
         {"if":{"properties":{"state":{"const":"open"}}},"then":{"properties":{"resolution":{"type":"null"}}},"else":{"properties":{"resolution":{"type":"object"}}}},
         {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"state":{"enum":["open","completed","dismissed"]}}},"else":{"properties":{"state":{"enum":["open","answered","dismissed"]},"approval":{"type":"null"}}}},
         {"if":{"properties":{"state":{"const":"answered"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"string","minLength":1,"pattern":"\\S"},"reason":{"type":"null"}},"required":["text"]}}}},
-        {"if":{"properties":{"state":{"enum":["completed","dismissed"]}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"null"}}}}}},
-        {"if":{"properties":{"state":{"const":"completed"}}},"then":{"properties":{"resolution":{"properties":{"reason":{"type":"null"}}}}}}
+        {"if":{"properties":{"state":{"const":"dismissed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"null"}}}}}},
+        {"if":{"properties":{"state":{"const":"completed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"reason":{"type":"null"}}}}}}
     ])
 }
 
@@ -1457,6 +1679,10 @@ fn required_option<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     Option::<T>::deserialize(decoder)
 }
 
+fn reopen_constraints() -> serde_json::Value {
+    serde_json::json!([{"if":{"properties":{"available":{"const":true}}},"then":{"properties":{"reason":{"type":"null"}}},"else":{"properties":{"reason":{"type":"string","minLength":1,"pattern":"\\S"}}}}])
+}
+
 fn input_constraints() -> serde_json::Value {
     serde_json::json!([{"if":{"properties":{"kind":{"const":"question"}}},"then":{"properties":{"approval":{"type":"null"}}}}])
 }
@@ -1468,6 +1694,13 @@ fn nullable<T: JsonSchema>(generator: &mut schemars::SchemaGenerator) -> schemar
 fn parse_answer(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
         return Err("answer text must not be blank".into());
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_note(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("a note's text must not be blank".into());
     }
     Ok(value.to_owned())
 }
@@ -1511,14 +1744,33 @@ fn validate_impact(item: &HumanItem, blocked: &HumanItemBlocked) -> Result<(), S
     }
     Ok(())
 }
+/// What holds of any reopen a view states: only an adapter's missing undo, which the
+/// record cannot see, may refuse an item that nothing else refuses.
+fn validate_reopen(item: &HumanItem, reopen: &HumanItemReopen) -> Result<(), String> {
+    if reopen.available && reopen_refusal(item, true).is_some() {
+        return Err("an item that cannot be reopened reports it can".into());
+    }
+    Ok(())
+}
+impl HumanItemReopen {
+    fn validate(&self) -> Result<(), String> {
+        match (self.available, self.reason.as_deref()) {
+            (true, None) => Ok(()),
+            (false, Some(reason)) if !reason.trim().is_empty() => Ok(()),
+            _ => Err("reopen states a reason exactly when it is unavailable".into()),
+        }
+    }
+}
 impl HumanItemView {
     fn validate(&self) -> Result<(), String> {
-        validate_impact(&self.item, &self.blocked)
+        validate_impact(&self.item, &self.blocked)?;
+        validate_reopen(&self.item, &self.reopen)
     }
 }
 impl HumanItemDetail {
     fn validate(&self) -> Result<(), String> {
         validate_impact(&self.item, &self.blocked)?;
+        validate_reopen(&self.item, &self.reopen)?;
         if self.nodes.len() as u64 != self.blocked.total {
             return Err("blocked total differs from affected nodes".into());
         }
@@ -1552,6 +1804,9 @@ impl HumanItemSample {
         for detail in &self.items {
             detail.item.validate()?;
             detail.validate()?;
+            if detail.reopen != reopen_availability(&detail.item, true) {
+                return Err("reopen differs from what the item's state derives".into());
+            }
             if !ids.insert(&detail.item.id) {
                 return Err("duplicate human-item id".into());
             }
@@ -1603,30 +1858,54 @@ impl HumanItemEventPayload {
                 "event identity, owner, version or resolution differs from its item".into(),
             );
         }
-        let expected = match self.action {
-            HumanItemEventAction::Raised => HumanItemState::Open,
-            HumanItemEventAction::Answered => HumanItemState::Answered,
-            HumanItemEventAction::Completed => HumanItemState::Completed,
-            HumanItemEventAction::Dismissed | HumanItemEventAction::AutoResolved => {
-                HumanItemState::Dismissed
-            }
-        };
-        if self.item.state != expected {
+        let (states, by) = event_rule(self.action);
+        if !states.contains(&self.item.state) {
             return Err("event action and item state conflict".into());
+        }
+        if by != self.by.is_some() {
+            return Err("only a reopen or a note, and each of those, says who acted".into());
         }
         Ok(())
     }
 }
-fn event_constraints() -> serde_json::Value {
+/// The states an event of `action` leaves its item in, and whether it says who acted.
+fn event_rule(action: HumanItemEventAction) -> (&'static [HumanItemState], bool) {
     use HumanItemEventAction as Action;
     use HumanItemState as State;
+    match action {
+        Action::Raised => (&[State::Open], false),
+        Action::Answered => (&[State::Answered], false),
+        Action::Completed => (&[State::Completed], false),
+        Action::Dismissed | Action::AutoResolved => (&[State::Dismissed], false),
+        Action::Reopened => (&[State::Open], true),
+        Action::Noted => (&[State::Completed, State::Dismissed], true),
+    }
+}
+fn event_constraints() -> serde_json::Value {
+    use HumanItemEventAction as Action;
     let constraints = [
-        (Action::Raised, State::Open), (Action::Answered, State::Answered),
-        (Action::Completed, State::Completed), (Action::Dismissed, State::Dismissed),
-        (Action::AutoResolved, State::Dismissed),
-    ].into_iter().map(|(action, state)| serde_json::json!({
-        "if":{"properties":{"action":{"const":action}}},
-        "then":{"properties":{"item":{"properties":{"state":{"const":state}}},"resolution":{"type":if state == State::Open { "null" } else { "object" }}}}
-    })).collect::<Vec<_>>();
+        Action::Raised,
+        Action::Answered,
+        Action::Completed,
+        Action::Dismissed,
+        Action::AutoResolved,
+        Action::Reopened,
+        Action::Noted,
+    ]
+    .into_iter()
+    .map(|action| {
+        let (states, by) = event_rule(action);
+        let open = states == [HumanItemState::Open];
+        let mut then = serde_json::json!({"properties":{
+            "item":{"properties":{"state":{"enum":states}}},
+            "resolution":{"type":if open { "null" } else { "object" }},
+            "by":{"type":if by { "object" } else { "null" }}
+        }});
+        if by {
+            then["required"] = serde_json::json!(["by"]);
+        }
+        serde_json::json!({"if":{"properties":{"action":{"const":action}}},"then":then})
+    })
+    .collect::<Vec<_>>();
     serde_json::json!(constraints)
 }
