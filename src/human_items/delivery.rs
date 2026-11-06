@@ -75,9 +75,8 @@ struct OwedSurface {
     run: String,
     /// The event it carries, which is what says it was already carried.
     event: String,
-    /// What it says.
     message: String,
-    /// What it says where the run's publication boundary refuses that.
+    /// The message to carry instead where the run's publication boundary refuses it.
     neutral: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]

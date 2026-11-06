@@ -86,7 +86,13 @@ fn command<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Err
 }
 
 fn undo<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
-    command(d).map(Some)
+    let undo = Vec::<String>::deserialize(d)?;
+    if undo.first().is_none_or(|program| program.trim().is_empty()) {
+        return Err(serde::de::Error::custom(
+            "an approval adapter's undo names a program",
+        ));
+    }
+    Ok(Some(undo))
 }
 
 /// Aggregations a hook may select.

@@ -1126,11 +1126,70 @@ fn sample_reopen_and_note_answer_the_engine_schema_and_refuse_what_their_view_re
     );
 
     // A bundle stating a reopen its item's state contradicts is refused whole.
-    let mut invalid = world.state();
-    invalid["items"][1]["reopen"] = json!({"available": true, "reason": "both"});
-    world.write(&invalid);
+    let good = world.state();
+    let open_item = good["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|detail| detail["item"]["state"] == "open")
+        .unwrap();
+    for (reopen, says) in [
+        (
+            json!({"available": true, "reason": "both"}),
+            "reopen states a reason exactly when it is unavailable",
+        ),
+        (
+            json!({"available": true, "reason": null}),
+            "reopen differs from what the item's state derives",
+        ),
+        (
+            json!({"available": false, "reason": "made up"}),
+            "reopen differs from what the item's state derives",
+        ),
+    ] {
+        let mut invalid = good.clone();
+        invalid["items"][open_item]["reopen"] = reopen;
+        world.write(&invalid);
+        refuse(world.run(&["list", "--json"]), says);
+    }
+}
+
+/// The fixture authority refuses to undo a version it no longer holds, leaving the item
+/// completed and the bundle as it was; a work hold's impact returns with its reopen,
+/// derived as a raise derives it from another item holding the same step.
+#[test]
+fn sample_reopen_refuses_a_version_the_authority_lost_and_restores_a_work_holds_impact() {
+    let world = World::new();
+    world.json(&["complete", "item-3"], "HumanItemReceipt");
+    let mut moved = world.state();
+    moved["approval_keys"]["design.md"] = json!("v2");
+    world.write(&moved);
     refuse(
-        world.run(&["list", "--json"]),
-        "reopen states a reason exactly when it is unavailable",
+        world.run(&["reopen", "item-3"]),
+        "no longer holds that version",
     );
+    assert_eq!(world.state(), moved);
+
+    let original = world.json(&["show", "item-2", "--json"], "HumanItemDetail");
+    assert_eq!(original["blocked"]["total"], 5);
+    let copy = world.sample().with_file_name("copy.json");
+    std::fs::write(
+        &copy,
+        json!({"schema_version": 1, "dedup_key": "same-step", "kind": "task",
+               "title": "Hold the same step", "body": "Hold it.", "priority": "low",
+               "owner": {"session": "manager", "run": null, "plan": null},
+               "block": original["item"]["block"], "approval": null})
+        .to_string(),
+    )
+    .unwrap();
+    world.json(
+        &["raise", "--input", copy.to_str().unwrap()],
+        "HumanItemReceipt",
+    );
+    let dismissed = world.json(&["dismiss", "item-2"], "HumanItemReceipt");
+    assert_eq!(dismissed["item"]["blocked"]["total"], 0);
+    world.json(&["reopen", "item-2"], "HumanItemReceipt");
+    let restored = world.json(&["show", "item-2", "--json"], "HumanItemDetail");
+    assert_eq!(restored["blocked"], original["blocked"]);
+    assert_eq!(restored["nodes"], original["nodes"]);
 }

@@ -515,6 +515,9 @@ pub struct HumanItemReceipt {
 #[serde(deny_unknown_fields)]
 pub struct HumanItemEventBy {
     /// Actor.
+    #[serde(deserialize_with = "nonempty")]
+    #[schemars(length(min = 1), pattern(r"\S"))]
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes `by` as `{actor,on_behalf_of}` strings, the spelling HumanItemResolution gives the same two values; the shared nonempty decoder and the action boundary refuse a blank actor without introducing another public identity type.
     pub actor: String,
     /// On behalf of.
     #[serde(deserialize_with = "required_option")]
@@ -1744,11 +1747,11 @@ fn validate_impact(item: &HumanItem, blocked: &HumanItemBlocked) -> Result<(), S
     }
     Ok(())
 }
-/// What holds of any reopen a view states: only an adapter's missing undo, which the
-/// record cannot see, may refuse an item that nothing else refuses.
+/// A view's reopen is what its item derives under one of the two answers a configuration
+/// can give about an undo, which is the one thing the record cannot see.
 fn validate_reopen(item: &HumanItem, reopen: &HumanItemReopen) -> Result<(), String> {
-    if reopen.available && reopen_refusal(item, true).is_some() {
-        return Err("an item that cannot be reopened reports it can".into());
+    if *reopen != reopen_availability(item, true) && *reopen != reopen_availability(item, false) {
+        return Err("reopen differs from what the item's state derives".into());
     }
     Ok(())
 }

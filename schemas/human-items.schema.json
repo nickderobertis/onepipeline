@@ -4777,7 +4777,9 @@
         "properties": {
           "actor": {
             "description": "Actor.",
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "on_behalf_of": {
             "description": "On behalf of.",

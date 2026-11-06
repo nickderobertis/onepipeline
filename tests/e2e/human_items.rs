@@ -2267,6 +2267,7 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
     assert!(!dispatched(&world, name).contains(&"b".to_owned()));
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys are this module's by the task's own acceptance criteria, which name `tests/e2e/human_items.rs` and the real binary, and they exercise the human-item verbs, a real watch and an adopted driver over the whole engine, so any Rust source can move what they prove and no edge narrower than the e2e target would still select them; each takes seconds, the slowest about eight.
 /// The events an owner's watch prints, by kind and what each said of the item.
 fn kinds(events: &[Value]) -> Vec<&str> {
     events.iter().map(|e| e["kind"].as_str().unwrap()).collect()
@@ -2424,6 +2425,8 @@ fn undo_checkout(world: &World) -> std::path::PathBuf {
         &format!(
             "cat > '{root}/undo.in'\necho run >> '{root}/undo.runs'\n\
              if [ -f '{root}/refuse' ]; then echo 'the board is locked' >&2; exit 3; fi\n\
+             if [ -f '{root}/silent' ]; then exit 3; fi\n\
+             if [ -f '{root}/garbage' ]; then echo 'not a version'; exit 0; fi\n\
              if [ -f '{root}/misanswer' ]; then echo 'that version moved on' >&2; \
              printf '{{\"board_copy\":\"board:doc\",\"key\":\"v2\"}}'; exit 0; fi\n\
              printf '{{\"board_copy\":\"board:doc\",\"key\":\"v1\"}}'\n",
@@ -2442,9 +2445,11 @@ fn undo_checkout(world: &World) -> std::path::PathBuf {
         Some(&format!(
             "human_items:\n  enabled: true\n  approval_adapters:\n    undoable:\n      \
              command: [\"sh\", {approve}]\n      undo: [\"sh\", {undo}]\n    one-way:\n      \
-             command: [\"sh\", {approve}]\n  hooks:\n{}{}",
+             command: [\"sh\", {approve}]\n    unstartable:\n      \
+             command: [\"sh\", {approve}]\n      undo: [\"/nonexistent/undo\"]\n  hooks:\n{}{}{}",
             hook("reviewed", "undoable"),
             hook("signed", "one-way"),
+            hook("orphaned", "unstartable"),
         )),
     )
 }
@@ -2531,6 +2536,21 @@ fn an_undo_script_decides_whether_a_completed_approval_reopens() {
     assert_eq!(journal_records(&world), records);
     std::fs::remove_file(&misanswer).unwrap();
 
+    // Refusing in silence, or answering nothing it can read, still refuses, in the
+    // engine's words since the script gave none.
+    for (marker, says) in [
+        ("silent", "the undo script refused"),
+        ("garbage", "did not answer {board_copy,key}"),
+    ] {
+        let marker = world.root.join(marker);
+        std::fs::write(&marker, "").unwrap();
+        in_checkout(&world, &repo, &["human-items", "reopen", &task])
+            .exited(2)
+            .err_has(says);
+        assert_eq!(journal_records(&world), records);
+        std::fs::remove_file(&marker).unwrap();
+    }
+
     // Undone: it read exactly what completion reads, and the item is open again.
     let reopened = in_checkout(&world, &repo, &["human-items", "reopen", &task]);
     reopened.exited(0);
@@ -2548,7 +2568,21 @@ fn an_undo_script_decides_whether_a_completed_approval_reopens() {
             .lines()
             .count()
     };
-    assert_eq!(ran(&world), 3);
+    assert_eq!(ran(&world), 5);
+
+    // An undo that cannot even start refuses too, and the item stays completed.
+    let orphaned = raise_review(&world, &repo, "orphaned", "lost-script");
+    in_checkout(&world, &repo, &["human-items", "complete", &orphaned]).exited(0);
+    let records = journal_records(&world);
+    in_checkout(&world, &repo, &["human-items", "reopen", &orphaned])
+        .exited(2)
+        .err_has("could not be started");
+    assert_eq!(journal_records(&world), records);
+    assert_eq!(
+        in_checkout(&world, &repo, &["human-items", "show", &orphaned, "--json"]).json()["item"]
+            ["state"],
+        "completed"
+    );
 
     // No undo declared: refused with the reason the view states, before any script.
     let signed = raise_review(&world, &repo, "signed", "contract");
@@ -2558,15 +2592,21 @@ fn an_undo_script_decides_whether_a_completed_approval_reopens() {
         &repo,
         &["human-items", "list", "--state", "completed", "--json"],
     );
-    let view = listed.json()[0].clone();
-    assert_eq!(view["item"]["id"], signed.as_str());
+    let view = listed
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] == signed.as_str())
+        .unwrap()
+        .clone();
     assert_eq!(view["reopen"]["available"], false);
     let reason = view["reopen"]["reason"].as_str().unwrap().to_owned();
     assert!(reason.contains("declares no undo"), "{reason}");
     in_checkout(&world, &repo, &["human-items", "reopen", &signed])
         .exited(2)
         .err_has(&reason);
-    assert_eq!(ran(&world), 3);
+    assert_eq!(ran(&world), 5);
     in_checkout(
         &world,
         &repo,
@@ -3018,3 +3058,4 @@ fn a_refused_surface_stays_owed_and_an_ended_run_or_engine_resolution_surfaces_n
         .exited(0);
     assert!(item_surfaces(&world, other).is_empty());
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
