@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.101.3] - 2026-11-06
+
+### Fixed
+
+- *(ci)* retain release safeguards after cache eviction
+- *(ci)* repair cache journeys under the runner environment
+- *(ci)* retain cache history and dependency selection
+
 ## [0.101.2](https://github.com/nickderobertis/onepipeline/compare/v0.101.1...v0.101.2) - 2026-11-05
 
 ### Added
