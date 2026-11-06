@@ -1708,7 +1708,6 @@ impl<'a> Writer<'a> {
             .ok_or_else(|| conflict(format!("no such human item {id}")))
     }
 
-    /// Record `item` as changed after the fact by `actor`.
     fn after_the_fact(
         &mut self,
         mut item: HumanItem,

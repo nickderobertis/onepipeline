@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use onepipeline::human_items::{schemas, HumanItemSample};
+use onepipeline::human_items::{schemas, HumanItemAction, HumanItemRefusal, HumanItemSample};
 use serde_json::{json, Value};
 
 struct World(PathBuf);
@@ -1192,4 +1192,33 @@ fn sample_reopen_refuses_a_version_the_authority_lost_and_restores_a_work_holds_
     let restored = world.json(&["show", "item-2", "--json"], "HumanItemDetail");
     assert_eq!(restored["blocked"], original["blocked"]);
     assert_eq!(restored["nodes"], original["nodes"]);
+}
+
+/// The fixture API holds an after-the-fact action to the same actor rule as the live one.
+#[test]
+fn a_sample_reopen_or_note_names_its_actor() {
+    let mut sample: HumanItemSample =
+        serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    let before = sample.clone();
+    for action in [
+        HumanItemAction::Reopen {
+            id: "item-1".into(),
+            actor: " ".into(),
+            on_behalf_of: None,
+        },
+        HumanItemAction::Note {
+            id: "item-1".into(),
+            text: "said".into(),
+            actor: String::new(),
+            on_behalf_of: None,
+        },
+    ] {
+        assert_eq!(
+            sample.apply(action),
+            Err(HumanItemRefusal::Conflict {
+                reason: "an action names its actor".into()
+            })
+        );
+    }
+    assert_eq!(sample, before);
 }

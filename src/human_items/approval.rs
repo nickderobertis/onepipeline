@@ -62,7 +62,6 @@ fn adapter_of<'a>(config: &'a EffectiveConfig, item: &HumanItem) -> Option<&'a A
         .and_then(|approval| config.human_items.approval_adapters.get(&approval.adapter))
 }
 
-/// Run a configured adapter program over `request` on its standard input.
 fn invoke(argv: (&String, &[String]), request: &[u8]) -> std::io::Result<std::process::Output> {
     let mut child = Command::new(argv.0)
         .args(argv.1)

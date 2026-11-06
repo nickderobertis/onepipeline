@@ -910,6 +910,11 @@ impl HumanItemSample {
             return Ok(receipt(self.items.last().expect("just appended"), "raised"));
         }
         let action = match action {
+            HumanItemAction::Reopen { actor, .. } | HumanItemAction::Note { actor, .. }
+                if actor.trim().is_empty() =>
+            {
+                return Err(conflict("an action names its actor"));
+            }
             HumanItemAction::Reopen { id, .. } => return self.reopen(&id),
             HumanItemAction::Note { id, text, .. } => return self.note(&id, text),
             other => other,
@@ -1104,7 +1109,6 @@ impl HumanItemSample {
         Ok(receipt(detail, "reopened"))
     }
 
-    /// Set a sample item's comment or reason.
     fn note(&mut self, id: &str, text: String) -> Result<HumanItemReceipt, HumanItemRefusal> {
         if text.trim().is_empty() {
             return Err(conflict("a note's text must not be blank"));

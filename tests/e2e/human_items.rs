@@ -2783,6 +2783,7 @@ fn next_item_surface(world: &World, run: &str) -> Value {
 
 /// The delivery document, gone: the next carry starts over from the journal's first
 /// record, as a crash between a push and its cursor leaves a carry redoing that push.
+// llmlint: ignore[tests_mirror_real_usage] a writer dying between a surface's push and the cursor passing it is the state this reaches, and no process outside that writer can schedule the death; removing the cursor leaves that same on-disk state without a failpoint in the engine. The failure a person can actually meet, a carry the host refused, is driven through the binary by `an_event_its_writer_could_not_carry_is_carried_by_the_next_driver`.
 fn forget_delivery(world: &World) -> bool {
     fn find(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
@@ -3057,5 +3058,88 @@ fn a_refused_surface_stays_owed_and_an_ended_run_or_engine_resolution_surfaces_n
         .run(&["human-items", "note", &late, "--text", "Understood."])
         .exited(0);
     assert!(item_surfaces(&world, other).is_empty());
+}
+/// A writer whose carry the host refused leaves its event owed with no surface anywhere,
+/// and the next driver of the run carries it without any human-items command being run.
+#[cfg(unix)]
+#[test]
+fn an_event_its_writer_could_not_carry_is_carried_by_the_next_driver() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-driver-carry");
+    enabled(&world);
+    let name = "carried";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let id = raise(
+        &world,
+        "item",
+        &input(
+            "item",
+            "task",
+            "mgr",
+            Some(name),
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let bus = world.runs.join("human-items/bus");
+    let mode = std::fs::metadata(&bus).unwrap().permissions().mode();
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let completed = world.run(&["human-items", "complete", &id]);
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(mode)).unwrap();
+    completed.exited(0).err_has("not yet delivered");
+    assert!(item_surfaces(&world, name).is_empty());
+
+    world.run(&["adopt", name]).exited(0);
+    let surfaced = item_surfaces(&world, name);
+    assert_eq!(surfaced.len(), 1, "{surfaced:?}");
+    assert!(surfaced[0].1.contains(&id), "{surfaced:?}");
+}
+
+/// A host hold reaches every run that has not ended, and a run whose channel refuses
+/// its surface holds no other run's back: it is told by the next carry, once.
+#[cfg(unix)]
+#[test]
+fn a_host_hold_reaches_every_live_run_and_one_refusing_holds_no_other_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-fanout");
+    enabled(&world);
+    let waiting = |name: &str| {
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+        );
+        world.run(&["start", &project, "--attach"]).exited(0);
+    };
+    waiting("refusing");
+    waiting("taking");
+    let finished = world.plan("finished", &plan_of("finished", vec![agent("a", &[])]));
+    world.run(&["start", &finished, "--attach"]).exited(0);
+    let host = raise(
+        &world,
+        "host",
+        &input("host", "task", "ops", None, None, json!({"scope": "host"})),
+    );
+    let channel = world.runs.join("refusing").join("channel");
+    let mode = std::fs::metadata(&channel).unwrap().permissions().mode();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let completed = world.run(&["human-items", "complete", &host]);
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(mode)).unwrap();
+    completed
+        .exited(0)
+        .err_has("not yet surfaced on run 'refusing'");
+    let taken = item_surfaces(&world, "taking");
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert!(taken[0].1.contains(&host));
+    assert!(item_surfaces(&world, "refusing").is_empty());
+    assert!(item_surfaces(&world, "finished").is_empty());
+
+    watch(&world, "ops");
+    assert_eq!(item_surfaces(&world, "refusing").len(), 1);
+    assert_eq!(item_surfaces(&world, "taking"), taken);
+    assert!(item_surfaces(&world, "finished").is_empty());
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

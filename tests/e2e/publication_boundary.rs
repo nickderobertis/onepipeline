@@ -6209,9 +6209,10 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|record| {
+            .filter(|record| {
                 record["kind"] == "human-item" && record["message"].as_str().unwrap().contains(id)
             })
+            .last()
             .unwrap_or_else(|| panic!("{id} reached no surface"))["message"]
             .as_str()
             .unwrap()
@@ -6229,5 +6230,41 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
     world.run(&["human-items", "complete", &clean]).exited(0);
     let carried = item_surface(&clean);
     assert!(carried.contains("Tidy the plain layout"), "{carried}");
+
+    // What a person says afterwards is judged as well: a note's text and a reason.
+    world
+        .run(&[
+            "human-items",
+            "note",
+            &clean,
+            "--text",
+            "Matches the zephyrine one.",
+        ])
+        .exited(0);
+    let noted = item_surface(&clean);
+    assert!(noted.starts_with("human-item-noted: "), "{noted}");
+    assert!(
+        !noted.contains("zephyrine") && noted.contains("withheld"),
+        "{noted}"
+    );
+    let reasoned = raised_as("reasoned", "Tidy the other layout");
+    world
+        .run(&[
+            "human-items",
+            "dismiss",
+            &reasoned,
+            "--reason",
+            "A zephyrine concern.",
+        ])
+        .exited(0);
+    let dismissed = item_surface(&reasoned);
+    assert!(
+        dismissed.starts_with("human-item-dismissed: "),
+        "{dismissed}"
+    );
+    assert!(
+        !dismissed.contains("zephyrine") && dismissed.contains("withheld"),
+        "{dismissed}"
+    );
     world.release("generalize.go");
 }
