@@ -268,8 +268,9 @@ budgets:
     direction: max
     threshold: 5400
     timeout_seconds: 300
-  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
-  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 5 CI
+  # jobs (the 4 of that window plus budgets); 80 releases and 224 merged PRs in 30 days
+  # (2026-09-15 to 10-15).
   - id: onepipeline-ci-job-count
     description: >-
       The most counted jobs any pull request of one release ran at its last commit, over every
