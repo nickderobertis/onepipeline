@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -33,13 +34,22 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 ACTION = 'nickderobertis/onebudgetspec-github-action'
 OWN_BUDGET = 'onepipeline-budget-report-command-seconds'
-CATALOG_FILES = ('budgets.yaml', '.github/budgets.yaml', '.github/reporting/budgets.yaml', 'pool-maintenance/budgets.yaml',
-                 'tests/human_items/budgets.yaml', 'tests/journal_workload/budgets.yaml',
-                 'tests/pool_workload/budgets.yaml', 'tests/scratch_workload/budgets.yaml')
+# Directories the action's discovery never treats as production budgets.
+EXCLUDED_TREES = {'fixture', 'fixtures', '__fixtures__', 'testdata', 'conformance'}
+
+
+def tracked():
+    return subprocess.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=ROOT,
+                          capture_output=True, text=True, check=True).stdout.split('\0')
+
+
+# The action's own discovery: every file its `**/budgets.yaml` default matches, as `git` lists them.
+CATALOG_FILES = tuple(sorted(name for name in tracked() if Path(name).name == 'budgets.yaml'
+                             and not EXCLUDED_TREES & set(Path(name).parts) and (ROOT / name).is_file()))
 # The checkout a journey's commands see: every budgets file, the code its commands name, and the
 # two ignore files that keep a job's own outputs out of discovery.
-CHECKOUT_PREFIXES = ('scripts/', 'pool-maintenance/', 'tests/human_items/', 'tests/journal_workload/',
-                     'tests/pool_workload/', 'tests/scratch_workload/', '.github/reporting/budgets.yaml')
+CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_FILES
+                                   if not name.startswith('.github/') and '/' in name))
 CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
 ROWS = 100
@@ -70,6 +80,7 @@ def action_step():
 def released_action():
     """The action at the workflow's pin: its tree, its harness and its real payload."""
     tag = action_step()['uses'].split('@', 1)[1]
+    assert re.fullmatch(r'v\d+\.\d+\.\d+', tag), f'the job pins no exact release: {tag}'
     version = tag.removeprefix('v')
     directory = ROOT / 'target' / 'report-job' / f'action-{tag}'
     target = {('Linux', 'x86_64'): 'x86_64-unknown-linux-gnu', ('Linux', 'aarch64'): 'aarch64-unknown-linux-gnu',
@@ -128,9 +139,7 @@ def catalog():
 
 
 def checkout_files():
-    listed = subprocess.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=ROOT,
-                            capture_output=True, text=True, check=True).stdout.split('\0')
-    wanted = [name for name in listed if name.startswith(CHECKOUT_PREFIXES)]
+    wanted = [name for name in tracked() if name.startswith(CHECKOUT_PREFIXES)]
     return sorted({*wanted, *CHECKOUT_FILES})
 
 
