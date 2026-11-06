@@ -1396,8 +1396,10 @@ fn the_budgets_file_registers_the_store_operation_budgets() {
         e2e["targets"]["test"]["outputs"]
             .as_array()
             .expect("the e2e tier names its outputs")
-            .contains(&serde_json::json!(format!("{{workspaceRoot}}/{records}"))),
-        "the e2e tier's outputs leave out {records}, so a cached replay of it restores no record"
+            .contains(&serde_json::json!(format!(
+                "{{workspaceRoot}}/{records}/*.json"
+            ))),
+        "the e2e tier's outputs leave out the {records}/*.json records its budget reads"
     );
     let project: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(root().join("project.json")).expect("project.json"),

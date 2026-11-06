@@ -311,14 +311,9 @@ test("actual workflow graph routes all events, preserves contexts and records li
                   .map((j) => ({ workflow: r.workflow, ...j })),
               );
               if (eventName === "pull_request") {
-                // `test-macos` runs on every pull request but release-plz's own,
-                // which the classifier's authorized omission covers.
-                const releasePlz =
-                  String(s.event.pull_request?.head?.ref ?? "").startsWith("release-plz-") &&
-                  s.event.pull_request?.head?.repo?.full_name === "nickderobertis/onepipeline";
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  releasePlz ? [] : ["test-macos"],
+                  ["test-macos"],
                 );
                 for (const name of required)
                   assert.equal(
@@ -473,10 +468,7 @@ test("an ordinary pull request emits every required context once, whatever its j
         for (const name of required) {
           const emitted = contexts.filter((context) => context.name === name);
           assert.equal(emitted.length, 1, `${label}: ${name} reports exactly once`);
-          // Each of the four starts on every pull request, but `test-macos` on
-          // release-plz's own, where it reports skipped.
-          const skipped = name === "test-macos" && branch.startsWith("release-plz-");
-          assert.equal(emitted[0].selected, !skipped, `${label}: ${name} runs`);
+          assert.equal(emitted[0].selected, true, `${label}: ${name} runs`);
         }
       }
 });

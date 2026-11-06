@@ -1,0 +1,1 @@
+# No tracked files outside Cargo manifests and lockfiles carry the package version.

@@ -18,9 +18,11 @@ budgets:
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/$1", macos-budget, .telemetry/macos-policy.json]
     unit: runs
     direction: max
-    threshold: 3
+    threshold: 4
     description: >-
-      Raised from 2 to 3 for one run: rust-cache-warm.yml's build-only macOS job on the push
+      Raised from 3 to 4 because removing the release-PR skip adds the release pull
+      request's macOS run; manager ruling 228 requires demonstration replay evidence.
+      The earlier increase from 2 to 3 added one run: rust-cache-warm.yml's build-only macOS job on the push
       that merges an ordinary change, which keeps test-macos's Rust cache warm. The user approved
       that leg on 2026-10-17; it is skipped on the push that merges a release pull request.
       Maximum distinct Mac-spending workflow runs over one ordinary PR push, its base merge,

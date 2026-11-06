@@ -7,12 +7,22 @@
 // `llmlint fingerprint` resolves the harness configuration through) is handed to the
 // real oneharness at `STANDIN_REAL_ONEHARNESS`, so the digest stays real.
 //
+// STANDIN_FAIL_VERSION=true refuses --version to exercise fingerprint failure.
 // STANDIN_VERDICT: `pass` holds every rule asked; `fail` breaks the first one on
 // `STANDIN_FILE`; `none` answers no rule; `some` answers only the first.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
+const failVersion = process.env.STANDIN_FAIL_VERSION ?? "false";
+if (!["true", "false"].includes(failVersion)) {
+  process.stderr.write("oneharness stand-in: STANDIN_FAIL_VERSION must be true or false\n");
+  process.exit(2);
+}
+if (args[0] === "--version" && failVersion === "true") {
+  process.stderr.write("oneharness stand-in: version unavailable\n");
+  process.exit(70);
+}
 
 if (args[0] !== "run") {
   const real = spawnSync(process.env.STANDIN_REAL_ONEHARNESS, args, { stdio: "inherit" });

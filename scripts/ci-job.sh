@@ -63,7 +63,8 @@ done
 # in `test-linux` are each their project's own uncached target that no `check` reaches,
 # selected on the crate being affected exactly as the `release-compat` and `smoke` jobs were;
 # `report-job:test`, selected by `test`, is its project's own target no `check` reaches, reading
-# the action's public release and PyPI's public wheel anonymously, cached on what it reads.
+# the action's public release and PyPI's public wheel anonymously, selected only when what it
+# reads changes and uncached, as its budget needs the released reader it saves beside its telemetry.
 case "$job" in
   lint) targets="format-check,lint,syntax-check,deps-check" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;

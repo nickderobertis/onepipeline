@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
@@ -28,7 +28,7 @@ import { parse, stringify } from "yaml";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 // The onevcs release this repository adopts: the one carrying `onevcs host`'s read-only queries.
-const ADOPTED_ONEVCS = "0.57.4";
+const ADOPTED_ONEVCS = readFileSync(join(root, ".github/onevcs-cli-version"), "utf8").trim();
 const REPOSITORY = "nickderobertis/onepipeline";
 const RELEASE = "v0.97.1";
 // The Release run whose publish job runs the tail.
@@ -105,9 +105,11 @@ export function tailProblems(workflow) {
   const install = steps.slice(0, -1).find((step) => /\bonevcs-cli@/.test(step.run ?? ""));
   if (!install) problems.push("no step of publish before its last installs the onevcs CLI");
   else {
-    const version = install.run.match(/\bonevcs-cli@(\S+)/)[1];
-    if (version !== ADOPTED_ONEVCS)
-      problems.push(`publish installs onevcs-cli@${version}, not the adopted ${ADOPTED_ONEVCS}`);
+    if (
+      !install.run.startsWith('onevcs_version="$(bash .github/read-onevcs-cli-version.sh)"\n') ||
+      !install.run.includes('"onevcs-cli@$onevcs_version"')
+    )
+      problems.push(`publish does not read the adopted onevcs ${ADOPTED_ONEVCS} pin`);
     const cli = install.run.match(/@onebudgetspec\/cli@(\S+)/)?.[1];
     if (cli !== PINNED_ONEBUDGETSPEC)
       problems.push(`publish installs @onebudgetspec/cli@${cli}, not the justfile's pin`);
@@ -150,9 +152,9 @@ test("a tail that moves, is read, may fail quietly or installs another onevcs is
     "installs the onevcs CLI": (w) => {
       w.jobs.publish.steps.splice(-2, 1);
     },
-    "not the adopted": (w) => {
+    "does not read the adopted": (w) => {
       const install = w.jobs.publish.steps.at(-2);
-      install.run = install.run.replace(`onevcs-cli@${ADOPTED_ONEVCS}`, "onevcs-cli@0.56.2");
+      install.run = install.run.replace('"onevcs-cli@$onevcs_version"', "onevcs-cli@0.56.2");
     },
     "not the justfile's pin": (w) => {
       const install = w.jobs.publish.steps.at(-2);
@@ -229,8 +231,21 @@ const releaseCommit = compare.commits.at(-1).sha;
 const pullRequests = compare.commits.map((commit) => {
   const pull = pulls.find((p) => p.merge_commit_sha === commit.sha);
   assert.ok(pull, `commit ${commit.sha} maps to a merged pull request`);
-  return { number: pull.number, head: pull.head.sha, merged: ts(pull.merged_at) };
+  return {
+    number: pull.number,
+    head: pull.head.sha,
+    merged: ts(pull.merged_at),
+    merge: pull.merge_commit_sha,
+  };
 });
+const publishedSpecs = readFileSync(join(root, ".github/release-published-paths"), "utf8")
+  .split("\n")
+  .filter((line) => line && !line.startsWith("#"));
+const changesPublished = (merge) =>
+  execFileSync("git", ["diff", "--name-only", `${merge}^1`, merge, "--", ...publishedSpecs], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim().length > 0;
 const releaseListing = `repos/${REPOSITORY}/actions/runs?per_page=100&head_sha=${releaseCommit}`;
 const atRelease = () => body(releaseListing).workflow_runs;
 // The runs the CD figures count: push and release runs at the release commit, but the excluded
@@ -324,7 +339,22 @@ before(() => {
 function checkout(budgets = readFileSync(join(root, "budgets.yaml"), "utf8")) {
   const dir = join(scratch, `checkout-${cases++}`);
   mkdirSync(join(dir, "scripts"), { recursive: true });
-  writeFileSync(join(dir, "budgets.yaml"), budgets);
+  // v0.97.1 predates cache receipts. Its seven original budgets are replayed
+  // here; the production cache-use budget is exercised by the cache journey.
+  const spec = parse(budgets);
+  spec.budgets = spec.budgets.filter((budget) => budget.id !== "onepipeline-nx-cache-use");
+  writeFileSync(join(dir, "budgets.yaml"), stringify(spec));
+  mkdirSync(join(dir, ".github"));
+  copyFileSync(
+    join(root, ".github/release-published-paths"),
+    join(dir, ".github/release-published-paths"),
+  );
+  execFileSync("git", ["init", "-q", dir]);
+  const common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  writeFileSync(join(dir, ".git/objects/info/alternates"), `${resolve(root, common, "objects")}\n`);
   copyFileSync(
     join(root, "scripts/actions-budget-figures.sh"),
     join(dir, "scripts/actions-budget-figures.sh"),
@@ -435,12 +465,14 @@ function expected(servedPaths, now) {
     "onepipeline-ci-check-time": Math.max(...prs.flatMap((pr) => pr.jobs.map((job) => job.secs))),
     "onepipeline-cd-job-time": Math.max(...cdJobs.map((job) => job.secs)),
     "onepipeline-release-cycle-time": Math.max(
-      ...prs.map(
-        (pr) =>
-          Math.max(...pr.jobs.map((job) => job.end)) -
-          Math.min(...pr.runs.map((run) => ts(run.created_at))) +
-          (now - pr.merged),
-      ),
+      ...prs
+        .filter((pr) => changesPublished(pr.merge))
+        .map(
+          (pr) =>
+            Math.max(...pr.jobs.map((job) => job.end)) -
+            Math.min(...pr.runs.map((run) => ts(run.created_at))) +
+            (now - pr.merged),
+        ),
     ),
     "onepipeline-ci-job-count": Math.max(...prs.map((pr) => pr.jobs.length)),
     "onepipeline-cd-job-count": cdJobs.length,
@@ -472,6 +504,25 @@ test(`over release ${RELEASE} the tail reports all seven budgets with their brea
   const budgets = budgetsFile().budgets;
   assert.deepEqual(Object.keys(run.results).sort(), [...TAIL_IDS].sort(), run.output);
   const figures = assertFigures(run, servedPaths);
+  console.error(
+    `recorded ${RELEASE} release-cycle-time: ${JSON.stringify(run.results["onepipeline-release-cycle-time"])}`,
+  );
+  assert.deepEqual(
+    pullRequests
+      .filter((pr) => changesPublished(pr.merge))
+      .map((pr) => pr.number)
+      .sort((a, b) => a - b),
+    [1278, 1320, 1322],
+  );
+  assert.deepEqual(
+    pullRequests.filter((pr) => !changesPublished(pr.merge)),
+    [],
+  );
+  // #1323 is present in the recorded merged-PR listing and changes justfile,
+  // a published build input, but belongs to a later release's range.
+  const outside = pulls.find((pr) => pr.number === 1323);
+  assert.ok(outside && changesPublished(outside.merge_commit_sha));
+  assert.doesNotMatch(run.output, /#1323:/);
   // The step's exit is onebudgetspec's: 1 when any reading is over, 0 when all are within.
   const over = TAIL_IDS.filter((id) => run.results[id].verdict === "over");
   for (const id of TAIL_IDS) {
@@ -480,8 +531,14 @@ test(`over release ${RELEASE} the tail reports all seven budgets with their brea
     assert.equal(run.results[id].verdict, figures[id] > threshold ? "over" : "within", id);
   }
   assert.equal(run.status, over.length ? 1 : 0, run.output);
-  for (const pr of pullRequests)
-    assert.match(run.output, new RegExp(`#${pr.number}: checks \\d+s \\+ merge to release \\d+s`));
+  for (const pr of pullRequests) {
+    if (changesPublished(pr.merge))
+      assert.match(
+        run.output,
+        new RegExp(`#${pr.number}: checks \\d+s \\+ merge to release \\d+s`),
+      );
+    else assert.match(run.output, new RegExp(`#${pr.number}: left out, changes no published path`));
+  }
   assert.match(run.output, /Release \/ publish: \d+s/);
   assert.match(run.output, /longest per runner OS:/);
   assert.match(run.output, /per workflow:/);
@@ -699,7 +756,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     lines[2],
     "# source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/budgets/actions-budget-figures.sh",
   );
-  assert.equal(lines[3], "# version: 10");
+  assert.equal(lines[3], "# version: 11");
   const digest = lines[4].match(/^# sha256: ([0-9a-f]{64})$/)?.[1];
   const rest = lines.slice(5).join("\n");
   assert.equal(
@@ -707,7 +764,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     digest,
     "the copy was edited in place",
   );
-  assert.equal(digest, "13ac7d79aaa3902dc7cfe87449283a05ba397fbc0612701e9b788ed59daf438d");
+  assert.equal(digest, "4e712406a1b09dac07d496be28d6a71141958de3259efb5c85f1dc23744fa5a4");
 });
 
 // The reconciliation script, against a stand-in for gh that answers each path with its

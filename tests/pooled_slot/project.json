@@ -14,7 +14,10 @@
     "build": {
       "command": "just _tier-build pooled_slot",
       "inputs": [
-        "pooledSlotSource"
+        "pooledSlotSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "format": {
@@ -23,31 +26,41 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/pooled_slot/main.rs",
       "inputs": [
-        "pooledSlotSource"
+        "pooledSlotSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "lint": {
       "command": "just _tier-lint pooled_slot",
       "inputs": [
-        "pooledSlotSource"
+        "pooledSlotSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ]
     },
     "test": {
       "command": "just _pooled_slot-test",
       "inputs": [
-        "pooledSlotSource"
+        "pooledSlotSource",
+        {
+          "runtime": "node -p process.platform"
+        }
       ],
       "dependsOn": [
         {
           "projects": [
             "onepipeline"
           ],
-          "target": "test-archive"
+          "target": "coverage-clean"
         }
       ],
       "outputs": [
         "{workspaceRoot}/target/llvm-cov-target/onepipeline-pooled_slot-*.profraw"
-      ]
+      ],
+      "cache": false
     },
     "test-quick": {
       "command": "just _pooled_slot-test-quick",
@@ -55,16 +68,12 @@
         "pooledSlotSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
-        }
-      ],
-      "dependsOn": [
+        },
         {
-          "projects": [
-            "onepipeline"
-          ],
-          "target": "test-quick-archive"
+          "runtime": "node -p process.platform"
         }
       ],
+      "dependsOn": [],
       "parallelism": false
     },
     "check": {
@@ -73,6 +82,15 @@
         "format-check",
         "lint",
         "test"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "cargoSelection",
+        "npmSelection"
       ]
     }
   }

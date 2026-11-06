@@ -340,17 +340,20 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
+rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
 codex-server-tier := "binary(codex_server)"
-e2e-tier := "binary(e2e)"
-contract-tier := "binary(contract)"
+e2e-tier := "binary(e2e) and not test(=surface::version_reports_the_crate_version)"
+contract-tier := "binary(contract) and not test(=the_contract_names_the_retention_path_and_the_release_it_ships_in)"
 pooled-slot-tier := "binary(pooled_slot) and not test(/^harness::/)"
 note-tier := "binary(note) and not test(/^harness::/)"
+version-contract-tier := "binary(contract) and test(=the_contract_names_the_retention_path_and_the_release_it_ships_in)"
+version-e2e-tier := "binary(e2e) and test(=surface::version_reports_the_crate_version)"
+version-package-tier := "binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)"
 
-# Their union, and the whole offline tier, spelled once from the five parts so it
+# Their union, and the whole offline tier, spelled once from these parts so it
 # cannot drift from them: what a check that the tiers partition the suite lists
 # against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
-offline-tiers := "(" + pooled-slot-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ")"
+offline-tiers := "(" + pooled-slot-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md. It is measured over the **whole** offline tier, which is why the five
@@ -403,12 +406,12 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # wrote. `cargo llvm-cov report` merges every `*.profraw` in the tree, so the
 # name changes nothing about what is counted.
 _tier-test tier filter:
+    @bash scripts/ensure-test-archive.sh coverage
     @LLVM_PROFILE_FILE_NAME="onepipeline-$1-%p-%14m.profraw" RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E "$2" --final-status-level fail
 
-# The instrumented build every tier runs, archived once, ahead of them all, when
-# CI names where (the `onepipeline:test-archive` target every tier's `test`
-# depends on). Built under the same flags the tiers build with, so each finds
-# it fresh and the archive is the build the step tested.
+# Explicit archive verb for warm builds and diagnostics. Executing test tiers
+# build it lazily through ensure-test-archive.sh, so cache hits build nothing.
+# Both paths use the same flags and archive the exact build the tiers test.
 _crate-test-archive:
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest-archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
 
@@ -486,6 +489,7 @@ test-quick:
 # A nonempty whole tier can have an empty shard. Check the unpartitioned listing
 # before allowing that share to be empty; an empty filter still fails.
 _tier-test-quick filter:
+    @bash scripts/ensure-test-archive.sh quick
     @partition=$(bash scripts/test-partition.sh) && \
       no_tests=fail && \
       if [ -n "$partition" ]; then \
@@ -529,15 +533,15 @@ _e2e-doubles-build mode:
       cargo build --offline $selection --target-dir "$target"; \
     done
 
-# The uninstrumented build every project's `test-quick` runs, archived once,
-# ahead of them all (the `onepipeline:test-quick-archive` target).
+# Explicit uninstrumented archive verb, also used by the warm build. A test
+# tier miss lazily builds the job's archive; a cache replay never invokes it.
 _crate-test-quick-archive:
     @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || cargo nextest archive --locked --archive-file "$ONEPIPELINE_TEST_ARCHIVE"
 # llmlint: ignore-end[diagnostics_error_or_absent]
 
 # `ONEPIPELINE_TEST_ARCHIVE` (CI sets it; nothing local does) makes the
-# `test-archive` and `test-quick-archive` targets archive the build the tiers are
-# about to run, with nextest's own archive command, before any of them runs.
+# Executing tiers archive their build once with nextest's own archive command,
+# before running tests. A tier replay does not need a diagnostic test archive.
 # Each run then finds that build fresh, so the archive is the build the step
 # tested, and it holds every tier's binaries, so a test any tier failed can be
 # re-run from it. `rerun-failed` re-runs from that archive and nothing else:
@@ -906,7 +910,11 @@ session-setup:
 
 # Install/refresh the llmlint toolchain (oneharness + llmlint). Idempotent.
 setup-llmlint:
-    ./scripts/setup-llmlint.sh
+    @if [ "${GITHUB_ACTIONS:-}" = true ]; then just setup-llmlint-ci; else ./scripts/setup-llmlint.sh; fi
+
+# CI installs the exact lint and harness versions declared in its tracked tool pins.
+setup-llmlint-ci:
+    bash .github/setup-llmlint.sh
 
 # Out of the gate for the reason `deps-check` is: these need third-party tools
 # `just check` deliberately does not install.
@@ -998,3 +1006,18 @@ lint-llm-diff base="origin/main" *nx_args:
 _codex-server-test: (_tier-test "codex_server" codex-server-tier)
 
 _codex-server-test-quick: (_tier-test-quick codex-server-tier)
+
+# Version-reading test: its own cache key retains the crate version.
+_version-contract-test: (_tier-test "version-contract" version-contract-tier)
+
+_version-contract-test-quick: (_tier-test-quick version-contract-tier)
+
+# Version-reading test: its own cache key retains the crate version.
+_version-e2e-test: (_tier-test "version-e2e" version-e2e-tier)
+
+_version-e2e-test-quick: (_tier-test-quick version-e2e-tier)
+
+# Version-reading test: its own cache key retains the crate version.
+_version-package-test: (_tier-test "version-package" version-package-tier)
+
+_version-package-test-quick: (_tier-test-quick version-package-tier)
