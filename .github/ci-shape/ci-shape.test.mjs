@@ -13,7 +13,8 @@
 // - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
-//   from main under exactly the keys the test jobs restore.
+//   from main under exactly the keys the test jobs restore, each leg deleting its
+//   families' superseded copies, and a fork's run writing nothing to any cache.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
@@ -520,6 +521,221 @@ describe("the caches", () => {
       }
     }
   });
+});
+
+// What keeps a run's saves under the Actions cache line. Each problem names what is
+// wrong, so the mutation table below can hold each one to the alteration that causes it.
+const WARM_FAMILIES = {
+  linux: ["v0-rust-test-linux-Linux-x64-", "ci-capture-Linux-X64-", "bootstrap-tools-Linux-X64-", "v0-rust-release-plz-Linux-x64-"],
+  windows: ["v0-rust-test-windows-Windows_NT-x64-", "bootstrap-tools-Windows-X64-"],
+  macos: ["v0-rust-test-macos-Darwin-arm64-", "bootstrap-tools-macOS-ARM64-"],
+};
+const CLEANUP_TOKEN = "${{ github.token }}";
+const SAME_REPOSITORY = "github.event.pull_request.head.repo.full_name == github.repository";
+const isCleanup = (step) => runs(step).includes("scripts/actions-cache-prune.mjs");
+const familiesOf = (text) => [...String(text).matchAll(/--family (\S+)/g)].map((match) => match[1]);
+// The Rust step a pull-request job restores through, and every action that can write
+// an Actions cache unless told not to. An action not named in either list is refused
+// until someone says which it is, so a new writer cannot arrive unguarded.
+const CACHE_READ_ONLY = "${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}";
+const NEVER_WRITES = [
+  "actions/checkout@", "actions/upload-artifact@", "actions/cache/restore@", "taiki-e/install-action@",
+  "dtolnay/rust-toolchain@", "samypr100/setup-dev-drive@", "nickderobertis/screencomp", "nickderobertis/notignored@",
+  "nickderobertis/onebudgetspec-github-action@", "amannn/action-semantic-pull-request@",
+];
+function cacheWriteProblem(id, step) {
+  const name = uses(step);
+  const label = `ci.yml ${id}: ${name || step.name}`;
+  if (!name) return undefined;
+  if (name.startsWith("Swatinem/rust-cache@"))
+    return String(step.with?.["save-if"]) === "false" ? undefined : `${label} could save`;
+  if (name.startsWith("astral-sh/setup-uv@"))
+    return step.with?.["enable-cache"] === `\${{ ${SAME_REPOSITORY} }}` ? undefined : `${label} writes for a fork`;
+  if (name.startsWith("op-nx/github-cache/start-cache-server@"))
+    return step.env?.CACHE_READ_ONLY === CACHE_READ_ONLY ? undefined : `${label} writes for a fork`;
+  if (name.startsWith("actions/setup-node@") || name.startsWith("actions/setup-python@"))
+    return step.with?.cache === undefined || String(step.if).includes(SAME_REPOSITORY) ? undefined : `${label} writes for a fork`;
+  if (name.startsWith("actions/cache/save@") || /^actions\/cache@/.test(name))
+    return String(step.if).includes(SAME_REPOSITORY) ? undefined : `${label} writes for a fork`;
+  return NEVER_WRITES.some((known) => name.startsWith(known)) ? undefined : `${label} is not classified as writing a cache or not`;
+}
+function warmProblems(all, budgetFile) {
+  const problems = [];
+  const warmFlow = all["rust-cache-warm.yml"];
+  const trigger = warmFlow.on ?? warmFlow[true];
+  if (Object.keys(trigger ?? {}).join() !== "push" || trigger.push?.branches?.join() !== "main")
+    problems.push("a warm workflow runs on something other than a push to main");
+  if (!String(warmFlow.concurrency?.group ?? "").includes("github.ref"))
+    problems.push("the warm workflow lost its concurrency group");
+  const named = [];
+  for (const [leg, families] of Object.entries(WARM_FAMILIES)) {
+    const job = warmFlow.jobs[leg];
+    const all_steps = steps(job);
+    const cleanup = all_steps.filter(isCleanup);
+    if (cleanup.length !== 1) { problems.push(`${leg} has no cleanup step`); continue; }
+    if (all_steps.at(-1) !== cleanup[0]) problems.push(`${leg}'s cleanup is not its last ordinary step`);
+    named.push(...familiesOf(cleanup[0].run));
+    if (familiesOf(cleanup[0].run).join() !== families.join()) problems.push(`${leg}'s cleanup names the wrong families`);
+    if (cleanup[0].env?.GH_TOKEN !== CLEANUP_TOKEN) problems.push(`${leg}'s cleanup has no token`);
+    for (const step of all_steps)
+      if (step !== cleanup[0] && /github\.token|secrets\./.test(JSON.stringify(step)))
+        problems.push(`${leg}: a step other than the cleanup is handed the token`);
+    const checkout = all_steps.find((step) => uses(step).startsWith("actions/checkout@"));
+    if (checkout?.with?.["persist-credentials"] !== false) problems.push(`${leg}'s checkout persists credentials`);
+    if (job.permissions?.actions !== "write" || job.permissions?.contents !== "read" || Object.keys(job.permissions).length !== 2)
+      problems.push(`${leg} does not hold exactly contents: read and actions: write`);
+    const rust = all_steps.findIndex((step) => uses(step).startsWith("Swatinem/rust-cache@"));
+    const cold = all_steps[rust + 1];
+    const tools = all_steps.findIndex((step) => step.name === "Restore the bootstrap tools");
+    if (cold?.if !== `steps.${all_steps[rust]?.id}.outputs.cache-hit != 'true'` || runs(cold).trim() !== "rm -rf target" || !(rust + 1 < tools))
+      problems.push(`${leg} lacks the conditional target deletion`);
+    const devDrive = "${{ env.DEV_DRIVE_WORKSPACE }}";
+    if (leg === "windows" && cold?.["working-directory"] !== devDrive) problems.push("windows deletes a target outside the Dev Drive");
+  }
+  const linux = steps(warmFlow.jobs.linux);
+  const deleted = linux.findIndex((step) => runs(step).trim() === "rm -rf target/ci-capture-target");
+  const saved = linux.findIndex((step) => step.name === "Save the visual docs capture's build");
+  if (deleted < 0 || deleted < saved || deleted > linux.findIndex(isCleanup))
+    problems.push("the Linux leg no longer deletes target/ci-capture-target after the capture's save");
+  const budget = budgetFile.budgets.find((entry) => entry.id === "onepipeline-cache-headroom");
+  if (familiesOf(budget.command.join(" ")).sort().join() !== [...named].sort().join())
+    problems.push("the budget's families differ from the cleanup steps'");
+  for (const file of ["ci.yml", "release.yml"])
+    for (const [id, job] of Object.entries(all[file].jobs))
+      for (const step of steps(job))
+        if (uses(step).startsWith("Swatinem/rust-cache@") && String(step.with?.["save-if"]) !== "false")
+          problems.push(`${file} ${id}: a Rust cache step could save`);
+  for (const id of ["lint", ...TESTS]) {
+    const rust = steps(all["ci.yml"].jobs[id]).filter((step) => uses(step).startsWith("Swatinem/rust-cache@"));
+    const key = id === "lint" ? "test-linux" : id;
+    if (rust.length !== 1 || rust[0].with?.["shared-key"] !== key || rust[0].if !== undefined)
+      problems.push(`ci.yml ${id} stopped restoring its Rust cache`);
+  }
+  for (const [file, flow] of Object.entries(all)) {
+    if (pullRequestTrigger(flow) === undefined) continue;
+    const held = [flow.permissions, ...Object.values(flow.jobs).map((job) => job.permissions)];
+    if (held.some((grant) => grant?.actions === "write" || grant === "write-all"))
+      problems.push(`${file}: a pull request triggers a job holding actions: write`);
+  }
+  for (const [id, job] of Object.entries(all["ci.yml"].jobs))
+    for (const step of steps(job)) {
+      const problem = cacheWriteProblem(id, step);
+      if (problem) problems.push(problem);
+    }
+  return problems;
+}
+
+describe("the Actions cache keeps room for proven results", () => {
+  const budgetFile = parse(readFileSync(join(github, "..", "budgets.yaml"), "utf8"));
+  const stepNamed = (all, leg, test) => steps(all["rust-cache-warm.yml"].jobs[leg]).find(test);
+
+  it("holds the composed shape as it stands", () => {
+    assert.deepEqual(warmProblems(workflows, budgetFile), []);
+  });
+
+  // Each alteration the shape must refuse, and the problem it must be refused with.
+  const ALTERATIONS = {
+    "the cleanup step removed": [(all) => {
+      const job = all["rust-cache-warm.yml"].jobs.windows;
+      job.steps = job.steps.filter((step) => !isCleanup(step));
+    }, "windows has no cleanup step"],
+    "a family dropped from a cleanup": [(all) => {
+      const step = stepNamed(all, "macos", isCleanup);
+      step.run = step.run.replace(" --family bootstrap-tools-macOS-ARM64-", "");
+    }, "macos's cleanup names the wrong families"],
+    "a step after the cleanup": [(all) => {
+      all["rust-cache-warm.yml"].jobs.linux.steps.push({ run: "true" });
+    }, "linux's cleanup is not its last ordinary step"],
+    "the budget's family dropped": [(_all, budget) => {
+      const entry = budget.budgets.find((b) => b.id === "onepipeline-cache-headroom");
+      entry.command = entry.command.slice(0, -2);
+    }, "the budget's families differ from the cleanup steps'"],
+    "a Rust step in ci.yml able to save": [(all) => {
+      delete steps(all["ci.yml"].jobs.lint).find((step) => uses(step).startsWith("Swatinem/rust-cache@")).with["save-if"];
+    }, "ci.yml lint: a Rust cache step could save"],
+    "a Rust step in release.yml able to save": [(all) => {
+      delete steps(all["release.yml"].jobs.publish).find((step) => uses(step).startsWith("Swatinem/rust-cache@")).with["save-if"];
+    }, "release.yml publish: a Rust cache step could save"],
+    "the warm workflow on pull requests": [(all) => {
+      (all["rust-cache-warm.yml"].on ?? all["rust-cache-warm.yml"][true]).pull_request = {};
+    }, "a warm workflow runs on something other than a push to main"],
+    "the warm concurrency group gone": [(all) => {
+      delete all["rust-cache-warm.yml"].concurrency;
+    }, "the warm workflow lost its concurrency group"],
+    "a pull-request job no longer restoring": [(all) => {
+      const job = all["ci.yml"].jobs["test-macos"];
+      job.steps = job.steps.filter((step) => !uses(step).startsWith("Swatinem/rust-cache@"));
+    }, "ci.yml test-macos stopped restoring its Rust cache"],
+    "actions: write on a pull-request job": [(all) => {
+      all["ci.yml"].jobs["test-linux"].permissions.actions = "write";
+    }, "ci.yml: a pull request triggers a job holding actions: write"],
+    "a warm checkout persisting credentials": [(all) => {
+      delete stepNamed(all, "windows", (step) => uses(step).startsWith("actions/checkout@")).with;
+    }, "windows's checkout persists credentials"],
+    "another warm step handed the token": [(all) => {
+      stepNamed(all, "linux", (step) => step.name === "Build what test-linux and lint build").env = { GH_TOKEN: CLEANUP_TOKEN };
+    }, "linux: a step other than the cleanup is handed the token"],
+    "setup-uv's fork guard removed": [(all) => {
+      delete steps(all["ci.yml"].jobs["test-windows"]).find((step) => uses(step).startsWith("astral-sh/setup-uv@")).with["enable-cache"];
+    }, "ci.yml test-windows: astral-sh/setup-uv@v6 writes for a fork"],
+    "the Nx sidecar's fork guard removed": [(all) => {
+      delete steps(all["ci.yml"].jobs.lint).find((step) => uses(step).startsWith("op-nx/github-cache/")).env.CACHE_READ_ONLY;
+    }, /ci\.yml lint: op-nx\/github-cache\/start-cache-server@\S+ writes for a fork/],
+    "an unguarded cache save added": [(all) => {
+      all["ci.yml"].jobs["test-linux"].steps.push({ uses: "actions/cache/save@v4", with: { path: "x", key: "y" } });
+    }, "ci.yml test-linux: actions/cache/save@v4 writes for a fork"],
+    "setup-node's own cache turned on": [(all) => {
+      steps(all["ci.yml"].jobs.lint).find((step) => uses(step).startsWith("actions/setup-node@")).with.cache = "npm";
+    }, "ci.yml lint: actions/setup-node@v4 writes for a fork"],
+    "a new action nobody classified": [(all) => {
+      all["ci.yml"].jobs.lint.steps.push({ uses: "example/setup-thing@v1" });
+    }, "ci.yml lint: example/setup-thing@v1 is not classified as writing a cache or not"],
+    "the conditional target deletion removed": [(all) => {
+      const job = all["rust-cache-warm.yml"].jobs.macos;
+      job.steps = job.steps.filter((step) => step.name !== "Build cold on a moved lock or toolchain");
+    }, "macos lacks the conditional target deletion"],
+    "the deletion reading another step's output": [(all) => {
+      stepNamed(all, "linux", (step) => step.name === "Build cold on a moved lock or toolchain").if = "steps.tools.outputs.cache-hit != 'true'";
+    }, "linux lacks the conditional target deletion"],
+    "the Windows deletion leaving the Dev Drive": [(all) => {
+      delete stepNamed(all, "windows", (step) => step.name === "Build cold on a moved lock or toolchain")["working-directory"];
+    }, "windows deletes a target outside the Dev Drive"],
+    "the capture's deletion removed": [(all) => {
+      const job = all["rust-cache-warm.yml"].jobs.linux;
+      job.steps = job.steps.filter((step) => runs(step).trim() !== "rm -rf target/ci-capture-target");
+    }, "the Linux leg no longer deletes target/ci-capture-target after the capture's save"],
+  };
+  for (const [name, [alter, expected]] of Object.entries(ALTERATIONS)) {
+    it(`refuses ${name}`, () => {
+      const all = structuredClone(workflows);
+      const budget = structuredClone(budgetFile);
+      alter(all, budget);
+      const problems = warmProblems(all, budget);
+      assert.ok(
+        problems.some((problem) => (expected instanceof RegExp ? expected.test(problem) : problem === expected)),
+        `expected "${expected}" among: ${problems.join("; ") || "no problems"}`,
+      );
+    });
+  }
+
+  // The landing commit's files, by the digest its header and versions file both state.
+  const COPIES = {
+    "scripts/actions-cache-prune.mjs": ["112878b64182200739b5e0c7e34decc3778f0316f0cb05f9bd40f66445d33031", 1],
+    "scripts/actions-budget-figures.sh": ["b77b3b6fdccba79eae1db6523122d22eec80ac0738d5b4df03321db600697d3d", 12],
+    "scripts/nx-remote-cache.mjs": ["e35435fb6ffde524af3d4244dcd67c115fc9d3f350ab3d535124dbcc07518bd0", 8],
+  };
+  for (const [path, [digest, version]] of Object.entries(COPIES)) {
+    it(`carries ${path} version ${version} unaltered`, () => {
+      const text = readFileSync(join(github, "..", path), "utf8");
+      const lines = text.split("\n");
+      const header = lines.findIndex((line) => /sha256: [a-f0-9]{64}$/.test(line));
+      assert.equal(lines[header].split(": ").at(-1), digest);
+      assert.match(lines[header - 1], new RegExp(`version: ${version}$`));
+      assert.equal(createHash("sha256").update(lines.slice(header + 1).join("\n")).digest("hex"), digest);
+      const versions = readFileSync(join(github, "..", path.replace(/\.(mjs|sh)$/, ".versions")), "utf8").trim().split("\n");
+      assert.equal(versions.at(-1), `${version} ${digest}`);
+    });
+  }
 });
 
 describe("rust-cache-warm.yml", () => {

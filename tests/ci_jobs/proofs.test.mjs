@@ -319,6 +319,13 @@ describe("the warm build's test doubles", () => {
       recipe,
       /instrumented\).*cargo llvm-cov show-env.*target="\{\{llvm-cov-target-dir\}\}"/,
     );
+    // show-env exports no RUSTFLAGS of its own, whatever it is run under, and a coverage
+    // tier's nested cargo asks under `-D warnings`: lost, the warm line builds units no
+    // journey asks for, and the first journey compiles the doubles again.
+    assert.match(
+      recipe,
+      /instrumented\) eval "\$\(cargo llvm-cov show-env --export-prefix\)"; export RUSTFLAGS="-D warnings";/,
+    );
     assert.match(
       recipe,
       /plain\) unset RUSTFLAGS; target="\{\{justfile_directory\(\)\}\}\/target"/,

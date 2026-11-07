@@ -2,7 +2,13 @@
 # from `main` under the key that job restores. Pull-request runs restore Rust
 # caches and never save one, so the repository's Actions cache holds main's
 # builds rather than one per branch, and this is where they are made: each leg
-# restores its own previous main cache, so it rebuilds only what the push changed.
+# restores its own previous main cache, so it rebuilds only what the push changed,
+# and a lock or toolchain move, whose key rust-cache has no copy of, builds cold
+# rather than saving the units the old lock built beside the new ones.
+#
+# Each leg's last ordinary step deletes the superseded copies of the families it
+# saves. It runs before rust-cache's post step and keeps the newest copy on main, so
+# a family holds at most two copies, and the previous one leaves at the next push.
 #
 # Not a pull-request check: it runs on push to `main` alone, and nothing
 # requires it. `.github/ci-shape/` holds each leg to its job's key and runner.
@@ -31,14 +37,25 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write # deleting superseded cache copies; only the last step has the token
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
+        id: rust-cache
         with:
           shared-key: test-linux
+      # A key rust-cache has no exact copy of means the lock or toolchain moved: what
+      # it restored is the old lock's build, and building over it saves both.
+      - name: Build cold on a moved lock or toolchain
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: rm -rf target
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
@@ -84,15 +101,31 @@ jobs:
         with:
           path: target/ci-capture-target
           key: ci-capture-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/workflows/visual-docs.yml') }}
+      # The capture lives under rust-cache's `target` path, and `test-linux` never
+      # reads it: its own family above is the one copy `lint` restores.
+      - name: Keep the capture's build out of the test-linux family
+        run: rm -rf target/ci-capture-target
+      # Last among the ordinary steps, so rust-cache's post step saves after it and
+      # the family keeps its previous copy until the next push's cleanup. The only
+      # step handed the token.
+      - name: Delete this family's superseded copies
+        run: node scripts/actions-cache-prune.mjs --family v0-rust-test-linux-Linux-x64- --family ci-capture-Linux-X64- --family bootstrap-tools-Linux-X64- --family v0-rust-release-plz-Linux-x64-
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write # deleting superseded cache copies; only the last step has the token
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # test-windows builds on a Dev Drive, so this does too: the cache paths
       # rust-cache records are the ones that job restores into.
       - uses: samypr100/setup-dev-drive@v3
@@ -111,9 +144,16 @@ jobs:
           Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
           New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
       - uses: Swatinem/rust-cache@v2.9.2
+        id: rust-cache
         with:
           shared-key: test-windows
           workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+      # A key rust-cache has no exact copy of means the lock or toolchain moved: what
+      # it restored is the old lock's build, and building over it saves both.
+      - name: Build cold on a moved lock or toolchain
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: rm -rf target
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
@@ -143,22 +183,43 @@ jobs:
       - name: Build what test-windows builds
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: bash scripts/warm-rust-cache.sh cross
+      # Last among the ordinary steps, so rust-cache's post step saves after it and
+      # the family keeps its previous copy until the next push's cleanup. The only
+      # step handed the token.
+      - name: Delete this family's superseded copies
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: node scripts/actions-cache-prune.mjs --family v0-rust-test-windows-Windows_NT-x64- --family bootstrap-tools-Windows-X64-
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   macos:
     # The push that merges release-plz's release pull request changes only
     # versions and the changelog, and a Mac job is the scarcest slot the
-    # account has (five at once, shared): that push warms Linux and Windows only.
+    # account has (five at once, shared): that push warms Linux and Windows only,
+    # which is what holds the macOS budget of 4 on the release commit's cycle. It
+    # has no replay to retire onto: this builds a cache, and nothing here tests.
     if: "${{ !startsWith(github.event.head_commit.message, 'chore: release') }}"
     runs-on: macos-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write # deleting superseded cache copies; only the last step has the token
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2.9.2
+        id: rust-cache
         with:
           shared-key: test-macos
+      # A key rust-cache has no exact copy of means the lock or toolchain moved: what
+      # it restored is the old lock's build, and building over it saves both.
+      - name: Build cold on a moved lock or toolchain
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: rm -rf target
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
@@ -185,3 +246,10 @@ jobs:
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Build what test-macos builds
         run: bash scripts/warm-rust-cache.sh cross
+      # Last among the ordinary steps, so rust-cache's post step saves after it and
+      # the family keeps its previous copy until the next push's cleanup. The only
+      # step handed the token.
+      - name: Delete this family's superseded copies
+        run: node scripts/actions-cache-prune.mjs --family v0-rust-test-macos-Darwin-arm64- --family bootstrap-tools-macOS-ARM64-
+        env:
+          GH_TOKEN: ${{ github.token }}

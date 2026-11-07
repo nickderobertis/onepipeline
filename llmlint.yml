@@ -33,6 +33,7 @@ files:
     - "scripts/actions-budget-figures.sh"
     # Upstream-owned copies pinned by the manager, held byte-identical by
     # .github/ci-shape/shared-scripts.test.mjs; their directives name upstream rules.
+    - "scripts/actions-cache-prune.mjs"
     - "scripts/nx-remote-cache.mjs"
     - "scripts/nx-version-free-inputs.mjs"
 rationales: true
