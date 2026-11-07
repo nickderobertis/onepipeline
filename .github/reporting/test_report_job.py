@@ -11,6 +11,7 @@ catalog, filled with explicitly synthetic ones) and one rolling file of 20 commi
 REST-reading commands and a retried rate limit. It asserts behaviour and never a cost: the figures
 are written to `.telemetry/report-job.json` and printed.
 """
+import ast
 import hashlib
 import importlib.util
 import io
@@ -19,6 +20,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -64,6 +66,9 @@ DESIGN_REQUESTS = 20
 TELEMETRY = HERE / '.telemetry' / 'report-job.json'
 TRANSFER_SERVICES = ('artifact-service', 'blob-storage', 'object-storage', 'release-host', 'package-index')
 WRITE = 'echo "{\\"value\\": %s}" > "$ONEBUDGETSPEC_RESULT"'
+# With no token for its host, gh tries the keyring, and that lookup autolaunches a session bus whose
+# daemon outlives the job, holding one of the host's inotify instances.
+NO_SESSION_BUS = {'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
 
 
 def workflow():
@@ -204,6 +209,13 @@ def schedule(workflow_file, event_name, results):
     return json.loads(answered.stdout)
 
 
+def recording_dbus_launch(directory, record):
+    """A `dbus-launch` that notes each call and starts nothing, so a failing guard leaks nothing."""
+    stand_in = directory / 'dbus-launch'
+    stand_in.write_text(f'#!/bin/sh\necho called >> {shlex.quote(str(record))}\nexit 1\n')
+    stand_in.chmod(0o755)
+
+
 def zip_of(name, content):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w') as archive:
@@ -222,6 +234,8 @@ class Journey(unittest.TestCase):
         self.scratch = Path(scratch.name)
         (self.scratch / 'bin').mkdir()
         self.runner = runner_path(self.scratch / 'bin')
+        self.bus_calls = self.scratch / 'bus-calls'
+        recording_dbus_launch(self.scratch / 'bin', self.bus_calls)
         self.counts = self.scratch / 'counts'
         self.next_run = 1000
         self.base_sha = None
@@ -244,16 +258,24 @@ class Journey(unittest.TestCase):
         self.assertEqual(given.pop('token'), '${{ github.token }}')
         return {'token': 'job-token', **given}
 
-    def run_job(self, event_name, sha, **options):
+    def job(self, event_name, sha, **options):
         self.next_run += 1
         self.counts.unlink(missing_ok=True)
         environment = {'JOURNEY_COUNTS': str(self.counts), 'PATH': self.runner,
                        'GITHUB_REPOSITORY': harness.REPOSITORY, 'GITHUB_RUN_ID': str(self.next_run),
-                       'RUNNER_NAME': 'hosted-runner', 'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
+                       'RUNNER_NAME': 'hosted-runner', **NO_SESSION_BUS}
         job = harness.Job(self.host, self.repository, event_name, sha, inputs=self.inputs(), run_id=self.next_run,
                           environment=environment, action_path=ACTION_TREE, **options)
         self.addCleanup(job.close)
-        return job.run()
+        return job
+
+    def recorded_bus_calls(self):
+        return len(self.bus_calls.read_text().splitlines()) if self.bus_calls.exists() else 0
+
+    def run_job(self, event_name, sha, **options):
+        result = self.job(event_name, sha, **options).run()
+        self.assertEqual(self.recorded_bus_calls(), 0, 'gh asked for a session bus during the job')
+        return result
 
     def base_push(self):
         self.repository.git('checkout', '--quiet', 'main')
@@ -642,6 +664,31 @@ class Pin(unittest.TestCase):
             driver = next(Path(directory).rglob('onebudgetspec-github-action'))
             shown = subprocess.run([str(driver), 'telemetry', '--help'], capture_output=True, check=True).stdout
         self.assertEqual(shown, (vendored / 'telemetry-help.txt').read_bytes())
+
+
+class SessionBus(Journey):
+    """The real `gh` under what the job is handed, at the double, against a recording `dbus-launch`."""
+
+    def gh_under(self, job, environment):
+        """How many times one real `gh` call asks for a bus, with what `_shell` adds to a job's environment."""
+        self.bus_calls.unlink(missing_ok=True)
+        subprocess.run(['gh', 'api', 'repos/owner/repo/commits/main'], capture_output=True, check=False, timeout=60,
+                       env={'HOME': str(job.temp), **harness.real_gh_environment(self.host.url, job.temp), **environment})
+        return self.recorded_bus_calls()
+
+    def test_the_job_environment_keeps_the_real_gh_from_asking_for_a_session_bus(self):
+        if platform.system() != 'Linux' or shutil.which('gh') is None:
+            self.skipTest('no session bus can start here: this guard needs the real gh on Linux')
+        job = self.job('push', '0' * 40)
+        without = {key: value for key, value in job.environment.items() if key != 'DBUS_SESSION_BUS_ADDRESS'}
+        if self.gh_under(job, without) == 0:
+            self.skipTest('this gh asks for no session bus even without the variable, so none can leak')
+        self.assertEqual(self.gh_under(job, job.environment), 0, 'the job environment lets gh ask for a session bus')
+
+    def test_every_job_is_built_where_that_environment_and_the_recording_are(self):
+        tree = ast.parse(Path(__file__).read_text())
+        jobs = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ast.unparse(node.func) == 'harness.Job']
+        self.assertEqual(len(jobs), 1, 'a second harness.Job would hand the real gh an environment nothing here guards')
 
 
 class Workload(Journey):

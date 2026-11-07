@@ -2943,12 +2943,18 @@ pub(crate) fn opening_for(
 /// such test holds this for its duration instead; the guard is the whole of the
 /// protocol, which is why it is a value the caller binds rather than a pair of
 /// calls it could get half right.
+///
+/// It also turns the session bus off for the process. The linked `onevcs` asks the `gh` on
+/// `PATH` as it registers a hosted identity, and with no token that lookup autolaunches a
+/// session bus whose daemon outlives the test and holds one of the host's inotify instances.
 #[cfg(test)]
 pub(crate) fn scratch_home_held() -> std::sync::MutexGuard<'static, ()> {
     static IN_USE: Mutex<()> = Mutex::new(());
-    IN_USE
+    let held = IN_USE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+    held
 }
 
 #[cfg(test)]
@@ -2957,6 +2963,80 @@ mod tests {
 
     use super::*;
     use crate::plan::Node;
+
+    /// The real `gh` under what [`scratch_home_held`] leaves the process with, against a
+    /// recording `dbus-launch` that starts nothing, so a failing guard leaks nothing. A
+    /// signed-in account with no token sends `gh` to the keyring and stops it there; the
+    /// closed proxy is there so that nothing could reach GitHub even if a later `gh` went on.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_scratch_home_keeps_the_real_gh_from_asking_for_a_session_bus() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _home = super::scratch_home_held();
+        if std::process::Command::new("gh")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no session bus can start here, as this guard needs the real gh");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("op-gh-bus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory for the recording");
+        let record = dir.join("bus-calls");
+        let stand_in = dir.join("dbus-launch");
+        std::fs::write(
+            &stand_in,
+            "#!/bin/sh\necho called >> \"$BUS_RECORD\"\nexit 1\n",
+        )
+        .expect("the recording dbus-launch");
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
+            .expect("the recording dbus-launch is executable");
+        std::fs::write(
+            dir.join("hosts.yml"),
+            "github.com:\n    user: fixture\n    git_protocol: https\n",
+        )
+        .expect("a signed-in account for gh to look up");
+        let path = std::env::join_paths(std::iter::once(dir.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("a PATH this host can spell");
+
+        let asks_for_a_bus = |without_the_variable: bool| {
+            let _ = std::fs::remove_file(&record);
+            let mut gh = std::process::Command::new("gh");
+            gh.args(["api", "repos/owner/service", "--include"])
+                .env("GH_CONFIG_DIR", &dir)
+                .env("BUS_RECORD", &record)
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .env("PATH", &path)
+                .env_remove("NO_PROXY")
+                .env_remove("no_proxy")
+                .env_remove("GH_TOKEN")
+                .env_remove("GITHUB_TOKEN");
+            if without_the_variable {
+                gh.env_remove("DBUS_SESSION_BUS_ADDRESS");
+            }
+            gh.output().expect("the real gh runs");
+            std::fs::read_to_string(&record)
+                .map(|calls| calls.lines().count())
+                .unwrap_or(0)
+        };
+
+        let control = asks_for_a_bus(true);
+        let guarded = asks_for_a_bus(false);
+        let _ = std::fs::remove_dir_all(&dir);
+        if control == 0 {
+            eprintln!("skipped: this gh asks for no session bus even without the variable");
+            return;
+        }
+        assert_eq!(guarded, 0, "a scratch home lets gh ask for a session bus");
+        assert_eq!(
+            std::env::var("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+            Ok("disabled:")
+        );
+    }
 
     /// **A written branch name reads back only as one [`BranchName::checked`]
     /// accepts**: a checkpoint's session base round-trips, and an empty name or one
