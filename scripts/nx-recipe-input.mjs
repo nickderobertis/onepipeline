@@ -38,9 +38,12 @@ function parseArguments(args) {
 }
 
 // The variables an expression or a recipe body uses, from just's own parse: a use is the
-// two-element array ["variable", name], at any depth.
+// two-element array ["variable", name], at any depth. Text and an absent value use none;
+// anything else is a shape this does not know, which would otherwise go uncounted.
 function variablesIn(parsed, found = new Set()) {
-  if (!Array.isArray(parsed)) return found;
+  if (parsed === null || typeof parsed === "string") return found;
+  if (!Array.isArray(parsed))
+    throw new Error(`just's dump holds an unknown expression: ${JSON.stringify(parsed)}`);
   if (parsed[0] === "variable" && typeof parsed[1] === "string") found.add(parsed[1]);
   for (const part of parsed) variablesIn(part, found);
   return found;

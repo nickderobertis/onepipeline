@@ -30,6 +30,8 @@ export async function githubListing(entries = recordedEntries(), repository = "n
       const prefix = url.searchParams.get("key") ?? "";
       const size = Number(url.searchParams.get("per_page") ?? 30);
       const page = Number(url.searchParams.get("page") ?? 1);
+      if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isInteger(page) || page < 1)
+        return answer(422, { message: "Validation Failed" });
       const found = held
         .filter((entry) => entry.key.startsWith(prefix))
         .sort((a, b) =>

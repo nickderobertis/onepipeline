@@ -37,6 +37,9 @@ nested:
 through-a-script:
     @echo through a script
 
+through-two-scripts:
+    @echo through two scripts
+
 elsewhere:
     @echo elsewhere
 `;
@@ -44,10 +47,18 @@ const HELPER = `#!/usr/bin/env bash
 # just elsewhere is a comment here, not a run
 echo "and 'just elsewhere' is a message"
 OPTION=1 just through-a-script
+bash deeper.sh
+`;
+// It names the first script back, so a walk that did not remember where it had been
+// would never finish.
+const DEEPER = `#!/usr/bin/env bash
+just through-two-scripts
+bash helper.sh
 `;
 const digest = (args, { justfile = JUSTFILE, helper = HELPER, env = {} } = {}) => {
   writeFileSync(join(dir, "justfile"), justfile);
   writeFileSync(join(dir, "helper.sh"), helper);
+  writeFileSync(join(dir, "deeper.sh"), DEEPER);
   return spawnSync(process.execPath, [script, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, ...env } });
 };
 const main = (options) => digest(["main"], options).stdout.trim();
@@ -73,6 +84,7 @@ describe("a recipe's digest", () => {
     ["a setting", replaced("set positional-arguments\n", "set positional-arguments\nset fallback\n")],
     ["a recipe a `just` line in its body runs", replaced("@echo nested", "@echo changed")],
     ["a recipe a `just` line in a script it names runs", replaced("@echo through a script", "@echo changed")],
+    ["a recipe a script that script names runs, in a cycle of scripts", replaced("@echo through two scripts", "@echo changed")],
   ]) {
     it(`moves with ${what}`, () => assert.notEqual(main(options), base));
   }
@@ -111,6 +123,8 @@ describe("a recipe digest that cannot be taken", () => {
     ["no recipes", '{"assignments":{},"settings":{}}', /carries no recipes/],
     ["a recipe of an unknown shape", '{"recipes":{"main":{"body":"text"}},"assignments":{},"settings":{}}', /recipe 'main' an unknown shape/],
     ["a variable of an unknown shape", '{"recipes":{},"assignments":{"x":{}},"settings":{}}', /variable 'x' an unknown shape/],
+    ["a body expression of an unknown shape", '{"recipes":{"main":{"body":[[{"kind":"variable","name":"x"}]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["a variable's value of an unknown shape", '{"recipes":{"main":{"body":[[["variable","x"]]],"dependencies":[],"parameters":[]}},"assignments":{"x":{"export":false,"value":{"kind":"new"}}},"settings":{}}', /unknown expression/],
   ]) {
     it(`refuses a dump with ${what}`, () => {
       const bin = join(dir, "fake-just");

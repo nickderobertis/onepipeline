@@ -68,6 +68,16 @@ describe("a warm leg's cleanup, the command its step states, against GitHub's RE
     });
   }
 
+  it("the double refuses a page size or number GitHub would refuse", async () => {
+    const api = await githubListing();
+    try {
+      for (const query of ["per_page=0", "per_page=101", "page=0", "page=x"]) {
+        const answer = await fetch(`${api.url}/repos/nickderobertis/onepipeline/actions/caches?${query}`, { headers: { authorization: "Bearer fixture" } });
+        assert.equal(answer.status, 422, query);
+      }
+    } finally { await api.close(); }
+  });
+
   it("deletes nothing from a family with no copy on main, and says so", async () => {
     const pullOnly = { id: 1, key: "v0-rust-release-plz-Linux-x64-pull-only", ref: "refs/pull/7/merge", size_in_bytes: 300, created_at: "2026-12-01T00:00:00Z", last_accessed_at: "2026-12-01T00:00:00Z", version: "fixture" };
     const api = await githubListing([...recordedEntries(), pullOnly]);
