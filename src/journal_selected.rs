@@ -447,7 +447,7 @@ fn select(
 /// Read a whole journal, parsing only what `selection` keeps.
 ///
 /// A journal that cannot be read reads as one holding nothing, which is the rule
-/// [`crate::journal::read`] follows. The module note says what the read rests on.
+/// the complete read follows. The module note says what the read rests on.
 #[must_use]
 pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecords {
     let Ok(bytes) = std::fs::read(journal) else {
