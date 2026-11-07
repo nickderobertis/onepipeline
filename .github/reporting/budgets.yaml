@@ -1,6 +1,6 @@
 # The budgets job measures itself: only that job and report-job:test hold this telemetry, which is
 # written after the main result upload. The limit is an estimate until real runs have measured it.
-# llmlint: ignore[budgets_track_product_owner_outcomes] The report job's own time budget sits beside this repository's longest-CI-job budget, the overlap the design that added this job approved; this change narrows its interval and adds no overlap.
+# This budget's measure sits beside onepipeline-ci-check-time: the report job's own time budget sits beside this repository's longest-CI-job budget, the overlap the design that added this job approved; this change narrows its interval and adds no overlap.
 schema_version: 1
 budgets:
   - id: onepipeline-budget-report-command-seconds
