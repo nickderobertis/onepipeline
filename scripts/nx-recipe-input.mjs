@@ -169,7 +169,6 @@ function digestOf(dump, reach) {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
 
-// What fixes this failure: each names only what could.
 function actionFor(error) {
   if (error.code === "ENOENT")
     return "install just, at the version .github/ci-tool-versions.json pins, then re-run";
