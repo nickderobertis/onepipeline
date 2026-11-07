@@ -512,14 +512,16 @@
         "clippy.toml",
         "rustfmt.toml",
         "tests/e2e/profiling.rs",
-        "tests/golden/test-profile-record-v2.json"
+        "tests/golden/test-profile-record-v2.json",
+        "tests/e2e/gh_session_bus.rs"
       ],
       "crates": [
         "onepipeline"
       ],
       "modules": [
         "harness",
-        "profiling"
+        "profiling",
+        "gh_session_bus"
       ]
     }
   }

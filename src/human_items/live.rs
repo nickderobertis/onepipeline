@@ -32,9 +32,9 @@ use sha2::{Digest, Sha256};
 
 use super::{
     HumanItem, HumanItemAction, HumanItemBlock, HumanItemBlocked, HumanItemBlockedPlan,
-    HumanItemDetail, HumanItemEventAction, HumanItemEventPayload, HumanItemFilter, HumanItemInput,
-    HumanItemKind, HumanItemNode, HumanItemReceipt, HumanItemRefusal, HumanItemResolution,
-    HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
+    HumanItemDetail, HumanItemEventAction, HumanItemEventBy, HumanItemEventPayload,
+    HumanItemFilter, HumanItemInput, HumanItemKind, HumanItemNode, HumanItemReceipt,
+    HumanItemRefusal, HumanItemResolution, HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
 };
 use crate::event::{Envelope, Source, ENVELOPE_VERSION};
 
@@ -437,7 +437,7 @@ impl HumanItems {
     pub fn query(&self, filter: &HumanItemFilter) -> Result<Vec<HumanItemView>, HumanItemRefusal> {
         let (snapshot, mut telemetry) = self.recovered()?;
         let started = Instant::now();
-        let views = query(&snapshot, filter);
+        let views = query(&self.config, &snapshot, filter);
         telemetry.blocker_ms += ms(started);
         self.report(&telemetry);
         Ok(views)
@@ -451,7 +451,7 @@ impl HumanItems {
             .items
             .get(id)
             .ok_or_else(|| conflict(format!("no such human item {id}")))?;
-        let detail = detail(&snapshot, item);
+        let detail = detail(&self.config, &snapshot, item);
         telemetry.blocker_ms += ms(started);
         self.report(&telemetry);
         Ok(detail)
@@ -480,9 +480,17 @@ impl HumanItems {
             }
         }
         let config = self.config.clone();
+        // A reopen or a note takes nothing further to the step an item stands for.
+        let resolves = !matches!(
+            action,
+            HumanItemAction::Reopen { .. } | HumanItemAction::Note { .. }
+        );
         let receipt = self.apply_with(action, &mut |item, actor| {
             super::approval::complete(&config, item, actor)
         })?;
+        if !resolves {
+            return Ok(receipt);
+        }
         // The resolution is durable; the human step it stands for is released
         // through its run's own commands. One that cannot be released now is
         // released by the run's driver, so this is said and the receipt stands.
@@ -645,6 +653,13 @@ impl HumanItems {
         }
         writer.finish();
         Ok(())
+    }
+
+    /// Carry whatever the journal holds and delivery has not reached, under the
+    /// journal's lock as a writer carries it: what a driver does when the journal moved,
+    /// so an event whose writer died before carrying it still reaches a watched run.
+    pub(crate) fn carry(&self) {
+        super::delivery::carry(&self.root);
     }
 
     /// Probe every open host condition by the capability that failed; a writer's
@@ -1048,7 +1063,7 @@ fn first_line(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
     }
 }
 
-fn event_id(seq: u64) -> String {
+pub(crate) fn event_id(seq: u64) -> String {
     format!("{STREAM}:{seq}")
 }
 
@@ -1245,19 +1260,33 @@ fn impact(groups: &[(String, Vec<HumanItemNode>)]) -> HumanItemBlocked {
     }
 }
 
-pub(crate) fn view(snapshot: &Snapshot, item: &HumanItem) -> HumanItemView {
+fn reopen_of(config: &super::config::EffectiveConfig, item: &HumanItem) -> super::HumanItemReopen {
+    super::reopen_availability(item, super::approval::undoable(config, item))
+}
+
+pub(crate) fn view(
+    config: &super::config::EffectiveConfig,
+    snapshot: &Snapshot,
+    item: &HumanItem,
+) -> HumanItemView {
     HumanItemView {
         item: item.clone(),
         blocked: impact(&blocked_nodes(snapshot, item)),
+        reopen: reopen_of(config, item),
     }
 }
 
-pub(crate) fn detail(snapshot: &Snapshot, item: &HumanItem) -> HumanItemDetail {
+pub(crate) fn detail(
+    config: &super::config::EffectiveConfig,
+    snapshot: &Snapshot,
+    item: &HumanItem,
+) -> HumanItemDetail {
     let groups = blocked_nodes(snapshot, item);
     HumanItemDetail {
         item: item.clone(),
         blocked: impact(&groups),
         nodes: groups.into_iter().flat_map(|(_, nodes)| nodes).collect(),
+        reopen: reopen_of(config, item),
     }
 }
 
@@ -1296,7 +1325,11 @@ pub(crate) fn selected(item: &HumanItem, filter: &HumanItemFilter) -> bool {
             .is_none_or(|host| (item.block == HumanItemBlock::Host) == host)
 }
 
-fn query(snapshot: &Snapshot, filter: &HumanItemFilter) -> Vec<HumanItemView> {
+fn query(
+    config: &super::config::EffectiveConfig,
+    snapshot: &Snapshot,
+    filter: &HumanItemFilter,
+) -> Vec<HumanItemView> {
     let mut items: Vec<&HumanItem> = snapshot
         .items
         .values()
@@ -1310,7 +1343,10 @@ fn query(snapshot: &Snapshot, filter: &HumanItemFilter) -> Vec<HumanItemView> {
             item.id.clone(),
         )
     });
-    items.into_iter().map(|item| view(snapshot, item)).collect()
+    items
+        .into_iter()
+        .map(|item| view(config, snapshot, item))
+        .collect()
 }
 
 /// One serialized writer: the journal's append lock held from the read the
@@ -1435,6 +1471,15 @@ impl<'a> Writer<'a> {
         item: &HumanItem,
         action: HumanItemEventAction,
     ) -> Result<String, HumanItemRefusal> {
+        self.append_by(item, action, None)
+    }
+
+    fn append_by(
+        &mut self,
+        item: &HumanItem,
+        action: HumanItemEventAction,
+        by: Option<HumanItemEventBy>,
+    ) -> Result<String, HumanItemRefusal> {
         let payload = HumanItemEventPayload {
             schema_version: 1,
             item_id: item.id.clone(),
@@ -1442,6 +1487,7 @@ impl<'a> Writer<'a> {
             action,
             item: item.clone(),
             resolution: item.resolution.clone(),
+            by,
         };
         let serde_json::Value::Object(payload) = serde_json::to_value(&payload)
             .map_err(|e| conflict(format!("the item event cannot be serialized: {e}")))?
@@ -1569,7 +1615,7 @@ impl<'a> Writer<'a> {
 
     fn receipt(&self, item: &HumanItem, event_id: String) -> HumanItemReceipt {
         HumanItemReceipt {
-            item: view(&self.snapshot, item),
+            item: view(&self.store.config, &self.snapshot, item),
             event_id,
         }
     }
@@ -1650,6 +1696,77 @@ impl<'a> Writer<'a> {
         Ok(self.receipt(&resolved, event))
     }
 
+    /// The item an after-the-fact action names, and who is taking it.
+    fn acted_on(&self, id: &str, actor: &Actor) -> Result<HumanItem, HumanItemRefusal> {
+        if actor.actor.trim().is_empty() {
+            return Err(conflict("an action names its actor"));
+        }
+        self.snapshot
+            .items
+            .get(id)
+            .cloned()
+            .ok_or_else(|| conflict(format!("no such human item {id}")))
+    }
+
+    fn after_the_fact(
+        &mut self,
+        mut item: HumanItem,
+        action: HumanItemEventAction,
+        actor: Actor,
+    ) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        item.updated_at = crate::sys::now_rfc3339();
+        let by = HumanItemEventBy {
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        };
+        let event = self.append_by(&item, action, Some(by))?;
+        Ok(self.receipt(&item, event))
+    }
+
+    /// Take a resolution back. The refusal is what the item's views already say; a
+    /// completed approval's undo runs under the lock, as its completion did, and
+    /// nothing is recorded unless it answers that it undid the stored version.
+    fn reopen(&mut self, id: &str, actor: Actor) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        let mut item = self.acted_on(id, &actor)?;
+        let config = &self.store.config;
+        if let Some(reason) = super::reopen_refusal(&item, super::approval::undoable(config, &item))
+        {
+            return Err(conflict(reason));
+        }
+        if item.state == HumanItemState::Completed && item.approval.is_some() {
+            super::approval::undo(config, &item, &actor)?;
+        }
+        item.state = HumanItemState::Open;
+        item.resolution = None;
+        self.after_the_fact(item, HumanItemEventAction::Reopened, actor)
+    }
+
+    /// Set a completed item's comment or a dismissed item's reason. Who resolved it
+    /// stays who resolved it, and the journal keeps every note.
+    fn note(
+        &mut self,
+        id: &str,
+        text: String,
+        actor: Actor,
+    ) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        if text.trim().is_empty() {
+            return Err(conflict("a note's text must not be blank"));
+        }
+        let mut item = self.acted_on(id, &actor)?;
+        let state = item.state;
+        let resolution = item
+            .resolution
+            .as_mut()
+            .filter(|_| matches!(state, HumanItemState::Completed | HumanItemState::Dismissed))
+            .ok_or_else(|| conflict(super::NOTE_REFUSED))?;
+        if state == HumanItemState::Completed {
+            resolution.text = Some(text);
+        } else {
+            resolution.reason = Some(text);
+        }
+        self.after_the_fact(item, HumanItemEventAction::Noted, actor)
+    }
+
     fn apply(
         &mut self,
         action: HumanItemAction,
@@ -1657,6 +1774,29 @@ impl<'a> Writer<'a> {
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let (id, actor, state, text, reason) = match action {
             HumanItemAction::Raise(input) => return self.raise(input),
+            HumanItemAction::Reopen {
+                id,
+                actor,
+                on_behalf_of,
+            } => {
+                let actor = Actor {
+                    actor,
+                    on_behalf_of,
+                };
+                return self.reopen(&id, actor);
+            }
+            HumanItemAction::Note {
+                id,
+                text,
+                actor,
+                on_behalf_of,
+            } => {
+                let actor = Actor {
+                    actor,
+                    on_behalf_of,
+                };
+                return self.note(&id, text, actor);
+            }
             HumanItemAction::Answer {
                 id,
                 text,

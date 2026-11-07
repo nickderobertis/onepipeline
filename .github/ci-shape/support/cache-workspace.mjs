@@ -11,13 +11,19 @@ import { evaluate } from "../../workflow-graph.mjs";
 import { OP_NX_COMMIT } from "../../../scripts/nx-remote-cache.mjs";
 
 export const root = fileURLToPath(new URL("../../../", import.meta.url));
+export function commandEnvironment(env) {
+  // Fixture Nx runs must not inherit the enclosing CI job's sidecar or
+  // telemetry identity. Cache journeys supply their own explicit context.
+  const inherited = { ...process.env };
+  for (const key of Object.keys(inherited)) if (key.startsWith("GITHUB_") || key.startsWith("ACTIONS_") || key.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_") || key === "NX_BASE" || key === "NX_HEAD") delete inherited[key];
+  // nx-remote-cache runs the real gh at the loopback GITHUB_API_URL. GH_TOKEN is for
+  // github.com, so gh tries the keyring for that host, which autolaunches a session
+  // bus whose daemon outlives the journey and holds one of the host's inotify instances.
+  return { ...inherited, DBUS_SESSION_BUS_ADDRESS: "disabled:", ...env };
+}
 export function command(cwd, cmd, args, env) {
   return new Promise((resolve, reject) => {
-    // Fixture Nx runs must not inherit the enclosing CI job's sidecar or
-    // telemetry identity. Cache journeys supply their own explicit context.
-    const inherited = { ...process.env };
-    for (const key of Object.keys(inherited)) if (key.startsWith("GITHUB_") || key.startsWith("ACTIONS_") || key.startsWith("NX_SELF_HOSTED_REMOTE_CACHE_") || key === "NX_BASE" || key === "NX_HEAD") delete inherited[key];
-    const child = spawn(cmd, args, { cwd, env: { ...inherited, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd, env: commandEnvironment(env), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (data) => { stdout += data; });
     child.stderr.on("data", (data) => { stderr += data; });

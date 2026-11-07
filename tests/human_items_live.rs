@@ -193,6 +193,8 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             vec!["answer", "hi-x", "--text", "yes"],
             vec!["complete", "hi-x"],
             vec!["dismiss", "hi-x"],
+            vec!["reopen", "hi-x"],
+            vec!["note", "hi-x", "--text", "said"],
             vec!["watch", "--session", "s"],
         ];
         // Exactly the contract's live verbs, so a verb it adds is driven here too.
@@ -1870,6 +1872,8 @@ fn every_malformed_hook_configuration_is_refused_at_load_by_its_file() {
         (hook("").replace("kind: task", "kind: question").replace("block: {scope: nothing}", "block: {scope: nothing}\n      aggregate: ticket_review"), "a question carries no approval"),
         (hook("").replace("block: {scope: nothing}", "block: {scope: nothing}\n      approval: {adapter: missing}"), "is not configured under human_items.approval_adapters"),
         (hook("  approval_adapters:\n    empty: {command: []}\n"), "command names a program"),
+        (hook("  approval_adapters:\n    empty: {command: [sh], undo: []}\n"), "undo names a program"),
+        (hook("  approval_adapters:\n    blank: {command: [sh], undo: ['  ']}\n"), "undo names a program"),
         (hook("").replace("priority: low", "priority: none"), "states its priority"),
     ] {
         let world = Live::new(Some(&config));
@@ -2797,4 +2801,59 @@ fn a_stale_completion_stopped_between_its_records_converges_on_retry() {
         "dismissed"
     );
     assert!(lines(&world.root.join("approvals.ndjson")).is_empty());
+}
+
+/// Who acts is stated on every after-the-fact action: the SDK refuses a blank actor on a
+/// reopen or a note, and a blank note's text, recording nothing.
+#[test]
+fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
+    use onepipeline::human_items::{HumanItemAction, HumanItemRefusal, HumanItems};
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "one",
+        "task",
+        "low",
+        "owner",
+        json!({"scope": "nothing"}),
+    ));
+    world.ok(None, &["complete", &id]);
+    let journal = world.store().join("events.ndjson");
+    let before = std::fs::read(&journal).unwrap();
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    for (action, says) in [
+        (
+            HumanItemAction::Reopen {
+                id: id.clone(),
+                actor: " ".into(),
+                on_behalf_of: None,
+            },
+            "names its actor",
+        ),
+        (
+            HumanItemAction::Note {
+                id: id.clone(),
+                text: "said".into(),
+                actor: String::new(),
+                on_behalf_of: None,
+            },
+            "names its actor",
+        ),
+        (
+            HumanItemAction::Note {
+                id: id.clone(),
+                text: "  ".into(),
+                actor: "user:someone".into(),
+                on_behalf_of: None,
+            },
+            "must not be blank",
+        ),
+    ] {
+        match store.apply(action) {
+            Err(HumanItemRefusal::Conflict { reason }) => {
+                assert!(reason.contains(says), "{reason} lacks {says}");
+            }
+            other => panic!("{says}: {other:?}"),
+        }
+    }
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
 }

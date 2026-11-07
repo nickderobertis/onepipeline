@@ -1353,15 +1353,16 @@ onevcs-testing = "0.20.0"
 # destination (table cells, reference-style definitions), pointing each at the counterpart
 # there; `tests/e2e/multi_source.rs`'s private-references journey fails on 0.14.2, which
 # rewrites one of the three and misses the one it cannot resolve.
-# **0.14.4 writes a same-record section link on GitHub as the issue's own `www` URL**, the one
-# form that scrolls when clicked inside that issue; `linear_writeback.rs`'s private Linear
-# journey holds it on the public board.
-# **0.14.5 screens a narrow write's own text without reading the item first**, so a settlement
-# or a plan copy under a policy that can rewrite costs what it costs under one that only checks,
-# and a term already stored is left for `sources sanitize`. The engine stays off
-# `with_sanitize_stored_on_write`, by the user's ruling that screening adds no GitHub request to
-# a small board edit. `tests/e2e/narrow_write_cost.rs` fails below this release, and so does
-# `publication_boundary`'s settlement journey.
+# **0.14.4 reads a private destination's reference-style section links**: a definition's relative
+# path, or one written alone, is rewritten as an inline link's is on a copy to a destination
+# declared private. `tests/e2e/multi_source.rs`'s private-budget-link journey fails on 0.14.3,
+# which leaves the definition naming the path the draft held.
+# It also writes a GitHub issue's link to its own heading as that issue's `www.github.com` URL, the
+# form `tests/e2e/linear_writeback.rs` holds on the public board.
+# **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
+# a term already stored on a task stays for `sources sanitize` unless the caller opts in, as
+# `src/writeback.rs` does, so a settlement still rewrites or refuses it:
+# `tests/e2e/publication_boundary.rs`'s settlement journey fails without that opt-in.
 onetaskgraph-core = "=0.14.5"
 onetaskgraph-plugin-api = "=0.14.5"
 onetaskgraph-local-md = "=0.14.5"
@@ -1387,7 +1388,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.101.5"
+version = "0.102.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

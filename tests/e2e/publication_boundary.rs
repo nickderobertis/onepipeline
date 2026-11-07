@@ -861,11 +861,17 @@ fn full_file_export(lfs: bool) {
     world.until("the consumer to start on the export", |world| {
         !tasks_of(world, "examples").is_empty()
     });
-    let opening = world
-        .events_of("files", "session-opened")
-        .into_iter()
-        .find(|event| event["labels"]["node"] == "examples")
-        .expect("the consumer session opened");
+    // The task appearing does not mean the journal holds its session yet: on a slow host the
+    // driver's `session-opened` line lands after it.
+    let mut opening = None;
+    world.until("the consumer's session-opened to be journalled", |world| {
+        opening = world
+            .events_of("files", "session-opened")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == "examples");
+        opening.is_some()
+    });
+    let opening = opening.expect("the wait returns only once the consumer session opened");
     let worktree = std::path::PathBuf::from(opening["payload"]["worktree"].as_str().unwrap());
     assert_eq!(
         git_out(&world, &worktree, &["rev-parse", "HEAD"]),
@@ -5872,7 +5878,7 @@ pub(crate) fn declare_replacement(world: &World, repository: &Repository) {
 }
 
 #[test]
-fn settlement_writebacks_leave_a_stored_term_for_the_sweep_and_refuse_a_private_item() {
+fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_content() {
     for level in ["repository", "ancestor", "reject", "private-item"] {
         let (world, private, _, _) = scoped_world(&format!("sanitize-body-{level}"));
         let world = world.with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public");
@@ -5927,8 +5933,8 @@ fn settlement_writebacks_leave_a_stored_term_for_the_sweep_and_refuse_a_private_
                 onepipeline_testfakes::yaml::to_string(&front).unwrap()
             )
         } else {
-            // Restore the stored spelling after the dispatch's write: a term a person put back
-            // on the item, which the settlement's narrow write neither reads for nor rewrites.
+            // Restore the stored spelling after the dispatch's write; the settlement must
+            // sanitize it again, through its own narrow write.
             let held = before.replace(
                 "An operator's sample body.",
                 "An operator's velvetquasar body.",
@@ -5939,9 +5945,14 @@ fn settlement_writebacks_leave_a_stored_term_for_the_sweep_and_refuse_a_private_
         std::fs::write(&path, &poisoned).unwrap();
         worker.release();
         until_settled(&world, "sanitized", "work");
-        if level == "private-item" {
+        if matches!(level, "reject" | "private-item") {
+            let kind = if level == "private-item" {
+                "not-private-destination"
+            } else {
+                "boundary-refused"
+            };
             world.until("the settlement write to be refused", |world| {
-                projections(world, "sanitized").contains("not-private-destination")
+                projections(world, "sanitized").contains(kind)
             });
             assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),
@@ -5949,23 +5960,33 @@ fn settlement_writebacks_leave_a_stored_term_for_the_sweep_and_refuse_a_private_
                 "a refused write mutated the item"
             );
             let record = projections(&world, "sanitized");
-            assert!(
-                record.contains("The item's `repositories` already named a private repository"),
-                "{record}"
-            );
+            if level == "private-item" {
+                assert!(
+                    record.contains("The item's `repositories` already named a private repository"),
+                    "{record}"
+                );
+            } else {
+                assert!(
+                    record.contains("it carries a term of a private repository in its text"),
+                    "{record}"
+                );
+                assert!(
+                    record.contains("The term was already on the item before this write"),
+                    "{record}"
+                );
+            }
         } else {
-            world.until_store("the settlement to be stored", |world| {
-                world.store_tasks(&project).iter().any(|task| {
-                    task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
-                })
-            });
-            let written = std::fs::read_to_string(&path).unwrap();
-            assert!(
-                written.contains("An operator's velvetquasar body."),
-                "the settlement's narrow write rewrote what it did not write: {written}"
+            world.until_store(
+                "the settlement to be stored with its body rewritten",
+                |world| {
+                    world.store_tasks(&project).iter().any(|task| {
+                        task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+                            && task.to_string().contains("An operator's sample body.")
+                    })
+                },
             );
-            let record = projections(&world, "sanitized");
-            assert!(!record.contains("boundary-refused"), "{record}");
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert!(!written.contains("velvetquasar"), "{written}");
         }
     }
 }
@@ -6149,4 +6170,106 @@ fn replacements_do_not_relax_publication_checks_or_public_id_derivation() {
             assert_eq!(launched["name_withheld"], true, "{launched}");
         }
     }
+}
+
+/// An item a person resolves wakes a mixed run's watch without carrying what its public
+/// node may not be shown: a title or text naming a private term becomes a surface naming
+/// only the item, the action and the actor, and a clean one is carried whole.
+#[test]
+fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
+    let (world, _) = held_mixed_run("item-surface", &["zephyrine"]);
+    let config = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.yaml"),
+        "human_items:\n  enabled: true\n",
+    )
+    .unwrap();
+    let raised_as = |key: &str, title: &str| {
+        let input = world.root.join(format!("{key}.json"));
+        std::fs::write(
+            &input,
+            json!({
+                "schema_version": 1,
+                "dedup_key": key,
+                "kind": "task",
+                "title": title,
+                "body": "What it needs from a person.",
+                "priority": "high",
+                "owner": {"session": "mgr", "run": "item-surface", "plan": null},
+                "block": {"scope": "nothing"},
+                "approval": null
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let raised = world.run(&["human-items", "raise", "--input", input.to_str().unwrap()]);
+        raised.exited(0);
+        raised.json()["item"]["item"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let item_surface = |id: &str| -> String {
+        std::fs::read_to_string(world.run_file("item-surface", "channel/surfaces.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .rfind(|record| {
+                record["kind"] == "human-item" && record["message"].as_str().unwrap().contains(id)
+            })
+            .unwrap_or_else(|| panic!("{id} reached no surface"))["message"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let private = raised_as("private", "Tidy the zephyrine layout");
+    world.run(&["human-items", "complete", &private]).exited(0);
+    let withheld = item_surface(&private);
+    assert!(!withheld.contains("zephyrine"), "{withheld}");
+    assert!(withheld.starts_with("human-item-completed: "), "{withheld}");
+    assert!(withheld.contains("withheld"), "{withheld}");
+
+    let clean = raised_as("clean", "Tidy the plain layout");
+    world.run(&["human-items", "complete", &clean]).exited(0);
+    let carried = item_surface(&clean);
+    assert!(carried.contains("Tidy the plain layout"), "{carried}");
+
+    // What a person says afterwards is judged as well: a note's text and a reason.
+    world
+        .run(&[
+            "human-items",
+            "note",
+            &clean,
+            "--text",
+            "Matches the zephyrine one.",
+        ])
+        .exited(0);
+    let noted = item_surface(&clean);
+    assert!(noted.starts_with("human-item-noted: "), "{noted}");
+    assert!(
+        !noted.contains("zephyrine") && noted.contains("withheld"),
+        "{noted}"
+    );
+    let reasoned = raised_as("reasoned", "Tidy the other layout");
+    world
+        .run(&[
+            "human-items",
+            "dismiss",
+            &reasoned,
+            "--reason",
+            "A zephyrine concern.",
+        ])
+        .exited(0);
+    let dismissed = item_surface(&reasoned);
+    assert!(
+        dismissed.starts_with("human-item-dismissed: "),
+        "{dismissed}"
+    );
+    assert!(
+        !dismissed.contains("zephyrine") && dismissed.contains("withheld"),
+        "{dismissed}"
+    );
+    world.release("generalize.go");
 }

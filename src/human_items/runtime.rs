@@ -250,7 +250,11 @@ impl Gate {
             return self.held.clone();
         }
         self.looked = Some(std::time::Instant::now());
-        self.seen = self.length();
+        let length = self.length();
+        if length != self.seen {
+            self.store.carry();
+        }
+        self.seen = length;
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
             if statuses.get(&node.id) != Some(&NodeStatus::Waiting)
                 || self.raised.contains(&node.id)
