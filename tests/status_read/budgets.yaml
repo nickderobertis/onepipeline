@@ -1,0 +1,53 @@
+# The budgets the `onepipeline-status-read` project holds the read of one run to, checked by
+# `onebudgetspec check budgets.yaml` from this directory in that project's `test` target,
+# after the journey that writes `target/budget-records/status-read.json`. Each figure is read
+# from that saved recording; nothing is timed twice.
+schema_version: 1
+budgets:
+  - id: onepipeline-status-read-seconds
+    measure: reported
+    command: [node, report.mjs, ../../target/budget-records/status-read.json, --metric, status]
+    unit: seconds
+    direction: max
+    threshold: 1
+    description: >-
+      Command-line status read of one run. Wall-clock seconds of `onepipeline status <run>` on
+      the release binary with its default text, the slowest of the large and the small run;
+      detail reports the checkpoint read and the render per run, the checkpoint's bytes, the
+      record and stream counts, and how many times the stand-in provider CLI started. Workload:
+      one read of a generated run of 124,000 records, 102 MB, 19 nodes, 2,100 streams, a 7 MB
+      checkpoint and one settled consumer's cross-run edge into another run's 30 MB journal,
+      and one of a settled run of 8 records, under a root of 850 run directories, with a
+      `claude` stand-in on PATH that takes 20 s and records each start. Target by design: the
+      supervisor's most frequent look at a run. The reporter errors on a checkpoint under
+      6.5 MB, under 2,000 streams, or a stand-in start during the default read.
+  - id: onepipeline-run-results-read-seconds
+    measure: reported
+    command: [node, report.mjs, ../../target/budget-records/status-read.json, --metric, results]
+    unit: seconds
+    direction: max
+    threshold: 8
+    description: >-
+      Command-line results read of a long run. Wall-clock seconds of `onepipeline results <run>`
+      on the release binary, a command that folds the whole journal, over the large run; detail
+      reports the journal read and fold against the render. Workload: one read of the generated
+      run of 124,000 records, 102 MB, 19 nodes and 2,100 streams, under a root of 850 run
+      directories. Estimated from spike-run-open-costs' fold readings: 30.5 s with a scan and
+      5.7 s with the heap at load 53 on this host's largest run, and 16.1 s and 2.62 s over its
+      corpus with `streams=2000`, so 8 s sits above the heap's worst and below the scan's best,
+      and a scan restored fails it.
+  - id: onepipeline-transcript-read-seconds
+    measure: reported
+    command: [node, report.mjs, ../../target/budget-records/status-read.json, --metric, transcript]
+    unit: seconds
+    direction: max
+    threshold: 5
+    description: >-
+      Command-line transcript read of a long dispatch. Wall-clock seconds of `onepipeline
+      transcript <run> <node>` on the release binary, a command that resolves every reference;
+      detail reports the reference count and session-file bytes. Workload: one read of a
+      generated run of 6,000 records whose one node holds 5,000 activity references into 3
+      session files of 1.8 MB each in a generated oneharness history store, under a root of 850
+      run directories. Arithmetic from spike-run-open-costs: about 7.3 ms per reference
+      re-parsing costs about 36 s, and one parse per file well under 1 s. The reporter errors
+      when a reference did not resolve.

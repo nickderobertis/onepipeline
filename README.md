@@ -720,10 +720,11 @@ retry chain's cycle time, from its first dispatch to the landing `onevcs`
 recorded, with its dispatches, publications and gate runs, and where the time went
 in segments that sum exactly — any segment its records cannot decide is named as
 not measured, never estimated.
-`status [RUN] [--no-providers] [--json]`: `--no-providers` leaves out the closing
-provider report and does not ask `oneagentgraph` for it; every other line is the one
-`status` prints without the flag, so a watch that used to cut the view with a shell
-filter is one plain command.
+`status [RUN] [--providers] [--no-providers] [--json]`: by default the view neither
+asks for nor prints the host's provider report, which costs a reader over twenty seconds
+to learn something about the host rather than about the run. `--providers` asks for it
+and closes the view with it; `--no-providers` stays accepted and changes nothing, and
+naming both is refused. Every other line is the same in all three.
 
 A run nothing drives says how it was left. `SETTLED` is a run whose every node is
 `done`; `ENDED failed`, `ENDED unfinished` and `ENDED stopped` are the endings its
