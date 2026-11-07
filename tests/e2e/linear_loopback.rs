@@ -2390,8 +2390,8 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
     assert_eq!(read["data"]["project"]["content"], "");
 }
 
-/// Every rewrite the spike measured is what this endpoint stores, and storing what it stored
-/// changes nothing more — what the spike measured of every follow-up write's answer.
+/// The editor state this endpoint keeps decodes through the linked plugin into each heading
+/// outside a fence, and a later edit leaving a heading's text alone keeps that heading's id.
 #[test]
 fn the_editor_state_reads_back_through_the_linked_plugin_with_ids_an_edit_keeps() {
     let content = "## Budget a\n```\n## not a heading\n```\n## Budget a\n\nProse.\n# Other";
@@ -2409,6 +2409,8 @@ fn the_editor_state_reads_back_through_the_linked_plugin_with_ids_an_edit_keeps(
     assert_eq!(read("## Budget a\n\nAnother body.")[0], held[0]);
 }
 
+/// Every rewrite the spike measured is what this endpoint stores, and storing what it stored
+/// changes nothing more — what the spike measured of every follow-up write's answer.
 #[test]
 fn the_loopback_stores_every_rewrite_the_spike_measured() {
     for (probe, written, kept) in MEASURED {
