@@ -1362,7 +1362,8 @@ onevcs-testing = "0.20.0"
 # **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
 # a term already stored on a task stays for `sources sanitize` unless the caller opts in. The
 # engine does not, by the user's ruling that screening adds no GitHub request to a small board
-# edit: `tests/e2e/narrow_write_cost.rs` fails if it does, or on a release below this one.
+# edit: `tests/e2e/narrow_write_cost.rs` fails if it does. It does not compile against 0.14.4,
+# which has no such opt-in; with that one call taken out, its comparisons fail there on the reads.
 onetaskgraph-core = "=0.14.5"
 onetaskgraph-plugin-api = "=0.14.5"
 onetaskgraph-local-md = "=0.14.5"
