@@ -213,6 +213,179 @@ const DESIGN_STORED: &str = "## Design\n\n* Build on the store.\n\nA paragraph l
      that**\n**spans** stay.\n\n```\nan indented code line\n```\n\n| part | owner |\n| -- | -- \
      |\n| core | build |\n";
 
+/// A design document's budget table, written with reference-style links to the tasks of its plan,
+/// lands at a Linear source declared private with each cell an inline link to that task's copy and
+/// its budget heading. Linear keeps a reference-style link only as escaped text and rewrites what a
+/// copy writes, and neither stops the copy. Two tasks also name each other by a path alone in a
+/// table cell, so one of them is finished by a follow-up write as a bare address Linear autolinks,
+/// which the copy takes for what it is rather than refusing. An unchanged plan copied again writes
+/// nothing.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey composes the linked store's copy with the Linear plugin over a real socket and reads what the endpoint stored, which only the e2e binary's loopback offers, as for the Linear journeys above it.
+#[test]
+fn a_budget_table_of_reference_links_lands_on_each_tasks_heading_at_a_private_linear_source() {
+    let world = World::new("linear-private-budget-table").with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve_empty(STATES, STATUSES);
+    linear.store_links();
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        configuration(&linear).replacen(
+            "    plugin: linear",
+            "    visibility: private\n    plugin: linear",
+            1,
+        ),
+    )
+    .expect("the launch directory's store configuration");
+
+    let budgeted = |id: &str, budget: &str, other: &str, other_budget: &str| {
+        json!({
+            "id": id,
+            "task": format!(
+                "## What\nShip {id}, within [the other budget][other].\n\n\
+                 ## Budget {budget}\nOne minute.\n\n\
+                 ## Acceptance criteria\n- {id} is published.\n\n\
+                 | Next |\n| --- |\n| {other}.md#budget-{other_budget} |\n\n\
+                 [other]: {other}.md#budget-{other_budget}\n"
+            ),
+        })
+    };
+    let name = "linear-budgeted";
+    world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                budgeted("core", "core-time", "001-later", "later-time"),
+                budgeted("later", "later-time", "000-core", "core-time"),
+            ],
+        ),
+    );
+    let project = project_id(name);
+    for task in ["000-core", "001-later"] {
+        let file = world
+            .store()
+            .join("tasks")
+            .join(&project)
+            .join(format!("{task}.md"));
+        assert!(file.is_file(), "the table below names no task at {file:?}");
+    }
+    world.write_item(
+        &world.store().join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        &format!(
+            "## Budgets\n\n| Budget | Limit |\n| --- | --- |\n| [core time][1] | 1m |\n\
+             | [later time][2] | 2m |\n\n\
+             [1]: ../tasks/{project}/000-core.md#budget-core-time\n\
+             [2]: ../tasks/{project}/001-later.md#budget-later-time\n"
+        ),
+    );
+
+    let copy = || {
+        let home = copied(
+            &world,
+            &launch,
+            &format!("{STORE_SOURCE}:{project}"),
+            onetaskgraph_core::CopyScope::Projects { tasks: true },
+        );
+        let document = copied(
+            &world,
+            &launch,
+            &format!("{STORE_SOURCE}:design"),
+            onetaskgraph_core::CopyScope::Documents,
+        );
+        (home, document)
+    };
+    let landed = copy();
+
+    let issue_of = |node: &str| {
+        linear
+            .issues()
+            .into_iter()
+            .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == node)
+            .unwrap_or_else(|| panic!("Linear holds no copy of {node}: {:#?}", linear.log()))
+    };
+    let link = |node: &str, text: &str, budget: &str, slug: &str| {
+        let (id, _, description) = issue_of(node);
+        assert!(
+            description
+                .lines()
+                .any(|line| line == format!("## Budget {budget}")),
+            "{node}'s copy holds no budget heading: {description}"
+        );
+        let heading = onetaskgraph_linear::headings::decoded(&linear.issue_editor_state(&id))
+            .expect("the issue's editor state decodes")
+            .into_iter()
+            .find(|heading| heading.text == format!("Budget {budget}"))
+            .expect("the editor state names the budget heading");
+        let id8: String = heading.id.chars().filter(|c| *c != '-').take(8).collect();
+        let address = linear.issue_address(&id);
+        format!("[{text}](<{address}#heading-{slug}-{id8}>)")
+    };
+    for (node, other, budget) in [
+        ("core", "later", "later-time"),
+        ("later", "core", "core-time"),
+    ] {
+        let wanted = link(
+            other,
+            "the other budget",
+            budget,
+            &format!("budget-{budget}"),
+        );
+        let (other_id, _, _) = issue_of(other);
+        let address = linear.issue_address(&other_id);
+        let fragment = wanted
+            .rsplit_once('#')
+            .and_then(|(_, fragment)| fragment.strip_suffix(">)"))
+            .expect("a link names its heading");
+        let identifier = address.rsplit('/').next().expect("an issue's identifier");
+        let autolinked = format!("| [{identifier}]({address}#{fragment}) |");
+        let (_, _, description) = issue_of(node);
+        let held = content_of(&description);
+        assert!(
+            held.contains(&format!("within {wanted}.")) && held.contains(&autolinked),
+            "{node}'s links to {other} did not land on its budget heading, wanted {wanted} and \
+             {autolinked}: {description}"
+        );
+    }
+    // What makes the store's own follow-up worth holding: it sent one of those addresses bare, and
+    // what Linear stored of it is not what it sent, which the copy did not refuse.
+    let finished_bare = linear.log().iter().any(|request| {
+        request.operation == Operation::IssueUpdate
+            && request.variables["input"]["description"]
+                .as_str()
+                .is_some_and(|sent| sent.contains("| https://linear.app/generic/issue/"))
+    });
+    assert!(
+        finished_bare,
+        "no follow-up finished a bare address: {:#?}",
+        linear.log()
+    );
+    let wanted = format!(
+        "## Budgets\n\n| Budget | Limit |\n| -- | -- |\n| {} | 1m |\n| {} | 2m |\n",
+        link("core", "core time", "core-time", "budget-core-time"),
+        link("later", "later time", "later-time", "budget-later-time"),
+    );
+    let held = linear
+        .documents()
+        .into_iter()
+        .find(|(id, _)| landed.1 == format!("{SOURCE}:{id}"))
+        .map(|(_, content)| content)
+        .unwrap_or_else(|| panic!("Linear holds no {}", landed.1));
+    assert_eq!(content_of(&held), wanted, "as Linear stores it:\n{held}");
+    let first = linear.log().len();
+    assert_eq!(copy(), landed);
+    let written: Vec<_> = linear.log()[first..]
+        .iter()
+        .filter(|request| request.operation.writes())
+        .cloned()
+        .collect();
+    assert!(
+        written.is_empty(),
+        "an unchanged plan copied again wrote to Linear: {written:#?}"
+    );
+}
+
 /// Copy `item` into Linear with the linked store's copy over `scope`, and answer where it landed.
 fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::CopyScope) -> String {
     let report = copy_report(world, launch, item, scope)

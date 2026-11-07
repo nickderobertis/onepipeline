@@ -33,9 +33,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use base64::Engine as _;
 use onetaskgraph_linear::graphql;
 use onetaskgraph_plugin_api::MetadataRecord;
 use serde_json::{json, Map, Value};
+use yrs::types::xml::{XmlElementPrelim, XmlTextPrelim};
+use yrs::{Doc, ReadTxn, Transact, Xml, XmlFragment};
 
 /// The team key a source over this endpoint is configured with.
 pub const TEAM: &str = "TEAM";
@@ -272,6 +275,8 @@ struct World {
     log: Vec<Request>,
     faults: BTreeMap<Operation, VecDeque<Fault>>,
     held: bool,
+    /// Whether links and headings are held as real Linear holds them: [`Linear::store_links`].
+    links_stored: bool,
 }
 
 /// The loopback endpoint. Its listener serves until the test process ends, so a driver a journey
@@ -337,6 +342,39 @@ impl Linear {
         linear
     }
 
+    /// Hold links and headings as real Linear does: content stored by [`linear_stores_links`], and
+    /// each record answered with the editor state naming its headings' ids, so a heading can be
+    /// linked by the id Linear gave it. Without this a store has no such id to name, which is what
+    /// the journeys holding that fallback serve.
+    pub fn store_links(&self) {
+        self.lock().links_stored = true;
+    }
+
+    /// The editor state the issue `id` is answered with.
+    pub fn issue_editor_state(&self, id: &str) -> String {
+        let world = self.lock();
+        let held = world
+            .issues
+            .iter()
+            .find(|held| held.id == id)
+            .unwrap_or_else(|| panic!("no issue {id}"));
+        editor_state(&held.id, &held.description)
+    }
+
+    /// The address the issue `id` is answered with.
+    pub fn issue_address(&self, id: &str) -> String {
+        let world = self.lock();
+        let held = world
+            .issues
+            .iter()
+            .find(|held| held.id == id)
+            .unwrap_or_else(|| panic!("no issue {id}"));
+        world.render(held)["url"]
+            .as_str()
+            .expect("an issue answers its address")
+            .to_owned()
+    }
+
     /// The project's id: [`PROJECT`] for one served from the start, and for one a copy filed
     /// into [`Linear::serve_empty`], the id that copy's create sent, which only it knows.
     pub fn project_id(&self) -> String {
@@ -347,12 +385,13 @@ impl Linear {
     /// `edit` is handed what Linear holds and answers what it holds after.
     pub fn edit_description(&self, issue: &str, edit: impl FnOnce(&str) -> String) {
         let mut world = self.lock();
+        let links_stored = world.links_stored;
         let held = world
             .issues
             .iter_mut()
             .find(|held| held.id == issue)
             .unwrap_or_else(|| panic!("no issue {issue}"));
-        held.description = linear_stores(&edit(&held.description));
+        held.description = stored_as(links_stored, &edit(&held.description));
     }
 
     /// How many requests of `operation` this endpoint was sent: of a create, how many times it
@@ -671,11 +710,21 @@ impl Linear {
                 data
             }
             Operation::CounterpartLookups => {
-                // Every issue and the project, whatever the filters: the plugin confirms each
-                // row against the origin it looks up, as it does a listing's.
+                // The issues whose description holds a phrase the filter names, as Linear narrows
+                // a page the plugin sizes to the origins it looks up; and the project, whatever
+                // the filter: the plugin confirms each row against the origin it looks up, as it
+                // does a listing's.
                 let mut data = world.resolution();
+                let mut phrases = Vec::new();
+                contains_phrases(&variables["issuesFilter"], &mut phrases);
                 data["originIssues"] = match world.listed(query) {
-                    Ok(issues) => page(issues),
+                    Ok(mut issues) => {
+                        issues.retain(|issue| {
+                            let held = issue["description"].as_str().unwrap_or_default();
+                            phrases.is_empty() || phrases.iter().any(|at| held.contains(at))
+                        });
+                        page(issues)
+                    }
                     Err(why) => return refusal(&why),
                 };
                 data["originProjects"] = json!({
@@ -812,7 +861,7 @@ impl Linear {
                 if let Some(name) = name {
                     world.project_name = name;
                 }
-                world.project_content = linear_stores(content);
+                world.project_content = stored_as(world.links_stored, content);
                 // The project as stored, which the plugin selects in its answer — the content
                 // Linear stored among it — as Linear answers it.
                 let mut project = world.project();
@@ -963,7 +1012,7 @@ impl World {
         };
         self.project_status = status.name.clone();
         self.project_name = name.to_owned();
-        self.project_content = linear_stores(content);
+        self.project_content = stored_as(self.links_stored, content);
         // Linear files a create under the `id` it names, where it names one.
         if let Some(id) = input.get("id").and_then(Value::as_str) {
             id.clone_into(&mut self.project_id);
@@ -994,7 +1043,7 @@ impl World {
             id: text("id").map_or_else(|| format!("issue-{n}"), str::to_owned),
             identifier: format!("{TEAM}-{n}"),
             title: title.to_owned(),
-            description: linear_stores(description),
+            description: stored_as(self.links_stored, description),
             state: state.to_owned(),
             priority: input.get("priority").and_then(Value::as_u64).unwrap_or(0),
         };
@@ -1041,14 +1090,14 @@ impl World {
             title.clone_into(&mut document.title);
         }
         if let Some(content) = text("content") {
-            document.content = linear_stores(content);
+            document.content = stored_as(self.links_stored, content);
         }
         let document = document.clone();
         Ok(self.render_document(&document))
     }
 
     fn render_document(&self, document: &Document) -> Value {
-        json!({
+        let mut rendered = json!({
             "id": document.id,
             "title": document.title,
             "content": document.content,
@@ -1057,7 +1106,14 @@ impl World {
             "updatedAt": "2026-10-01T00:00:00.000Z",
             "archivedAt": null,
             "project": {"id": self.project_id},
-        })
+        });
+        self.with_editor_state(
+            &mut rendered,
+            "contentState",
+            &document.id,
+            &document.content,
+        );
+        rendered
     }
 
     fn render(&self, issue: &Issue) -> Value {
@@ -1066,7 +1122,7 @@ impl World {
             .iter()
             .find(|named| named.id == issue.state)
             .map(|named| json!({"name": named.name, "type": named.kind}));
-        json!({
+        let mut rendered = json!({
             "id": issue.id,
             "identifier": issue.identifier,
             "title": issue.title,
@@ -1079,7 +1135,22 @@ impl World {
             "priority": issue.priority,
             "labels": {"nodes": []},
             "project": {"id": self.project_id},
-        })
+        });
+        self.with_editor_state(
+            &mut rendered,
+            "descriptionState",
+            &issue.id,
+            &issue.description,
+        );
+        rendered
+    }
+
+    /// `rendered` with the `field` holding the editor state of the record `id` stored as `content`,
+    /// when this endpoint answers with editor states.
+    fn with_editor_state(&self, rendered: &mut Value, field: &str, id: &str, content: &str) {
+        if self.links_stored {
+            rendered[field] = json!(editor_state(id, content));
+        }
     }
 
     /// Everything a status write resolves: the team's workflow states and the workspace's
@@ -1147,7 +1218,7 @@ impl World {
             .iter()
             .find(|named| named.name == self.project_status)
             .map(|named| json!({"name": named.name, "type": named.kind}));
-        json!({
+        let mut rendered = json!({
             "id": self.project_id,
             "name": self.project_name,
             "content": self.project_content,
@@ -1157,7 +1228,14 @@ impl World {
             "archivedAt": null,
             "status": status,
             "labels": {"nodes": []},
-        })
+        });
+        self.with_editor_state(
+            &mut rendered,
+            "contentState",
+            &self.project_id,
+            &self.project_content,
+        );
+        rendered
     }
 
     fn update(&mut self, id: &str, input: &Map<String, Value>) -> Result<Value, String> {
@@ -1192,7 +1270,7 @@ impl World {
             issue.state = state;
         }
         if let Some(description) = text("description") {
-            issue.description = linear_stores(&description);
+            issue.description = stored_as(self.links_stored, &description);
         }
         if let Some(title) = text("title") {
             issue.title = title;
@@ -1637,6 +1715,193 @@ pub fn linear_stores(content: &str) -> String {
     stored
 }
 
+/// [`linear_stores`], or [`linear_stores_links`] where `links` are held as Linear holds them.
+fn stored_as(links: bool, content: &str) -> String {
+    if links {
+        linear_stores_links(content)
+    } else {
+        linear_stores(content)
+    }
+}
+
+/// What Linear stores of `content` when its links are modelled too: [`linear_stores`], and what
+/// writes to `TES2` were observed storing on 2026-11-07, which onetaskgraph's own model of Linear
+/// holds as well: bare addresses autolinked, every other link's destination in angle brackets, and
+/// every other bracket and tilde escaped, which is why Linear keeps no reference-style link.
+pub fn linear_stores_links(content: &str) -> String {
+    let stored = linear_stores(content);
+    inline_lines(stored.split('\n').map(str::to_owned).collect()).join("\n")
+}
+
+/// `lines` with the text of each [`inline_text`] rewrites, which is neither inside a fence, nor a
+/// code block's indented line, nor an HTML line such as the metadata slot.
+fn inline_lines(lines: Vec<String>) -> Vec<String> {
+    let mut fence: Option<(char, usize)> = None;
+    let mut after_blank = true;
+    lines
+        .into_iter()
+        .map(|line| {
+            if let Some((mark, opened)) = fence {
+                if fence_of(&line).is_some_and(|(closing, run, rest)| {
+                    closing == mark && run >= opened && rest.trim().is_empty()
+                }) {
+                    fence = None;
+                }
+                return line;
+            }
+            if let Some((mark, run, _)) = fence_of(&line) {
+                fence = Some((mark, run));
+                return line;
+            }
+            let code = after_blank && line.starts_with("    ");
+            after_blank = code || line.trim().is_empty();
+            if code || line.trim_start().starts_with('<') {
+                line
+            } else {
+                inline_text(&line)
+            }
+        })
+        .collect()
+}
+
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] As with the rest of this model, Linear publishes no statement of what it stores and this reading of its issue address is the model's own on purpose: reusing the store's `section_links` would let the two never disagree, which is the disagreement the journeys through this endpoint exist to find.
+/// One line of Markdown's text as Linear stores it. A code span, an image and an escape stay as they
+/// are written, and a list item's task box stays one. A link's destination goes in angle brackets,
+/// but for a link to a Linear issue under its identifier. A bare URL, or a `.md` file with a fragment
+/// read as a domain, is linked under itself, a Linear issue's URL under the identifier. Any other
+/// bracket or tilde is escaped. Storing what this stored changes nothing.
+fn inline_text(line: &str) -> String {
+    let mut stored = String::with_capacity(line.len());
+    let box_at = line.len() - line.trim_start_matches([' ', '-', '*']).len();
+    let mut at = 0;
+    while let Some(character) = line[at..].chars().next() {
+        let rest = &line[at..];
+        let at_word_start = !line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || "@/.-_:\\#=+%".contains(c));
+        let taken = if character == '`' {
+            let run = rest.len() - rest.trim_start_matches('`').len();
+            let close = rest[run..]
+                .find(&"`".repeat(run))
+                .map(|end| run + end + run);
+            let span = close.unwrap_or(run);
+            stored.push_str(&rest[..span]);
+            span
+        } else if character == '\\' {
+            let escaped = 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            stored.push_str(&rest[..escaped]);
+            escaped
+        } else if character == '!' && link_length(&rest[1..]).is_some() {
+            let image = 1 + link_length(&rest[1..]).expect("checked just now");
+            stored.push_str(&rest[..image]);
+            image
+        } else if at == box_at
+            && at > 0
+            && ["[ ] ", "[x] ", "[X] "].iter().any(|b| rest.starts_with(b))
+        {
+            stored.push_str(&rest[..3]);
+            3
+        } else if character == '[' {
+            match link_length(rest) {
+                Some(length) => {
+                    stored.push_str(&stored_link(&rest[..length]));
+                    length
+                }
+                None => {
+                    stored.push_str("\\[");
+                    1
+                }
+            }
+        } else if matches!(character, ']' | '~') {
+            stored.push('\\');
+            stored.push(character);
+            1
+        } else if let Some(token) = at_word_start.then(|| autolinked_token(rest)).flatten() {
+            match issue_identifier(token) {
+                Some(identifier) => stored.push_str(&format!("[{identifier}]({token})")),
+                None if token.starts_with("http") => {
+                    stored.push_str(&format!("[{token}](<{token}>)"));
+                }
+                None => stored.push_str(&format!("[{token}](<http://{token}>)")),
+            }
+            token.len()
+        } else {
+            stored.push(character);
+            character.len_utf8()
+        };
+        at += taken;
+    }
+    stored
+}
+
+/// The length of the inline link `text` opens with: `[text](target)`, its target bare or in angle
+/// brackets. A link's text may hold balanced brackets, as a record's title does.
+fn link_length(text: &str) -> Option<usize> {
+    let mut depth = 0_usize;
+    let close = text.find(|c: char| {
+        depth = match c {
+            '[' => depth + 1,
+            ']' => depth.saturating_sub(1),
+            _ => depth,
+        };
+        depth == 0
+    })?;
+    let target = text[close + 1..].strip_prefix('(')?;
+    let length = if target.starts_with('<') {
+        target.find(">)")? + 2
+    } else {
+        let end = target.find(')')?;
+        if target[..end].contains(char::is_whitespace) {
+            return None;
+        }
+        end + 1
+    };
+    Some(close + 2 + length)
+}
+
+/// The inline link `link` as Linear stores it.
+fn stored_link(link: &str) -> String {
+    let (text, target) = link
+        .split_once("](")
+        .expect("a link's text closes before its destination");
+    let target = target.strip_suffix(')').expect("a link closes");
+    if target.starts_with('<') || issue_identifier(target) == Some(&text[1..]) {
+        return link.to_owned();
+    }
+    format!("{text}](<{target}>)")
+}
+
+/// The token at the start of `text` Linear autolinks: a URL, or a file name under `.md` with a
+/// fragment. Punctuation trailing it stays outside it.
+fn autolinked_token(text: &str) -> Option<&str> {
+    let end = text
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '`' | '[' | ']' | '|'))
+        .unwrap_or(text.len());
+    let token =
+        text[..end].trim_end_matches(['.', ',', ':', ';', '!', '?', '\'', '"', ')', '*', '_', '~']);
+    let scheme = ["http://", "https://"]
+        .iter()
+        .any(|scheme| token.len() > scheme.len() && token.starts_with(scheme));
+    let file = token.split_once(".md#").is_some_and(|(name, fragment)| {
+        !name.is_empty()
+            && !fragment.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+    });
+    (scheme || file).then_some(token)
+}
+
+/// The identifier a Linear issue's address names: `TES2-1` of
+/// `https://linear.app/<workspace>/issue/TES2-1#heading-a-12345678`.
+fn issue_identifier(address: &str) -> Option<&str> {
+    let (_, issue) = address
+        .strip_prefix("https://linear.app/")?
+        .split_once("/issue/")?;
+    issue.split(['/', '#']).next()
+}
+
 /// What the line before the one being stored was, as [`linear_stores`] sets lines apart by it.
 #[derive(Clone, Copy)]
 enum Before {
@@ -1713,7 +1978,113 @@ pub const MEASURED: &[(&str, &str, &str)] = &[
         "| a |\n| -- |\n\n<!-- onetaskgraph.metadata `{\"k\":\"**\"}` -->",
     ),
 ];
+
+/// Every rewrite [`linear_stores_links`] adds, by what it rewrites: what was written and what Linear
+/// stored.
+pub const OBSERVED_LINKS: &[(&str, &str, &str)] = &[
+    (
+        "reference-link",
+        "| [core][1] |\n\n[1]: ../tasks/core.md#budget",
+        "| \\[core\\]\\[1\\] |\n\n\\[1\\]: ../tasks/core.md#budget",
+    ),
+    (
+        "link-destination",
+        "see [core](https://a.example/b) ~ then",
+        "see [core](<https://a.example/b>) \\~ then",
+    ),
+    (
+        "bare-url",
+        "| https://a.example/b |",
+        "| [https://a.example/b](<https://a.example/b>) |\n",
+    ),
+    (
+        "bare-issue-url",
+        "see https://linear.app/w/issue/TES2-1#heading-a-12345678.",
+        "see [TES2-1](https://linear.app/w/issue/TES2-1#heading-a-12345678).",
+    ),
+];
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
+/// Every phrase `filter` asks an issue's description to hold, compared as `contains` compares it.
+fn contains_phrases(filter: &Value, phrases: &mut Vec<String>) {
+    match filter {
+        Value::Object(fields) => {
+            for (field, value) in fields {
+                match (field.as_str(), value.as_str()) {
+                    ("contains", Some(phrase)) => phrases.push(phrase.to_owned()),
+                    _ => contains_phrases(value, phrases),
+                }
+            }
+        }
+        Value::Array(members) => {
+            for member in members {
+                contains_phrases(member, phrases);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The editor state Linear keeps beside the record `id` stored as `content`: base64 of a Yjs update
+/// whose `prosemirror` fragment holds a `heading` node per ATX heading outside a fence. Each id is
+/// made from the record, the heading's text and its position among those of that text, so an update
+/// leaving a heading's text alone keeps its id, as Linear's does.
+fn editor_state(id: &str, content: &str) -> String {
+    let doc = Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment("prosemirror");
+    let mut seen: Vec<&str> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    let mut txn = doc.transact_mut();
+    for line in content.lines() {
+        if let Some((mark, run, rest)) = fence_of(line) {
+            fence = match fence {
+                None => Some((mark, run)),
+                Some((open, opened)) if open == mark && run >= opened && rest.trim().is_empty() => {
+                    None
+                }
+                held => held,
+            };
+            continue;
+        }
+        let marks = line.len() - line.trim_start_matches('#').len();
+        let Some(text) = line[marks..]
+            .strip_prefix(' ')
+            .filter(|_| fence.is_none() && (1..=6).contains(&marks))
+        else {
+            continue;
+        };
+        let text = text.trim();
+        let ordinal = seen.iter().filter(|earlier| **earlier == text).count();
+        seen.push(text);
+        let index = u32::try_from(seen.len() - 1).expect("a record's headings fit");
+        let heading = fragment.insert(&mut txn, index, XmlElementPrelim::empty("heading"));
+        heading.insert_attribute(
+            &mut txn,
+            "level",
+            f64::from(u32::try_from(marks).expect("at most six")),
+        );
+        heading.insert_attribute(
+            &mut txn,
+            "id",
+            heading_id(&format!("{id}/{text}/{ordinal}")),
+        );
+        heading.insert(&mut txn, 0, XmlTextPrelim::new(text));
+    }
+    drop(txn);
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    base64::engine::general_purpose::STANDARD.encode(update)
+}
+
+/// A heading id shaped as Linear's UUIDs are, made from `seed` so a run reproduces.
+fn heading_id(seed: &str) -> String {
+    let hash = seed.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let hex = format!("{hash:016x}");
+    format!("{}-{}-4000-a000-{}0000", &hex[..8], &hex[8..12], &hex[..8])
+}
 
 /// The content a description holding a metadata slot reports, as a read of it does: the text
 /// above the slot less the one blank line that sets it off — of which only a line break is left
@@ -2001,11 +2372,36 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
 /// Every rewrite the spike measured is what this endpoint stores, and storing what it stored
 /// changes nothing more — what the spike measured of every follow-up write's answer.
 #[test]
+fn the_editor_state_reads_back_through_the_linked_plugin_with_ids_an_edit_keeps() {
+    let content = "## Budget a\n```\n## not a heading\n```\n## Budget a\n\nProse.\n# Other";
+    let read = |content: &str| -> Vec<(String, String)> {
+        onetaskgraph_linear::headings::decoded(&editor_state("issue-1", content))
+            .expect("the plugin decodes the state")
+            .into_iter()
+            .map(|heading| (heading.text, heading.id))
+            .collect()
+    };
+    let held = read(content);
+    let texts: Vec<&str> = held.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(texts, ["Budget a", "Budget a", "Other"]);
+    assert_ne!(held[0].1, held[1].1, "two headings of one text: {held:?}");
+    assert_eq!(read("## Budget a\n\nAnother body.")[0], held[0]);
+}
+
+#[test]
 fn the_loopback_stores_every_rewrite_the_spike_measured() {
     for (probe, written, kept) in MEASURED {
         assert_eq!(linear_stores(written), *kept, "{probe}: {written:?}");
         assert_eq!(
             linear_stores(kept),
+            *kept,
+            "{probe}, stored again: {kept:?}"
+        );
+    }
+    for (probe, written, kept) in OBSERVED_LINKS {
+        assert_eq!(linear_stores_links(written), *kept, "{probe}: {written:?}");
+        assert_eq!(
+            linear_stores_links(kept),
             *kept,
             "{probe}, stored again: {kept:?}"
         );
@@ -2024,6 +2420,7 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
         "![a](https://uploads.linear.app/a) and (b)\n![b](https://uploads.linear.app/b)",
     ] {
         assert_eq!(linear_stores(kept), kept, "{kept:?}");
+        assert_eq!(linear_stores_links(kept), kept, "{kept:?}, links modelled");
     }
     // A read's content is the text above the slot less its separator, and a table's own line
     // break survives it.
