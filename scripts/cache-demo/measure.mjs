@@ -196,7 +196,12 @@ if (verb === "doubles") {
   const asked = ask(script, dir, `${inside}/target`);
   out("capture-rerun", "status", asked.status, "artifacts", asked.artifacts, "recompiled", asked.stale.length, asked.stale.join(" ").slice(0, 400));
   const disk = new Set(walk(dir).map((f) => f.path).filter((p) => /\/(deps|build)\//.test(p)).map((p) => unitKey(p)).filter(Boolean));
-  const unnamed = [...disk].filter((key) => !asked.keys.has(key));
+  // A crate named lib* has its .d as lib<x>-<hash> and its rlib as liblib<x>-<hash>, so the
+  // key above reads the same unit as <x>-<hash> and lib<x>-<hash>: one unit, two spellings.
+  const spelled = (key) => key.replace(/\/deps\/([^/]+)$/, "/deps/lib$1");
+  const unnamed = [...disk].filter((key) => !asked.keys.has(key) && !asked.keys.has(spelled(key)));
+  const spellings = [...disk].filter((key) => !asked.keys.has(key) && asked.keys.has(spelled(key)));
+  out("capture-spellings", spellings.length, spellings.join(" "));
   const fingerprints = existsSync(join(dir, "release/.fingerprint")) ? readdirSync(join(dir, "release/.fingerprint")).length : 0;
   out("capture-fingerprints", fingerprints);
   out("capture-units", "on-disk", disk.size, "named-by-its-build", asked.keys.size, "unnamed", unnamed.length, unnamed.slice(0, 20).join(" "));
