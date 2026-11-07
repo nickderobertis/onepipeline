@@ -1313,6 +1313,9 @@ fn a_settled_consumer_stands_whatever_its_upstream_does_and_an_unsettled_one_fol
         node("waiting-consumer", &["run:open-upstream#build"]),
         // A recorded gate is re-derived against the graph, so it has not settled.
         node("gated-consumer", &["run:gating-upstream#build"]),
+        // One edge, one consumer settled and one not: the edge is still waited on.
+        node("settled-beside", &["run:shared-upstream#build"]),
+        node("waiting-beside", &["run:shared-upstream#build"]),
     ];
     let mut run = Run::new("selected-edges", plan);
     let upstream = |name: &str| {
@@ -1355,6 +1358,15 @@ fn a_settled_consumer_stands_whatever_its_upstream_does_and_an_unsettled_one_fol
         ],
     );
     settled_with(&mut run, "gated-consumer", &[("status", json!("blocked"))]);
+    settled_with(
+        &mut run,
+        "settled-beside",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
 
     let current = RunView::open_current(&run.paths).expect("opens");
     assert!(
@@ -1369,6 +1381,13 @@ fn a_settled_consumer_stands_whatever_its_upstream_does_and_an_unsettled_one_fol
         .state
         .cross_dag
         .contains_key("run:open-upstream#build"));
+    assert!(
+        current
+            .state
+            .cross_dag
+            .contains_key("run:shared-upstream#build"),
+        "an edge one unsettled consumer names is read"
+    );
     assert!(
         current
             .state

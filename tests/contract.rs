@@ -9407,6 +9407,17 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&Projects, Grouping, &str) -> String = verbs::render_runs;
     let _: fn(&Path, Option<&str>) -> Result<Status> = verbs::status;
     let _: fn(&Status) -> String = verbs::render_status;
+    // The selective read the contract's first-screen paragraph names, at its signatures.
+    let _: fn(
+        &std::path::Path,
+        &onepipeline::journal::Selection<'_>,
+    ) -> onepipeline::journal::SelectedRecords = onepipeline::journal::read_selected;
+    let _: fn(&mut [onepipeline::event::Envelope]) = onepipeline::journal::merge_order;
+    let _: fn(
+        &onepipeline::views::RunPaths,
+        Vec<onepipeline::event::Envelope>,
+    ) -> onepipeline::Result<onepipeline::views::RunView> =
+        onepipeline::views::RunView::over_selected;
     let _: fn(&Path) -> Host = verbs::host;
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
