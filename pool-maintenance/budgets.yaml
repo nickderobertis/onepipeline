@@ -9,7 +9,7 @@ budgets:
       any backlog, one ordinary run's worth of superseded builds is removed while each unit's
       newest build stays. It protects how long a regular post-run pass holds a warm slot out of
       service, which a host running several dispatches waits on.
-    labels: [host]
+    labels: [host, not-measured-on-pr]
     measure: reported
     command: [just, pool-maintenance-budget]
     unit: seconds

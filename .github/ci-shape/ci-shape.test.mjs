@@ -223,6 +223,30 @@ describe("the `budgets` job", () => {
     assert.equal(declared["budget-files"].default, "**/budgets.yaml");
   });
 
+  it("reads what `test-linux` saved and leaves out what a pull request cannot measure", () => {
+    const given = steps(job).find((step) => uses(step).startsWith(`${REPORT_ACTION}@`)).with;
+    assert.equal(given["omit-labels"], "not-measured-on-pr");
+    assert.equal(given["saved-results-artifacts"], "budget-check-results-*");
+    const uploads = Object.entries(ci.jobs).flatMap(([id, definition]) =>
+      steps(definition)
+        .filter((step) => step.with?.name?.startsWith("budget-check-results-"))
+        .map((step) => ({ id, step })),
+    );
+    assert.deepEqual(
+      uploads.map(({ id }) => id),
+      ["test-linux"],
+    );
+    const [{ step }] = uploads;
+    assert.equal(step.if, "always()");
+    assert.match(uses(step), /^actions\/upload-artifact@/);
+    assert.deepEqual(step.with, {
+      name: "budget-check-results-test-linux",
+      path: "target/budget-results/",
+      "if-no-files-found": "warn",
+    });
+    assert.equal(ci.jobs["test-linux"].if, "github.event_name == 'pull_request'");
+  });
+
   it("is held by its own budget, read through the released reader's flags and metric", () => {
     const declared = parse(readFileSync(join(vendored, "action.yml"), "utf8")).inputs;
     const help = readFileSync(join(vendored, "telemetry-help.txt"), "utf8");
@@ -718,10 +742,10 @@ describe("the Actions cache keeps room for proven results", () => {
     });
   }
 
-  // The landing commit's files, by the digest its header and versions file both state.
+  // Each upstream copy, by the digest its header and versions file both state.
   const COPIES = {
     "scripts/actions-cache-prune.mjs": ["112878b64182200739b5e0c7e34decc3778f0316f0cb05f9bd40f66445d33031", 1],
-    "scripts/actions-budget-figures.sh": ["b77b3b6fdccba79eae1db6523122d22eec80ac0738d5b4df03321db600697d3d", 12],
+    "scripts/actions-budget-figures.sh": ["d530d435aead03a443b1ea528db96eef9b97cc343d7eb3fade0b09099bd112ef", 13],
     "scripts/nx-remote-cache.mjs": ["e35435fb6ffde524af3d4244dcd67c115fc9d3f350ab3d535124dbcc07518bd0", 8],
   };
   for (const [path, [digest, version]] of Object.entries(COPIES)) {

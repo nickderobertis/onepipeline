@@ -1,16 +1,24 @@
 # The budgets job measures itself: only that job and report-job:test hold this telemetry, which is
-# written after the main result upload. The limit is provisional until real runs have measured it.
+# written after the main result upload. The limit is an estimate until real runs have measured it.
+# Kept beside onepipeline-ci-check-time because this job's own turnaround is a separate unit: its interval holds no other job.
 schema_version: 1
 budgets:
   - id: onepipeline-budget-report-command-seconds
     description: >-
-      One budgets job with 100 catalog rows and one rolling file of up to 20 eligible base commits,
-      from its cold install through the checks, the history read, the comment and the main result
-      upload. Its own check and the saving of that verdict, and runner queueing, setup and teardown,
-      are outside the interval, which cannot include its own judgment. It protects the turnaround
-      of the check every pull request waits on. Provisional design requirement: the spike's prototype
-      took 38.55 s, including a 10.49 s install, with no typed scalar archive bytes and simulated
-      posting.
+      Budget report job time: seconds of one budgets job from its cold install through its checks,
+      the saved-results read, the history read and the main result upload; the breakdown in detail
+      gives install, check, archive and render seconds and the request counts. The interval ends
+      after the main upload and before the comment post: this job cannot include its own judgment,
+      the post that carries that judgment, or runner queue, setup and teardown in a figure it
+      reports about itself. The post took 1.14 to 1.86 s on the spike's runs and about 2.4 s before.
+      Workload: one budgets job per pull request push or base push, with 35 catalog rows and one
+      rolling file of up to 20 base commits, downloading one results artifact of about 50 KB; on a
+      base push it also reads the merged pull request's run. It protects the turnaround of the
+      check every pull request waits on. An estimate, not yet a measurement of this workload: real
+      jobs before this change took 8.99 s, from report-job.json of the plan's runs, without the
+      saved-results read and with the post inside the interval, and the spike measured the added
+      parts on onepipeline-ui at 0.47 to 1.02 s of download and 1.24 to 1.87 s of merged-run lookup,
+      over artifacts of 2,619 to 11,350 zipped bytes.
     labels: [ci-report]
     measure: reported
     command: [onebudgetspec-github-action, telemetry, --metric, report-command-seconds, --input, .telemetry/report-job.json]

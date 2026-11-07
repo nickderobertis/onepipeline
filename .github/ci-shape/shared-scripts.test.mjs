@@ -1,13 +1,14 @@
-// Upstream-owned copies: the cache reader, the figures and the cache prune at dero-skills
+// Upstream-owned copies: the cache reader and the cache prune at dero-skills
 // 270bea5d287f6fe6a844fd6b882922eacadf6ecf; version-free inputs at
-// 63e071b72420bd6737226a50cb8a7a7760cc73a4.
+// 63e071b72420bd6737226a50cb8a7a7760cc73a4; figures, version 13, at
+// afc6829981dc31ad4221fc7cf706916d078ada35.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const upstream = {
-  "scripts/actions-budget-figures.sh": "c6a80ccd9051b95c84421505f79dea7b0e8b1b02f1dffcc16a90827b7d400da4",
+  "scripts/actions-budget-figures.sh": "f4dbf47e81ce3baf9acf92d4e92f284614bf9c6a3774a76f18ed89893ce7d3b0",
   "scripts/actions-cache-prune.mjs": "4c7bfd986ddb7e59b395a00eb3bb74892b44b76234d0c2a61d63ddf7a49b37a7",
   "scripts/nx-remote-cache.mjs": "88c72d76565a53bb7c09702255d8fe2be72165d1abcbca48bc125984d140fcf7",
   "scripts/nx-version-free-inputs.mjs": "fdd4f59fc98a0073dbefdbaa0f08f4b58432bbf8e55d315865f951e0151b19b2",

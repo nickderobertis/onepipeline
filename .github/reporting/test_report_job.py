@@ -5,10 +5,12 @@ action.yml's own steps, the released driver and plugin archive, the published co
 `gh`, onevcs and `actions/upload-artifact` code. Only GitHub's API and artifact services, the release
 host and the package index are doubled, by the harness the action ships at that same tag. The
 checkout holds this repository's real budgets files and the commands they name, on a runner's PATH.
+`test-linux`'s upload step runs from `ci.yml` too, through the same real upload code, over results the
+pinned checker really saved.
 
-The workload recorded for `onepipeline-budget-report-command-seconds`: 100 catalog rows (the real
-catalog, filled with explicitly synthetic ones) and one rolling file of 20 commits, with 12 synthetic
-REST-reading commands and a retried rate limit. It asserts behaviour and never a cost: the figures
+The workload recorded for `onepipeline-budget-report-command-seconds`: the real catalog's 35 rows, one
+rolling file of 20 commits and one saved-results artifact of about 50 KB, with a retried rate limit; a
+base push also reads the merged pull request's run. It asserts behaviour and never a cost: the figures
 are written to `.telemetry/report-job.json` and printed.
 """
 import ast
@@ -52,12 +54,25 @@ CATALOG_FILES = tuple(sorted(name for name in tracked() if Path(name).name == 'b
 # two ignore files that keep a job's own outputs out of discovery.
 CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_FILES
                                    if not name.startswith('.github/') and '/' in name))
-CHECKOUT_FILES = ('justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
+CHECKOUT_FILES = ('Cargo.toml', 'justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
                   '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
-ROWS = 100
-COMMANDS_READING_REST = 12
+CATALOG_ROWS = 35
 COMMITS = 20
+OMIT_LABEL = 'not-measured-on-pr'
+OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipeline-cd-job-count',
+           'onepipeline-release-read-requests', 'onepipeline-pr-read-requests', 'onepipeline-nx-cache-use',
+           'onepipeline-gate-time', 'onepipeline-pool-maintenance-seconds', 'driver-event-journal-delay',
+           'driver-envelope-outcome-latency', 'driver-idle-cpu-share', 'driver-peak-rss',
+           'liveness-journal-bytes-per-member-hour', 'pool-maintenance-engine-seconds',
+           'run-ending-scratch-seconds', 'scratch-discard-seconds')
+OWN_RUN_FIGURES = {'onepipeline-ci-check-time': 6549.0, 'onepipeline-ci-job-count': 5.0}
+NO_SAVED_RESULT = 'no saved result was found on this run'
+RESULTS_ARTIFACT = 'budget-check-results-test-linux'
+# Hexadecimal digests zip to about half their size, so this many bytes of them make an artifact of
+# about the 50 KB the budget's workload states.
+RESULTS_ARTIFACT_BYTES = 100_000
+OWN_RUN_JOBS = ROOT / '.github/tests/fixtures/own-run/jobs.json'
 PUSH_EVENT = {'head_commit': {'message': 'feat: a change'}}
 PREDECESSORS = ('lint', 'test-linux', 'test-windows', 'test-macos')
 REQUESTS_METRIC = 'report-github-api-requests-per-run'
@@ -77,6 +92,13 @@ def workflow():
 
 def job_definition():
     return workflow()['jobs']['budgets']
+
+
+def upload_step():
+    """`test-linux`'s step that keeps what its `budgets` targets saved."""
+    steps = [step for step in workflow()['jobs']['test-linux']['steps'] if step.get('with', {}).get('name') == RESULTS_ARTIFACT]
+    assert len(steps) == 1, steps
+    return steps[0]
 
 
 def action_step():
@@ -125,6 +147,15 @@ def fetch(url):
 
 
 TAG, ACTION_TREE, harness = released_action()
+
+
+class Host(harness.Host):
+    """The action's GitHub double, answering one run's job listing with the recording of a real one."""
+
+    def read(self, handler, path):
+        if re.fullmatch(r'/repos/owner/repo/actions/runs/\d+/jobs', path.split('?')[0]):
+            return self.reply(handler, 200, OWN_RUN_JOBS.read_bytes())
+        return super().read(handler, path)
 
 
 def runner_path(directory):
@@ -179,20 +210,6 @@ MIXED_RUNNABLE = sorted(['synthetic-bundle-bytes', 'synthetic-coverage-percent',
                          'synthetic-release-figure', 'synthetic-walltime'])
 
 
-def fill_catalog(present):
-    """Synthetic rows up to the workload's 100, 12 of them reading REST as the design allows."""
-    entries = []
-    for index in range(COMMANDS_READING_REST):
-        # One reads through curl: the job cannot see it, and the boundary still counts it.
-        read = (f'curl -fsS -H "Authorization: Bearer $GH_TOKEN" http://api.github.localhost/repos/owner/repo/commits/{index}'
-                if index == 0 else f'gh api repos/owner/repo/commits/{index}')
-        entries.append((f'synthetic-reads-rest-{index}', ['bash', '-c', f'{read} > /dev/null || exit 1; {WRITE % 1}'],
-                        {'unit': 'requests'}))
-    while len(entries) + present < ROWS:
-        entries.append((f'synthetic-local-{len(entries)}', ['bash', '-c', WRITE % 1], {'unit': 'bytes'}))
-    return harness.budgets_yaml(entries)
-
-
 def schedule(workflow_file, event_name, results):
     """Whether the workflow file starts `budgets` for this event and these predecessor outcomes."""
     if event_name == 'pull_request':
@@ -225,7 +242,7 @@ def zip_of(name, content):
 
 class Journey(unittest.TestCase):
     def setUp(self):
-        self.host = harness.Host()
+        self.host = Host()
         self.addCleanup(self.host.close)
         self.repository = harness.Repository()
         self.addCleanup(self.repository.close)
@@ -258,10 +275,10 @@ class Journey(unittest.TestCase):
         self.assertEqual(given.pop('token'), '${{ github.token }}')
         return {'token': 'job-token', **given}
 
-    def job(self, event_name, sha, **options):
-        self.next_run += 1
+    def job(self, event_name, sha, same_run=False, **options):
+        self.next_run += 0 if same_run else 1
         self.counts.unlink(missing_ok=True)
-        environment = {'JOURNEY_COUNTS': str(self.counts), 'PATH': self.runner,
+        environment = {'JOURNEY_COUNTS': str(self.counts), 'PATH': self.runner, 'GITHUB_EVENT_NAME': event_name,
                        'GITHUB_REPOSITORY': harness.REPOSITORY, 'GITHUB_RUN_ID': str(self.next_run),
                        'RUNNER_NAME': 'hosted-runner', **NO_SESSION_BUS}
         job = harness.Job(self.host, self.repository, event_name, sha, inputs=self.inputs(), run_id=self.next_run,
@@ -292,6 +309,27 @@ class Journey(unittest.TestCase):
         return self.run_job('pull_request', head, event=harness.event_pull_request(1, head, self.base_sha, **event),
                             base_ref='main', register=False)
 
+    def upload_saved_results(self):
+        """`test-linux`'s upload step from `ci.yml`, run as the runner takes it, through the real upload code."""
+        step = upload_step()
+        self.assertEqual(step['if'], 'always()', 'a failed job would lose what it saved')
+        self.assertEqual(step['with']['path'], 'target/budget-results/')
+        job = self.job('pull_request', '0' * 40)
+        context = {'inputs': {}, 'github': job.github, 'steps': {}, 'runner': {'temp': str(job.temp)}}
+        outcome, _ = job._artifact_action(step, harness.Expression(context), job.temp / 'upload-output')
+        self.assertEqual(outcome, 'success', job.stdout)
+
+    def pull_request_with_saved_results(self, **event):
+        """A pull request's whole run: `test-linux` uploads, then `budgets` runs in the same run, in a fresh checkout."""
+        self.repository.git('checkout', '--quiet', '-B', 'change', self.base_sha)
+        head = self.repository.commit('change')
+        self.host.head = head
+        self.upload_saved_results()
+        shutil.rmtree(self.repository.path / 'target', ignore_errors=True)
+        (self.repository.path / 'node_modules').unlink(missing_ok=True)
+        return self.run_job('pull_request', head, event=harness.event_pull_request(1, head, self.base_sha, **event),
+                            base_ref='main', register=False, same_run=True)
+
     def executed(self):
         return sorted(self.counts.read_text().split()) if self.counts.exists() else []
 
@@ -311,42 +349,38 @@ class RealCatalog(Journey):
         self.write_real_catalog()
         self.base_sha = self.repository.commit('the real catalog')
 
-    def assert_every_row_stated(self, job):
-        budgets = catalog()
+    def shown(self):
+        return sorted(set(catalog()) - set(OMITTED))
+
+    def assert_no_row_left_out_of_the_report(self, job):
         self.assertEqual(job.exit_code, 0, job.stdout)
-        self.assertEqual(sorted(job.rows()), sorted(budgets))
-        results = self.verdicts(job)
-        self.assertEqual([id for id, result in results.items() if result['verdict'] == 'error'], [],
+        self.assertEqual(sorted(job.rows()), self.shown())
+        self.assertEqual([id for id, result in self.verdicts(job).items() if result['verdict'] == 'error'], [],
                          'a budget reads as an error because its input is absent')
+
+    def test_the_label_covers_exactly_the_budgets_a_pull_request_cannot_measure(self):
+        budgets = catalog()
+        self.assertEqual(len(budgets), CATALOG_ROWS)
+        self.assertEqual(sorted(id for id, budget in budgets.items() if OMIT_LABEL in budget.get('labels', [])), sorted(OMITTED))
+
+    def test_a_pull_request_shows_its_own_run_and_says_why_every_other_row_has_no_figure(self):
+        job = self.pull_request()
+        self.assert_no_row_left_out_of_the_report(job)
+        results = self.verdicts(job)
         own = results.pop(OWN_BUDGET)
         self.assertIn(own['verdict'], ('within', 'over'))
-        self.assertEqual(results, {}, 'nothing else can measure in a checkout-only job')
+        self.assertEqual({id: result['actual'] for id, result in results.items()}, OWN_RUN_FIGURES)
         reasons = self.unavailable(job)
-        self.assertEqual(sorted(reasons), sorted(set(budgets) - {OWN_BUDGET}))
-        return budgets, reasons
-
-    def test_a_pull_request_states_every_production_budget_and_why_it_cannot_run_here(self):
-        job = self.pull_request()
-        budgets, reasons = self.assert_every_row_stated(job)
-        for budget, reason in reasons.items():
-            command = budgets[budget]['command']
-            if command[0] == 'just':
-                self.assertIn('needs just', reason, budget)
-            elif 'release-tail' in budgets[budget].get('labels', []):
-                # cache-use and cache-headroom read GitHub itself rather than through onevcs: one refuses
-                # with no release to read, the other with no storage limit from this host double.
-                expected = 'no release' if 'cache-use' in command else 'storage-limit' if 'cache-headroom' in command else 'onevcs'
-                self.assertIn(expected, reason, budget)
-            elif 'host-variable' in budgets[budget].get('labels', []):
-                self.assertIn('report-only', reason, budget)
-            else:
-                named = [argument for argument in command[1:] if '/' in argument and ' ' not in argument][-1]
-                self.assertIn(f'reads {named}, which is not available', reason, budget)
-        # Nothing was built, run or recorded to fill a row, and no budget command spent a read.
+        self.assertEqual(sorted(reasons), sorted(set(self.shown()) - {OWN_BUDGET, *OWN_RUN_FIGURES}))
+        self.assertEqual(set(reasons.values()), {NO_SAVED_RESULT})
+        for id, reason in reasons.items():
+            self.assertIsNone(job.rows()[id].get('current'), id)
+        # Nothing was built, run or recorded to fill a row, and each of the pair read its one listing.
         self.assertFalse((self.repository.path / 'target').exists())
-        self.assertEqual(self.host.count('/releases|/runs/\\d+/jobs|/compare'), 0)
+        self.assertEqual(self.host.count('/releases|/compare'), 0)
+        self.assertEqual(self.host.count(r'/runs/\d+/jobs'), len(OWN_RUN_FIGURES))
         self.assertEqual(len(self.host.comments), 1)
-        for budget in budgets:
+        for budget in self.shown():
             self.assertIn(budget, self.host.comments[0]['body'])
         self.assertEqual(self.budget_run(job)['enforcement_exclude_labels'], ['release-tail', 'host-variable'])
         # The job's own budget ran after the main upload, and its completed verdict was saved.
@@ -357,21 +391,55 @@ class RealCatalog(Journey):
         self.assertEqual(own['unit'], 'seconds')
         self.assertIsNotNone(self.host.artifact_files(job.run_id, 'budget-results-main'))
 
-    def test_a_base_push_saves_the_same_results_and_posts_nothing(self):
+    def test_the_labelled_budgets_have_no_row_run_no_command_and_one_line_counts_them(self):
+        document = yaml.safe_load((self.repository.path / 'budgets.yaml').read_text())
+        for budget in document['budgets']:
+            budget['command'] = counting(WRITE % 1)
+        self.repository.write('budgets.yaml', yaml.safe_dump(document))
+        for name in ('pool-maintenance', 'tests/journal_workload', 'tests/pool_workload', 'tests/scratch_workload'):
+            document = yaml.safe_load((self.repository.path / name / 'budgets.yaml').read_text())
+            for budget in document['budgets']:
+                budget['command'] = counting(WRITE % 1)
+            self.repository.write(f'{name}/budgets.yaml', yaml.safe_dump(document))
+        self.base_sha = self.repository.commit('every command counts itself')
+        job = self.pull_request()
+        ran = set(self.executed())
+        self.assertEqual(ran & set(OMITTED), set(), 'a labelled budget ran its command')
+        self.assertTrue(ran, 'the counting commands of the budgets it shows never ran')
+        self.assertEqual(set(job.rows()) & set(OMITTED), set())
+        body = self.host.comments[0]['body']
+        line = f'{len(OMITTED)} budgets are left out because a pull request cannot measure them (label {OMIT_LABEL}).'
+        self.assertEqual(body.count(line), 1, body)
+        for budget in OMITTED:
+            self.assertNotIn(budget, body)
+        self.assertEqual(sorted(entry['id'] for entry in self.budget_run(job)['catalog'] if OMIT_LABEL in entry.get('labels', [])),
+                         sorted(OMITTED), "the catalog keeps them")
+
+    def test_a_saved_result_for_a_labelled_budget_is_ignored(self):
+        results = self.repository.path / 'target/budget-results'
+        results.mkdir(parents=True)
+        (results / 'stray.json').write_text(harness.check_report(
+            harness.check_result(OMITTED[0], 5, labels=['release-tail', OMIT_LABEL], unit='seconds')))
+        job = self.pull_request_with_saved_results()
+        self.assertNotIn(OMITTED[0], job.rows())
+
+    def test_a_base_push_with_no_pull_request_saves_the_same_results_and_posts_nothing(self):
         pull = self.pull_request()
         posted = len(self.host.comments)
         base = self.base_push()
-        self.assert_every_row_stated(base)
+        self.assertEqual(base.exit_code, 0, base.stdout)
+        self.assertEqual(sorted(base.rows()), self.shown())
         self.assertEqual(len(self.host.comments), posted)
         base_files = self.host.artifact_files(base.run_id)
         pull_files = self.host.artifact_files(pull.run_id)
         self.assertEqual(set(base_files), {*pull_files, 'rolling-history.json'}, 'only history is added')
         saved = json.loads(base_files['budget-run.json'].decode())
         self.assertEqual([result['id'] for result in saved['results']['results']], [OWN_BUDGET])
+        self.assertEqual(self.host.count(r'/runs/\d+/jobs'), len(OWN_RUN_FIGURES), "only the pull request's run was read")
 
     def test_a_base_push_saves_the_own_budget_as_history_a_later_pull_request_reads_as_a_baseline(self):
         base = self.base_push()
-        self.assert_every_row_stated(base)
+        self.assertEqual(base.exit_code, 0, base.stdout)
         files = self.host.artifact_files(base.run_id)
         history = json.loads(files['rolling-history.json'].decode())
         self.assertEqual([run['head_sha'] for run in history['runs']], [self.base_sha])
@@ -411,6 +479,117 @@ class RealCatalog(Journey):
         self.assertEqual(self.verdicts(job)['stacked-spikes-stage-time']['verdict'], 'error')
 
 
+class SavedResults(Journey):
+    """`test-linux` saves through the pinned checker, its upload step ships that, and `budgets` shows it."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_real_catalog()
+        self.base_sha = self.repository.commit('the real catalog')
+        (self.repository.path / 'node_modules').symlink_to(ROOT / 'node_modules')
+        tools = self.repository.path / 'target'
+        tools.mkdir(exist_ok=True)
+        (tools / 'tools').symlink_to(ROOT / 'target/tools')
+        records = tools / 'budget-records'
+        records.mkdir()
+        (records / 'stacked-spikes-stage.json').write_text('{"wall_ms": 1234, "run_id": "run"}')
+        (records / 'human-items.json').write_text(json.dumps({
+            'host': 'runner', 'warm_max_elapsed_s': 0.25, 'warm': [{'elapsed_s': 0.25, 'phase': 'warm', **dict.fromkeys(
+                ('index_io_ms', 'discovery_ms', 'replay_ms', 'blocker_ms', 'render_ms', 'capture_ms'), 1)}],
+            'cold': [], 'tail': [], 'workload': dict.fromkeys(('runs', 'events_per_run', 'open_items', 'plans', 'steps'), 1)}))
+
+    def checker(self, *arguments, cwd=None):
+        """The pinned checker with the flag a saving target passes, leaving exactly what that target leaves."""
+        root = subprocess.run(['just', '--evaluate', 'onebudgetspec-root'], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        return subprocess.run([f'{root}/bin/onebudgetspec', 'check', *arguments], cwd=cwd or self.repository.path, capture_output=True,
+                              text=True, check=False)
+
+    def save(self, *arguments, name='onepipeline.json', cwd=None, status=0):
+        ran = self.checker(*arguments, '--save-results', str(self.repository.path / 'target/budget-results' / name), cwd=cwd)
+        self.assertEqual(ran.returncode, status, ran.stdout + ran.stderr)
+        return json.loads((self.repository.path / 'target/budget-results' / name).read_text())
+
+    def saved_figures(self):
+        stacked = self.save('budgets.yaml', '--id', 'stacked-spikes-stage-time')
+        human = self.save('budgets.yaml', name='human-items.json', cwd=self.repository.path / 'tests/human_items')
+        return {result['id']: result for result in [*stacked['results'], *human['results']]}
+
+    def test_a_saved_figure_shows_exactly_and_a_budget_with_none_says_so(self):
+        saved = self.saved_figures()
+        self.assertEqual(sorted(saved), ['human-items-read-seconds', 'stacked-spikes-stage-time'])
+        job = self.pull_request_with_saved_results()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertEqual(job.outcomes['saved-results'], 'success', job.stdout)
+        rows = job.rows()
+        for id, result in saved.items():
+            self.assertEqual(rows[id]['current'], result['actual'], id)
+            self.assertEqual(rows[id]['verdict'], result['verdict'], id)
+        self.assertEqual(rows['stacked-spikes-stage-time']['current'], 1.234)
+        self.assertEqual(rows['human-items-read-seconds']['current'], 0.25)
+        for id, figure in OWN_RUN_FIGURES.items():
+            self.assertEqual(rows[id]['current'], figure, 'the CI-time pair comes from the job')
+        body = self.host.comments[0]['body']
+        for absent in ('host-view-time', 'onepipeline-macos-jobs-per-run', 'review-round-github-quota'):
+            self.assertIsNone(rows[absent].get('current'), absent)
+            self.assertEqual(self.unavailable(job)[absent], NO_SAVED_RESULT, absent)
+            line = next(line for line in body.splitlines() if absent in line)
+            self.assertIn(NO_SAVED_RESULT, line)
+
+    def test_a_saved_over_budget_keeps_its_verdict_and_fails_the_job(self):
+        (self.repository.path / 'target/budget-records/stacked-spikes-stage.json').write_text('{"wall_ms": 600000, "run_id": "run"}')
+        self.save('budgets.yaml', '--id', 'stacked-spikes-stage-time', status=1)
+        job = self.pull_request_with_saved_results()
+        self.assertEqual(job.exit_code, 1, 'an enforced budget saved over its line still fails this job')
+        self.assertEqual(job.rows()['stacked-spikes-stage-time']['verdict'], 'over')
+        self.assertEqual(job.rows()['stacked-spikes-stage-time']['current'], 600.0)
+
+    def test_a_failed_test_job_that_saved_nothing_reads_as_no_saved_result(self):
+        # `if-no-files-found: warn`: the step passes with nothing to ship, and no artifact arrives.
+        shutil.rmtree(self.repository.path / 'target/budget-results', ignore_errors=True)
+        job = self.pull_request_with_saved_results()
+        self.assertEqual(job.exit_code, 0, job.stdout)
+        self.assertNotIn(RESULTS_ARTIFACT, [item['name'] for item in self.host.artifacts[str(job.run_id)]])
+        self.assertEqual(self.unavailable(job)['stacked-spikes-stage-time'], NO_SAVED_RESULT)
+
+    def test_a_base_push_records_the_merged_pull_requests_figures_with_no_test_job_and_no_command(self):
+        answer = schedule(ROOT / '.github/workflows/ci.yml', 'push', {})
+        self.assertEqual(answer['jobs'], {**dict.fromkeys(PREDECESSORS, False), 'budgets': True})
+        saved = self.saved_figures()
+        pull = self.pull_request_with_saved_results()
+        head = pull.sha
+        self.assertEqual(pull.exit_code, 0, pull.stdout)
+        self.host.add_run(pull.run_id, head, event='pull_request', minute=1)
+        merged = {result['id']: result for result in pull.saved('budget-run.json')['results']['results']}
+
+        self.repository.git('checkout', '--quiet', 'main')
+        # Every command of the merged run's budgets now reports what would give it away if it ran.
+        for name, entries in {'budgets.yaml': ['stacked-spikes-stage-time', 'onepipeline-ci-check-time', 'onepipeline-ci-job-count'],
+                              'tests/human_items/budgets.yaml': ['human-items-read-seconds']}.items():
+            document = yaml.safe_load((self.repository.path / name).read_text())
+            for budget in document['budgets']:
+                if budget['id'] in entries:
+                    budget['command'] = counting(WRITE % 999)
+            self.repository.write(name, yaml.safe_dump(document))
+        merge = self.repository.commit('squash')
+        self.host.merge_pull_request(merge, head)
+        self.host.clear_requests()
+        base = self.run_job('push', merge)
+        self.assertEqual(base.exit_code, 0, base.stdout)
+        self.assertEqual(self.executed(), [], "a budget's command ran on the base push")
+        self.assertEqual(self.host.count(f'/commits/{merge}/pulls$'), 1)
+        history = json.loads(self.host.artifact_files(base.run_id)['rolling-history.json'].decode())
+        entry = next(run for run in history['runs'] if run['head_sha'] == merge)
+        kept = {result['id']: result for result in entry['results']['results']}
+        for id, result in saved.items():
+            self.assertEqual(kept[id]['actual'], result['actual'], id)
+            self.assertEqual(kept[id]['verdict'], result['verdict'], id)
+        for id, figure in OWN_RUN_FIGURES.items():
+            self.assertEqual(kept[id]['actual'], figure, id)
+            self.assertEqual(kept[id]['actual'], merged[id]['actual'], id)
+        self.assertFalse(set(kept) & set(OMITTED))
+        self.assertNotEqual(kept[OWN_BUDGET]['actual'], merged[OWN_BUDGET]['actual'], 'the own budget stays this job')
+
+
 class MixedCatalog(Journey):
     def setUp(self):
         super().setUp()
@@ -429,8 +608,7 @@ class MixedCatalog(Journey):
         self.assertEqual(verdicts['synthetic-release-figure']['verdict'], 'over', 'report-only keeps its verdict')
         reasons = self.unavailable(job)
         self.assertEqual(sorted(reasons), ['synthetic-needs-a-tool', 'synthetic-needs-telemetry'])
-        self.assertIn('needs tool-this-runner-lacks', reasons['synthetic-needs-a-tool'])
-        self.assertIn('dist/telemetry/journey.json', reasons['synthetic-needs-telemetry'])
+        self.assertEqual(set(reasons.values()), {NO_SAVED_RESULT})
         self.assertNotIn('ci-report', ' '.join(reasons.values()), 'a label is never the reason')
 
     def test_an_enforced_budget_over_its_line_fails_and_a_second_head_updates_one_comment(self):
@@ -542,8 +720,10 @@ class PredecessorOutcomes(Journey):
         self.assertEqual(sorted(json.loads(self.host.artifact_files(job.run_id, 'budget-results-main')['budget-run.json'].decode())
                                 ['results']['results'][0]), sorted(saved['results']['results'][0]))
         self.assertIn(OWN_BUDGET, {result['id'] for result in saved['results']['results']}, 'the completed verdict is saved')
-        self.assertEqual(sorted(MIXED_RUNNABLE + [OWN_BUDGET]), sorted(result['id'] for result in saved['results']['results']))
+        figures = {*OWN_RUN_FIGURES} if job.event_name == 'pull_request' else set()
+        self.assertEqual(sorted({*MIXED_RUNNABLE, OWN_BUDGET, *figures}), sorted(result['id'] for result in saved['results']['results']))
         self.assertIn('stacked-spikes-stage-time', {entry['id'] for entry in saved['unavailable']})
+        self.assertFalse(set(OMITTED) & {entry['id'] for entry in saved['unavailable']})
         return {result['id']: result['verdict'] for result in saved['results']['results']}
 
     def test_the_action_runs_saves_its_results_and_keeps_enforcement_however_predecessors_end(self):
@@ -696,7 +876,6 @@ class SessionBus(Journey):
 class Workload(Journey):
     def test_record_a_complete_job(self):
         self.write_real_catalog()
-        self.repository.write('synthetic-workload/budgets.yaml', fill_catalog(len(catalog())))
         heads = [self.repository.commit(f'base {index}') for index in range(COMMITS)]
         self.base_sha = heads[-1]
         first = self.run_job('push', heads[-1])
@@ -711,21 +890,46 @@ class Workload(Journey):
         self.host.add_run(519, heads[-1], minute=519)
         self.host.attach(519, 'budget-results', zip_of('rolling-history.json', json.dumps(history)))
 
+        saved = sorted(set(catalog()) - set(OMITTED) - {OWN_BUDGET, *OWN_RUN_FIGURES})
+        details = [hashlib.sha256(str(index).encode()).hexdigest() for index in range(RESULTS_ARTIFACT_BYTES // 64)]
+        each = len(details) // len(saved)
+        results = self.repository.path / 'target/budget-results'
+        results.mkdir(parents=True)
+        (results / 'test-linux.json').write_text(harness.check_report(*[
+            harness.check_result(budget, catalog()[budget]['threshold'], file=catalog()[budget]['file'], labels=catalog()[budget].get('labels', ()),
+                                 unit=catalog()[budget]['unit'], threshold=catalog()[budget]['threshold'],
+                                 detail=''.join(details[index * each:(index + 1) * each]))
+            for index, budget in enumerate(saved)]))
+
         self.repository.git('checkout', '--quiet', '-b', 'feature')
         head = self.repository.commit('change')
         self.host.head = head
         figures = []
         for event_name, sha, options in (
             ('pull_request', head, {'base_ref': 'main', 'register': False, 'event': harness.event_pull_request(1, head, heads[-1])}),
-            ('push', heads[-1], {'attempt': 2, 'register': False}),
+            ('push', None, {'attempt': 2, 'register': False}),
         ):
             self.host.clear_requests()
             self.host.refuse.append({'path': r'artifacts\?', 'status': 429, 'times': 1, 'retry_after': 1})
+            if event_name == 'pull_request':
+                self.upload_saved_results()
+                size = next(item['size_in_bytes'] for item in self.host.artifacts[str(self.next_run)]
+                            if item['name'] == RESULTS_ARTIFACT)
+                print(f'{RESULTS_ARTIFACT}: {size} zipped bytes', file=sys.stderr)
+                options['same_run'] = True
+                shutil.rmtree(results)
+            else:
+                self.host.add_run(self.next_run, head, event='pull_request', minute=600)
+                self.repository.git('checkout', '--quiet', 'main')
+                sha = self.repository.commit('squash')
+                self.host.merge_pull_request(sha, head)
             job = self.run_job(event_name, sha, **options)
             self.assertEqual(job.exit_code, 0, job.stdout)
-            self.assertEqual(len(job.rows()), ROWS)
+            self.assertEqual(len(self.budget_run(job)['catalog']), CATALOG_ROWS)
+            self.assertEqual(len(job.rows()), CATALOG_ROWS - len(OMITTED))
             self.assertEqual(job.outcomes['final-upload'], 'success', job.stdout)
-            self.assertEqual(self.host.count('commits/'), COMMANDS_READING_REST, 'each runnable read once')
+            for budget in saved:
+                self.assertEqual(job.rows()[budget]['current'], catalog()[budget]['threshold'], budget)
             telemetry = job.saved('report-job.json')
             requests = telemetry['metrics'][REQUESTS_METRIC]['value']
             self.assertIsNotNone(requests, telemetry)

@@ -1,0 +1,75 @@
+{
+  "total_count": 5,
+  "jobs": [
+    {
+      "id": 128023753786,
+      "run_id": 42237631071,
+      "workflow_name": "CI",
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-06T16:50:53Z",
+      "completed_at": "2026-11-06T17:01:00Z",
+      "runner_name": "GitHub Actions 1000301804",
+      "labels": [
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "id": 128023755630,
+      "run_id": 42237631071,
+      "workflow_name": "CI",
+      "name": "test-linux",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-06T14:51:18Z",
+      "completed_at": "2026-11-06T16:40:27Z",
+      "runner_name": "GitHub Actions 1000301701",
+      "labels": [
+        "ubuntu-latest"
+      ]
+    },
+    {
+      "id": 128023756581,
+      "run_id": 42237631071,
+      "workflow_name": "CI",
+      "name": "test-macos",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-06T14:51:18Z",
+      "completed_at": "2026-11-06T15:19:43Z",
+      "runner_name": "GitHub Actions 1000301702",
+      "labels": [
+        "macos-latest"
+      ]
+    },
+    {
+      "id": 128023757734,
+      "run_id": 42237631071,
+      "workflow_name": "CI",
+      "name": "test-windows",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-06T14:51:18Z",
+      "completed_at": "2026-11-06T15:11:57Z",
+      "runner_name": "GitHub Actions 1000301704",
+      "labels": [
+        "windows-latest"
+      ]
+    },
+    {
+      "id": 128029173514,
+      "run_id": 42237631071,
+      "workflow_name": "CI",
+      "name": "budgets",
+      "status": "in_progress",
+      "conclusion": null,
+      "started_at": "2026-11-06T17:01:03Z",
+      "completed_at": null,
+      "runner_name": "GitHub Actions 1000301812",
+      "labels": [
+        "ubuntu-latest"
+      ]
+    }
+  ]
+}

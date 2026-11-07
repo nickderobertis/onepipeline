@@ -5,6 +5,7 @@
 schema_version: 1
 budgets:
   - id: driver-event-journal-delay
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, journal-budget.mjs, event-delay, ../../target/budget-records/journal-workload.json]
     unit: milliseconds
@@ -15,6 +16,7 @@ budgets:
       its line being in events.jsonl. It holds the driver journalling a run's activity
       as it happens however long the run's journal has grown.
   - id: driver-envelope-outcome-latency
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, journal-budget.mjs, envelope-latency, ../../target/budget-records/journal-workload.json]
     unit: milliseconds
@@ -25,6 +27,7 @@ budgets:
       submitted through its own `onepipeline reply` to that reply's answer. It holds a
       manager's reply answered promptly whatever the size of the run it is sent to.
   - id: driver-idle-cpu-share
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, journal-budget.mjs, idle-cpu, ../../target/budget-records/journal-workload.json]
     unit: cores
@@ -35,6 +38,7 @@ budgets:
       running. It holds a waiting driver cheap on its host however much history its run
       carries.
   - id: driver-peak-rss
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, journal-budget.mjs, peak-rss, ../../target/budget-records/journal-workload.json]
     unit: megabytes
@@ -45,6 +49,7 @@ budgets:
       kernel's high-water mark. It holds the driver's memory to its live state rather
       than to the run's history.
   - id: liveness-journal-bytes-per-member-hour
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, journal-budget.mjs, liveness-bytes, ../../target/budget-records/journal-workload.json]
     unit: bytes

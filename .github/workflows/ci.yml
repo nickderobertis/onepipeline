@@ -413,6 +413,15 @@ jobs:
           path: target/test-profile/
           if-no-files-found: warn
           retention-days: 30
+      # What each `budgets` check this run selected saved, for the `budgets` job's report. A failed
+      # job's results still arrive, and a target this run did not select saved nothing.
+      - name: Keep the saved budget results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: budget-check-results-test-linux
+          path: target/budget-results/
+          if-no-files-found: warn
       - name: Does each failed test fail again on this build
         if: failure() && steps.gate.outcome == 'failure'
         continue-on-error: true
@@ -722,7 +731,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: nickderobertis/onebudgetspec-github-action@v0.1.2
+      - uses: nickderobertis/onebudgetspec-github-action@v0.2.0
         with:
           token: ${{ github.token }}
           enforcement-exclude-labels: release-tail,host-variable
+          omit-labels: not-measured-on-pr
+          saved-results-artifacts: budget-check-results-*

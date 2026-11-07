@@ -1,6 +1,7 @@
 schema_version: 1
 budgets:
   - id: run-ending-scratch-seconds
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scratch-budget.mjs, ending, ../../target/budget-records/scratch-workload.json]
     unit: seconds
@@ -10,6 +11,7 @@ budgets:
       The slower scratch handling of a failed ending that keeps 840000 entries
       and its retry's successful ending removing that same generated tree.
   - id: scratch-discard-seconds
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, scratch-budget.mjs, discard, ../../target/budget-records/scratch-workload.json]
     unit: seconds
