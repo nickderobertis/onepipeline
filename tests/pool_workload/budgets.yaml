@@ -10,6 +10,7 @@ budgets:
   # inside `onevcs::pool_maintain` (resolving the declaration, claiming, measuring,
   # running, stamping), which stretches with host load.
   - id: pool-maintenance-engine-seconds
+    labels: [not-measured-on-pr]
     measure: reported
     command: [node, pool-maintenance-budget.mjs, ../../target/budget-records/pool-maintenance.json]
     unit: seconds

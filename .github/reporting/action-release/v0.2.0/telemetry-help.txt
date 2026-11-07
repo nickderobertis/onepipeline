@@ -1,0 +1,20 @@
+Report one saved telemetry metric as a budget's measurement.
+
+`report-command-seconds` runs from cold install to the end of the main result upload, so it ends before the comment post. `report-github-api-requests-per-run` counts every request made through gh, retries and pages included: budget commands such as CI-time reads, the workflow lookup, the history and merged-run reads and the delivery. A budget reading it during the job sees the count before the post, whose requests the saved file then adds.
+
+Usage: onebudgetspec-github-action telemetry [OPTIONS] --metric <METRIC> --input <INPUT>
+
+Options:
+      --metric <METRIC>
+          The metric to report, a key of the file's `metrics`
+
+      --input <INPUT>
+          The saved telemetry file, relative to the budgets file's directory under a check
+
+      --label <LABEL>
+          The label the file must carry, proving it is this job's own telemetry
+          
+          [default: ci-report]
+
+  -h, --help
+          Print help (see a summary with '-h')

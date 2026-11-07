@@ -756,7 +756,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     lines[2],
     "# source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/budgets/actions-budget-figures.sh",
   );
-  assert.equal(lines[3], "# version: 11");
+  assert.equal(lines[3], "# version: 13");
   const digest = lines[4].match(/^# sha256: ([0-9a-f]{64})$/)?.[1];
   const rest = lines.slice(5).join("\n");
   assert.equal(
@@ -764,7 +764,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     digest,
     "the copy was edited in place",
   );
-  assert.equal(digest, "4e712406a1b09dac07d496be28d6a71141958de3259efb5c85f1dc23744fa5a4");
+  assert.equal(digest, "d530d435aead03a443b1ea528db96eef9b97cc343d7eb3fade0b09099bd112ef");
 });
 
 // The reconciliation script, against a stand-in for gh that answers each path with its

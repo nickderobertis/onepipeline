@@ -8,4 +8,4 @@ if [ ! -x "$checker" ]; then
   echo 'The repository-pinned onebudgetspec is missing; run just bootstrap.' >&2
   exit 1
 fi
-exec "$checker" check .github/budgets.yaml
+exec "$checker" check .github/budgets.yaml --save-results target/budget-results/github-workflows.json
