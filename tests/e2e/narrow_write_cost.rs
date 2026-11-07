@@ -69,7 +69,6 @@ enum Write {
     MetadataSet,
 }
 
-/// The `onevcs` policy command `arguments` names, as the configuration spells a command.
 fn policy_command(arguments: &[&str]) -> Value {
     let onevcs = crate::harness::onevcs_binary()
         .to_string_lossy()
@@ -277,7 +276,6 @@ fn a_term_already_stored_stays_and_only_the_opt_in_reads_for_it() {
     assert!(!issue.to_string().contains(TERM), "{issue:#}");
 }
 
-/// Whether a logged request is a GraphQL mutation rather than a read.
 fn is_mutation(request: &Value) -> bool {
     request["query"]
         .as_str()
