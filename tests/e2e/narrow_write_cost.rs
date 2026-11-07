@@ -13,13 +13,15 @@
 //! write-back's own settlement through the compiled binary. None of them opts into
 //! `with_sanitize_stored_on_write`: a term already stored on an item is left for
 //! `sources sanitize`, by the user's ruling that screening adds no GitHub request to a small board
-//! edit. Opting in fails these journeys, on the read of the item and its comments it adds.
+//! edit. Opting in fails these journeys, on the read of the item and its comments it adds, and
+//! [`a_term_already_stored_stays_and_only_the_opt_in_reads_for_it`] shows that read being seen.
 
 // llmlint: ignore-file[e2e_not_mocked] GitHub is the loopback beside this file — real HTTP on a
 // real socket, reached by the real `github-projects` plugin the engine links — because an offline
 // check may not reach the hosted API. `harness.rs` carries the same suppression and the full
 // rationale.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use onetaskgraph_core::boundary::CommandWritePolicy;
@@ -43,6 +45,8 @@ const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
 /// The item every write here is made to, as the source names it.
 const ITEM: &str = "board:note";
 const NOTE: &str = "myapp.note";
+/// What an item holds before a write, when no term is stored on it.
+const PLAIN: &str = "Nothing private here.";
 
 /// What the store is told about its boundary.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +57,9 @@ enum Policy {
     Sanitizes,
     /// A policy handed to the store by its linking caller, with no opt-in to the read-first guard.
     Linked,
+    /// The same policy opted into that guard, which the engine never does: what the journeys'
+    /// comparison is there to catch.
+    OptedIn,
 }
 
 /// One narrow write of each kind the engine makes.
@@ -72,9 +79,16 @@ fn policy_command(arguments: &[&str]) -> Value {
     Value::Array(command)
 }
 
-/// Make `write` carrying `word` under `policy`, on a board and a host of its own: every request
-/// the write sent, in a stable order, and the issue it wrote to as the board then holds it.
-fn written(name: &str, policy: Policy, write: Write, word: &str) -> (Vec<Value>, Value) {
+/// Make `write` carrying `word` under `policy`, to an item already holding `stored`, on a board
+/// and a host of its own: every request the write sent, in a stable order, and the issue it wrote
+/// to as the board then holds it.
+fn written(
+    name: &str,
+    policy: Policy,
+    write: Write,
+    word: &str,
+    stored: &str,
+) -> (Vec<Value>, Value) {
     let (world, private, _public) = mixed_world(name);
     declare_replacement(&world, &private);
     let github = GitHub::serve(
@@ -84,7 +98,7 @@ fn written(name: &str, policy: Policy, write: Write, word: &str) -> (Vec<Value>,
             "repositories": {"owner/service": "private", PUBLIC: "public"},
             "boards": {BOARD.to_string(): {"public": true}},
             "issues": [{"id": "note", "repository": PUBLIC, "title": "Plain", "board": BOARD,
-                        "status": "Todo", "parent": null, "body": "Nothing private here."}],
+                        "status": "Todo", "parent": null, "body": stored}],
         }),
     );
     let engine = engine_over(&world, &github, policy);
@@ -137,7 +151,7 @@ fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
             &["boundary", "check", "--destination", "public", "--input", "-"],
         ),
     });
-    if matches!(policy, Policy::Sanitizes | Policy::Linked) {
+    if !matches!(policy, Policy::Checks) {
         write_policy["sanitize_command"] =
             policy_command(&["boundary", "sanitize", "--input", "-"]);
     }
@@ -169,10 +183,12 @@ fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
     let engine = Engine::build(&loaded.config, &loaded.secrets);
     match policy {
         Policy::Checks | Policy::Sanitizes => engine,
-        Policy::Linked => {
+        Policy::Linked | Policy::OptedIn => {
             let answered =
                 serde_json::from_value(document["write_policy"].clone()).expect("the policy");
-            engine.with_write_policy(Arc::new(CommandWritePolicy::new(&answered)))
+            engine
+                .with_write_policy(Arc::new(CommandWritePolicy::new(&answered)))
+                .with_sanitize_stored_on_write(matches!(policy, Policy::OptedIn))
         }
     }
 }
@@ -192,10 +208,17 @@ fn a_narrow_write_under_a_rewriting_policy_reads_what_it_reads_under_one_that_on
             Policy::Checks,
             write,
             WITH,
+            PLAIN,
         );
         assert!(!expected.is_empty(), "{write:?} sent the board nothing");
         for (policy, kind) in [(Policy::Sanitizes, "sanitizes"), (Policy::Linked, "linked")] {
-            let (sent, issue) = written(&format!("narrow-{label}-{kind}"), policy, write, TERM);
+            let (sent, issue) = written(
+                &format!("narrow-{label}-{kind}"),
+                policy,
+                write,
+                TERM,
+                PLAIN,
+            );
             assert_eq!(sent, expected, "{policy:?} {write:?}");
             let replaced = format!("Retry the way {WITH} does.");
             let body = issue["body"].as_str().expect("the issue's body");
@@ -217,15 +240,61 @@ fn a_narrow_write_under_a_rewriting_policy_reads_what_it_reads_under_one_that_on
     }
 }
 
-/// Every read a run of one lifecycle node sends a public board from its start through its
-/// settlement, in a stable order, and that node's issue once the run is over. The item holds
-/// [`TERM`] from the start, as a person's edit would leave it. `screened` configures the rewriting
-/// policy the write-back then answers through its own; otherwise the store has no boundary at all.
-fn reads_of_a_run(name: &str, screened: bool) -> (Vec<Value>, Value) {
-    let (world, private, _public) = mixed_world(name);
-    declare_replacement(&world, &private);
+/// A term already on the item stays through a narrow write that does not carry it, for the same
+/// requests a check-only store sends. Only the opt-in the engine does not set reads the item and
+/// its comments for it and rewrites it, which is also what shows the comparison sees such a read.
+#[test]
+fn a_term_already_stored_stays_and_only_the_opt_in_reads_for_it() {
+    let stored = format!("Retry the way {TERM} does.");
+    let reads = |sent: &[Value]| sent.iter().filter(|request| !is_mutation(request)).count();
+    let (expected, _) = written(
+        "stored-checks",
+        Policy::Checks,
+        Write::MetadataSet,
+        WITH,
+        &stored,
+    );
+    for (policy, kind) in [(Policy::Sanitizes, "sanitizes"), (Policy::Linked, "linked")] {
+        let (sent, issue) = written(
+            &format!("stored-{kind}"),
+            policy,
+            Write::MetadataSet,
+            WITH,
+            &stored,
+        );
+        assert_eq!(sent, expected, "{policy:?}");
+        let body = issue["body"].as_str().expect("the issue's body");
+        assert!(body.starts_with(&stored), "{issue:#}");
+    }
+    let (sent, issue) = written(
+        "stored-opted-in",
+        Policy::OptedIn,
+        Write::MetadataSet,
+        WITH,
+        &stored,
+    );
+    assert!(reads(&sent) > reads(&expected), "{sent:#?}");
+    assert!(!issue.to_string().contains(TERM), "{issue:#}");
+}
+
+/// Whether a logged request is a GraphQL mutation rather than a read.
+fn is_mutation(request: &Value) -> bool {
+    request["query"]
+        .as_str()
+        .is_some_and(|query| query.starts_with("mutation"))
+}
+
+/// Every read a run of one lifecycle node sends a board from its start through its settlement, in
+/// a stable order. `screened` declares the board public and configures the rewriting policy the
+/// write-back then answers through its own; otherwise the store has no boundary at all, since the
+/// engine replaces whatever policy an active boundary names with the linked one and so has no
+/// check-only settlement to compare with.
+fn reads_of_a_run(name: &str, screened: bool) -> Vec<Value> {
+    let (world, _private, _public) = mixed_world(name);
     let mut world = world.with_env(TOKEN_ENV, "loopback-token");
+    let mut visibility = "";
     if screened {
+        visibility = "    visibility: public\n";
         let onevcs = crate::harness::onevcs_binary()
             .to_string_lossy()
             .into_owned();
@@ -257,10 +326,8 @@ fn reads_of_a_run(name: &str, screened: bool) -> (Vec<Value>, Value) {
                 {"id": "work", "repository": PUBLIC, "title": "chore: work", "board": BOARD,
                  "status": "Todo", "parent": "plan",
                  "body": described(
-                     &format!(
-                         "## What\nRetry the way {TERM} does.\n\n## Why\nSo the run settles.\n\n\
-                          ## Acceptance criteria\n- work is done."
-                     ),
+                     "## What\nSettle.\n\n## Why\nSo the run settles.\n\n\
+                      ## Acceptance criteria\n- work is done.",
                      &json!({"onepipeline.id": "work", "onepipeline.persona": "engineer"}))},
             ],
         }),
@@ -270,7 +337,7 @@ fn reads_of_a_run(name: &str, screened: bool) -> (Vec<Value>, Value) {
     std::fs::write(
         launch.join("onetaskgraph.yaml"),
         format!(
-            "sources:\n  board:\n    plugin: github-projects\n    visibility: public\n    \
+            "sources:\n  board:\n    plugin: github-projects\n{visibility}    \
              config:\n      owner: owner\n      project_number: {BOARD}\n      \
              repository: {PUBLIC}\n      token_env: {TOKEN_ENV}\n      endpoint: {}\n      \
              status_mapping:\n        todo: Todo\n        queued: Queued\n        \
@@ -283,44 +350,59 @@ fn reads_of_a_run(name: &str, screened: bool) -> (Vec<Value>, Value) {
     world.script("work.work", "a neutral example\n");
     let start = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
     world.run_on(start, "start the run").exited(0);
-    world.until("the run to finish", |world| {
-        !world.events_of(name, "run-stopped").is_empty()
-    });
-    world.until("the settlement to land", |_| {
-        let body = github.state()["issues"]["work"]["body"].clone();
-        metadata_of(body.as_str().unwrap_or_default()).contains_key("onepipeline.settlement")
+    world.until("the driver to exit", |world| {
+        !world.events_of(name, "driver-exited").is_empty()
     });
     let state = github.state();
     assert_eq!(state["unsupported"], json!([]), "{name}");
+    let settled = state["issues"]["work"]["body"].as_str().unwrap_or_default();
+    assert!(
+        metadata_of(settled).contains_key("onepipeline.settlement"),
+        "{name}: {settled}"
+    );
     let mut reads: Vec<Value> = state["requests"]
         .as_array()
         .expect("the request log")
         .iter()
-        .filter(|request| {
-            !request["query"]
-                .as_str()
-                .is_some_and(|q| q.starts_with("mutation"))
-        })
+        .filter(|request| !is_mutation(request))
         .cloned()
         .collect();
     reads.sort_by_key(Value::to_string);
-    (reads, state["issues"]["work"].clone())
+    reads
 }
 
-/// The write-back's own settlement, driven through the compiled binary: under a rewriting policy
-/// a run reads the board exactly what it reads with no policy at all, so its settlement's narrow
-/// write reads nothing for screening, and a term already stored stays for `sources sanitize`.
+/// The write-back's own settlement, driven through the compiled binary: the settled item is read
+/// exactly as often under a rewriting policy as under no boundary at all, and the run sends the
+/// board no document the unscreened run did not, so nothing in it reads an item's comments or
+/// dependencies for screening. The plan's reads are not compared whole: an active boundary reads a
+/// project's members for its classification whichever policy answers. A stored term staying is
+/// `publication_boundary`'s settlement journey's to hold, as a run's term scope here names no
+/// private repository.
 #[test]
 fn a_runs_settlement_under_a_rewriting_policy_reads_what_it_reads_under_none() {
-    let (expected, plain) = reads_of_a_run("narrow-settlement-plain", false);
-    assert!(!expected.is_empty(), "the run read nothing of the board");
-    let (reads, issue) = reads_of_a_run("narrow-settlement-screened", true);
-    assert_eq!(reads, expected);
-    for issue in [&plain, &issue] {
-        let body = issue["body"].as_str().expect("the issue's body");
-        assert!(
-            body.contains(&format!("Retry the way {TERM} does.")),
-            "{issue:#}"
-        );
-    }
+    let of_the_item = |reads: &[Value]| -> Vec<Value> {
+        reads
+            .iter()
+            .filter(|request| request["variables"]["id"] == "work")
+            .cloned()
+            .collect()
+    };
+    let documents = |reads: &[Value]| -> BTreeSet<String> {
+        reads
+            .iter()
+            .map(|request| request["query"].to_string())
+            .collect()
+    };
+    let expected = reads_of_a_run("narrow-settlement-plain", false);
+    assert!(
+        !of_the_item(&expected).is_empty(),
+        "the run read nothing of the item"
+    );
+    let reads = reads_of_a_run("narrow-settlement-screened", true);
+    assert_eq!(of_the_item(&reads), of_the_item(&expected));
+    let added: Vec<String> = documents(&reads)
+        .difference(&documents(&expected))
+        .cloned()
+        .collect();
+    assert!(added.is_empty(), "{added:#?}");
 }
