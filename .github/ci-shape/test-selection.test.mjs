@@ -12,6 +12,10 @@ function list(filter) {
   const doc = JSON.parse(command("cargo", ["nextest", "list", "--locked", "--message-format", "json", "-E", filter]));
   return Object.entries(doc["rust-suites"]).flatMap(([binary, suite]) => Object.entries(suite.testcases).filter(([, t]) => t["filter-match"].status === "matches").map(([name]) => `${binary}::${name}`)).sort();
 }
+// A budget tier added after the pinned justfile, excluded from `rest-tier` by name and
+// run by its own project, so the pinned filters would otherwise still claim it.
+const ownTierSincePin = "binary(status_read_workload)";
+const withoutOwnTier = (filter) => `(${filter}) and not ${ownTierSincePin}`;
 test("real nextest listings preserve every test when version readers move to their targets", { timeout: 600000 }, () => {
   const dir = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "test-selection-"));
   try {
@@ -21,7 +25,7 @@ test("real nextest listings preserve every test when version readers move to the
       const beforeFilter = command("just", ["--justfile", base, "--evaluate", `${original}-tier`]).trim();
       const afterFilter = command("just", ["--evaluate", `${original}-tier`]).trim();
       const movedFilter = command("just", ["--evaluate", `version-${moved}-tier`]).trim();
-      const before = list(beforeFilter);
+      const before = list(withoutOwnTier(beforeFilter));
       const after = list(afterFilter);
       const version = list(movedFilter);
       assert.equal(version.length, 1, `${moved}'s version target must contain exactly its one moved test`);
@@ -30,6 +34,6 @@ test("real nextest listings preserve every test when version readers move to the
     }
     const before = command("just", ["--justfile", base, "--evaluate", "offline-tiers"]).trim();
     const after = command("just", ["--evaluate", "offline-tiers"]).trim();
-    assert.deepEqual(list(after), list(before));
+    assert.deepEqual(list(after), list(withoutOwnTier(before)));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
