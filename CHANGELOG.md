@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.102.0](https://github.com/nickderobertis/onepipeline/compare/v0.101.5...v0.102.0) - 2026-11-07
+
+### Added
+
+- *(human-items)* [**breaking**] reopen items, add notes afterwards, and declare an undo for a completion script ([#1446](https://github.com/nickderobertis/onepipeline/pull/1446))
+
+### Fixed
+
+- *(deps)* link the onetaskgraph release that rewrites private-destination reference links ([#1442](https://github.com/nickderobertis/onepipeline/pull/1442))
+
 ## [0.101.5](https://github.com/nickderobertis/onepipeline/compare/v0.101.4...v0.101.5) - 2026-11-06
 
 ### Added
