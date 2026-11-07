@@ -166,6 +166,15 @@ fn against_the_release(name: &str, produce: impl Fn(&Path) -> Value) -> Option<(
     Some((expected, produce(&binary())))
 }
 
+/// `status` asks for the provider report only under `--providers` now, and every other
+/// line of what the release said still stands.
+fn without_the_provider_report(recorded: &str) -> String {
+    recorded
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("  providers: "))
+        .collect()
+}
+
 /// Capture 0.28.2's answers, or hold this build's to them.
 fn held_to_the_release(fixture: &str) {
     let Some((expected, actual)) =
@@ -184,11 +193,12 @@ fn held_to_the_release(fixture: &str) {
     );
     for (want, got) in want.iter().zip(got) {
         for part in ["exit", "stdout", "stderr"] {
-            // The recorded answer is 0.28.2's as captured; the one report this
-            // build deliberately no longer writes is taken out of it here, as
-            // it is out of every answer produced now.
+            // The recorded answer is 0.28.2's as captured; the reports this build
+            // deliberately no longer writes are taken out of it here, as they
+            // are out of every answer produced now.
             let want_part = match (part, want[part].as_str()) {
                 ("stderr", Some(recorded)) => json!(without_the_reset_report(recorded)),
+                ("stdout", Some(recorded)) => json!(without_the_provider_report(recorded)),
                 _ => want[part].clone(),
             };
             assert_eq!(
