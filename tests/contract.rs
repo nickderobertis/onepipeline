@@ -10252,9 +10252,9 @@ fn the_readmes_template_passage_is_a_gated_copy_of_the_contract() {
     );
 }
 
-/// The flags a supervisor's two most frequent reads take — `status
-/// --no-providers` and `watch --log PATH` — and the library renderer beside the
-/// first are what divergence entry 95 proposes and what the README states.
+/// The flags a supervisor's two most frequent reads take — `status`'s pair over
+/// the provider report and `watch --log PATH` — and the library renderers beside
+/// the first are what divergence entry 95 proposes and what the README states.
 ///
 /// Held both ways against clap, because entry 95 is the only place this surface
 /// is written down for the planner who owns the contract, and the README is what
@@ -10316,6 +10316,8 @@ fn the_supervision_flags_are_what_divergence_95_and_the_readme_name() {
     // The renderer the entry names, at the signature it is called with.
     assert!(entry.contains("`Status::render_without_providers`"));
     let _: fn(&verbs::Status) -> String = verbs::Status::render_without_providers;
+    assert!(entry.contains("`Status::render_with_providers`"));
+    let _: fn(&verbs::Status) -> String = verbs::Status::render_with_providers;
 
     // The statuses the entry says a logged watch keeps, and the one it refuses
     // with, are the ones this build returns.

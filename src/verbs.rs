@@ -162,14 +162,20 @@ pub enum Status {
     Listing(Projects),
 }
 
-/// One run's folded detail.
+/// One run's detail.
 #[derive(Debug)]
 pub struct RunStatus {
-    /// The run, read once.
+    /// The run, read off its checkpoint and the records appended past it, as
+    /// [`status`] states: its state is the whole run's and `view.events` holds no
+    /// history. A reader of the store opens the run with [`RunView::open`].
     pub view: RunView,
 }
 
 /// `onepipeline status [RUN]`.
+///
+/// A run named is read through its checkpoint rather than by folding its whole
+/// journal: every line of its text is folded or kept whole there. So the returned
+/// [`RunStatus::view`] carries the run's whole state and no event of its history.
 ///
 /// # Errors
 ///
@@ -177,13 +183,14 @@ pub struct RunStatus {
 pub fn status(root: &Path, run: Option<&str>) -> Result<Status> {
     Ok(match run {
         Some(run) => Status::Run(RunStatus {
-            view: RunView::open(&resolved(root, run)?)?,
+            view: RunView::open_current(&resolved(root, run)?)?,
         }),
         None => Status::Listing(Projects::of(&Listing::of(root))),
     })
 }
 
-/// The text `onepipeline status [RUN]` prints.
+/// The text `onepipeline status [RUN]` prints: what the run is, and nothing about
+/// the host's providers, which are not asked.
 pub fn render_status(status: &Status) -> String {
     match status {
         Status::Run(detail) => views::status_of(&detail.view),
@@ -192,17 +199,27 @@ pub fn render_status(status: &Status) -> String {
 }
 
 impl Status {
-    /// The text `onepipeline status [RUN] --no-providers` prints: what
-    /// [`render_status`] renders, less the host's provider report, which is
-    /// not asked for at all.
+    /// The text `onepipeline status [RUN] --no-providers` prints: the text
+    /// [`render_status`] renders, the flag having stayed accepted when the report
+    /// stopped being the default.
     ///
     /// A method rather than a second `render_` function beside
     /// [`render_status`], because the contract's verbs paragraph names every
     /// function this module publishes and is amended only by the planner who
     /// owns it — `docs/contract-divergences.md` entry 95 proposes the name.
     pub fn render_without_providers(&self) -> String {
+        render_status(self)
+    }
+
+    /// The text `onepipeline status [RUN] --providers` prints: what
+    /// [`render_status`] renders, with the host's provider report, which this
+    /// asks for, where it has always been printed.
+    ///
+    /// A method for the reason [`render_without_providers`](Self::render_without_providers)
+    /// is one.
+    pub fn render_with_providers(&self) -> String {
         match self {
-            Self::Run(detail) => views::status_reporting(&detail.view, views::Providers::Omitted),
+            Self::Run(detail) => views::status_reporting(&detail.view, views::Providers::Reported),
             Self::Listing(projects) => views::status_listed(projects),
         }
     }

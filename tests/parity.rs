@@ -357,6 +357,12 @@ fn status_lists_every_run_details_one_and_refuses_one_that_is_not_there() {
         &detail.render_without_providers(),
         EXIT_SUCCESS,
     );
+    same_view(
+        "status RUN --providers",
+        &fixture.binary(&["status", RUN, "--providers"]),
+        &detail.render_with_providers(),
+        EXIT_SUCCESS,
+    );
     let missing = verbs::status(&fixture.root, Some("nowhere")).expect_err("no such run");
     refused(
         "status nowhere",

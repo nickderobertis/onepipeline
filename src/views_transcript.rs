@@ -353,6 +353,11 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
         Ok(None) | Err(_) => return Err(unresolved(Why::Unreadable)),
     };
     let history_id = location.history_id.to_string();
+    if let Some(wanted) = index {
+        return session_index::of_file(&path, file)
+            .ok_or_else(|| unresolved(Why::Unreadable))?
+            .activity(&history_id, wanted, &unresolved);
+    }
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
     let mut unreadable = false;
@@ -414,23 +419,155 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
                     _ => Err(unresolved(Why::Unreadable)),
                 };
             }
-            (TranscriptRef::Activity(_), Some("event")) if field("run_id") == Some(&history_id) => {
-                let Some(wanted) = index else { continue };
-                let raw = entry.get("event").unwrap_or(&Value::Null);
-                // An entry of this candidate whose index is no integer may be the
-                // one asked for and cannot be told apart: it is unreadable, and
-                // makes a miss an unreadable file rather than a missing entry.
-                let Some(at) = raw.get("index").and_then(Value::as_u64) else {
-                    unreadable = true;
-                    continue;
-                };
-                if at != wanted.index {
-                    continue;
+            _ => {}
+        }
+    }
+    if let Some(prompt) = prompt_at_close {
+        return Ok(described(Text::Instruction(prompt)));
+    }
+    Err(unresolved(if unreadable {
+        Why::Unreadable
+    } else {
+        Why::MissingEntry
+    }))
+}
+
+/// Read a record's content straight off its payload: [`TranscriptRef::of`]
+/// then [`resolve`], with a malformed reference answered as unresolved.
+#[must_use]
+pub fn of_record(kind: &str, payload: &Map<String, Value>) -> Option<Result<Resolved, Unresolved>> {
+    TranscriptRef::of(kind, payload).map(|reference| reference.and_then(|r| resolve(&r)))
+}
+
+/// Each session file's activity entries, from one parse of the file.
+///
+/// A dispatch's transcript holds thousands of references into a few files, and
+/// answering each by parsing its file from the top was most of what reading a long
+/// dispatch cost. What is kept is the file's text and, per `(history id, index)`, the
+/// lines holding that entry, so what stays in memory is bounded by the file itself
+/// rather than by a parsed tree several times its size.
+///
+/// Process-wide, because `onepipeline-ui` reads the same files for every request, and
+/// bounded by [`SESSIONS`]: the sessions used least recently go first. An entry stands
+/// only while its file's [`Stamp`](crate::appendstamp::Stamp) does, so a file that grew
+/// or changed is read again, and a removed one never reaches here.
+mod session_index {
+    use std::collections::{HashMap, HashSet};
+    use std::io::Read as _;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::Value;
+
+    use super::{described, ActivityTranscript, Resolved, Text, ToolKind, Unresolved, Why};
+    use crate::appendstamp::Stamp;
+
+    /// How many session files are held.
+    pub(super) const SESSIONS: usize = 256;
+
+    /// One session file, read.
+    #[derive(Debug)]
+    pub(super) struct SessionFile {
+        text: String,
+        /// Where each entry's lines are in `text`, in the file's order.
+        entries: HashMap<(String, u64), Vec<(usize, usize)>>,
+        /// A whole line of the file did not parse, which makes a miss an unreadable
+        /// file rather than a missing entry: it may have been the entry asked for.
+        malformed: bool,
+        /// The file stopped being readable as text here: nothing after it was seen.
+        cut_short: bool,
+        /// History ids holding an entry whose index is no integer, which may be the
+        /// one asked for and cannot be told apart.
+        indexless: HashSet<String>,
+    }
+
+    impl SessionFile {
+        fn of(bytes: Vec<u8>) -> Self {
+            // Up to a line that is not text, as a line-by-line read of the file stops
+            // there, and only ever through finished lines: the last line of a file
+            // still being written may be half of one, however much of it parses.
+            let mut cut_short = false;
+            let mut valid = match std::str::from_utf8(&bytes) {
+                Ok(_) => bytes.len(),
+                Err(error) => {
+                    cut_short = true;
+                    error.valid_up_to()
                 }
-                // Read through oneharness's own event type, so a field of the
-                // wrong type is an unreadable entry rather than empty content.
+            };
+            valid = bytes[..valid]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |newline| newline + 1);
+            let mut bytes = bytes;
+            bytes.truncate(valid);
+            let text = String::from_utf8(bytes).unwrap_or_default();
+            let mut session = Self {
+                text,
+                entries: HashMap::new(),
+                malformed: false,
+                cut_short,
+                indexless: HashSet::new(),
+            };
+            let mut start = 0;
+            let mut lines = Vec::new();
+            for line in session.text.split_inclusive('\n') {
+                lines.push((start, start + line.len()));
+                start += line.len();
+            }
+            for (from, to) in lines {
+                session.index_line(from, to);
+            }
+            session
+        }
+
+        fn index_line(&mut self, from: usize, to: usize) {
+            let Ok(entry) = serde_json::from_str::<Value>(self.text[from..to].trim_end()) else {
+                self.malformed = true;
+                return;
+            };
+            if entry.get("type").and_then(Value::as_str) != Some("event") {
+                return;
+            }
+            let Some(run) = entry.get("run_id").and_then(Value::as_str) else {
+                return;
+            };
+            let raw = entry.get("event").unwrap_or(&Value::Null);
+            match raw.get("index").and_then(Value::as_u64) {
+                Some(at) => self
+                    .entries
+                    .entry((run.to_owned(), at))
+                    .or_default()
+                    .push((from, to)),
+                None => {
+                    self.indexless.insert(run.to_owned());
+                }
+            }
+        }
+
+        /// What this file answers for an activity reference.
+        ///
+        /// In the file's order, the first entry of that index whose tool call is the
+        /// one asked for: an entry naming another call is not this one, and an entry
+        /// of that index that does not read as an event makes the file unreadable.
+        pub(super) fn activity(
+            &self,
+            history_id: &str,
+            wanted: &ActivityTranscript,
+            unresolved: &dyn Fn(Why) -> Unresolved,
+        ) -> Result<Resolved, Unresolved> {
+            let lines = self
+                .entries
+                .get(&(history_id.to_owned(), wanted.index))
+                .map_or(&[][..], Vec::as_slice);
+            for (from, to) in lines {
+                let raw = serde_json::from_str::<Value>(self.text[*from..*to].trim_end())
+                    .ok()
+                    .and_then(|mut entry| entry.get_mut("event").map(Value::take))
+                    .unwrap_or(Value::Null);
+                // Read through oneharness's own event type, so a field of the wrong
+                // type is an unreadable entry rather than empty content.
                 let event: oneharness_core::domain::events::ActionEvent =
-                    serde_json::from_value(raw.clone()).map_err(|_| unresolved(Why::Unreadable))?;
+                    serde_json::from_value(raw).map_err(|_| unresolved(Why::Unreadable))?;
                 if let (Some(expected), Some(found)) = (
                     wanted.tool_call_id.as_deref(),
                     event.tool_call_id.as_deref(),
@@ -450,24 +587,68 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
                     },
                 }));
             }
-            _ => {}
+            Err(unresolved(
+                if self.malformed || self.cut_short || self.indexless.contains(history_id) {
+                    Why::Unreadable
+                } else {
+                    Why::MissingEntry
+                },
+            ))
         }
     }
-    if let Some(prompt) = prompt_at_close {
-        return Ok(described(Text::Instruction(prompt)));
-    }
-    Err(unresolved(if unreadable {
-        Why::Unreadable
-    } else {
-        Why::MissingEntry
-    }))
-}
 
-/// Read a record's content straight off its payload: [`TranscriptRef::of`]
-/// then [`resolve`], with a malformed reference answered as unresolved.
-#[must_use]
-pub fn of_record(kind: &str, payload: &Map<String, Value>) -> Option<Result<Resolved, Unresolved>> {
-    TranscriptRef::of(kind, payload).map(|reference| reference.and_then(|r| resolve(&r)))
+    /// How many sessions are held now.
+    #[cfg(test)]
+    pub(super) fn held() -> usize {
+        let held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+        held.as_ref().map_or(0, |(files, _)| files.len())
+    }
+
+    /// One held file: what it was stamped when read, and when it was last used.
+    type Held = (Stamp, Arc<SessionFile>, u64);
+
+    /// The held files, and the clock their use is ordered by.
+    static HELD: Mutex<Option<(HashMap<PathBuf, Held>, u64)>> = Mutex::new(None);
+
+    /// The file at `path`, open as `file`, as it stands now: `None` where it cannot be
+    /// read.
+    ///
+    /// The stamp is taken before the read, so a file that changes during it is read
+    /// again next time rather than held as what it no longer is. The lock is not held
+    /// across the parse, which is the one slow step: two readers of one file may both
+    /// parse it, and neither makes the other wait behind an unrelated file.
+    pub(super) fn of_file(path: &Path, mut file: std::fs::File) -> Option<Arc<SessionFile>> {
+        let stamp = Stamp::read(path)?;
+        {
+            let mut held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+            let (files, clock) = held.get_or_insert_with(Default::default);
+            *clock += 1;
+            if let Some((held_stamp, session, used)) = files.get_mut(path) {
+                if *held_stamp == stamp {
+                    *used = *clock;
+                    return Some(Arc::clone(session));
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let session = Arc::new(SessionFile::of(bytes));
+        let mut held = HELD.lock().unwrap_or_else(|held| held.into_inner());
+        let (files, clock) = held.get_or_insert_with(Default::default);
+        *clock += 1;
+        files.insert(path.to_path_buf(), (stamp, Arc::clone(&session), *clock));
+        while files.len() > SESSIONS {
+            let Some(oldest) = files
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            files.remove(&oldest);
+        }
+        Some(session)
+    }
 }
 
 fn described(text: Text) -> Resolved {
@@ -1257,6 +1438,193 @@ mod tests {
         conflicting["tool_call_id"] = json!("call-from-another-turn");
         let missing = unresolved("turn-activity", &activity(conflicting, 0));
         assert_eq!(missing.why, Why::MissingEntry);
+    }
+
+    /// The session file a reference names.
+    fn session_file(reference: &Value) -> PathBuf {
+        address(reference)
+    }
+
+    /// What a whole read of a session file holds at `index` for `run`: its `output`.
+    fn whole_read_output(path: &std::path::Path, run: &str, index: u64) -> Option<String> {
+        std::fs::read_to_string(path)
+            .expect("the session file")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|entry| entry["run_id"] == run && entry["event"]["index"] == index)
+            .and_then(|entry| entry["event"]["output"].as_str().map(str::to_string))
+    }
+
+    fn output_of(reference: &Value, index: u64) -> Option<String> {
+        match resolved("turn-activity", &activity(reference.clone(), index)).text {
+            Text::Tool { output, .. } => output,
+            other => panic!("a tool entry, not {other:?}"),
+        }
+    }
+
+    /// Every reference answers what a whole read of the file holds, and a file whose
+    /// bytes changed answers its new content on the next read: grown, rewritten at the
+    /// same length with a new modification time, or removed.
+    #[test]
+    fn one_parse_of_a_session_answers_what_the_file_holds_until_the_file_changes() {
+        let written = Written::new("indexed", "## What\nread it");
+        for index in 0..200 {
+            written.event(
+                index,
+                "tool_result",
+                Some("Bash"),
+                None,
+                Some(&format!("output of {index} \u{1F980}")),
+            );
+        }
+        let path = session_file(&written.reference);
+        let run = written.run_id.to_string();
+        for index in (0..200).rev() {
+            assert_eq!(
+                output_of(&written.reference, index),
+                whole_read_output(&path, &run, index),
+                "entry {index}"
+            );
+        }
+
+        // It grew: what was not there is, and what was still is.
+        assert_eq!(
+            unresolved("turn-activity", &activity(written.reference.clone(), 200)).why,
+            Why::MissingEntry
+        );
+        written.event(200, "tool_result", Some("Bash"), None, Some("grown"));
+        assert_eq!(output_of(&written.reference, 200).as_deref(), Some("grown"));
+        assert_eq!(
+            output_of(&written.reference, 3),
+            whole_read_output(&path, &run, 3)
+        );
+
+        // Rewritten in place, one byte for another, so only its stamp says so.
+        let text = std::fs::read_to_string(&path).expect("the session file");
+        std::fs::write(&path, text.replace("output of 7 ", "OUTPUT of 7 ")).expect("rewritten");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(later))
+            .expect("a new modification time");
+        assert_eq!(
+            output_of(&written.reference, 7).as_deref(),
+            Some("OUTPUT of 7 \u{1F980}")
+        );
+
+        std::fs::remove_file(&path).expect("removed");
+        assert_eq!(
+            unresolved("turn-activity", &activity(written.reference.clone(), 7)).why,
+            Why::MissingFile
+        );
+    }
+
+    /// A tool-call identity mismatch and a malformed line answer as they do when the
+    /// file is scanned: the first entry of the index naming that call, a miss that may
+    /// have been the unreadable line, and a hit that no malformed line can reach.
+    #[test]
+    fn a_mismatched_call_and_a_malformed_line_answer_what_a_scan_of_the_file_answers() {
+        let written = Written::new("indexed-malformed", "## What\nread it");
+        written.event(0, "tool_result", Some("Bash"), None, Some("the first"));
+        written.event(1, "tool_result", Some("Bash"), None, Some("the second"));
+        let path = session_file(&written.reference);
+
+        // Another call at that index, later in the file, is the one a reference names.
+        let text = std::fs::read_to_string(&path).expect("the session file");
+        let repeated = text
+            .lines()
+            .find(|line| line.contains("\"call-0\""))
+            .expect("the first entry")
+            .replace("call-0", "call-again")
+            .replace("the first", "the entry again");
+        std::fs::write(&path, format!("{text}{repeated}\n")).expect("appended");
+        let mut named = written.reference.clone();
+        named["tool_call_id"] = json!("call-again");
+        assert_eq!(
+            output_of(&named, 0).as_deref(),
+            Some("the entry again"),
+            "the later entry naming this call"
+        );
+        let mut other = written.reference.clone();
+        other["tool_call_id"] = json!("call-elsewhere");
+        assert_eq!(
+            unresolved("turn-activity", &activity(other.clone(), 0)).why,
+            Why::MissingEntry,
+            "a call this file never held at that index"
+        );
+
+        // A malformed line: what is there still answers, and a miss may be that line.
+        let text = std::fs::read_to_string(&path).expect("the session file");
+        std::fs::write(&path, format!("{text}{{\"type\":\"event\",\n")).expect("appended");
+        assert_eq!(
+            output_of(&written.reference, 1).as_deref(),
+            Some("the second")
+        );
+        assert_eq!(
+            unresolved("turn-activity", &activity(written.reference.clone(), 9)).why,
+            Why::Unreadable
+        );
+        assert_eq!(
+            unresolved("turn-activity", &activity(other, 0)).why,
+            Why::Unreadable
+        );
+
+        // Bytes that are not text end the read there: before them still answers.
+        let mut bytes = std::fs::read(&path).expect("the session file");
+        bytes.extend_from_slice(b"\xff\xfe\n");
+        std::fs::write(&path, bytes).expect("appended");
+        assert_eq!(
+            output_of(&written.reference, 1).as_deref(),
+            Some("the second")
+        );
+        assert_eq!(
+            unresolved("turn-activity", &activity(written.reference.clone(), 9)).why,
+            Why::Unreadable
+        );
+    }
+
+    /// The index holds at most its bound of sessions, and a session it let go of reads
+    /// the same as one it holds.
+    #[test]
+    fn the_session_index_holds_no_more_than_its_bound_and_forgets_nothing_it_answers() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-transcript-bound-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("a project directory");
+        let history = "01a13e8e-0000-7000-8000-00000000b0dd".to_string();
+        let reference_of = |session: usize| {
+            location(
+                root.to_str().expect("a path"),
+                "project",
+                &format!("session-{session}"),
+                &history,
+            )
+        };
+        let sessions = session_index::SESSIONS + 8;
+        for session in 0..sessions {
+            let line = json!({
+                "type": "event",
+                "run_id": history,
+                "event": {"kind": "tool_result", "index": 0, "output": format!("of {session}")},
+            });
+            std::fs::write(
+                project.join(format!("session-{session}.jsonl")),
+                format!("{line}\n"),
+            )
+            .expect("a session file");
+        }
+        for session in (0..sessions).chain(0..sessions) {
+            assert_eq!(
+                output_of(&reference_of(session), 0),
+                Some(format!("of {session}"))
+            );
+            assert!(session_index::held() <= session_index::SESSIONS);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A command recorded as an argv list: the harness's shell wrapper taken

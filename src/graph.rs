@@ -1553,6 +1553,20 @@ pub fn derive(
     statuses
 }
 
+/// Whether [`derive`] answers this node's status without reading any dependency of
+/// it: a parked node, and one whose recorded settlement stands, which is every
+/// settlement but the two gates derivation works out again against the graph.
+pub(crate) fn status_stands_without_its_dependencies(
+    graph: &Graph,
+    id: &str,
+    settled: &BTreeMap<NodeRef, Settled>,
+) -> bool {
+    graph.iter().any(|node| node.id == id && node.parked)
+        || settled.get(id).is_some_and(|recorded| {
+            !matches!(recorded.status(), NodeStatus::Blocked | NodeStatus::Skipped)
+        })
+}
+
 fn eligibility(
     graph: &Graph,
     node: &Node,

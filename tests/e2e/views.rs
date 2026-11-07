@@ -353,9 +353,13 @@ fn status_carries_the_provider_health_block_from_the_sibling() {
     let world = World::new("views-health");
     let run = settled(&world, "healthy", vec![agent("build", &[])]);
     world
-        .run(&["status", &run])
+        .run(&["status", &run, "--providers"])
         .exited(0)
         .out_has("providers: fake-provider");
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_lacks("providers:");
 }
 
 /// How many times `onepipeline` has asked the `oneagentgraph` double for the
@@ -383,10 +387,10 @@ fn above_the_report(view: &str) -> String {
 /// and the readings move by the second and by a tenth of a gibibyte.
 const BRACKETS: usize = 20;
 
-/// `status --no-providers` leaves the provider report out and never asks
-/// `oneagentgraph` for it, and every other line is the one `status` prints —
-/// the unread planner update and the free-space reading above the cut included —
-/// for one run and for the listing alike.
+/// `status` and `status --no-providers` leave the provider report out and never
+/// ask `oneagentgraph` for it, and every other line is the one `status --providers`
+/// prints — the unread planner update and the free-space reading above the cut
+/// included — for one run and for the listing alike.
 ///
 /// This is what a supervisor's watch guidance used to get by piping the view
 /// through `sed`, which no allowlist can approve as one command.
@@ -408,13 +412,13 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
     for scope in [vec!["status", run.as_str()], vec!["status"]] {
         // Two readings in the view move on their own between invocations: the
         // free space on the host and the age of the unread planner update. So
-        // `--no-providers` is run between two plain `status` runs, and held
+        // `--no-providers` is run between two `status --providers` runs, and held
         // byte for byte to whichever of the two it matches above the report: a
         // reading that moved once across the bracket leaves it equal to one side,
         // and a line the flag moved leaves it equal to neither.
         let mut compared = false;
         for _ in 0..BRACKETS {
-            let before = world.run(&scope);
+            let before = world.run(&[scope.as_slice(), &["--providers"]].concat());
             before.exited(0);
             // llmlint: ignore-block[tests_mirror_real_usage] the provider-health call is a spawn of
             // the sibling, observable only at the double that receives it; the full reason is at
@@ -429,7 +433,7 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
                 omitted.args
             );
             // llmlint: ignore-end[tests_mirror_real_usage]
-            let after = world.run(&scope);
+            let after = world.run(&[scope.as_slice(), &["--providers"]].concat());
             after.exited(0);
             omitted.out_lacks("providers:");
             assert_eq!(omitted.stderr, before.stderr, "{}", omitted.args);
@@ -459,7 +463,7 @@ fn status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_li
 
     // The detail view is the one that carries the report, and every line the
     // guidance's cut had to keep is still there.
-    let reported = world.run(&["status", &run]);
+    let reported = world.run(&["status", &run, "--providers"]);
     reported.out_has("  providers: fake-provider");
     let omitted = world.run(&["status", &run, "--no-providers"]);
     omitted.out_has("planner update(s) waiting");
@@ -499,7 +503,7 @@ fn status_and_host_report_free_space_on_the_filesystem_holding_both_roots() {
     let run = settled(&world, "spaced", vec![lifecycle("service", &[])]);
     let runs = world.runs.display().to_string();
 
-    let status = world.run(&["status", &run]);
+    let status = world.run(&["status", &run, "--providers"]);
     status.exited(0).out_has("providers: fake-provider");
     let lines = free_space_lines(&status.stdout);
     assert_eq!(

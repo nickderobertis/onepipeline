@@ -1467,6 +1467,9 @@ name = "onepipeline"
 path = "src/lib.rs"
 
 [dependencies]
+# The selective journal read (`src/journal_selected.rs`) walks every line of a 100 MB
+# journal and a whole first screen waits on it; already in the tree through serde_json.
+memchr = "2"
 clap = { version = "4.6", features = ["derive"] }
 # A release target's adoption instructions are a minijinja template the producer
 # wrote, which `onevcs` carries through the three layers and parses but never

@@ -431,16 +431,9 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 println!("{reading}");
                 return Ok(EXIT_SUCCESS);
             }
-            // One run's text reads the same off its checkpoint: every record a line
-            // of it quotes is folded or kept whole there, so its history is not read.
-            let status = match args.run.as_deref() {
-                Some(run) => verbs::Status::Run(verbs::RunStatus {
-                    view: RunView::open_current(&verbs::resolved(&ledger::runs_root(), run)?)?,
-                }),
-                None => verbs::status(&ledger::runs_root(), None)?,
-            };
-            if args.no_providers {
-                print!("{}", status.render_without_providers());
+            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
+            if args.providers {
+                print!("{}", status.render_with_providers());
             } else {
                 print!("{}", verbs::render_status(&status));
             }
