@@ -7,9 +7,11 @@
 //! compared: every document and every variable, so a read of the item, its comments or its
 //! dependencies that only a rewriting policy makes fails the comparison by naming it.
 //!
-//! The write-back hands the store a policy of its own rather than a configured command, so
-//! [`Policy::Linked`] drives that same mode, and `publication_boundary`'s settlement journey
-//! holds what it leads to through the compiled binary.
+//! A linking caller hands the store a policy of its own rather than a configured command, as
+//! `taskgraph` does for a fence, so [`Policy::Linked`] drives that mode too. The write-back also
+//! opts into `with_sanitize_stored_on_write`, the read-first guard that keeps a settlement from
+//! writing past a stored term. That read is the opt-in's purpose and is not compared here:
+//! `publication_boundary`'s settlement journey holds what it does through the compiled binary.
 
 // llmlint: ignore-file[e2e_not_mocked] GitHub is the loopback beside this file — real HTTP on a
 // real socket, reached by the real `github-projects` plugin the engine links — because an offline
@@ -46,11 +48,11 @@ enum Policy {
     Checks,
     /// The same with a `sanitize_command`.
     Sanitizes,
-    /// A policy handed to the store by its linking caller, as the write-back hands its own.
+    /// A policy handed to the store by its linking caller, with no opt-in to the read-first guard.
     Linked,
 }
 
-/// One narrow write of each kind the write-back makes.
+/// One narrow write of each kind the engine makes.
 #[derive(Clone, Copy, Debug)]
 enum Write {
     TaskUpdate,
@@ -172,8 +174,8 @@ fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
     }
 }
 
-/// Every narrow write the write-back makes, under each policy that can rewrite, sends the board
-/// exactly what it sends under one that only checks. The text the policy rewrote goes out as the
+/// A narrow write of each kind, under each policy that can rewrite, sends the board exactly what
+/// it sends under one that only checks. The text the policy rewrote goes out as the
 /// text the check-only store was handed directly, so the two logs compare whole, and the write
 /// is stored replaced.
 #[test]
