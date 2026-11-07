@@ -134,7 +134,7 @@ fn golden_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/status-read-v0.101.5.txt")
 }
 
-// llmlint: ignore[tests_mirror_real_usage] the acceptance criterion is a change on disk past the checkpoint, read by a process that did not write it: a driver appending exactly such a record is what a reader meets.
+// llmlint: ignore-block[tests_mirror_real_usage] the acceptance criterion is a change on disk past the checkpoint, read by a process that did not write it: a driver appending exactly such a record is what a reader meets.
 fn appended(dir: &Path, line: &str) {
     use std::io::Write;
     let mut journal = std::fs::OpenOptions::new()
@@ -143,6 +143,7 @@ fn appended(dir: &Path, line: &str) {
         .expect("the journal");
     journal.write_all(line.as_bytes()).expect("appended");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// `status` says of a run with landed, unlanded and failed nodes and unread surfaces what
 /// `v0.101.5`'s `--no-providers` said, line for line, and reads every later change off the
