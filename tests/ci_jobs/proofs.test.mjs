@@ -11,6 +11,7 @@
 // The capture's clone of HEAD is the one thing past them proved here, against a
 // stand-in `docker` that only records how it was run.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,

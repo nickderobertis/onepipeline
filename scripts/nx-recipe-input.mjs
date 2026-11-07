@@ -114,8 +114,15 @@ function reached(
       for (const argument of dependency.arguments)
         for (const use of variablesIn(argument)) reachedVariables.add(use);
     }
+    // A line is text and interpolations, each interpolation a one-element list around its
+    // expression.
     for (const line of recipe.body)
-      for (const part of line) for (const use of variablesIn(part)) reachedVariables.add(use);
+      for (const part of line) {
+        if (typeof part === "string") continue;
+        if (!Array.isArray(part) || part.length !== 1)
+          throw new Error(`just's dump holds an unknown line part: ${JSON.stringify(part)}`);
+        for (const use of variablesIn(part[0])) reachedVariables.add(use);
+      }
     for (const parameter of recipe.parameters)
       for (const use of variablesIn(parameter.default)) reachedVariables.add(use);
     const text = textOf(recipe.body);

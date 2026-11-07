@@ -130,10 +130,10 @@ describe("a recipe digest that cannot be taken", () => {
     ["no recipes", '{"assignments":{},"settings":{}}', /carries no recipes/],
     ["a recipe of an unknown shape", '{"recipes":{"main":{"body":"text"}},"assignments":{},"settings":{}}', /recipe 'main' an unknown shape/],
     ["a variable of an unknown shape", '{"recipes":{},"assignments":{"x":{}},"settings":{}}', /variable 'x' an unknown shape/],
-    ["a body expression of an unknown shape", '{"recipes":{"main":{"body":[[{"kind":"variable","name":"x"}]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
-    ["an expression form it does not know", '{"recipes":{"main":{"body":[[["new-form","x"]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
-    ["a use naming no variable", '{"recipes":{"main":{"body":[[["variable"]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
-    ["a variable's value of an unknown shape", '{"recipes":{"main":{"body":[[["variable","x"]]],"dependencies":[],"parameters":[]}},"assignments":{"x":{"export":false,"value":{"kind":"new"}}},"settings":{}}', /unknown expression/],
+    ["a body expression of an unknown shape", '{"recipes":{"main":{"body":[[[{"kind":"variable","name":"x"}]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["an expression form it does not know", '{"recipes":{"main":{"body":[[[["new-form","x"]]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["a use naming no variable", '{"recipes":{"main":{"body":[[[["variable"]]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["a variable's value of an unknown shape", '{"recipes":{"main":{"body":[[[["variable","x"]]]],"dependencies":[],"parameters":[]}},"assignments":{"x":{"export":false,"value":{"kind":"new"}}},"settings":{}}', /unknown expression/],
   ]) {
     it(`refuses a dump with ${what}`, () => {
       const bin = join(dir, "fake-just");
