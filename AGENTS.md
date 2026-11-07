@@ -76,6 +76,11 @@ over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it.
 
+A cached target that runs `just <recipe>` names `node scripts/nx-recipe-input.mjs <recipe>`
+among its inputs, and one whose code reads the `justfile` names the file: it is no global
+input, so an edit moves only the hashes it really changes. `justfileSelection` is what still
+selects each project. `nx.json` stays global because Nx's own hash planner adds it to every task.
+
 ## Invariants (non-negotiable)
 
 - **Coverage is enforced at 95% line coverage.** `just check` fails below it.

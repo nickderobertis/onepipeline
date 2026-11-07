@@ -1217,7 +1217,11 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     const tier = project("onepipeline-stop-verdict");
     assert.equal(tier.targets.test.cache, false);
     assert.equal(tier.targets["test-build"].cache, true);
-    assert.deepEqual(tier.targets["test-build"].inputs, tier.targets.test.inputs);
+    // The producer's one more input is the digest of the recipe it runs; the timed run is
+    // uncached, so it needs none.
+    const recipeDigest = { runtime: "node scripts/nx-recipe-input.mjs _stop-verdict-build" };
+    assert.deepEqual(tier.targets["test-build"].inputs[0], recipeDigest);
+    assert.deepEqual(tier.targets["test-build"].inputs.slice(1), tier.targets.test.inputs);
   });
 
   it("builds only the release tree, leaving the debug tree's lock to the rest of the gate", () => {
