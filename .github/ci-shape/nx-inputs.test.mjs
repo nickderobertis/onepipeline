@@ -247,7 +247,7 @@ test("Nx's own expanded inputs cover every original cached task's files after th
 });
 
 // Every cached target of every project, as real Nx reads it: what a global input's edit
-// could move. The global input merges moved most stopped being global.
+// could move.
 function cachedTargets(dir) {
   const out = join(dir, ".nx/project-graph.json");
   mkdirSync(join(dir, ".nx"), { recursive: true });
