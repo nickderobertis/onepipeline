@@ -2871,6 +2871,7 @@ fn a_person_resolving_a_tied_item_wakes_a_watch_on_the_run_once() {
     );
     let started = world.run(&["start", &project, "--detach"]);
     started.exited(0);
+    #[cfg(unix)]
     let driver = started.json()["pid"].as_u64().unwrap() as u32;
     world.until("the side step to start", |w| {
         dispatched(w, name) == ["side"]
@@ -2954,18 +2955,23 @@ fn a_person_resolving_a_tied_item_wakes_a_watch_on_the_run_once() {
     );
     assert_eq!(item_surfaces(&world, name), carried);
 
-    // Nor by an adopted driver, whose first pass carries it over again.
-    assert!(forget_delivery(&world));
-    crate::harness::end_process(driver);
-    world.until("the dead driver to be proved gone", |w| {
-        w.run(&["status", name]).stdout.contains("DRIVER DEAD")
-    });
-    world.run(&["adopt", name, "--detach"]).exited(0);
-    world.until("the adopted driver to carry", |w| {
-        std::fs::read_to_string(w.runs.join("human-items/events.ndjson")).is_ok()
-            && forgotten_delivery_returned(w)
-    });
-    assert_eq!(item_surfaces(&world, name), carried);
+    // Nor by an adopted driver, whose first pass carries it over again. **Unix** only,
+    // because the driver is ended by pid and `harness::end_process` has no Windows
+    // spelling: the same terms `driver.rs`'s adoption journeys are gated on.
+    #[cfg(unix)]
+    {
+        assert!(forget_delivery(&world));
+        crate::harness::end_process(driver);
+        world.until("the dead driver to be proved gone", |w| {
+            w.run(&["status", name]).stdout.contains("DRIVER DEAD")
+        });
+        world.run(&["adopt", name, "--detach"]).exited(0);
+        world.until("the adopted driver to carry", |w| {
+            std::fs::read_to_string(w.runs.join("human-items/events.ndjson")).is_ok()
+                && forgotten_delivery_returned(w)
+        });
+        assert_eq!(item_surfaces(&world, name), carried);
+    }
 
     // A reopen and a note wake it as well, each once, and say who acted.
     let reopened = &carried[0];
@@ -3016,6 +3022,7 @@ fn a_person_resolving_a_tied_item_wakes_a_watch_on_the_run_once() {
 }
 
 /// Whether delivery's document exists again: a carry has run since it was forgotten.
+#[cfg(unix)]
 fn forgotten_delivery_returned(world: &World) -> bool {
     fn exists(dir: &std::path::Path) -> bool {
         std::fs::read_dir(dir).is_ok_and(|entries| {
