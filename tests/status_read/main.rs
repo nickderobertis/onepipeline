@@ -245,6 +245,11 @@ fn status_results_and_transcript_read_a_long_run_and_record_what_each_spent() {
     );
 
     let transcript = world.read(&["transcript", generate::DISPATCH, generate::DISPATCH_NODE]);
+    assert!(
+        transcript.stdout.lines().count() >= generated.references,
+        "every reference is a line of the transcript: {} lines",
+        transcript.stdout.lines().count()
+    );
     let unresolved = transcript
         .stdout
         .lines()

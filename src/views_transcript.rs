@@ -332,14 +332,17 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
         Some(&location.history_project),
         &location.history_session,
     );
-    let file = match found {
-        Ok(Some(found)) => std::fs::File::open(found).map_err(|error| {
-            unresolved(if error.kind() == std::io::ErrorKind::NotFound {
-                Why::MissingFile
-            } else {
-                Why::Unreadable
-            })
-        })?,
+    let (found, file) = match found {
+        Ok(Some(found)) => {
+            let file = std::fs::File::open(&found).map_err(|error| {
+                unresolved(if error.kind() == std::io::ErrorKind::NotFound {
+                    Why::MissingFile
+                } else {
+                    Why::Unreadable
+                })
+            })?;
+            (found, file)
+        }
         // The lookup answers nothing for an address that names no plain file
         // under the store as well as for one that is absent: the first is a
         // reference this build cannot follow, the second a file that is gone.
@@ -354,7 +357,7 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
     };
     let history_id = location.history_id.to_string();
     if let Some(wanted) = index {
-        return session_index::of_file(&path, file)
+        return session_index::of_file(&found, file)
             .ok_or_else(|| unresolved(Why::Unreadable))?
             .activity(&history_id, wanted, &unresolved);
     }
