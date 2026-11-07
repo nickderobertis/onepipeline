@@ -119,12 +119,19 @@ describe("a recipe digest that cannot be taken", () => {
     assert.notEqual(first.stdout, second.stdout, "two failures shared a key");
     return first.stderr;
   };
-  it("refuses a recipe the justfile does not define", () => assert.match(fails(["no-such-recipe"]), /no recipe 'no-such-recipe'/));
+  it("refuses a recipe the justfile does not define", () => {
+    const said = fails(["no-such-recipe"]);
+    assert.match(said, /no recipe 'no-such-recipe'/);
+    assert.match(said, /ACTION: name what the justfile defines/);
+  });
   it("refuses a variable the justfile does not define", () => assert.match(fails(["main", "--variable", "no-such"]), /no variable 'no-such'/));
   it("refuses --variable with no name", () => assert.match(fails(["main", "--variable"]), /--variable names no variable/));
   it("refuses being asked for nothing", () => assert.match(fails([]), /name a recipe/));
-  it("refuses a justfile just cannot parse", () => {
-    fails(["main"], { justfile: "main:\n    @echo {{nope}}\n" });
+  it("refuses a justfile just cannot parse, and says to fix the justfile", () => {
+    assert.match(fails(["main"], { justfile: "main:\n    @echo {{nope}}\n" }), /ACTION: fix the justfile/);
+  });
+  it("says to install just when just is not there", () => {
+    assert.match(fails(["main"], { env: { PATH: join(dir, "no-such-directory") } }), /ACTION: install just/);
   });
   for (const [what, answer, reason] of [
     ["no recipes", '{"assignments":{},"settings":{}}', /carries no recipes/],
@@ -140,7 +147,9 @@ describe("a recipe digest that cannot be taken", () => {
       mkdirSync(bin, { recursive: true });
       writeFileSync(join(bin, "just"), `#!/usr/bin/env bash\nprintf '%s' '${answer}'\n`);
       chmodSync(join(bin, "just"), 0o755);
-      assert.match(fails(["main"], { env: { PATH: `${bin}${delimiter}${process.env.PATH}` } }), reason);
+      const said = fails(["main"], { env: { PATH: `${bin}${delimiter}${process.env.PATH}` } });
+      assert.match(said, reason);
+      assert.match(said, /ACTION: use the just .* pins, or teach/);
     });
   }
 });

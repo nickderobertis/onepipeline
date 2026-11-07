@@ -169,6 +169,21 @@ function digestOf(dump, reach) {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
 
+// What fixes this failure: each names only what could.
+function actionFor(error) {
+  if (error.code === "ENOENT")
+    return "install just, at the version .github/ci-tool-versions.json pins, then re-run";
+  if (error.status !== undefined)
+    return "fix the justfile: `just --dump` above says what it could not read";
+  if (error instanceof SyntaxError || /just's dump/.test(error.message))
+    return "use the just .github/ci-tool-versions.json pins, or teach scripts/nx-recipe-input.mjs this dump's shape";
+  if (/the justfile has no/.test(error.message))
+    return "name what the justfile defines (`just --list`), in this target's inputs in its project.json";
+  if (/names no variable|name a recipe/.test(error.message))
+    return "run 'node scripts/nx-recipe-input.mjs RECIPE... [--variable NAME]...'";
+  return "fix what the message above names, then re-run";
+}
+
 try {
   const wanted = parseArguments(process.argv.slice(2));
   const dump = validated(
@@ -184,7 +199,7 @@ try {
   const unique = randomUUID();
   process.stdout.write(`recipe-input-failed-${unique}\n`);
   process.stderr.write(
-    `nx-recipe-input: ${error.message} (${unique})\nACTION: install just and name recipes the justfile defines\n`,
+    `nx-recipe-input: ${error.message} (${unique})\nACTION: ${actionFor(error)}\n`,
   );
   process.exitCode = 1;
 }
