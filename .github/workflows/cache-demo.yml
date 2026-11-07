@@ -1,0 +1,111 @@
+# A throwaway on a draft whose branch disables ci.yml: builds each altered warm leg from
+# cold and measures the archive it would save. It restores no Rust copy and saves nothing:
+# a trial copy would itself push the repository over its allowance and evict results.
+name: Cache demo
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - name: What the bootstrap tools are built from
+        id: pins
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install the bootstrap tools
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec _ensure-prune-superseded
+      - name: Build what test-linux and lint build
+        run: bash scripts/warm-rust-cache.sh linux
+      - name: The coverage tier's flags over the instrumented doubles
+        run: node scripts/cache-demo/measure.mjs doubles
+      - name: Build what lint's visual docs capture builds
+        env:
+          SHOTS_OUT: shots/current/x86_64
+        run: bash screenshots/ci-capture.sh
+      - name: The capture's archive, and its build again
+        run: node scripts/cache-demo/measure.mjs capture-archive
+      - name: Keep the capture's build out of the test-linux family
+        run: rm -rf target/ci-capture-target
+      - name: What the family would archive
+        run: node scripts/cache-demo/measure.mjs clean-and-archive --leg linux
+      - name: Each warm line again over the result
+        run: node scripts/cache-demo/measure.mjs rerun --leg linux
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: What the bootstrap tools are built from
+        id: pins
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install the bootstrap tools
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec _ensure-prune-superseded
+      - name: Build what test-windows builds
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: bash scripts/warm-rust-cache.sh cross
+      - name: What the family would archive
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: node scripts/cache-demo/measure.mjs clean-and-archive --leg cross
+      - name: Each warm line again over the result
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: node scripts/cache-demo/measure.mjs rerun --leg cross
