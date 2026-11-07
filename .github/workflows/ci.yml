@@ -147,9 +147,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
+      # A fork's run writes nothing to any cache: this action saves its own otherwise.
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
+          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # Whether the lock still resolves the sibling engines the manifest permits
@@ -359,9 +361,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
+      # A fork's run writes nothing to any cache: this action saves its own otherwise.
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
+          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
@@ -523,9 +527,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
+      # A fork's run writes nothing to any cache: this action saves its own otherwise.
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
+          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       - name: What the bootstrap tools are built from
         id: pins
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -647,9 +653,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.ci-tools.outputs.python }}
+      # A fork's run writes nothing to any cache: this action saves its own otherwise.
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
+          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       - name: What the bootstrap tools are built from
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"

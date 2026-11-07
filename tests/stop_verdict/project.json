@@ -15,6 +15,9 @@
     "build": {
       "command": "just _tier-build stop_verdict",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
@@ -32,6 +35,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/stop_verdict/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
@@ -46,6 +52,9 @@
     "lint": {
       "command": "just _tier-lint stop_verdict",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
@@ -62,7 +71,11 @@
       "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly the uncached `test`'s producing inputs. A matching producer result replays; the timed journey checks and builds its executable through its own recipe before recording it. The debug test binaries `test` runs come from `onepipeline:build`, the other edge `test` declares.",
       "cache": true,
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _stop-verdict-build"
+        },
         "rustBuild",
+        "{workspaceRoot}/justfile",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
@@ -84,6 +97,7 @@
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, and the cached producer uses this same input set. A module left out of both would let a changed binary be judged by an old one's timings. The timed tier itself stays uncached because its record requires the producing executable.",
       "inputs": [
         "rustBuild",
+        "{workspaceRoot}/justfile",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
@@ -129,6 +143,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

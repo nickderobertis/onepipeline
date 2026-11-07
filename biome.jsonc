@@ -17,6 +17,7 @@
       "tests/ci_jobs/**/*.mjs",
       "tests/ci_jobs/**/*.json",
       // Upstream-owned copies are held byte-identical by the shared-script drift test.
+      "!!scripts/actions-cache-prune.mjs",
       "!!scripts/nx-remote-cache.mjs",
       "!!scripts/nx-version-free-inputs.mjs"
     ]

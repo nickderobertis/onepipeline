@@ -76,6 +76,11 @@ over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it.
 
+A cached target that runs `just <recipe>` names `node scripts/nx-recipe-input.mjs <recipe>`
+among its inputs, and one whose code reads the `justfile` names the file: it is no global
+input, so an edit moves only the hashes it really changes. `justfileSelection` is what still
+selects each project. `nx.json` stays global because Nx's own hash planner adds it to every task.
+
 ## Invariants (non-negotiable)
 
 - **Coverage is enforced at 95% line coverage.** `just check` fails below it.
@@ -141,18 +146,20 @@ nobody here made must not block an unrelated merge; red there is closed by one
 a stale gallery is a thing to refresh, not a reason to hold a correct change out
 of `main`.
 
-**Nine budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
+**Ten budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
 telemetry the run already produced, never measured afresh:
 
 <!-- llmlint: ignore-block[agents_md_durable_and_terse] the change that set these budgets requires this section to name each one with its label and where it is checked, beside the required checks it holds: budgets.yaml says what each measures, and this is the one place that says which moment enforces which, and why none of them can block a release or a laptop's gate. -->
-- The eight labelled `release-tail` — `onepipeline-ci-check-time`,
+- The nine labelled `release-tail` — `onepipeline-ci-check-time`,
   `onepipeline-cd-job-time`, `onepipeline-release-cycle-time`,
   `onepipeline-ci-job-count`, `onepipeline-cd-job-count`, `onepipeline-nx-cache-use`,
-  `onepipeline-release-read-requests` and `onepipeline-pr-read-requests` — are
+  `onepipeline-cache-headroom`, `onepipeline-release-read-requests` and
+  `onepipeline-pr-read-requests` — are
   checked **after the release, reporting only**, by the last step of
   `release.yml`'s `publish`. Nothing reads that step's result, so an over figure
   never blocks, demotes or reverts a release. `scripts/actions-budget-figures.sh`
-  is dero-skills' create-repo copy: change it there, never here. At PR time a
+  is dero-skills' create-repo copy, as are `scripts/nx-remote-cache.mjs` and
+  `scripts/actions-cache-prune.mjs`: change them there, never here. At PR time a
   check that runs long is failed by its own `timeout-minutes`.
 - `onepipeline-gate-time`, labelled `host-variable`, is checked **by `just gate`
   on a development machine, as a warning**: over warns and still passes, since a

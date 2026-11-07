@@ -234,6 +234,9 @@ test("Nx's own expanded inputs cover every original cached task's files after th
       for (const file of originals[id].sourceFiles) {
         if (retired.has(file)) continue;
         if (file === "CHANGELOG.md" && !versionReaders.has(id)) continue;
+        // Narrowed: a task now reads the recipes it runs through scripts/nx-recipe-input.mjs,
+        // which the narrowing journey below holds, and names the file only if it reads it.
+        if (file === "justfile" && !now[id].sourceFiles.includes(file)) continue;
         assert.ok(union.has(file === "biome.json" ? "biome.jsonc" : file), `${id} lost the input ${file}`);
       }
     }
@@ -241,6 +244,128 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     rmSync(base, { recursive: true, force: true });
     rmSync(current, { recursive: true, force: true });
   }
+});
+
+// Every cached target of every project, as real Nx reads it: what a global input's edit
+// could move.
+function cachedTargets(dir) {
+  const out = join(dir, ".nx/project-graph.json");
+  mkdirSync(join(dir, ".nx"), { recursive: true });
+  rmSync(join(dir, ".nx/workspace-data"), { recursive: true, force: true });
+  run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "graph", `--file=${out}`]);
+  const found = new Map();
+  for (const [name, node] of Object.entries(JSON.parse(readFileSync(out, "utf8")).graph.nodes))
+    for (const [target, definition] of Object.entries(node.data.targets ?? {}))
+      if (definition.cache === true) found.set(`${name}:${target}`, definition);
+  rmSync(out, { force: true });
+  return found;
+}
+const recipeOf = (definition) => String(definition.options?.command ?? definition.command ?? "").match(/^just (\S+)/)?.[1];
+function assertMoved(before, after, expected, what) {
+  const moved = Object.keys(before).filter((id) => before[id].hash !== after[id].hash).sort();
+  assert.deepEqual(moved, [...expected].sort(), what);
+}
+
+test("a justfile edit moves the tasks that run or read what it changed, and no other", { timeout: 900000 }, () => {
+  const dir = fixture();
+  try {
+    const targets = cachedTargets(dir);
+    const tasks = [...targets.keys()];
+    const before = capture(dir, tasks);
+    const readers = tasks.filter((id) => before[id].sourceFiles.includes("justfile"));
+    assert.ok(readers.includes("onepipeline:test-quick"), "the crate's tests read the justfile");
+    assert.ok(!readers.includes("onepipeline-contract:test-quick"), "the contract tier does not read the file");
+    const running = (...recipes) => tasks.filter((id) => recipes.includes(recipeOf(targets.get(id))));
+    const quickTiers = tasks.filter((id) => id.endsWith(":test-quick"));
+    const path = join(dir, "justfile");
+    const original = readFileSync(path, "utf8");
+    const editRecipe = (name) => {
+      const header = new RegExp(`^${name}\\b[^\\n]*:[^\\n]*\\n`, "m");
+      assert.match(original, header, `the justfile has no ${name}`);
+      return original.replace(header, (line) => `${line}    @true input-probe\n`);
+    };
+    for (const [what, edited, expected] of [
+      ["a recipe one task runs", editRecipe("_crate-doc"), running("_crate-doc")],
+      ["a recipe many tasks run", editRecipe("_tier-lint"), running("_tier-lint")],
+      ["a recipe reached only through a script a recipe names", editRecipe("_crate-test-quick-archive"), quickTiers],
+      ["the variable the journeys read from the file", original.replace(/^onetaskgraph-version := "/m, 'onetaskgraph-version := "9'), quickTiers],
+      ["a comment", `# a comment nothing runs\n${original}`, []],
+    ]) {
+      assert.notEqual(edited, original, what);
+      writeFileSync(path, edited);
+      const after = capture(dir, tasks);
+      writeFileSync(path, original);
+      assertMoved(before, after, new Set([...expected, ...readers]), what);
+    }
+    assert.ok(tasks.some((id) => !readers.includes(id) && !recipeOf(targets.get(id))), "a task that runs no recipe keeps its hash above");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// nx.json stays a global input, and not by choice: Nx's own hash planner adds it (and
+// .gitignore) to every task, named or not. A later Nx that stops doing so fails this,
+// which is when narrowing it becomes possible.
+test("Nx itself hashes nx.json into every task, so no input setting can narrow it", { timeout: 300000 }, () => {
+  const dir = fixture();
+  try {
+    const tasks = ["onepipeline-e2e:test-quick", "onepipeline-contract:lint", "pool-maintenance:format-check"];
+    const path = join(dir, "nx.json");
+    const nx = JSON.parse(readFileSync(path, "utf8"));
+    nx.namedInputs.sharedGlobals = nx.namedInputs.sharedGlobals.filter((input) => input !== "{workspaceRoot}/nx.json");
+    writeFileSync(path, JSON.stringify(nx));
+    const before = capture(dir, tasks);
+    for (const id of tasks) assert.ok(before[id].sourceFiles.includes("nx.json"), `${id} no longer hashes nx.json`);
+    writeFileSync(path, JSON.stringify({ ...nx, namedInputs: { ...nx.namedInputs, inputProbe: ["{workspaceRoot}/LICENSE"] } }));
+    const after = capture(dir, tasks);
+    for (const id of tasks) assert.notEqual(after[id].hash, before[id].hash, `${id} kept its hash, so nx.json can be narrowed now`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("narrowing hashes selects the same projects: a justfile edit still touches them", { timeout: 300000 }, () => {
+  const base = fixture("7e3a3c72");
+  const current = fixture();
+  try {
+    const affected = (dir, file) => {
+      rmSync(join(dir, ".nx/workspace-data"), { recursive: true, force: true });
+      return JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--affected", "--files", file, "--json"])).sort();
+    };
+    const selected = affected(current, "justfile");
+    assert.ok(selected.includes("onepipeline-contract"), "the justfile no longer selects the contract tier");
+    assert.deepEqual(selected, affected(base, "justfile"), "the justfile selects other projects than before");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(current, { recursive: true, force: true });
+  }
+});
+
+test("a task that runs a recipe hashes that recipe, and the justfile is not global", { timeout: 120000 }, () => {
+  const dir = fixture();
+  try {
+    const missing = [...cachedTargets(dir)].filter(([, definition]) => {
+      const recipe = recipeOf(definition);
+      return recipe && !definition.inputs.some((input) => new RegExp(`^node scripts/nx-recipe-input\\.mjs ${recipe}( |$)`).test(input.runtime ?? ""));
+    }).map(([id]) => id);
+    assert.deepEqual(missing, []);
+    const { sharedGlobals } = JSON.parse(readFileSync(join(dir, "nx.json"), "utf8")).namedInputs;
+    assert.ok(!sharedGlobals.includes("{workspaceRoot}/justfile"), "the justfile is global again");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a failed recipe digest never yields a replayable key", { timeout: 120000 }, () => {
+  const dir = fixture();
+  try {
+    const digest = (...args) => spawnSync(process.execPath, ["scripts/nx-recipe-input.mjs", ...args], { cwd: dir, encoding: "utf8" });
+    const healthy = digest("_crate-doc");
+    assert.equal(healthy.status, 0, healthy.stderr);
+    assert.match(healthy.stdout.trim(), /^[0-9a-f]{64}$/);
+    assert.equal(digest("_crate-doc").stdout, healthy.stdout, "a healthy tree must keep one digest");
+    const [first, second] = [digest("no-such-recipe"), digest("no-such-recipe")];
+    for (const failed of [first, second]) {
+      assert.equal(failed.status, 1);
+      assert.doesNotMatch(failed.stdout, /^[0-9a-f]{64}$/m);
+      assert.match(failed.stderr, /ACTION: /);
+    }
+    assert.notEqual(first.stdout, second.stdout);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("every quick tier's real Nx hash retains the selected nextest partition", { timeout: 120000 }, () => {
