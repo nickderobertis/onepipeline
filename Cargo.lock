@@ -1756,9 +1756,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "917012250d5f13771218405838c66632704a5672e4ec6ef37c19283d60871ffe"
+checksum = "ed2ab15d44fa083a6f6e10b2d989176be666cce6b08c3a2ed3101faa5db5ed9e"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1786,9 +1786,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2802b3e0c8f756239c4245a55f1b9522198a1f46703dd46590d9ded8fecb6ed"
+checksum = "2b5e06e7a8737bb0c58d6cea6d6dfa0b87ced0c352591dafde25c74a25b330fe"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1804,9 +1804,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a94bc60525317aaf7aeb8e4d1d676bbdec4a7a8be57f465da61897d634a40d9"
+checksum = "54276257f42b74de3f0a3244802fdef65f1b01c531aafe390faac7efa99f11cc"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1818,9 +1818,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "281d5c28c8279b5739e16fd8d33c8adf82d9a51ab0ebbe3749c071ddd540cea4"
+checksum = "9037d3b8c2ba8d2c3ae3457f2420b76f540bd4f90ab0decc644d9ee0f9af2ebb"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1836,9 +1836,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "652c387e642a573d871753521c7fdb2fcb58d008f0e0de1acfa8793a6676c091"
+checksum = "10f7466510bbb952f497e89b75f1a50ac2fa3f1ecfee04b8f509e128390141bd"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1853,9 +1853,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.14.3"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae76bd6469cfa69a18f0f8c4dd57f3a09e064de0637366a4af586fe95ba41d5"
+checksum = "44eadff6ba180853100bf6f3e7eb91095b5b55c4c10adcb767407ccaae96cf61"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

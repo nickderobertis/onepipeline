@@ -2296,7 +2296,9 @@ fn a_private_linear_home_keeps_section_links_local_in_dispatch_and_on_the_public
         })
         .unwrap();
     assert!(
-        public.contains("[the budget](#user-content-budget-details)"),
+        public.contains(
+            "[the budget](https://www.github.com/owner/library/issues/2#user-content-budget-details)"
+        ),
         "{public}"
     );
     for text in [dispatched.as_str(), public] {

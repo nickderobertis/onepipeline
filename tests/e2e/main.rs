@@ -235,6 +235,8 @@ mod older_launch_record;
 mod github_create_retry;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey reads a plan out of a private GitHub board and writes a live addition back through the linked `github-projects` plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod linear_writeback` above.
 mod private_github_home;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey writes through the linked store and its `github-projects` plugin to a loopback board under the linked `onevcs` binary's policy, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod private_github_home` above.
+mod narrow_write_cost;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is `land`, `lifecycle`'s drafter and `destination`'s resolution together, against
 // the linked `onevcs` over a real origin — so the narrowest edge they can honestly sit

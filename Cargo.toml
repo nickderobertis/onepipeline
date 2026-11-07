@@ -1353,14 +1353,23 @@ onevcs-testing = "0.20.0"
 # destination (table cells, reference-style definitions), pointing each at the counterpart
 # there; `tests/e2e/multi_source.rs`'s private-references journey fails on 0.14.2, which
 # rewrites one of the three and misses the one it cannot resolve.
-onetaskgraph-core = "=0.14.3"
-onetaskgraph-plugin-api = "=0.14.3"
-onetaskgraph-local-md = "=0.14.3"
+# **0.14.4 writes a same-record section link on GitHub as the issue's own `www` URL**, the one
+# form that scrolls when clicked inside that issue; `linear_writeback.rs`'s private Linear
+# journey holds it on the public board.
+# **0.14.5 screens a narrow write's own text without reading the item first**, so a settlement
+# or a plan copy under a policy that can rewrite costs what it costs under one that only checks,
+# and a term already stored is left for `sources sanitize`. The engine stays off
+# `with_sanitize_stored_on_write`, by the user's ruling that screening adds no GitHub request to
+# a small board edit. `tests/e2e/narrow_write_cost.rs` fails below this release, and so does
+# `publication_boundary`'s settlement journey.
+onetaskgraph-core = "=0.14.5"
+onetaskgraph-plugin-api = "=0.14.5"
+onetaskgraph-local-md = "=0.14.5"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.3"
+onetaskgraph-linear = "=0.14.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

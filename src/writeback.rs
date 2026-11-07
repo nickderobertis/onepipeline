@@ -759,9 +759,10 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
             ("visibility-unreadable".to_owned(), Some(error))
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        // Existing-body refusals use the store's Predates variant: publication_boundary's
-        // settlement body journey asserts its distinct pre-existing-term guidance and
-        // this boundary-refused kind through the real engine's records.
+        // The Predates variant answers a term already stored on the item, which the linked
+        // store reaches only under `sanitize_stored_on_write`. The engine does not set it, so
+        // a settlement leaves that term for `sources sanitize`, as publication_boundary's
+        // settlement journey holds, and the variant is named for this match's exhaustiveness.
         EngineError::BoundaryRefused { .. } | EngineError::BoundaryRefusedPredates { .. } => {
             decided("boundary-refused")
         }
