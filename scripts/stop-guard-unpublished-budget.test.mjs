@@ -558,6 +558,7 @@ test("the fingerprint and the producing tier's Nx inputs name one set of files",
       if (
         [
           "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+          "{workspaceRoot}/scripts/nx-recipe-input.mjs",
           "{workspaceRoot}/.github/nx-version-files",
           "{workspaceRoot}/scripts/ensure-test-archive.sh",
         ].includes(input)
@@ -570,6 +571,7 @@ test("the fingerprint and the producing tier's Nx inputs name one set of files",
       input.runtime?.endsWith("--ecosystem files")
     )
       return [];
+    if (input.runtime?.startsWith("node scripts/nx-recipe-input.mjs ")) return ["justfile"];
     if (/--ecosystem cargo(?: --keep-version)?$/.test(input.runtime ?? ""))
       return ["Cargo.toml", "Cargo.lock"];
     if (input.runtime?.endsWith("--ecosystem npm")) return ["package.json", "package-lock.json"];

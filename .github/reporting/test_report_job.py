@@ -333,8 +333,10 @@ class RealCatalog(Journey):
             if command[0] == 'just':
                 self.assertIn('needs just', reason, budget)
             elif 'release-tail' in budgets[budget].get('labels', []):
-                # cache-use reads GitHub itself rather than through onevcs, and refuses with no release to read.
-                self.assertIn('no release' if 'cache-use' in command else 'onevcs', reason, budget)
+                # cache-use and cache-headroom read GitHub itself rather than through onevcs: one refuses
+                # with no release to read, the other with no storage limit from this host double.
+                expected = 'no release' if 'cache-use' in command else 'storage-limit' if 'cache-headroom' in command else 'onevcs'
+                self.assertIn(expected, reason, budget)
             elif 'host-variable' in budgets[budget].get('labels', []):
                 self.assertIn('report-only', reason, budget)
             else:

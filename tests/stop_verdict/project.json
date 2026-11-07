@@ -75,6 +75,7 @@
           "runtime": "node scripts/nx-recipe-input.mjs _stop-verdict-build"
         },
         "rustBuild",
+        "{workspaceRoot}/justfile",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
@@ -96,6 +97,7 @@
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, and the cached producer uses this same input set. A module left out of both would let a changed binary be judged by an old one's timings. The timed tier itself stays uncached because its record requires the producing executable.",
       "inputs": [
         "rustBuild",
+        "{workspaceRoot}/justfile",
         "{workspaceRoot}/tests/stop_verdict/**/*",
         "{workspaceRoot}/tests/golden/**/*",
         "{workspaceRoot}/tests/recorded/registry/**/*",
