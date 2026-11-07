@@ -2701,11 +2701,14 @@ impl Attempt {
         })?;
         // A store whose configuration opted into the public boundary has its writes
         // checked by the linked `onevcs` rather than by the commands it names — the same
-        // check, answered in process — over the run's own term scope.
+        // check, answered in process — over the run's own term scope. A settlement's narrow
+        // write is screened with the task as stored, so a term someone left on it is rewritten
+        // or refused rather than written past.
         let engine = if built.engine.boundary_active() {
             built
                 .engine
                 .with_write_policy(std::sync::Arc::new(crate::boundary::WritePolicy))
+                .with_sanitize_stored_on_write(true)
                 .with_term_scope(Some(snapshot.term_scope.clone()))
         } else {
             built.engine

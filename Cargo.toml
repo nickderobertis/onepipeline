@@ -1359,14 +1359,18 @@ onevcs-testing = "0.20.0"
 # which leaves the definition naming the path the draft held.
 # It also writes a GitHub issue's link to its own heading as that issue's `www.github.com` URL, the
 # form `tests/e2e/linear_writeback.rs` holds on the public board.
-onetaskgraph-core = "=0.14.4"
-onetaskgraph-plugin-api = "=0.14.4"
-onetaskgraph-local-md = "=0.14.4"
+# **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
+# a term already stored on a task stays for `sources sanitize` unless the caller opts in, as
+# `src/writeback.rs` does, so a settlement still rewrites or refuses it:
+# `tests/e2e/publication_boundary.rs`'s settlement journey fails without that opt-in.
+onetaskgraph-core = "=0.14.5"
+onetaskgraph-plugin-api = "=0.14.5"
+onetaskgraph-local-md = "=0.14.5"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.4"
+onetaskgraph-linear = "=0.14.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
