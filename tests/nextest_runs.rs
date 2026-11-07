@@ -313,6 +313,7 @@ fn scheduling_fixture(case: &str, config: &str) -> Fixture {
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
             ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
+            ("tests/narrow_write.rs", "#[test]\nfn one() {}\n"),
             (
                 "tests/oneagentgraph_liveness.rs",
                 SCHEDULING_OUTSIDE_THE_GROUP,
@@ -343,7 +344,7 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
     );
     assert!(
-        log.contains("12 tests run: 12 passed"),
+        log.contains("13 tests run: 13 passed"),
         "every test of the fixture ran and passed:\n{log}"
     );
 }
@@ -455,6 +456,7 @@ fn leaking_fixture(case: &str) -> Fixture {
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
             ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
+            ("tests/narrow_write.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -630,6 +632,7 @@ fn long_journey_fixture(name: &str, config: &str) -> Fixture {
             ("tests/note.rs", &journeys),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
             ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
+            ("tests/narrow_write.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -1730,6 +1733,7 @@ fn a_single_test_tier_accepts_its_empty_shard_but_refuses_an_empty_filter() {
         "[package]\nname = \"empty-tier\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
         &[
             ("tests/pooled_slot.rs", "#[test] fn journey() {}\n"),
+            ("tests/narrow_write.rs", "#[test] fn journey() {}\n"),
             (
                 "scripts/test-partition.sh",
                 include_str!("../scripts/test-partition.sh"),
@@ -2345,6 +2349,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
             ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
+            ("tests/narrow_write.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     );
@@ -2370,7 +2375,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
         .filter_map(|line| line.split_once(' '))
         .map(|(binary, test)| format!("{binary}\t{test}"))
         .collect();
-    assert_eq!(tests.len(), 7, "{}", stdout(&listed));
+    assert_eq!(tests.len(), 8, "{}", stdout(&listed));
 
     let mut log = String::new();
     for (_, project, _) in INVENTORY_PROJECTS {

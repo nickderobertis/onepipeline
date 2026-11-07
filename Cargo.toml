@@ -1362,7 +1362,7 @@ onevcs-testing = "0.20.0"
 # **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
 # a term already stored on a task stays for `sources sanitize` unless the caller opts in. The
 # engine does not, by the user's ruling that screening adds no GitHub request to a small board
-# edit: `tests/e2e/narrow_write_cost.rs` fails if it does. It does not compile against 0.14.4,
+# edit: `tests/narrow_write/main.rs` fails if it does. It does not compile against 0.14.4,
 # which has no such opt-in; with that one call taken out, its comparisons fail there on the reads.
 onetaskgraph-core = "=0.14.5"
 onetaskgraph-plugin-api = "=0.14.5"
@@ -1631,6 +1631,11 @@ path = "tests/e2e/main.rs"
 [[test]]
 name = "pooled_slot"
 path = "tests/pooled_slot/main.rs"
+
+# The narrow-write journeys have their own Nx input edge and coverage tier.
+[[test]]
+name = "narrow_write"
+path = "tests/narrow_write/main.rs"
 
 # The conversational tier, in its own binary for the reason `smoke` is in one:
 # so a runner can name it. Each of these journeys starts a real two-party

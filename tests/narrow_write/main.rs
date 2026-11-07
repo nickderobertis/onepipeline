@@ -15,13 +15,24 @@
 //! `sources sanitize`, by the user's ruling that screening adds no GitHub request to a small board
 //! edit. Opting in fails these journeys, on the read of the item and its comments it adds, and
 //! [`a_term_already_stored_stays_and_only_the_opt_in_reads_for_it`] shows that read being seen.
+//!
+//! Its own binary and Nx project (`tests/narrow_write/project.json`), so an ordinary e2e edit does
+//! not select these journeys: they read the crate, the linked store and their two support files.
 
 // llmlint: ignore-file[e2e_not_mocked] GitHub is the loopback beside this file — real HTTP on a
 // real socket, reached by the real `github-projects` plugin the engine links — because an offline
 // check may not reach the hosted API. `harness.rs` carries the same suppression and the full
 // rationale.
 
+#[path = "../e2e/github_world_support.rs"]
+mod github_world_support;
+#[path = "../e2e/harness.rs"]
+mod harness;
+#[path = "../e2e/mixed_world_support.rs"]
+mod mixed_world_support;
+
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use onetaskgraph_core::boundary::CommandWritePolicy;
@@ -30,10 +41,9 @@ use onetaskgraph_core::{Engine, Environment, GlobalId};
 use onetaskgraph_plugin_api::{MetadataKey, TaskUpdate};
 use serde_json::{json, Value};
 
-use crate::harness::World;
-use crate::linear_writeback::from_the_launch_directory;
-use crate::private_github_home::{described, metadata_of, GitHub};
-use crate::publication_boundary::{declare_replacement, mixed_world};
+use github_world_support::{described, metadata_of, GitHub};
+use harness::World;
+use mixed_world_support::{declare_replacement, mixed_world};
 
 /// The invented private term the private repository declares, and what replaces it.
 const TERM: &str = "velvetquasar";
@@ -66,9 +76,7 @@ enum Write {
 }
 
 fn policy_command(arguments: &[&str]) -> Value {
-    let onevcs = crate::harness::onevcs_binary()
-        .to_string_lossy()
-        .into_owned();
+    let onevcs = harness::onevcs_binary().to_string_lossy().into_owned();
     let mut command = vec![json!(onevcs)];
     command.extend(arguments.iter().map(|word| json!(word)));
     Value::Array(command)
@@ -187,11 +195,6 @@ fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below hold
-// which `onetaskgraph-core` this crate links: a move of its pin or `Cargo.lock` entry, which only
-// this crate's own project sees, is what fails them, so an edge narrower than this target would
-// drop them out of `nx affected` for exactly the change they exist to catch. They also build on
-// the `World` and `mixed_world` this binary owns. Same grounds as `agents.rs`'s journeys.
 /// A narrow write of each kind, under each policy that can rewrite, sends the board exactly what
 /// it sends under one that only checks. The text the policy rewrote goes out as the
 /// text the check-only store was handed directly, so the two logs compare whole, and the write
@@ -276,7 +279,30 @@ fn a_term_already_stored_stays_and_only_the_opt_in_reads_for_it() {
     assert!(!issue.to_string().contains(TERM), "{issue:#}");
 }
 
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+/// A command whose store is configured by the launch directory's `onetaskgraph.yaml` alone, as
+/// `tests/e2e/linear_writeback.rs`'s journeys launch one: every setting this host's or this
+/// world's commands carry for another source is taken away.
+fn from_the_launch_directory(
+    world: &World,
+    dir: &Path,
+    args: &[&str],
+) -> onepipeline_testfakes::profile::process::Command {
+    let mut command = world.cmd(args);
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("ONETASKGRAPH_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .current_dir(dir)
+        .env_remove("ONETASKGRAPH_DEFAULT_SOURCES")
+        .env_remove(format!(
+            "ONETASKGRAPH_SOURCES__{}__PLUGIN",
+            harness::STORE_SOURCE.to_uppercase()
+        ))
+        .env_remove(harness::store_root_env());
+    command
+}
 
 fn is_mutation(request: &Value) -> bool {
     request["query"]
@@ -295,9 +321,7 @@ fn reads_of_a_run(name: &str, screened: bool) -> Vec<Value> {
     let mut visibility = "";
     if screened {
         visibility = "    visibility: public\n";
-        let onevcs = crate::harness::onevcs_binary()
-            .to_string_lossy()
-            .into_owned();
+        let onevcs = harness::onevcs_binary().to_string_lossy().into_owned();
         for (variable, arguments) in [
             ("CHECK", "boundary,check,--destination,public,--input,-"),
             ("VISIBILITY", "boundary,inspect,--input,-,--json"),
@@ -376,7 +400,7 @@ fn reads_of_a_run(name: &str, screened: bool) -> Vec<Value> {
 /// board no document the unscreened run did not, so nothing in it reads an item's comments or
 /// dependencies for screening. The plan's reads are not compared whole: an active boundary reads a
 /// project's members for its classification whichever policy answers. A stored term staying is
-/// `publication_boundary`'s settlement journey's to hold, as a run's term scope here names no
+/// `tests/e2e/publication_boundary.rs`'s settlement journey's to hold, as a run's term scope here names no
 /// private repository.
 #[test]
 fn a_runs_settlement_under_a_rewriting_policy_reads_what_it_reads_under_none() {
