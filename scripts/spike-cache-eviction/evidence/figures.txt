@@ -1,0 +1,314 @@
+[0 requests]
+onepipeline: 228 readings 2026-11-06T17:06:15Z to 2026-11-07T01:04:49Z, listed 10.497..10.499 GB, usage 10.497..10.499 GB; requests 1458
+onetaskgraph: 228 readings 2026-11-06T17:06:19Z to 2026-11-07T01:04:59Z, listed 10.485..11.282 GB, usage 10.551..10.924 GB; requests 3962
+  18:06:24 listed 10.663 (was 10.631) usage 10.631 entries 2090; new>5MB [('release-plz-Linux-X64-0.3.160', 17), ('release-plz-macOS-ARM64-0.3.160', 14)]; gone 0 = 0.0 MB
+  18:08:24 listed 10.676 (was 10.663) usage 10.663 entries 2093; new>5MB [('release-plz-Windows-X64-0.3.160', 13)]; gone 0 = 0.0 MB
+  18:42:24 listed 10.638 (was 10.676) usage 10.638 entries 2076; new>5MB [('setup-uv-2-x86_64-pc-windows-msvc-windows-20', 19), ('setup-uv-2-x86_64-unknown-linux-gnu-ubuntu-2', 23), ('v0-rust-lint-afresh-lint-Linux-x64-2c443741-', 218), ('setup-uv-2-aarch64-apple-darwin-macos-16-3.1', 17), ('bun-kSmiCOujAb+jFWQqTDn70+CxniQ=', 21)]; gone 48 = 337.5 MB
+    of 2109: rank by last access [0, 1, 2, 3, 4, 5]..47, rank by creation [8, 17, 18, 44, 49, 54]..154; contiguous from oldest access True, from oldest creation False
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3877/merge 316.2MB created 11-04T21:13 last_access 11-04T21:52
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3877/merge 21.3MB created 11-04T07:49 last_access 11-04T21:52
+      nx-cache-17581394019936667777 refs/pull/3877/merge 0.0MB created 11-04T21:18 last_access 11-04T21:18
+      nx-cache-11495231510648096141 refs/pull/3877/merge 0.0MB created 11-04T21:19 last_access 11-04T21:19
+      nx-cache-2012635963737264006 refs/pull/3877/merge 0.0MB created 11-04T21:18 last_access 11-04T21:18
+      nx-cache-12328485791657216028 refs/pull/3877/merge 0.0MB created 11-04T21:10 last_access 11-04T21:10
+  19:14:27 listed 10.924 (was 10.638) usage 10.638 entries 1747; new>5MB [('v0-rust-build-linux-Linux-x64-5e270797-6e0fe', 199), ('v0-rust-build-linux-arm64-Linux-arm64-4936b5', 199)]; gone 333 = 111.8 MB
+    of 2077: rank by last access [0, 1, 2, 3, 4, 5]..332, rank by creation [2, 3, 4, 5, 6, 7]..340; contiguous from oldest access True, from oldest creation False
+      setup-uv-2-x86_64-pc-windows-msvc-windows-2025-3.13.17-prune refs/pull/3889/merge 19.0MB created 11-04T22:54 last_access 11-04T22:54
+      release-plz-Linux-X64-0.3.160 refs/pull/3889/merge 16.5MB created 11-04T22:33 last_access 11-04T22:33
+      release-plz-Linux-X64-0.3.160 refs/pull/3877/merge 16.5MB created 11-04T06:37 last_access 11-04T21:53
+      release-plz-macOS-ARM64-0.3.160 refs/pull/3877/merge 14.0MB created 11-04T06:44 last_access 11-04T21:53
+      release-plz-macOS-ARM64-0.3.160 refs/pull/3889/merge 14.0MB created 11-04T22:33 last_access 11-04T22:33
+      release-plz-Windows-X64-0.3.160 refs/pull/3877/merge 13.0MB created 11-04T06:38 last_access 11-04T21:53
+  19:20:27 listed 10.588 (was 10.924) usage 10.924 entries 1496; new>5MB [('v0-rust-build-windows-Windows_NT-x64-cdab7ce', 187)]; gone 254 = 524.0 MB
+    of 1747: rank by last access [0, 1, 2, 3, 4, 5]..253, rank by creation [8, 9, 10, 11, 15, 16]..356; contiguous from oldest access True, from oldest creation False
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3891/merge 245.3MB created 11-05T07:24 last_access 11-05T11:08
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3889/merge 218.0MB created 11-04T22:57 last_access 11-04T22:57
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3889/merge 21.3MB created 11-04T22:59 last_access 11-04T22:59
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3891/merge 21.3MB created 11-05T07:55 last_access 11-05T11:08
+      setup-uv-2-aarch64-apple-darwin-macos-16-3.13.17-pruned-c4eb refs/pull/3889/merge 17.3MB created 11-04T22:59 last_access 11-04T22:59
+      setup-uv-2-x86_64-unknown-linux-gnu-ubuntu-24.04-unknown-pru refs/pull/3889/merge 0.3MB created 11-04T22:57 last_access 11-04T22:57
+  19:22:28 listed 10.770 (was 10.588) usage 10.770 entries 1498; new>5MB [('v0-rust-build-macos-Darwin-arm64-1d20e77f-6e', 182)]; gone 0 = 0.0 MB
+  19:34:30 listed 10.551 (was 10.770) usage 10.551 entries 1355; new>5MB [('v0-rust-publish-Linux-x64-5e270797-6e0fea97', 303)]; gone 144 = 522.1 MB
+    of 1498: rank by last access [0, 1, 2, 3, 4, 5]..143, rank by creation [40, 41, 44, 45, 46, 50]..289; contiguous from oldest access True, from oldest creation False
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3892/merge 218.0MB created 11-05T12:00 last_access 11-05T12:51
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3894/merge 192.4MB created 11-05T12:30 last_access 11-05T12:30
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3894/merge 21.3MB created 11-05T12:40 last_access 11-05T12:40
+      release-plz-Linux-X64-0.3.160 refs/pull/3894/merge 16.5MB created 11-05T12:21 last_access 11-05T12:21
+      release-plz-Linux-X64-0.3.160 refs/pull/3891/merge 16.5MB created 11-05T07:11 last_access 11-05T11:09
+      release-plz-macOS-ARM64-0.3.160 refs/pull/3894/merge 14.0MB created 11-05T12:23 last_access 11-05T12:23
+  23:58:20 listed 10.596 (was 10.551) usage 10.568 entries 1366; new>5MB [('release-plz-Linux-X64-0.3.160', 17), ('release-plz-macOS-ARM64-0.3.160', 14), ('release-plz-Windows-X64-0.3.160', 13)]; gone 0 = 0.0 MB
+  00:10:29 listed 10.485 (was 10.596) usage 10.568 entries 1345; new>5MB [('v0-rust-lint-afresh-lint-Linux-x64-2c443741-', 281)]; gone 126 = 391.7 MB
+    of 1440: rank by last access [0, 1, 2, 3, 4, 5]..125, rank by creation [6, 7, 65, 68, 76, 77]..216; contiguous from oldest access True, from oldest creation False
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3896/merge 258.2MB created 11-05T13:50 last_access 11-05T13:50
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3892/merge 21.3MB created 11-05T13:45 last_access 11-05T13:45
+      setup-uv-2-x86_64-pc-windows-msvc-windows-2025-3.13.17-prune refs/pull/3892/merge 19.1MB created 11-05T12:07 last_access 11-05T12:51
+      release-plz-Linux-X64-0.3.160 refs/pull/3892/merge 16.5MB created 11-05T11:39 last_access 11-05T12:51
+      release-plz-Linux-X64-0.3.160 refs/pull/3896/merge 16.5MB created 11-05T13:33 last_access 11-05T13:33
+      release-plz-macOS-ARM64-0.3.160 refs/pull/3892/merge 14.0MB created 11-05T11:39 last_access 11-05T13:21
+  00:26:46 listed 11.123 (was 10.485) usage 10.568 entries 1391; new>5MB [('v0-rust-test-windows-Windows_NT-x64-1185fd9a', 638)]; gone 0 = 0.0 MB
+  00:28:48 listed 10.669 (was 11.123) usage 10.568 entries 1076; new>5MB [('v0-rust-test-linux-Linux-x64-2c443741-44f644', 1309)]; gone 316 = 1762.4 MB
+    of 1391: rank by last access [0, 1, 2, 3, 4, 5]..315, rank by creation [29, 30, 42, 64, 68, 69]..418; contiguous from oldest access True, from oldest creation False
+      v0-rust-publish-Linux-x64-5e270797-6e0fea97 refs/heads/refs/tags/v0.14.1 303.1MB created 11-05T14:08 last_access 11-05T14:08
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3897/merge 270.2MB created 11-05T21:04 last_access 11-05T21:04
+      v0-rust-lint-afresh-lint-Linux-x64-2c443741-6e0fea97 refs/pull/3901/merge 245.3MB created 11-05T19:59 last_access 11-05T19:59
+      v0-rust-build-linux-Linux-x64-5e270797-6e0fea97 refs/heads/refs/tags/v0.14.1 199.4MB created 11-05T13:53 last_access 11-05T13:53
+      v0-rust-build-linux-arm64-Linux-arm64-4936b508-6e0fea97 refs/heads/refs/tags/v0.14.1 198.5MB created 11-05T13:57 last_access 11-05T13:57
+      v0-rust-build-windows-Windows_NT-x64-cdab7ceb-6e0fea97 refs/heads/refs/tags/v0.14.1 187.0MB created 11-05T13:57 last_access 11-05T13:57
+  00:30:50 listed 11.282 (was 10.669) usage 10.568 entries 1079; new>5MB [('v0-rust-test-macos-Darwin-arm64-2e933a5e-44f', 613)]; gone 0 = 0.0 MB
+  00:34:54 listed 10.663 (was 11.282) usage 10.568 entries 992; new>5MB []; gone 91 = 619.3 MB
+    of 1080: rank by last access [0, 1, 2, 3, 4, 5]..90, rank by creation [26, 76, 77, 78, 79, 80]..179; contiguous from oldest access True, from oldest creation False
+      v0-rust-build-linux-Linux-x64-5e270797-6e0fea97 refs/heads/refs/tags/v0.14.2 199.4MB created 11-05T21:29 last_access 11-05T21:29
+      v0-rust-build-linux-arm64-Linux-arm64-4936b508-6e0fea97 refs/heads/refs/tags/v0.14.2 198.5MB created 11-05T21:28 last_access 11-05T21:28
+      v0-rust-build-macos-Darwin-arm64-1d20e77f-6e0fea97 refs/heads/refs/tags/v0.14.2 181.9MB created 11-05T21:26 last_access 11-05T21:26
+      bun-kSmiCOujAb+jFWQqTDn70+CxniQ= refs/pull/3897/merge 21.3MB created 11-05T21:19 last_access 11-05T21:19
+      setup-uv-2-aarch64-apple-darwin-macos-16-3.13.17-pruned-603b refs/pull/3897/merge 17.3MB created 11-05T21:19 last_access 11-05T21:19
+      setup-uv-2-aarch64-apple-darwin-macos-16-3.13.17-pruned-603b refs/heads/refs/tags/v0.14.2 0.3MB created 11-05T21:26 last_access 11-05T21:26
+onepipeline-ui: 229 readings 2026-11-06T17:01:11Z to 2026-11-07T01:05:11Z, listed 9.220..9.261 GB, usage 9.220..9.261 GB; requests 955
+  17:10:33 listed 9.261 (was 9.220) usage 9.220 entries 181; new>5MB [('onepipeline-api-baseline-Linux-X64-7d264e133', 40)]; gone 0 = 0.0 MB
+onepipeline:
+onetaskgraph:
+  18:42:24: gone 48 {('other', 'pr'): 1, ('nx-cache', 'pr'): 46, ('rust', 'pr'): 1}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 48; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T18:01'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-06T18:04'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-06T18:04'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-06T18:04')]
+  19:14:27: gone 333 {('other', 'pr'): 14, ('nx-cache', 'pr'): 171, ('nx-cache', 'other'): 148}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 333; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-06T18:04'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-06T19:07'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-06T19:06')]
+  19:20:27: gone 254 {('rust', 'pr'): 2, ('other', 'pr'): 4, ('nx-cache', 'main'): 84, ('nx-cache', 'pr'): 164}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 254; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-06T18:04'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-06T19:07'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-06T19:06')]
+  19:34:30: gone 144 {('nx-cache', 'main'): 30, ('other', 'pr'): 14, ('nx-cache', 'pr'): 98, ('rust', 'pr'): 2}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 144; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-06T18:04'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-06T19:07'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-06T19:06')]
+  00:10:29: gone 126 {('other', 'main'): 3, ('nx-cache', 'main'): 40, ('other', 'pr'): 15, ('nx-cache', 'pr'): 67, ('rust', 'pr'): 1}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 126; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-06T23:56'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-06T23:56'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-06T23:56')]
+  00:28:48: gone 316 {('nx-cache', 'main'): 52, ('other', 'main'): 3, ('nx-cache', 'pr'): 235, ('rust', 'tag'): 5, ('other', 'tag'): 3, ('other', 'pr'): 16, ('rust', 'pr'): 2}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 316; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-07T00:19'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-07T00:17'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-07T00:17')]
+  00:34:54: gone 91 {('nx-cache', 'main'): 69, ('nx-cache', 'pr'): 15, ('other', 'pr'): 2, ('other', 'tag'): 2, ('rust', 'tag'): 3}; survivors accessed earlier than the newest gone: 0; gone though created after a survivor: 91; older-created Rust surviving gone results: [('v0-rust-release-plz-Linux-x64-5e2707', '11-04T19:56', '11-06T19:06'), ('v0-rust-test-macos-Darwin-arm64-2e93', '11-04T20:09', '11-07T00:19'), ('v0-rust-test-windows-Windows_NT-x64-', '11-04T20:09', '11-07T00:17'), ('v0-rust-test-linux-Linux-x64-2c44374', '11-04T20:15', '11-07T00:17')]
+onepipeline-ui:
+onepipeline:
+onetaskgraph:
+  18:42:24 (+22m) listed 10.6376 usage 10.6376 entries 2076 total_count 2076; new 298.9MB gone 48 = 337.5MB; save crossing 10 GiB at 18:34:09 (v0-rust-lint-afresh-lint-Linux-x); newest gone last access 11-04T21:52:44, oldest survivor 11-04T21:53:00
+  19:14:27 (+2m) listed 10.9241 usage 10.6376 entries 1747 total_count 1747; new 398.3MB gone 333 = 111.8MB; save crossing 10 GiB at 19:13:18 (v0-rust-build-linux-Linux-x64-5e); newest gone last access 11-04T22:54:55, oldest survivor 11-04T22:57:53
+  19:16:27 (+2m) listed 10.9241 usage 10.6376 entries 1747 total_count 1747; new 0.0MB gone 0 = 0.0MB
+  19:18:27 (+2m) listed 10.9241 usage 10.9241 entries 1747 total_count 1747; new 0.0MB gone 0 = 0.0MB
+  19:20:27 (+2m) listed 10.5878 usage 10.9241 entries 1496 total_count 1496; new 187.7MB gone 254 = 524.0MB; save crossing 10 GiB at 19:18:46 (setup-uv-2-x86_64-pc-windows-msv); newest gone last access 11-05T11:08:53, oldest survivor 11-05T11:09:15
+  19:22:28 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 182.2MB gone 0 = 0.0MB; save crossing 10 GiB at 19:21:50 (v0-rust-build-macos-Darwin-arm64)
+  19:24:29 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 0.0MB gone 0 = 0.0MB
+  19:26:30 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 0.0MB gone 0 = 0.0MB
+  19:28:30 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 0.0MB gone 0 = 0.0MB
+  19:30:30 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 0.0MB gone 0 = 0.0MB
+  19:32:30 (+2m) listed 10.7700 usage 10.7700 entries 1498 total_count 1498; new 0.0MB gone 0 = 0.0MB
+  19:34:30 (+2m) listed 10.5509 usage 10.5509 entries 1355 total_count 1355; new 303.0MB gone 144 = 522.1MB; save crossing 10 GiB at 19:32:56 (v0-rust-publish-Linux-x64-5e2707); newest gone last access 11-05T12:51:09, oldest survivor 11-05T12:51:10
+  00:10:29 (+2m) listed 10.4849 usage 10.5680 entries 1345 total_count 1345; new 280.7MB gone 126 = 391.7MB; save crossing 10 GiB at 00:09:10 (v0-rust-lint-afresh-lint-Linux-x); newest gone last access 11-05T13:50:25, oldest survivor 11-05T13:52:39
+  00:26:46 (+2m) listed 11.1226 usage 10.5680 entries 1391 total_count 1391; new 637.5MB gone 0 = 0.0MB; save crossing 10 GiB at 00:25:56 (v0-rust-test-windows-Windows_NT-)
+  00:28:48 (+2m) listed 10.6691 usage 10.5680 entries 1076 total_count 1076; new 1309.0MB gone 316 = 1762.4MB; save crossing 10 GiB at 00:28:35 (v0-rust-test-linux-Linux-x64-2c4); newest gone last access 11-05T21:04:17, oldest survivor 11-05T21:05:58
+  00:30:50 (+2m) listed 11.2825 usage 10.5680 entries 1079 total_count 1079; new 613.3MB gone 0 = 0.0MB; save crossing 10 GiB at 00:29:36 (v0-rust-test-macos-Darwin-arm64-)
+  00:32:51 (+2m) listed 11.2825 usage 10.5680 entries 1080 total_count 1080; new 0.0MB gone 0 = 0.0MB; save crossing 10 GiB at 00:31:53 (nx-cache-3820557291902389802)
+  00:34:54 (+2m) listed 10.6632 usage 10.5680 entries 992 total_count 992; new 0.0MB gone 91 = 619.3MB; save crossing 10 GiB at 00:33:20 (nx-cache-466642419199942635); newest gone last access 11-05T21:29:22, oldest survivor 11-05T21:32:53
+onepipeline-ui:
+onepipeline: {('no save found it over', 'none gone'): 227}; longest a run of readings stood over 10 GiB without coming under 0m
+  exceptions (time, listed before GB, before+new GB, new, gone, gap min): []
+onetaskgraph: {('no save found it over', 'none gone'): 218, ('save found it over', 'gone'): 7, ('save found it over', 'none gone'): 2}; longest a run of readings stood over 10 GiB without coming under 10m
+  exceptions (time, listed before GB, before+new GB, new, gone, gap min): [('00:30:50', 10.669137564, 11.282475685, 3, 0, 2), ('00:32:51', 11.282475685, 11.282486894, 1, 0, 2)]
+onepipeline-ui: {('no save found it over', 'none gone'): 228}; longest a run of readings stood over 10 GiB without coming under 0m
+  exceptions (time, listed before GB, before+new GB, new, gone, gap min): []
+onepipeline: warm runs 37, duration min n=31 p50=22 p90=37 max=42; runs with a save >50MB 27
+  first big save finished to run end, min n=27 p50=5 p90=18 max=28; bytes saved per run GB n=27 p50=1 p90=9 max=10
+    run 41292188331 created 11-01T09:13 end 09:55 macos:09:27=0.72G linux:09:55=0.53G windows:09:55=0.77G linux:09:55=1.53G
+    run 41343346682 created 11-01T19:45 end 20:07 linux:20:02=0.53G
+    run 41379454970 created 11-02T02:45 end 03:07 linux:03:04=0.53G
+    run 41389558435 created 11-02T04:38 end 05:03 macos:04:57=0.95G windows:04:58=1.03G linux:05:03=0.59G linux:05:03=2.51G
+    run 41400160119 created 11-02T06:28 end 06:48 linux:06:40=0.59G
+    run 41421313073 created 11-02T09:31 end 09:51 linux:09:46=0.59G
+    run 41443319421 created 11-02T12:16 end 12:36 linux:12:30=0.59G
+    run 41550499862 created 11-03T00:07 end 00:41 windows:00:26=1.15G linux:00:28=0.65G linux:00:29=2.77G macos:00:41=1.06G
+    run 41569079575 created 11-03T02:55 end 03:18 linux:03:18=0.64G
+    run 41636096867 created 11-03T12:29 end 13:00 linux:12:52=0.70G linux:12:53=3.01G macos:12:55=1.17G windows:12:59=1.26G
+    run 41663372463 created 11-03T15:23 end 15:45 linux:15:43=0.70G
+    run 41668199834 created 11-03T15:51 end 16:23 macos:16:05=1.57G windows:16:16=1.65G linux:16:21=0.89G linux:16:23=4.02G
+    run 41688993324 created 11-03T17:56 end 18:13 linux:18:10=0.89G
+    run 41778037130 created 11-04T05:14 end 05:48 linux:05:37=0.99G linux:05:38=4.54G windows:05:43=2.02G macos:05:48=1.75G
+    run 41821653324 created 11-04T11:32 end 12:12 linux:12:12=2.88G
+    run 41846876223 created 11-04T14:22 end 14:39 linux:14:35=0.99G
+    run 41869884581 created 11-04T16:41 end 17:15 linux:17:03=1.07G linux:17:04=3.25G windows:17:06=2.48G macos:17:15=0.94G
+    run 41878432721 created 11-04T17:32 end 18:02 linux:17:57=1.13G linux:17:58=3.50G macos:18:01=1.05G windows:18:02=2.59G
+    run 41905134804 created 11-04T20:17 end 20:37 linux:20:33=1.13G
+    run 41985722554 created 11-05T07:13 end 07:50 macos:07:25=1.16G linux:07:36=1.19G linux:07:37=3.76G windows:07:50=2.71G
+    run 42006289130 created 11-05T09:54 end 10:16 linux:10:10=1.19G
+    run 42143612060 created 11-06T01:24 end 02:03 linux:01:46=1.25G linux:01:47=4.03G macos:01:54=0.94G windows:02:03=2.83G
+    run 42150356318 created 11-06T02:26 end 02:48 linux:02:42=1.25G
+    run 42177914199 created 11-06T06:59 end 07:26 macos:07:21=1.06G linux:07:24=1.32G windows:07:25=2.95G linux:07:25=4.29G
+    run 42195155921 created 11-06T09:27 end 09:47 linux:09:43=1.32G
+    run 42213147881 created 11-06T11:50 end 12:24 macos:12:24=0.94G
+    run 42237398831 created 11-06T14:49 end 15:13 linux:15:05=1.32G
+onetaskgraph: warm runs 35, duration min n=33 p50=15 p90=18 max=24; runs with a save >50MB 6
+  first big save finished to run end, min n=6 p50=6 p90=13 max=13; bytes saved per run GB n=6 p50=2 p90=3 max=3
+    run 41010405177 created 10-30T05:47 end 06:13 ubuntu-l:06:05=0.73G windows-:06:13=0.45G
+    run 41203258937 created 10-31T12:55 end 13:12 macos-la:13:11=0.41G
+    run 41212201726 created 10-31T14:53 end 15:07 windows-:15:01=0.45G macos-la:15:02=0.41G ubuntu-l:15:07=0.95G
+    run 41602287354 created 11-03T08:18 end 08:36 macos-la:08:23=0.42G windows-:08:29=0.46G ubuntu-l:08:36=0.95G
+    run 41610989869 created 11-03T09:26 end 09:49 macos-la:09:41=0.53G windows-:09:45=0.56G ubuntu-l:09:49=1.19G
+    run 41901596004 created 11-04T19:55 end 20:15 macos-la:20:09=0.61G windows-:20:09=0.63G ubuntu-l:20:15=1.31G
+onepipeline-ui: warm runs 41, duration min n=36 p50=11 p90=22 max=24; runs with a save >50MB 11
+  first big save finished to run end, min n=11 p50=7 p90=17 max=28; bytes saved per run GB n=11 p50=6 p90=8 max=9
+    run 41417454373 created 11-02T09:02 end 09:13 warm-mac:09:07=0.46G
+    run 41444248202 created 11-02T12:23 end 12:42 warm-win:12:38=1.38G warm-lin:12:41=1.99G warm-mac:12:42=0.54G
+    run 41580930796 created 11-03T04:55 end 05:34 warm-win:05:06=1.42G warm-lin:05:10=2.16G warm-mac:05:34=0.58G
+    run 41647734187 created 11-03T13:49 end 14:03 warm-lin:14:03=2.16G
+    run 41700324320 created 11-03T19:07 end 19:26 warm-mac:19:18=0.66G warm-win:19:22=1.51G warm-lin:19:26=2.45G
+    run 41738096726 created 11-03T23:18 end 23:40 warm-mac:23:23=0.87G warm-win:23:34=1.72G warm-lin:23:40=3.18G
+    run 41873564253 created 11-04T17:02 end 17:18 warm-win:17:13=1.79G warm-mac:17:17=0.93G warm-lin:17:18=3.45G
+    run 41919992152 created 11-04T21:51 end 22:13 warm-mac:22:02=1.16G warm-win:22:03=2.00G warm-lin:22:13=3.98G
+    run 42015751800 created 11-05T11:03 end 11:20 warm-mac:11:14=1.29G warm-lin:11:19=4.39G warm-win:11:20=2.15G
+    run 42156628861 created 11-06T03:27 end 03:42 warm-mac:03:35=1.38G warm-win:03:41=2.24G warm-lin:03:42=4.69G
+    run 42203838235 created 11-06T10:35 end 10:53 warm-mac:10:44=1.46G warm-lin:10:50=5.00G warm-win:10:53=2.33G
+onepipeline: horizon n=163 (no release yet 2) p50=149m p90=542m max=1416m
+  promotion to release PR final CI start: n=163 p50=3m p90=379m max=1321m (PR #916 to release #925); observed promote offset median 0.8m, 6 exact promotion times
+  over p50 (149m): 41/163 = 25.2%
+  over p90 (542m): 9/163 = 5.5%
+  over max (1416m): 0/163 = 0.0%
+  over 60m: 57/163 = 35.0%
+  over 180m: 37/163 = 22.7%
+  over 360m: 20/163 = 12.3%
+  over 720m: 8/163 = 4.9%
+onetaskgraph: horizon n=97 (no release yet 2) p50=188m p90=1299m max=3942m
+  promotion to release PR final CI start: n=97 p50=75m p90=1208m max=3864m (PR #3601 to release #3676); observed promote offset median 0.6m, 13 exact promotion times
+  over p50 (188m): 38/97 = 39.2%
+  over p90 (1299m): 7/97 = 7.2%
+  over max (3942m): 0/97 = 0.0%
+  over 60m: 50/97 = 51.5%
+  over 180m: 38/97 = 39.2%
+  over 360m: 31/97 = 32.0%
+  over 720m: 15/97 = 15.5%
+onepipeline-ui: horizon n=126 (no release yet 2) p50=53m p90=461m max=1775m
+  promotion to release PR final CI start: n=126 p50=3m p90=402m max=1740m (PR #357 to release #368); observed promote offset median 0.7m, 24 exact promotion times
+  over p50 (53m): 46/126 = 36.5%
+  over p90 (461m): 9/126 = 7.1%
+  over max (1775m): 0/126 = 0.0%
+  over 60m: 45/126 = 35.7%
+  over 180m: 29/126 = 23.0%
+  over 360m: 17/126 = 13.5%
+  over 720m: 3/126 = 2.4%
+onepipeline:
+  bootstrap-tools: saves=31 first=0.016GB (2026-11-01T09:16) last=0.017GB (2026-11-06T11:56) median=0.017GB mean_growth=+0.0MB/save largest_growth=+7MB (job 126402851588 to 126744255476)
+  ci-capture: saves=25 first=0.530GB (2026-11-01T09:55) last=1.316GB (2026-11-06T15:05) median=0.887GB mean_growth=+32.7MB/save largest_growth=+185MB (job 126012106955 to 126029135996)
+  v0-rust-test-linux-Linux-x64: saves=12 first=1.534GB (2026-11-01T09:55) last=4.289GB (2026-11-06T07:25) median=3.374GB mean_growth=+250.4MB/save largest_growth=+1005MB (job 125917575980 to 126029135996)
+  v0-rust-test-macos-Darwin-arm64: saves=12 first=0.716GB (2026-11-01T09:27) last=0.943GB (2026-11-06T12:24) median=1.052GB mean_growth=+20.7MB/save largest_growth=+406MB (job 125917576454 to 126029135943)
+  v0-rust-test-windows-Windows_N: saves=11 first=0.767GB (2026-11-01T09:55) last=2.947GB (2026-11-06T07:25) median=2.017GB mean_growth=+218.0MB/save largest_growth=+461MB (job 126402851486 to 126713747464)
+onetaskgraph:
+  (unnamed): saves=27 first=0.000GB (2026-10-30T08:41) last=0.000GB (2026-11-06T08:29) median=0.000GB mean_growth=+0.0MB/save largest_growth=+0MB (job 124830688744 to 125803776800)
+  v0-rust-test-linux-Linux-x64: saves=5 first=0.726GB (2026-10-30T06:05) last=1.306GB (2026-11-04T20:15) median=0.953GB mean_growth=+145.1MB/save largest_growth=+232MB (job 125803643041 to 125832511746)
+  v0-rust-test-macos-Darwin-arm64: saves=5 first=0.412GB (2026-10-31T13:11) last=0.613GB (2026-11-04T20:09) median=0.418GB mean_growth=+50.3MB/save largest_growth=+116MB (job 125803776800 to 125832673117)
+  v0-rust-test-windows-Windows_N: saves=5 first=0.455GB (2026-10-30T06:13) last=0.635GB (2026-11-04T20:09) median=0.457GB mean_growth=+45.0MB/save largest_growth=+101MB (job 125803642992 to 125832511550)
+onepipeline-ui:
+  (unnamed): saves=3 first=0.021GB (2026-11-02T09:07) last=0.034GB (2026-11-02T09:13) median=0.034GB mean_growth=+6.3MB/save largest_growth=+15MB (job 125184671894 to 125184672285)
+  onepipeline-api-baseline: saves=41 first=0.039GB (2026-11-02T09:04) last=0.040GB (2026-11-06T17:10) median=0.040GB mean_growth=+0.0MB/save largest_growth=+1MB (job 126158978705 to 126272406583)
+  onepipeline-cli: saves=27 first=0.019GB (2026-11-02T09:03) last=0.024GB (2026-11-06T10:39) median=0.023GB mean_growth=+0.2MB/save largest_growth=+4MB (job 126141585539 to 126141585869)
+  v0-rust-test-linux-Linux-x64: saves=10 first=1.989GB (2026-11-02T12:41) last=5.003GB (2026-11-06T10:50) median=3.315GB mean_growth=+334.9MB/save largest_growth=+730MB (job 126141585211 to 126272406583)
+  v0-rust-test-macos-Darwin-arm64: saves=10 first=0.462GB (2026-11-02T09:07) last=1.460GB (2026-11-06T10:44) median=0.899GB mean_growth=+110.9MB/save largest_growth=+233MB (job 126726849483 to 126889649336)
+  v0-rust-test-windows-Windows_N: saves=9 first=1.380GB (2026-11-02T12:38) last=2.329GB (2026-11-06T10:53) median=1.792GB mean_growth=+118.7MB/save largest_growth=+213MB (job 126141585869 to 126272406314)
+onepipeline: merged 252 (release 87), no CI run found for head 0; base moved 103 (40.9%), of them ordinary PRs 99, with a non-release intervening merge 70
+  moved PRs: [(853, [856]), (868, [867]), (869, [866]), (878, [862]), (828, [870]), (875, [828]), (884, [875]), (865, [884]), (887, [865]), (886, [883]), (919, [916]), (922, [942, 925]), (910, [942, 925, 922, 946]), (924, [942, 925, 922, 946, 910]), (952, [924]), (943, [924, 952]), (951, [924, 952, 943, 911, 953]), (885, [911, 953, 951]), (965, [977]), (983, [985]), (982, [1003]), (994, [983, 1003, 982]), (1000, [1003, 982, 994]), (988, [982, 994, 1000]), (1013, [992]), (999, [992, 1013]), (969, [988, 992, 1013, 999]), (1014, [992, 1013, 999, 969]), (1016, [999, 969, 1014]), (986, [1014, 1016]), (935, [986]), (1021, [935]), (1001, [935, 1021]), (904, [935, 1021, 1001]), (1026, [1033]), (1027, [1039]), (1047, [1049]), (1052, [1048]), (1051, [1052, 1053]), (1054, [1053, 1051, 1066]), (1067, [1066, 1054]), (1065, [1054, 1067]), (1080, [1081]), (1094, [1102]), (1100, [1103]), (1105, [1108]), (1106, [1105]), (1115, [1113]), (1111, [1118]), (1121, [1119]), (1122, [1123]), (1114, [1122, 1127]), (1129, [1124]), (1120, [1131]), (1132, [1131, 1120]), (1134, [1131, 1120, 1132]), (1133, [1135]), (1128, [1150]), (1117, [1128]), (1153, [1155]), (1086, [1155, 1153]), (920, [1156]), (1152, [920]), (1160, [920, 1152]), (1186, [1173]), (1206, [1205]), (1209, [1206, 1208]), (1207, [1208, 1209]), (1214, [1215]), (1212, [1200]), (1229, [1228, 1231]), (1234, [1230]), (1236, [1234]), (1266, [1262]), (1265, [1262, 1266]), (1259, [1266, 1265]), (1273, [1266, 1265, 1259]), (1268, [1266, 1265, 1259, 1273]), (1283, [1279, 1264]), (1261, [1264, 1283]), (1274, [1264, 1283, 1261]), (1285, [1264, 1283, 1261, 1274, 1286]), (1288, [1285]), (1289, [1288]), (1295, [1291]), (1297, [1291, 1295]), (1304, [1299]), (1301, [1299, 1304]), (1300, [1299, 1304, 1301, 1294]), (1302, [1306]), (1320, [1321]), (1323, [1331]), (1344, [1349]), (1350, [1349, 1344]), (1353, [1349, 1344, 1350]), (1352, [1354]), (1356, [1355]), (1385, [1386]), (1395, [1394, 1392, 1396]), (1407, [1408]), (1416, [1417]), (1391, [1420]), (1428, [1391])]
+  intervening files changed: 419 distinct; top [('Cargo.lock', 116), ('Cargo.toml', 99), ('CHANGELOG.md', 64), ('justfile', 35), ('src/engine.rs', 26), ('src/driver.rs', 26), ('tests/e2e/harness.rs', 25), ('docs/contract-divergences.md', 24), ('tests/contract.rs', 20), ('tests/e2e/main.rs', 20), ('src/writeback.rs', 17), ('src/views.rs', 15)]
+  in global inputs (excluding release merges, whose version edits are normalised): {'justfile': 35, 'nx.json': 13, 'package-lock.json': 3, 'package.json': 3, 'npm/onepipeline-cli/package.json': 2, '.github/ci-tool-versions.json': 1, '.github/nx-version-files': 1, '.github/onevcs-cli-version': 1, '.github/read-ci-tool-versions.mjs': 1, 'scripts/nx-version-free-inputs.mjs': 1}; 34 moved PRs hit a global; intervening PRs with >100 files, list truncated: 1
+onetaskgraph: merged 141 (release 42), no CI run found for head 1; base moved 19 (13.5%), of them ordinary PRs 19, with a non-release intervening merge 12
+  moved PRs: [(3562, [3561, 3563]), (3622, [3625]), (3619, [3625, 3622]), (3651, [3646]), (3685, [3692]), (3718, [3716]), (3728, [3727]), (3725, [3727, 3728, 3726]), (3762, [3763]), (3793, [3784]), (3791, [3784, 3793, 3795]), (3817, [3803]), (3816, [3813]), (3804, [3811, 3803, 3817, 3813, 3816]), (3807, [3818]), (3809, [3818, 3807]), (3825, [3821]), (3829, [3826]), (3896, [3892])]
+  intervening files changed: 372 distinct; top [('Cargo.lock', 18), ('Cargo.toml', 13), ('bun.lock', 13), ('crates/onetaskgraph-core/CHANGELOG.md', 13), ('crates/onetaskgraph-core/Cargo.toml', 13), ('crates/onetaskgraph-github-projects/Cargo.toml', 13), ('crates/onetaskgraph-in-memory/Cargo.toml', 13), ('crates/onetaskgraph-linear/Cargo.toml', 13), ('crates/onetaskgraph-live/Cargo.toml', 13), ('crates/onetaskgraph-local-md/Cargo.toml', 13), ('crates/onetaskgraph-plugin-api/Cargo.toml', 13), ('crates/onetaskgraph-status-options/Cargo.toml', 13)]
+  in global inputs (excluding release merges, whose version edits are normalised): {'Cargo.lock': 6, 'crates/onetaskgraph-linear-e2e/Cargo.toml': 2, 'Cargo.toml': 1, 'bun.lock': 1, 'crates/onetaskgraph-core/Cargo.toml': 1, 'crates/onetaskgraph-github-projects/Cargo.toml': 1, 'crates/onetaskgraph-in-memory/Cargo.toml': 1, 'crates/onetaskgraph-linear/Cargo.toml': 1, 'crates/onetaskgraph-live/Cargo.toml': 1, 'crates/onetaskgraph-local-md/Cargo.toml': 1, 'crates/onetaskgraph-plugin-api/Cargo.toml': 1, 'crates/onetaskgraph-status-options/Cargo.toml': 1, 'crates/onetaskgraph/Cargo.toml': 1, 'npm/cli/package.json': 1, 'npm/platforms/darwin-arm64/package.json': 1, 'npm/platforms/linux-arm64/package.json': 1, 'npm/platforms/linux-x64/package.json': 1, 'npm/platforms/win32-x64/package.json': 1, 'sdks/typescript/package.json': 1, 'crates/onetaskgraph-github-projects-e2e/Cargo.toml': 2, 'crates/onetaskgraph-live-janitor/Cargo.toml': 1}; 6 moved PRs hit a global; intervening PRs with >100 files, list truncated: 2
+onepipeline-ui: merged 201 (release 73), no CI run found for head 1; base moved 13 (6.5%), of them ordinary PRs 13, with a non-release intervening merge 9
+  moved PRs: [(349, [351]), (370, [377, 379, 380]), (426, [423]), (440, [443]), (546, [548]), (549, [548, 546]), (572, [569]), (576, [574]), (620, [621]), (631, [630]), (632, [634]), (640, [614]), (652, [651])]
+  intervening files changed: 147 distinct; top [('Cargo.toml', 9), ('Cargo.lock', 8), ('CHANGELOG.md', 6), ('AGENTS.md', 3), ('.github/CODEOWNERS', 2), ('.github/tests/ci-jobs.test.mjs', 2), ('.github/workflows/ci.yml', 2), ('justfile', 2), ('tests/AGENTS.md', 2), ('tests/e2e/ensure_baseline.rs', 2), ('tests/e2e/ensure_sibling.rs', 2), ('tests/e2e/main.rs', 2)]
+  in global inputs (excluding release merges, whose version edits are normalised): {'Cargo.toml': 3, 'Cargo.lock': 2}; 3 moved PRs hit a global; intervening PRs with >100 files, list truncated: 0
+onetaskgraph: merged pull-request branches 97, with >1 push 64; jobs in minutes
+  budgets: first n=2 p50=0 p90=0 max=0; later n=2 p50=0 p90=0 max=0; paired later-first median +0.0 over 1 PRs
+  check (macos-latest): first n=32 p50=0 p90=41 max=58; later n=93 p50=0 p90=34 max=53; paired later-first median +0.0 over 8 PRs
+  check (ubuntu-latest): first n=28 p50=62 p90=91 max=93; later n=88 p50=64 p90=84 max=116; paired later-first median -1.5 over 3 PRs
+  check (windows-latest): first n=32 p50=50 p90=67 max=72; later n=80 p50=60 p90=74 max=83; paired later-first median +1.2 over 7 PRs
+  deny: first n=50 p50=1 p90=1 max=1; later n=132 p50=0 p90=1 max=1; paired later-first median -0.0 over 25 PRs
+  install path (macos-latest): first n=34 p50=0 p90=16 max=18; later n=93 p50=0 p90=13 max=17; paired later-first median -0.0 over 9 PRs
+  install path (ubuntu-latest): first n=50 p50=18 p90=24 max=24; later n=128 p50=18 p90=24 max=25; paired later-first median -0.1 over 25 PRs
+  install path (windows-latest): first n=51 p50=24 p90=30 max=32; later n=125 p50=24 p90=31 max=32; paired later-first median +1.4 over 26 PRs
+  lint: first n=13 p50=18 p90=22 max=28; later n=78 p50=13 p90=18 max=26; paired later-first median -5.8 over 7 PRs
+  llmlint: first n=51 p50=4 p90=6 max=8; later n=125 p50=5 p90=7 max=9; paired later-first median +0.3 over 26 PRs
+  macOS check and install proofs: first n=13 p50=62 p90=79 max=80; later n=63 p50=62 p90=79 max=102; paired later-first median +3.2 over 3 PRs
+  macOS lanes: first n=35 p50=0 p90=0 max=0; later n=121 p50=0 p90=0 max=1; paired later-first median -0.0 over 22 PRs
+  pr-title: first n=51 p50=0 p90=0 max=0; later n=134 p50=0 p90=0 max=1; paired later-first median +0.0 over 26 PRs
+  test-linux: first n=7 p50=26 p90=33 max=33; later n=38 p50=27 p90=34 max=39; paired later-first median -4.0 over 1 PRs
+  test-macos: first n=7 p50=25 p90=27 max=27; later n=58 p50=23 p90=28 max=33; paired later-first median -3.7 over 3 PRs
+  test-windows: first n=10 p50=13 p90=26 max=31; later n=48 p50=25 p90=33 max=90; paired later-first median +0.5 over 4 PRs
+  lint/first: sampled 13 {'miss': 13} median minutes {'miss': 17.9}; runs [41229550836, 41232592498, 41244777819, 41602597587, 41769591173, 41786527596, 41796956736, 41985291875, 42026208668, 42036556197, 42094103599, 42096194285, 42238289872]
+  lint/later: sampled 60 {'restored full=true': 52, 'miss': 3, 'restored full=false': 5} median minutes {'restored full=true': 12.2, 'miss': 16.2, 'restored full=false': 17.8}; runs [41158752267, 41172757648, 41173425134, 41181558361, 41183771851, 41183966027, 41207786578, 41247865123, 41258284271, 41238593083, 41245850140, 41249661720, 41285626873, 41293164371, 41297225871, 41247587655, 41264317305, 41266553208, 41271824631, 41271834160, 41285194383, 41568219263, 41570427583, 41574966068, 41577339318, 41580807379, 41585682296, 41589082661, 41596017418, 41599840142, 41606565192, 41828778133, 41834495210, 41885811322, 41891007197, 41774327002, 41778561550, 41782028760, 41789113915, 41793123704, 41792623446, 41815045385, 41828901725, 41836080866, 41870339982, 41871956897, 41898199980, 41911157148, 41920034272, 41851196272, 41860747940, 41990493335, 42006286398, 42011154557, 42016476626, 42101071669, 42113596638, 42119422338, 42175689645, 42177448000]
+  test-linux/first: sampled 7 {'restored full=true': 5, 'none': 2} median minutes {'restored full=true': 27.6, 'none': 0.3}; runs [41244777819, 41602597587, 41796956736, 42026208668, 42036556197, 42096194285, 42238289872]
+  test-linux/later: sampled 38 {'restored full=true': 34, 'restored full=false': 4} median minutes {'restored full=true': 26.8, 'restored full=false': 28.1}; runs [39132645011, 39177779933, 39280140229, 40665510604, 41158752267, 41172757648, 41173425134, 41181558361, 41183771851, 41183966027, 41207786578, 41258284271, 41293164371, 41297225871, 41247587655, 41264317305, 41271824631, 41271834160, 41285194383, 41574966068, 41577339318, 41580807379, 41589082661, 41596017418, 41599840142, 41606565192, 41891007197, 41793123704, 41792623446, 41836080866, 41870339982, 41920034272, 41860747940, 42016476626, 42101071669, 42119422338, 42175689645, 42177448000]
+  test-macos/first: sampled 7 {'restored full=false': 2, 'restored full=true': 5} median minutes {'restored full=false': 25.7, 'restored full=true': 23.7}; runs [41229550836, 41232592498, 42026208668, 42036556197, 42094103599, 42096194285, 42238289872]
+  test-macos/later: sampled 58 {'restored full=true': 54, 'restored full=false': 4} median minutes {'restored full=true': 23.3, 'restored full=false': 25.1}; runs [39151781586, 39165503331, 39177779933, 39187220484, 41129896104, 41140769112, 41147797634, 41154845482, 41158752267, 41172757648, 41173425134, 41183771851, 41183966027, 41207786578, 41234036001, 41258284271, 41245850140, 41249661720, 41285626873, 41293164371, 41297225871, 41247587655, 41264317305, 41266553208, 41271824631, 41271834160, 41285194383, 41568219263, 41570427583, 41574966068, 41577339318, 41580807379, 41585682296, 41589082661, 41596017418, 41599840142, 41606565192, 41891007197, 41774327002, 41782028760, 41793123704, 41792623446, 41815045385, 41828901725, 41836080866, 41870339982, 41871956897, 41920034272, 41860747940, 41988568895, 41990493335, 42006286398, 42016476626, 42101071669, 42113596638, 42119422338, 42175689645, 42177448000]
+  test-windows/first: sampled 10 {'restored full=false': 2, 'restored full=true': 6, 'none': 2} median minutes {'restored full=false': 28.0, 'restored full=true': 17.0, 'none': 0.8}; runs [41229550836, 41244777819, 41566185667, 41602597587, 41796956736, 42026208668, 42036556197, 42094103599, 42096194285, 42238289872]
+  test-windows/later: sampled 48 {'restored full=true': 44, 'restored full=false': 4} median minutes {'restored full=true': 23.3, 'restored full=false': 32.5}; runs [39151781586, 39177779933, 41158752267, 41172757648, 41173425134, 41181558361, 41183771851, 41183966027, 41207786578, 41234036001, 41258284271, 41249661720, 41285626873, 41297225871, 41247587655, 41264317305, 41266553208, 41271824631, 41271834160, 41285194383, 41568219263, 41570427583, 41574966068, 41577339318, 41580807379, 41589082661, 41606565192, 41891007197, 41774327002, 41782028760, 41793123704, 41792623446, 41815045385, 41828901725, 41836080866, 41870339982, 41871956897, 41898199980, 41920034272, 41860747940, 41988568895, 41990493335, 42006286398, 42016476626, 42113596638, 42119422338, 42175689645, 42177448000]
+onepipeline: runs by attempt {1: 75, 3: 3, 2: 9}
+  Build and install the Apple silicon Darwin products: duration_s n=1 p50=937 p90=937 max=937; post-job rust save_s n=1 p50=19 p90=19 max=19; saved MB n=1 p50=368 p90=368 max=368; restores {'miss': 1}
+  build-linux: duration_s n=62 p50=899 p90=1200 max=1481; post-job rust save_s none; saved MB none; restores {'none': 63}
+  build-linux-arm64: duration_s n=56 p50=802 p90=931 max=1294; post-job rust save_s none; saved MB none; restores {'none': 57}
+  build-macos: duration_s n=62 p50=1082 p90=1401 max=1789; post-job rust save_s n=62 p50=19 p90=26 max=42; saved MB n=62 p50=379 p90=395 max=411; restores {'miss': 63}
+  build-npm (aarch64-apple-darwin): duration_s n=22 p50=601 p90=741 max=849; post-job rust save_s n=22 p50=14 p90=19 max=32; saved MB n=10 p50=341 p90=367 max=368; restores {'miss': 13, 'restored': 9}
+  build-npm (aarch64-unknown-linux-gnu): duration_s n=23 p50=439 p90=501 max=525; post-job rust save_s n=23 p50=5 p90=6 max=7; saved MB n=23 p50=365 p90=386 max=387; restores {'miss': 23}
+  build-npm (x86_64-apple-darwin): duration_s n=22 p50=619 p90=846 max=922; post-job rust save_s n=22 p50=17 p90=27 max=31; saved MB n=15 p50=348 p90=368 max=368; restores {'restored': 3, 'miss': 19}
+  build-npm (x86_64-pc-windows-msvc): duration_s n=23 p50=894 p90=1141 max=1170; post-job rust save_s n=23 p50=30 p90=49 max=56; saved MB n=23 p50=357 p90=378 max=379; restores {'miss': 23}
+  build-npm (x86_64-unknown-linux-gnu): duration_s n=23 p50=507 p90=601 max=620; post-job rust save_s n=23 p50=7 p90=9 max=16; saved MB n=23 p50=368 p90=389 max=389; restores {'miss': 23}
+  build-wheels (aarch64-apple-darwin): duration_s n=22 p50=640 p90=847 max=1027; post-job rust save_s none; saved MB none; restores {'none': 22}
+  build-wheels (aarch64-unknown-linux-gnu): duration_s n=23 p50=471 p90=512 max=535; post-job rust save_s none; saved MB none; restores {'none': 23}
+  build-wheels (x86_64-apple-darwin): duration_s n=22 p50=650 p90=809 max=907; post-job rust save_s none; saved MB none; restores {'none': 22}
+  build-wheels (x86_64-pc-windows-msvc): duration_s n=23 p50=847 p90=1032 max=1077; post-job rust save_s none; saved MB none; restores {'none': 23}
+  build-wheels (x86_64-unknown-linux-gnu): duration_s n=23 p50=544 p90=622 max=667; post-job rust save_s none; saved MB none; restores {'none': 23}
+  build-windows: duration_s n=61 p50=1426 p90=1569 max=1726; post-job rust save_s n=61 p50=26 p90=33 max=45; saved MB n=61 p50=394 p90=412 max=421; restores {'miss': 63}
+  guard: duration_s n=24 p50=3 p90=4 max=4; post-job rust save_s none; saved MB none; restores {'none': 24}
+  linked-engines: duration_s n=24 p50=9 p90=11 max=12; post-job rust save_s none; saved MB none; restores {'none': 24}
+  publish: duration_s n=47 p50=941 p90=1095 max=1322; post-job rust save_s n=47 p50=7 p90=9 max=9; saved MB n=46 p50=359 p90=364 max=366; restores {'miss': 62, 'restored': 1}
+  publish-crate: duration_s n=23 p50=218 p90=232 max=239; post-job rust save_s n=23 p50=8 p90=9 max=10; saved MB n=23 p50=414 p90=445 max=447; restores {'miss': 23}
+  publish-npm: duration_s n=18 p50=826 p90=1250 max=1634; post-job rust save_s none; saved MB none; restores {'none': 22}
+  publish-pypi: duration_s n=23 p50=32 p90=42 max=49; post-job rust save_s none; saved MB none; restores {'none': 23}
+  record the release outcome: duration_s n=23 p50=9 p90=14 max=17; post-job rust save_s none; saved MB none; restores {'none': 24}
+  test: duration_s n=23 p50=3768 p90=5058 max=5222; post-job rust save_s n=23 p50=24 p90=34 max=44; saved MB n=23 p50=1104 p90=1146 max=1414; restores {'miss': 24}
+  upload (aarch64-apple-darwin): duration_s n=22 p50=683 p90=789 max=883; post-job rust save_s none; saved MB none; restores {'none': 22}
+  upload (aarch64-unknown-linux-gnu): duration_s n=23 p50=433 p90=489 max=509; post-job rust save_s none; saved MB none; restores {'none': 23}
+  upload (x86_64-apple-darwin): duration_s n=22 p50=581 p90=808 max=949; post-job rust save_s none; saved MB none; restores {'none': 22}
+  upload (x86_64-pc-windows-msvc): duration_s n=23 p50=902 p90=1073 max=1145; post-job rust save_s none; saved MB none; restores {'none': 23}
+  upload (x86_64-unknown-linux-gnu): duration_s n=23 p50=503 p90=592 max=633; post-job rust save_s none; saved MB none; restores {'none': 23}
+  upload-darwin: duration_s n=1 p50=8 p90=8 max=8; post-job rust save_s none; saved MB none; restores {'none': 1}
+  verify-crate: duration_s n=23 p50=482 p90=609 max=635; post-job rust save_s n=23 p50=5 p90=6 max=6; saved MB n=23 p50=93 p90=97 max=98; restores {'miss': 23}
+  verify-npm (macos-15-intel): duration_s n=17 p50=18 p90=27 max=27; post-job rust save_s none; saved MB none; restores {'none': 17}
+  verify-npm (macos-latest): duration_s n=17 p50=11 p90=15 max=31; post-job rust save_s none; saved MB none; restores {'none': 17}
+  verify-npm (ubuntu-24.04-arm): duration_s n=18 p50=10 p90=13 max=14; post-job rust save_s none; saved MB none; restores {'none': 18}
+  verify-npm (ubuntu-latest): duration_s n=18 p50=8 p90=12 max=13; post-job rust save_s none; saved MB none; restores {'none': 18}
+  verify-npm (windows-latest): duration_s n=18 p50=26 p90=36 max=52; post-job rust save_s none; saved MB none; restores {'none': 18}
+  verify-pypi (macos-15-intel): duration_s n=22 p50=19 p90=36 max=122; post-job rust save_s none; saved MB none; restores {'none': 22}
+  verify-pypi (macos-latest): duration_s n=21 p50=11 p90=18 max=20; post-job rust save_s none; saved MB none; restores {'none': 21}
+  verify-pypi (ubuntu-latest): duration_s n=23 p50=15 p90=26 max=28; post-job rust save_s none; saved MB none; restores {'none': 23}
+  verify-pypi (windows-latest): duration_s n=23 p50=24 p90=34 max=42; post-job rust save_s none; saved MB none; restores {'none': 23}
+  restored rust caches: 13
+    (37697371723, 1, 'v0.63.1', 'build-npm (x86_64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-76be67d9 full match: true.')
+    (37853185034, 1, 'v0.63.3', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-2b2151a9 full match: true.')
+    (37871370644, 1, 'v0.63.4', 'build-npm (x86_64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-73b78400 full match: true.')
+    (38025973856, 1, 'v0.63.7', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-ecb0a799 full match: true.')
+    (38122452745, 1, 'v0.65.0', 'build-npm (x86_64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-14b32adb full match: true.')
+    (38156475483, 1, 'v0.66.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-14b32adb full match: true.')
+    (38167377974, 1, 'v0.67.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-69b36025 full match: true.')
+    (38212438490, 1, 'v0.68.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-c0c6349d full match: true.')
+    (38374277729, 1, 'v0.70.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-a7c17f4f full match: true.')
+    (38390269415, 1, 'v0.70.1', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-56b62b26 full match: true.')
+    (38461596996, 1, 'v0.71.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-64d267dd full match: true.')
+    (38649654071, 2, 'v0.72.0', 'build-npm (aarch64-apple-darwin)', 'v0-rust-build-npm-Darwin-arm64-39b173e7-aab6c0d1 full match: true.')
+    (39612115008, 2, 'v0.82.0', 'publish', 'v0-rust-publish-Linux-x64-d88f0267-816b4cb6 full match: true.')
+onetaskgraph: runs by attempt {1: 48, 2: 1}
+  build-distributions: duration_s n=34 p50=19 p90=24 max=27; post-job rust save_s none; saved MB none; restores {'none': 34}
+  build-linux: duration_s n=15 p50=438 p90=526 max=593; post-job rust save_s n=15 p50=5 p90=6 max=7; saved MB n=15 p50=185 p90=199 max=199; restores {'miss': 15}
+  build-linux-arm64: duration_s n=15 p50=443 p90=783 max=819; post-job rust save_s n=15 p50=4 p90=6 max=8; saved MB n=15 p50=184 p90=199 max=199; restores {'miss': 15}
+  build-macos: duration_s n=15 p50=491 p90=638 max=731; post-job rust save_s n=15 p50=14 p90=18 max=24; saved MB n=15 p50=167 p90=182 max=182; restores {'miss': 15}
+  build-wheels (ubuntu-24.04-arm, aarch64-unknown-linux-gnu): duration_s n=13 p50=188 p90=206 max=210; post-job rust save_s none; saved MB none; restores {'none': 13}
+  build-wheels (ubuntu-latest, x86_64-unknown-linux-gnu): duration_s n=13 p50=219 p90=292 max=294; post-job rust save_s none; saved MB none; restores {'none': 13}
+  build-wheels (windows-latest, x86_64-pc-windows-msvc): duration_s n=13 p50=377 p90=428 max=443; post-job rust save_s none; saved MB none; restores {'none': 13}
+  build-windows: duration_s n=15 p50=711 p90=801 max=954; post-job rust save_s n=15 p50=16 p90=22 max=22; saved MB n=14 p50=174 p90=187 max=187; restores {'miss': 14, 'restored': 1}
+  collect-wheels: duration_s n=21 p50=6 p90=7 max=10; post-job rust save_s none; saved MB none; restores {'none': 21}
+  macos-assets-carriers-and-wheels: duration_s n=34 p50=359 p90=649 max=741; post-job rust save_s n=34 p50=15 p90=18 max=21; saved MB n=34 p50=167 p90=270 max=279; restores {'miss': 34}
+  native-assets-and-carriers (ubuntu-24.04-arm, aarch64-unknown-linux-gnu, tar.gz, linux-arm64): duration_s n=13 p50=190 p90=212 max=213; post-job rust save_s n=13 p50=4 p90=5 max=5; saved MB n=13 p50=178 p90=183 max=183; restores {'miss': 13}
+  native-assets-and-carriers (ubuntu-latest, x86_64-unknown-linux-gnu, tar.gz, linux-x64): duration_s n=13 p50=258 p90=298 max=312; post-job rust save_s n=13 p50=5 p90=6 max=6; saved MB n=13 p50=179 p90=184 max=184; restores {'miss': 13}
+  native-assets-and-carriers (windows-latest, x86_64-pc-windows-msvc, zip, win32-x64): duration_s n=13 p50=407 p90=466 max=492; post-job rust save_s n=13 p50=21 p90=33 max=35; saved MB n=13 p50=168 p90=173 max=173; restores {'miss': 13}
+  native-assets-carriers-and-wheels (ubuntu-24.04-arm, aarch64-unknown-linux-gnu, tar.gz, linux-arm64): duration_s n=21 p50=236 p90=256 max=320; post-job rust save_s n=21 p50=4 p90=5 max=5; saved MB n=21 p50=183 p90=184 max=184; restores {'miss': 21}
+  native-assets-carriers-and-wheels (ubuntu-latest, x86_64-unknown-linux-gnu, tar.gz, linux-x64): duration_s n=21 p50=275 p90=332 max=349; post-job rust save_s n=21 p50=5 p90=6 max=8; saved MB n=21 p50=184 p90=184 max=184; restores {'miss': 21}
+  native-assets-carriers-and-wheels (windows-latest, x86_64-pc-windows-msvc, zip, win32-x64): duration_s n=21 p50=481 p90=536 max=573; post-job rust save_s n=21 p50=17 p90=32 max=50; saved MB n=21 p50=173 p90=173 max=173; restores {'miss': 21}
+  publish: duration_s n=5 p50=608 p90=692 max=692; post-job rust save_s n=5 p50=6 p90=7 max=7; saved MB n=15 p50=255 p90=303 max=303; restores {'miss': 15}
+  publish-assets: duration_s n=21 p50=9 p90=12 max=12; post-job rust save_s none; saved MB none; restores {'none': 21}
+  publish-crates: duration_s n=34 p50=229 p90=256 max=298; post-job rust save_s none; saved MB none; restores {'none': 34}
+  publish-npm: duration_s n=34 p50=30 p90=41 max=87; post-job rust save_s none; saved MB none; restores {'none': 34}
+  publish-python: duration_s n=34 p50=23 p90=29 max=32; post-job rust save_s none; saved MB none; restores {'none': 34}
+  restored rust caches: 1
+    (42128139925, 2, 'v0.14.3', 'build-windows', 'v0-rust-build-windows-Windows_NT-x64-cdab7ceb-6e0fea97 full match: true.')

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read-only, on-disk-cached GitHub history for spike-cache-eviction's 30-day questions.
 
-Every GET lands in --cache keyed by its path, so a re-analysis costs no request, and no request
-is made once `gh api rate_limit` reports under --floor core requests remaining (checked every
-25 requests). Pulls merged pull requests over GraphQL, workflow runs, their jobs and job logs.
+Every GET lands in a cache directory keyed by its path, so a re-analysis costs no request, and no
+REST request is made once `gh api rate_limit` reports under the floor of 2,500 core requests
+remaining (checked at the first request and after every 25). Pulls merged pull requests over
+GraphQL, which has its own limit, and workflow runs, their jobs and job logs over REST.
 
 Imported by analyse.py, which holds the arithmetic and is what a person runs.
 """
@@ -44,13 +45,15 @@ class Store:
         self.cache = cache
         self.floor = floor
         self.requests = 0
+        self.since_check = 25
         cache.mkdir(parents=True, exist_ok=True)
 
     def _file(self, kind: str, key: str) -> Path:
         return self.cache / f"{kind}-{hashlib.sha1(key.encode()).hexdigest()}"
 
     def _guard(self) -> None:
-        if self.requests % 25 == 0:
+        if self.since_check >= 25:
+            self.since_check = 0
             done = subprocess.run(
                 ["gh", "api", "rate_limit", "--jq", ".resources.core.remaining"],
                 capture_output=True, text=True, check=True,
@@ -66,6 +69,7 @@ class Store:
         self._guard()
         for attempt in range(3):
             self.requests += 1
+            self.since_check += 1
             with (self.cache / "requests.ledger").open("a", encoding="utf-8") as ledger:
                 ledger.write(" ".join(args) + "\n")
             done = subprocess.run(["gh", "api", *args], capture_output=True, text=True, check=False, errors="replace")

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """spike-cache-eviction's arithmetic over readings.jsonl and history.py's cache.
 
-    python3 scripts/spike-cache-eviction/analyse.py --cache DIR --readings FILE q4 q6 ...
+    python3 scripts/spike-cache-eviction/analyse.py --cache DIR --readings FILE \\
+        q1 q2 episodes trigger q3 q4 q5 q6 q7_restores q8
+
+evidence/figures.txt is that command's output as it stood when the report was written.
 """
 
 from __future__ import annotations
@@ -389,7 +392,7 @@ def q3(store: h.Store, repo: str) -> None:
         rows.append(f"    run {run_id} created {runs[run_id]['created_at'][5:16]} end {end[11:16]} "
                     + " ".join(f"{e['leg'].replace('warm (', '')[:8]}:{e['finished'][11:16]}={e['bytes'] / 1e9:.2f}G" for e in entries))
     print(f"  first big save finished to run end, min {summary(windows)}; bytes saved per run GB {summary(added)}")
-    print("\n".join(rows[-6:]))
+    print("\n".join(rows))
 
 
 def q7(store: h.Store, repo: str) -> None:
@@ -453,7 +456,7 @@ def q7_restores(store: h.Store, repo: str) -> None:
             answers[kind] += 1
             builds[kind].append(value)
         print(f"  {name}: sampled {len(sampled)} {dict(answers)} median minutes "
-              f"{ {k: round(median(v), 1) for k, v in builds.items()} }")
+              f"{ {k: round(median(v), 1) for k, v in builds.items()} }; runs {[row[0] for row in sampled]}")
 
 
 def episodes(store: h.Store, repo: str, path: Path) -> None:
@@ -488,6 +491,80 @@ def episodes(store: h.Store, repo: str, path: Path) -> None:
         previous = row
 
 
+def kind(entry: dict) -> str:
+    key = entry["key"]
+    if key.startswith("nx-cache-"):
+        return "nx-cache"
+    if key.startswith("v0-rust-"):
+        return "rust"
+    return "other"
+
+
+def scope(entry: dict) -> str:
+    ref = entry["ref"]
+    return "pr" if "/pull/" in ref else "tag" if "/tags/" in ref else "main" if ref == "refs/heads/main" else "other"
+
+
+def q2(store: h.Store, repo: str, path: Path) -> None:
+    """Across all evictions: is the order strictly by last access, and what goes before what."""
+    rows = readings(path, repo)
+    print(f"{repo}:")
+    previous = None
+    for row in rows:
+        if previous is not None:
+            before = {e["id"]: e for e in previous["entries"]}
+            after = {e["id"]: e for e in row["entries"]}
+            gone = [before[i] for i in before if i not in after]
+            if gone:
+                survivors = [before[i] for i in before if i in after]
+                newest_gone = max(e["last_accessed_at"] for e in gone)
+                inversions = [e for e in survivors if e["last_accessed_at"] < newest_gone]
+                younger_gone = sum(
+                    1 for e in gone if any(e["created_at"] > s["created_at"] for s in survivors)
+                )
+                rust_older = [s for s in survivors if kind(s) == "rust" and any(
+                    kind(g) == "nx-cache" and s["created_at"] < g["created_at"] for g in gone)]
+                print(f"  {row['started_at'][11:19]}: gone {len(gone)} {dict(Counter((kind(e), scope(e)) for e in gone))}; "
+                      f"survivors accessed earlier than the newest gone: {len(inversions)}; gone though created after a "
+                      f"survivor: {younger_gone}; older-created Rust surviving gone results: "
+                      f"{[(s['key'][:36], s['created_at'][5:16], s['last_accessed_at'][5:16]) for s in rust_older[:4]]}")
+                if inversions:
+                    print(f"    inversions: {[(s['key'][:30], s['last_accessed_at'][5:19]) for s in inversions[:5]]} newest gone {newest_gone[5:19]}")
+        previous = row
+
+
+def trigger(store: h.Store, repo: str, path: Path) -> None:
+    """Test: an eviction needs the listing already over 10 GiB and a save arriving. Counts every pair of readings."""
+    rows = readings(path, repo)
+    table: Counter[tuple[str, str, str]] = Counter()
+    exceptions = []
+    longest_over = 0.0
+    over_since = None
+    for previous, row in zip(rows, rows[1:]):
+        before = {e["id"]: e for e in previous["entries"]}
+        after = {e["id"]: e for e in row["entries"]}
+        new = sorted((after[i] for i in after if i not in before), key=lambda e: e["created_at"])
+        gone = [before[i] for i in before if i not in after]
+        # Did any new entry find the total, with the saves before it, already over the line?
+        running = previous["listed_bytes"]
+        found_over = False
+        for entry in new:
+            if running > GIB:
+                found_over = True
+            running += entry["size_in_bytes"]
+        cell = ("save found it over" if found_over else "no save found it over", "gone" if gone else "none gone")
+        table[cell] += 1
+        if (found_over and not gone) or (gone and not found_over):
+            exceptions.append((row["started_at"][11:19], previous["listed_bytes"] / 1e9, running / 1e9, len(new), len(gone), round(minutes(row["started_at"], previous["started_at"]))))
+        if row["listed_bytes"] > GIB:
+            over_since = over_since or row["started_at"]
+            longest_over = max(longest_over, minutes(row["started_at"], over_since))
+        else:
+            over_since = None
+    print(f"{repo}: {dict(table)}; longest a run of readings stood over 10 GiB without coming under {longest_over:.0f}m")
+    print(f"  exceptions (time, listed before GB, before+new GB, new, gone, gap min): {exceptions}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache", type=Path, required=True)
@@ -497,7 +574,7 @@ def main() -> int:
     store = h.Store(args.cache)
     for question in args.questions:
         for repo in REPOS:
-            if question in ("q1", "episodes"):
+            if question in ("q1", "q2", "episodes", "trigger"):
                 globals()[question](store, repo, args.readings)
             else:
                 globals()[question](store, repo)
