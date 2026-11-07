@@ -15,6 +15,9 @@
     "build": {
       "command": "just _tier-build release_channel",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "releaseCompatSource",
         {
           "runtime": "node -p process.platform"
@@ -27,6 +30,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/release_channel/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "releaseCompatSource",
         {
           "runtime": "node -p process.platform"
@@ -36,6 +42,9 @@
     "lint": {
       "command": "just _tier-lint release_channel",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "releaseCompatSource",
         {
           "runtime": "node -p process.platform"
@@ -74,6 +83,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

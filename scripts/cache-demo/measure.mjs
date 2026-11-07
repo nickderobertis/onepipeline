@@ -46,10 +46,11 @@ function compressed(files) {
 }
 const unitKey = (path) => {
   const p = posix(path);
+  // The unit's own directory, however deep its build script's output goes.
+  const build = p.match(/^([^/]+\/build\/[^/]+)(\/.*)?$/);
+  if (build) return build[1];
   const deps = p.match(/^(.*\/deps\/)(?:lib)?([^/.]+)[^/]*$/);
-  if (deps) return `${deps[1]}${deps[2]}`;
-  const build = p.match(/^(.*\/build\/[^/]+)(\/.*)?$/);
-  return build ? build[1] : null;
+  return deps ? `${deps[1]}${deps[2]}` : null;
 };
 const members = () => new Set(JSON.parse(sh("cargo metadata --no-deps --format-version 1 --locked").stdout).packages.map((p) => p.name.replaceAll("-", "_")));
 // What a compile asks of cargo, as its JSON says: the artifacts, and which it did not find fresh.
@@ -196,6 +197,8 @@ if (verb === "doubles") {
   out("capture-rerun", "status", asked.status, "artifacts", asked.artifacts, "recompiled", asked.stale.length, asked.stale.join(" ").slice(0, 400));
   const disk = new Set(walk(dir).map((f) => f.path).filter((p) => /\/(deps|build)\//.test(p)).map((p) => unitKey(p)).filter(Boolean));
   const unnamed = [...disk].filter((key) => !asked.keys.has(key));
+  const fingerprints = existsSync(join(dir, "release/.fingerprint")) ? readdirSync(join(dir, "release/.fingerprint")).length : 0;
+  out("capture-fingerprints", fingerprints);
   out("capture-units", "on-disk", disk.size, "named-by-its-build", asked.keys.size, "unnamed", unnamed.length, unnamed.slice(0, 20).join(" "));
 } else if (verb === "clean-and-archive") {
   const pkgs = packages();

@@ -15,6 +15,9 @@
     "build": {
       "command": "just _tier-build pool_workload",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "poolWorkloadSource",
         {
           "runtime": "node -p process.platform"
@@ -27,6 +30,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/pool_workload/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "poolWorkloadSource",
         {
           "runtime": "node -p process.platform"
@@ -36,6 +42,9 @@
     "lint": {
       "command": "just _tier-lint pool_workload",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "poolWorkloadSource",
         {
           "runtime": "node -p process.platform"
@@ -67,6 +76,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

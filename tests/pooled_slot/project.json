@@ -14,6 +14,9 @@
     "build": {
       "command": "just _tier-build pooled_slot",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "pooledSlotSource",
         {
           "runtime": "node -p process.platform"
@@ -26,6 +29,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/pooled_slot/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "pooledSlotSource",
         {
           "runtime": "node -p process.platform"
@@ -35,6 +41,9 @@
     "lint": {
       "command": "just _tier-lint pooled_slot",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "pooledSlotSource",
         {
           "runtime": "node -p process.platform"
@@ -65,6 +74,9 @@
     "test-quick": {
       "command": "just _pooled_slot-test-quick",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _pooled_slot-test-quick --variable onetaskgraph-version"
+        },
         "pooledSlotSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
@@ -89,6 +101,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]
