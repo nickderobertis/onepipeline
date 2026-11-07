@@ -37,15 +37,37 @@ function parseArguments(args) {
   return { recipes, variables };
 }
 
-// The variables an expression or a recipe body uses, from just's own parse: a use is the
-// two-element array ["variable", name], at any depth. Text and an absent value use none;
-// anything else is a shape this does not know, which would otherwise go uncounted.
-function variablesIn(parsed, found = new Set()) {
-  if (parsed === null || typeof parsed === "string") return found;
-  if (!Array.isArray(parsed))
-    throw new Error(`just's dump holds an unknown expression: ${JSON.stringify(parsed)}`);
-  if (parsed[0] === "variable" && typeof parsed[1] === "string") found.add(parsed[1]);
-  for (const part of parsed) variablesIn(part, found);
+// Every expression form just's dump writes. A form this does not know could hide a
+// variable from the digest, so it fails until it is added here.
+const EXPRESSIONS = new Set([
+  "variable",
+  "concatenate",
+  "join",
+  "call",
+  "if",
+  "==",
+  "!=",
+  "=~",
+  "evaluate",
+  "and",
+  "or",
+  "assert",
+  "format",
+]);
+
+// The variables one expression uses, from just's own parse: text and an absent value use
+// none, and a use is the two-element ["variable", name], at any depth.
+function variablesIn(expression, found = new Set()) {
+  if (expression === null || typeof expression === "string") return found;
+  const unknown = () =>
+    new Error(`just's dump holds an unknown expression: ${JSON.stringify(expression)}`);
+  if (!Array.isArray(expression) || !EXPRESSIONS.has(expression[0])) throw unknown();
+  if (expression[0] === "variable") {
+    if (expression.length !== 2 || typeof expression[1] !== "string") throw unknown();
+    found.add(expression[1]);
+    return found;
+  }
+  for (const part of expression.slice(1)) variablesIn(part, found);
   return found;
 }
 
@@ -89,9 +111,11 @@ function reached(
     reachedRecipes.add(name);
     for (const dependency of recipe.dependencies) {
       visit(dependency.recipe);
-      for (const use of variablesIn(dependency.arguments)) reachedVariables.add(use);
+      for (const argument of dependency.arguments)
+        for (const use of variablesIn(argument)) reachedVariables.add(use);
     }
-    for (const use of variablesIn(recipe.body)) reachedVariables.add(use);
+    for (const line of recipe.body)
+      for (const part of line) for (const use of variablesIn(part)) reachedVariables.add(use);
     for (const parameter of recipe.parameters)
       for (const use of variablesIn(parameter.default)) reachedVariables.add(use);
     const text = textOf(recipe.body);

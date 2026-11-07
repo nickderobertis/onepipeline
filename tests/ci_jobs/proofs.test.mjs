@@ -336,6 +336,50 @@ describe("the warm build's test doubles", () => {
     );
   });
 
+  // A coverage tier asks for the doubles under `-D warnings`; a warm build that lost those
+  // flags saved units no journey asks for, and 83 of them were stale at the tier's first
+  // journey. Over a scratch crate: what the recipe's own instrumented arm builds is fresh
+  // under the tier's flags, and the arm's earlier form, which lost them, is not.
+  it("are the units a coverage tier's flags ask for", () => {
+    const arm = recipe.match(/instrumented\) (.*?); target=/)?.[1];
+    assert.ok(arm, "the recipe has no instrumented arm");
+    const dir = mkdtempSync(
+      join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "instrumented-"),
+    );
+    try {
+      mkdirSync(join(dir, "src"));
+      writeFileSync(
+        join(dir, "Cargo.toml"),
+        '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
+      );
+      writeFileSync(join(dir, "src/lib.rs"), "pub fn fixture() {}\n");
+      const build = (flags) => {
+        const script = `set -eu; unset RUSTFLAGS; ${flags}; cargo build --offline --target-dir out --message-format=json`;
+        const done = spawnSync("bash", ["-c", script], { cwd: dir, encoding: "utf8" });
+        assert.equal(done.status, 0, done.stderr);
+        return done.stdout
+          .split("\n")
+          .filter((line) => line.startsWith('{"reason":"compiler-artifact"'))
+          .map((line) => JSON.parse(line).fresh);
+      };
+      const tier =
+        'eval "$(cargo llvm-cov show-env --export-prefix 2>/dev/null)"; export RUSTFLAGS="-D warnings"';
+      assert.deepEqual(build(arm), [false], "the warm build compiled nothing");
+      assert.deepEqual(build(tier), [true], "the tier's flags found the warm build stale");
+      rmSync(join(dir, "out"), { recursive: true });
+      build(
+        `eval "$(RUSTFLAGS='-D warnings' cargo llvm-cov show-env --export-prefix 2>/dev/null)"`,
+      );
+      assert.deepEqual(
+        build(tier),
+        [false],
+        "the arm's earlier form lost -D warnings, and this no longer tells them apart",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // The doubles inherit RUSTFLAGS from the test that asks for them, and cargo
   // fingerprints RUSTFLAGS, so each uninstrumented journey's own flags name the
   // build it needs warm: release-compat's denied warnings, smoke's none (in

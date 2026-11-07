@@ -95,6 +95,12 @@ describe("a recipe's digest", () => {
   ]) {
     it(`stays with ${what}`, () => assert.equal(main(options), base));
   }
+  it("can be taken over a variable alone", () => {
+    const alone = (options) => digest(["--variable", "unused"], options);
+    assert.match(alone().stdout.trim(), /^[0-9a-f]{64}$/);
+    assert.notEqual(alone(replaced('unused := "unused"', 'unused := "changed"')).stdout, alone().stdout);
+    assert.equal(alone(replaced("@echo {{derived}}", "@echo changed {{derived}}")).stdout, alone().stdout);
+  });
   it("covers a variable the task reads some other way, when named", () => {
     const edit = replaced('unused := "unused"', 'unused := "changed"');
     const named = (options) => digest(["main", "--variable", "unused"], options).stdout.trim();
@@ -115,6 +121,7 @@ describe("a recipe digest that cannot be taken", () => {
   };
   it("refuses a recipe the justfile does not define", () => assert.match(fails(["no-such-recipe"]), /no recipe 'no-such-recipe'/));
   it("refuses a variable the justfile does not define", () => assert.match(fails(["main", "--variable", "no-such"]), /no variable 'no-such'/));
+  it("refuses --variable with no name", () => assert.match(fails(["main", "--variable"]), /--variable names no variable/));
   it("refuses being asked for nothing", () => assert.match(fails([]), /name a recipe/));
   it("refuses a justfile just cannot parse", () => {
     fails(["main"], { justfile: "main:\n    @echo {{nope}}\n" });
@@ -124,6 +131,8 @@ describe("a recipe digest that cannot be taken", () => {
     ["a recipe of an unknown shape", '{"recipes":{"main":{"body":"text"}},"assignments":{},"settings":{}}', /recipe 'main' an unknown shape/],
     ["a variable of an unknown shape", '{"recipes":{},"assignments":{"x":{}},"settings":{}}', /variable 'x' an unknown shape/],
     ["a body expression of an unknown shape", '{"recipes":{"main":{"body":[[{"kind":"variable","name":"x"}]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["an expression form it does not know", '{"recipes":{"main":{"body":[[["new-form","x"]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
+    ["a use naming no variable", '{"recipes":{"main":{"body":[[["variable"]]],"dependencies":[],"parameters":[]}},"assignments":{},"settings":{}}', /unknown expression/],
     ["a variable's value of an unknown shape", '{"recipes":{"main":{"body":[[["variable","x"]]],"dependencies":[],"parameters":[]}},"assignments":{"x":{"export":false,"value":{"kind":"new"}}},"settings":{}}', /unknown expression/],
   ]) {
     it(`refuses a dump with ${what}`, () => {
