@@ -202,8 +202,6 @@ test("`just budgets` still says how to install a checker that is missing, and sa
   assert.equal(existsSync(join(dir, "target", "budget-results")), false);
 });
 
-// ---- A saving target Nx caches declares what it saved, so a replay restores it.
-
 test("each target saving results is uncached, or names the file in its outputs", () => {
   const targets = {
     onepipeline: { budgets: "onepipeline.json", "install-smoke": "host-view.json" },
@@ -231,8 +229,6 @@ test("each target saving results is uncached, or names the file in its outputs",
     }
   }
 });
-
-// ---- The labelled budgets keep the checks that held them.
 
 const LABELLED = {
   "budgets.yaml": [
@@ -426,8 +422,6 @@ for (const [name, recipe, file, reader, recordName, recording] of [
       Object.fromEntries(LABELLED[file].map((id) => [id, "over"])),
     );
   });
-
-// ---- A pull request's CI-time pair reads its own run, as the `budgets` job does.
 
 const RECORDED_JOBS = join(root, ".github/tests/fixtures/own-run/jobs.json");
 const RUN = "42237631071";
