@@ -4,7 +4,8 @@
 Every GET lands in a cache directory keyed by its path, so a re-analysis costs no request, and no
 REST request is made once `gh api rate_limit` reports under the floor of 2,500 core requests
 remaining (checked at the first request and after every 25). Pulls merged pull requests over
-GraphQL, which has its own limit, and workflow runs, their jobs and job logs over REST.
+GraphQL, which has its own limit, and workflow runs, their jobs, job logs and the full file lists
+of pull requests over 100 files over REST.
 
 Imported by analyse.py, which holds the arithmetic and is what a person runs.
 """
@@ -137,6 +138,38 @@ nodes{number title createdAt mergedAt baseRefName headRefName baseRefOid headRef
 mergeCommit{oid committedDate}
 commits(last:1){nodes{commit{oid committedDate pushedDate}}}
 files(first:100){totalCount nodes{path}}}}}}"""
+
+
+class IncompleteFiles(Exception):
+    """A pull request's complete file list could not be read."""
+
+
+def pr_files(store: Store, repo: str, pr: dict) -> list[str]:
+    """Every path a merged pull request changed, paged over REST past GraphQL's first 100.
+
+    Refuses a list that does not match the pull request's totalCount, which REST's own
+    3,000-file cap would otherwise pass off as complete.
+    """
+    total = pr["files"]["totalCount"]
+    if total <= len(pr["files"]["nodes"]):
+        return [node["path"] for node in pr["files"]["nodes"]]
+    paths: dict[str, None] = {}
+    page = 1
+    while True:
+        path = f"repos/{OWNER}/{repo}/pulls/{pr['number']}/files?per_page=100&page={page}"
+        try:
+            body = store.get(path)
+        except (UnderFloor, RuntimeError) as failed:
+            raise IncompleteFiles(f"{repo}#{pr['number']}: {failed}") from failed
+        if not isinstance(body, list):
+            raise IncompleteFiles(f"{repo}#{pr['number']}: page {page} answered {str(body)[:120]}")
+        paths.update((entry["filename"], None) for entry in body)
+        if len(body) < 100:
+            break
+        page += 1
+    if len(paths) != total:
+        raise IncompleteFiles(f"{repo}#{pr['number']}: read {len(paths)} of {total} files")
+    return list(paths)
 
 
 def merged_prs(store: Store, repo: str) -> list[dict]:

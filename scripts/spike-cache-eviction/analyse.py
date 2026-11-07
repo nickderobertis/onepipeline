@@ -160,21 +160,37 @@ def q6(store: h.Store, repo: str) -> None:
     files: Counter[str] = Counter()
     global_hits: Counter[str] = Counter()
     hit_prs = 0
-    truncated = 0
+    paths: dict[int, list[str]] = {}
+    paged: list[str] = []
+    missing: list[str] = []
+    for _pr, _run, between in moved:
+        for other in between:
+            if other["number"] in paths:
+                continue
+            total = other["files"]["totalCount"]
+            try:
+                paths[other["number"]] = h.pr_files(store, repo, other)
+                if total > 100:
+                    paged.append(f"#{other['number']} {total} of {total}")
+            except h.IncompleteFiles as failed:
+                paths[other["number"]] = [node["path"] for node in other["files"]["nodes"]]
+                missing.append(f"#{other['number']} {len(paths[other['number']])} of {total} ({failed})")
     for pr, run, between in moved:
         hit = False
         for other in between:
-            truncated += other["files"]["totalCount"] > 100
-            for node in other["files"]["nodes"]:
-                files[node["path"]] += 1
-                if is_global(repo, node["path"]) and not is_release(other):
-                    global_hits[node["path"]] += 1
+            for path in paths[other["number"]]:
+                files[path] += 1
+                if is_global(repo, path) and not is_release(other):
+                    global_hits[path] += 1
                     hit = True
         hit_prs += hit
     print(f"  moved PRs: {[(m[0]['number'], [o['number'] for o in m[2]]) for m in moved]}")
     print(f"  intervening files changed: {len(files)} distinct; top {files.most_common(12)}")
     print(f"  in global inputs (excluding release merges, whose version edits are normalised): {dict(global_hits)}; "
-          f"{hit_prs} moved PRs hit a global; intervening PRs with >100 files, list truncated: {truncated}")
+          f"{hit_prs} moved PRs hit a global")
+    print(f"  intervening PRs over 100 files, read in full: {paged or 'none'}")
+    if missing:
+        print(f"  LOWER BOUNDS, file lists still truncated: {missing}; read repos/{h.OWNER}/{repo}/pulls/<n>/files every page")
 
 
 SENT = re.compile(r"^(\S+) Sent (\d+) of (\d+) \(100\.0%\)")
