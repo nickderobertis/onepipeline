@@ -120,7 +120,6 @@ function digestOf(dump, reach) {
 
 try {
   const wanted = parseArguments(process.argv.slice(2));
-  // llmlint: ignore[scripts_runtime_independent] just is what parses a justfile, and every task this digests runs through it, so it is present wherever the digest is taken.
   const dump = JSON.parse(
     execFileSync("just", ["--dump", "--dump-format", "json"], {
       encoding: "utf8",
