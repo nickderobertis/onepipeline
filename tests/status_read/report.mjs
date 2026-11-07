@@ -16,8 +16,11 @@ if (flag !== "--metric" || !["status", "results", "transcript"].includes(metric)
   throw new Error("usage: report.mjs RECORD --metric status|results|transcript");
 }
 const recording = JSON.parse(readFileSync(path, "utf8"));
-const ms = (nanos) => `${(Number(nanos ?? 0) / 1e6).toFixed(1)} ms`;
-const phase = (read, name) => ms(read.phases?.phases?.[name]?.wall_ns);
+const phase = (read, name) => {
+  const wall = read.phases?.phases?.[name]?.wall_ms;
+  if (typeof wall !== "number") throw new Error(`the recording holds no ${name} phase`);
+  return `${wall.toFixed(1)} ms`;
+};
 const load = `host load ${recording.host_load}`;
 
 const reporters = {
@@ -55,8 +58,8 @@ const reporters = {
     }
     report(
       t.seconds,
-      `${load}; ${t.references} references into ${t.session_files} session files of ` +
-        `${t.session_bytes} bytes`,
+      `${load}; ${t.references} references into ${t.session_files} session files, ` +
+        `${t.session_bytes} bytes in all`,
     );
   },
 };
