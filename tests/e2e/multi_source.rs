@@ -1477,6 +1477,142 @@ fn a_private_documents_references_point_at_the_tasks_a_public_board_already_hold
     );
 }
 
+/// A design document names its budget with a reference-style link, whose definition holds a path
+/// relative to the document. Copied after the plan's tasks to a local Markdown destination
+/// declared private, that definition points at the destination's copy of the task and at its
+/// budget heading, so the link lands on the section there; a path naming no record of the plan is
+/// left as written. The plan the copy filed stays one the engine's own loader reads.
+#[test]
+fn a_reference_style_budget_link_lands_on_its_section_at_a_private_destination() {
+    let world = a_world_with_members_and_draft("multi-source-private-budget-link")
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__VISIBILITY", "private")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "private");
+    let name = "budgeted";
+    let project = project_id(name);
+    // The destination already holds another plan under the draft's own id, so its copy of this
+    // one sits under another folder and a path left as written would not reach it.
+    world.write_item(
+        &world.store().join("projects").join(format!("{project}.md")),
+        &[("title", json!("Another plan"))],
+        "",
+    );
+    let mut core = on(HOME, "core", &[]);
+    core["task"] = json!(
+        "## What\nShip core.\n\n## Budget core-time\nOne minute.\n\n## Acceptance criteria\n\
+         - core is published."
+    );
+    let home = filed(&world, name, &plan_of(name, vec![core]));
+    world.run(&["plan", "check", &home]).exited(0);
+
+    let authored = format!("../tasks/{project}/000-core.md");
+    let gone = format!("../tasks/{project}/009-gone.md");
+    let draft = root_of(&world, DRAFT);
+    assert!(
+        draft
+            .join("tasks")
+            .join(&project)
+            .join("000-core.md")
+            .is_file(),
+        "the definition written below names no task the draft holds: {authored}"
+    );
+    world.write_item(
+        &draft.join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        &format!(
+            "## Budgets\n\nHold the [core time][1]. Not filed: [gone][2].\n\n\
+             [1]: {authored}#budget-core-time\n\
+             [2]: {gone}#budget-core-time\n"
+        ),
+    );
+
+    let design = global(&format!("{DRAFT}:design"));
+    let landed = world.store_call(|engine| async move {
+        let report = engine
+            .copy(&onetaskgraph_core::CopyRequest {
+                items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
+                scope: onetaskgraph_core::CopyScope::Documents,
+                destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
+                    .expect("a source name"),
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
+                match_by: None,
+                recreate: false,
+                create: false,
+                dry_run: false,
+                comments: false,
+                no_link: false,
+                expect: None,
+                statuses: Vec::new(),
+                conditions: onetaskgraph_core::CopyConditions::default(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
+        let id = report
+            .items
+            .first()
+            .and_then(|item| item.action.destination())
+            .unwrap_or_else(|| panic!("the copy reports where the document landed: {report:?}"))
+            .clone();
+        let landed = engine
+            .document(&id)
+            .await
+            .unwrap_or_else(|error| panic!("the store reads the copied document {id}: {error}"));
+        serde_json::to_value(&landed).expect("a document renders")
+    });
+
+    let document = &landed["items"][0]["item"];
+    let content = document["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document holds no content: {landed}"));
+    let location = document["location"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document names no location: {landed}"));
+    let definition = content
+        .split_once("[1]: ")
+        .and_then(|(_, rest)| rest.split_once('\n'))
+        .map(|(definition, _)| definition)
+        .unwrap_or_else(|| panic!("the copied document defines no budget link: {content}"));
+    let (link, fragment) = definition
+        .split_once('#')
+        .unwrap_or_else(|| panic!("the budget link names no heading: {definition}"));
+    assert_ne!(
+        link, authored,
+        "the copy left the definition naming the draft's path, not the destination's task"
+    );
+    assert_eq!(fragment, "budget-core-time", "{content}");
+
+    // The link is followed the way a Markdown viewer follows it: from the copied document to the
+    // file it names, and to the heading that fragment is the anchor of.
+    let followed = std::path::Path::new(location)
+        .parent()
+        .expect("the copied document sits in a folder")
+        .join(link);
+    let task = plan_tasks(&world, &home)["core"]["item"]["location"]["path"]
+        .as_str()
+        .map(PathBuf::from)
+        .expect("the filed task names a location");
+    assert_eq!(
+        std::fs::canonicalize(&followed)
+            .unwrap_or_else(|error| panic!("{} names no file: {error}", followed.display())),
+        std::fs::canonicalize(&task).expect("the destination's copy of core"),
+        "the budget link from {location} does not reach the destination's copy of core"
+    );
+    let copied = std::fs::read_to_string(&task).expect("the destination's copy of core reads");
+    assert!(
+        copied.lines().any(|line| line == "## Budget core-time"),
+        "the destination's copy of core holds no budget heading: {copied}"
+    );
+    assert_eq!(
+        content,
+        format!(
+            "## Budgets\n\nHold the [core time][1]. Not filed: [gone][2].\n\n\
+             [1]: {link}#budget-core-time\n\
+             [2]: {gone}#budget-core-time\n"
+        ),
+        "the copy changed more of the document than the budget link's destination"
+    );
+}
+
 /// A plan drafted in a source declared private is copied onto the board, which is not: the copy
 /// records no origin there, so the board names nothing private. Its design document, copied after
 /// it with the store's document copy, still finds the board's copy of the plan — through the

@@ -861,11 +861,17 @@ fn full_file_export(lfs: bool) {
     world.until("the consumer to start on the export", |world| {
         !tasks_of(world, "examples").is_empty()
     });
-    let opening = world
-        .events_of("files", "session-opened")
-        .into_iter()
-        .find(|event| event["labels"]["node"] == "examples")
-        .expect("the consumer session opened");
+    // The task appearing does not mean the journal holds its session yet: on a slow host the
+    // driver's `session-opened` line lands after it.
+    let mut opening = None;
+    world.until("the consumer's session-opened to be journalled", |world| {
+        opening = world
+            .events_of("files", "session-opened")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == "examples");
+        opening.is_some()
+    });
+    let opening = opening.expect("the wait returns only once the consumer session opened");
     let worktree = std::path::PathBuf::from(opening["payload"]["worktree"].as_str().unwrap());
     assert_eq!(
         git_out(&world, &worktree, &["rev-parse", "HEAD"]),
