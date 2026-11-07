@@ -186,6 +186,51 @@ test("the Linux leg's capture deletion leaves the rest of target for the family"
   rmSync(dir, { recursive: true, force: true });
 });
 
+describe("the registered headroom budget, through onebudgetspec, against GitHub's REST listing", () => {
+  const ALLOWANCE = 10 * 1024 ** 3;
+  const older = (family, id) => ({ id, key: `${family}older`, ref: "refs/heads/main", size_in_bytes: 3e9, created_at: "2026-01-01T00:00:00Z", last_accessed_at: "2026-01-01T00:00:00Z", version: "fixture" });
+  const measure = async (api) => {
+    const measured = await command(root, "onebudgetspec", ["check", "budgets.yaml", "--id", "onepipeline-cache-headroom", "--json"], {
+      GITHUB_REPOSITORY: "nickderobertis/onepipeline", GITHUB_API_URL: api.url, GH_TOKEN: "fixture-token", GITHUB_TOKEN: "fixture-token",
+    });
+    return JSON.parse(measured.stdout).results[0];
+  };
+  const sizes = (entries) => entries.reduce((total, entry) => total + entry.size_in_bytes, 0);
+
+  it("reads every page, counts results, and leaves a named family's older copy in the detail", async () => {
+    const recorded = recordedEntries();
+    const family = "v0-rust-test-linux-Linux-x64-";
+    const api = await githubListing([...recorded, older(family, 1)]);
+    try {
+      const result = await measure(api);
+      assert.ok(Math.abs(result.actual - (ALLOWANCE - sizes(recorded)) / 1e9) < 0.001, `${result.actual}: ${result.detail}`);
+      assert.equal(result.verdict, "over", "the recorded listing has far less room than the target");
+      assert.match(result.detail, new RegExp(`family ${family}: newest .*1 older copy`));
+      assert.match(result.detail, /result/);
+    } finally { await api.close(); }
+  });
+
+  it("reads within target once the families are shrunk to what the target allows", async () => {
+    const small = recordedEntries().map((entry) => (entry.key.startsWith("nx-cache-") ? entry : { ...entry, size_in_bytes: Math.min(entry.size_in_bytes, 1e9) }));
+    const api = await githubListing(small);
+    try {
+      const result = await measure(api);
+      assert.equal(result.verdict, "within", `${result.actual}: ${result.detail}`);
+    } finally { await api.close(); }
+  });
+
+  it("reads 0 for a named family over two entries", async () => {
+    const family = "ci-capture-Linux-X64-";
+    const api = await githubListing([...recordedEntries().map((entry) => ({ ...entry, size_in_bytes: Math.min(entry.size_in_bytes, 1000) })), older(family, 1), { ...older(family, 2), key: `${family}oldest` }]);
+    try {
+      const result = await measure(api);
+      assert.equal(result.actual, 0, result.detail);
+      assert.equal(result.verdict, "over");
+      assert.match(result.detail, new RegExp(family));
+    } finally { await api.close(); }
+  });
+});
+
 // The evidence is what the production workflow steps wrote, on real merge commits: the
 // pull request's run tested one base and its merge landed on a later one, which changed
 // the task's input. The release's history selection and GitHub's HTTP service are doubled.

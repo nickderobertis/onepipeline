@@ -108,6 +108,23 @@ function reached(
   return { recipes: [...reachedRecipes].sort(), variables: [...reachedVariables].sort() };
 }
 
+// just's dump is another program's output, and the digest only covers what this reads of
+// it: a shape it does not know must fail rather than digest less than the task runs.
+function validated(dump) {
+  const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!isObject(dump?.recipes) || !isObject(dump.assignments) || !isObject(dump.settings))
+    throw new Error("just's dump carries no recipes, assignments or settings");
+  for (const [name, recipe] of Object.entries(dump.recipes)) {
+    const lists = [recipe?.body, recipe?.dependencies, recipe?.parameters];
+    if (!lists.every(Array.isArray) || !recipe.body.every(Array.isArray))
+      throw new Error(`just's dump gives recipe '${name}' an unknown shape`);
+  }
+  for (const [name, assignment] of Object.entries(dump.assignments))
+    if (!isObject(assignment) || !("value" in assignment) || typeof assignment.export !== "boolean")
+      throw new Error(`just's dump gives variable '${name}' an unknown shape`);
+  return dump;
+}
+
 function digestOf(dump, reach) {
   const describe = (recipe) => ({ ...recipe, doc: undefined, namepath: undefined });
   const content = {
@@ -120,11 +137,13 @@ function digestOf(dump, reach) {
 
 try {
   const wanted = parseArguments(process.argv.slice(2));
-  const dump = JSON.parse(
-    execFileSync("just", ["--dump", "--dump-format", "json"], {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-    }),
+  const dump = validated(
+    JSON.parse(
+      execFileSync("just", ["--dump", "--dump-format", "json"], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      }),
+    ),
   );
   process.stdout.write(`${digestOf(dump, reached(dump, wanted))}\n`);
 } catch (error) {
