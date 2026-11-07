@@ -14,6 +14,9 @@
     "build": {
       "command": "just _tier-build e2e",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "e2eSource",
         {
           "runtime": "node -p process.platform"
@@ -26,6 +29,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/e2e/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "e2eSource",
         {
           "runtime": "node -p process.platform"
@@ -35,6 +41,9 @@
     "lint": {
       "command": "just _tier-lint e2e",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "e2eSource",
         {
           "runtime": "node -p process.platform"
@@ -72,6 +81,9 @@
     "test-quick": {
       "command": "just _e2e-test-quick",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test-quick --variable onetaskgraph-version"
+        },
         "e2eSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
@@ -99,6 +111,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

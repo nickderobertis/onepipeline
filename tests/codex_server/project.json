@@ -14,6 +14,9 @@
     "build": {
       "command": "just _tier-build codex_server",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "codexServerSource",
         {
           "runtime": "node -p process.platform"
@@ -26,6 +29,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/codex_server/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "codexServerSource",
         {
           "runtime": "node -p process.platform"
@@ -35,6 +41,9 @@
     "lint": {
       "command": "just _tier-lint codex_server",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "codexServerSource",
         {
           "runtime": "node -p process.platform"
@@ -66,6 +75,9 @@
     "test-quick": {
       "command": "just _codex-server-test-quick",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _codex-server-test-quick --variable onetaskgraph-version"
+        },
         "codexServerSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
@@ -90,6 +102,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

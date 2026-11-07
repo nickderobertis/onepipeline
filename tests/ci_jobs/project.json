@@ -24,6 +24,7 @@
       "command": "node --test tests/ci_jobs/*.test.mjs",
       "//": "ci.yml's four job recipes and the refusals of the scripts the jobs run around them, driven over scratch copies of this workspace. Keyed on everything the recipes read to select and run: a project declaration or the Nx configuration changes what they select.",
       "inputs": [
+        "{workspaceRoot}/justfile",
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/ci-job.sh",
         "{workspaceRoot}/scripts/ci-job-tasks.mjs",
@@ -53,7 +54,7 @@
       "executor": "nx:noop",
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
-      "inputs": ["npmSelection"]
+      "inputs": ["justfileSelection", "npmSelection"]
     }
   }
 }
