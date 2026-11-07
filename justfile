@@ -1,3 +1,4 @@
+# DO NOT MERGE: demonstration of the budget report on the paths #1414 touched
 # Canonical command surface for onepipeline.
 #
 # `just bootstrap` works from a clean clone; `just check` is the deterministic

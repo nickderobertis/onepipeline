@@ -1,3 +1,4 @@
+// DO NOT MERGE: demonstration of the budget report on the paths #1414 touched
 //! `budgets.yaml` and the commands behind its budgets, held to the checker that reads them:
 //! `onebudgetspec-core`, the library the `onebudgetspec` binary is built from, at the release
 //! `justfile` installs that binary at.

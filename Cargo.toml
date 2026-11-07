@@ -1,3 +1,4 @@
+# DO NOT MERGE: demonstration of the budget report on the paths #1414 touched
 [workspace]
 # The crate at the root, plus the test-support crate whose binaries stand in for
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
