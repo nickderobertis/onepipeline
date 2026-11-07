@@ -10,7 +10,10 @@
 
 mod generate;
 #[path = "../journal_workload/generate.rs"]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "only its seeded generator primitives are reused; the rest serves its own project"
+)]
 mod workload;
 
 use std::path::{Path, PathBuf};

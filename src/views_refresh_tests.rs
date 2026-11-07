@@ -1446,3 +1446,68 @@ fn a_settled_consumer_stands_whatever_its_upstream_does_and_an_unsettled_one_fol
     assert_eq!(held.refresh().expect("refresh"), Refreshed::Reread);
     assert_eq!(held.state.statuses(), expected);
 }
+
+/// A retained selective view meets an edit that opens an edge it never resolved: a new
+/// consumer of another run, and a settled consumer asked to run again. Neither edge has
+/// an answer in the view, so it reads the run again, and reports as a fresh open does.
+#[test]
+fn a_selective_view_reads_again_when_an_edit_opens_an_edge_it_never_resolved() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![node("settled-consumer", &["run:first-upstream#build"])];
+    let mut run = Run::new("selected-opened", plan);
+    settled_with(
+        &mut run,
+        "settled-consumer",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    let mut view = over_first_screen(&run.paths);
+    assert!(view.state.cross_dag.is_empty(), "no consumer waits yet");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+
+    let edit = |operation: Value| {
+        let kind = operation["kind"].clone();
+        journal::payload(&[
+            ("author", json!("planner")),
+            ("operations", json!([operation])),
+            ("operation_kinds", json!([kind])),
+        ])
+    };
+    let added = node("new-consumer", &["run:second-upstream#build"]);
+    run.writer
+        .emit(
+            PipelineKind::EditCommitted,
+            journal::labels("demo", None),
+            edit(json!({"kind": "node-added", "node": added})),
+        )
+        .expect("an edit");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Reread);
+    assert_eq!(view.state.statuses()["new-consumer"], NodeStatus::Blocked);
+    same_answers(&view, &run.open());
+
+    let mut view = over_first_screen(&run.paths);
+    assert!(!view
+        .state
+        .cross_dag
+        .contains_key("run:first-upstream#build"));
+    run.writer
+        .emit(
+            PipelineKind::EditCommitted,
+            journal::labels("demo", None),
+            edit(json!({"kind": "node-requeued", "node": "settled-consumer"})),
+        )
+        .expect("an edit");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Reread);
+    assert!(view
+        .state
+        .cross_dag
+        .contains_key("run:first-upstream#build"));
+    assert_eq!(
+        view.state.statuses()["settled-consumer"],
+        NodeStatus::Blocked
+    );
+    same_answers(&view, &run.open());
+}

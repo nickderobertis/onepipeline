@@ -34,6 +34,9 @@ fn task(id: &str, deps: &[&str]) -> Value {
     json!({"id": id, "task": "## What\nDo it.", "persona": "engineer", "deps": deps})
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the golden is the text one release printed for
+// one run, so the run has to be the same bytes for that release and this build at fixed stamps,
+// which no launch through the CLI gives. The readings the journey then takes are the real verb's.
 /// A run nothing drives any more, in the writers' own form, at fixed stamps: nodes landed,
 /// unlanded and failed, one skipped behind the failure and one not yet settled.
 fn fixture_run(root: &Path) -> PathBuf {
@@ -107,6 +110,8 @@ fn fixture_run(root: &Path) -> PathBuf {
     dir
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The readings a view says of the moment and the host rather than of the run: the free
 /// space and the runs root, and how long the unread surfaces have been waiting.
 fn stable(text: &str, world: &World) -> String {
@@ -129,6 +134,7 @@ fn golden_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/status-read-v0.101.5.txt")
 }
 
+// llmlint: ignore[tests_mirror_real_usage] the acceptance criterion is a change on disk past the checkpoint, read by a process that did not write it: a driver appending exactly such a record is what a reader meets.
 fn appended(dir: &Path, line: &str) {
     use std::io::Write;
     let mut journal = std::fs::OpenOptions::new()
@@ -272,6 +278,9 @@ fn status_says_of_each_node_what_it_said_and_reads_each_change_off_the_disk() {
 fn the_default_read_never_starts_the_provider_cli_and_providers_does() {
     use std::os::unix::fs::PermissionsExt;
 
+    // llmlint: ignore-block[e2e_not_mocked] the provider CLI is the thing whose start this
+    // proves absent, a runner holds no authenticated Claude Code, and its process boundary is the
+    // only place a start is observable; the sweep that finds it is the real one.
     let world = World::new("status-read-providers").with_env("HOSTNAME", HOST);
     fixture_run(&world.runs);
     let work = world.runs.with_file_name("status-read-providers");
@@ -286,6 +295,7 @@ fn the_default_read_never_starts_the_provider_cli_and_providers_does() {
     )
     .expect("a stand-in");
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    // llmlint: ignore-end[e2e_not_mocked]
     let started = || std::fs::read_to_string(&starts).map_or(0, |text| text.lines().count());
     let status = |flags: &[&str]| {
         let mut args = vec!["status", RUN];

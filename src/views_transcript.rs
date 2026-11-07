@@ -468,7 +468,6 @@ mod session_index {
     /// How many session files are held.
     pub(super) const SESSIONS: usize = 256;
 
-    /// One session file, read.
     #[derive(Debug)]
     pub(super) struct SessionFile {
         text: String,
@@ -600,7 +599,6 @@ mod session_index {
         }
     }
 
-    /// How many sessions are held now.
     #[cfg(test)]
     pub(super) fn held() -> usize {
         let held = HELD.lock().unwrap_or_else(|held| held.into_inner());
@@ -1443,7 +1441,6 @@ mod tests {
         assert_eq!(missing.why, Why::MissingEntry);
     }
 
-    /// The session file a reference names.
     fn session_file(reference: &Value) -> PathBuf {
         address(reference)
     }
