@@ -1847,25 +1847,31 @@ struct RefreshCursor {
     coverage: crate::checkpoint::Coverage,
     result: Option<serde_json::Value>,
     upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
-    /// Whether this view resolved only the edges a consumer still waits on, as
-    /// [`RunView::over_selected`] does, so an upstream only a settled consumer
-    /// names moving is no reason to read anything.
-    open_edges_only: bool,
+    edges: EdgesResolved,
+}
+
+/// Which of a graph's cross-run edges a view holds an answer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgesResolved {
+    All,
+    /// Only those a consumer still waits on, as [`RunView::over_selected`] resolves
+    /// them, so an upstream only a settled consumer names moving is no reason to read
+    /// anything.
+    Open,
 }
 
 fn upstream_stamps(
     paths: &RunPaths,
     state: &RunState,
-    open_edges_only: bool,
+    resolved: EdgesResolved,
 ) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
     let root = paths
         .dir
         .parent()
         .map_or_else(ledger::runs_root, Path::to_path_buf);
-    let edges = if open_edges_only {
-        crate::crossdag::open_edges(state)
-    } else {
-        crate::crossdag::edges(&state.graph).into_keys().collect()
+    let edges = match resolved {
+        EdgesResolved::Open => crate::crossdag::open_edges(state),
+        EdgesResolved::All => crate::crossdag::edges(&state.graph).into_keys().collect(),
     };
     edges
         .into_iter()
@@ -1934,7 +1940,7 @@ impl RunView {
                 &state.graph,
                 &state.cross_dag,
             ),
-            open_edges_only: false,
+            edges: EdgesResolved::All,
         };
         Ok(Self {
             paths: paths.clone(),
@@ -1986,7 +1992,7 @@ impl RunView {
             coverage: crate::checkpoint::Coverage::default(),
             result: ledger::read_json_opt(&paths.result()),
             upstreams: None,
-            open_edges_only: false,
+            edges: EdgesResolved::All,
         };
         Ok(Self {
             paths: paths.clone(),
@@ -2061,7 +2067,7 @@ impl RunView {
                 crate::crossdag::open_edges(&state),
                 &state.cross_dag,
             ),
-            open_edges_only: true,
+            edges: EdgesResolved::Open,
         };
         Ok(Self {
             paths: paths.clone(),
@@ -2082,8 +2088,8 @@ impl RunView {
         let mut launch: LaunchRecord = ledger::read_json(&self.paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
         let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
-        let open_edges_only = self.refresh.open_edges_only;
-        let upstreams = upstream_stamps(&self.paths, &self.state, open_edges_only);
+        let resolved = self.refresh.edges;
+        let upstreams = upstream_stamps(&self.paths, &self.state, resolved);
         if self.refresh.upstreams.as_ref() != Some(&upstreams) {
             crate::crossdag::resolve_for_refresh(
                 &self
@@ -2146,13 +2152,12 @@ impl RunView {
         // A consumer that settled stops reading its edge, which a view resolving only
         // open edges has no reason to read anything over; one that stopped being
         // settled, or a new edge, is an edge it has no answer for.
-        let upstreams_after = upstream_stamps(&self.paths, &state, open_edges_only);
-        let moved = if open_edges_only {
-            upstreams_after
+        let upstreams_after = upstream_stamps(&self.paths, &state, resolved);
+        let moved = match resolved {
+            EdgesResolved::Open => upstreams_after
                 .iter()
-                .any(|(edge, stamp)| upstreams.get(edge) != Some(stamp))
-        } else {
-            upstreams_after != upstreams
+                .any(|(edge, stamp)| upstreams.get(edge) != Some(stamp)),
+            EdgesResolved::All => upstreams_after != upstreams,
         };
         if moved {
             crate::crossdag::resolve_for_refresh(
