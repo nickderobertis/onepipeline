@@ -1,0 +1,131 @@
+# spike-onepipeline-contents: restore one Rust cache family from main, say what it
+# holds, and save nothing. It restores with the steps and key inputs
+# rust-cache-warm.yml saves with, so a key change here is a refusal rather than a
+# partial restore that prunes. A throwaway on a draft whose branch disables ci.yml.
+name: Cache contents
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-contents-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  # rust-cache hashes the CARGO_* environment into its key, as rust-cache-warm.yml says.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      family: ${{ steps.request.outputs.family }}
+      mode: ${{ steps.request.outputs.mode }}
+      runner: ${{ steps.request.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the request
+        id: request
+        shell: bash
+        run: |
+          read -r family mode < .github/cache-contents-request
+          case "$family" in
+            test-linux | ci-capture) runner=ubuntu-latest ;;
+            test-windows) runner=windows-latest ;;
+            test-macos) runner=macos-latest ;;
+            *) echo "::error::no family '$family'" >&2; exit 1 ;;
+          esac
+          case "$mode" in size | price) ;; *) echo "::error::no mode '$mode'" >&2; exit 1 ;; esac
+          { echo "family=$family"; echo "mode=$mode"; echo "runner=$runner"; } >> "$GITHUB_OUTPUT"
+
+  measure:
+    needs: select
+    runs-on: ${{ needs.select.outputs.runner }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      FAMILY: ${{ needs.select.outputs.family }}
+      MODE: ${{ needs.select.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: samypr100/setup-dev-drive@v3
+        if: runner.os == 'Windows'
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      - name: Say where the workspace is
+        run: echo "MEASURE_DIR=${DEV_DRIVE_WORKSPACE:-$GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+
+      - name: Restore test-linux
+        id: linux
+        if: env.FAMILY == 'test-linux'
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
+      - name: Restore test-macos
+        id: macos
+        if: env.FAMILY == 'test-macos'
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-macos
+          save-if: false
+      - name: Restore test-windows
+        id: windows
+        if: env.FAMILY == 'test-windows'
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-windows
+          save-if: false
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+      - name: Restore ci-capture
+        id: capture
+        if: env.FAMILY == 'ci-capture'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/ci-capture-target
+          key: ci-capture-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/workflows/visual-docs.yml') }}
+      - name: Refuse anything but main's exact copy
+        if: steps.linux.outputs.cache-hit != 'true' && steps.macos.outputs.cache-hit != 'true' && steps.windows.outputs.cache-hit != 'true' && steps.capture.outputs.cache-hit != 'true'
+        run: |
+          echo "::error::no exact key match for $FAMILY: main's lock or toolchain moved past this branch, or the warm run has not saved yet. A partial restore prunes, so nothing here would be main's copy." >&2
+          exit 1
+
+      - name: What it holds
+        working-directory: ${{ env.MEASURE_DIR }}
+        run: node scripts/cache-contents/measure.mjs inventory --family "$FAMILY"
+
+      # After the inventory: the installs write into ~/.cargo/bin, which the family holds.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - name: Have the pruner
+        working-directory: ${{ env.MEASURE_DIR }}
+        run: just _ensure-prune-superseded
+      - name: Who wants what
+        if: env.MODE == 'size'
+        working-directory: ${{ env.MEASURE_DIR }}
+        run: node scripts/cache-contents/measure.mjs lines --family "$FAMILY"
+      - name: Each compile line from cold
+        if: env.MODE == 'price'
+        working-directory: ${{ env.MEASURE_DIR }}
+        run: node scripts/cache-contents/measure.mjs price --family "$FAMILY"
