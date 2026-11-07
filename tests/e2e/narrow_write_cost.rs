@@ -8,10 +8,12 @@
 //! dependencies that only a rewriting policy makes fails the comparison by naming it.
 //!
 //! A linking caller hands the store a policy of its own rather than a configured command, as
-//! `taskgraph` does for a fence, so [`Policy::Linked`] drives that mode too. The write-back also
-//! opts into `with_sanitize_stored_on_write`, the read-first guard that keeps a settlement from
-//! writing past a stored term. That read is the opt-in's purpose and is not compared here:
-//! `publication_boundary`'s settlement journey holds what it does through the compiled binary.
+//! `taskgraph` and the write-back do, so [`Policy::Linked`] drives that mode too, and
+//! [`a_runs_settlement_under_a_rewriting_policy_reads_what_it_reads_under_none`] holds the
+//! write-back's own settlement through the compiled binary. None of them opts into
+//! `with_sanitize_stored_on_write`: a term already stored on an item is left for
+//! `sources sanitize`, by the user's ruling that screening adds no GitHub request to a small board
+//! edit. Opting in fails these journeys, on the read of the item and its comments it adds.
 
 // llmlint: ignore-file[e2e_not_mocked] GitHub is the loopback beside this file — real HTTP on a
 // real socket, reached by the real `github-projects` plugin the engine links — because an offline
@@ -27,7 +29,8 @@ use onetaskgraph_plugin_api::{MetadataKey, TaskUpdate};
 use serde_json::{json, Value};
 
 use crate::harness::World;
-use crate::private_github_home::{metadata_of, GitHub};
+use crate::linear_writeback::from_the_launch_directory;
+use crate::private_github_home::{described, metadata_of, GitHub};
 use crate::publication_boundary::{declare_replacement, mixed_world};
 
 /// The invented private term the private repository declares, and what replaces it.
@@ -211,5 +214,113 @@ fn a_narrow_write_under_a_rewriting_policy_reads_what_it_reads_under_one_that_on
             }
             assert!(!issue.to_string().contains(TERM), "{issue:#}");
         }
+    }
+}
+
+/// Every read a run of one lifecycle node sends a public board from its start through its
+/// settlement, in a stable order, and that node's issue once the run is over. The item holds
+/// [`TERM`] from the start, as a person's edit would leave it. `screened` configures the rewriting
+/// policy the write-back then answers through its own; otherwise the store has no boundary at all.
+fn reads_of_a_run(name: &str, screened: bool) -> (Vec<Value>, Value) {
+    let (world, private, _public) = mixed_world(name);
+    declare_replacement(&world, &private);
+    let mut world = world.with_env(TOKEN_ENV, "loopback-token");
+    if screened {
+        let onevcs = crate::harness::onevcs_binary()
+            .to_string_lossy()
+            .into_owned();
+        for (variable, arguments) in [
+            ("CHECK", "boundary,check,--destination,public,--input,-"),
+            ("VISIBILITY", "boundary,inspect,--input,-,--json"),
+            ("SANITIZE", "boundary,sanitize,--input,-"),
+        ] {
+            world = world.with_env(
+                &format!("ONETASKGRAPH_WRITE_POLICY__{variable}_COMMAND"),
+                &format!("{onevcs},{arguments}"),
+            );
+        }
+    }
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {"owner/service": "private", PUBLIC: "public"},
+            "boards": {BOARD.to_string(): {"public": true}},
+            "issues": [
+                {"id": "plan", "repository": PUBLIC, "title": name, "board": BOARD,
+                 "status": "Todo", "parent": null,
+                 "body": described("## Plan\n- Settle one node.", &json!({
+                     "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                     "onepipeline.concurrency": 1,
+                     "onepipeline.goal": {"text": "Settle one node"},
+                 }))},
+                {"id": "work", "repository": PUBLIC, "title": "chore: work", "board": BOARD,
+                 "status": "Todo", "parent": "plan",
+                 "body": described(
+                     &format!(
+                         "## What\nRetry the way {TERM} does.\n\n## Why\nSo the run settles.\n\n\
+                          ## Acceptance criteria\n- work is done."
+                     ),
+                     &json!({"onepipeline.id": "work", "onepipeline.persona": "engineer"}))},
+            ],
+        }),
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("the launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  board:\n    plugin: github-projects\n    visibility: public\n    \
+             config:\n      owner: owner\n      project_number: {BOARD}\n      \
+             repository: {PUBLIC}\n      token_env: {TOKEN_ENV}\n      endpoint: {}\n      \
+             status_mapping:\n        todo: Todo\n        queued: Queued\n        \
+             in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        \
+             cancelled: Canceled\n",
+            github.board(BOARD),
+        ),
+    )
+    .expect("the store configuration");
+    world.script("work.work", "a neutral example\n");
+    let start = from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
+    world.run_on(start, "start the run").exited(0);
+    world.until("the run to finish", |world| {
+        !world.events_of(name, "run-stopped").is_empty()
+    });
+    world.until("the settlement to land", |_| {
+        let body = github.state()["issues"]["work"]["body"].clone();
+        metadata_of(body.as_str().unwrap_or_default()).contains_key("onepipeline.settlement")
+    });
+    let state = github.state();
+    assert_eq!(state["unsupported"], json!([]), "{name}");
+    let mut reads: Vec<Value> = state["requests"]
+        .as_array()
+        .expect("the request log")
+        .iter()
+        .filter(|request| {
+            !request["query"]
+                .as_str()
+                .is_some_and(|q| q.starts_with("mutation"))
+        })
+        .cloned()
+        .collect();
+    reads.sort_by_key(Value::to_string);
+    (reads, state["issues"]["work"].clone())
+}
+
+/// The write-back's own settlement, driven through the compiled binary: under a rewriting policy
+/// a run reads the board exactly what it reads with no policy at all, so its settlement's narrow
+/// write reads nothing for screening, and a term already stored stays for `sources sanitize`.
+#[test]
+fn a_runs_settlement_under_a_rewriting_policy_reads_what_it_reads_under_none() {
+    let (expected, plain) = reads_of_a_run("narrow-settlement-plain", false);
+    assert!(!expected.is_empty(), "the run read nothing of the board");
+    let (reads, issue) = reads_of_a_run("narrow-settlement-screened", true);
+    assert_eq!(reads, expected);
+    for issue in [&plain, &issue] {
+        let body = issue["body"].as_str().expect("the issue's body");
+        assert!(
+            body.contains(&format!("Retry the way {TERM} does.")),
+            "{issue:#}"
+        );
     }
 }
