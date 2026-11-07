@@ -38,17 +38,13 @@ use crate::publication_boundary::{declare_replacement, mixed_world};
 /// The invented private term the private repository declares, and what replaces it.
 const TERM: &str = "velvetquasar";
 const WITH: &str = "sample";
-/// The public repository holding the item written to.
 const PUBLIC: &str = "owner/library";
 const BOARD: u64 = 2;
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
-/// The item every write here is made to, as the source names it.
 const ITEM: &str = "board:note";
 const NOTE: &str = "myapp.note";
-/// What an item holds before a write, when no term is stored on it.
 const PLAIN: &str = "Nothing private here.";
 
-/// What the store is told about its boundary.
 #[derive(Clone, Copy, Debug)]
 enum Policy {
     /// `visibility_command` and `check_command`, with no `sanitize_command`.
@@ -140,7 +136,6 @@ fn written(
     (sent, state["issues"]["note"].clone())
 }
 
-/// The store a configuration names over `github`'s public board, under `policy`.
 fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
     let directory = world.root.join("store-configuration");
     std::fs::create_dir_all(&directory).expect("the configuration's directory");
@@ -192,6 +187,11 @@ fn engine_over(world: &World, github: &GitHub, policy: Policy) -> Engine {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the two journeys below hold
+// which `onetaskgraph-core` this crate links: a move of its pin or `Cargo.lock` entry, which only
+// this crate's own project sees, is what fails them, so an edge narrower than this target would
+// drop them out of `nx affected` for exactly the change they exist to catch. They also build on
+// the `World` and `mixed_world` this binary owns. Same grounds as `agents.rs`'s journeys.
 /// A narrow write of each kind, under each policy that can rewrite, sends the board exactly what
 /// it sends under one that only checks. The text the policy rewrote goes out as the
 /// text the check-only store was handed directly, so the two logs compare whole, and the write
@@ -275,6 +275,8 @@ fn a_term_already_stored_stays_and_only_the_opt_in_reads_for_it() {
     assert!(reads(&sent) > reads(&expected), "{sent:#?}");
     assert!(!issue.to_string().contains(TERM), "{issue:#}");
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 fn is_mutation(request: &Value) -> bool {
     request["query"]
