@@ -2,42 +2,43 @@
 //! whole journal, each with the place a complete read gives it.
 //!
 //! Published through [`crate::journal`]. Every line is merged, so a kept record's
-//! place is the complete read's, and only what is kept is parsed.
+//! place is the complete read's, and only what is kept becomes a record.
 //!
 //! **What the skim rests on.** Every writer of a journal serializes an
 //! [`Envelope`] through its one `Serialize`, whose fields are, in this order: `v`,
 //! `ts`, `stream`, `seq`, `source`, `kind`, `phase` where there is one, `labels`,
-//! `payload`, `artifacts`. A line in exactly that form is skimmed; anything else
-//! about a line, a field in another order or a string carrying an escape, sends it
-//! to the complete reader's own parse rather than past it. So a line the skim
-//! cannot read is never a line this read loses.
+//! `payload`, `artifacts`. A line in exactly that form has its merge fields read off
+//! its opening; anything else about a line, a field in another order or a string
+//! carrying an escape, sends it to the complete reader's own parse rather than past it.
 //!
-//! **What it answers as the complete reader does.** A final line no newline ended
-//! is no record, whatever it holds and whichever form it is in; a line holding a
-//! fragment and then a whole record is that record; a blank or unreadable line is
-//! no record. A line whose opening and end are in the form but whose middle is not
-//! is the one thing a skim cannot tell apart without parsing it: it is found when
-//! it is kept, and the whole read is then taken again parsing every line.
+//! **What it answers as the complete reader does, on every line.** A line holds a place
+//! only if the complete reader would hand back a record for it, so each line in the form
+//! is also validated to the end, by the same parser and depth and against the envelope's
+//! own field types, without building its payload: [`Checked`] is why a line nothing keeps
+//! costs its bytes and no tree. A line that fails goes to the complete reader's parse,
+//! which answers what it answers: a line holding a fragment and then a whole record is
+//! that record, and a blank or unreadable line is no record. A final line no newline
+//! ended is no record, whatever it holds and whichever form it is in.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use memchr::memmem;
 use serde::de::value::{Error as ValueError, StrDeserializer};
-use serde::Deserialize;
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
-use crate::event::{Envelope, Phase, Source};
+use crate::event::{ArtifactRef, Envelope, Phase, Source};
 
 /// The kinds a first screen does not parse unless its node is asked for: by far the
 /// most numerous records of a long run, and nothing a first answer draws.
 const SKIPPED_KINDS: [&str; 2] = ["member-heartbeat", "turn-activity"];
 
-/// More kept records than this are parsed across threads.
-const PARSED_ALONE: usize = 512;
+/// Fewer items than this are worked through on one thread.
+const WORKED_ALONE: usize = 512;
 
 /// What spike-first-screen measured the read at, on a host running other work beside it.
-const PARSERS: usize = 4;
+const WORKERS: usize = 4;
 
 /// What a [`read_selected`] keeps of a journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,11 +123,16 @@ fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
 /// the object.
 fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     let mut node = None;
+    let mut seen: Vec<&str> = Vec::new();
     if let Some(after) = rest.strip_prefix(b"}") {
         return Some((None, after));
     }
     loop {
         let (key, after) = string_of(rest.strip_prefix(b"\"")?)?;
+        if seen.contains(&key) {
+            return None;
+        }
+        seen.push(key);
         let after = after.strip_prefix(b":")?;
         rest = if let Some(value) = after.strip_prefix(b"\"") {
             if key == "round" {
@@ -149,19 +155,94 @@ fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     }
 }
 
-// llmlint: ignore-block[boundary_inputs_validated] the journal is this crate's own record, and a
-// first screen reading 100 MB in a fraction of a second is why a line nothing keeps goes unparsed:
-// this module's note states the one case that leaves, a discarded line whose opening and end are
-// in the form and whose middle is not.
-/// The fields of a line in the one form the writers leave, or `None` for any line
-/// that is not, which then goes to [`parsed_line`].
-fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
+/// A JSON value read by the parser a record is read by, to the end and at the same
+/// depth, with nothing kept of it: every string decoded and every number read, so what
+/// the complete reader refuses in a payload this refuses, and a tree it would build
+/// here is not built.
+struct Checked;
+
+impl<'de> Deserialize<'de> for Checked {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(CheckedVisitor)
+    }
+}
+
+struct CheckedVisitor;
+
+impl<'de> Visitor<'de> for CheckedVisitor {
+    type Value = Checked;
+
+    fn expecting(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("any JSON value")
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_unit<E>(self) -> Result<Checked, E> {
+        Ok(Checked)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Checked, A::Error> {
+        while items.next_element::<Checked>()?.is_some() {}
+        Ok(Checked)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Checked, A::Error> {
+        while fields.next_entry::<Checked, Checked>()?.is_some() {}
+        Ok(Checked)
+    }
+}
+
+/// A whole line in the writers' form, as far as the envelope's own types decide it: a
+/// field it does not name, a repeated one or a value of another type is refused here and
+/// answered by the complete reader's parse. The labels are [`labels_of`]'s to have read.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    dead_code,
+    reason = "each field is read for the refusal its type makes, and only `artifacts` is used"
+)]
+struct WholeLine {
+    v: u32,
+    ts: IgnoredAny,
+    stream: IgnoredAny,
+    seq: u64,
+    source: IgnoredAny,
+    kind: IgnoredAny,
+    phase: Option<IgnoredAny>,
+    labels: Checked,
+    payload: Checked,
+    artifacts: Vec<ArtifactRef>,
+}
+
+/// The fields a merge needs off the opening of a line in the writers' form, with nothing
+/// past `labels` looked at. What a reader asks whose answer is the source alone.
+struct Opening<'a> {
+    ts: &'a str,
+    stream: &'a str,
+    seq: u64,
+    source: Source,
+    kind: &'a str,
+    node: Option<&'a str>,
+}
+
+fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
     let (_, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
     let (ts, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
     let (stream, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
     let (seq, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
     let (source, rest) = string_of(rest.strip_prefix(b",\"source\":\"")?)?;
-    Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()?;
+    let source = Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()?;
     let (kind, mut rest) = string_of(rest.strip_prefix(b",\"kind\":\"")?)?;
     if let Some(phase) = rest.strip_prefix(b",\"phase\":\"") {
         let (phase, after) = string_of(phase)?;
@@ -170,31 +251,35 @@ fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     }
     let (node, rest) = labels_of(rest.strip_prefix(b",\"labels\":{")?)?;
     rest.strip_prefix(b",\"payload\":{")?;
-    // Its end in the form, so a record cut short and then terminated is not counted
-    // as one; and a whole record glued after a fragment is read as that record.
-    let evidence = if line.ends_with(b"},\"artifacts\":[]}") {
-        false
-    } else if line.ends_with(b"]}") && memmem::rfind(line, b"},\"artifacts\":[{").is_some() {
-        true
-    } else {
-        return None;
-    };
-    if memmem::find(&line[1..], b"{\"v\":").is_some() {
-        return None;
-    }
-    Some(Skim {
-        line,
-        ts: Cow::Borrowed(ts),
-        stream: Cow::Borrowed(stream),
+    Some(Opening {
+        ts,
+        stream,
         seq,
-        kind: Cow::Borrowed(kind),
-        node: node.map(Cow::Borrowed),
-        evidence,
-        parsed: None,
+        source,
+        kind,
+        node,
     })
 }
 
-// llmlint: ignore-end[boundary_inputs_validated]
+/// A line in the one form the writers leave that the complete reader would read as a
+/// record, or `None` for any other, which then goes to [`parsed_line`].
+fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
+    let opening = opening_of(line)?;
+    if !line.ends_with(b"]}") {
+        return None;
+    }
+    let whole: WholeLine = serde_json::from_str(std::str::from_utf8(line).ok()?).ok()?;
+    Some(Skim {
+        line,
+        ts: Cow::Borrowed(opening.ts),
+        stream: Cow::Borrowed(opening.stream),
+        seq: opening.seq,
+        kind: Cow::Borrowed(opening.kind),
+        node: opening.node.map(Cow::Borrowed),
+        evidence: !whole.artifacts.is_empty(),
+        parsed: None,
+    })
+}
 
 /// A finished line read as the complete reader reads it: a whole record, or the
 /// whole record after a fragment, or nothing.
@@ -228,25 +313,29 @@ fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
+/// `work` over each of `items`, in their order, across threads where there are many.
+fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    if items.len() < WORKED_ALONE {
+        return items.iter().map(work).collect();
+    }
+    let work = &work;
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = items
+            .chunks(items.len().div_ceil(WORKERS))
+            .map(|items| scope.spawn(move || items.iter().map(work).collect::<Vec<_>>()))
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("reading a line does not panic"))
+            .collect()
+    })
+}
+
 /// `lines` parsed in their order, `None` for one that does not parse.
 fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
-    let parse = |skim: &&Skim<'_>| match &skim.parsed {
+    in_order(lines, |skim| match &skim.parsed {
         Some(event) => Some((**event).clone()),
         None => serde_json::from_slice::<Envelope>(skim.line).ok(),
-    };
-    if lines.len() <= PARSED_ALONE {
-        return lines.iter().map(parse).collect();
-    }
-    let chunk = lines.len().div_ceil(PARSERS);
-    std::thread::scope(|scope| {
-        let parsers: Vec<_> = lines
-            .chunks(chunk)
-            .map(|lines| scope.spawn(move || lines.iter().map(parse).collect::<Vec<_>>()))
-            .collect();
-        parsers
-            .into_iter()
-            .flat_map(|parser| parser.join().unwrap_or_default())
-            .collect()
     })
 }
 
@@ -255,9 +344,13 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 fn select(
     bytes: &[u8],
     selection: &Selection<'_>,
-    skim: fn(&[u8]) -> Option<Skim<'_>>,
+    skim: for<'a> fn(&'a [u8]) -> Option<Skim<'a>>,
 ) -> Option<SelectedRecords> {
-    let lines: Vec<Skim<'_>> = finished_lines(bytes).filter_map(skim).collect();
+    let finished: Vec<&[u8]> = finished_lines(bytes).collect();
+    let lines: Vec<Skim<'_>> = in_order(&finished, |line| skim(line))
+        .into_iter()
+        .flatten()
+        .collect();
     let key = |index: usize| {
         let line = &lines[index];
         (line.ts.as_ref(), line.stream.as_ref(), line.seq)
@@ -377,21 +470,10 @@ pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
     };
     crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
     finished_lines(&bytes)
-        .filter(|line| skimmed_source(line).is_none_or(|source| source == Source::Pipeline))
+        .filter(|line| opening_of(line).is_none_or(|opening| opening.source == Source::Pipeline))
         .filter_map(|line| parsed_line(line)?.parsed.map(|event| *event))
         .filter(|event| event.source == Source::Pipeline)
         .collect()
-}
-
-/// The source word of a line in the writers' form, or `None` for any other line.
-fn skimmed_source(line: &[u8]) -> Option<Source> {
-    skimmed_line(line)?;
-    let (_, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
-    let (_, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
-    let (_, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
-    let (_, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
-    let (source, _) = string_of(rest.strip_prefix(b",\"source\":\"")?)?;
-    Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()
 }
 
 /// How far from its start a journal's first `len` bytes are accounted for by a view
@@ -534,6 +616,9 @@ mod tests {
             whole.replace(r#""pipeline""#, r#""elsewhere""#),
             whole.replace(r#""labels":{"node":"n"}"#, r#""labels":{"round":"2"}"#),
             whole.replace(r#","artifacts":[]"#, ""),
+            whole.replace(r#""payload":{}"#, r#""payload":{broken}"#),
+            whole.replace(r#""payload":{}"#, r#""payload":{},"stray":1"#),
+            whole.replace(r#"{"v":2"#, r#"{"v":99999999999"#),
             whole[..whole.len() - 4].to_owned(),
             format!(r#"{}{whole}"#, &whole[..whole.len() - 20]),
         ] {

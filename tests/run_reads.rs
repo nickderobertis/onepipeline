@@ -439,9 +439,101 @@ fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
     }
 }
 
+/// A heartbeat or activity record no selection keeps, between valid records, whose opening
+/// and end are the writers' and whose middle a complete reader refuses. It holds no place,
+/// claims no `seq`, and moves nothing beside it, whichever way its middle is wrong.
+#[test]
+fn a_discarded_line_malformed_in_its_middle_moves_nothing_a_complete_read_would_not() {
+    let valid = |seq: u64, tick: u64, kind: &str| {
+        written(&json!({
+            "v": 1, "ts": stamp(tick), "stream": "stream-a", "seq": seq,
+            "source": "agentgraph", "kind": kind, "labels": {"node": "ship"},
+            "payload": {"text": "intact"},
+        }))
+    };
+    let shaped = |kind: &str, stream: &str, seq: u64| {
+        written(&json!({
+            "v": 1, "ts": stamp(1_500), "stream": stream, "seq": seq,
+            "source": "agentgraph", "kind": kind, "labels": {"node": "ship"},
+            "payload": {"text": "intact"},
+        }))
+    };
+    let nested = "[".repeat(200) + &"]".repeat(200);
+    let middles: [(&str, &str, &str); 8] = [
+        ("bare text", r#""intact""#, "intact"),
+        ("a lone surrogate", r#""intact""#, r#""\ud800""#),
+        ("a number out of range", r#""intact""#, "1e999"),
+        ("nesting past the parser's depth", r#""intact""#, &nested),
+        ("a control character", r#""intact""#, "\"a\tb\""),
+        (
+            "an unknown top-level field",
+            r#","artifacts":[]"#,
+            r#","stray":1,"artifacts":[]"#,
+        ),
+        (
+            "an artifact missing its fields",
+            r#""artifacts":[]"#,
+            r#""artifacts":[{"id":"a"}]"#,
+        ),
+        (
+            "a version past its type",
+            r#"{"v":1,"#,
+            r#"{"v":99999999999,"#,
+        ),
+    ];
+    for kind in ["member-heartbeat", "turn-activity"] {
+        for (what, from, to) in middles {
+            // In the middle of its own stream, where a first screen discards it; and as
+            // the end of a stream of its own, its `seq` far above the journal's, where a
+            // selection of one owner discards it and it must not reach `last_seq`.
+            for (place, stream, seq) in
+                [("mid-stream", "stream-a", 1), ("high", "stream-b", 900_000)]
+            {
+                let malformed = shaped(kind, stream, seq).replace(from, to);
+                assert!(malformed.contains(to), "{what}: the fixture broke nothing");
+                let journal = format!(
+                    "{}\n{malformed}\n{}\n{}\n",
+                    valid(0, 1_000, "node-dispatched"),
+                    valid(2, 2_000, "member-heartbeat"),
+                    valid(3, 3_000, "node-dispatched"),
+                );
+                let name = format!("discarded-{kind}-{place}-{}", what.replace(' ', "-"));
+                let run = Run::new(&name, &journal);
+                assert_eq!(
+                    run.complete().len(),
+                    3,
+                    "{name}: the complete read refuses it"
+                );
+                every_selection_agrees(&run, &name);
+            }
+        }
+
+        // Bytes that are not text in its middle.
+        let mut journal = valid(0, 1_000, "node-dispatched").into_bytes();
+        journal.push(b'\n');
+        let mut malformed = shaped(kind, "stream-a", 1)
+            .replace("intact", "in@tact")
+            .into_bytes();
+        let mark = malformed
+            .iter()
+            .position(|byte| *byte == b'@')
+            .expect("the mark");
+        malformed[mark] = 0xFF;
+        journal.extend_from_slice(&malformed);
+        journal.push(b'\n');
+        for (seq, tick) in [(2, 2_000), (3, 3_000)] {
+            journal.extend_from_slice(valid(seq, tick, "node-dispatched").as_bytes());
+            journal.push(b'\n');
+        }
+        let run = Run::new(&format!("discarded-{kind}-not-text"), "");
+        std::fs::write(run.journal(), journal).expect("a journal");
+        assert_eq!(run.complete().len(), 3, "the complete read refuses it");
+        every_selection_agrees(&run, "bytes that are not text");
+    }
+}
+
 /// A kept line whose opening and end are in the form and whose middle is not is found
-/// when it is parsed, and the read is then the complete reader's. (Where a selection
-/// does not keep such a line nothing parses it, as `read_selected`'s module note states.)
+/// when it is read, and the read is then the complete reader's.
 #[test]
 fn a_kept_line_corrupt_only_in_its_middle_leaves_the_read_equal_to_the_complete_one() {
     let body = generated(31, 6, 200);
@@ -455,11 +547,5 @@ fn a_kept_line_corrupt_only_in_its_middle_leaves_the_read_equal_to_the_complete_
         .replace("100000", "100001")
         .replace("08:00:00", "08:00:01");
     let run = Run::new("corrupt-middle", &format!("{body}{corrupt}\n{after}\n"));
-    for selection in [
-        Selection::FirstScreen { node: None },
-        Selection::FirstScreen { node: Some("ship") },
-        Selection::Share(Some("ship")),
-    ] {
-        agrees_with_the_complete_read(&run, &selection, "a corrupt kept line");
-    }
+    every_selection_agrees(&run, "a corrupt kept line");
 }
