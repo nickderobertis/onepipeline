@@ -1360,9 +1360,10 @@ onevcs-testing = "0.20.0"
 # It also writes a GitHub issue's link to its own heading as that issue's `www.github.com` URL, the
 # form `tests/e2e/linear_writeback.rs` holds on the public board.
 # **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
-# a term already stored on a task stays for `sources sanitize` unless the caller opts in, as
-# `src/writeback.rs` does, so a settlement still rewrites or refuses it:
-# `tests/e2e/publication_boundary.rs`'s settlement journey fails without that opt-in.
+# a term already stored on a task stays for `sources sanitize` unless the caller opts in. The
+# engine does not, by the user's ruling that screening adds no GitHub request to a small board
+# edit: `tests/e2e/narrow_write_cost.rs` fails if it does. It does not compile against 0.14.4,
+# which has no such opt-in; with that one call taken out, its comparisons fail there on the reads.
 onetaskgraph-core = "=0.14.5"
 onetaskgraph-plugin-api = "=0.14.5"
 onetaskgraph-local-md = "=0.14.5"

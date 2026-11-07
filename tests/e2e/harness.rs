@@ -1974,7 +1974,7 @@ impl World {
     /// `set_var` and its call and landed in that world's registry — which the
     /// launch then met as `"engine" is not a registered repository`, naming the
     /// repository whichever thread had lost the race.
-    fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
         let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
         std::env::set_var("ONEVCS_HOME", self.onevcs_home());
         std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
