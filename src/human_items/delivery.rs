@@ -13,6 +13,14 @@
 //! died before delivering it loses nothing. A crash between a queue append and
 //! the document can carry one event twice; the watch drops what it has already
 //! printed by its sequence number.
+//!
+//! The same carry reaches a manager watching a run. An event a person took is owed,
+//! as a non-blocking planner surface, to every run the item is tied to; what is owed
+//! is written into the delivery document with the cursor that passes its record, so
+//! it survives a run whose channel refuses it and holds nobody else's events back. A
+//! surface names the event as its `source`, and that run's own queue is what says it
+//! was carried: a crash after a push, a retried carry and an adopted driver all find
+//! it there and push nothing.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -54,6 +62,180 @@ struct Delivered {
     /// under delivery is recognised rather than read from the middle of a record.
     #[serde(default)]
     last: String,
+    /// The surfaces carried past and not yet on their runs' channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    owed: Vec<OwedSurface>,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] a private record of this module's own document, written only by `owed_for` from a validated journal record and a listed run's id; it is rebuilt by nothing else, and `Surface`, which it becomes, spells all of these as strings.
+/// One event's surface, owed to one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwedSurface {
+    run: String,
+    /// The event it carries, which is what says it was already carried.
+    event: String,
+    message: String,
+    /// The message to carry instead where the run's publication boundary refuses it.
+    neutral: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+const SURFACE_KIND: &str = "human-item";
+
+/// The two messages an event's surface may say, if a person took it: an item's title,
+/// its text and its reason are theirs and may be private, so the neutral one names only
+/// the id, the action and the actor.
+fn surface_messages(payload: &super::HumanItemEventPayload) -> Option<(String, String)> {
+    use super::HumanItemEventAction as Action;
+    let (actor, on_behalf_of) = match payload.action {
+        Action::Completed | Action::Dismissed => payload
+            .resolution
+            .as_ref()
+            .map(|r| (r.actor.as_str(), r.on_behalf_of.as_deref()))?,
+        Action::Reopened | Action::Noted => payload
+            .by
+            .as_ref()
+            .map(|by| (by.actor.as_str(), by.on_behalf_of.as_deref()))?,
+        Action::Raised | Action::Answered | Action::AutoResolved => return None,
+    };
+    if actor == "engine" {
+        return None;
+    }
+    let action = serde_json::to_value(payload.action)
+        .ok()?
+        .as_str()?
+        .to_owned();
+    let by = on_behalf_of.map_or_else(
+        || actor.to_owned(),
+        |user| format!("{actor} on behalf of {user}"),
+    );
+    let said = payload
+        .resolution
+        .as_ref()
+        .and_then(|r| r.text.as_deref().or(r.reason.as_deref()))
+        .map_or_else(String::new, |text| format!(": {text}"));
+    Some((
+        format!(
+            "{action}: {} \"{}\" by {by}{said}",
+            payload.item_id, payload.item.title
+        ),
+        format!(
+            "{action}: {} by {by}; its title and text are withheld by this run's publication \
+             boundary, and `onepipeline human-items show` prints them",
+            payload.item_id
+        ),
+    ))
+}
+
+/// Every listed run `item` is tied to: its owner, the run its work hold names, the runs
+/// of the plan its plan hold names, and for a host hold every run. Read off the listing
+/// because an item's run and plan are a raiser's words, and whether each has ended is
+/// asked when its surface is pushed.
+fn tied_runs(root: &Path, item: &super::HumanItem) -> Vec<String> {
+    use super::HumanItemBlock as Block;
+    crate::ledger::all_runs(root)
+        .runs
+        .into_iter()
+        .filter(|paths| {
+            item.owner.run.as_deref() == Some(paths.run.as_str())
+                || match &item.block {
+                    Block::Host => true,
+                    Block::Work { run, .. } => run == &paths.run,
+                    Block::Plan { plan } => {
+                        crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
+                            .is_ok_and(|launch| &launch.project == plan)
+                    }
+                    Block::Nothing => false,
+                }
+        })
+        .map(|paths| paths.run)
+        .collect()
+}
+
+fn owed_for(root: &Path, seq: u64, payload: &super::HumanItemEventPayload) -> Vec<OwedSurface> {
+    let Some((message, neutral)) = surface_messages(payload) else {
+        return Vec::new();
+    };
+    tied_runs(root, &payload.item)
+        .into_iter()
+        .map(|run| OwedSurface {
+            run,
+            event: super::live::event_id(seq),
+            message: message.clone(),
+            neutral: neutral.clone(),
+        })
+        .collect()
+}
+
+/// Whether a run has ended, by the test that retires its holds: stopped, or converged on
+/// anything but waiting. A run waiting on a person has not ended, and neither has one
+/// whose failed branch leaves others still moving.
+fn run_has_ended(state: &crate::projection::RunState) -> bool {
+    let statuses = state.statuses();
+    state.stop_recorded()
+        || (!statuses.is_empty()
+            && crate::graph::is_terminal(&statuses)
+            && crate::graph::state_of(&statuses) != crate::graph::GraphState::Waiting)
+}
+
+/// Put one owed surface on its run's channel. Answers `Ok` when nothing more is owed:
+/// pushed now, found already there, or its run gone or ended.
+fn push_owed(root: &Path, owed: &OwedSurface) -> crate::error::Result<()> {
+    let paths = crate::ledger::RunPaths::under(root, &owed.run);
+    if !paths.journal().is_file() {
+        return Ok(());
+    }
+    let view = crate::views::RunView::open(&paths)?;
+    if run_has_ended(&view.state) {
+        return Ok(());
+    }
+    let channel = crate::channel::ChannelState::new(&paths);
+    if channel
+        .every_surface()
+        .iter()
+        .any(|s| s.source == owed.event)
+    {
+        return Ok(());
+    }
+    let allowed =
+        crate::boundary::guard(&view.state, &serde_json::json!({"message": owed.message}));
+    let surface = crate::channel::Surface {
+        id: 0,
+        kind: SURFACE_KIND.to_owned(),
+        message: if allowed.is_ok() {
+            owed.message.clone()
+        } else {
+            owed.neutral.clone()
+        },
+        source: owed.event.clone(),
+        blocking: false,
+        queued_at: crate::sys::now_millis(),
+        workstream: None,
+        abandoned: false,
+        asker: None,
+        correlation: None,
+    };
+    let mut journal = crate::journal::Journal::open(&paths);
+    crate::engine::raise(&paths, &mut journal, surface)
+}
+
+/// Push every surface still owed, keeping and saying each one its run refused. Answers
+/// whether the list changed.
+fn push_every_owed(root: &Path, delivered: &mut Delivered) -> bool {
+    let before = delivered.owed.len();
+    delivered.owed.retain(|owed| match push_owed(root, owed) {
+        Ok(()) => false,
+        Err(why) => {
+            eprintln!(
+                "onepipeline: the human-item event {} is recorded and not yet surfaced on run \
+                 '{}' ({why}); the next human-items command or watch carries it",
+                owed.event, owed.run
+            );
+            true
+        }
+    });
+    delivered.owed.len() != before
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -105,6 +287,19 @@ pub(crate) fn deliver(root: &Path, _just: &Envelope) {
         eprintln!(
             "onepipeline: a human-item event is recorded and not yet delivered to its owner's \
              watch ({error}); the next human-items command or watch carries it"
+        );
+    }
+}
+
+/// Carry everything recorded and not yet delivered, taking the journal's lock as a
+/// writer holds it; a failure is said and left for the next carrier.
+pub(crate) fn carry(root: &Path) {
+    let journal = root.join(super::JOURNAL_PATH);
+    let held = crate::ledger::open_healed_for_append(&journal).map_err(|e| e.to_string());
+    if let Err(error) = held.and_then(|_lock| catch_up(root).map_err(|e| e.to_string())) {
+        eprintln!(
+            "onepipeline: a human-item event is recorded and not yet delivered ({error}); the \
+             next human-items command or watch carries it"
         );
     }
 }
@@ -162,6 +357,13 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
     let mut rest = Vec::new();
     file.read_to_end(&mut rest)
         .map_err(|e| journal_error(&journal, e))?;
+    let write = |delivered: &Delivered| {
+        transport.replace_document(
+            &control,
+            &document,
+            &serde_json::to_vec(delivered).unwrap_or_default(),
+        )
+    };
     let mut carried = 0;
     let mut offset = 0usize;
     while let Some(end) = rest[offset..].iter().position(|b| *b == b'\n') {
@@ -169,7 +371,7 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
         // The journal's own records, held to the item event they must carry: one
         // that is not is refused here rather than carried or passed over, and
         // delivery stops at it until it is repaired.
-        let payload = item_event(line).map_err(|why| {
+        let (seq, payload) = super::live::parse_record(line).map_err(|why| {
             journal_error(
                 &journal,
                 format!(
@@ -183,11 +385,11 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
         offset += end + 1;
         delivered.through += end as u64 + 1;
         delivered.last = digest(line);
-        transport.replace_document(
-            &control,
-            &document,
-            &serde_json::to_vec(&delivered).unwrap_or_default(),
-        )?;
+        delivered.owed.extend(owed_for(root, seq, &payload));
+        write(&delivered)?;
+    }
+    if push_every_owed(root, &mut delivered) {
+        write(&delivered)?;
     }
     Ok(carried)
 }

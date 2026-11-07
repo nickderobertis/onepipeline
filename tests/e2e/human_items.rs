@@ -453,7 +453,7 @@ fn each_manager_sees_its_own_items_and_what_holds_its_work() {
     assert_eq!(all, items(&mine, &["--all", "--full"]));
     for view in &all {
         let keys: Vec<&String> = view.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["item", "blocked"], "{view}");
+        assert_eq!(keys, ["item", "blocked", "reopen"], "{view}");
         let fields: Vec<&String> = view["item"].as_object().unwrap().keys().collect();
         assert_eq!(fields.len(), 15, "{fields:?}");
     }
@@ -2169,6 +2169,70 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
         .collect();
     assert_eq!(resolved.len(), 1, "{resolved:#?}");
     assert_eq!(status_of(&state, &resolved[0]), "Done");
+
+    // The store holds a settled task's terminal state immutable, so a reopen's open and
+    // a changed reason are projections it refuses: each is said, leaves the item as the
+    // person left it, and creates nothing. Completing it again owes nothing more.
+    in_repo(&["human-items", "reopen", &offline])
+        .exited(0)
+        .err_has("its projection into board failed");
+    let open = in_repo(&["human-items", "show", &offline, "--json"]).json();
+    assert_eq!(open["item"]["state"], "open");
+    let completed = in_repo(&["human-items", "complete", &offline]);
+    completed.exited(0);
+    assert!(
+        !completed
+            .stderr
+            .contains("its projection into board failed"),
+        "{}",
+        completed.stderr
+    );
+    let noted = in_repo(&["human-items", "note", &offline, "--text", "Rotated it."]);
+    noted.exited(0);
+    assert!(
+        !noted.stderr.contains("its projection into board failed"),
+        "a completed task projects as the state it is on: {}",
+        noted.stderr
+    );
+    let dismissed = json!({"schema_version": 1, "dedup_key": "dismissed", "kind": "task",
+        "title": "Rotate the other key", "body": "Rotate it.", "priority": "low",
+        "owner": {"session": "mgr", "run": null, "plan": null},
+        "block": {"scope": "nothing"}, "approval": null});
+    let other = world.root.join("other.json");
+    std::fs::write(&other, dismissed.to_string()).unwrap();
+    let raised = in_repo(&["human-items", "raise", "--input", other.to_str().unwrap()]);
+    raised.exited(0);
+    let other = raised.json()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    in_repo(&["human-items", "dismiss", &other, "--reason", "Not ours"]).exited(0);
+    in_repo(&[
+        "human-items",
+        "note",
+        &other,
+        "--text",
+        "Another team's key.",
+    ])
+    .exited(0)
+    .err_has("its projection into board failed");
+    assert_eq!(
+        in_repo(&["human-items", "show", &other, "--json"]).json()["item"]["resolution"]["reason"],
+        "Another team's key."
+    );
+    let state = github.state();
+    for title in ["Rotate the offline key", "Rotate the other key"] {
+        let tickets = state["issues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|i| i["title"] == title)
+            .count();
+        assert_eq!(
+            tickets, 1,
+            "a refused projection files nothing more: {title}"
+        );
+    }
 }
 
 /// A human step whose item could not be raised — the host refused the store —
@@ -2202,3 +2266,943 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
     assert_eq!(open[0]["item"]["dedup_key"], format!("run:{name}#gate"));
     assert!(!dispatched(&world, name).contains(&"b".to_owned()));
 }
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys are this module's by the task's own acceptance criteria, which name `tests/e2e/human_items.rs` and the real binary, and they exercise the human-item verbs, a real watch and an adopted driver over the whole engine, so any Rust source can move what they prove and no edge narrower than the e2e target would still select them; each takes seconds, the slowest about eight.
+/// The events an owner's watch prints, by kind and what each said of the item.
+fn kinds(events: &[Value]) -> Vec<&str> {
+    events.iter().map(|e| e["kind"].as_str().unwrap()).collect()
+}
+
+fn human_item(world: &World, id: &str) -> Value {
+    let run = world.run(&["human-items", "show", id, "--json"]);
+    run.exited(0);
+    serde_json::from_str(&run.stdout).unwrap()
+}
+
+/// Who `onepipeline human-items` records as acting in this world.
+fn actor_of(item: &Value) -> String {
+    item["resolution"]["actor"].as_str().unwrap().to_owned()
+}
+
+/// A completed item takes a comment and a dismissed one a reason, each replacing what it
+/// held and leaving who resolved it; reopening takes the resolution back and the plan
+/// hold returns with it. Every action reaches the owner's watch, saying who acted.
+#[test]
+fn reopen_and_note_change_a_live_item_and_reach_its_owner_and_a_holds_return() {
+    let world = World::new("human-item-reopen");
+    enabled(&world);
+    world.script("a.wait", "hold");
+    let name = "reopens";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("a", &[]), agent("b", &["a"])]),
+    );
+    let hold = raise(
+        &world,
+        "hold",
+        &input(
+            "freeze",
+            "task",
+            "owner",
+            None,
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    stays_undispatched(&world, name, std::time::Duration::from_secs(2));
+    assert_eq!(items(&world, &[])[0]["blocked"]["total"], 2);
+
+    world.run(&["human-items", "complete", &hold]).exited(0);
+    world.until("the released step to start", |w| {
+        dispatched(w, name) == ["a"]
+    });
+    let resolver = actor_of(&state_of(&world, &hold));
+    let said = world.run(&[
+        "human-items",
+        "note",
+        &hold,
+        "--text",
+        "Unfroze it after the deploy.",
+    ]);
+    said.exited(0);
+    assert_eq!(
+        said.json()["item"]["item"]["resolution"]["text"],
+        "Unfroze it after the deploy."
+    );
+    world
+        .run(&["human-items", "note", &hold, "--text", "Unfroze it."])
+        .exited(0);
+    let noted = human_item(&world, &hold);
+    assert_eq!(noted["item"]["state"], "completed");
+    assert_eq!(noted["item"]["resolution"]["text"], "Unfroze it.");
+    assert_eq!(noted["item"]["resolution"]["reason"], Value::Null);
+    assert_eq!(noted["item"]["resolution"]["actor"], resolver.as_str());
+    assert_eq!(noted["reopen"], json!({"available": true, "reason": null}));
+    world
+        .run(&["human-items", "note", &hold, "--text", "  "])
+        .exited(2)
+        .err_has("must not be blank");
+
+    // The hold returns: what the running step would release stays held.
+    let reopened = world.run(&["human-items", "reopen", &hold]);
+    reopened.exited(0);
+    assert_eq!(reopened.json()["item"]["item"]["state"], "open");
+    let open = human_item(&world, &hold);
+    assert_eq!(open["item"]["state"], "open");
+    assert_eq!(open["item"]["resolution"], Value::Null);
+    assert_eq!(open["blocked"]["total"], 1, "{open}");
+    assert_eq!(open["nodes"][0]["node"], "b");
+    assert_eq!(open["reopen"]["available"], false);
+    let refusal = open["reopen"]["reason"].as_str().unwrap();
+    world
+        .run(&["human-items", "reopen", &hold])
+        .err_has(refusal);
+    world
+        .run(&["human-items", "note", &hold, "--text", "on an open item"])
+        .err_has("only a completed or dismissed item takes a note");
+    world.release("a.go");
+    stays_undispatched_after(&world, name, "b", std::time::Duration::from_secs(3));
+    assert_eq!(dispatched(&world, name), ["a"]);
+
+    // Dismissed, a note is its reason; and the owner heard all of it, once each.
+    world
+        .run(&["human-items", "dismiss", &hold, "--reason", "Not needed"])
+        .exited(0);
+    world
+        .run(&["human-items", "note", &hold, "--text", "Superseded."])
+        .exited(0);
+    let dismissed = state_of(&world, &hold);
+    assert_eq!(dismissed["resolution"]["reason"], "Superseded.");
+    assert_eq!(dismissed["resolution"]["text"], Value::Null);
+    let events = watch(&world, "owner");
+    assert_eq!(
+        kinds(&events),
+        [
+            "human-item-raised",
+            "human-item-completed",
+            "human-item-noted",
+            "human-item-noted",
+            "human-item-reopened",
+            "human-item-dismissed",
+            "human-item-noted",
+        ]
+    );
+    let by = json!({"actor": resolver, "on_behalf_of": dismissed["resolution"]["on_behalf_of"]});
+    for event in &events {
+        let payload = &event["payload"];
+        match event["kind"].as_str().unwrap() {
+            "human-item-noted" | "human-item-reopened" => assert_eq!(payload["by"], by),
+            _ => assert!(payload.get("by").is_none(), "{payload}"),
+        }
+    }
+    // Every note stayed in the journal, though only the last is stored.
+    let noted: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "human-item-noted")
+        .collect();
+    assert_eq!(
+        noted[0]["payload"]["item"]["resolution"]["text"],
+        "Unfroze it after the deploy."
+    );
+    assert_eq!(events[4]["payload"]["resolution"], Value::Null);
+    assert!(watch(&world, "owner").is_empty(), "printed once");
+}
+
+/// Whoever takes an after-the-fact action is who `by` names, which need not be who
+/// resolved the item: a manager acting for a person is recorded as both, and the
+/// resolution goes on naming its resolver until a reopen takes it back.
+#[test]
+fn by_names_who_took_the_action_and_the_resolution_keeps_its_resolver() {
+    let world = World::new("human-item-by");
+    enabled(&world);
+    let id = raise(
+        &world,
+        "item",
+        &input(
+            "item",
+            "task",
+            "owner",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let as_person = |args: &[&str], session: &str, user: &str| {
+        let mut command = world.cmd(args);
+        command
+            .env("ONEPIPELINE_LAUNCHER_SESSION", session)
+            .env("USER", user);
+        world.run_on(command, &args.join(" ")).exited(0);
+    };
+    as_person(&["human-items", "complete", &id], "first", "ada");
+    as_person(
+        &["human-items", "note", &id, "--text", "Checked it."],
+        "second",
+        "grace",
+    );
+    let noted = state_of(&world, &id);
+    assert_eq!(noted["resolution"]["actor"], "session:first");
+    assert_eq!(noted["resolution"]["on_behalf_of"], "user:ada");
+    assert_eq!(noted["resolution"]["text"], "Checked it.");
+    as_person(&["human-items", "reopen", &id], "third", "linus");
+
+    let events = watch(&world, "owner");
+    let of = |kind: &str| {
+        events
+            .iter()
+            .find(|e| e["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind}"))["payload"]["by"]
+            .clone()
+    };
+    assert_eq!(
+        of("human-item-noted"),
+        json!({"actor": "session:second", "on_behalf_of": "user:grace"})
+    );
+    assert_eq!(
+        of("human-item-reopened"),
+        json!({"actor": "session:third", "on_behalf_of": "user:linus"})
+    );
+}
+
+/// A configured phase's approval with an `undo`, and a phase's without one.
+fn undo_checkout(world: &World) -> std::path::PathBuf {
+    let script = |name: &str, body: &str| {
+        let path = world.root.join(name);
+        std::fs::write(&path, body).unwrap();
+        serde_json::to_string(&path.to_string_lossy()).unwrap()
+    };
+    let approve = script(
+        "approve.sh",
+        "cat > /dev/null\nprintf '{\"board_copy\":\"board:doc\",\"key\":\"v1\"}'\n",
+    );
+    let undo = script(
+        "undo.sh",
+        &format!(
+            "cat > '{root}/undo.in'\necho run >> '{root}/undo.runs'\n\
+             if [ -f '{root}/refuse' ]; then echo 'the board is locked' >&2; exit 3; fi\n\
+             if [ -f '{root}/silent' ]; then exit 3; fi\n\
+             if [ -f '{root}/garbage' ]; then echo 'not a version'; exit 0; fi\n\
+             if [ -f '{root}/misanswer' ]; then echo 'that version moved on' >&2; \
+             printf '{{\"board_copy\":\"board:doc\",\"key\":\"v2\"}}'; exit 0; fi\n\
+             printf '{{\"board_copy\":\"board:doc\",\"key\":\"v1\"}}'\n",
+            root = world.root.display()
+        ),
+    );
+    let hook = |phase: &str, adapter: &str| {
+        format!(
+            "    - phase: {phase}\n      kind: task\n      title: Approve {phase}\n      \
+             body: Read it and approve it.\n      priority: high\n      block: {{scope: nothing}}\n      \
+             approval: {{adapter: {adapter}}}\n"
+        )
+    };
+    checkout(
+        world,
+        Some(&format!(
+            "human_items:\n  enabled: true\n  approval_adapters:\n    undoable:\n      \
+             command: [\"sh\", {approve}]\n      undo: [\"sh\", {undo}]\n    one-way:\n      \
+             command: [\"sh\", {approve}]\n    unstartable:\n      \
+             command: [\"sh\", {approve}]\n      undo: [\"/nonexistent/undo\"]\n  hooks:\n{}{}{}",
+            hook("reviewed", "undoable"),
+            hook("signed", "one-way"),
+            hook("orphaned", "unstartable"),
+        )),
+    )
+}
+
+/// Raise a phase's task over the stored approval, from the checkout configuring it.
+fn raise_review(world: &World, repo: &std::path::Path, phase: &str, key: &str) -> String {
+    let context = world.root.join(format!("{phase}-{key}.json"));
+    std::fs::write(
+        &context,
+        json!({"owner": {"session": "mgr", "run": null, "plan": null}, "dedup_key": key,
+               "approval": {"board_copy": "board:doc", "key": "v1"}})
+        .to_string(),
+    )
+    .unwrap();
+    let raised = in_checkout(
+        world,
+        repo,
+        &[
+            "human-items",
+            "raise",
+            "--phase",
+            phase,
+            "--context",
+            context.to_str().unwrap(),
+        ],
+    );
+    raised.exited(0);
+    raised.json()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn in_checkout(world: &World, repo: &std::path::Path, args: &[&str]) -> crate::harness::Run {
+    world.run_from(repo, args)
+}
+
+/// The records the host journal holds, which a refused action must not move.
+fn journal_records(world: &World) -> usize {
+    std::fs::read_to_string(world.runs.join("human-items/events.ndjson"))
+        .unwrap()
+        .lines()
+        .count()
+}
+
+/// Reopening a completed approval runs its adapter's `undo` with what completion was
+/// given; a script that refuses, or answers anything but the stored version, is the
+/// refusal and changes nothing; with no `undo` the view says why before anyone tries.
+#[test]
+fn an_undo_script_decides_whether_a_completed_approval_reopens() {
+    let world = World::new("human-item-undo");
+    let repo = undo_checkout(&world);
+    let task = raise_review(&world, &repo, "reviewed", "doc");
+    in_checkout(&world, &repo, &["human-items", "complete", &task]).exited(0);
+    let shown = in_checkout(&world, &repo, &["human-items", "show", &task, "--json"]);
+    assert_eq!(
+        shown.json()["reopen"],
+        json!({"available": true, "reason": null})
+    );
+    let actor = shown.json()["item"]["resolution"]["actor"].clone();
+    let on_behalf_of = shown.json()["item"]["resolution"]["on_behalf_of"].clone();
+
+    // A refusal: its standard error is the reason, and nothing was recorded.
+    let refuse = world.root.join("refuse");
+    std::fs::write(&refuse, "").unwrap();
+    let records = journal_records(&world);
+    in_checkout(&world, &repo, &["human-items", "reopen", &task])
+        .exited(2)
+        .err_has(r#""reason":"the board is locked""#);
+    assert_eq!(journal_records(&world), records);
+    assert_eq!(
+        in_checkout(&world, &repo, &["human-items", "show", &task, "--json"]).json()["item"]
+            ["state"],
+        "completed"
+    );
+    std::fs::remove_file(&refuse).unwrap();
+
+    // An exit 0 naming another version is no undo either.
+    let misanswer = world.root.join("misanswer");
+    std::fs::write(&misanswer, "").unwrap();
+    in_checkout(&world, &repo, &["human-items", "reopen", &task])
+        .exited(2)
+        .err_has("that version moved on");
+    assert_eq!(journal_records(&world), records);
+    std::fs::remove_file(&misanswer).unwrap();
+
+    // Refusing in silence, or answering nothing it can read, still refuses, in the
+    // engine's words since the script gave none.
+    for (marker, says) in [
+        ("silent", "the undo script refused"),
+        ("garbage", "did not answer {board_copy,key}"),
+    ] {
+        let marker = world.root.join(marker);
+        std::fs::write(&marker, "").unwrap();
+        in_checkout(&world, &repo, &["human-items", "reopen", &task])
+            .exited(2)
+            .err_has(says);
+        assert_eq!(journal_records(&world), records);
+        std::fs::remove_file(&marker).unwrap();
+    }
+
+    // Undone: it read exactly what completion reads, and the item is open again.
+    let reopened = in_checkout(&world, &repo, &["human-items", "reopen", &task]);
+    reopened.exited(0);
+    assert_eq!(reopened.json()["item"]["item"]["state"], "open");
+    let read: Value =
+        serde_json::from_str(&std::fs::read_to_string(world.root.join("undo.in")).unwrap())
+            .unwrap();
+    assert_eq!(
+        read,
+        json!({"board_copy": "board:doc", "key": "v1", "actor": actor, "on_behalf_of": on_behalf_of})
+    );
+    let ran = |world: &World| {
+        std::fs::read_to_string(world.root.join("undo.runs"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    assert_eq!(ran(&world), 5);
+
+    // An undo that cannot even start refuses too, and the item stays completed.
+    let orphaned = raise_review(&world, &repo, "orphaned", "lost-script");
+    in_checkout(&world, &repo, &["human-items", "complete", &orphaned]).exited(0);
+    let records = journal_records(&world);
+    in_checkout(&world, &repo, &["human-items", "reopen", &orphaned])
+        .exited(2)
+        .err_has("could not be started");
+    assert_eq!(journal_records(&world), records);
+    assert_eq!(
+        in_checkout(&world, &repo, &["human-items", "show", &orphaned, "--json"]).json()["item"]
+            ["state"],
+        "completed"
+    );
+
+    // No undo declared: refused with the reason the view states, before any script.
+    let signed = raise_review(&world, &repo, "signed", "contract");
+    in_checkout(&world, &repo, &["human-items", "complete", &signed]).exited(0);
+    let listed = in_checkout(
+        &world,
+        &repo,
+        &["human-items", "list", "--state", "completed", "--json"],
+    );
+    let view = listed
+        .json()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] == signed.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(view["reopen"]["available"], false);
+    let reason = view["reopen"]["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("declares no undo"), "{reason}");
+    in_checkout(&world, &repo, &["human-items", "reopen", &signed])
+        .exited(2)
+        .err_has(&reason);
+    assert_eq!(ran(&world), 5);
+    in_checkout(
+        &world,
+        &repo,
+        &["human-items", "note", &signed, "--text", "Signed."],
+    )
+    .exited(0);
+    assert_eq!(
+        in_checkout(&world, &repo, &["human-items", "show", &signed, "--json"]).json()["reopen"]
+            ["reason"],
+        reason.as_str()
+    );
+}
+
+/// Availability is the engine's: a human step's item and an engine's resolution cannot
+/// be reopened and say why, while a plain completion and a dismissed design review can
+/// — the latter running no script, since its dismissal ran none.
+#[test]
+fn what_can_be_reopened_is_stated_by_the_view_and_held_by_the_action() {
+    let world = World::new("human-item-availability");
+    let repo = undo_checkout(&world);
+    let actions = |args: &[&str]| in_checkout(&world, &repo, args);
+    let refused_as_viewed = |id: &str, says: &str| {
+        let view = actions(&["human-items", "show", id, "--json"]).json();
+        assert_eq!(view["reopen"]["available"], false, "{view}");
+        let reason = view["reopen"]["reason"].as_str().unwrap().to_owned();
+        assert!(reason.contains(says), "{reason}");
+        actions(&["human-items", "reopen", id])
+            .exited(2)
+            .err_has(&reason);
+    };
+
+    let name = "availability";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    actions(&["start", &project, "--attach"]).exited(0);
+    let open = actions(&["human-items", "list", "--json"]).json();
+    let gate = id_of(&open[0]);
+    let held = raise_in(
+        &world,
+        &repo,
+        "held",
+        &input(
+            "held-by-the-run",
+            "task",
+            "mgr",
+            Some(name),
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    refused_as_viewed(&gate, "nothing to reopen");
+    actions(&["human-items", "complete", &gate]).exited(0);
+    refused_as_viewed(&gate, "human step");
+    // A note is still an after-the-fact comment, and releases the step no further.
+    actions(&["human-items", "note", &gate, "--text", "Looked fine."]).exited(0);
+    refused_as_viewed(&gate, "human step");
+
+    // The run's end resolves its plan hold as the engine.
+    actions(&["stop", name]).exited(0);
+    assert_eq!(
+        actions(&["human-items", "show", &held, "--json"]).json()["item"]["resolution"]["actor"],
+        "engine"
+    );
+    refused_as_viewed(&held, "the engine resolved");
+
+    let plain = raise_in(
+        &world,
+        &repo,
+        "plain",
+        &input(
+            "plain",
+            "task",
+            "mgr",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    actions(&["human-items", "complete", &plain]).exited(0);
+    assert_eq!(
+        actions(&["human-items", "show", &plain, "--json"]).json()["reopen"],
+        json!({"available": true, "reason": null})
+    );
+    actions(&["human-items", "reopen", &plain]).exited(0);
+
+    let design = raise_review(&world, &repo, "signed", "dismissed-design");
+    actions(&["human-items", "dismiss", &design, "--reason", "Wrong doc"]).exited(0);
+    let listed = actions(&["human-items", "list", "--state", "dismissed", "--json"]).json();
+    let view = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] == design.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(view["item"]["approval"]["key"], "v1");
+    assert_eq!(view["reopen"], json!({"available": true, "reason": null}));
+    actions(&["human-items", "reopen", &design]).exited(0);
+    assert!(
+        !world.root.join("undo.in").exists(),
+        "a dismissal ran no script"
+    );
+}
+
+fn raise_in(world: &World, repo: &std::path::Path, file: &str, item: &Value) -> String {
+    let path = world.root.join(format!("{file}.json"));
+    std::fs::write(&path, item.to_string()).unwrap();
+    let raised = in_checkout(
+        world,
+        repo,
+        &["human-items", "raise", "--input", path.to_str().unwrap()],
+    );
+    raised.exited(0);
+    raised.json()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Each `human-item` surface a run's channel holds, once per surface id: its source
+/// and its message.
+fn item_surfaces(world: &World, run: &str) -> Vec<(String, String)> {
+    let log =
+        std::fs::read_to_string(world.run_file(run, "channel/surfaces.jsonl")).unwrap_or_default();
+    let mut seen = std::collections::BTreeMap::new();
+    for line in log.lines() {
+        let record: Value = serde_json::from_str(line).unwrap();
+        if record["kind"] == "human-item" {
+            assert_eq!(record["blocking"], false, "{record}");
+            seen.insert(
+                record["id"].as_u64().unwrap(),
+                (
+                    record["source"].as_str().unwrap().to_owned(),
+                    record["message"].as_str().unwrap().to_owned(),
+                ),
+            );
+        }
+    }
+    seen.into_values().collect()
+}
+
+/// A real watch armed on `run`, returned once its lease is on disk.
+fn armed_watch(world: &World, run: &str) -> onepipeline_testfakes::profile::process::Child {
+    let watch = world
+        .cmd(&["watch", run, "--timeout", "120", "--tick-interval", "0"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the watch starts");
+    let mine = format!("{}-", watch.id());
+    world.until("the watch to record itself", |w| {
+        std::fs::read_dir(w.run_file(run, "watchers"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+    });
+    watch
+}
+
+/// The human-item surface `next` hands the planner, every other surface passed over.
+fn next_item_surface(world: &World, run: &str) -> Value {
+    loop {
+        let read = world.run(&["next", run]);
+        let surface = read.json()["surface"].clone();
+        assert!(!surface.is_null(), "no human-item surface: {}", read.stdout);
+        if surface["kind"] == "human-item" {
+            return surface;
+        }
+    }
+}
+
+/// The delivery document, gone: the next carry starts over from the journal's first
+/// record, as a crash between a push and its cursor leaves a carry redoing that push.
+// llmlint: ignore[tests_mirror_real_usage] a writer dying between a surface's push and the cursor passing it is the state this reaches, and no process outside that writer can schedule the death; removing the cursor leaves that same on-disk state without a failpoint in the engine. The failure a person can actually meet, a carry the host refused, is driven through the binary by `an_event_its_writer_could_not_carry_is_carried_by_the_next_driver`.
+fn forget_delivery(world: &World) -> bool {
+    fn find(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                find(&path)
+            } else {
+                (entry.file_name() == "delivered.json").then_some(path)
+            }
+        })
+    }
+    find(&world.runs.join("human-items/bus")).is_some_and(|path| std::fs::remove_file(path).is_ok())
+}
+
+/// A manager watching a run learns a person acted: an item the run owns, one holding
+/// its work, its plan or the host, and one whose owning session nobody is watching each
+/// end a real watch on `surface`, resolved from another process with no driver. A
+/// repeated carry and an adopted driver surface none of them twice, and an item tied to
+/// no run reaches only its owner.
+#[test]
+fn a_person_resolving_a_tied_item_wakes_a_watch_on_the_run_once() {
+    let world = World::new("human-item-wakes");
+    enabled(&world);
+    world.script("side.wait", "hold");
+    let name = "watched";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("side", &[]), agent("later", &["side"])]),
+    );
+    let started = world.run(&["start", &project, "--detach"]);
+    started.exited(0);
+    #[cfg(unix)]
+    let driver = started.json()["pid"].as_u64().unwrap() as u32;
+    world.until("the side step to start", |w| {
+        dispatched(w, name) == ["side"]
+    });
+
+    let work = json!({"scope": "work", "run": name, "node": "later"});
+    let plan = json!({"scope": "plan", "plan": project});
+    let cases = [
+        (
+            "owned",
+            "mgr",
+            Some(name),
+            json!({"scope": "nothing"}),
+            "complete",
+        ),
+        ("work-held", "ops", None, work.clone(), "dismiss"),
+        ("plan-held", "ops", None, plan, "complete"),
+        (
+            "host-held",
+            "ops",
+            None,
+            json!({"scope": "host"}),
+            "complete",
+        ),
+        ("unwatched", "nobody", None, work, "dismiss"),
+    ];
+    for (key, session, run, block, verb) in &cases {
+        let id = raise(
+            &world,
+            key,
+            &input(key, "task", session, *run, None, block.clone()),
+        );
+        let watching = armed_watch(&world, name);
+        let mut acted = vec!["human-items", verb, &id];
+        if *verb == "dismiss" {
+            acted.extend(["--reason", "Handled elsewhere"]);
+        }
+        world.run(&acted).exited(0);
+        let ended = watching.wait_with_output().unwrap();
+        assert_eq!(
+            ended.status.code(),
+            Some(4),
+            "{key} ends the watch on surface"
+        );
+        let ending = String::from_utf8_lossy(&ended.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["watch"] == "return")
+            .unwrap();
+        assert_eq!(ending["condition"], "surface-waiting", "{key}: {ending}");
+
+        let surface = next_item_surface(&world, name);
+        let message = surface["message"].as_str().unwrap();
+        let actor = actor_of(&state_of(&world, &id));
+        let action = format!(
+            "human-item-{}",
+            if *verb == "dismiss" {
+                "dismissed"
+            } else {
+                "completed"
+            }
+        );
+        for named in [id.as_str(), &format!("Decide {key}"), &action, &actor] {
+            assert!(message.contains(named), "{key} lacks {named}: {message}");
+        }
+        if *verb == "dismiss" {
+            assert!(message.contains("Handled elsewhere"), "{message}");
+        }
+        assert_eq!(surface["blocking"], false);
+    }
+    let carried = item_surfaces(&world, name);
+    assert_eq!(carried.len(), cases.len(), "{carried:?}");
+
+    // The session nobody watched still has its own event queued, and nothing is doubled
+    // by a carry that starts over from the journal's first record.
+    assert!(forget_delivery(&world));
+    let unwatched = watch(&world, "nobody");
+    assert_eq!(
+        kinds(&unwatched),
+        ["human-item-raised", "human-item-dismissed"]
+    );
+    assert_eq!(item_surfaces(&world, name), carried);
+
+    // Nor by an adopted driver, whose first pass carries it over again. **Unix** only,
+    // because the driver is ended by pid and `harness::end_process` has no Windows
+    // spelling: the same terms `driver.rs`'s adoption journeys are gated on.
+    #[cfg(unix)]
+    {
+        assert!(forget_delivery(&world));
+        crate::harness::end_process(driver);
+        world.until("the dead driver to be proved gone", |w| {
+            w.run(&["status", name]).stdout.contains("DRIVER DEAD")
+        });
+        world.run(&["adopt", name, "--detach"]).exited(0);
+        world.until("the adopted driver to carry", |w| {
+            std::fs::read_to_string(w.runs.join("human-items/events.ndjson")).is_ok()
+                && forgotten_delivery_returned(w)
+        });
+        assert_eq!(item_surfaces(&world, name), carried);
+    }
+
+    // A reopen and a note wake it as well, each once, and say who acted.
+    let reopened = &carried[0];
+    let id = reopened.1.split_whitespace().nth(1).unwrap().to_owned();
+    let watching = armed_watch(&world, name);
+    world.run(&["human-items", "reopen", &id]).exited(0);
+    assert_eq!(watching.wait_with_output().unwrap().status.code(), Some(4));
+    assert!(next_item_surface(&world, name)["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("human-item-reopened: "));
+    world.run(&["human-items", "complete", &id]).exited(0);
+    next_item_surface(&world, name);
+    world
+        .run(&["human-items", "note", &id, "--text", "Done by hand."])
+        .exited(0);
+    let noted = next_item_surface(&world, name);
+    assert!(noted["message"]
+        .as_str()
+        .unwrap()
+        .contains("human-item-noted"));
+    assert!(noted["message"]
+        .as_str()
+        .unwrap()
+        .ends_with(": Done by hand."));
+
+    // An item tied to no run reaches its owner's watch and no run.
+    let before = item_surfaces(&world, name);
+    let solo = raise(
+        &world,
+        "solo",
+        &input(
+            "solo",
+            "task",
+            "solo",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    world.run(&["human-items", "complete", &solo]).exited(0);
+    assert_eq!(item_surfaces(&world, name), before);
+    assert_eq!(
+        kinds(&watch(&world, "solo")),
+        ["human-item-raised", "human-item-completed"]
+    );
+    world.release("side.go");
+}
+
+/// Whether delivery's document exists again: a carry has run since it was forgotten.
+#[cfg(unix)]
+fn forgotten_delivery_returned(world: &World) -> bool {
+    fn exists(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name() == "delivered.json" || exists(&entry.path()))
+        })
+    }
+    exists(&world.runs.join("human-items/bus"))
+}
+
+/// A run's channel that refuses its surface costs that run the surface for now and
+/// nobody else anything: the resolution stands, is said to be unsurfaced, the owner still
+/// hears it, and the next carry surfaces it once. A run that has ended is told nothing,
+/// and an engine's resolution reaches no run.
+#[cfg(unix)]
+#[test]
+fn a_refused_surface_stays_owed_and_an_ended_run_or_engine_resolution_surfaces_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-owed");
+    enabled(&world);
+    let name = "owed";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let held = raise(
+        &world,
+        "held",
+        &input(
+            "held",
+            "task",
+            "mgr",
+            Some(name),
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let channel = world.runs.join(name).join("channel");
+    let mode = std::fs::metadata(&channel).unwrap().permissions().mode();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let completed = world.run(&["human-items", "complete", &held]);
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(mode)).unwrap();
+    completed.exited(0).err_has("not yet surfaced on run");
+    assert_eq!(state_of(&world, &held)["state"], "completed");
+    assert!(item_surfaces(&world, name).is_empty());
+    assert_eq!(
+        kinds(&watch(&world, "mgr")),
+        ["human-item-raised", "human-item-completed"],
+        "the owner's event went ahead of it"
+    );
+
+    // That watch was the next carry; another finds nothing more owed.
+    let surfaced = item_surfaces(&world, name);
+    assert_eq!(surfaced.len(), 1, "{surfaced:?}");
+    assert!(surfaced[0].1.contains(&held));
+    watch(&world, "mgr");
+    assert_eq!(item_surfaces(&world, name), surfaced);
+
+    // The human step's own resolution wakes the run too; the driver then settles it.
+    let gate = id_of(&items(&world, &[])[0]);
+    world.run(&["human-items", "complete", &gate]).exited(0);
+    assert_eq!(item_surfaces(&world, name).len(), 2);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "b").as_deref(), Some("done"));
+
+    // Settled: a further action names a run that has ended.
+    let after = item_surfaces(&world, name);
+    world.run(&["human-items", "reopen", &held]).exited(0);
+    assert_eq!(item_surfaces(&world, name), after);
+
+    // Stopped: the engine's dismissal of what held the run reaches no surface either.
+    let other = "stopped";
+    let project = world.plan(
+        other,
+        &plan_of(other, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let late = raise(
+        &world,
+        "late",
+        &input(
+            "late",
+            "task",
+            "mgr",
+            Some(other),
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    world.run(&["stop", other]).exited(0);
+    assert_eq!(actor_of(&state_of(&world, &late)), "engine");
+    assert!(item_surfaces(&world, other).is_empty());
+    world
+        .run(&["human-items", "note", &late, "--text", "Understood."])
+        .exited(0);
+    assert!(item_surfaces(&world, other).is_empty());
+}
+/// A writer whose carry the host refused leaves its event owed with no surface anywhere,
+/// and the next driver of the run carries it without any human-items command being run.
+#[cfg(unix)]
+#[test]
+fn an_event_its_writer_could_not_carry_is_carried_by_the_next_driver() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-driver-carry");
+    enabled(&world);
+    let name = "carried";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let id = raise(
+        &world,
+        "item",
+        &input(
+            "item",
+            "task",
+            "mgr",
+            Some(name),
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let bus = world.runs.join("human-items/bus");
+    let mode = std::fs::metadata(&bus).unwrap().permissions().mode();
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let completed = world.run(&["human-items", "complete", &id]);
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(mode)).unwrap();
+    completed.exited(0).err_has("not yet delivered");
+    assert!(item_surfaces(&world, name).is_empty());
+
+    world.run(&["adopt", name]).exited(0);
+    let surfaced = item_surfaces(&world, name);
+    assert_eq!(surfaced.len(), 1, "{surfaced:?}");
+    assert!(surfaced[0].1.contains(&id), "{surfaced:?}");
+}
+
+/// A host hold reaches every run that has not ended, and a run whose channel refuses
+/// its surface holds no other run's back: it is told by the next carry, once.
+#[cfg(unix)]
+#[test]
+fn a_host_hold_reaches_every_live_run_and_one_refusing_holds_no_other_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-fanout");
+    enabled(&world);
+    let waiting = |name: &str| {
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+        );
+        world.run(&["start", &project, "--attach"]).exited(0);
+    };
+    waiting("refusing");
+    waiting("taking");
+    let finished = world.plan("finished", &plan_of("finished", vec![agent("a", &[])]));
+    world.run(&["start", &finished, "--attach"]).exited(0);
+    let host = raise(
+        &world,
+        "host",
+        &input("host", "task", "ops", None, None, json!({"scope": "host"})),
+    );
+    let channel = world.runs.join("refusing").join("channel");
+    let mode = std::fs::metadata(&channel).unwrap().permissions().mode();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let completed = world.run(&["human-items", "complete", &host]);
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(mode)).unwrap();
+    completed
+        .exited(0)
+        .err_has("not yet surfaced on run 'refusing'");
+    let taken = item_surfaces(&world, "taking");
+    assert_eq!(taken.len(), 1, "{taken:?}");
+    assert!(taken[0].1.contains(&host));
+    assert!(item_surfaces(&world, "refusing").is_empty());
+    assert!(item_surfaces(&world, "finished").is_empty());
+
+    watch(&world, "ops");
+    assert_eq!(item_surfaces(&world, "refusing").len(), 1);
+    assert_eq!(item_surfaces(&world, "taking"), taken);
+    assert!(item_surfaces(&world, "finished").is_empty());
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

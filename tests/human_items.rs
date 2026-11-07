@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use onepipeline::human_items::{schemas, HumanItemSample};
+use onepipeline::human_items::{schemas, HumanItemAction, HumanItemRefusal, HumanItemSample};
 use serde_json::{json, Value};
 
 struct World(PathBuf);
@@ -573,7 +573,7 @@ fn sample_boundaries_validate_fixtures_and_cover_source_and_authority_recovery()
                 } else {
                     "completed"
                 });
-                invalid["items"][0]["item"]["resolution"] = json!({"actor":"user","on_behalf_of":null,"text":if case == "completed-reason" { Value::Null } else { json!("invalid") },"reason":if case == "completed-reason" { json!("invalid") } else { Value::Null }});
+                invalid["items"][0]["item"]["resolution"] = json!({"actor":"user","on_behalf_of":null,"text":if case == "completed-reason" { Value::Null } else if case == "completed-text" { json!(" ") } else { json!("invalid") },"reason":if case == "completed-reason" { json!("invalid") } else { Value::Null }});
             }
             _ => unreachable!(),
         }
@@ -1072,4 +1072,183 @@ fn malformed_selectors_and_blank_answers_are_refused_before_the_fixture_is_read(
         refuse(output, reason);
     }
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+}
+
+/// `--sample` carries reopen and note as every other verb: it answers the same view,
+/// refuses what the view says it refuses, keeps the fixture on a refusal, and takes
+/// the fixture authority's record back when an approval is reopened.
+#[test]
+fn sample_reopen_and_note_answer_the_engine_schema_and_refuse_what_their_view_refuses() {
+    let world = World::new();
+    let open = world.json(&["show", "item-3", "--json"], "HumanItemDetail");
+    assert_eq!(open["reopen"]["available"], false);
+    let reason = open["reopen"]["reason"].as_str().unwrap().to_owned();
+    refuse(world.run(&["reopen", "item-3"]), &reason);
+    refuse(
+        world.run(&["note", "item-3", "--text", "too soon"]),
+        "only a completed or dismissed item takes a note",
+    );
+    refuse(
+        world.run(&["note", "item-3", "--text", " "]),
+        "must not be blank",
+    );
+
+    world.json(&["complete", "item-3"], "HumanItemReceipt");
+    assert_eq!(world.state()["approvals"].as_array().unwrap().len(), 1);
+    let noted = world.json(
+        &["note", "item-3", "--text", "Read it twice."],
+        "HumanItemReceipt",
+    );
+    assert_eq!(noted["item"]["item"]["state"], "completed");
+    assert_eq!(
+        noted["item"]["item"]["resolution"]["text"],
+        "Read it twice."
+    );
+    assert_eq!(noted["item"]["reopen"]["available"], true);
+    let reopened = world.json(&["reopen", "item-3"], "HumanItemReceipt");
+    assert_eq!(reopened["item"]["item"]["state"], "open");
+    assert_eq!(reopened["item"]["item"]["resolution"], Value::Null);
+    assert_eq!(reopened["item"]["reopen"]["reason"], reason.as_str());
+    assert_eq!(world.state()["approvals"], Value::Null);
+
+    world.json(
+        &["dismiss", "item-2", "--reason", "Not now"],
+        "HumanItemReceipt",
+    );
+    let noted = world.json(&["note", "item-2", "--text", "Later"], "HumanItemReceipt");
+    assert_eq!(noted["item"]["item"]["resolution"]["reason"], "Later");
+    assert_eq!(noted["item"]["item"]["resolution"]["text"], Value::Null);
+    let answered = world.json(&["answer", "item-4", "--text", "Yes"], "HumanItemReceipt");
+    assert_eq!(answered["item"]["reopen"]["available"], false);
+    refuse(
+        world.run(&["reopen", "item-4"]),
+        "an answered question cannot be reopened",
+    );
+
+    // A bundle stating a reopen its item's state contradicts is refused whole.
+    let good = world.state();
+    let open_item = good["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|detail| detail["item"]["state"] == "open")
+        .unwrap();
+    for (reopen, says) in [
+        (
+            json!({"available": true, "reason": "both"}),
+            "reopen states a reason exactly when it is unavailable",
+        ),
+        (
+            json!({"available": true, "reason": null}),
+            "reopen differs from what the item's state derives",
+        ),
+        (
+            json!({"available": false, "reason": "made up"}),
+            "reopen differs from what the item's state derives",
+        ),
+    ] {
+        let mut invalid = good.clone();
+        invalid["items"][open_item]["reopen"] = reopen;
+        world.write(&invalid);
+        refuse(world.run(&["list", "--json"]), says);
+    }
+}
+
+/// The fixture authority refuses to undo a version it no longer holds, leaving the item
+/// completed and the bundle as it was; a work hold's impact returns with its reopen,
+/// derived as a raise derives it from another item holding the same step.
+#[test]
+fn sample_reopen_refuses_a_version_the_authority_lost_and_restores_a_work_holds_impact() {
+    let world = World::new();
+    world.json(&["complete", "item-3"], "HumanItemReceipt");
+    let mut moved = world.state();
+    moved["approval_keys"]["design.md"] = json!("v2");
+    world.write(&moved);
+    refuse(
+        world.run(&["reopen", "item-3"]),
+        "no longer holds that version",
+    );
+    assert_eq!(world.state(), moved);
+
+    let original = world.json(&["show", "item-2", "--json"], "HumanItemDetail");
+    assert_eq!(original["blocked"]["total"], 5);
+    let copy = world.sample().with_file_name("copy.json");
+    std::fs::write(
+        &copy,
+        json!({"schema_version": 1, "dedup_key": "same-step", "kind": "task",
+               "title": "Hold the same step", "body": "Hold it.", "priority": "low",
+               "owner": {"session": "manager", "run": null, "plan": null},
+               "block": original["item"]["block"], "approval": null})
+        .to_string(),
+    )
+    .unwrap();
+    world.json(
+        &["raise", "--input", copy.to_str().unwrap()],
+        "HumanItemReceipt",
+    );
+    let dismissed = world.json(&["dismiss", "item-2"], "HumanItemReceipt");
+    assert_eq!(dismissed["item"]["blocked"]["total"], 0);
+    world.json(&["reopen", "item-2"], "HumanItemReceipt");
+    let restored = world.json(&["show", "item-2", "--json"], "HumanItemDetail");
+    assert_eq!(restored["blocked"], original["blocked"]);
+    assert_eq!(restored["nodes"], original["nodes"]);
+}
+
+/// With nothing else holding the same step, and for plan and host holds, a sample has no
+/// context to derive impact from: the item reopens blocking, reporting none, as a raise
+/// of those holds does.
+#[test]
+fn sample_reopen_without_a_peer_or_of_a_wider_hold_reports_no_impact() {
+    let world = World::new();
+    for (id, verb) in [
+        ("item-2", "dismiss"),
+        ("item-1", "complete"),
+        ("item-3", "dismiss"),
+    ] {
+        assert_eq!(
+            world.json(&["show", id, "--json"], "HumanItemDetail")["blocked"]["total"],
+            5
+        );
+        world.json(&[verb, id], "HumanItemReceipt");
+        let reopened = world.json(&["reopen", id], "HumanItemReceipt");
+        assert_eq!(reopened["item"]["item"]["state"], "open");
+        assert_eq!(
+            reopened["item"]["blocked"],
+            json!({"total": 0, "plans": []})
+        );
+        let shown = world.json(&["show", id, "--json"], "HumanItemDetail");
+        assert_eq!(shown["nodes"], json!([]));
+    }
+    let blocking: Value =
+        serde_json::from_str(&world.ok(&["list", "--blocking", "yes", "--json"])).unwrap();
+    assert_eq!(blocking.as_array().unwrap().len(), 3, "each hold is back");
+}
+
+/// The fixture API holds an after-the-fact action to the same actor rule as the live one.
+#[test]
+fn a_sample_reopen_or_note_names_its_actor() {
+    let mut sample: HumanItemSample =
+        serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    let before = sample.clone();
+    for action in [
+        HumanItemAction::Reopen {
+            id: "item-1".into(),
+            actor: " ".into(),
+            on_behalf_of: None,
+        },
+        HumanItemAction::Note {
+            id: "item-1".into(),
+            text: "said".into(),
+            actor: String::new(),
+            on_behalf_of: None,
+        },
+    ] {
+        assert_eq!(
+            sample.apply(action),
+            Err(HumanItemRefusal::Conflict {
+                reason: "an action names its actor".into()
+            })
+        );
+    }
+    assert_eq!(sample, before);
 }

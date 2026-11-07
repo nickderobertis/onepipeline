@@ -59,6 +59,17 @@ pub struct ApprovalAdapter {
     #[serde(deserialize_with = "command")]
     // llmlint: ignore[invalid_states_unrepresentable] the configured shape is the task's `command: [program, args...]` list; its decoder refuses an empty list or a blank program, so no adapter without a program is ever constructed from configuration.
     pub command: Vec<String>,
+    /// What takes that approval back, if anything can: the program and its arguments.
+    /// It reads the same standard input and, having undone it, answers `{board_copy,key}`
+    /// naming the stored version. It must be idempotent, since a crash after it succeeds
+    /// leaves the item completed and a retry runs it again.
+    #[serde(
+        default,
+        deserialize_with = "undo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    // llmlint: ignore[invalid_states_unrepresentable] the configured shape is the contract's optional `undo: [program, args...]` list; its decoder refuses an empty list or a blank program, as `command`'s does, so no undo without a program is ever constructed from configuration.
+    pub undo: Option<Vec<String>>,
 }
 
 fn command<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
@@ -72,6 +83,16 @@ fn command<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Err
         ));
     }
     Ok(command)
+}
+
+fn undo<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    let undo = Vec::<String>::deserialize(d)?;
+    if undo.first().is_none_or(|program| program.trim().is_empty()) {
+        return Err(serde::de::Error::custom(
+            "an approval adapter's undo names a program",
+        ));
+    }
+    Ok(Some(undo))
 }
 
 /// Aggregations a hook may select.

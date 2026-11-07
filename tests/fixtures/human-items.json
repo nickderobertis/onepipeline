@@ -77,7 +77,11 @@
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -157,7 +161,11 @@
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -239,7 +247,11 @@
           "node": "step-4",
           "title": "Step 4"
         }
-      ]
+      ],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     },
     {
       "item": {
@@ -269,7 +281,11 @@
         "total": 0,
         "plans": []
       },
-      "nodes": []
+      "nodes": [],
+      "reopen": {
+        "available": false,
+        "reason": "the item is open, so there is nothing to reopen"
+      }
     }
   ],
   "approval_keys": {
