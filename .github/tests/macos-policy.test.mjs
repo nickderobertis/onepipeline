@@ -635,6 +635,13 @@ test("registered budgets run through the existing pinned checker and manifest-di
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /onepipeline-macos-jobs-per-run/);
   assert.match(result.stdout, /onepipeline-macos-runs-per-change/);
+  const saved = JSON.parse(readFileSync("target/budget-results/github-workflows.json", "utf8"));
+  assert.deepEqual(saved.results.map((budget) => budget.id).sort(), [
+    "onepipeline-macos-jobs-per-run",
+    "onepipeline-macos-runs-per-change",
+  ]);
+  for (const budget of saved.results)
+    assert.match(result.stdout, new RegExp(`budget ${budget.id}: actual ${budget.actual} `));
 });
 
 test("deleting version metadata is unreadable release input and requires the Mac lane", () => {
