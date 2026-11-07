@@ -163,13 +163,10 @@ telemetry the run already produced, never measured afresh:
 
 Every other check of the root `budgets.yaml` excludes both labels.
 
-**A pull request's report reads what `test-linux` saved.** Each `budgets` check that job runs passes
-`--save-results target/budget-results/<name>.json`, and the job uploads that directory as
-`budget-check-results-test-linux` for the `budgets` job, which runs none of those commands. On a push to
-`main` that job takes the merged pull request's figures instead. `no saved result was found on this run`
-is the truthful row of a target the run did not select. `not-measured-on-pr` leaves a budget out of the
-report and goes only on one no CI job runs; the check holding it is unchanged. A saving target that is
-ever cached declares its file in its Nx `outputs`.
+**A pull request's report reads what `test-linux` saved**, and never measures it again.
+`no saved result was found on this run` is the truthful row of a target that run did not select.
+`not-measured-on-pr` goes only on a budget no CI job runs, and changes nothing about the check holding it.
+A saving target that is ever cached declares its file in its Nx `outputs`.
 
 The four CI jobs run on every pull request, including release branches.
 Cache only proofs valid for their inputs: exact tools, sources and dependencies;
