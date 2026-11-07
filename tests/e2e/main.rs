@@ -392,3 +392,5 @@ mod writeback_cost;
 // from nx affected when the projection changes.
 mod writeback_projections;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// Demonstration only: this line touches the tests so the affected tiers run. Never merged.

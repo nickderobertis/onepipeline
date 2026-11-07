@@ -343,3 +343,5 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     )
     .unwrap();
 }
+
+// Demonstration only: this line touches the tests so the affected tiers run. Never merged.
