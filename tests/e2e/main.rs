@@ -312,6 +312,7 @@ mod shipped;
 // The block form because a line-scoped directive reaches only the line right below it.
 mod shutdown;
 mod stacked_drafts;
+mod status_read;
 // And `stop-guard`, under the same block: it is a verb of
 // this binary over `src/stopguard.rs` and `src/unwatched.rs`, and it answers off the run
 // store every launch writes, so any change under `src/` can move what it decides: the crate

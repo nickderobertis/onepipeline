@@ -362,6 +362,32 @@ pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecor
     .unwrap_or_default()
 }
 
+/// Every record this crate's own writers put in a journal, in the order it was
+/// appended, with no other record parsed: what a reader whose answer no relayed record
+/// decides reads, since on a long run those are nearly all of its bytes.
+pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
+    let Ok(bytes) = std::fs::read(journal) else {
+        return Vec::new();
+    };
+    crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
+    finished_lines(&bytes)
+        .filter(|line| skimmed_source(line).is_none_or(|source| source == Source::Pipeline))
+        .filter_map(|line| parsed_line(line)?.parsed.map(|event| *event))
+        .filter(|event| event.source == Source::Pipeline)
+        .collect()
+}
+
+/// The source word of a line in the writers' form, or `None` for any other line.
+fn skimmed_source(line: &[u8]) -> Option<Source> {
+    skimmed_line(line)?;
+    let (_, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
+    let (_, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
+    let (_, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
+    let (_, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
+    let (source, _) = string_of(rest.strip_prefix(b",\"source\":\"")?)?;
+    Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()
+}
+
 /// How far from its start a journal's first `len` bytes are accounted for by a view
 /// holding `reached`, the greatest `seq` it holds per stream: the end of the last
 /// finished line whose record that covers.

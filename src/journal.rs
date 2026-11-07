@@ -835,11 +835,21 @@ pub(crate) fn integrity(path: &Path) -> Integrity {
 /// the timestamps, so a `ts` tie there is broken by stream id: deterministic
 /// rather than meaningful.
 pub fn merge_order(events: &mut [Envelope]) {
-    let mut merged: Vec<Envelope> = merged_order(events)
-        .into_iter()
-        .map(|index| events[index].clone())
-        .collect();
-    events.swap_with_slice(&mut merged);
+    // Moved into place cycle by cycle rather than cloned: on a long run the records'
+    // payloads are most of the file.
+    let mut order = merged_order(events);
+    for start in 0..order.len() {
+        let mut at = start;
+        loop {
+            let from = order[at];
+            order[at] = at;
+            if from == start {
+                break;
+            }
+            events.swap(at, from);
+            at = from;
+        }
+    }
 }
 
 /// Where each record belongs in the merged order, as indices into `events`.

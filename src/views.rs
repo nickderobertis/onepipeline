@@ -5832,9 +5832,12 @@ pub fn results(view: &RunView) -> String {
     }
     out.push_str(&superseded_lines(view));
     // Under the graph, because a hook is the run's rather than any node's.
-    out.push_str(&crate::hooks::results_lines(view));
+    // In the order they were appended, and only this crate's own: no relayed record
+    // decides a graph's ending or a home status, and those are nearly all of a long run.
+    let own_records = crate::journal_selected::pipeline_records(&view.paths.journal());
+    out.push_str(&crate::hooks::results_lines(&view.paths, &own_records));
     // And what the store answered when the run's home was marked `done`, the run's too.
-    out.push_str(&crate::home::results_line(view));
+    out.push_str(&crate::home::results_line(&own_records));
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
     out.push_str(&crate::scratch::lines(view, None));
