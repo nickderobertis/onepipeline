@@ -12,6 +12,9 @@
     "screenshots": {
       "command": "just _visual-docs-capture",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _visual-docs-capture"
+        },
         "visualDocsSource",
         {
           "runtime": "node -p process.platform"
@@ -33,6 +36,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

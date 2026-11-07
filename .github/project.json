@@ -45,8 +45,12 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/screencomp.toml",
         "{workspaceRoot}/scripts/nx-remote-cache.mjs",
+        "{workspaceRoot}/scripts/nx-remote-cache.versions",
         "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+        "{workspaceRoot}/scripts/actions-cache-prune.mjs",
+        "{workspaceRoot}/scripts/actions-cache-prune.versions",
         "{workspaceRoot}/scripts/actions-budget-figures.sh",
+        "{workspaceRoot}/scripts/actions-budget-figures.versions",
         "{workspaceRoot}/budgets.yaml",
         "sharedGlobals",
         {
@@ -118,7 +122,7 @@
       "executor": "nx:noop",
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
-      "inputs": ["cargoSelection", "npmSelection", "pythonSelection"]
+      "inputs": ["justfileSelection", "cargoSelection", "npmSelection", "pythonSelection"]
     }
   }
 }

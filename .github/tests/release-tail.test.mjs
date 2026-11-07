@@ -340,9 +340,12 @@ function checkout(budgets = readFileSync(join(root, "budgets.yaml"), "utf8")) {
   const dir = join(scratch, `checkout-${cases++}`);
   mkdirSync(join(dir, "scripts"), { recursive: true });
   // v0.97.1 predates cache receipts. Its seven original budgets are replayed
-  // here; the production cache-use budget is exercised by the cache journey.
+  // here; the production cache-use budget is exercised by the cache journey, and the
+  // cache-headroom budget reads GitHub's listing fresh when it runs, so no recording holds it.
   const spec = parse(budgets);
-  spec.budgets = spec.budgets.filter((budget) => budget.id !== "onepipeline-nx-cache-use");
+  spec.budgets = spec.budgets.filter(
+    (budget) => !["onepipeline-nx-cache-use", "onepipeline-cache-headroom"].includes(budget.id),
+  );
   writeFileSync(join(dir, "budgets.yaml"), stringify(spec));
   mkdirSync(join(dir, ".github"));
   copyFileSync(
@@ -756,7 +759,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     lines[2],
     "# source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/budgets/actions-budget-figures.sh",
   );
-  assert.equal(lines[3], "# version: 11");
+  assert.equal(lines[3], "# version: 12");
   const digest = lines[4].match(/^# sha256: ([0-9a-f]{64})$/)?.[1];
   const rest = lines.slice(5).join("\n");
   assert.equal(
@@ -764,7 +767,7 @@ test("the figures script is the unedited create-repo copy its header names", () 
     digest,
     "the copy was edited in place",
   );
-  assert.equal(digest, "4e712406a1b09dac07d496be28d6a71141958de3259efb5c85f1dc23744fa5a4");
+  assert.equal(digest, "b77b3b6fdccba79eae1db6523122d22eec80ac0738d5b4df03321db600697d3d");
 });
 
 // The reconciliation script, against a stand-in for gh that answers each path with its
