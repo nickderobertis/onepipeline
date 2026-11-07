@@ -274,7 +274,8 @@
         "docs/contract.md",
         "tests/e2e/run_end_hook.sh",
         "tests/e2e/run_end_hook.bat",
-        "tests/e2e/transcript_refs.rs"
+        "tests/e2e/transcript_refs.rs",
+        "tests/e2e/status_read.rs"
       ],
       "crates": [
         "onepipeline"
@@ -290,7 +291,8 @@
         "change_telemetry",
         "compatibility",
         "layout_document",
-        "transcript_refs"
+        "transcript_refs",
+        "status_read"
       ]
     },
     "e2e-dispatch": {
