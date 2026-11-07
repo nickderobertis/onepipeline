@@ -46,10 +46,12 @@ const refusal =
     `results: each names a job of the workflow and one of ${OUTCOMES.join(", ")}`);
 if (refusal) refuse(`the scenario's ${refusal} is invalid`);
 let started;
+let rows;
 let row;
 try {
   started = triggered(workflow, scenario);
-  row = runGraph(workflow, scenario).find((candidate) => candidate.job === "budgets");
+  rows = runGraph(workflow, scenario);
+  row = rows.find((candidate) => candidate.job === "budgets");
 } catch (error) {
   refuse(`cannot interpret ${file}: ${error.message}`);
 }
@@ -57,4 +59,5 @@ if (!row) {
   console.error(`${file} has no budgets job`);
   process.exit(1);
 }
-console.log(JSON.stringify({ triggered: started, selected: row.selected, needs: row.needs }));
+const jobs = Object.fromEntries(rows.map((candidate) => [candidate.job, candidate.selected]));
+console.log(JSON.stringify({ triggered: started, selected: row.selected, needs: row.needs, jobs }));

@@ -8,4 +8,4 @@ if [ ! -x "$checker" ]; then
   echo 'The repository-pinned onebudgetspec is missing; run just bootstrap.' >&2
   exit 1
 fi
-PATH="$PWD/.github/reporting/.telemetry/tools:$PATH" exec "$checker" check .github/reporting/budgets.yaml
+PATH="$PWD/.github/reporting/.telemetry/tools:$PATH" exec "$checker" check .github/reporting/budgets.yaml --save-results target/budget-results/report-job.json

@@ -37,7 +37,7 @@ onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
-onebudgetspec-version := "0.1.5"
+onebudgetspec-version := "0.2.0"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
 
 # The pruner `just pool-maintenance` runs, installed onto `PATH` by `bootstrap` (the
@@ -694,7 +694,7 @@ _journal-workload-run:
 human-items-budget:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
-    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/human-items.json
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
@@ -769,7 +769,7 @@ pool-maintenance-budget:
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
       || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
-    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable --save-results target/budget-results/onepipeline.json
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 # CI's `install` job runs this on the binary its `cargo install --path .` has just built,
@@ -785,7 +785,7 @@ host-view-budget binary built_by="":
     @just _ensure-strace
     @just _ensure-node-modules
     @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
-    @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time --exclude-label release-tail --exclude-label host-variable
+    @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time --exclude-label release-tail --exclude-label host-variable --save-results target/budget-results/host-view.json
 
 # What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`). `target`
 # is every directory this clone's cargo builds write to: `.cargo/config.toml` sets it, and

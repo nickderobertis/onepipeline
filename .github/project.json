@@ -24,6 +24,11 @@
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
         },
         "{workspaceRoot}/scripts/actions-budget-figures.sh",
+        "{workspaceRoot}/scripts/ci-job.sh",
+        "{workspaceRoot}/scripts/install-proof.sh",
+        "{workspaceRoot}/pool-maintenance/budgets.yaml",
+        "{workspaceRoot}/tests/*/budgets.yaml",
+        "{workspaceRoot}/tests/*/*.mjs",
         "{workspaceRoot}/scripts/gate-time.sh",
         "{workspaceRoot}/scripts/gate-time-budget.mjs",
         {

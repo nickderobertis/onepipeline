@@ -231,7 +231,9 @@ budgets:
     description: >-
       The longest counted job of each pull request's last-commit CI runs, over the pull requests
       one release carries, from GitHub's job timestamps. It protects every contributor's
-      turnaround, because one slow check holds every change behind it.
+      turnaround, because one slow check holds every change behind it. On a pull request's own run
+      it reports that run: the longest finished job of its five, breaking down by job, read once when
+      the budgets job runs with four jobs finished and itself in progress.
     labels: [release-tail]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, pr]
@@ -247,7 +249,7 @@ budgets:
       The longest counted job of one release's CD runs — release-plz's run at the release commit
       and the Release run, publish included up to the tail's moment. It protects the time a
       release takes, a slow job being the actionable unit inside the release cycle.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, cd, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: seconds
@@ -261,7 +263,7 @@ budgets:
       Per pull request one release carries whose merge changes a published artifact path, its last
       commit's checks plus its merge to the end of publish; the maximum over those pull requests. It protects how soon a merged change
       reaches the people who install it.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, release-cycle-time, --published-paths, .github/release-published-paths]
     unit: seconds
@@ -275,7 +277,9 @@ budgets:
     description: >-
       The most counted jobs any pull request of one release ran at its last commit, over every
       workflow its pull_request event started. It protects this repository's share of the
-      account-wide 20-job concurrency limit: lint, one test job per platform and budgets.
+      account-wide 20-job concurrency limit: lint, one test job per platform and budgets. On a pull
+      request's own run it reports that run: its jobs, breaking down by job name, read once when the
+      budgets job runs.
     labels: [release-tail]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, pr]
@@ -291,7 +295,7 @@ budgets:
       The counted jobs of one release's CD runs, publish included as the job running the tail. It
       protects this repository's CD share of the account-wide 20-job concurrency limit:
       release-plz, four build jobs and publish.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, cd, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: jobs
@@ -308,7 +312,7 @@ budgets:
       closed-pull-request page, the runs at the release commit and the jobs of its CD runs —
       summed from onevcs's answers. It protects the tail's GitHub reads from growing with this
       repository's CD shape, whatever number of pull requests a release carries.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, release-read-requests, --exclude-workflow, "Rust cache warm", --exclude-workflow, CI]
     unit: requests
@@ -323,7 +327,7 @@ budgets:
       The most REST requests any one pull request of the release needed — its runs at head and the
       jobs of each CI run there — from onevcs's answers. It protects the reads each pull request
       costs from growing with the workflows a pull request starts.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, pr-read-requests]
     unit: requests
@@ -337,7 +341,7 @@ budgets:
       The wall clock of one `just gate` run on a development machine, from the start and end the
       recipe records on that run. It holds the local gate to the line each CI job is held to, as a
       warning, since a development machine's timing varies too much to refuse on.
-    labels: [host-variable]
+    labels: [host-variable, not-measured-on-pr]
     measure: reported
     command: [node, scripts/gate-time-budget.mjs]
     unit: seconds
@@ -355,7 +359,7 @@ budgets:
       executions, excluding local hits. Report release-PR and same-PR retry/push
       rates, misses and receipt ages, promotion failures, bytes and GitHub reads.
       The 100 percent design target is revisited after real release-tail observations.
-    labels: [release-tail]
+    labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, cache-use]
     unit: percent

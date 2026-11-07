@@ -24,6 +24,8 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/.github/workflows/ci.yml",
+        "{workspaceRoot}/.github/tests/fixtures/own-run/**/*",
+        "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/justfile",
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/.github/budgets.yaml",

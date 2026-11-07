@@ -75,7 +75,10 @@ describe("the pool-maintenance budget", () => {
 
   it("is registered in its project's budgets file alone", () => {
     const own = readFileSync(join(root, "pool-maintenance", "budgets.yaml"), "utf8");
-    assert.match(own, /- id: onepipeline-pool-maintenance-seconds\n {4}[\s\S]*labels: \[host\]/);
+    assert.match(
+      own,
+      /- id: onepipeline-pool-maintenance-seconds\n {4}[\s\S]*labels: \[host, not-measured-on-pr\]/,
+    );
     const shared = readFileSync(join(root, "budgets.yaml"), "utf8");
     assert.doesNotMatch(shared, /onepipeline-pool-maintenance-seconds/);
   });
