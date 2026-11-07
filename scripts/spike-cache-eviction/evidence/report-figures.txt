@@ -1,0 +1,120 @@
+onepipeline warm runs in window 1
+ run 42258425963 11-06T17:05:39 17:29:36 success fix(ci): move the budget report to the a
+    windows 17:05:41 17:29:35 [] v0-rust-test-windows-Windows_NT-x64-694142f9-b9a89a15 full m
+    linux 17:05:41 17:19:39 [] v0-rust-test-linux-Linux-x64-ff458983-f3fcd9b9 full match: t
+    macos 17:05:43 17:27:32 [] v0-rust-test-macos-Darwin-arm64-40fe5700-f3fcd9b9 full match
+onetaskgraph warm runs in window 3
+ run 42263927637 11-06T17:41:26 17:54:58 success fix(ci): move the budget report to the a
+    release merge 17:41:29 17:41:38 [] none
+    warm (ubuntu-latest) 17:41:29 17:54:40 [] v0-rust-test-linux-Linux-x64-2c443741-6e0fea97 full match: t
+    warm (windows-latest) 17:41:29 17:54:58 [] v0-rust-test-windows-Windows_NT-x64-1185fd9a-6e0fea97 full m
+    warm (macos-latest) 17:41:40 17:53:17 [] v0-rust-test-macos-Darwin-arm64-2e933a5e-6e0fea97 full match
+ run 42266808264 11-06T18:00:44 18:16:31 success fix: rewrite reference-style section lin
+    warm (ubuntu-latest) 18:00:46 18:16:31 [] v0-rust-test-linux-Linux-x64-2c443741-6e0fea97 full match: t
+    warm (windows-latest) 18:00:47 18:12:05 [] v0-rust-test-windows-Windows_NT-x64-1185fd9a-6e0fea97 full m
+    release merge 18:00:46 18:00:56 [] none
+    warm (macos-latest) 18:00:59 18:12:24 [] v0-rust-test-macos-Darwin-arm64-2e933a5e-6e0fea97 full match
+ run 42276683373 11-06T19:06:21 19:21:23 success chore: release v0.14.4 (#3913)
+    release merge 19:06:24 19:06:33 [] none
+    warm (ubuntu-latest) 19:06:24 19:21:22 [] v0-rust-test-linux-Linux-x64-2c443741-6e0fea97 full match: t
+    warm (windows-latest) 19:06:25 19:20:37 [] v0-rust-test-windows-Windows_NT-x64-1185fd9a-6e0fea97 full m
+onepipeline-ui warm runs in window 1
+ run 42258559031 11-06T17:06:29 17:14:48 success fix(ci): move the budget report to the a
+    advisories 17:06:33 17:07:10 [] none
+    warm-linux 17:06:32 17:14:48 [('17:10:20', 40)] v0-rust-test-linux-Linux-x64-ff458983-46eb2322 full match: t
+    warm-windows 17:06:32 17:13:54 [] v0-rust-test-windows-Windows_NT-x64-694142f9-46eb2322 full m
+    warm-macos 17:06:33 17:12:19 [] v0-rust-test-macos-Darwin-arm64-40fe5700-46eb2322 full match
+('other', 'pr') evicted 66 age created min n=66 p50=2077 p90=3533 max=3637 idle min n=66 p50=2065 p90=2692 max=2721
+('nx-cache', 'pr') evicted 796 age created min n=796 p50=2000 p90=2761 max=2778 idle min n=796 p50=1996 p90=2721 max=2746
+('rust', 'pr') evicted 8 age created min n=8 p50=1894 p90=2729 max=2729 idle min n=8 p50=1864 p90=2690 max=2690
+('nx-cache', 'other') evicted 148 age created min n=148 p50=2684 p90=2684 max=2684 idle min n=148 p50=2681 p90=2684 max=2684
+('nx-cache', 'main') evicted 275 age created min n=275 p50=2195 p90=2640 max=2954 idle min n=275 p50=2059 p90=2640 max=2640
+('other', 'main') evicted 6 age created min n=6 p50=2082 p90=3104 max=3104 idle min n=6 p50=1664 p90=2078 max=2078
+('rust', 'tag') evicted 8 age created min n=8 p50=2060 p90=2075 max=2075 idle min n=8 p50=2060 p90=2075 max=2075
+('other', 'tag') evicted 5 age created min n=5 p50=2072 p90=2075 max=2075 idle min n=5 p50=2072 p90=2075 max=2075
+onepipeline 2026-11-07T01:04:49Z 10.499 headroom to 10GiB 0.238
+   ('main', 'v0-rust-test-linux-Linux-x64') 1 4.289
+   ('main', 'v0-rust-test-windows-Windows_N') 1 2.947
+   ('main', 'ci-capture') 1 1.316
+   ('main', 'v0-rust-test-macos-Darwin-arm64') 1 0.943
+   ('tag', 'v0-rust-build-windows-Windows_') 1 0.421
+   ('tag', 'v0-rust-build-macos-Darwin-arm64') 1 0.411
+   ('main', 'v0-rust-release-plz-Linux-x64') 1 0.107
+   ('main', 'bootstrap-tools') 3 0.057
+   ('pr', 'other') 12 0.003
+   ('pr', 'nx-cache') 434 0.002
+   ('main', 'nx-cache') 124 0.001
+   ('main', 'other') 1 0.0
+   ('tag', 'other') 3 0.0
+onetaskgraph 2026-11-07T01:04:59Z 10.663 headroom to 10GiB 0.074
+   ('pr', 'v0-rust-lint-afresh-lint-Linux-x64') 8 1.832
+   ('pr', 'v0-rust-test-linux-Linux-x64') 1 1.309
+   ('main', 'v0-rust-test-linux-Linux-x64') 1 1.306
+   ('tag', 'v0-rust-publish-Linux-x64') 3 0.909
+   ('pr', 'other') 64 0.643
+   ('pr', 'v0-rust-test-windows-Windows_N') 1 0.638
+   ('main', 'v0-rust-test-windows-Windows_N') 1 0.635
+   ('pr', 'v0-rust-test-macos-Darwin-arm64') 1 0.613
+   ('main', 'v0-rust-test-macos-Darwin-arm64') 1 0.613
+   ('tag', 'v0-rust-build-windows-Windows_') 3 0.561
+   ('tag', 'v0-rust-build-linux-Linux-x64') 2 0.399
+   ('tag', 'v0-rust-build-linux-arm64-Linux-arm64') 2 0.397
+   ('tag', 'v0-rust-build-macos-Darwin-arm64') 2 0.364
+   ('main', 'v0-rust-documents-Linux-x64') 1 0.225
+onepipeline-ui 2026-11-07T01:05:11Z 9.261 headroom to 10GiB 1.476
+   ('main', 'v0-rust-test-linux-Linux-x64') 1 5.003
+   ('main', 'v0-rust-test-windows-Windows_N') 1 2.329
+   ('main', 'v0-rust-test-macos-Darwin-arm64') 1 1.46
+   ('main', 'other') 10 0.322
+   ('main', 'v0-rust-release-plz-Linux-x64') 1 0.112
+   ('tag', 'other') 1 0.033
+   ('pr', 'other') 5 0.001
+   ('pr', 'nx-cache') 140 0.0
+   ('main', 'nx-cache') 123 0.0
+onepipeline runs with save 27 p50 1.32 p90 9.05 max 9.61
+   latest per family {'v0-rust-test-macos-Darwin-arm64': 0.943, 'ci-capture': 1.316, 'v0-rust-test-windows-Windows_N': 2.947, 'v0-rust-test-linux-Linux-x64': 4.289} sum 9.495
+onetaskgraph runs with save 6 p50 1.81 p90 2.55 max 2.55
+   latest per family {'v0-rust-test-linux-Linux-x64': 1.306, 'v0-rust-test-windows-Windows_N': 0.635, 'v0-rust-test-macos-Darwin-arm64': 0.613} sum 2.554
+onepipeline-ui runs with save 11 p50 5.78 p90 8.31 max 8.79
+   latest per family {'v0-rust-test-macos-Darwin-arm64': 1.46, 'v0-rust-test-windows-Windows_N': 2.329, 'v0-rust-test-linux-Linux-x64': 5.003} sum 8.792
+2026-11-06 18:20 18:43 [('18:20:28', 0.0), ('18:21:58', 0.0), ('18:22:13', 0.0), ('18:22:29', 0.0), ('18:22:58', 0.0), ('18:23:53', 0.0), ('18:24:18', 0.0), ('18:24:24', 0.0), ('18:24:58', 0.0), ('18:25:48', 0.0), ('18:26:10', 19.1), ('18:26:39', 0.0), ('18:28:25', 23.1), ('18:34:09', 218.0), ('18:34:35', 17.3), ('18:34:36', 21.3)]
+2026-11-06 19:12 19:35 [('19:13:18', 199.4), ('19:13:41', 0.3), ('19:13:46', 198.6), ('19:18:46', 0.3), ('19:19:07', 187.1), ('19:20:33', 0.3), ('19:21:34', 0.3), ('19:21:50', 181.9), ('19:32:56', 303.0)]
+2026-11-07 00:08 00:11 [('00:08:11', 0.0), ('00:08:22', 0.0), ('00:08:22', 0.0), ('00:08:22', 0.0), ('00:08:23', 0.0), ('00:08:24', 0.0), ('00:08:32', 0.0), ('00:08:38', 0.0), ('00:08:38', 0.0), ('00:08:38', 0.0), ('00:08:39', 0.0), ('00:08:39', 0.0), ('00:08:40', 0.0), ('00:08:40', 0.0), ('00:08:41', 0.0), ('00:08:41', 0.0), ('00:08:42', 0.0), ('00:08:42', 0.0), ('00:08:42', 0.0), ('00:08:43', 0.0), ('00:08:43', 0.0), ('00:08:44', 0.0), ('00:08:44', 0.0), ('00:08:47', 0.0), ('00:08:47', 0.0), ('00:08:48', 0.0), ('00:08:48', 0.0), ('00:08:50', 0.0), ('00:08:50', 0.0), ('00:08:51', 0.0), ('00:08:51', 0.0), ('00:08:52', 0.0), ('00:08:52', 0.0), ('00:08:53', 0.0), ('00:08:54', 0.0), ('00:09:02', 0.0), ('00:09:10', 280.7), ('00:09:48', 0.0), ('00:10:08', 0.0), ('00:10:09', 0.0)]
+2026-11-07 00:24 00:36 [('00:24:00', 0.0), ('00:24:58', 0.0), ('00:25:07', 0.0), ('00:25:56', 637.5), ('00:28:35', 1309.0), ('00:29:20', 0.0), ('00:29:36', 613.3), ('00:30:50', 0.0), ('00:31:53', 0.0), ('00:33:20', 0.0), ('00:33:55', 0.0), ('00:34:38', 0.0)]
+onepipeline saves in watch 306 gap min n=305 p50=0 p90=2 max=139 share of gaps under 1 min 0.83
+  by scope GB {'main': 9.661, 'pr': 0.005, 'tag': 0.833} results GB 0.0032 n 558
+  end: listed 10498991756 room under 10GiB 238426484 oldest access 2026-11-06T13:07
+  start 2026-11-06T17:06:15Z oldest access 2026-11-06T13:07 tag entries ['v0.101.5']
+  readings usage!=listed 88 of 228 max diff MB 0
+onetaskgraph saves in watch 407 gap min n=406 p50=0 p90=1 max=264 share of gaps under 1 min 0.89
+  by scope GB {'main': 2.994, 'pr': 5.036, 'tag': 2.632} results GB 0.002 n 899
+  end: listed 10663236672 room under 10GiB 74181568 oldest access 2026-11-05T21:32
+  start 2026-11-06T17:06:19Z oldest access 2026-11-04T20:56 tag entries ['/v0.14.1', '/v0.14.2', '/v0.14.3']
+  readings usage!=listed 57 of 228 max diff MB 715
+onepipeline-ui saves in watch 122 gap min n=121 p50=0 p90=2 max=395 share of gaps under 1 min 0.86
+  by scope GB {'main': 9.227, 'pr': 0.001, 'tag': 0.033} results GB 0.0002 n 263
+  end: listed 9260980125 room under 10GiB 1476438115 oldest access 2026-11-06T10:48
+  start 2026-11-06T17:01:11Z oldest access 2026-11-06T10:48 tag entries ['/v0.69.0']
+  readings usage!=listed 44 of 229 max diff MB 40
+onepipeline all warm runs 37 with >50MB 28 legs saving big Counter({1: 16, 3: 11, 0: 1})
+   H 1.07 crossing runs 17 of 28 with a later save in the same run 11
+   H 1.27 crossing runs 14 of 28 with a later save in the same run 11
+   H 0.238 crossing runs 27 of 28 with a later save in the same run 11
+onetaskgraph all warm runs 35 with >50MB 6 legs saving big Counter({3: 4, 2: 1, 1: 1})
+   H 0.65 crossing runs 5 of 6 with a later save in the same run 5
+   H 6.0 crossing runs 0 of 6 with a later save in the same run 0
+onepipeline-ui all warm runs 41 with >50MB 11 legs saving big Counter({3: 9, 1: 2})
+   H 1.83 crossing runs 10 of 11 with a later save in the same run 9
+   H 1.476 crossing runs 10 of 11 with a later save in the same run 9
+onepipeline last40 ordinary 24 moved 12 moved by non-release 4
+onepipeline all ordinary 165 moved 99 moved by non-release 66
+  final CI start to merge min n=165 p50=146 p90=301 max=1283
+  rate/day 8.4
+onetaskgraph last40 ordinary 29 moved 5 moved by non-release 2
+onetaskgraph all ordinary 99 moved 19 moved by non-release 12
+  final CI start to merge min n=98 p50=77 p90=227 max=937
+  rate/day 4.7
+onepipeline-ui last40 ordinary 29 moved 7 moved by non-release 5
+onepipeline-ui all ordinary 128 moved 13 moved by non-release 9
+  final CI start to merge min n=128 p50=26 p90=87 max=443
+  rate/day 6.7
