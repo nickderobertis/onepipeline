@@ -132,7 +132,13 @@ fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
     );
     assert_eq!(extended["schema_version"], 15);
 
-    let status = world.run(&["status", run]).exited(0).stdout.clone();
+    // `BEFORE`'s default read carries the provider report, which this build's
+    // gives only on `--providers`, so that is the read the two are held equal on.
+    let status = world
+        .run(&["status", run, "--providers"])
+        .exited(0)
+        .stdout
+        .clone();
     let results = world.run(&["results", run]).exited(0).stdout.clone();
     let journal = world.run_file(run, "events.jsonl");
     let recorded = std::fs::read(&journal).expect("the journal");
