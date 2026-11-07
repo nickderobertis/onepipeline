@@ -1373,7 +1373,7 @@ onetaskgraph-local-md = "=0.14.5"
 onetaskgraph-linear = "=0.14.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
-onebudgetspec-core = "=0.1.5"
+onebudgetspec-core = "=0.2.0"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
@@ -1388,7 +1388,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.101.5"
+version = "0.102.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

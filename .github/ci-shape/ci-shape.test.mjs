@@ -222,6 +222,30 @@ describe("the `budgets` job", () => {
     assert.equal(declared["budget-files"].default, "**/budgets.yaml");
   });
 
+  it("reads what `test-linux` saved and leaves out what a pull request cannot measure", () => {
+    const given = steps(job).find((step) => uses(step).startsWith(`${REPORT_ACTION}@`)).with;
+    assert.equal(given["omit-labels"], "not-measured-on-pr");
+    assert.equal(given["saved-results-artifacts"], "budget-check-results-*");
+    const uploads = Object.entries(ci.jobs).flatMap(([id, definition]) =>
+      steps(definition)
+        .filter((step) => step.with?.name?.startsWith("budget-check-results-"))
+        .map((step) => ({ id, step })),
+    );
+    assert.deepEqual(
+      uploads.map(({ id }) => id),
+      ["test-linux"],
+    );
+    const [{ step }] = uploads;
+    assert.equal(step.if, "always()");
+    assert.match(uses(step), /^actions\/upload-artifact@/);
+    assert.deepEqual(step.with, {
+      name: "budget-check-results-test-linux",
+      path: "target/budget-results/",
+      "if-no-files-found": "warn",
+    });
+    assert.equal(ci.jobs["test-linux"].if, "github.event_name == 'pull_request'");
+  });
+
   it("is held by its own budget, read through the released reader's flags and metric", () => {
     const declared = parse(readFileSync(join(vendored, "action.yml"), "utf8")).inputs;
     const help = readFileSync(join(vendored, "telemetry-help.txt"), "utf8");
