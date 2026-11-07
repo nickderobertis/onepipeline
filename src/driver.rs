@@ -431,12 +431,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 println!("{reading}");
                 return Ok(EXIT_SUCCESS);
             }
-            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
-            if args.providers {
-                print!("{}", status.render_with_providers());
-            } else {
-                print!("{}", verbs::render_status(&status));
-            }
+            let status = {
+                let _read = crate::hostphases::phase("read");
+                verbs::status(&ledger::runs_root(), args.run.as_deref())?
+            };
+            let text = {
+                let _render = crate::hostphases::phase("render");
+                if args.providers {
+                    status.render_with_providers()
+                } else {
+                    verbs::render_status(&status)
+                }
+            };
+            print!("{text}");
+            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         Verb::Host(args) => {
@@ -764,12 +772,19 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
         Verb::RepoRecover(args) => crate::land::land(crate::land::Verb::Recover, args.args),
         Verb::Integrate(args) => crate::land::land(crate::land::Verb::Integrate, args.args),
         Verb::Results(args) => {
-            let results = verbs::results(&resolve(&args.run)?)?;
-            if args.json {
-                println!("{}", verbs::render_results_json(&results)?);
-            } else {
-                print!("{}", verbs::render_results(&results));
+            let results = {
+                let _read = crate::hostphases::phase("read");
+                verbs::results(&resolve(&args.run)?)?
+            };
+            {
+                let _render = crate::hostphases::phase("render");
+                if args.json {
+                    println!("{}", verbs::render_results_json(&results)?);
+                } else {
+                    print!("{}", verbs::render_results(&results));
+                }
             }
+            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         Verb::Supersessions(args) => {

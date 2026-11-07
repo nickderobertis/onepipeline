@@ -176,7 +176,8 @@ const declaresUniform = (declared, target) =>
 // per-change selection pays for one.
 const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
-// The budget tiers (`tier:budget`: `onepipeline-stop-verdict`, `human-items-e2e`)
+// The budget tiers (`tier:budget`: `onepipeline-stop-verdict`, `human-items-e2e`,
+// `onepipeline-status-read`)
 // produce budget telemetry from their `test` target. They time an uninstrumented
 // release binary over full workloads, so they write no coverage profiles and have no
 // cross-platform `test-quick`: their journeys are Unix-only and run on the merge
@@ -188,6 +189,7 @@ const BUDGET = projects.filter((declared) => declared.tags?.includes("tier:budge
 const BUDGET_READERS = {
   "onepipeline-stop-verdict": "onepipeline:budgets",
   "human-items-e2e": "own test",
+  "onepipeline-status-read": "own test",
 };
 
 // The Rust projects that run a share of the offline suite, each declaring
@@ -435,6 +437,7 @@ describe("the offline tier split", () => {
       "scratch_workload",
       "journal_workload",
       "human_items_workload",
+      "status_read_workload",
     ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
