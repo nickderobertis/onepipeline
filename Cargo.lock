@@ -1701,7 +1701,6 @@ name = "onepipeline"
 version = "0.102.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "clap",
  "fs4",
  "jsonschema 0.56.0",

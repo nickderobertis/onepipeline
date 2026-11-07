@@ -1613,8 +1613,9 @@ onepipeline-testfakes = { path = "crates/testfakes" }
 # `[workspace.dependencies]`.
 onetaskgraph-linear = { workspace = true }
 # What `tests/e2e/linear_loopback.rs` encodes a record's editor state with, as Linear's own are:
-# the releases the Linear plugin above decodes them with.
-base64 = "0.22"
+# the release the Linear plugin above decodes it with. Its base64 wrapping is written in that
+# file instead, so no direct dependency lands in `Cargo.lock`'s onepipeline entry between
+# `async-trait` and `clap`: see `standard_base64` there.
 yrs = "0.28"
 onevcs-testing = { workspace = true }
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s

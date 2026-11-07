@@ -33,7 +33,6 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use base64::Engine as _;
 use onetaskgraph_linear::graphql;
 use onetaskgraph_plugin_api::MetadataRecord;
 use serde_json::{json, Map, Value};
@@ -2074,7 +2073,29 @@ fn editor_state(id: &str, content: &str) -> String {
     let update = doc
         .transact()
         .encode_state_as_update_v1(&yrs::StateVector::default());
-    base64::engine::general_purpose::STANDARD.encode(update)
+    standard_base64(&update)
+}
+
+/// Standard, padded base64 (RFC 4648 §4), the alphabet Linear's `contentState` is written in.
+/// Written here rather than linked: a direct dependency named between `async-trait` and `clap`
+/// lands inside the context `.github/ci-shape/nx-inputs.test.mjs` reverse-applies the recorded
+/// release's `Cargo.lock` edit against, and refuses that patch.
+fn standard_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = chunk.iter().enumerate().fold(0u32, |acc, (i, byte)| {
+            acc | u32::from(*byte) << (16 - 8 * i)
+        });
+        for position in 0..4 {
+            out.push(if position <= chunk.len() {
+                char::from(ALPHABET[(triple >> (18 - 6 * position) & 0x3f) as usize])
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 /// A heading id shaped as Linear's UUIDs are, made from `seed` so a run reproduces.
@@ -2750,4 +2771,22 @@ fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers(
         "{answer}"
     );
     assert_eq!(linear.project_id(), "project-fresh");
+}
+
+/// The editor state's base64 is the standard padded alphabet: RFC 4648 §10's vectors, plus the
+/// two characters only the standard alphabet spells.
+#[test]
+fn editor_state_base64_matches_the_rfc_vectors() {
+    for (input, encoded) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ] {
+        assert_eq!(standard_base64(input.as_bytes()), encoded, "{input:?}");
+    }
+    assert_eq!(standard_base64(&[0xfb, 0xff]), "+/8=");
 }
