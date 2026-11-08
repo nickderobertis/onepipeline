@@ -520,6 +520,8 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
     // still held, so the driver has work in flight when it panics.
     adopted_build.release();
 
+    // The adopter's own exit is the event: the failing write panics it. The deadline
+    // only names an adopter that never ends; it decides nothing of a passing run.
     let deadline = Instant::now() + Duration::from_secs(120);
     let ended = loop {
         if let Some(status) = adopting.try_wait().expect("the adoption is waited on") {

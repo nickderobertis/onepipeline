@@ -5989,20 +5989,19 @@ fn a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_drive
 /// the interval it is held for all the same — so the three are one decision.
 ///
 /// **The interval is widened on purpose**, because a host that wins the race
-/// every time cannot observe it: the record's write is a plain `fs::write`, so
-/// standing a FIFO in the record's place holds that write at `open` for exactly
-/// as long as this journey withholds a reader. Nothing is substituted and no
-/// call is intercepted — the graph, its driver, the record and both views are
-/// the real ones, meeting a kernel object any writer would meet the same way.
+/// every time cannot observe it: the sibling renames a finished record onto the
+/// name while holding that record's own lock, so taking the lock holds the write
+/// there for exactly as long as this journey keeps it. Nothing is substituted and
+/// no call is intercepted — the graph, its driver, the record and both views are
+/// the real ones, meeting the lock every writer of that record waits on.
 ///
-/// Unix only, because a FIFO is. The lane this exists for is macOS, which the
-/// matrix runs and which is unix.
+/// Unix only, as the lane this exists for is: macOS, which the matrix runs.
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] measured rather than assumed: run
 // with its neighbours (`-E 'binary(e2e) and test(observer)'`) this journey takes 2.7s, less than
 // five of the eighteen observer journeys beside it in the same target — `a_run_whose_observer_
 // graph_is_watching_and_then_is_killed_reads_as_each` is 4.2s and the channel journeys 6.9-8.9s.
-// The two-second window is the driver's own poll cadence forty times over, and the thirty-second
-// FIFO drain is the bound a *failing* run stops at, never spent on a passing one.
+// The two-second window is the driver's own poll cadence forty times over, and the one-step
+// wait for the held write is the bound a *failing* run stops at, never spent on a passing one.
 #[cfg(unix)]
 #[test]
 fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
@@ -6054,10 +6053,10 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
     let record = graph_dir.join(oneagentgraph::run::RECORD_FILE);
     // llmlint: ignore[tests_mirror_real_usage] the interval this journey is about is the one
     // between the graph's announcement and its own write of that record, and no user-facing
-    // surface can hold a write still: standing a FIFO in the path's place is the kernel's own
-    // rendezvous, met by the real `fs::write` any host would meet, and it is the only way a
-    // machine that wins the race every time can observe the state a macOS runner lost.
-    interpose_a_fifo(&record);
+    // surface can hold a write still: taking the record's lock is the kernel's own rendezvous,
+    // met by the real write any host would make, and it is the only way a machine that wins
+    // the race every time can observe the state a macOS runner lost.
+    let write_held = hold_the_records_write(&record);
 
     world.release("observer.go");
     // Read off the observer's own output rather than the run's merged store: a
@@ -6080,9 +6079,9 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
     //
     // llmlint: ignore-block[tests_mirror_real_usage] the view that renders this verdict is the
     // one thing that cannot be asked here: `views::observer_liveness` reads it through
-    // `agentgraph::graph_run_ended`, which opens the record — the path this journey is holding
-    // a FIFO at — so a `runs` inside the interval would itself be the reader that releases the
-    // write and closes the window. `reclaimable` is the very call that verdict falls back on,
+    // `agentgraph::graph_run_ended`, which reads the record under the lock this journey is
+    // holding, so a `runs` inside the interval would wait on this journey's own hold.
+    // `reclaimable` is the very call that verdict falls back on,
     // read at the one moment the surface over it cannot answer; the surface itself is asserted
     // below, once the ending is written.
     let gone = |world: &World| -> Option<String> {
@@ -6098,6 +6097,12 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
             .then(|| format!("the driver said its observer had stopped watching:\n{log}"))
     };
     // llmlint: ignore-end[tests_mirror_real_usage]
+    // The window only means something once the write is waiting at the lock: a sibling
+    // whose write no longer waits there would leave this journey watching nothing.
+    world.until(
+        "the graph's ending to wait at its record's lock, or its observer to be reported gone",
+        |world| held_ending(&record).is_some() || gone(world).is_some(),
+    );
     // Watched for rather than sampled once: the driver polls on its own cadence,
     // so a single read taken the instant the announcement lands would pass
     // against a build that ends its observer there and had simply not been asked
@@ -6109,37 +6114,19 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
         onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Let the ending through, whatever the window read: opening the FIFO for
-    // reading is what releases the write, and what comes back is the record the
-    // graph wrote. Done before the assertions, and bounded, because a build that
-    // ends its observer inside the interval leaves nobody to open the other end
-    // — this journey has to fail with what it saw rather than wait on a write
-    // that is never coming.
-    let held = record.clone();
-    let (drained, drain) = std::sync::mpsc::channel();
-    std::thread::spawn(move || drop(drained.send(std::fs::read_to_string(&held))));
-    let written = drain
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .ok()
-        .and_then(Result::ok);
-    // Put the path back the way a view reads it before anything reads it: a FIFO
-    // left standing would block the next reader of the record instead of
-    // answering it.
-    std::fs::remove_file(&record).expect("the interposed FIFO is removed");
-    if let Some(written) = &written {
-        std::fs::write(&record, written).expect("the record is put back where a view reads it");
-    }
+    // Let the ending through, whatever the window read, before anything else reads
+    // the record: a reader of it waits on this lock.
+    drop(write_held);
 
     assert!(
         said.is_none(),
         "the observer was reported gone with its ending unwritten: {}",
         said.unwrap_or_default()
     );
-    let written = written.expect("the graph wrote the ending this journey was holding");
-    assert!(
-        written.contains("finished_ms"),
-        "the graph settled without recording an ending: {written}"
-    );
+    // Its rename lands now the lock is free, and only a process still running can make it.
+    world.until("the graph's ending to land on its record", |_| {
+        std::fs::read_to_string(&record).is_ok_and(|text| text.contains("finished_ms"))
+    });
 
     // And only now does anything say the observer has stopped — the driver's own
     // line, and the verdict both views read off the record it managed to write.
@@ -6169,38 +6156,35 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
 /// announcement and never waits for its final reaper — that is what the journey
 /// named for the reaper holds — and the announcement is emitted *before* the
 /// record's ending is written, so a `drive` released by the announcement alone
-/// could exit with that write half made: `fs::write` truncates and then writes,
-/// and an exit between the two leaves an empty `record.json`, which is a run the
-/// sibling's own `history` no longer lists. That is what
+/// could exit with that write half made: before oneagentgraph 0.9.2 it truncated
+/// and then wrote, and an exit between the two left an empty `record.json`, which
+/// is a run the sibling's own `history` no longer lists. That is what
 /// `the_run_state_this_crate_places_is_where_the_sibling_looks_for_it` met on
 /// the hosted runner, twice — an empty listing over a record that had nothing
 /// in it — and it is the observation this journey stages on purpose.
 ///
-/// **The interval is widened** the way the observer journey widens it: a FIFO
-/// stood in the record's place holds the sibling's write at `open` until this
-/// journey opens the other end. What the two halves then differ on is what the
-/// launch is waiting for. An observer waits for the sibling's own wait, reap
-/// included; a dispatch may not — the outliving process in the reaper journey
-/// has to still be there when its node settles — so it is held on the record
-/// itself, read back with its ending on it, and the FIFO standing at the path
-/// is never opened from inside the product: opening its reading end is itself
-/// what would release the write.
+/// **The interval is widened** the way the observer journey widens it: holding
+/// the record's lock keeps the sibling's rename of its finished record waiting,
+/// the whole ending already written beside the name. What the two halves then
+/// differ on is what the launch is waiting for. An observer waits for the
+/// sibling's own wait, reap included; a dispatch may not — the outliving process
+/// in the reaper journey has to still be there when its node settles — so it is
+/// held on the record itself, read back with its ending on it, by a read that
+/// never takes that lock.
 ///
-/// So the sequence is: the graph announces, the launch is *not* seen to settle
-/// its node inside the window, this journey then opens the FIFO's reading end,
-/// and what comes through is the ending the graph wrote — because the process
-/// carrying that write was still there to make it. Against a build that exits
-/// on the announcement, the node settles inside the window and nobody is left
-/// to write; the read below then finds no writer at all. The hold is bounded,
-/// and the second half keeps the record away past that bound to hold that the
-/// launch is released on it — a settled node is never held indefinitely for a
-/// record that is not coming.
+/// So the sequence is: the graph announces, its ending is seen waiting at the
+/// lock, and the launch is *not* seen to settle its node inside the window —
+/// because it is held on a record that does not carry that ending yet. Against a
+/// build that exits on the announcement, the node settles inside the window. The
+/// hold is bounded, and the second half keeps the lock past that bound to hold
+/// that the launch is released on it — a settled node is never held indefinitely
+/// for a record that is not coming.
 ///
-/// Unix only, because a FIFO is.
+/// Unix only, as the observer journey is.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what a passing run spends
 // beyond the observer journey above is the one-second window and the product's own
-// five-second bound, which the second half exists to spend; the ten-second drain is what a
-// *failing* run stops at, never spent on a passing one. Measured in one invocation on a host
+// five-second bound, which the second half exists to spend; the one-step wait for the held
+// write is what a *failing* run stops at, never spent on a passing one. Measured in one invocation on a host
 // at load 16-21 of 14 cores, before the bound was added to the journey: 19.4s here against
 // 18.3s for the observer journey and 16.3s for
 // `a_plan_dispatches_through_the_real_oneagentgraph_and_its_members_run`, the plainest
@@ -6243,10 +6227,10 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
         .join(oneagentgraph::run::RECORD_FILE);
     // llmlint: ignore-block[tests_mirror_real_usage] the interval this journey is about is the
     // one between the graph's announcement and its own write of the record, and no user-facing
-    // surface can hold a write still: standing a FIFO in the path's place is the kernel's own
-    // rendezvous, met by the real `fs::write` any host would meet, and it is the only way a
-    // machine that wins the race every time can observe the state the hosted runner lost.
-    interpose_a_fifo(&record);
+    // surface can hold a write still: taking the record's lock is the kernel's own rendezvous,
+    // met by the real write any host would make, and it is the only way a machine that wins
+    // the race every time can observe the state the hosted runner lost.
+    let write_held = hold_the_records_write(&record);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("turn.go");
@@ -6259,15 +6243,21 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
 
     // Inside the interval. The node settling is the launch having let its
     // `drive` child go — the stream ends when that process does — and a build
-    // that exits on the announcement settles it here, inside the window, with
-    // the write still held at the FIFO and nothing left to make it. Watched for
-    // rather than sampled once, because the parent collects its child on its
-    // own cadence; fifty times its relay poll is the budget.
+    // that exits on the announcement settles it here, with the write still
+    // waiting at the lock and nothing left to make it. Watched for rather than
+    // sampled once, because the parent collects its child on its own cadence;
+    // fifty times its relay poll is the budget.
     let settled_inside = |world: &World| {
         !world
             .events_of("recorded-ending", "node-settled")
             .is_empty()
     };
+    // The window only means something once the write is waiting at the lock: a sibling
+    // whose write no longer waits there would leave this journey watching nothing.
+    world.until(
+        "the graph's ending to wait at its record's lock, or the node to settle",
+        |world| held_ending(&record).is_some() || settled_inside(world),
+    );
     let mut settled_early = false;
     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < until && !settled_early {
@@ -6275,35 +6265,15 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
         onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    // Let the ending through, whatever the window read: opening the FIFO for
-    // reading is what releases the write, and what comes back is the record the
-    // graph wrote. Bounded, because a build that let its child exit inside the
-    // interval leaves nobody to open the other end — this journey has to fail
-    // with what it saw rather than wait on a write that is never coming.
-    let held = record.clone();
-    let (drained, drain) = std::sync::mpsc::channel();
-    std::thread::spawn(move || drop(drained.send(std::fs::read_to_string(&held))));
-    let written = drain
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .ok()
-        .and_then(Result::ok);
-    // The FIFO comes down before anything else reads the path: left standing it
-    // would block the next reader of the record instead of answering it. The
-    // record itself is deliberately *not* put back yet — see below.
-    std::fs::remove_file(&record).expect("the interposed FIFO is removed");
-
-    let written = written.unwrap_or_else(|| {
+    // The whole ending the graph has ready, read from beside the name it is waiting
+    // to replace. Absent, the launch let go of the process that was to write it.
+    let written = held_ending(&record).unwrap_or_else(|| {
         // The launch is collected either way, so a failing run leaves nothing
         // of its own behind.
         let _ = launch.wait();
         panic!(
-            "the graph's ending was never written: its launch {} inside the interval and left \
-             nobody to write it:\n{}",
-            if settled_early {
-                "settled the node"
-            } else {
-                "held, but the write did not come through"
-            },
+            "the graph's ending was never written: its launch settled the node inside the \
+             interval and left nobody to write it:\n{}",
             world.dump()
         )
     });
@@ -6318,12 +6288,11 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     );
 
     // The hold is bounded, and this is the bound being what releases it: the
-    // record is kept *away* — the write went through the FIFO and nothing has
-    // been put in its place — so the launch never sees the ending land, and it
-    // still hands back with its node done rather than holding a settled run
-    // for a record that is not coming. `wait` is the clock here: a launch held
-    // past the bound is one this journey's own deadline, not the product's,
-    // would end.
+    // lock is kept, so the rename never lands and the launch never sees the
+    // ending, and it still hands back with its node done rather than holding a
+    // settled run for a record that is not coming. `wait` is the clock here: a
+    // launch held past the bound is one this journey's own deadline, not the
+    // product's, would end.
     let status = launch.wait().expect("the attached launch exits");
     assert!(status.success(), "the attached launch failed: {status}");
     world.until("the node to settle", |world| {
@@ -6333,8 +6302,9 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
             .any(|event| event["payload"]["status"] == "done")
     });
 
-    // And put back where the sibling reads it, the run is listed there — which
-    // is what an exit inside the write took away.
+    // Its writer went with the launch, so the ending it had ready lands here, as
+    // its rename would have — and the sibling lists the run whose ending that is.
+    drop(write_held);
     std::fs::write(&record, &written).expect("the record is put back where the sibling reads it");
     let history = onepipeline_testfakes::profile::process::Command::new(
         crate::harness::oneagentgraph_binary(),
@@ -6352,28 +6322,47 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     );
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
-/// Stand a **FIFO** in a file's place, so the next writer of that path blocks at
-/// `open` until the caller opens the other end.
+/// Hold a graph run's next write of its `record`, by taking the lock that write
+/// waits on.
 ///
-/// The kernel's own rendezvous rather than anything substituted: the write being
-/// held is an ordinary `fs::write`, and it meets a FIFO exactly as any writer
-/// does.
+/// oneagentgraph writes a whole new record to a sibling file and renames it onto
+/// the name while holding `.<record>.lock` exclusively, so a write made while this
+/// is held stands complete beside the name until it is dropped. The lock exists
+/// from the record's first write, which is before the run announces itself. A
+/// reader of the record through oneagentgraph waits on this too.
 #[cfg(unix)]
-fn interpose_a_fifo(path: &std::path::Path) {
-    use std::os::unix::ffi::OsStrExt;
+fn hold_the_records_write(record: &std::path::Path) -> std::fs::File {
+    let name = record
+        .file_name()
+        .expect("a record is a file")
+        .to_string_lossy();
+    let path = record.with_file_name(format!(".{name}.lock"));
+    let lock = std::fs::File::open(&path)
+        .unwrap_or_else(|error| panic!("no lock at {}: {error}", path.display()));
+    lock.lock().expect("the record's lock is taken");
+    lock
+}
 
-    std::fs::remove_file(path).expect("the file the FIFO stands in for is there to replace");
-    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
-    // SAFETY: `mkfifo` takes a NUL-terminated path and a mode and reports
-    // failure in its return value. The `CString` owns those bytes for the whole
-    // call and nothing is borrowed past it.
-    assert_eq!(
-        unsafe { libc::mkfifo(raw.as_ptr(), 0o600) },
-        0,
-        "could not put a FIFO at {}: {}",
-        path.display(),
-        std::io::Error::last_os_error()
-    );
+/// What a write held by [`hold_the_records_write`] has ready, once all of it is
+/// there: the sibling file parses as a whole record, which a part of one does not.
+#[cfg(unix)]
+fn held_ending(record: &std::path::Path) -> Option<String> {
+    let name = record.file_name()?.to_string_lossy();
+    let prefix = format!(".{name}.");
+    std::fs::read_dir(record.parent()?)
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            let entry = entry.file_name();
+            let entry = entry.to_string_lossy();
+            entry.starts_with(&prefix) && entry.ends_with(".partial")
+        })
+        .find_map(|entry| {
+            let text = std::fs::read_to_string(entry.path()).ok()?;
+            serde_json::from_str::<oneagentgraph::run::Record>(&text)
+                .is_ok()
+                .then_some(text)
+        })
 }
 
 /// `adopt` replays the launch's source filter onto the observer it relaunches.
