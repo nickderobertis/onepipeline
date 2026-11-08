@@ -1360,9 +1360,9 @@ onevcs-testing = "0.20.0"
 # It also writes a GitHub issue's link to its own heading as that issue's `www.github.com` URL, the
 # form `tests/e2e/linear_writeback.rs` holds on the public board.
 # **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
-# a term already stored on a task stays for `sources sanitize` unless the caller opts in, as
-# `src/writeback.rs` does, so a settlement still rewrites or refuses it:
-# `tests/e2e/publication_boundary.rs`'s settlement journey fails without that opt-in.
+# a term already stored on a task stays for `sources sanitize` unless the caller opts in. The
+# engine does not, by the user's ruling that screening adds no GitHub request to a small board
+# edit: `tests/narrow_write/main.rs` fails if it does.
 # **0.14.7 writes a reference-style link inline on a copy to Linear**, which keeps one only as
 # escaped text, and takes Linear's autolinks and escapes of a follow-up's own text for what they
 # are rather than refusing them: `tests/e2e/linear_launch.rs`'s budget-table journey fails on 0.14.5.
@@ -1638,6 +1638,11 @@ path = "tests/e2e/main.rs"
 [[test]]
 name = "pooled_slot"
 path = "tests/pooled_slot/main.rs"
+
+# The narrow-write journeys have their own Nx input edge and coverage tier.
+[[test]]
+name = "narrow_write"
+path = "tests/narrow_write/main.rs"
 
 # The conversational tier, in its own binary for the reason `smoke` is in one:
 # so a runner can name it. Each of these journeys starts a real two-party

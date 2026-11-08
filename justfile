@@ -340,11 +340,12 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
+rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(narrow_write) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e) and not test(=surface::version_reports_the_crate_version)"
 contract-tier := "binary(contract) and not test(=the_contract_names_the_retention_path_and_the_release_it_ships_in)"
 pooled-slot-tier := "binary(pooled_slot) and not test(/^harness::/)"
+narrow-write-tier := "binary(narrow_write) and not test(/^harness::/)"
 note-tier := "binary(note) and not test(/^harness::/)"
 version-contract-tier := "binary(contract) and test(=the_contract_names_the_retention_path_and_the_release_it_ships_in)"
 version-e2e-tier := "binary(e2e) and test(=surface::version_reports_the_crate_version)"
@@ -353,7 +354,7 @@ version-package-tier := "binary(package_bundle) and test(=the_packaged_crate_car
 # Their union, and the whole offline tier, spelled once from these parts so it
 # cannot drift from them: what a check that the tiers partition the suite lists
 # against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
-offline-tiers := "(" + pooled-slot-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
+offline-tiers := "(" + pooled-slot-tier + ") or (" + narrow-write-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md. It is measured over the **whole** offline tier, which is why the five
@@ -463,6 +464,8 @@ _contract-test: (_tier-test "contract" contract-tier)
 
 _pooled_slot-test: (_tier-test "pooled_slot" pooled-slot-tier)
 
+_narrow_write-test: (_tier-test "narrow_write" narrow-write-tier)
+
 _note-test: (_tier-test "note" note-tier)
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
@@ -505,6 +508,8 @@ _e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e
 _contract-test-quick: (_tier-test-quick contract-tier)
 
 _pooled_slot-test-quick: (_tier-test-quick pooled-slot-tier)
+
+_narrow_write-test-quick: (_tier-test-quick narrow-write-tier)
 
 _note-test-quick: (_tier-test-quick note-tier)
 

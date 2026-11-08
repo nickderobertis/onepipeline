@@ -22,6 +22,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
+use crate::mixed_world_support::declare_replacement;
+pub(crate) use crate::mixed_world_support::{declare_visibility, mixed_world};
 
 /// The contract's own boundary block, which the journeys hold what the engine emits to.
 fn contract_block() -> Value {
@@ -55,35 +57,6 @@ fn exit_for(verdict: &str) -> i32 {
 
 /// What `plan check` exits with when the plan carries refusals.
 const HAS_REFUSALS: i32 = 1;
-
-/// A world with two registered repositories: `service`, which the rules declare
-/// private, and `library`, which they declare public.
-pub(crate) fn mixed_world(name: &str) -> (World, Repository, Repository) {
-    let world = World::new(name);
-    let private = world.repository("local-direct", &[]);
-    let public = world.extra_repository("library");
-    declare_visibility(&world, &[("service", "private"), ("library", "public")]);
-    (world, private, public)
-}
-
-/// Rewrite this host's rules file at version 4, declaring each named repository of
-/// owner `owner` public or private, everything else publishing `local-direct`.
-pub(crate) fn declare_visibility(world: &World, declared: &[(&str, &str)]) {
-    let rules: String = declared
-        .iter()
-        .map(|(name, visibility)| {
-            format!("  - match: {{owner: owner, name: {name}}}\n    visibility: {visibility}\n")
-        })
-        .collect();
-    std::fs::write(
-        world.onevcs_home().join("rules.yml"),
-        format!(
-            "version: 4\nrules:\n{rules}  - match: {{owner: owner}}\n    visibility: private\n\
-             default:\n  publication: local-direct\n  approvals: none\n"
-        ),
-    )
-    .expect("the rules file is written");
-}
 
 /// A private producer: a lifecycle node in `service` that keeps its branch.
 pub(crate) fn producer(id: &str, deps: &[&str]) -> Value {
@@ -5862,23 +5835,8 @@ fn a_private_node_written_back_is_private_on_the_store_s_own_field() {
     world.release("keep.go");
 }
 
-/// Commit the synthetic replacement declaration the linked boundary reads from the repository.
-fn declare_replacement(world: &World, repository: &Repository) {
-    std::fs::write(
-        repository.checkout.join("private-terms.toml"),
-        "schema_version = 2\nterms = [\"velvetquasar\"]\nreplacements = [{term = \"velvetquasar\", with = \"sample\"}]\n",
-    ).expect("the declaration is written");
-    crate::harness::git(world, &repository.checkout, &["add", "-A"]);
-    crate::harness::git(
-        world,
-        &repository.checkout,
-        &["commit", "-qm", "chore: declare replacement"],
-    );
-    crate::harness::git(world, &repository.checkout, &["push", "origin", "main"]);
-}
-
 #[test]
-fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_content() {
+fn settlement_writebacks_leave_a_stored_term_for_the_sweep_and_refuse_a_private_item() {
     for level in ["repository", "ancestor", "reject", "private-item"] {
         let (world, private, _, _) = scoped_world(&format!("sanitize-body-{level}"));
         let world = world.with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "public");
@@ -5933,8 +5891,8 @@ fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_cont
                 onepipeline_testfakes::yaml::to_string(&front).unwrap()
             )
         } else {
-            // Restore the stored spelling after the dispatch's write; the settlement must
-            // sanitize it again, through its own narrow write.
+            // Restore the stored spelling after the dispatch's write: a term a person put back
+            // on the item, which the settlement's narrow write neither reads for nor rewrites.
             let held = before.replace(
                 "An operator's sample body.",
                 "An operator's velvetquasar body.",
@@ -5945,14 +5903,9 @@ fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_cont
         std::fs::write(&path, &poisoned).unwrap();
         worker.release();
         until_settled(&world, "sanitized", "work");
-        if matches!(level, "reject" | "private-item") {
-            let kind = if level == "private-item" {
-                "not-private-destination"
-            } else {
-                "boundary-refused"
-            };
+        if level == "private-item" {
             world.until("the settlement write to be refused", |world| {
-                projections(world, "sanitized").contains(kind)
+                projections(world, "sanitized").contains("not-private-destination")
             });
             assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),
@@ -5960,33 +5913,23 @@ fn settlement_writebacks_rewrite_declared_terms_and_refuse_unfixable_stored_cont
                 "a refused write mutated the item"
             );
             let record = projections(&world, "sanitized");
-            if level == "private-item" {
-                assert!(
-                    record.contains("The item's `repositories` already named a private repository"),
-                    "{record}"
-                );
-            } else {
-                assert!(
-                    record.contains("it carries a term of a private repository in its text"),
-                    "{record}"
-                );
-                assert!(
-                    record.contains("The term was already on the item before this write"),
-                    "{record}"
-                );
-            }
-        } else {
-            world.until_store(
-                "the settlement to be stored with its body rewritten",
-                |world| {
-                    world.store_tasks(&project).iter().any(|task| {
-                        task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
-                            && task.to_string().contains("An operator's sample body.")
-                    })
-                },
+            assert!(
+                record.contains("The item's `repositories` already named a private repository"),
+                "{record}"
             );
+        } else {
+            world.until_store("the settlement to be stored", |world| {
+                world.store_tasks(&project).iter().any(|task| {
+                    task["item"]["metadata"]["onepipeline.settlement"]["status"] == "done"
+                })
+            });
             let written = std::fs::read_to_string(&path).unwrap();
-            assert!(!written.contains("velvetquasar"), "{written}");
+            assert!(
+                written.contains("An operator's velvetquasar body."),
+                "the settlement's narrow write rewrote what it did not write: {written}"
+            );
+            let record = projections(&world, "sanitized");
+            assert!(!record.contains("boundary-refused"), "{record}");
         }
     }
 }

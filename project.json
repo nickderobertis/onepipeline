@@ -125,7 +125,8 @@
             "onepipeline-contract",
             "onepipeline-note-journeys",
             "onepipeline-codex-server",
-            "onepipeline-pooled-slot"
+            "onepipeline-pooled-slot",
+            "onepipeline-narrow-write"
           ],
           "target": "test"
         },
@@ -314,7 +315,8 @@
     "onepipeline-real-smoke",
     "onepipeline-release-compat",
     "onepipeline-stop-verdict",
-    "onepipeline-pooled-slot"
+    "onepipeline-pooled-slot",
+    "onepipeline-narrow-write"
   ],
   "namedInputs": {
     "default": [
