@@ -475,9 +475,13 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
         vec![agent("build", &[]), agent("ship", &[])],
         &[],
     );
-    let _original_build = build.arrived();
-    let _original_ship = ship.arrived();
-    end_process(killed);
+    let _original_build = build.arrived_within_a_step(&world, "the original build dispatch");
+    let _original_ship = ship.arrived_within_a_step(&world, "the original ship dispatch");
+    // Ended and reaped, not only ended: the engine reads a zombie as the live driver,
+    // so an adoption made before `init` reaps this orphan is refused and dispatches
+    // nothing — and the arrivals below would then wait for a worker no process is left
+    // to start.
+    assert_eq!(crate::harness::end_driver(&world, run), killed);
 
     let mut adopt = world.cmd(&["adopt", run]);
     adopt
@@ -486,11 +490,11 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
         .stderr(std::process::Stdio::piped());
     let mut adopting = adopt.spawn().expect("the adoption starts");
     let pid = adopting.id();
-    // These connections prove both replacement workers reached their holds. A
-    // loaded runner can take longer than one polling step to adopt and launch
-    // them; nextest's test timeout remains the backstop for a missing dispatch.
-    let adopted_build = build.arrived();
-    let adopted_ship = ship.arrived();
+    // These connections prove both replacement workers reached their holds, however
+    // long a loaded runner takes to adopt and launch them. The step's bound only names
+    // a dispatch that never comes, where the runner's timeout could name only this test.
+    let adopted_build = build.arrived_within_a_step(&world, "the adopted build dispatch");
+    let adopted_ship = ship.arrived_within_a_step(&world, "the adopted ship dispatch");
     assert!(
         world
             .events_of(run, "driver-adopted")
