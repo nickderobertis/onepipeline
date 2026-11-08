@@ -21,6 +21,9 @@
     "build": {
       "command": "just _crate-build",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-build"
+        },
         "crateSource",
         {
           "runtime": "node -p process.platform"
@@ -40,6 +43,9 @@
     "format-check": {
       "command": "just _crate-fmt-check",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-fmt-check"
+        },
         "crateSource",
         {
           "runtime": "node -p process.platform"
@@ -49,6 +55,9 @@
     "lint": {
       "command": "just _crate-lint",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-lint"
+        },
         "crateSource",
         {
           "runtime": "node -p process.platform"
@@ -146,6 +155,9 @@
     "test-quick": {
       "command": "just _crate-test-quick",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-test-quick --variable onetaskgraph-version"
+        },
         "crateTestSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
@@ -160,6 +172,9 @@
     "doc": {
       "command": "just _crate-doc",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-doc"
+        },
         "crateSource",
         {
           "runtime": "node -p process.platform"
@@ -285,6 +300,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection",
         "pythonSelection"

@@ -36,6 +36,8 @@ jobs:
     # Not on the push that merges release-plz's release pull request: it changes
     # only versions and the changelog, which no screenshot shows, and the release
     # commit runs no push workflow but release-plz's and the cache warmer's.
+    # It stays: a capture is a screenshot run rather than a test result, so a replay
+    # has nothing to offer in its place, and this push's gallery would match the last.
     if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
     # llmlint: ignore-block[least_privilege_grants] granted on the job rather than the
     # workflow, and neither can be narrowed further by event here: `permissions` values

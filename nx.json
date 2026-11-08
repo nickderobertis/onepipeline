@@ -11,8 +11,8 @@
       {
         "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
       },
-      "{workspaceRoot}/justfile",
       "{workspaceRoot}/scripts/nx-version-free-inputs.mjs",
+      "{workspaceRoot}/scripts/nx-recipe-input.mjs",
       "{workspaceRoot}/.github/nx-version-files",
       {
         "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem files"
@@ -52,6 +52,7 @@
     ],
     "crateTestSource": [
       "rustBuild",
+      "{workspaceRoot}/justfile",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/README.md",
@@ -222,6 +223,9 @@
       "{workspaceRoot}/justfile",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml"
+    ],
+    "justfileSelection": [
+      "{workspaceRoot}/justfile"
     ],
     "cargoSelection": [
       "{workspaceRoot}/Cargo.toml",

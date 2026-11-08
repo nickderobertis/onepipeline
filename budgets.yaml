@@ -210,7 +210,7 @@ budgets:
       so 6 changes x 20 one-minute reads with no two overlapping is 120 points; a holdup read is
       at most 2 queries of 1 point, every 10 minutes and shared by both held nodes, 18 x 2 = 36;
       156 in all, and 250 leaves room for the first reads at publication and at the run's end.
-  # The CI, CD and local-gate budgets. The eight labelled `release-tail` are measured after a
+  # The CI, CD and local-gate budgets. The nine labelled `release-tail` are measured after a
   # release, from GitHub's own records of the runs it carried, by the last step of release.yml's
   # `publish` (`onebudgetspec check budgets.yaml --label release-tail`), reporting only;
   # `onepipeline-gate-time`, labelled `host-variable`, is checked by `just gate` as a warning.
@@ -349,16 +349,21 @@ budgets:
     threshold: 1800
     timeout_seconds: 30
 
-  # Workload: every crate-touching push of the release's carried PRs, across all
-  # four jobs. Instrumented coverage runs uncached. Count every current cacheable
-  # execution and its
-  # preceding failed/throttled attempts; unavailable evidence is missing data.
+  # Workload: the newest release with evidence when the command runs, carrying 1 to 9 merged
+  # pull requests at 3 pushes each and 4 CI jobs per push, with 542 minutes at p90 from
+  # promotion to the release pull request. Instrumented coverage runs uncached. Count every
+  # current cacheable execution and its preceding failed/throttled attempts; evidence that
+  # ordinary conditions removed is counted as unavailable, and the figure is taken over what
+  # is measurable.
   - id: onepipeline-nx-cache-use
     description: >-
-      Remote hits as a percentage of attempt-qualified cacheable task/OS/hash
-      executions, excluding local hits. Report release-PR and same-PR retry/push
-      rates, misses and receipt ages, promotion failures, bytes and GitHub reads.
-      The 100 percent design target is revisited after real release-tail observations.
+      onepipeline: proven results replay when needed. Remote hits as a percentage of
+      attempt-qualified cacheable task/OS/hash executions, excluding local hits, with
+      `base_moved` tasks counted as misses. Report misses by class (throttled, failed,
+      evicted, never_promoted, base_moved), attempts whose evidence is unavailable, receipt
+      ages and requests. The 100 percent design target is revisited after real release-tail
+      observations; over 30 days to 2026-11-06 a non-release merge moved the base under 66
+      of 165 pull requests, so a reading under 100 is expected rather than alarming.
     labels: [release-tail, not-measured-on-pr]
     measure: reported
     command: [bash, scripts/actions-budget-figures.sh, cache-use]
@@ -366,3 +371,60 @@ budgets:
     direction: min
     threshold: 100
     timeout_seconds: 300
+
+  # Workload: one reading of this repository's real listing as it stands when the command
+  # runs, about 590 entries; one request per 100 entries over every page. The target is sized
+  # for one warm run saving four families beside the previous copy of each, 542 minutes at p90
+  # and 1,416 at most from promotion to release pull request, and at most 22 pushes a day at
+  # about 1 MB of results each.
+  #
+  # Threshold, by arithmetic from spike-cache-eviction's 8-hour watch to 2026-11-07 and warm
+  # logs since 2026-11-01: a run must save beside the old copies under the line, so
+  # 2C + g + O + R <= L, with L 10.737, O 0.171, R 0.05 and g/C 2.057/9.495 from each family's
+  # largest growth. So C <= 4.74 GB and the target is 10.737 - 0.171 - 4.74 = 5.82 GB. Each warm
+  # workflow's concurrency group holds it to one run at a time, and each leg's cleanup runs
+  # before its save and keeps the newest copy, so a family holds at most two copies at any
+  # moment; that bound is 2C + g. Results count in the figure, at most about 0.154 GB at 22 MB
+  # a day over GitHub's 7-day idle limit, so 5.82 stays above what the arithmetic needs then
+  # (5.71). The families named are exactly those the warm legs' cleanup steps name, which
+  # .github/ci-shape/ci-shape.test.mjs holds.
+  - id: onepipeline-cache-headroom
+    description: >-
+      onepipeline: room left for test results. Room left for one warm run's saves and test
+      results: GitHub's stated Actions-cache allowance, 10 GiB, minus the bytes of every entry,
+      test results (`nx-cache-*`) included, read over every page of the listing when the command
+      runs, in gigabytes of 10^9 bytes and negative when those bytes are over the line. A family
+      the command names counts only its newest entry, because a working cleanup leaves the
+      previous copy until the next push to `main`; when a named family holds more than two
+      entries the figure is 0, which reads over, because two is the most a working cleanup
+      leaves. It shows the cause of `onepipeline-nx-cache-use` and
+      `onepipeline-release-cycle-time` falling before results are lost, and names the family
+      responsible. Detail: the allowance, non-result bytes per key family, older copies' bytes,
+      any family over two entries, result entries and bytes, the oldest result's age, the
+      requests the read made and the lowest rate-limit remaining.
+    labels: [release-tail]
+    measure: reported
+    command:
+      - bash
+      - scripts/actions-budget-figures.sh
+      - cache-headroom
+      - --family
+      - v0-rust-test-linux-Linux-x64-
+      - --family
+      - v0-rust-test-windows-Windows_NT-x64-
+      - --family
+      - v0-rust-test-macos-Darwin-arm64-
+      - --family
+      - ci-capture-Linux-X64-
+      - --family
+      - bootstrap-tools-Linux-X64-
+      - --family
+      - bootstrap-tools-Windows-X64-
+      - --family
+      - bootstrap-tools-macOS-ARM64-
+      - --family
+      - v0-rust-release-plz-Linux-x64-
+    unit: gigabytes
+    direction: min
+    threshold: 5.82
+    timeout_seconds: 60

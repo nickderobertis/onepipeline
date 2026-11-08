@@ -8,7 +8,7 @@ checkout holds this repository's real budgets files and the commands they name, 
 `test-linux`'s upload step runs from `ci.yml` too, through the same real upload code, over results the
 pinned checker really saved.
 
-The workload recorded for `onepipeline-budget-report-command-seconds`: the real catalog's 34 rows, one
+The workload recorded for `onepipeline-budget-report-command-seconds`: the real catalog's 35 rows, one
 rolling file of 20 commits and one saved-results artifact of about 50 KB, with a retried rate limit; a
 base push also reads the merged pull request's run. It asserts behaviour and never a cost: the figures
 are written to `.telemetry/report-job.json` and printed.
@@ -57,7 +57,7 @@ CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_F
 CHECKOUT_FILES = ('Cargo.toml', 'justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
                   '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
-CATALOG_ROWS = 34
+CATALOG_ROWS = 35
 COMMITS = 20
 OMIT_LABEL = 'not-measured-on-pr'
 OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipeline-cd-job-count',
@@ -67,6 +67,7 @@ OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipe
            'liveness-journal-bytes-per-member-hour', 'pool-maintenance-engine-seconds',
            'run-ending-scratch-seconds', 'scratch-discard-seconds')
 OWN_RUN_FIGURES = {'onepipeline-ci-check-time': 6549.0, 'onepipeline-ci-job-count': 5.0}
+HEADROOM_BUDGET = 'onepipeline-cache-headroom'
 NO_SAVED_RESULT = 'no saved result was found on this run'
 RESULTS_ARTIFACT = 'budget-check-results-test-linux'
 # Hexadecimal digests zip to about half their size, so this many bytes of them make an artifact of
@@ -372,6 +373,8 @@ class RealCatalog(Journey):
         self.assertEqual({id: result['actual'] for id, result in results.items()}, OWN_RUN_FIGURES)
         reasons = self.unavailable(job)
         self.assertEqual(sorted(reasons), sorted(set(self.shown()) - {OWN_BUDGET, *OWN_RUN_FIGURES}))
+        # This row's command runs on a pull request and reads GitHub itself; the double states no limit.
+        self.assertIn('storage-limit', reasons.pop(HEADROOM_BUDGET))
         self.assertEqual(set(reasons.values()), {NO_SAVED_RESULT})
         for id, reason in reasons.items():
             self.assertIsNone(job.rows()[id].get('current'), id)
@@ -890,7 +893,7 @@ class Workload(Journey):
         self.host.add_run(519, heads[-1], minute=519)
         self.host.attach(519, 'budget-results', zip_of('rolling-history.json', json.dumps(history)))
 
-        saved = sorted(set(catalog()) - set(OMITTED) - {OWN_BUDGET, *OWN_RUN_FIGURES})
+        saved = sorted(set(catalog()) - set(OMITTED) - {OWN_BUDGET, HEADROOM_BUDGET, *OWN_RUN_FIGURES})
         details = [hashlib.sha256(str(index).encode()).hexdigest() for index in range(RESULTS_ARTIFACT_BYTES // 64)]
         each = len(details) // len(saved)
         results = self.repository.path / 'target/budget-results'

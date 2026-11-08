@@ -56,7 +56,7 @@
       "executor": "nx:noop",
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
-      "inputs": ["cargoSelection", "npmSelection"]
+      "inputs": ["justfileSelection", "cargoSelection", "npmSelection"]
     }
   }
 }
