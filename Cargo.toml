@@ -867,6 +867,11 @@ resolver = "2"
 # holds it. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of,
 # so the two requirements move as one.
 #
+# `oneagentgraph` 0.10.0 is the floor because it carries `reset_on` and
+# `run::Request::follow_events`, the journal every observer graph now follows.
+# `tests/e2e/observer_follow.rs` holds it. It requires nothing this lock did not
+# already resolve.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -887,7 +892,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.9.0"
+oneagentgraph = "0.10.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.

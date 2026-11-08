@@ -5146,21 +5146,77 @@ fn evidence(landed: &onevcs::Landed) -> String {
     }
 }
 
+/// The newer of the run's last `driver-exited` and last `driver-adopted`.
+///
+/// A `driver-exited` older than the last adoption is the driver before this one,
+/// as [`HostShutdown::of`] reads a shutdown an adoption has since taken up.
+fn current_driver_record(view: &RunView) -> Option<&Envelope> {
+    view.state.recalled.iter().rev().find(|event| {
+        event.source == Source::Pipeline
+            && matches!(
+                PipelineKind::from_wire(&event.kind),
+                Some(PipelineKind::DriverExited | PipelineKind::DriverAdopted)
+            )
+    })
+}
+
+/// The adopting driver's line: live, or gone without recording an exit.
+fn adopted_driver_line(event: &Envelope, ago: &str, liveness: DriverLiveness) -> String {
+    let state = if liveness.is_undriven() {
+        "exited without recording it"
+    } else {
+        "live"
+    };
+    match serde_json::from_value::<crate::payload::DriverAdopted>(serde_json::Value::Object(
+        event.payload.clone(),
+    )) {
+        Ok(adopted) => format!(
+            "  driver: pid {}, {state}, adopted{ago} ({}) — adoption {}\n",
+            adopted.pid, event.ts, adopted.adoption
+        ),
+        Err(_) => format!(
+            "  driver: {state}, adopted{ago} ({}): its driver-adopted record could not be read\n",
+            event.ts
+        ),
+    }
+}
+
+/// One `driver-exited` record, as `status` reads it.
+fn driver_exited_line(event: &Envelope, ago: &str) -> String {
+    match serde_json::from_value::<crate::payload::DriverExited>(serde_json::Value::Object(
+        event.payload.clone(),
+    )) {
+        Ok(exited) => format!(
+            "  driver exited{ago} ({}): settled {}{}\n",
+            event.ts,
+            exited.settlement.as_str(),
+            exited
+                .reason
+                .map(|reason| format!(" — {}", one_line(&reason)))
+                .unwrap_or_default()
+        ),
+        Err(_) => format!(
+            "  driver exited{ago} ({}): its driver-exited record could not be read\n",
+            event.ts
+        ),
+    }
+}
+
 /// How the run's last driver to let go of it ended, and every command envelope
 /// claimed off its queue that was never answered.
 ///
-/// The first is the last `driver-exited` record's time and settlement, with the
-/// error a driver reported; nothing where no driver has written one. The second
+/// The first is the driver record that is current: the last `driver-exited`'s
+/// time and settlement, with the error a driver reported, or — where a
+/// `driver-adopted` is newer, so that exit is no longer this run's — the
+/// adopting driver; nothing where neither was written. The second
 /// is read off the channel rather than the journal: an envelope at or below the
 /// command cursor with no outcome line is one no writer will claim again and
 /// whose submitter was told nothing, which is what a reader deciding whether an
 /// edit was applied or abandoned has to be told.
 fn driver_exit_lines(view: &RunView) -> String {
     let mut out = String::new();
-    if let Some(event) = view.state.recalled.iter().rev().find(|event| {
-        event.source == Source::Pipeline
-            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
-    }) {
+    let liveness = view.liveness();
+    if let Some(event) = current_driver_record(view) {
         let ago = crate::projection::millis_of(&event.ts)
             .map(|at| {
                 format!(
@@ -5169,26 +5225,12 @@ fn driver_exit_lines(view: &RunView) -> String {
                 )
             })
             .unwrap_or_default();
-        let exited = serde_json::from_value::<crate::payload::DriverExited>(
-            serde_json::Value::Object(event.payload.clone()),
-        );
-        match exited {
-            Ok(exited) => out.push_str(&format!(
-                "  driver exited{ago} ({}): settled {}{}\n",
-                event.ts,
-                exited.settlement.as_str(),
-                exited
-                    .reason
-                    .map(|reason| format!(" — {}", one_line(&reason)))
-                    .unwrap_or_default()
-            )),
-            Err(_) => out.push_str(&format!(
-                "  driver exited{ago} ({}): its driver-exited record could not be read\n",
-                event.ts
-            )),
+        if PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverAdopted) {
+            out.push_str(&adopted_driver_line(event, &ago, liveness));
+        } else {
+            out.push_str(&driver_exited_line(event, &ago));
         }
     }
-    let liveness = view.liveness();
     let unanswered = unanswered_of(view, liveness);
     if unanswered.is_empty() {
         return out;
@@ -5745,10 +5787,11 @@ pub fn results(view: &RunView) -> String {
 /// longer followed, as `results` and `status` print them: nothing where it named
 /// neither.
 fn check_ending_lines(view: &RunView) -> String {
-    crate::checkwatch::ending_sections(view.state.recalled.iter().rev().find(|event| {
-        event.source == Source::Pipeline
-            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
-    }))
+    crate::checkwatch::ending_sections(
+        current_driver_record(view).filter(|event| {
+            PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
+        }),
+    )
 }
 
 /// What the run's results say about the nodes a `retry` replaced, or nothing
@@ -7576,7 +7619,7 @@ mod tests {
         assert_eq!(view.launch.driver_pid(), None);
         assert_eq!(view.launch.recorded_host(), None);
         assert_eq!(view.launch.launched_at(), None);
-        assert_eq!(view.launch.pacemaker_interval(), None);
+        assert_eq!(view.launch.heartbeat_interval, 0);
         assert_ne!(view.liveness(), DriverLiveness::DriverDead);
 
         // And both are on the view an operator opens, under the label an

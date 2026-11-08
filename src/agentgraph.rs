@@ -1020,6 +1020,7 @@ struct LibraryLaunch<'a> {
     env: &'a [(String, String)],
     sets: &'a [String],
     filter: Option<&'a EventFilter>,
+    follow_events: Option<&'a Path>,
     ending: Ending,
 }
 
@@ -1046,6 +1047,10 @@ pub struct Launch<'a> {
     /// belongs to the library that owns the stream, so what a launch is told not
     /// to emit is never emitted rather than read and dropped here.
     pub filter: Option<&'a EventFilter>,
+    /// The NDJSON stream the graph follows, its `reset_on` clocks reading what is
+    /// appended to it after graph start. An observer's is its run's own journal;
+    /// a node's launch follows nothing.
+    pub follow_events: Option<&'a Path>,
     /// Where the started graph's own output goes.
     pub output: GraphOutput<'a>,
     /// How this launch's caller learns the graph has stopped, which is what
@@ -1156,15 +1161,18 @@ fn retainable() -> bool {
 /// whatever the host installed — a second parser that can refuse what the
 /// attached path accepts. [`BINARY_ENV`] is the explicit, all-or-nothing
 /// override, and the only way an installed sibling is composed instead.
-fn retained_command(
-    graph: &str,
-    task: &str,
-    dir: &Path,
-    labels: &[String],
-    sets: &[String],
-    filter: Option<&EventFilter>,
-    ending: Ending,
-) -> Result<Command> {
+fn retained_command(launch: &Launch<'_>) -> Result<Command> {
+    let Launch {
+        graph,
+        task,
+        dir,
+        sets,
+        filter,
+        follow_events,
+        ending,
+        ..
+    } = *launch;
+    let labels = label_args(launch.labels);
     let mut command = match overridden() {
         true => {
             let mut command = Command::new(binary());
@@ -1204,7 +1212,7 @@ fn retained_command(
     };
     command.arg("--task").arg(task);
     command.arg("--dir").arg(dir);
-    for label in labels {
+    for label in &labels {
         command.arg("--label").arg(label);
     }
     for value in sets {
@@ -1220,6 +1228,12 @@ fn retained_command(
             serde_json::to_string(filter)
                 .map_err(|error| sibling(format!("rendering the event filter: {error}")))?,
         );
+    }
+    // Spelled the same to both too: the sibling's `run` takes this flag, and this
+    // build's `drive` takes it so the retained graph is told what the attached
+    // one is.
+    if let Some(path) = follow_events {
+        command.arg("--follow-events").arg(path);
     }
     Ok(command)
 }
@@ -1244,15 +1258,7 @@ impl ProcessGraphRun {
     /// Start a graph, with its envelopes going wherever `output` says.
     pub fn start(launch: &Launch<'_>) -> Result<Self> {
         let output = launch.output;
-        let mut command = retained_command(
-            launch.graph,
-            launch.task,
-            launch.dir,
-            &label_args(launch.labels),
-            launch.sets,
-            launch.filter,
-            launch.ending,
-        )?;
+        let mut command = retained_command(launch)?;
         for (key, value) in launch.env {
             command.env(key, value);
         }
@@ -1754,6 +1760,7 @@ impl GraphRun {
             env: launch.env,
             sets: launch.sets,
             filter: launch.filter,
+            follow_events: launch.follow_events,
             ending: launch.ending,
         })
     }
@@ -1768,6 +1775,7 @@ impl GraphRun {
             env,
             sets,
             filter,
+            follow_events,
             ending,
         } = *launch;
         let mut run_env = process_env();
@@ -1795,6 +1803,7 @@ impl GraphRun {
             filter: filter.map(sibling_filter).transpose()?,
             state_dir,
             oneharness_bin: oneharness_bin(&run_env),
+            follow_events: follow_events.map(Path::to_path_buf),
         };
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
@@ -2095,32 +2104,33 @@ impl GraphRun {
 /// A refusal is left to the caller — printed by the binary with every other one,
 /// into the launch log the launcher reads its evidence from.
 ///
-/// `ending` is [`AWAIT_ENDING_FLAG`], parsed: it decides whether this process
+/// Its `await_ending` is [`AWAIT_ENDING_FLAG`], parsed: it decides whether this process
 /// may exit on the graph's announcement or has to outlive the sibling's own
 /// write of the record its launcher reads. See [`Ending`].
-pub fn drive(
-    graph: &str,
-    task: &str,
-    dir: &Path,
-    labels: &[String],
-    sets: &[String],
-    filter: Option<&str>,
-    ending: Ending,
-) -> Result<i32> {
+pub fn drive(args: &crate::cli::DriveArgs) -> Result<i32> {
     use std::io::Write;
 
     // Read here rather than in the launcher that spelled it: this is a process
     // boundary, so the spec arrives as text and this is where it becomes a value
     // again — refused, with the offending matcher named, before a graph starts.
-    let filter = filter.map(EventFilter::read).transpose()?;
+    let filter = args
+        .event_filter
+        .as_deref()
+        .map(EventFilter::read)
+        .transpose()?;
+    let ending = match args.await_ending {
+        true => Ending::Recorded,
+        false => Ending::Announced,
+    };
     let mut run = GraphRun::in_library(&LibraryLaunch {
-        graph,
-        task,
-        dir,
-        labels,
+        graph: &args.graph,
+        task: &args.task,
+        dir: &args.dir,
+        labels: &args.labels,
         env: &[],
-        sets,
+        sets: &args.sets,
         filter: filter.as_ref(),
+        follow_events: args.follow_events.as_deref(),
         ending,
     })?;
     let mut out = std::io::stdout();
@@ -2165,9 +2175,11 @@ impl Settled {
 
 /// Restart the clock of every resettable schedule in one graph run.
 ///
-/// This is the whole check-in reset contract: a surface a planner actually read
-/// is what restarts the check-in clock, so a run that is already reporting does
-/// not also get a check-in surface. **Which** clocks is the graph document's to
+/// **Deprecated, still working** (`docs/contract-divergences.md` entry 148): a
+/// graph declares `reset_on` over the journal its run follows instead, and that
+/// is the only reset a scheduled note's clock answers to. Until this is removed,
+/// a surface a planner actually read restarts the check-in clock, so a run that
+/// is already reporting does not also get a check-in surface. **Which** clocks is the graph document's to
 /// say, and the engine names no member: a [`oneagentgraph::run::Signal::Reset`]
 /// is honoured only by a schedule that declared itself `resettable` and ignored
 /// by every other member — a scheduled one keeps its cadence, an unscheduled one
@@ -2969,6 +2981,7 @@ mod tests {
             environment: Environment::Shared,
             sets: &[],
             filter: None,
+            follow_events: None,
             output: GraphOutput::Relayed,
             ending: Ending::Announced,
         });

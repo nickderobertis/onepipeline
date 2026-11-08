@@ -270,7 +270,6 @@ fn start_launches_the_named_dag_scope_graph_and_records_how_to_relaunch_it() {
 
     // The relaunch record is what `adopt` replays from.
     let launch = world.run_json("launched", "launch.json");
-    assert_eq!(launch["heartbeat_interval"], 1_800);
     assert!(
         launch.get("round_budget").is_none(),
         "a retired field survived in the launch record: {launch}"

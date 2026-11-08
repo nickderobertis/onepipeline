@@ -1,5 +1,5 @@
 {
-  "version": "1.12.0",
+  "version": "2.0.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -705,7 +705,7 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0,
-            "description": "The check-in interval, in seconds."
+            "description": "The retired check-in interval, in seconds, only on a record an earlier\nbuild wrote; a new launch records none."
           },
           "owed_until_closed": {
             "anyOf": [
@@ -721,8 +721,7 @@
         },
         "required": [
           "plan",
-          "dir",
-          "heartbeat_interval"
+          "dir"
         ],
         "description": "`run-started`: the plan the run was launched with, and how it is driven.",
         "title": "RunStarted",

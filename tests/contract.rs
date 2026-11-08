@@ -21,10 +21,10 @@ use onepipeline::channel::{
 };
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
-    DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
-    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBER_READ,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES,
+    DEFAULT_HOOK_TIMEOUT_SECONDS, DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+    WRITEBACK_CLASSIFIED_COMMANDS, WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV,
+    WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_TARGETED_WRITES,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("146.")["bundle_versions"]["events"],
+        divergence_block("149.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -7230,8 +7230,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "graphs/dag-scope.yaml",
         "--pr-author-graph",
         "graphs/pr-author.yaml",
-        "--heartbeat-interval",
-        "1800",
         "--set",
         "members.monitor.agent.model=dag one",
         "--set=members.check-in.model=dag=two",
@@ -7252,7 +7250,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         args.pr_author_graph.as_deref(),
         Some("graphs/pr-author.yaml")
     );
-    assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
         args.dag_sets,
@@ -7269,8 +7266,18 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         ]
     );
 
-    // The document's numbers and its default are this crate's.
-    assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 1_800);
+    // The one form the document names that `start` no longer takes: divergence 149.
+    assert!(
+        Cli::try_parse_from([
+            "onepipeline",
+            "start",
+            "plans:demo",
+            "--heartbeat-interval",
+            "1800"
+        ])
+        .is_err(),
+        "`start` took the flag divergence 149 records as removed"
+    );
     assert!(
         CONTRACT.contains("`--dag-graph` defaults to `off`"),
         "the contract no longer states the shipped default"
@@ -7287,7 +7294,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         args.pr_author_graph, None,
         "a change request is drafted by no graph unless one is asked for"
     );
-    assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
 }
 
 /// The verbs an agent used to drive the engine with, which no longer exist.
@@ -7514,14 +7520,14 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     let Member::Oneharness(check_in) = check_in else {
         panic!("the pacemaker is a single-sided member");
     };
-    let schedule = check_in.schedule.expect("it is a cron member");
+    let schedule = check_in.schedule.clone().expect("it is a cron member");
     assert!(
         schedule.resettable,
         "the contract makes the check-in resettable"
     );
     assert_eq!(
-        schedule.every, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-        "its period is the driver's default heartbeat interval"
+        schedule.every, 1_800,
+        "its period is the half hour the shipped graph declares"
     );
 }
 
@@ -8993,16 +8999,6 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         .filter_map(|span| span.split_whitespace().next())
         .filter_map(|word| word.strip_prefix("--"))
     {
-        // The one flag the passage names that this verb must not take: it is
-        // `start`'s pacemaker cadence, and the sentence saying the two are
-        // different clocks is the point of naming it.
-        if mentioned == "heartbeat-interval" {
-            assert!(
-                !offered.contains(mentioned),
-                "`watch` took `start`'s pacemaker flag, which the README says it refuses"
-            );
-            continue;
-        }
         assert!(
             offered.contains(mentioned),
             "the README's watch passage names `--{mentioned}`, which the verb does not take"
@@ -11352,8 +11348,8 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entries 127, 128 and 130 raised
-    // it since, so the compiled-in bundle is that one or a later minor.
+    // The bundle that first carried the landings; later entries raised it, and
+    // entry 149 raised its major, so the compiled-in bundle is that one or later.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
             .split('.')
@@ -11368,10 +11364,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
     );
     let compiled = release(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION);
     assert_eq!(carried, (1, 4, 0));
-    assert!(
-        carried.0 == compiled.0 && carried <= compiled,
-        "{compiled:?}"
-    );
+    assert!(carried <= compiled, "{compiled:?}");
 }
 
 /// Entry 130's reply surface is this build's own: the flag is `start`'s and the key
