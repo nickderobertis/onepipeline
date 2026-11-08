@@ -48,7 +48,7 @@ jobs:
   # check, the PR title, the suppressions comment and the visual docs.
   lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
     # actions need, granted here because they are steps of this job rather than
@@ -275,7 +275,7 @@ jobs:
 
   test-linux:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
     # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
     # first run's cold build, with about a quarter's headroom; see the change that
@@ -717,7 +717,7 @@ jobs:
   budgets:
     needs: [lint, test-linux, test-windows, test-macos]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read

@@ -43,7 +43,7 @@ env:
 
 jobs:
   release-plz:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Every write — the checkout's pushes, release-plz, auto-merge — authenticates
     # with RELEASE_PLZ_TOKEN. Cache promotion reads metadata with the job token
