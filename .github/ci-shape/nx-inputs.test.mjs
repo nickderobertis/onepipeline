@@ -328,9 +328,13 @@ test("narrowing hashes selects the same projects: a justfile edit still touches 
       rmSync(join(dir, ".nx/workspace-data"), { recursive: true, force: true });
       return JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--affected", "--files", file, "--json"])).sort();
     };
+    const projects = (dir) => new Set(JSON.parse(run(dir, process.execPath, ["node_modules/nx/dist/bin/nx.js", "show", "projects", "--json"])));
     const selected = affected(current, "justfile");
     assert.ok(selected.includes("onepipeline-contract"), "the justfile no longer selects the contract tier");
-    assert.deepEqual(selected, affected(base, "justfile"), "the justfile selects other projects than before");
+    // A project added since the base has no "before" to match; it is held to being selected at all.
+    const existed = projects(base);
+    assert.ok(selected.includes("onepipeline-status-read"), "the justfile does not select a project added after the base");
+    assert.deepEqual(selected.filter((name) => existed.has(name)), affected(base, "justfile"), "the justfile selects other projects than before");
   } finally {
     rmSync(base, { recursive: true, force: true });
     rmSync(current, { recursive: true, force: true });
