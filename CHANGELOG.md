@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.102.3](https://github.com/nickderobertis/onepipeline/compare/v0.102.2...v0.102.3) - 2026-11-08
+
+### Fixed
+
+- *(writeback)* stop settlement write-backs reading an item to screen stored terms ([#1456](https://github.com/nickderobertis/onepipeline/pull/1456))
+- *(deps)* link the onetaskgraph release that copies reference-style links to Linear inline ([#1458](https://github.com/nickderobertis/onepipeline/pull/1458))
+
 ## [0.102.1](https://github.com/nickderobertis/onepipeline/compare/v0.102.0...v0.102.1) - 2026-11-07
 
 ### Fixed
