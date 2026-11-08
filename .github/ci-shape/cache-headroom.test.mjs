@@ -229,6 +229,36 @@ describe("the registered headroom budget, through onebudgetspec, against GitHub'
     } finally { await api.close(); }
   });
 
+  // A pull request's `budgets` job: its token cannot read the storage limit, and a listing
+  // whose entries share a size and a creation time is reordered between pages.
+  it("writes a figure against the stated 10 GiB under a refused limit read and a tied listing", async () => {
+    const at = "2026-11-01T00:00:00Z";
+    const tied = (key, id) => ({ id, key, ref: "refs/heads/main", size_in_bytes: 10_000_000, created_at: at, last_accessed_at: at, version: "fixture" });
+    const entries = [
+      ...Array.from({ length: 150 }, (_, n) => tied(`nx-cache-${String(n).padStart(3, "0")}`, n + 1)),
+      ...Array.from({ length: 90 }, (_, n) => tied(`sccache-Linux-${n.toString(16).padStart(6, "0")}`, n + 1001)),
+    ];
+    const api = await githubListing(entries, "nickderobertis/onepipeline", { storageLimit: 403, reorderTies: true });
+    try {
+      // The double reorders ties as GitHub does: paging the whole listing repeats and omits.
+      const paged = new Set();
+      for (const page of [1, 2, 3]) {
+        const answer = await fetch(`${api.url}/repos/nickderobertis/onepipeline/actions/caches?per_page=100&page=${page}`, { headers: { authorization: "Bearer fixture" } });
+        for (const entry of (await answer.json()).actions_caches) paged.add(entry.id);
+      }
+      assert.ok(paged.size < entries.length, `a paged read saw ${paged.size} of ${entries.length}`);
+
+      const result = await measure(api);
+      assert.equal(typeof result.detail, "string", `no figure was written: ${JSON.stringify(result)}`);
+      assert.equal(result.actual, Math.round(((ALLOWANCE - sizes(entries)) / 1e9) * 1000) / 1000, result.detail);
+      assert.equal(ALLOWANCE, 10_737_418_240);
+      assert.match(result.detail, /allowance: 10737418240 bytes \(GitHub's stated 10 GiB allowance; actions\/cache\/storage-limit answered HTTP 403\)/);
+      assert.match(result.detail, new RegExp(`counted ${sizes(entries)} bytes`));
+      assert.match(result.detail, /results: 150 entries, 1500000000 bytes/);
+      assert.match(result.detail, /non-result sccache-Linux: 900000000 bytes/);
+    } finally { await api.close(); }
+  });
+
   it("reads 0 for a named family over two entries", async () => {
     const family = "ci-capture-Linux-X64-";
     const api = await githubListing([...recordedEntries().map((entry) => ({ ...entry, size_in_bytes: Math.min(entry.size_in_bytes, 1000) })), older(family, 1), { ...older(family, 2), key: `${family}oldest` }]);
