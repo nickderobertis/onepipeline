@@ -6051,12 +6051,13 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
 
     let graph_dir = world.graph_state().join(graph_run());
     let record = graph_dir.join(oneagentgraph::run::RECORD_FILE);
-    // llmlint: ignore[tests_mirror_real_usage] the interval this journey is about is the one
+    // llmlint: ignore-block[tests_mirror_real_usage] the interval this journey is about is the one
     // between the graph's announcement and its own write of that record, and no user-facing
     // surface can hold a write still: taking the record's lock is the kernel's own rendezvous,
     // met by the real write any host would make, and it is the only way a machine that wins
     // the race every time can observe the state a macOS runner lost.
     let write_held = hold_the_records_write(&record);
+    // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("observer.go");
     // Read off the observer's own output rather than the run's merged store: a
@@ -6305,7 +6306,12 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     // Its writer went with the launch, so the ending it had ready lands here, as
     // its rename would have — and the sibling lists the run whose ending that is.
     drop(write_held);
+    // llmlint: ignore-block[tests_mirror_real_usage] nothing is manufactured here: `written` is
+    // the record the real sibling composed and left in its partial file, read back above. Its
+    // writer died with the launch while this journey held the lock, so the one step it never
+    // reached — the rename — has no process left to make it and no sibling surface that does.
     std::fs::write(&record, &written).expect("the record is put back where the sibling reads it");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let history = onepipeline_testfakes::profile::process::Command::new(
         crate::harness::oneagentgraph_binary(),
     )
