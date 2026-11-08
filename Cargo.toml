@@ -918,7 +918,7 @@ onevcs = "0.60.0"
 # translation, as every sibling release linked beside it does.
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
-onemessagebus = "0.9.3"
+onemessagebus = "0.10.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
