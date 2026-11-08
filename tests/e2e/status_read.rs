@@ -145,6 +145,34 @@ fn appended(dir: &Path, line: &str) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A relayed writer that died mid-record leaves a fragment the next append lands on. `results`
+/// reads only this crate's own records off the journal, and the home-status record glued to
+/// such a fragment is one of them, as the complete read has always said.
+#[test]
+fn results_reports_a_home_status_record_glued_to_an_unfinished_relayed_record() {
+    let world = World::new("status-read-glued").with_env("HOSTNAME", HOST);
+    let dir = fixture_run(&world.runs);
+    appended(
+        &dir,
+        concat!(
+            r#"{"v":2,"ts":"2026-01-01T00:09:00.000Z","stream":"relay-1","seq":0,"source":"agentgraph","#,
+            r#""kind":"turn-activity","labels":{"run_id":"golden"},"payload":{"text":"cut her"#,
+            r#"{"v":2,"ts":"2026-01-01T00:09:01.000Z","stream":"fixture-host-1","seq":900,"#,
+            r#""source":"pipeline","kind":"home-status","labels":{"run_id":"golden"},"#,
+            r#""payload":{"project":"glued-home","outcome":"written","status":{"name":"Done"}},"#,
+            r#""artifacts":[]}"#,
+            "\n"
+        ),
+    );
+    let results = world.run(&["results", RUN]);
+    results.exited(0);
+    assert!(
+        results.stdout.contains("home glued-home — written: Done"),
+        "the glued record went missing:\n{}",
+        results.stdout
+    );
+}
+
 /// `status` says of a run with landed, unlanded and failed nodes and unread surfaces what
 /// `v0.101.5`'s `--no-providers` said, line for line, and reads every later change off the
 /// disk: nothing a reader relies on moved or went stale.

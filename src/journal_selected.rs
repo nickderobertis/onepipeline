@@ -580,7 +580,12 @@ pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
     };
     crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
     finished_lines(&bytes)
-        .filter(|line| opening_of(line).is_none_or(|opening| opening.source == Source::Pipeline))
+        .filter(|line| {
+            // A relayed fragment glued to a later append opens as the fragment and reads
+            // as the record after it, which may be this crate's own.
+            opening_of(line).is_none_or(|opening| opening.source == Source::Pipeline)
+                || memchr::memmem::find(&line[1..], b"{\"v\":").is_some()
+        })
         .filter_map(|line| parsed_line(line)?.parsed.map(|event| *event))
         .filter(|event| event.source == Source::Pipeline)
         .collect()
