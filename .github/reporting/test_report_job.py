@@ -134,18 +134,25 @@ def comment_layout(body):
     (within_count, within), = found['within']
     details, = found['details']
     assert body.index('Needs attention (') < body.index('Within budget (') < body.index('<summary>Details</summary>'), body
-    sections = {'attention': {}, 'within': {}, 'unmeasured': {}}
+    entries = {'attention': [], 'within': [], 'unmeasured': []}
     if attention.strip() != 'Nothing failed or was flagged.':
-        sections['attention'] = {cells[0].strip('*'): cells for cells in table(attention, ('Budget', 'Now · vs base', 'Reason'))}
+        entries['attention'] = [(cells[0].strip('*'), cells) for cells in table(attention, ('Budget', 'Now · vs base', 'Reason'))]
     if within.strip() != 'No budget is within its limit.':
-        sections['within'] = {cells[0].strip('*'): cells for cells in table(within, ('Budget', 'Now · vs base'))}
+        entries['within'] = [(cells[0].strip('*'), cells) for cells in table(within, ('Budget', 'Now · vs base'))]
     unmeasured = NOT_MEASURED.search(details)
     if unmeasured:
         for line in unmeasured[2].splitlines():
             shown = NOT_MEASURED_ROW.fullmatch(line)
             assert shown, line
-            sections['unmeasured'][shown[1]] = line
-        assert int(unmeasured[1]) == len(sections['unmeasured']), details
+            entries['unmeasured'].append((shown[1], line))
+    # Checked on the raw entries: a mapping would fold a repeated budget into one and hide it.
+    for name, listed in entries.items():
+        names = [budget for budget, _ in listed]
+        repeated = sorted({budget for budget in names if names.count(budget) > 1})
+        assert not repeated, f'{name} lists {repeated} more than once: {body}'
+    sections = {name: dict(listed) for name, listed in entries.items()}
+    if unmeasured:
+        assert int(unmeasured[1]) == len(entries['unmeasured']), details
     missing = {}
     block = MISSING.search(details)
     for line in (block[1].splitlines() if block else []):
@@ -729,6 +736,20 @@ class MixedCatalog(Journey):
         self.assertEqual(sorted(reasons), ['synthetic-needs-a-tool', 'synthetic-needs-telemetry'])
         self.assertEqual(set(reasons.values()), {NO_SAVED_RESULT})
         self.assertNotIn('ci-report', ' '.join(reasons.values()), 'a label is never the reason')
+
+    def test_a_budget_rendered_twice_in_one_section_is_refused(self):
+        """Held here so the exact-once check cannot pass over a repeated row a mapping would fold away."""
+        self.pull_request()
+        body = self.host.comments[0]['body']
+        layout = comment_layout(body)
+        for section in ('attention', 'within', 'unmeasured'):
+            with self.subTest(section):
+                budget, entry = next(iter(layout['sections'][section].items()))
+                line = f'| {" | ".join(entry)} |' if section != 'unmeasured' else entry
+                self.assertEqual(body.count(f'{line}\n'), 1, line)
+                repeated = body.replace(f'{line}\n', f'{line}\n{line}\n')
+                with self.assertRaisesRegex(AssertionError, re.escape(f"{section} lists ['{budget}'] more than once")):
+                    comment_layout(repeated)
 
     def test_an_enforced_budget_over_its_line_fails_and_a_second_head_updates_one_comment(self):
         first = self.pull_request()
