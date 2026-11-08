@@ -20,6 +20,9 @@
 // `harness.rs`.
 
 mod harness;
+// Support the `narrow_write` binary compiles too: the loopback GitHub and a mixed-visibility world.
+mod github_world_support;
+mod mixed_world_support;
 
 mod adoption;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two journeys, a few

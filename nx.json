@@ -208,6 +208,22 @@
       "{workspaceRoot}/tests/e2e/pool_support.rs",
       "{workspaceRoot}/tests/e2e/pool_hand_back.rs"
     ],
+    "narrowWriteSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/narrow_write/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/tests/e2e/hook.*",
+      "{workspaceRoot}/tests/e2e/probe.*",
+      "{workspaceRoot}/tests/e2e/github_world.py",
+      "{workspaceRoot}/tests/e2e/github_world_support.rs",
+      "{workspaceRoot}/tests/e2e/mixed_world_support.rs",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/justfile",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
     "justfileSelection": [
       "{workspaceRoot}/justfile"
     ],

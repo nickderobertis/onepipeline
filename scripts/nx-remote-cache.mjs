@@ -1,7 +1,7 @@
 // Copied from dero-skills' create-repo skill; edit only the source.
 // source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/nx-remote-cache.mjs
-// version: 8
-// sha256: e35435fb6ffde524af3d4244dcd67c115fc9d3f350ab3d535124dbcc07518bd0
+// version: 10
+// sha256: f8ee98c7b95c9e2afe7cab4539183dabce85d92c67506215b052782d849923e8
 import {
   appendFileSync,
   readFileSync,
@@ -1831,6 +1831,9 @@ async function cacheUse(opts) {
 // GitHub's line is a binary 10 GiB, and the figure's gigabytes are decimal.
 const GIB = 1073741824;
 const GIGABYTE = 1000000000;
+// GitHub's stated allowance, for a token the storage-limit read refuses: `actions: read`
+// reads the listing but not the limit, and that is every pull request's `budgets` job.
+const STATED_ALLOWANCE_GIB = 10;
 const RESULT_KEY = /^nx-cache-/;
 // The key's trailing hex segments are rust-cache's environment and lockfile hashes.
 const familyOf = (key) => key.replace(/(-[0-9a-f]{6,})+$/, '');
@@ -1840,7 +1843,7 @@ function headroomClient(repo) {
   const token = env.GH_TOKEN || env.GITHUB_TOKEN;
   check(token, 'no token: set GH_TOKEN or GITHUB_TOKEN');
   const seen = { requests: 0, lowest: null };
-  async function get(path) {
+  async function read(path) {
     seen.requests++;
     const answer = await fetch(`${github.api.replace(/\/$/, '')}/repos/${repo}/${path}`, {
       headers: {
@@ -1853,43 +1856,155 @@ function headroomClient(repo) {
     const remaining = Number(answer.headers.get('x-ratelimit-remaining') ?? NaN);
     if (Number.isFinite(remaining))
       seen.lowest = seen.lowest === null ? remaining : Math.min(seen.lowest, remaining);
+    return answer;
+  }
+  async function get(path) {
+    const answer = await read(path);
     check(answer.ok, `GET ${path} answered HTTP ${answer.status}`);
     return answer.json();
   }
-  return { get, seen };
+  return { read, get, seen };
 }
 
-// Every entry of the listing, or a thrown reason: entries sort by size, so a page not
-// read is entries of any kind not counted, and a figure over the rest would be wrong.
+// The allowance and where it came from. Only a 403 falls back: a rate-limited 403 also
+// refuses the listing read next, and that still writes no figure.
+async function storageAllowance({ read }) {
+  const path = 'actions/cache/storage-limit';
+  const answer = await read(path);
+  if (answer.status === 403) {
+    await answer.arrayBuffer();
+    return {
+      gib: STATED_ALLOWANCE_GIB,
+      source: `GitHub's stated ${STATED_ALLOWANCE_GIB} GiB allowance; ${path} answered HTTP 403`,
+    };
+  }
+  check(answer.ok, `GET ${path} answered HTTP ${answer.status}`);
+  const limit = await answer.json();
+  check(
+    Number.isFinite(limit.max_cache_size_gb) && limit.max_cache_size_gb > 0,
+    'storage limit carries no max_cache_size_gb',
+  );
+  return {
+    gib: limit.max_cache_size_gb,
+    source: `max_cache_size_gb ${limit.max_cache_size_gb}`,
+  };
+}
+
+const LISTING_PAGE = 100;
+const LISTING_READS = 900;
+// The characters to probe a prefix with: printable ASCII less `%`, which also matches nothing
+// and so never narrows. `_` matches any one character, reaching a `%` or non-ASCII key.
+const KEY_CHARACTERS = Array.from({ length: 95 }, (_, at) =>
+  String.fromCharCode(32 + at),
+).filter((character) => character !== '%');
+
+async function readListing(get, { key, sort = 'created_at', direction = 'desc', page = 1 }) {
+  const query = new URLSearchParams({
+    sort,
+    direction,
+    per_page: String(LISTING_PAGE),
+    page: String(page),
+  });
+  if (key) query.set('key', key);
+  const doc = await get(`actions/caches?${query}`);
+  check(
+    Array.isArray(doc.actions_caches) && Number.isSafeInteger(doc.total_count),
+    `listing page ${page} is malformed`,
+  );
+  for (const entry of doc.actions_caches)
+    check(
+      Number.isSafeInteger(entry.id) &&
+        typeof entry.key === 'string' &&
+        Number.isSafeInteger(entry.size_in_bytes) &&
+        Number.isFinite(Date.parse(entry.created_at)),
+      `listing page ${page} holds a malformed entry`,
+    );
+  return doc;
+}
+
+// The whole listing with no page offset, for when pages reordered ties. GitHub offers no sort
+// on a unique field, so no paged order is total, but `key` narrows by prefix: narrowed until
+// an answer holds its whole total, that one response cannot repeat or omit an entry. `_` and
+// `%` in a key are wildcards to GitHub, so a prefix can over-match; entries count by id.
+async function listByKeyPrefix(get) {
+  const entries = new Map();
+  const nodes = new Map();
+  let reads = 0;
+  const read = async (options) => {
+    reads++;
+    check(reads <= LISTING_READS, `listing is incomplete: over ${LISTING_READS} reads`);
+    const doc = await readListing(get, options);
+    for (const entry of doc.actions_caches) entries.set(entry.id, entry);
+    return doc;
+  };
+  const nextCharacters = (doc, prefix) => {
+    const at = [...prefix].length;
+    return doc.actions_caches
+      .map((entry) => [...entry.key][at])
+      .filter((character) => character !== undefined)
+      .map((character) => prefix + character);
+  };
+  const descend = async (start) => {
+    const pending = [start];
+    while (pending.length) {
+      const prefix = pending.pop();
+      if (nodes.has(prefix)) continue;
+      const doc = await read({ key: prefix });
+      const total = doc.total_count;
+      nodes.set(prefix, total);
+      if (total > LISTING_PAGE) pending.push(...nextCharacters(doc, prefix));
+      else
+        check(
+          doc.actions_caches.length === total,
+          `listing is incomplete: ${doc.actions_caches.length} of ${total} entries read under key ${prefix || '(all)'}`,
+        );
+    }
+  };
+  // Whether a split prefix still holds entries no narrower prefix or seen entry accounts for.
+  const unaccounted = (prefix) => {
+    if (prefix.includes('%')) return false;
+    const length = [...prefix].length;
+    let held = [...entries.values()].filter((entry) => entry.key === prefix).length;
+    for (const [other, total] of nodes)
+      if (other.startsWith(prefix) && [...other].length === length + 1) held += total;
+    return nodes.get(prefix) > LISTING_PAGE && held < nodes.get(prefix);
+  };
+  await descend('');
+  const complete = () => entries.size >= nodes.get('');
+  // A later key an answer never showed: name each character. The Map's iteration takes in
+  // the prefixes this adds.
+  for (const prefix of nodes.keys()) {
+    if (complete()) break;
+    if (!unaccounted(prefix)) continue;
+    for (const character of KEY_CHARACTERS) await descend(prefix + character);
+  }
+  // What is left is one key held by many refs, which no prefix divides: it can only be seen.
+  for (const prefix of [...nodes.keys()]) {
+    for (const sort of ['created_at', 'last_accessed_at', 'size_in_bytes'])
+      for (const direction of ['desc', 'asc'])
+        for (let page = 1; page <= Math.ceil(nodes.get(prefix) / LISTING_PAGE); page++) {
+          if (complete() || !unaccounted(prefix)) break;
+          await read({ key: prefix, sort, direction, page });
+        }
+  }
+  check(
+    complete(),
+    `listing is incomplete: ${entries.size} of ${nodes.get('')} entries read`,
+  );
+  return [...entries.values()];
+}
+
+// Every entry of the listing, or a thrown reason: a page not read is entries of any kind
+// not counted, and a figure over the rest would be wrong. Pages run by created_at, which
+// never changes and carries microseconds, so they usually complete in the fewest reads.
+// Sizes tie, and GitHub reorders ties between pages; last_accessed_at moves as runs read.
 async function listAllCaches(get) {
   const entries = new Map();
-  let total = 0;
   for (let page = 1; page <= 1000; page++) {
-    const doc = await get(
-      `actions/caches?sort=size_in_bytes&direction=desc&per_page=100&page=${page}`,
-    );
-    check(
-      Array.isArray(doc.actions_caches) && Number.isSafeInteger(doc.total_count),
-      `listing page ${page} is malformed`,
-    );
-    for (const entry of doc.actions_caches) {
-      check(
-        Number.isSafeInteger(entry.id) &&
-          typeof entry.key === 'string' &&
-          Number.isSafeInteger(entry.size_in_bytes) &&
-          Number.isFinite(Date.parse(entry.created_at)),
-        `listing page ${page} holds a malformed entry`,
-      );
-      entries.set(entry.id, entry);
-    }
-    total = doc.total_count;
-    if (doc.actions_caches.length < 100) {
-      check(
-        entries.size >= total,
-        `listing is incomplete: ${entries.size} of ${total} entries read`,
-      );
-      return [...entries.values()];
-    }
+    const doc = await readListing(get, { page });
+    for (const entry of doc.actions_caches) entries.set(entry.id, entry);
+    if (doc.actions_caches.length < LISTING_PAGE)
+      return entries.size >= doc.total_count ? [...entries.values()] : listByKeyPrefix(get);
   }
   throw new Error('listing exceeds 1000 pages');
 }
@@ -1907,14 +2022,11 @@ async function cacheHeadroom(args) {
   }
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? ''))
     usage('--repo must be OWNER/NAME, or set GITHUB_REPOSITORY');
-  const { get, seen } = headroomClient(repo);
-  const limit = await get('actions/cache/storage-limit');
-  check(
-    Number.isFinite(limit.max_cache_size_gb) && limit.max_cache_size_gb > 0,
-    'storage limit carries no max_cache_size_gb',
-  );
-  const entries = await listAllCaches(get);
-  const allowance = limit.max_cache_size_gb * GIB;
+  const client = headroomClient(repo);
+  const { seen } = client;
+  const limit = await storageAllowance(client);
+  const entries = await listAllCaches(client.get);
+  const allowance = limit.gib * GIB;
   // An entry a longer prefix also names belongs to that one.
   const named = new Map(families.map((prefix) => [prefix, []]));
   const byLength = [...named.keys()].sort((a, b) => b.length - a.length);
@@ -1951,7 +2063,7 @@ async function cacheHeadroom(args) {
   );
   const measured = Math.round(((allowance - used) / GIGABYTE) * 1000) / 1000;
   const detail = [
-    `allowance: ${allowance} bytes (max_cache_size_gb ${limit.max_cache_size_gb}), ${allowance / GIGABYTE} GB; counted ${used} bytes`,
+    `allowance: ${allowance} bytes (${limit.source}), ${allowance / GIGABYTE} GB; counted ${used} bytes`,
     ...[...nonResults]
       .sort((a, b) => b[1] - a[1])
       .map(([family, bytes]) => `non-result ${family}: ${bytes} bytes`),

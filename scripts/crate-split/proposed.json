@@ -114,7 +114,9 @@
         "tests/e2e/public_id.rs",
         "tests/recorded/run-root/run-labels",
         "tests/recorded/run-root/run-labels/**",
-        "tests/e2e/pool_support.rs"
+        "tests/e2e/pool_support.rs",
+        "tests/e2e/github_world_support.rs",
+        "tests/e2e/mixed_world_support.rs"
       ],
       "crates": [
         "onepipeline"
@@ -209,7 +211,9 @@
         "tests/e2e/private_github_home.rs",
         "tests/e2e/github_world.py",
         "tests/e2e/github_create_retry.rs",
-        "tests/e2e/human_board_projection.rs"
+        "tests/e2e/human_board_projection.rs",
+        "tests/e2e/github_world_support.rs",
+        "tests/e2e/mixed_world_support.rs"
       ],
       "crates": [
         "onepipeline"

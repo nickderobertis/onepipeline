@@ -1360,17 +1360,20 @@ onevcs-testing = "0.20.0"
 # It also writes a GitHub issue's link to its own heading as that issue's `www.github.com` URL, the
 # form `tests/e2e/linear_writeback.rs` holds on the public board.
 # **0.14.5 screens a narrow write's own text without reading the item first** (onetaskgraph #3917):
-# a term already stored on a task stays for `sources sanitize` unless the caller opts in, as
-# `src/writeback.rs` does, so a settlement still rewrites or refuses it:
-# `tests/e2e/publication_boundary.rs`'s settlement journey fails without that opt-in.
-onetaskgraph-core = "=0.14.5"
-onetaskgraph-plugin-api = "=0.14.5"
-onetaskgraph-local-md = "=0.14.5"
+# a term already stored on a task stays for `sources sanitize` unless the caller opts in. The
+# engine does not, by the user's ruling that screening adds no GitHub request to a small board
+# edit: `tests/narrow_write/main.rs` fails if it does.
+# **0.14.7 writes a reference-style link inline on a copy to Linear**, which keeps one only as
+# escaped text, and takes Linear's autolinks and escapes of a follow-up's own text for what they
+# are rather than refusing them: `tests/e2e/linear_launch.rs`'s budget-table journey fails on 0.14.5.
+onetaskgraph-core = "=0.14.7"
+onetaskgraph-plugin-api = "=0.14.7"
+onetaskgraph-local-md = "=0.14.7"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.5"
+onetaskgraph-linear = "=0.14.7"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
@@ -1388,7 +1391,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.102.1"
+version = "0.102.2"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1612,6 +1615,11 @@ onepipeline-testfakes = { path = "crates/testfakes" }
 # The store's Linear plugin, at the release `onetaskgraph-core` links — see
 # `[workspace.dependencies]`.
 onetaskgraph-linear = { workspace = true }
+# What `tests/e2e/linear_loopback.rs` encodes a record's editor state with, as Linear's own are:
+# the release the Linear plugin above decodes it with. Its base64 wrapping is written in that
+# file instead, so no direct dependency lands in `Cargo.lock`'s onepipeline entry between
+# `async-trait` and `clap`: see `standard_base64` there.
+yrs = "0.28"
 onevcs-testing = { workspace = true }
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the
@@ -1633,6 +1641,11 @@ path = "tests/e2e/main.rs"
 [[test]]
 name = "pooled_slot"
 path = "tests/pooled_slot/main.rs"
+
+# The narrow-write journeys have their own Nx input edge and coverage tier.
+[[test]]
+name = "narrow_write"
+path = "tests/narrow_write/main.rs"
 
 # The conversational tier, in its own binary for the reason `smoke` is in one:
 # so a runner can name it. Each of these journeys starts a real two-party

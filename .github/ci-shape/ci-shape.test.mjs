@@ -746,7 +746,7 @@ describe("the Actions cache keeps room for proven results", () => {
   const COPIES = {
     "scripts/actions-cache-prune.mjs": ["112878b64182200739b5e0c7e34decc3778f0316f0cb05f9bd40f66445d33031", 1],
     "scripts/actions-budget-figures.sh": ["d530d435aead03a443b1ea528db96eef9b97cc343d7eb3fade0b09099bd112ef", 13],
-    "scripts/nx-remote-cache.mjs": ["e35435fb6ffde524af3d4244dcd67c115fc9d3f350ab3d535124dbcc07518bd0", 8],
+    "scripts/nx-remote-cache.mjs": ["f8ee98c7b95c9e2afe7cab4539183dabce85d92c67506215b052782d849923e8", 10],
   };
   for (const [path, [digest, version]] of Object.entries(COPIES)) {
     it(`carries ${path} version ${version} unaltered`, () => {

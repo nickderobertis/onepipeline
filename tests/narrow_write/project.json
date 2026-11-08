@@ -1,0 +1,110 @@
+{
+  "name": "onepipeline-narrow-write",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/narrow_write",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build narrow_write",
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
+        "narrowWriteSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/narrow_write/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/narrow_write/main.rs",
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
+        "narrowWriteSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint narrow_write",
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
+        "narrowWriteSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "test": {
+      "command": "just _narrow_write-test",
+      "inputs": [
+        "narrowWriteSource",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "coverage-clean"
+        }
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-narrow_write-*.profraw"
+      ],
+      "cache": false
+    },
+    "test-quick": {
+      "command": "just _narrow_write-test-quick",
+      "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _narrow_write-test-quick --variable onetaskgraph-version"
+        },
+        "narrowWriteSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ],
+      "dependsOn": [],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": [
+        "justfileSelection",
+        "cargoSelection",
+        "npmSelection"
+      ]
+    }
+  }
+}

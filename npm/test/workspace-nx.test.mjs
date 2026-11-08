@@ -762,6 +762,30 @@ describe("affected selection over real commits", () => {
     }
   });
 
+  it("selects the narrow-write journeys for the crate and their support, independently of other journeys", (t) => {
+    const repo = scratchRepository(t);
+    for (const [file, selected] of [
+      ["src/writeback.rs", "true"],
+      ["src/taskgraph.rs", "true"],
+      ["tests/e2e/harness.rs", "true"],
+      ["tests/e2e/github_world.py", "true"],
+      ["tests/e2e/github_world_support.rs", "true"],
+      ["tests/e2e/mixed_world_support.rs", "true"],
+      ["tests/narrow_write/main.rs", "true"],
+      ["docs/contract.md", "false"],
+      ["tests/e2e/publication_boundary.rs", "false"],
+      ["tests/e2e/private_github_home.rs", "false"],
+    ]) {
+      const base = repo.head();
+      repo.change(file);
+      assert.equal(
+        repo.affects(base, ["onepipeline-narrow-write"])["onepipeline-narrow-write"],
+        selected,
+        `${file} selects the narrow-write journeys`,
+      );
+    }
+  });
+
   it("selects a test tier by the files its tests read, and the crate with it", (t) => {
     const repo = scratchRepository(t);
     const base = repo.head();
@@ -957,6 +981,7 @@ esac
     "_note-test",
     "_codex-server-test",
     "_pooled_slot-test",
+    "_narrow_write-test",
     "_version-contract-test",
     "_version-e2e-test",
     "_version-package-test",
@@ -996,6 +1021,7 @@ esac
       "codex_server",
       "contract",
       "e2e",
+      "narrow_write",
       "note",
       "pooled_slot",
       "rest",
@@ -1031,6 +1057,7 @@ esac
       "codex_server",
       "contract",
       "e2e",
+      "narrow_write",
       "note",
       "pooled_slot",
       "rest",
