@@ -68,10 +68,10 @@ describe("a warm leg's cleanup, the command its step states, against GitHub's RE
     });
   }
 
-  it("the double refuses a page size or number GitHub would refuse", async () => {
+  it("the double refuses a page size, number, sort or direction GitHub would refuse", async () => {
     const api = await githubListing();
     try {
-      for (const query of ["per_page=0", "per_page=101", "page=0", "page=x"]) {
+      for (const query of ["per_page=0", "per_page=101", "page=0", "page=x", "sort=key", "direction=up"]) {
         const answer = await fetch(`${api.url}/repos/nickderobertis/onepipeline/actions/caches?${query}`, { headers: { authorization: "Bearer fixture" } });
         assert.equal(answer.status, 422, query);
       }

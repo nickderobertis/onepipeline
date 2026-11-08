@@ -33,11 +33,13 @@ export async function githubListing(entries = recordedEntries(), repository = "n
       const prefix = url.searchParams.get("key") ?? "";
       const size = Number(url.searchParams.get("per_page") ?? 30);
       const page = Number(url.searchParams.get("page") ?? 1);
-      if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isInteger(page) || page < 1)
-        return answer(422, { message: "Validation Failed" });
       const field = url.searchParams.get("sort") ?? "created_at";
+      const direction = url.searchParams.get("direction") ?? "desc";
+      if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isInteger(page) || page < 1
+        || !["created_at", "last_accessed_at", "size_in_bytes"].includes(field) || !["asc", "desc"].includes(direction))
+        return answer(422, { message: "Validation Failed" });
       const valueOf = (entry) => (field === "size_in_bytes" ? entry.size_in_bytes : Date.parse(entry[field]));
-      const sign = url.searchParams.get("direction") === "asc" ? 1 : -1;
+      const sign = direction === "asc" ? 1 : -1;
       const tie = (entry) => (reorderTies ? Math.imul(entry.id ^ (page * 0x9e3779b9), 0x85ebca6b) >>> 0 : 0);
       const found = held
         .filter((entry) => entry.key.startsWith(prefix))
