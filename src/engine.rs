@@ -2513,19 +2513,15 @@ fn converge(
                         }
                     }
                     let provisioning = envelope.labels.node.clone().zip(
-                        crate::provisioning::Failure::of(&envelope)
-                            .filter(|failure| !state.provisioning_recorded(failure)),
+                        crate::provisioning::Failure::of(&envelope).filter(|failure| {
+                            !state.provisioning_surfaced.contains(&failure.session)
+                        }),
                     );
                     if !journalled {
                         journal.relay(&envelope)?;
                     }
                     if let Some((node, failure)) = provisioning {
-                        raise_stamped(
-                            paths,
-                            journal,
-                            failure.surface(&node),
-                            crate::vocabulary::Significance::Attention,
-                        )?;
+                        raise_provisioning_failed(paths, journal, &node, &failure)?;
                         state.refresh(paths);
                     }
                     // A failing check is told to the manager once, whatever it blocks.
@@ -12391,31 +12387,37 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 
 /// [`raise`], answering the surface as the channel queued it — id and all.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
-    queue_surface(paths, journal, surface, None)
+    queue_surface(paths, journal, surface, &[])
 }
 
-/// [`raise`], its record stamped with how much attention it asks of a reader.
-fn raise_stamped(
+/// A session's `provisioning-failed` surface, its record labelled with that session
+/// and with the significance the `planner` profile admits.
+fn raise_provisioning_failed(
     paths: &RunPaths,
     journal: &mut Journal,
-    surface: Surface,
-    significance: crate::vocabulary::Significance,
+    node: &str,
+    failure: &crate::provisioning::Failure,
 ) -> Result<()> {
-    queue_surface(paths, journal, surface, Some(significance)).map(|_| ())
+    let stamps = [
+        (
+            "significance",
+            json!(crate::vocabulary::Significance::Attention),
+        ),
+        (crate::provisioning::SESSION_LABEL, json!(failure.session)),
+    ];
+    queue_surface(paths, journal, failure.surface(node), &stamps).map(|_| ())
 }
 
 fn queue_surface(
     paths: &RunPaths,
     journal: &mut Journal,
     surface: Surface,
-    significance: Option<crate::vocabulary::Significance>,
+    stamps: &[(&str, serde_json::Value)],
 ) -> Result<Surface> {
     let queued = ChannelState::new(paths).push(surface)?;
     let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
-    if let Some(significance) = significance {
-        labels
-            .extra
-            .insert("significance".to_owned(), json!(significance));
+    for (key, value) in stamps {
+        labels.extra.insert((*key).to_owned(), value.clone());
     }
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,

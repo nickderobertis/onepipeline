@@ -214,6 +214,11 @@ pub struct RunState {
     /// session; a later session's success removes nothing. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
+    /// The sessions whose `provisioning-failed` surface is on the journal, so each
+    /// raises one. Kept apart from the failures because the relay can journal a
+    /// failure, and a refresh fold it, before the loop reaches it. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) provisioning_surfaced: BTreeSet<String>,
     // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
     // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
     // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
@@ -1015,7 +1020,7 @@ impl Closure {
 
 impl RunState {
     /// Whether this failure's session already has its record on some node.
-    pub(crate) fn provisioning_recorded(&self, failure: &crate::provisioning::Failure) -> bool {
+    fn provisioning_recorded(&self, failure: &crate::provisioning::Failure) -> bool {
         self.provisioning_failures
             .values()
             .flatten()
@@ -1931,7 +1936,10 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
                 state.decisions_pending.remove(reference);
             }
         }
-        Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
+        Some(journal::PipelineKind::PlannerSurfaceQueued) => {
+            state.surfaces_queued += 1;
+            fold_provisioning_surface(state, event);
+        }
         Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
             state.last_surface_at = millis_of(&event.ts);
@@ -2026,8 +2034,6 @@ pub(crate) struct SessionOpened {
     pub(crate) at: String,
 }
 
-/// Fold where a sibling's record says its node's turn is, and what session it
-/// opened: [`RunState::last_turns`] and [`RunState::sessions_opened`].
 /// A session's failed provisioning, recorded once under the node that opened it.
 fn fold_provisioning(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_ref() else {
@@ -2045,6 +2051,28 @@ fn fold_provisioning(state: &mut RunState, event: &Envelope) {
     }
 }
 
+/// The session a `provisioning-failed` surface was queued for.
+fn fold_provisioning_surface(state: &mut RunState, event: &Envelope) {
+    if event
+        .payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        != Some(crate::channel::SurfaceKind::PROVISIONING_FAILED)
+    {
+        return;
+    }
+    if let Some(session) = event
+        .labels
+        .extra
+        .get(crate::provisioning::SESSION_LABEL)
+        .and_then(serde_json::Value::as_str)
+    {
+        state.provisioning_surfaced.insert(session.to_owned());
+    }
+}
+
+/// Fold where a sibling's record says its node's turn is, and what session it
+/// opened: [`RunState::last_turns`] and [`RunState::sessions_opened`].
 fn fold_addresses(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_ref() else {
         return;

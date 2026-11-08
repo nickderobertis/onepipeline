@@ -18,7 +18,7 @@ pub(crate) const HEADING: &str = "## Worktree provisioning failed";
 const SURFACE_OUTPUT_LINES: usize = 20;
 
 /// The `onevcs` label naming the session a stream record belongs to.
-const SESSION_LABEL: &str = "session";
+pub(crate) const SESSION_LABEL: &str = "session";
 
 /// One session's failed `post-checkout`, as a node's record keeps it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

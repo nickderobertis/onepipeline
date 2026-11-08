@@ -20,7 +20,7 @@ const KIND: &str = "provisioning-failed";
 fn tracked_post_checkout(world: &World, repo: &Repository, hook: &str) {
     let hooks = repo.checkout.join(".githooks");
     std::fs::create_dir_all(&hooks).expect("the tracked hooks directory");
-    onepipeline_testfakes::executable(&hooks.join("post-checkout"), hook.to_owned());
+    onepipeline_testfakes::executable(&hooks.join("post-checkout"), hook);
     git(world, &repo.checkout, &["add", "-A"]);
     git(
         world,
@@ -147,6 +147,7 @@ fn a_failed_hook_reaches_the_workers_first_turn_the_watch_and_the_results() {
     let surface = world.surfaced(run, KIND);
     assert_eq!(surface["labels"]["node"], "service");
     assert_eq!(surface["labels"]["significance"], "attention");
+    assert!(surface["labels"]["session"].is_string(), "{surface}");
     assert_eq!(surface["payload"]["blocking"], false);
     let message = surface["payload"]["message"].as_str().expect("a message");
     for expected in [
