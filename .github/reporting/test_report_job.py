@@ -85,6 +85,75 @@ WRITE = 'echo "{\\"value\\": %s}" > "$ONEBUDGETSPEC_RESULT"'
 # With no token for its host, gh tries the keyring, and that lookup autolaunches a session bus whose
 # daemon outlives the job, holding one of the host's inotify instances.
 NO_SESSION_BUS = {'DBUS_SESSION_BUS_ADDRESS': 'disabled:'}
+# The comment's layout, as the core contract renders it: a summary line, then three sections.
+SUMMARY = re.compile(r'^\*\*(?:⚠️ (\d+) need attention|✅ Nothing needs attention)\*\* · (\d+) within budget'
+                     r'(?: · (\d+) not measured)? · head ', re.M)
+SECTIONS = {
+    'attention': re.compile(r'^<details open><summary><b>Needs attention \((\d+)\)</b></summary>\n(.*?)\n</details>\n', re.M | re.S),
+    'within': re.compile(r'^<details><summary><b>Within budget \((\d+)\)</b></summary>\n(.*?)\n</details>\n', re.M | re.S),
+    'details': re.compile(r'^<details><summary>Details</summary>\n(.*?)\n</details>\n', re.M | re.S),
+}
+NOT_MEASURED = re.compile(r'^\*\*Not measured on this run \((\d+)\)\*\*\n\n((?:- .*\n)+)', re.M)
+NOT_MEASURED_ROW = re.compile(r'^- (.+): no result this run(?: \(report-only\))? · baseline \d+/5$')
+MISSING = re.compile(r'^\*\*Why some figures are missing\*\*\n\n((?:- .*\n)+)', re.M)
+MARKS = ('✅', '❌', '⚠️')
+
+
+def table(text, columns):
+    """A section's rows, each a list of its cells, under the exact header it must carry."""
+    lines = [line for line in text.strip().splitlines()]
+    assert lines[:2] == [f'| {" | ".join(columns)} |', f'|{" --- |" * len(columns)}'], lines[:2]
+    rows = [[cell.strip() for cell in line.strip('|').split(' | ')] for line in lines[2:]]
+    for row in rows:
+        assert len(row) == len(columns), row
+        assert not any(mark in cell for cell in row for mark in MARKS), row
+    return rows
+
+
+def reason(row, report_only):
+    """The one phrase the core contract gives a row needing attention, from its saved verdict and flag."""
+    if row.get('verdict') == 'over':
+        phrase = 'Over limit · flagged' if row.get('flag') else 'Over limit'
+    elif row.get('verdict') == 'error':
+        phrase = 'Error'
+    elif row.get('sd') == 0:
+        phrase = 'Flagged (was constant)'
+    else:
+        sigma = f'{row.get("sigma_change") or 0:+.1f}'
+        phrase = f'Flagged {"+0.0" if sigma == "-0.0" else sigma} SD'
+    return f'{phrase} (report-only)' if report_only else phrase
+
+
+def comment_layout(body):
+    """The summary counts, each section's rows by displayed budget, and Details' text and missing reasons."""
+    summary = SUMMARY.search(body)
+    assert summary, body
+    found = {name: pattern.findall(body) for name, pattern in SECTIONS.items()}
+    assert all(len(matches) == 1 for matches in found.values()), body
+    (attention_count, attention), = found['attention']
+    (within_count, within), = found['within']
+    details, = found['details']
+    assert body.index('Needs attention (') < body.index('Within budget (') < body.index('<summary>Details</summary>'), body
+    sections = {'attention': {}, 'within': {}, 'unmeasured': {}}
+    if attention.strip() != 'Nothing failed or was flagged.':
+        sections['attention'] = {cells[0].strip('*'): cells for cells in table(attention, ('Budget', 'Now · vs base', 'Reason'))}
+    if within.strip() != 'No budget is within its limit.':
+        sections['within'] = {cells[0].strip('*'): cells for cells in table(within, ('Budget', 'Now · vs base'))}
+    unmeasured = NOT_MEASURED.search(details)
+    if unmeasured:
+        for line in unmeasured[2].splitlines():
+            shown = NOT_MEASURED_ROW.fullmatch(line)
+            assert shown, line
+            sections['unmeasured'][shown[1]] = line
+        assert int(unmeasured[1]) == len(sections['unmeasured']), details
+    missing = {}
+    block = MISSING.search(details)
+    for line in (block[1].splitlines() if block else []):
+        names, said = line.removeprefix('- ').split(': ', 1)
+        missing.update(dict.fromkeys(names.split(', '), said))
+    counts = {'attention': int(summary[1] or 0), 'within': int(summary[2]), 'unmeasured': int(summary[3] or 0)}
+    assert (int(attention_count), int(within_count)) == (counts['attention'], counts['within']), body
+    return {'summary': counts, 'sections': sections, 'details': details, 'missing': missing}
 
 
 def workflow():
@@ -291,9 +360,56 @@ class Journey(unittest.TestCase):
         return len(self.bus_calls.read_text().splitlines()) if self.bus_calls.exists() else 0
 
     def run_job(self, event_name, sha, **options):
+        before = [comment['body'] for comment in self.host.comments]
         result = self.job(event_name, sha, **options).run()
         self.assertEqual(self.recorded_bus_calls(), 0, 'gh asked for a session bus during the job')
+        posted = [comment['body'] for comment in self.host.comments if comment['body'] not in before]
+        self.assertLessEqual(len(posted), 1, 'one run posts or updates one comment')
+        if posted:
+            self.assert_comment_layout(result, posted[0])
         return result
+
+    def assert_comment_layout(self, job, body):
+        """Every budget of the run's saved results in exactly the section its verdict and flag give it."""
+        saved = self.budget_run(job)
+        rows = job.rows()
+        self.assertEqual(sorted(rows), sorted([result['id'] for result in saved['results']['results']]
+                                              + [entry['id'] for entry in saved['unavailable']]))
+        excluded = set(saved['enforcement_exclude_labels'])
+        labels = {(entry['file'], entry['id']): set(entry.get('labels', ())) for entry in saved['catalog']}
+        prefix = f'{harness.REPOSITORY.split("/")[1]}-'
+        expected = {'attention': {}, 'within': {}, 'unmeasured': {}}
+        for id, row in rows.items():
+            report_only = bool(labels[(row['file'], id)] & excluded)
+            if row.get('verdict') == 'over' or (row.get('verdict') == 'error' and not report_only) or row.get('flag'):
+                bucket = 'attention'
+            elif row.get('verdict') == 'within':
+                bucket = 'within'
+            else:
+                bucket = 'unmeasured'
+            expected[bucket][id.removeprefix(prefix) or id] = (row, report_only)
+        layout = comment_layout(body)
+        for bucket, shown in layout['sections'].items():
+            self.assertEqual(sorted(shown), sorted(expected[bucket]), f'{bucket}: {body}')
+            self.assertEqual(layout['summary'][bucket], len(expected[bucket]), body)
+        for name, cells in layout['sections']['attention'].items():
+            self.assertEqual(cells[2], reason(*expected['attention'][name]), name)
+        for name, line in layout['sections']['unmeasured'].items():
+            self.assertEqual(line.split(': ', 1)[1].startswith('no result this run (report-only)'),
+                             expected['unmeasured'][name][1], line)
+        omitted = sum(OMIT_LABEL in entry.get('labels', ()) for entry in saved['catalog'])
+        left_out = [line for line in body.splitlines() if 'left out because a pull request cannot measure' in line]
+        self.assertEqual(len(left_out), 1 if omitted else 0, body)
+        if omitted:
+            self.assertEqual(layout['details'].count(left_out[0]), 1, 'the left-out line sits inside Details')
+        return layout
+
+    def assert_too_few_to_compare(self, id, row, message=None):
+        """A baseline under five samples gives no comparison, and the comment says how far it has to go."""
+        self.assertEqual([row.get(key) for key in ('mean', 'percent_change', 'sigma_change')], [None] * 3, message)
+        sections = comment_layout(self.host.comments[0]['body'])['sections']
+        cells, = [section[id] for section in (sections['attention'], sections['within']) if id in section]
+        self.assertTrue(cells[1].endswith(f'<br>baseline {row["baseline_n"]}/5'), message or cells)
 
     def base_push(self):
         self.repository.git('checkout', '--quiet', 'main')
@@ -454,7 +570,7 @@ class RealCatalog(Journey):
         self.assertEqual(pull.exit_code, 0, pull.stdout)
         row = pull.rows()[OWN_BUDGET]
         self.assertEqual(row['baseline_n'], 1, row)
-        self.assertIn('minimum 5', row['unavailable'], 'one sample is read, and is too few to compare yet')
+        self.assert_too_few_to_compare(OWN_BUDGET, row, 'one sample is read, and is too few to compare yet')
 
     def link_node_modules(self):
         (self.repository.path / 'node_modules').symlink_to(ROOT / 'node_modules')
@@ -531,12 +647,12 @@ class SavedResults(Journey):
         self.assertEqual(rows['human-items-read-seconds']['current'], 0.25)
         for id, figure in OWN_RUN_FIGURES.items():
             self.assertEqual(rows[id]['current'], figure, 'the CI-time pair comes from the job')
-        body = self.host.comments[0]['body']
+        layout = comment_layout(self.host.comments[0]['body'])
         for absent in ('host-view-time', 'onepipeline-macos-jobs-per-run', 'review-round-github-quota'):
             self.assertIsNone(rows[absent].get('current'), absent)
             self.assertEqual(self.unavailable(job)[absent], NO_SAVED_RESULT, absent)
-            line = next(line for line in body.splitlines() if absent in line)
-            self.assertIn(NO_SAVED_RESULT, line)
+            self.assertIn(absent, layout['sections']['unmeasured'])
+            self.assertEqual(layout['missing'][absent], NO_SAVED_RESULT, absent)
 
     def test_a_saved_over_budget_keeps_its_verdict_and_fails_the_job(self):
         (self.repository.path / 'target/budget-records/stacked-spikes-stage.json').write_text('{"wall_ms": 600000, "run_id": "run"}')
@@ -631,7 +747,7 @@ class MixedCatalog(Journey):
             self.assertEqual(self.base_push().exit_code, 0)
         few = self.pull_request()
         self.assertEqual(few.rows()['synthetic-bundle-bytes']['baseline_n'], 4)
-        self.assertIn('minimum 5', few.rows()['synthetic-bundle-bytes']['unavailable'])
+        self.assert_too_few_to_compare('synthetic-bundle-bytes', few.rows()['synthetic-bundle-bytes'])
         self.assertEqual(few.exit_code, 0, few.stdout)
 
         fifth = self.base_push()
