@@ -3543,6 +3543,11 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 ));
             }
         }
+        for node in view.state.graph.iter() {
+            for failure in provisioning_failures(&view.state, &node.id) {
+                out.push_str(&format!("  {}: {}\n", node.id, one_line(&failure.line())));
+            }
+        }
         // What review asked of the drafts it sent back, what bringing each draft
         // onto its parents' new heads did, and which titles nothing verified: a
         // stack of drafts in review moves without any node failing, and this is
@@ -5524,6 +5529,17 @@ fn counted(count: usize, what: &str) -> String {
     }
 }
 
+/// The node's sessions whose provisioning failed, oldest first.
+fn provisioning_failures<'state>(
+    state: &'state RunState,
+    node: &str,
+) -> &'state [crate::provisioning::Failure] {
+    state
+        .provisioning_failures
+        .get(node)
+        .map_or(&[], Vec::as_slice)
+}
+
 /// `onepipeline results` — per-node outcomes, with each node's own evidence.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn results(view: &RunView) -> String {
@@ -5656,6 +5672,9 @@ pub fn results(view: &RunView) -> String {
         out.push('\n');
         if let Some(title) = unverified_title_phrase(&view.state, &node.id) {
             out.push_str(&format!("      {title}\n"));
+        }
+        for failure in provisioning_failures(&view.state, &node.id) {
+            out.push_str(&format!("      {}\n", one_line(&failure.line())));
         }
         // Before the detail, because it is what the detail is evidence *for*: the
         // detail is the producer's own sentence about how the dispatch ended, and

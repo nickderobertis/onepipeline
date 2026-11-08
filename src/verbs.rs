@@ -340,6 +340,11 @@ pub fn render_results_json(results: &Results) -> Result<String> {
                     .unwrap_or(crate::graph::NodeStatus::Pending),
                 outcome: view.state.outcomes.get(&node.id).map(String::as_str),
                 comments: comments.get(&node.id).cloned().unwrap_or_default(),
+                provisioning_failures: view
+                    .state
+                    .provisioning_failures
+                    .get(&node.id)
+                    .map_or(&[], Vec::as_slice),
             })
             .collect(),
     })

@@ -2512,8 +2512,21 @@ fn converge(
                             opened_a_session = true;
                         }
                     }
+                    let provisioning = envelope.labels.node.clone().zip(
+                        crate::provisioning::Failure::of(&envelope)
+                            .filter(|failure| !state.provisioning_recorded(failure)),
+                    );
                     if !journalled {
                         journal.relay(&envelope)?;
+                    }
+                    if let Some((node, failure)) = provisioning {
+                        raise_stamped(
+                            paths,
+                            journal,
+                            failure.surface(&node),
+                            crate::vocabulary::Significance::Attention,
+                        )?;
+                        state.refresh(paths);
                     }
                     // A failing check is told to the manager once, whatever it blocks.
                     checks.observe(paths, journal, state, &envelope)?;
@@ -12378,10 +12391,35 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 
 /// [`raise`], answering the surface as the channel queued it — id and all.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
+    queue_surface(paths, journal, surface, None)
+}
+
+/// [`raise`], its record stamped with how much attention it asks of a reader.
+fn raise_stamped(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    surface: Surface,
+    significance: crate::vocabulary::Significance,
+) -> Result<()> {
+    queue_surface(paths, journal, surface, Some(significance)).map(|_| ())
+}
+
+fn queue_surface(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    surface: Surface,
+    significance: Option<crate::vocabulary::Significance>,
+) -> Result<Surface> {
     let queued = ChannelState::new(paths).push(surface)?;
+    let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
+    if let Some(significance) = significance {
+        labels
+            .extra
+            .insert("significance".to_owned(), json!(significance));
+    }
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, queued.workstream.as_deref()),
+        labels,
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),

@@ -210,6 +210,10 @@ pub struct RunState {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    /// Each node's sessions whose provisioning failed, oldest first, one entry per
+    /// session; a later session's success removes nothing. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
     // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
     // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
     // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
@@ -1010,6 +1014,14 @@ impl Closure {
 }
 
 impl RunState {
+    /// Whether this failure's session already has its record on some node.
+    pub(crate) fn provisioning_recorded(&self, failure: &crate::provisioning::Failure) -> bool {
+        self.provisioning_failures
+            .values()
+            .flatten()
+            .any(|recorded| recorded.session == failure.session)
+    }
+
     /// Whether a stop has been recorded at all, however it went, with no
     /// adoption driving the run since.
     ///
@@ -1300,6 +1312,7 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
+        fold_provisioning(state, event);
         fold_landing_commit(state, event);
         fold_push(state, event);
         // A landing that closes issues, kept whole for the closure watch a driver
@@ -2015,6 +2028,23 @@ pub(crate) struct SessionOpened {
 
 /// Fold where a sibling's record says its node's turn is, and what session it
 /// opened: [`RunState::last_turns`] and [`RunState::sessions_opened`].
+/// A session's failed provisioning, recorded once under the node that opened it.
+fn fold_provisioning(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    let Some(failure) = crate::provisioning::Failure::of(event) else {
+        return;
+    };
+    if !state.provisioning_recorded(&failure) {
+        state
+            .provisioning_failures
+            .entry(node.clone())
+            .or_default()
+            .push(failure);
+    }
+}
+
 fn fold_addresses(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_ref() else {
         return;

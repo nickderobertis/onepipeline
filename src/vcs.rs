@@ -2321,6 +2321,38 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
     }
 }
 
+/// What a `worktree-provision-failed` record states, read as `onevcs`'s own payload.
+///
+/// `None` for every other record, and for one that does not read as that payload.
+pub(crate) fn provision_failure(envelope: &Envelope) -> Option<onevcs::WorktreeProvision> {
+    if envelope.source != crate::event::Source::Vcs
+        || envelope.kind != kind_of(onevcs::EventKind::WorktreeProvisionFailed)
+    {
+        return None;
+    }
+    serde_json::from_value(serde_json::Value::Object(envelope.payload.clone())).ok()
+}
+
+/// The last `worktree-provision-failed` record of this session's own stream,
+/// stamped with this dispatch's labels and keeping what `onevcs` labelled it with.
+///
+/// Read from the stream directly, because a launch's source filter decides what
+/// is relayed and this is what a worker must be told regardless.
+pub(crate) fn provision_failure_in(
+    token: &SessionToken,
+    labels: &crate::event::Labels,
+) -> Option<Envelope> {
+    let mut failed = events(token, None)
+        .into_iter()
+        .rfind(|envelope| provision_failure(envelope).is_some())?;
+    let mut stamped = labels.clone();
+    for (key, value) in std::mem::take(&mut failed.labels.extra) {
+        stamped.extra.entry(key).or_insert(value);
+    }
+    failed.labels = stamped;
+    Some(failed)
+}
+
 /// The key a `session-opened` payload carries an open conflict under: `onevcs`'s
 /// own spelling, which this crate's envelope for the same opening repeats.
 const OPENED_CONFLICT: &str = "conflict";

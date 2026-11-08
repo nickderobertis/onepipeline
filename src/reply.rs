@@ -1328,8 +1328,10 @@ mod tests {
         );
         assert_eq!(
             block["results_schema_version"],
-            json!(crate::review::RESULTS_SCHEMA_VERSION)
+            // Entry 130's own version; a later additive field moved the constant on.
+            json!(2)
         );
+        assert!(crate::review::RESULTS_SCHEMA_VERSION >= 2);
         let operation: crate::edits::Operation = serde_json::from_value({
             let mut applied = block["decline_applied"].clone();
             applied["kind"] = json!("decline-applied");

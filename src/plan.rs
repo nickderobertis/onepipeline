@@ -1020,6 +1020,26 @@ pub(crate) fn with_merge_in_progress(task: &str, merge: &MergeInProgress) -> Str
     with_merge_context(&with_merge_resolution(task, merge), merge)
 }
 
+/// The rendered task with `section` above its operational notes: above
+/// `## Additional info`, or above the first section the rendering appended where
+/// the task states none, and otherwise at its end.
+pub(crate) fn above_notes(task: &str, section: &str) -> String {
+    let above = additional_info_at(task).or_else(|| {
+        [
+            PLANNER_CONTEXT_HEADING,
+            CROSS_REPO_REFERENCES_HEADING,
+            crate::boundary::SECTION_HEADING,
+        ]
+        .into_iter()
+        .filter_map(|heading| last_line_at(task, heading))
+        .min()
+    });
+    match above {
+        Some(at) => format!("{}\n\n{section}\n{}", task[..at].trim_end(), &task[at..]),
+        None => format!("{}\n\n{section}", task.trim_end()),
+    }
+}
+
 /// The criterion the judge of a conflicted dispatch reads, filled in.
 pub(crate) fn merge_resolution_criterion(merge: &MergeInProgress) -> String {
     MERGE_RESOLUTION_CRITERION
