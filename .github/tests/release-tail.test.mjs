@@ -340,9 +340,12 @@ function checkout(budgets = readFileSync(join(root, "budgets.yaml"), "utf8")) {
   const dir = join(scratch, `checkout-${cases++}`);
   mkdirSync(join(dir, "scripts"), { recursive: true });
   // v0.97.1 predates cache receipts. Its seven original budgets are replayed
-  // here; the production cache-use budget is exercised by the cache journey.
+  // here; the production cache-use budget is exercised by the cache journey, and the
+  // cache-headroom budget reads GitHub's listing fresh when it runs, so no recording holds it.
   const spec = parse(budgets);
-  spec.budgets = spec.budgets.filter((budget) => budget.id !== "onepipeline-nx-cache-use");
+  spec.budgets = spec.budgets.filter(
+    (budget) => !["onepipeline-nx-cache-use", "onepipeline-cache-headroom"].includes(budget.id),
+  );
   writeFileSync(join(dir, "budgets.yaml"), stringify(spec));
   mkdirSync(join(dir, ".github"));
   copyFileSync(

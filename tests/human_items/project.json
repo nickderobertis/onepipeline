@@ -15,6 +15,9 @@
     "build": {
       "command": "just _tier-build human_items_workload",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
@@ -31,6 +34,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/human_items/main.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/rustfmt.toml",
@@ -42,6 +48,9 @@
     "lint": {
       "command": "just _tier-lint human_items_workload",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "rustBuild",
         "{workspaceRoot}/tests/human_items/**/*",
         "{workspaceRoot}/tests/e2e/harness.rs",
@@ -86,6 +95,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

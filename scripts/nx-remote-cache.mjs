@@ -1,7 +1,7 @@
 // Copied from dero-skills' create-repo skill; edit only the source.
 // source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/nx-remote-cache.mjs
-// version: 7
-// sha256: 81030246b3f063d3e79b8234781e1fcbfe420c6fef3676159da921339e38b83c
+// version: 8
+// sha256: e35435fb6ffde524af3d4244dcd67c115fc9d3f350ab3d535124dbcc07518bd0
 import {
   appendFileSync,
   readFileSync,
@@ -77,6 +77,14 @@ const hashOK = (value) =>
   typeof value === 'string' && /^[a-f0-9]{1,512}$/.test(value);
 const integer = (value) => Number.isSafeInteger(value) && value > 0;
 const taskKey = (t) => `${t.task}\0${t.os}\0${t.hash}`;
+// A remote read's outcome at the recording proxy: 200 served it, 404 said it holds nothing,
+// and any other status or no answer (null) is a failed read. The pinned sidecar answers its
+// own store faults with a 404, so those read as a miss, which can only understate replays.
+function remoteRead(gets) {
+  if (gets.length === 0) return 'not_attempted';
+  if (gets.some((get) => get.http_status === 200)) return 'hit';
+  return gets.at(-1).http_status === 404 ? 'miss' : 'failed';
+}
 const trusted = (pr, repo) =>
   pr.head?.repo?.full_name === repo &&
   pr.base?.repo?.full_name === repo &&
@@ -338,6 +346,28 @@ async function proxy() {
   renameSync(temporaryPath, proxyPath);
 }
 
+// A schema 2 document is incomplete when it names its unfinished invocations. One
+// with no base_sha is the earlier writer's schema 2, which meant incomplete alone.
+const incompleteTelemetry = (doc) =>
+  doc.schema === 2 && (!('base_sha' in doc) || 'cancelled_invocations' in doc);
+// The first parent of the merge commit a pull_request run checked out. Anything else
+// at GITHUB_SHA (a push, a shallow checkout) has no base this run can name.
+function mergeRefBase() {
+  try {
+    // llmlint: ignore[scripts_runtime_independent] The run's merge commit is only known to the consumer checkout; git is provided on the GitHub-hosted runner, with no authoring dependency.
+    const parents = execFileSync(
+      'git',
+      ['rev-list', '--parents', '-n', '1', env.GITHUB_SHA],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+      .trim()
+      .split(' ');
+    return parents.length === 3 ? parents[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 function validateExecutions(doc) {
   check(
     [1, 2].includes(doc?.schema) &&
@@ -365,6 +395,12 @@ function validateExecutions(doc) {
     Array.isArray(doc.tasks) && Array.isArray(doc.store_attempts),
     'missing tasks or store_attempts',
   );
+  if ('base_sha' in doc)
+    check(
+      doc.base_sha === null ||
+        (typeof doc.base_sha === 'string' && /^[a-f0-9]{40}$/.test(doc.base_sha)),
+      'invalid base_sha',
+    );
   if (doc.schema === 2)
     check(
       Array.isArray(doc.cancelled_invocations ?? []) &&
@@ -384,6 +420,8 @@ function validateExecutions(doc) {
         typeof t.cacheable === 'boolean' &&
         ['remote_hit', 'local_hit', 'executed', 'failed'].includes(t.result) &&
         (t.remote_status === null || Number.isInteger(t.remote_status)) &&
+        (t.remote_read === undefined ||
+          ['hit', 'miss', 'failed', 'not_attempted'].includes(t.remote_read)) &&
         utc(t.started_at) &&
         utc(t.finished_at) &&
         Date.parse(t.started_at) <= Date.parse(t.finished_at),
@@ -511,6 +549,7 @@ async function report(opts) {
           cacheable: t.cacheable,
           result,
           remote_status: gets.at(-1)?.http_status ?? null,
+          remote_read: remoteRead(gets),
           started_at: t.started_at,
           finished_at: t.finished_at,
         });
@@ -539,10 +578,9 @@ async function report(opts) {
           });
       }
     const doc = {
-      schema: incomplete ? 2 : 1,
-      ...(cancelledInvocations.length
-        ? { cancelled_invocations: cancelledInvocations }
-        : {}),
+      schema: 2,
+      ...(incomplete ? { cancelled_invocations: cancelledInvocations } : {}),
+      base_sha: event.pull_request ? mergeRefBase() : null,
       repository: env.GITHUB_REPOSITORY,
       ref: env.GITHUB_REF,
       pr: event.pull_request?.number ?? null,
@@ -769,7 +807,13 @@ function attemptRun(gh, id, attempt) {
   );
   return run;
 }
-function artifactsFor(gh, run, detail = [], allowEmptyJobs = false) {
+function artifactsFor(
+  gh,
+  run,
+  detail = [],
+  allowEmptyJobs = false,
+  unavailable = { count: 0 },
+) {
   const all = gh.pages(
     `repos/${gh.repo}/actions/runs/${run.id}/artifacts`,
     'artifacts',
@@ -788,6 +832,15 @@ function artifactsFor(gh, run, detail = [], allowEmptyJobs = false) {
     detail.push(
       `run ${run.id}/${run.run_attempt} started no job (conclusion: ${run.conclusion})`,
     );
+    return [];
+  }
+  // Evidence nothing could have kept: nothing here was uploaded and validated, so
+  // there is nothing to distrust, and an artifact that is present is read below.
+  if (run.predates_adoption && selected.length === 0) {
+    detail.push(
+      `unavailable: run ${run.id}/${run.run_attempt} predates this repository's cache telemetry, adopted ${run.predates_adoption}`,
+    );
+    unavailable.count++;
     return [];
   }
   const expected = jobs.filter(
@@ -818,6 +871,15 @@ function artifactsFor(gh, run, detail = [], allowEmptyJobs = false) {
       );
       continue;
     }
+    // A whole-workflow re-run removes every artifact of the attempts before it, so one
+    // job missing beside another's present artifact is not that, and still refuses.
+    if (run.superseded && selected.length === 0) {
+      detail.push(
+        `unavailable: run ${run.id}/${run.run_attempt} job ${job.name}: a whole-workflow re-run removed its artifact`,
+      );
+      unavailable.count++;
+      continue;
+    }
     check(
       candidates.length > 0,
       `missing artifact for ${run.id}/${run.run_attempt}/${job.name}`,
@@ -840,7 +902,7 @@ function artifactsFor(gh, run, detail = [], allowEmptyJobs = false) {
       }
       const execution = validateExecutions(fileJson(files, 'executions.json'));
       check(
-        execution.schema !== 2 || cancelled,
+        !incompleteTelemetry(execution) || cancelled,
         'Nx run telemetry is incomplete',
       );
       if (execution.schema === 2)
@@ -1288,7 +1350,7 @@ function commitChangesPublished(sha) {
     throw new Error(`merge ${sha} unavailable: checkout with fetch-depth: 0`);
   }
 }
-function receiptRecords(gh, pr, sourceRuns, end, scope) {
+function receiptRecords(gh, pr, sourceRuns, end, scope, predatesAdoption = false) {
   const pushes = gh.pages(
     `repos/${gh.repo}/actions/workflows/release-plz.yml/runs?head_sha=${pr.merge_commit_sha}`,
     'workflow_runs',
@@ -1305,6 +1367,7 @@ function receiptRecords(gh, pr, sourceRuns, end, scope) {
     const artifacts = gh
       .pages(`repos/${gh.repo}/actions/runs/${run.id}/artifacts`, 'artifacts')
       .filter((a) => a.name === `nx-cache-promotion-${pr.merge_commit_sha}`);
+    if (predatesAdoption && artifacts.length === 0) continue;
     check(artifacts.length > 0, `missing promotion receipt for run ${run.id}`);
     for (const artifact of artifacts) {
       artifactIdentity(artifact, run);
@@ -1343,6 +1406,32 @@ function receiptRecords(gh, pr, sourceRuns, end, scope) {
     }
   }
   return receipts;
+}
+// When the telemetry reached this repository: the commit adding the script that writes
+// it, by committer date. Unknown in a shallow checkout, whose oldest commit is no such
+// thing, or for a script history does not hold: nothing then counts as pre-adoption.
+function telemetryAdoption() {
+  try {
+    // llmlint: ignore[scripts_runtime_independent] Adoption is a fact of the consumer checkout's history; git is provided on the GitHub-hosted runner, with no authoring dependency.
+    const git = (...args) =>
+      execFileSync('git', args, {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    if (git('rev-parse', '--is-shallow-repository') === 'true') return null;
+    const added = git(
+      'log',
+      '--format=%cI',
+      '--diff-filter=A',
+      '--',
+      'scripts/nx-remote-cache.mjs',
+    )
+      .split('\n')
+      .at(-1);
+    return added ? new Date(added) : null;
+  } catch {
+    return null;
+  }
 }
 async function cacheUse(opts) {
   const gh = new Github(opts.repo || env.GITHUB_REPOSITORY);
@@ -1401,7 +1490,12 @@ async function cacheUse(opts) {
     seen = new Set();
   let storedBytes = 0,
     localHits = 0,
-    promotionFailures = 0;
+    promotionFailures = 0,
+    unknownBase = 0;
+  const unavailable = { count: 0 },
+    removedAttempts = new Set(),
+    latestRuns = new Map(),
+    adoption = telemetryAdoption();
   for (const pr of prs.values()) {
     check(trusted(pr, gh.repo), `untrusted counted PR #${pr.number}`);
     const runs = gh
@@ -1427,8 +1521,24 @@ async function cacheUse(opts) {
         }
         r.in_interval = completed > start;
         check(r.status === 'completed', `run ${r.id}/${attempt} incomplete`);
+        r.superseded = attempt < run.run_attempt;
+        if (adoption && Date.parse(r.created_at ?? r.run_started_at) < adoption)
+          r.predates_adoption = adoption.toISOString();
         attempts.push(r);
       }
+    const predatesAdoption =
+      adoption !== null &&
+      pr.number !== releasePr.number &&
+      (attempts.length
+        ? attempts.every((r) => r.predates_adoption)
+        : Date.parse(pr.merged_at) < adoption);
+    if (predatesAdoption && attempts.length === 0) {
+      detail.push(
+        `unavailable: #${pr.number} merged before this repository's cache telemetry, adopted ${adoption.toISOString()}, with no CI run left to read`,
+      );
+      unavailable.count++;
+      continue;
+    }
     if (pr.number === releasePr.number) {
       const anchor = attempts
         .filter(
@@ -1450,8 +1560,11 @@ async function cacheUse(opts) {
           Date.parse(r.updated_at) >= Date.parse(anchor.updated_at);
     } else for (const r of attempts) r.observe = r.in_interval;
     check(attempts.length > 0, `missing CI attempts for #${pr.number}`);
-    for (const run of attempts)
-      for (const record of artifactsFor(gh, run, detail, true)) {
+    for (const run of attempts) {
+      const records = artifactsFor(gh, run, detail, true, unavailable);
+      if (run.superseded && records.length === 0)
+        removedAttempts.add(`${run.id}/${run.run_attempt}`);
+      for (const record of records) {
         validateSelection(gh, record.execution, run);
         storedBytes += record.manifest.stored_bytes;
         evidence.push({
@@ -1461,6 +1574,7 @@ async function cacheUse(opts) {
           release_pr: pr.number === releasePr.number,
         });
       }
+    }
     const latest = attempts
       .filter(
         (r) =>
@@ -1469,12 +1583,14 @@ async function cacheUse(opts) {
       )
       .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0];
     check(latest, `missing latest merged PR run #${pr.number}`);
-    for (const e of evidence.filter(
+    const latestEvidence = evidence.filter(
       (e) =>
         e.pr === pr.number &&
         e.run_id === latest.id &&
         e.attempt === latest.run_attempt,
-    )) {
+    );
+    if (pr.number !== releasePr.number) latestRuns.set(pr.number, latestEvidence);
+    for (const e of latestEvidence) {
       for (const a of e.store_attempts)
         mergedExpectations.push({
           ...a,
@@ -1515,7 +1631,14 @@ async function cacheUse(opts) {
       }
     }
     receipts.push(
-      ...receiptRecords(gh, pr, attempts, end, `refs/heads/${pr.base.ref}`),
+      ...receiptRecords(
+        gh,
+        pr,
+        attempts,
+        end,
+        `refs/heads/${pr.base.ref}`,
+        predatesAdoption,
+      ),
     );
   }
   const stores = evidence.flatMap((e) =>
@@ -1536,16 +1659,21 @@ async function cacheUse(opts) {
           e.attempt === receipt.source_attempt &&
           e.pr === receipt.pr,
       );
+      // A re-run after the merge removed the attempt this receipt names, whose receipt
+      // is the promotion's own record and still says what it wrote.
       check(
-        source.some(
-          (e) =>
-            e.os === a.os &&
-            e.tasks.some(
-              (t) => t.task === a.task && t.hash === a.hash && t.cacheable,
-            ) &&
-            (e.store_attempts.some((s) => taskKey(s) === taskKey(a)) ||
-              e.manifest.entries.some((m) => m.hash === a.hash)),
-        ),
+        removedAttempts.has(
+          `${receipt.source_run_id}/${receipt.source_attempt}`,
+        ) ||
+          source.some(
+            (e) =>
+              e.os === a.os &&
+              e.tasks.some(
+                (t) => t.task === a.task && t.hash === a.hash && t.cacheable,
+              ) &&
+              (e.store_attempts.some((s) => taskKey(s) === taskKey(a)) ||
+                e.manifest.entries.some((m) => m.hash === a.hash)),
+          ),
         'promotion receipt task/OS/hash has no source expectation',
       );
       check(
@@ -1563,6 +1691,31 @@ async function cacheUse(opts) {
         scope: receipt.scope,
       });
     }
+  // The carried run that tested this task and OS at another hash on a moved base.
+  function baseMoved(t, e) {
+    let found = null;
+    for (const [number, runs] of latestRuns)
+      for (const run of runs) {
+        const other = run.tasks.find(
+          (o) => o.task === t.task && o.hash !== t.hash,
+        );
+        if (!other || run.os !== e.os) continue;
+        if (typeof run.base_sha !== 'string') {
+          unknownBase++;
+          continue;
+        }
+        const landed = gh.read(
+          `repos/${gh.repo}/commits/${prs.get(number).merge_commit_sha}`,
+        ).parents?.[0]?.sha;
+        check(
+          /^[a-f0-9]{40}$/.test(landed),
+          `merge commit of #${number} has no first parent`,
+        );
+        if (run.base_sha !== landed)
+          found ??= { pr: number, at: other.hash, tested: run.base_sha, landed };
+      }
+    return found;
+  }
   let hits = 0,
     eligible = 0;
   const groups = {
@@ -1606,7 +1759,24 @@ async function cacheUse(opts) {
         );
         return ['ahead', 'identical'].includes(compare.status);
       });
-      if (!applicable.length) continue;
+      if (!applicable.length) {
+        // The release pull request's hash is one no carried run proved. That is a miss
+        // when a carried run proved this task at another hash against a base its merge
+        // did not land on, since the release is then re-testing what that run would
+        // have proved. A changed hash with its base unmoved is new work, as is a run
+        // whose base is unknown, which the detail counts.
+        if (e.release_pr && t.result !== 'remote_hit') {
+          const moved = baseMoved(t, e);
+          if (moved) {
+            eligible++;
+            groups.release.total++;
+            detail.push(
+              `miss ${t.task}/${e.os}/${t.hash}: base_moved, #${moved.pr} tested ${moved.at} on base ${moved.tested}, merged on ${moved.landed}`,
+            );
+          }
+        }
+        continue;
+      }
       eligible++;
       const group = groups[e.release_pr ? 'release' : 'retry'];
       group.total++;
@@ -1651,11 +1821,154 @@ async function cacheUse(opts) {
       `${name === 'release' ? 'release PR' : 'same-PR retry/push'}: ${g.hits}/${g.total} (${g.total ? (100 * g.hits) / g.total : 'n/a'}%)`,
     );
   detail.push(
-    `skipped local hits: ${localHits}; unavailable artifacts: 0; promotion failures: ${promotionFailures}; stored bytes: ${storedBytes}; requests: ${gh.requests}; artifact downloads: ${gh.downloads}`,
+    `skipped local hits: ${localHits}; unavailable artifacts: ${unavailable.count}; carried runs with an unknown base, excluded: ${unknownBase}; promotion failures: ${promotionFailures}; stored bytes: ${storedBytes}; requests: ${gh.requests}; artifact downloads: ${gh.downloads}`,
   );
   check(env.ONEBUDGETSPEC_RESULT, 'ONEBUDGETSPEC_RESULT is unset');
   save(env.ONEBUDGETSPEC_RESULT, { value, detail: detail.join('\n') });
   console.error(detail.join('\n'));
+}
+
+// GitHub's line is a binary 10 GiB, and the figure's gigabytes are decimal.
+const GIB = 1073741824;
+const GIGABYTE = 1000000000;
+const RESULT_KEY = /^nx-cache-/;
+// The key's trailing hex segments are rust-cache's environment and lockfile hashes.
+const familyOf = (key) => key.replace(/(-[0-9a-f]{6,})+$/, '');
+
+function headroomClient(repo) {
+  const github = new Github(repo);
+  const token = env.GH_TOKEN || env.GITHUB_TOKEN;
+  check(token, 'no token: set GH_TOKEN or GITHUB_TOKEN');
+  const seen = { requests: 0, lowest: null };
+  async function get(path) {
+    seen.requests++;
+    const answer = await fetch(`${github.api.replace(/\/$/, '')}/repos/${repo}/${path}`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        authorization: `Bearer ${token}`,
+        'x-github-api-version': '2022-11-28',
+      },
+      signal: AbortSignal.timeout(60000),
+    });
+    const remaining = Number(answer.headers.get('x-ratelimit-remaining') ?? NaN);
+    if (Number.isFinite(remaining))
+      seen.lowest = seen.lowest === null ? remaining : Math.min(seen.lowest, remaining);
+    check(answer.ok, `GET ${path} answered HTTP ${answer.status}`);
+    return answer.json();
+  }
+  return { get, seen };
+}
+
+// Every entry of the listing, or a thrown reason: entries sort by size, so a page not
+// read is entries of any kind not counted, and a figure over the rest would be wrong.
+async function listAllCaches(get) {
+  const entries = new Map();
+  let total = 0;
+  for (let page = 1; page <= 1000; page++) {
+    const doc = await get(
+      `actions/caches?sort=size_in_bytes&direction=desc&per_page=100&page=${page}`,
+    );
+    check(
+      Array.isArray(doc.actions_caches) && Number.isSafeInteger(doc.total_count),
+      `listing page ${page} is malformed`,
+    );
+    for (const entry of doc.actions_caches) {
+      check(
+        Number.isSafeInteger(entry.id) &&
+          typeof entry.key === 'string' &&
+          Number.isSafeInteger(entry.size_in_bytes) &&
+          Number.isFinite(Date.parse(entry.created_at)),
+        `listing page ${page} holds a malformed entry`,
+      );
+      entries.set(entry.id, entry);
+    }
+    total = doc.total_count;
+    if (doc.actions_caches.length < 100) {
+      check(
+        entries.size >= total,
+        `listing is incomplete: ${entries.size} of ${total} entries read`,
+      );
+      return [...entries.values()];
+    }
+  }
+  throw new Error('listing exceeds 1000 pages');
+}
+
+async function cacheHeadroom(args) {
+  const families = [];
+  let repo = env.GITHUB_REPOSITORY;
+  for (let at = 0; at < args.length; at += 2) {
+    const value = args[at + 1];
+    if (!['--family', '--repo'].includes(args[at]))
+      usage(`invalid argument ${args[at]}`);
+    if (!value || value.startsWith('--')) usage(`${args[at]} needs a value`);
+    if (args[at] === '--family') families.push(value);
+    else repo = value;
+  }
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? ''))
+    usage('--repo must be OWNER/NAME, or set GITHUB_REPOSITORY');
+  const { get, seen } = headroomClient(repo);
+  const limit = await get('actions/cache/storage-limit');
+  check(
+    Number.isFinite(limit.max_cache_size_gb) && limit.max_cache_size_gb > 0,
+    'storage limit carries no max_cache_size_gb',
+  );
+  const entries = await listAllCaches(get);
+  const allowance = limit.max_cache_size_gb * GIB;
+  // An entry a longer prefix also names belongs to that one.
+  const named = new Map(families.map((prefix) => [prefix, []]));
+  const byLength = [...named.keys()].sort((a, b) => b.length - a.length);
+  const others = [];
+  for (const entry of entries) {
+    const prefix = byLength.find((name) => entry.key.startsWith(name));
+    (prefix === undefined ? others : named.get(prefix)).push(entry);
+  }
+  const counted = [...others];
+  const familyLines = [];
+  const overfull = [];
+  for (const [prefix, members] of named) {
+    const [newest, ...older] = [...members].sort(
+      (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id,
+    );
+    if (newest) counted.push(newest);
+    const olderBytes = older.reduce((sum, entry) => sum + entry.size_in_bytes, 0);
+    familyLines.push(
+      `family ${prefix}: newest ${newest?.key ?? 'none'}; ${older.length} older ${older.length === 1 ? 'copy' : 'copies'}, ${olderBytes} bytes, not counted`,
+    );
+    if (members.length > 2) overfull.push([prefix, members.length]);
+  }
+  const results = entries.filter((entry) => RESULT_KEY.test(entry.key));
+  const resultBytes = results.reduce((sum, entry) => sum + entry.size_in_bytes, 0);
+  const nonResults = new Map();
+  for (const entry of counted.filter((entry) => !RESULT_KEY.test(entry.key))) {
+    const family = familyOf(entry.key);
+    nonResults.set(family, (nonResults.get(family) ?? 0) + entry.size_in_bytes);
+  }
+  const used = counted.reduce((sum, entry) => sum + entry.size_in_bytes, 0);
+  const oldest = results.reduce(
+    (at, entry) => Math.min(at, Date.parse(entry.created_at)),
+    Infinity,
+  );
+  const measured = Math.round(((allowance - used) / GIGABYTE) * 1000) / 1000;
+  const detail = [
+    `allowance: ${allowance} bytes (max_cache_size_gb ${limit.max_cache_size_gb}), ${allowance / GIGABYTE} GB; counted ${used} bytes`,
+    ...[...nonResults]
+      .sort((a, b) => b[1] - a[1])
+      .map(([family, bytes]) => `non-result ${family}: ${bytes} bytes`),
+    ...familyLines,
+    ...overfull.map(
+      ([prefix, count]) =>
+        `family ${prefix} holds ${count} entries, more than the two a working cleanup leaves: figure 0, measured ${measured}`,
+    ),
+    `results: ${results.length} entries, ${resultBytes} bytes; oldest result age: ${results.length ? `${Math.max(0, Math.round((Date.now() - oldest) / 1000))}s` : 'n/a'}`,
+    `requests: ${seen.requests}; lowest X-RateLimit-Remaining: ${seen.lowest ?? 'not reported'}`,
+  ].join('\n');
+  check(env.ONEBUDGETSPEC_RESULT, 'ONEBUDGETSPEC_RESULT is unset');
+  save(env.ONEBUDGETSPEC_RESULT, {
+    value: overfull.length ? 0 : measured,
+    detail,
+  });
+  console.error(detail);
 }
 
 async function main() {
@@ -1680,6 +1993,9 @@ async function main() {
           await cacheUse(opts);
         }
         break;
+      case 'cache-headroom':
+        await cacheHeadroom(args);
+        break;
       case 'promote': {
         const opts = options(
           args,
@@ -1701,7 +2017,7 @@ async function main() {
         await proxy();
         break;
       default:
-        usage('expected trust, ready, report, promote or cache-use');
+        usage('expected trust, ready, report, promote, cache-use or cache-headroom');
     }
   } catch (error) {
     console.error(error.message);

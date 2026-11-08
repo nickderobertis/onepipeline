@@ -14,6 +14,9 @@
     "build": {
       "command": "just _tier-build contract",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "contractSource",
         {
           "runtime": "node -p process.platform"
@@ -26,6 +29,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/contract.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "contractSource",
         {
           "runtime": "node -p process.platform"
@@ -35,6 +41,9 @@
     "lint": {
       "command": "just _tier-lint contract",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "contractSource",
         {
           "runtime": "node -p process.platform"
@@ -65,6 +74,9 @@
     "test-quick": {
       "command": "just _contract-test-quick",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _contract-test-quick --variable onetaskgraph-version"
+        },
         "contractSource",
         {
           "env": "ONEPIPELINE_TEST_PARTITION"
@@ -89,6 +101,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection"
       ]

@@ -1,0 +1,17 @@
+# Every version actions-budget-figures.sh has had, oldest first: `<version> <sha256
+# of every line after its header>`. A change to the script's body adds a line with
+# the next version and its header carries both; no line already here ever changes.
+# check_repo_baseline.py reads this to tell a repository's copy is current.
+1 e839aa36fc1ab5f447efc3dd6a17119d114b8ea3e303303e479bac06386c9b12
+2 34bd03bb503bdfbb6e834b3c278c9414f4124db212ef82426848914e00b00025
+3 38a2690787cff1748f09f093439bd8b929a9999c1ae50932469c5101ed801cea
+4 75da7c02643cda91e41283b31da59c964d50d90e86153e1d86621f1a7a1ea249
+5 cf0842bd1ab3c01b7e72e4a18de962499a7e5de030f8175cb8e804f5f58108cd
+6 05bc79c1067dc966cde6eb95971add8ee43ce82b943ffafd0fbe3e0abe0dc668
+7 ad33a62ae7d01e62a3c25910fcee1d4be8b37fea00237d96fa3ca2ead5765278
+8 d1b605c13430d7d86fdf16ff5341a577a1fae070c9a37518098778a6ccd2a4dd
+9 a29faecd791ba75ea38eb9a9940686416205ab0a4bb6c0edeba479e8129b7aaf
+10 13ac7d79aaa3902dc7cfe87449283a05ba397fbc0612701e9b788ed59daf438d
+11 4e712406a1b09dac07d496be28d6a71141958de3259efb5c85f1dc23744fa5a4
+12 b77b3b6fdccba79eae1db6523122d22eec80ac0738d5b4df03321db600697d3d
+13 d530d435aead03a443b1ea528db96eef9b97cc343d7eb3fade0b09099bd112ef

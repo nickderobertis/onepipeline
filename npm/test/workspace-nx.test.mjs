@@ -72,6 +72,10 @@ function project(name) {
 }
 
 const justfile = readFileSync(join(root, "justfile"), "utf8");
+// A `just` double stands in for running recipes. What a task's hash reads of the justfile
+// (scripts/nx-recipe-input.mjs) stays real, or no two runs would share a hash.
+const REAL_JUST = execFileSync("bash", ["-c", "command -v just"], { encoding: "utf8" }).trim();
+const PASS_DUMP_TO_REAL_JUST = `[ "$1" != --dump ] || exec "${REAL_JUST}" "$@"\n`;
 const nxJson = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
 
 /**
@@ -840,7 +844,7 @@ describe("affected selection over real commits", () => {
     mkdirSync(join(repo.path, "bin"));
     writeFileSync(
       join(repo.path, "bin", "just"),
-      '#!/usr/bin/env bash\necho "$*" >> "$JUST_CALLS"\n',
+      `#!/usr/bin/env bash\n${PASS_DUMP_TO_REAL_JUST}echo "$*" >> "$JUST_CALLS"\n`,
       {
         mode: 0o755,
       },
@@ -928,7 +932,7 @@ describe("coverage execution and quick-tier replay", () => {
   // the committed graph run here; the existing just double records invocations
   // and produces the named profile/report files the aggregate consumes.
   const DOUBLE = `#!/usr/bin/env bash
-echo "$1" >> "$JUST_CALLS"
+${PASS_DUMP_TO_REAL_JUST}echo "$1" >> "$JUST_CALLS"
 tree=target/llvm-cov-target
 case "$1" in
   _crate-coverage-clean) rm -rf "$tree" ;;
@@ -1124,7 +1128,7 @@ describe("the stop-verdict tier's builds", () => {
   // and ended, the build writes the binary the journeys time, and the journeys
   // record the binary they found, as the real producer records the one it timed.
   const DOUBLE = `#!/usr/bin/env bash
-now() { node -e 'process.stdout.write(String(Date.now()))'; }
+${PASS_DUMP_TO_REAL_JUST}now() { node -e 'process.stdout.write(String(Date.now()))'; }
 echo "start $1 $(now)" >> "$JUST_CALLS"
 case "$1" in
   _stop-verdict-build)
@@ -1220,7 +1224,11 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     const tier = project("onepipeline-stop-verdict");
     assert.equal(tier.targets.test.cache, false);
     assert.equal(tier.targets["test-build"].cache, true);
-    assert.deepEqual(tier.targets["test-build"].inputs, tier.targets.test.inputs);
+    // The producer's one more input is the digest of the recipe it runs; the timed run is
+    // uncached, so it needs none.
+    const recipeDigest = { runtime: "node scripts/nx-recipe-input.mjs _stop-verdict-build" };
+    assert.deepEqual(tier.targets["test-build"].inputs[0], recipeDigest);
+    assert.deepEqual(tier.targets["test-build"].inputs.slice(1), tier.targets.test.inputs);
   });
 
   it("builds only the release tree, leaving the debug tree's lock to the rest of the gate", () => {
@@ -1263,7 +1271,7 @@ describe("the npm suite's debug build", () => {
   // its own task. Asked of the real Nx and the committed graph in a scratch
   // repository, where `just` is a double that can refuse the build.
   const DOUBLE = `#!/usr/bin/env bash
-echo "$1" >> "$JUST_CALLS"
+${PASS_DUMP_TO_REAL_JUST}echo "$1" >> "$JUST_CALLS"
 printf '%s\n' "\${NX_RUN_COMMANDS_DIRECTLY:-unset}" > "$JUST_RUNNER_MODE"
 [ "$1" != _crate-build ] || [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
 `;

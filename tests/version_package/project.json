@@ -36,6 +36,9 @@
       "command": "just _version-package-test-quick",
       "cache": true,
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _version-package-test-quick --variable onetaskgraph-version"
+        },
         "crateTestSource",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
@@ -56,6 +59,7 @@
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
+        "justfileSelection",
         "cargoSelection",
         "npmSelection",
         "pythonSelection"
@@ -73,6 +77,9 @@
     "build": {
       "command": "just _tier-build package_bundle",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-build"
+        },
         "crateTestSource",
         {
           "runtime": "node -p process.platform"
@@ -91,6 +98,9 @@
     "format-check": {
       "command": "just _tier-fmt-check tests/package_bundle.rs",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-fmt-check"
+        },
         "crateTestSource",
         {
           "runtime": "node -p process.platform"
@@ -100,6 +110,9 @@
     "lint": {
       "command": "just _tier-lint package_bundle",
       "inputs": [
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _tier-lint"
+        },
         "crateTestSource",
         {
           "runtime": "node -p process.platform"

@@ -11,7 +11,7 @@ budgets:
       after the main upload and before the comment post: this job cannot include its own judgment,
       the post that carries that judgment, or runner queue, setup and teardown in a figure it
       reports about itself. The post took 1.14 to 1.86 s on the spike's runs and about 2.4 s before.
-      Workload: one budgets job per pull request push or base push, with 34 catalog rows and one
+      Workload: one budgets job per pull request push or base push, with 38 catalog rows and one
       rolling file of up to 20 base commits, downloading one results artifact of about 50 KB; on a
       base push it also reads the merged pull request's run. It protects the turnaround of the
       check every pull request waits on. An estimate, not yet a measurement of this workload: real
