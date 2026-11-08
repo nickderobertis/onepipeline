@@ -472,7 +472,11 @@ fn a_plan_copied_again_while_linears_listings_lag_creates_nothing_and_its_docume
     );
 
     let first = linear.log().len();
-    assert_eq!(copy(), landed, "the repeat lands on what the first copy wrote");
+    assert_eq!(
+        copy(),
+        landed,
+        "the repeat lands on what the first copy wrote"
+    );
     let created: Vec<_> = linear.log()[first..]
         .iter()
         .filter(|request| {
