@@ -249,7 +249,7 @@ const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 /// a later append looks like, which the complete reader answers as the later record, so
 /// it is never skimmed. Outside a string an opening cannot appear inside a payload's text,
 /// whose quotes are escaped; one a payload holds as structure only costs that line a parse.
-// llmlint: ignore[boundary_inputs_validated] the planner's ruling for this read: a line the
+// llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a line the
 // selection discards is read for its merge fields, node and artifact emptiness and never
 // parsed, because validating each one cost a 102 MB journal's first screen 731 ms at the
 // median. No skimmed field is trusted for a record returned: every kept line is the complete
@@ -272,7 +272,7 @@ fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
         instant: instant_of(opening.ts),
         parsed: None,
     })
-}
+} // llmlint: ignore-end[boundary_inputs_validated]
 
 /// A finished line read as the complete reader reads it: a whole record, or the
 /// whole record after a fragment, or nothing.
