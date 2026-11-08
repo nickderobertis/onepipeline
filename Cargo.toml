@@ -867,13 +867,15 @@ resolver = "2"
 # holds it. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of,
 # so the two requirements move as one.
 #
-# `oneagentgraph` 0.9.2 is the floor because it replaces a graph run's record
+# `oneagentgraph` 0.9.3 is the floor because it replaces a graph run's record
 # whole — written to a sibling and renamed into place — so a reader never opens
-# it empty or half-written. Below it the real sibling's `reset-timer` could read
-# a run's state mid-write and refuse with `EOF while parsing a value`.
-# `tests/e2e/dispatch.rs`'s `consuming_a_surface_restarts_the_real_pacemakers_clock`
-# drives that read through the sibling binary this lock builds. It requires
-# nothing this lock did not already resolve.
+# it empty or half-written, and on Windows a read never meets the record in the
+# middle of that replace. Below it the real sibling's `reset-timer` could read a
+# run's state mid-write and refuse with `EOF while parsing a value`; 0.9.2 closed
+# that on Unix alone. `tests/e2e/dispatch.rs`'s
+# `consuming_a_surface_restarts_the_real_pacemakers_clock` drives that read
+# through the sibling binary this lock builds. It requires nothing this lock did
+# not already resolve.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -895,7 +897,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.9.2"
+oneagentgraph = "0.9.3"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.
