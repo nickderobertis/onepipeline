@@ -276,6 +276,11 @@ struct World {
     held: bool,
     /// Whether links and headings are held as real Linear holds them: [`Linear::store_links`].
     links_stored: bool,
+    /// Whether a record filed from now on is left out of every filtered and searched read:
+    /// [`Linear::lag_listings`].
+    lagging: bool,
+    /// The id of every record filed while [`World::lagging`], which only a read by id finds.
+    unlisted: Vec<String>,
 }
 
 /// The loopback endpoint. Its listener serves until the test process ends, so a driver a journey
@@ -347,6 +352,16 @@ impl Linear {
     /// the journeys holding that fallback serve.
     pub fn store_links(&self) {
         self.lock().links_stored = true;
+    }
+
+    /// Lag every filtered and searched read behind the writes, as Linear's were observed to on
+    /// `TES2`: an issue, the project or a document filed from now on is left out of the `issues`
+    /// search, the `projects` and `documents` listings and the counterpart lookups a copy sends
+    /// ahead of its writes, and is found only by a read of its id — which Linear answers the
+    /// moment a record is written. That is the furthest such a read can lag, so a store that
+    /// finds what it wrote here finds it however briefly Linear's lag.
+    pub fn lag_listings(&self) {
+        self.lock().lagging = true;
     }
 
     /// The editor state the issue `id` is answered with.
@@ -727,7 +742,7 @@ impl Linear {
                     Err(why) => return refusal(&why),
                 };
                 data["originProjects"] = json!({
-                    "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
+                    "nodes": world.listed_project(),
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
                 });
                 data
@@ -771,7 +786,7 @@ impl Linear {
                 Err(why) => return refusal(&why),
             },
             Operation::Projects => json!({"projects": {
-                "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
+                "nodes": world.listed_project(),
                 "pageInfo": {"hasNextPage": false, "endCursor": null},
             }}),
             Operation::Project | Operation::ProjectRelations if !world.holds(id) => {
@@ -903,6 +918,7 @@ impl Linear {
                 "nodes": world
                     .documents
                     .iter()
+                    .filter(|held| world.listed_id(&held.id))
                     .map(|held| world.render_document(held))
                     .collect::<Vec<_>>(),
                 "pageInfo": {"hasNextPage": false, "endCursor": null},
@@ -1016,6 +1032,7 @@ impl World {
         if let Some(id) = input.get("id").and_then(Value::as_str) {
             id.clone_into(&mut self.project_id);
         }
+        self.filed(&self.project_id.clone());
         self.project_held = true;
         Ok(self.project())
     }
@@ -1047,6 +1064,7 @@ impl World {
             priority: input.get("priority").and_then(Value::as_u64).unwrap_or(0),
         };
         let answer = self.render(&issue);
+        self.filed(&issue.id);
         self.issues.push(issue);
         Ok(answer)
     }
@@ -1077,6 +1095,7 @@ impl World {
                     || format!("document-{}", self.documents.len() + 1),
                     str::to_owned,
                 );
+                self.filed(&id);
                 self.documents.push(Document {
                     id,
                     title: title.to_owned(),
@@ -1316,10 +1335,32 @@ impl World {
         Ok(id)
     }
 
-    /// Every issue, each with the relation connections `query` selects.
+    /// Record that `id` was just filed, which leaves it out of every listing while lagging.
+    fn filed(&mut self, id: &str) {
+        if self.lagging {
+            self.unlisted.push(id.to_owned());
+        }
+    }
+
+    /// Whether a filtered or searched read lists the record `id`: see [`Linear::lag_listings`].
+    fn listed_id(&self, id: &str) -> bool {
+        !self.unlisted.iter().any(|held| held == id)
+    }
+
+    /// The project, as a `projects` listing answers it: none until one is filed and listed.
+    fn listed_project(&self) -> Vec<Value> {
+        if self.project_held && self.listed_id(&self.project_id) {
+            vec![self.project()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Every issue a search lists, each with the relation connections `query` selects.
     fn listed(&self, query: &str) -> Result<Vec<Value>, String> {
         self.issues
             .iter()
+            .filter(|held| self.listed_id(&held.id))
             .map(|held| self.related(self.render(held), query))
             .collect()
     }

@@ -386,6 +386,111 @@ fn a_budget_table_of_reference_links_lands_on_each_tasks_heading_at_a_private_li
     );
 }
 
+/// A plan copied to a Linear source declared private, whose filtered and searched reads lag every
+/// write as Linear's were observed to on `TES2`, and at once copied again: the repeat finds each
+/// record the first copy wrote and creates none, and the design document copied right after its
+/// plan resolves its link to each of the plan's tasks. A store that finds its counterparts only
+/// through those reads creates the plan a second time, and leaves the document's links unresolved.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey composes the linked store's copy with the Linear plugin over a real socket and reads what the endpoint stored and was sent, which only the e2e binary's loopback offers, as for the Linear journeys above it.
+#[test]
+fn a_plan_copied_again_while_linears_listings_lag_creates_nothing_and_its_document_links_resolve() {
+    let world = World::new("linear-lagging-listings").with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve_empty(STATES, STATUSES);
+    linear.lag_listings();
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        configuration(&linear).replacen(
+            "    plugin: linear",
+            "    visibility: private\n    plugin: linear",
+            1,
+        ),
+    )
+    .expect("the launch directory's store configuration");
+
+    let name = "linear-lagging";
+    world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                json!({"id": "core", "task": "## What\nShip core.\n"}),
+                json!({"id": "later", "task": "## What\nShip later.\n"}),
+            ],
+        ),
+    );
+    let project = project_id(name);
+    world.write_item(
+        &world.store().join("documents").join("design.md"),
+        &[("title", json!("Design")), ("project", json!(project))],
+        &format!(
+            "## Tasks\n\nFirst [core](../tasks/{project}/000-core.md), then \
+             [later](../tasks/{project}/001-later.md).\n"
+        ),
+    );
+
+    let copy = || {
+        let home = copied(
+            &world,
+            &launch,
+            &format!("{STORE_SOURCE}:{project}"),
+            onetaskgraph_core::CopyScope::Projects { tasks: true },
+        );
+        let document = copied(
+            &world,
+            &launch,
+            &format!("{STORE_SOURCE}:design"),
+            onetaskgraph_core::CopyScope::Documents,
+        );
+        (home, document)
+    };
+    let landed = copy();
+    let issues = linear.issues();
+    assert_eq!(issues.len(), 2, "one issue a task: {issues:#?}");
+    let address = |node: &str| {
+        let (id, _, _) = issues
+            .iter()
+            .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == node)
+            .unwrap_or_else(|| panic!("Linear holds no copy of {node}: {issues:#?}"));
+        linear.issue_address(id)
+    };
+    let held = linear
+        .documents()
+        .into_iter()
+        .find(|(id, _)| landed.1 == format!("{SOURCE}:{id}"))
+        .map(|(_, content)| content)
+        .unwrap_or_else(|| panic!("Linear holds no {}", landed.1));
+    assert_eq!(
+        content_of(&held),
+        format!(
+            "## Tasks\n\nFirst [core]({}), then [later]({}).",
+            address("core"),
+            address("later")
+        ),
+        "the document's links resolve to each task's copy, as Linear stores it:\n{held}"
+    );
+
+    let first = linear.log().len();
+    assert_eq!(copy(), landed, "the repeat lands on what the first copy wrote");
+    let created: Vec<_> = linear.log()[first..]
+        .iter()
+        .filter(|request| {
+            matches!(
+                request.operation,
+                Operation::ProjectCreate | Operation::IssueCreate | Operation::DocumentCreate
+            )
+        })
+        .cloned()
+        .collect();
+    assert!(
+        created.is_empty(),
+        "the repeat created a record the first copy wrote: {created:#?}"
+    );
+    assert_eq!(linear.issues().len(), 2, "{:#?}", linear.issues());
+    assert_eq!(linear.documents().len(), 1, "{:#?}", linear.documents());
+}
+
 /// Copy `item` into Linear with the linked store's copy over `scope`, and answer where it landed.
 fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::CopyScope) -> String {
     let report = copy_report(world, launch, item, scope)
