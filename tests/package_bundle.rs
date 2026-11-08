@@ -93,7 +93,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     };
     let mut built = Vec::new();
     for (platform, runner) in [
-        ("linux", "ubuntu-latest"),
+        ("linux", "ubuntu-24.04"),
         ("linux-arm64", "ubuntu-24.04-arm"),
         ("macos", "macos-latest"),
         ("windows", "windows-latest"),
