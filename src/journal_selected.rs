@@ -515,7 +515,9 @@ fn select(
     })
 }
 
-/// Fewer bytes than this are read on one thread.
+/// Fewer bytes than this are read on one thread. Only the Unix read splits a file
+/// across threads, so elsewhere there is nothing for it to bound.
+#[cfg(unix)]
 const READ_ALONE: usize = 8 << 20;
 
 /// The bytes of `path` up to its length when opened: on a long journal read in parts
