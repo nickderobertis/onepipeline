@@ -704,7 +704,7 @@ human-items-budget:
 status-read-budget:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @STATUS_READ_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test status_read_workload -- --test-threads 1 --nocapture
-    @cd tests/status_read && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+    @cd tests/status_read && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/status-read.json
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
