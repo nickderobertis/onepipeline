@@ -1366,6 +1366,10 @@ onevcs-testing = "0.20.0"
 # **0.14.7 writes a reference-style link inline on a copy to Linear**, which keeps one only as
 # escaped text, and takes Linear's autolinks and escapes of a follow-up's own text for what they
 # are rather than refusing them: `tests/e2e/linear_launch.rs`'s budget-table journey fails on 0.14.5.
+# **0.14.9 finds what an earlier copy wrote to Linear by reading its id** (onetaskgraph #3931), so
+# a repeat copy creates nothing and a document copied right after its project resolves every link
+# to it while Linear's filtered and searched reads lag its writes: the lagging-listings journey in
+# `tests/e2e/linear_launch.rs` fails on 0.14.7. 0.14.8 was tagged but never published its crates.
 onetaskgraph-core = "=0.14.9"
 onetaskgraph-plugin-api = "=0.14.9"
 onetaskgraph-local-md = "=0.14.9"
