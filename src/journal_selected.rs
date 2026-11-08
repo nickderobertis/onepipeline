@@ -2,7 +2,8 @@
 //! whole journal, each with the place a complete read gives it.
 //!
 //! Published through [`crate::journal`]. Every line is merged, so a kept record's
-//! place is the complete read's, and only what is kept becomes a record.
+//! place is the complete read's wherever each line nothing keeps is one the complete
+//! read holds as a record, and only what is kept becomes a record.
 //!
 //! **What the skim rests on.** Every writer of a journal serializes an
 //! [`Envelope`] through its one `Serialize`, whose fields are, in this order: `v`,
@@ -11,24 +12,27 @@
 //! its opening; anything else about a line, a field in another order or a string
 //! carrying an escape, sends it to the complete reader's own parse rather than past it.
 //!
-//! **What it answers as the complete reader does, on every line.** A line holds a place
-//! only if the complete reader would hand back a record for it, so each line in the form
-//! is also validated to the end, by the same parser and depth and against the envelope's
-//! own field types, without building its payload: [`Checked`] is why a line nothing keeps
-//! costs its bytes and no tree. A line that fails goes to the complete reader's parse,
-//! which answers what it answers: a line holding a fragment and then a whole record is
-//! that record, and a blank or unreadable line is no record. A final line no newline
-//! ended is no record, whatever it holds and whichever form it is in.
+//! **What it answers as the complete reader does.** A line in the form is read for its
+//! merge fields, its node and whether its `artifacts` are empty, and nothing between its
+//! opening and its end is parsed unless the selection keeps it: on a long run nearly every
+//! byte is a record nothing keeps. Every kept record is then parsed by the complete
+//! reader's own parse, and where one in the form turns out to be no record the whole read
+//! is the complete reader's, line by line, so what is returned for a kept record is what a
+//! complete read holds for it. What is not checked is the middle of a line nothing keeps:
+//! one whose opening and end are the writers' and whose middle a complete reader refuses
+//! is merged as the record its opening names. A line out of the form is parsed rather than
+//! skimmed, and answers what the complete reader answers: a line holding a fragment and
+//! then a whole record is that record, and a blank or unreadable line is no record. A
+//! final line no newline ended is no record, whatever it holds and whichever form it is in.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::de::value::{Error as ValueError, StrDeserializer};
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
-use crate::event::{ArtifactRef, Envelope, Phase, Source};
+use crate::event::{Envelope, Phase, Source};
 
 /// The kinds a first screen does not parse unless its node is asked for: by far the
 /// most numerous records of a long run, and nothing a first answer draws.
@@ -37,8 +41,15 @@ const SKIPPED_KINDS: [&str; 2] = ["member-heartbeat", "turn-activity"];
 /// Fewer items than this are worked through on one thread.
 const WORKED_ALONE: usize = 512;
 
-/// What spike-first-screen measured the read at, on a host running other work beside it.
-const WORKERS: usize = 4;
+/// The most threads one read works across: past this a host running other work beside
+/// it gains little, and a first screen should not take a busy host's every core.
+const MOST_WORKERS: usize = 8;
+
+/// The threads a read of many items works across: the host's parallelism, up to
+/// [`MOST_WORKERS`], and the four spike-first-screen measured at where it cannot say.
+fn workers() -> usize {
+    std::thread::available_parallelism().map_or(4, |cores| cores.get().min(MOST_WORKERS))
+}
 
 /// What a [`read_selected`] keeps of a journal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +94,29 @@ pub struct SelectedRecords {
     pub shares: HashMap<String, Vec<usize>>,
 }
 
+/// A `ts` in the one form the writers stamp, `YYYY-MM-DDTHH:MM:SS.mmmZ`, as the number
+/// its digits spell: two of that form compare as their text does, so a journal whose
+/// every `ts` is in it is merged on numbers. `None` for any other text.
+fn instant_of(ts: &str) -> Option<u64> {
+    const FORM: &[u8; 24] = b"0000-00-00T00:00:00.000Z";
+    let ts = ts.as_bytes();
+    if ts.len() != FORM.len() {
+        return None;
+    }
+    let mut instant = 0_u64;
+    for (byte, form) in ts.iter().zip(FORM) {
+        if *form == b'0' {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            instant = instant * 10 + u64::from(byte - b'0');
+        } else if byte != form {
+            return None;
+        }
+    }
+    Some(instant)
+}
+
 /// One line of a journal, as far as a selection needs it.
 #[derive(Debug)]
 struct Skim<'a> {
@@ -93,18 +127,26 @@ struct Skim<'a> {
     kind: Cow<'a, str>,
     node: Option<Cow<'a, str>>,
     evidence: bool,
+    /// Its `ts` as [`instant_of`] reads it.
+    instant: Option<u64>,
     /// The record, where reading this line already parsed it.
     parsed: Option<Box<Envelope>>,
 }
 
-/// Bytes `from` the start of `line` up to the closing quote of a string with no
+/// The bytes from the start of `line` up to the closing quote of a string with no
 /// escape in it, and what follows that quote.
-fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
+fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let end = memchr::memchr2(b'"', b'\\', line)?;
     if line[end] != b'"' {
         return None;
     }
-    Some((std::str::from_utf8(&line[..end]).ok()?, &line[end + 1..]))
+    Some((&line[..end], &line[end + 1..]))
+}
+
+/// [`bytes_of`], where what is wanted is the text.
+fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
+    let (text, rest) = bytes_of(line)?;
+    Some((std::str::from_utf8(text).ok()?, rest))
 }
 
 /// The decimal number at the start of `line`, as an envelope's serializer writes
@@ -123,27 +165,30 @@ fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
 /// the object.
 fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     let mut node = None;
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<&[u8]> = Vec::new();
     if let Some(after) = rest.strip_prefix(b"}") {
         return Some((None, after));
     }
     loop {
-        let (key, after) = string_of(rest.strip_prefix(b"\"")?)?;
+        // Only `node`'s value is text anything reads, so no other is decoded.
+        let (key, after) = bytes_of(rest.strip_prefix(b"\"")?)?;
         if seen.contains(&key) {
             return None;
         }
         seen.push(key);
         let after = after.strip_prefix(b":")?;
         rest = if let Some(value) = after.strip_prefix(b"\"") {
-            if key == "round" {
+            if key == b"round" {
                 return None;
             }
-            let (value, after) = string_of(value)?;
-            if key == "node" {
+            if key == b"node" {
+                let (value, after) = string_of(value)?;
                 node = Some(value);
+                after
+            } else {
+                bytes_of(value)?.1
             }
-            after
-        } else if key == "round" {
+        } else if key == b"round" {
             number_of(after)?.1
         } else {
             return None;
@@ -153,76 +198,6 @@ fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
         }
         rest = rest.strip_prefix(b",")?;
     }
-}
-
-/// A JSON value read by the parser a record is read by, to the end and at the same
-/// depth, with nothing kept of it: every string decoded and every number read, so what
-/// the complete reader refuses in a payload this refuses, and a tree it would build
-/// here is not built.
-struct Checked;
-
-impl<'de> Deserialize<'de> for Checked {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(CheckedVisitor)
-    }
-}
-
-struct CheckedVisitor;
-
-impl<'de> Visitor<'de> for CheckedVisitor {
-    type Value = Checked;
-
-    fn expecting(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        out.write_str("any JSON value")
-    }
-    fn visit_bool<E>(self, _: bool) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_i64<E>(self, _: i64) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_u64<E>(self, _: u64) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_f64<E>(self, _: f64) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_str<E>(self, _: &str) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_unit<E>(self) -> Result<Checked, E> {
-        Ok(Checked)
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Checked, A::Error> {
-        while items.next_element::<Checked>()?.is_some() {}
-        Ok(Checked)
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Checked, A::Error> {
-        while fields.next_entry::<Checked, Checked>()?.is_some() {}
-        Ok(Checked)
-    }
-}
-
-/// A whole line in the writers' form, as far as the envelope's own types decide it: a
-/// field it does not name, a repeated one or a value of another type is refused here and
-/// answered by the complete reader's parse. The labels are [`labels_of`]'s to have read.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(
-    dead_code,
-    reason = "each field is read for the refusal its type makes, and only `artifacts` is used"
-)]
-struct WholeLine {
-    v: u32,
-    ts: IgnoredAny,
-    stream: IgnoredAny,
-    seq: u64,
-    source: IgnoredAny,
-    kind: IgnoredAny,
-    phase: Option<IgnoredAny>,
-    labels: Checked,
-    payload: Checked,
-    artifacts: Vec<ArtifactRef>,
 }
 
 /// The fields a merge needs off the opening of a line in the writers' form, with nothing
@@ -237,7 +212,8 @@ struct Opening<'a> {
 }
 
 fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
-    let (_, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
+    let (v, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
+    u32::try_from(v).ok()?;
     let (ts, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
     let (stream, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
     let (seq, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
@@ -261,14 +237,25 @@ fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
     })
 }
 
-/// A line in the one form the writers leave that the complete reader would read as a
-/// record, or `None` for any other, which then goes to [`parsed_line`].
+/// Where a line's top-level `artifacts` array opens: the last time this appears in it,
+/// since that array is an envelope's last field and an artifact holds no array.
+const ARTIFACTS: &[u8] = b",\"artifacts\":[";
+
+/// A line in the one form the writers leave, its merge fields read off its opening and
+/// whether it carries evidence off its end, with nothing between parsed; `None` for any
+/// other line, which then goes to [`parsed_line`].
+///
+/// A line holding a second envelope's opening past its start is what a fragment glued to
+/// a later append looks like, which the complete reader answers as the later record, so
+/// it is never skimmed. Outside a string an opening cannot appear inside a payload's text,
+/// whose quotes are escaped; one a payload holds as structure only costs that line a parse.
 fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     let opening = opening_of(line)?;
-    if !line.ends_with(b"]}") {
+    let body = line.strip_suffix(b"]}")?;
+    if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
         return None;
     }
-    let whole: WholeLine = serde_json::from_str(std::str::from_utf8(line).ok()?).ok()?;
+    let artifacts = memchr::memmem::rfind(body, ARTIFACTS)?;
     Some(Skim {
         line,
         ts: Cow::Borrowed(opening.ts),
@@ -276,7 +263,8 @@ fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
         seq: opening.seq,
         kind: Cow::Borrowed(opening.kind),
         node: opening.node.map(Cow::Borrowed),
-        evidence: !whole.artifacts.is_empty(),
+        evidence: artifacts + ARTIFACTS.len() < body.len(),
+        instant: instant_of(opening.ts),
         parsed: None,
     })
 }
@@ -299,6 +287,7 @@ fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
         kind: Cow::Owned(event.kind.0.clone()),
         node: event.labels.node.clone().map(Cow::Owned),
         evidence: !event.artifacts.is_empty(),
+        instant: instant_of(&event.ts),
         parsed: Some(Box::new(event)),
     })
 }
@@ -321,7 +310,7 @@ fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec
     let work = &work;
     std::thread::scope(|scope| {
         let workers: Vec<_> = items
-            .chunks(items.len().div_ceil(WORKERS))
+            .chunks(items.len().div_ceil(workers()))
             .map(|items| scope.spawn(move || items.iter().map(work).collect::<Vec<_>>()))
             .collect();
         workers
@@ -339,6 +328,60 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
     })
 }
 
+/// Each stream's lines in its own order, and every line's index in merged order: what
+/// [`merge_order`](crate::journal::merge_order) answers for the same records.
+///
+/// Where every line's `ts` is in the writers' form the heads are compared as numbers,
+/// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
+/// streams, which orders them as their text does; otherwise as the text itself.
+fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let Some(instants) = lines
+        .iter()
+        .map(|line| line.instant)
+        .collect::<Option<Vec<u64>>>()
+    else {
+        let key = |index: usize| {
+            let line = &lines[index];
+            (line.ts.as_ref(), line.stream.as_ref(), line.seq)
+        };
+        let queues = crate::journal::stream_queues(lines.len(), key);
+        let order = crate::journal::merge_queues(queues.clone(), key);
+        return (queues.into_iter().map(|(_, queue)| queue).collect(), order);
+    };
+    let mut streams: HashMap<&str, usize> = HashMap::new();
+    let mut queues: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
+            queues.push((line.stream.as_ref(), Vec::new()));
+            queues.len() - 1
+        });
+        queues[at].1.push(index);
+    }
+    // By stream, so a queue's position is its stream's rank.
+    queues.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut queues: Vec<Vec<usize>> = queues.into_iter().map(|(_, queue)| queue).collect();
+    for queue in &mut queues {
+        // Stable, for the reason `stream_queues` gives.
+        queue.sort_by_key(|index| lines[*index].seq);
+    }
+    let mut heads: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>> = queues
+        .iter()
+        .enumerate()
+        .filter_map(|(rank, queue)| Some(std::cmp::Reverse((instants[*queue.first()?], rank))))
+        .collect();
+    let mut cursors = vec![0_usize; queues.len()];
+    let mut order = Vec::with_capacity(lines.len());
+    while let Some(std::cmp::Reverse((_, rank))) = heads.pop() {
+        let queue = &queues[rank];
+        order.push(queue[cursors[rank]]);
+        cursors[rank] += 1;
+        if let Some(next) = queue.get(cursors[rank]) {
+            heads.push(std::cmp::Reverse((instants[*next], rank)));
+        }
+    }
+    (queues, order)
+}
+
 /// A selection over the lines of a journal, or `None` where a kept line in the
 /// skimmed form turned out to be no record.
 fn select(
@@ -351,14 +394,10 @@ fn select(
         .into_iter()
         .flatten()
         .collect();
-    let key = |index: usize| {
-        let line = &lines[index];
-        (line.ts.as_ref(), line.stream.as_ref(), line.seq)
-    };
-    let queues = crate::journal::stream_queues(lines.len(), key);
+    let (queues, order) = merged(&lines);
     let mut stream_end = vec![false; lines.len()];
     let mut repeated = vec![false; lines.len()];
-    for (_, queue) in &queues {
+    for queue in &queues {
         if let (Some(first), Some(last)) = (queue.first(), queue.last()) {
             stream_end[*first] = true;
             stream_end[*last] = true;
@@ -367,18 +406,38 @@ fn select(
             repeated[pair[1]] = lines[pair[0]].seq == lines[pair[1]].seq;
         }
     }
-    let order = crate::journal::merge_queues(queues, key);
+    drop(queues);
 
-    let mut before_evidence: HashSet<usize> = HashSet::new();
+    // Each line's node as a number, so nothing below hashes a name per line.
+    let mut node_ids: HashMap<&str, usize> = HashMap::new();
+    let mut names: Vec<&str> = Vec::new();
+    let node_of: Vec<Option<usize>> = lines
+        .iter()
+        .map(|line| {
+            let node = line.node.as_deref()?;
+            Some(*node_ids.entry(node).or_insert_with(|| {
+                names.push(node);
+                names.len() - 1
+            }))
+        })
+        .collect();
+    let asked = match selection {
+        Selection::FirstScreen { node } | Selection::Share(node) => {
+            node.map(|node| node_ids.get(node).copied())
+        }
+    };
+
+    let mut before_evidence = vec![false; lines.len()];
     if matches!(selection, Selection::FirstScreen { .. }) {
-        let mut previous: HashMap<&str, usize> = HashMap::new();
+        let mut previous: Vec<Option<usize>> = vec![None; names.len()];
         for index in &order {
-            let line = &lines[*index];
-            if let (Some(node), false) = (line.node.as_deref(), repeated[*index]) {
-                if line.evidence {
-                    before_evidence.extend(previous.get(node).copied());
+            if let (Some(node), false) = (node_of[*index], repeated[*index]) {
+                if lines[*index].evidence {
+                    if let Some(before) = previous[node] {
+                        before_evidence[before] = true;
+                    }
                 }
-                previous.insert(node, *index);
+                previous[node] = Some(*index);
             }
         }
     }
@@ -388,23 +447,24 @@ fn select(
         if at == 0 || at + 1 == order.len() {
             return true;
         }
-        match selection {
-            Selection::FirstScreen { node } => {
+        match (selection, asked) {
+            (Selection::FirstScreen { .. }, asked) => {
                 !SKIPPED_KINDS.contains(&line.kind.as_ref())
                     || stream_end[index]
-                    || before_evidence.contains(&index)
-                    || node.is_some_and(|node| line.node.as_deref() == Some(node))
+                    || before_evidence[index]
+                    || asked.is_some_and(|asked| asked.is_some() && asked == node_of[index])
             }
-            Selection::Share(owner) => line.node.as_deref() == *owner,
+            (Selection::Share(_), None) => node_of[index].is_none(),
+            (Selection::Share(_), Some(asked)) => asked.is_some() && asked == node_of[index],
         }
     };
 
-    let mut kept: Vec<&Skim<'_>> = Vec::new();
+    let mut kept: Vec<(&Skim<'_>, Option<usize>)> = Vec::new();
     let mut places = Vec::new();
     let mut share_places = Vec::new();
     let mut store_len = 0;
     let mut last_seq = 0;
-    let mut share_lengths: HashMap<&str, usize> = HashMap::new();
+    let mut share_lengths = vec![0_usize; names.len()];
     for (at, index) in order.iter().enumerate() {
         let line = &lines[*index];
         last_seq = last_seq.max(line.seq);
@@ -412,29 +472,35 @@ fn select(
             store_len += 1;
             store_len - 1
         });
-        let share_place = line.node.as_deref().zip(place).map(|(node, _)| {
-            let length = share_lengths.entry(node).or_insert(0);
-            *length += 1;
-            *length - 1
+        let share_place = node_of[*index].zip(place).map(|(node, _)| {
+            share_lengths[node] += 1;
+            share_lengths[node] - 1
         });
         if chosen(*index, at) {
-            kept.push(line);
+            kept.push((line, node_of[*index]));
             places.push(place);
             share_places.push(share_place);
         }
     }
 
-    let mut shares: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut share_lists: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
     let mut events = Vec::with_capacity(kept.len());
-    for (record, (line, share_place)) in parsed_records(&kept)
+    let lines_kept: Vec<&Skim<'_>> = kept.iter().map(|(line, _)| *line).collect();
+    for (record, ((_, node), share_place)) in parsed_records(&lines_kept)
         .into_iter()
         .zip(kept.iter().zip(share_places))
     {
         events.push(record?);
-        if let (Some(node), Some(place)) = (line.node.as_deref(), share_place) {
-            shares.entry(node.to_owned()).or_default().push(place);
+        if let (Some(node), Some(place)) = (node, share_place) {
+            share_lists[*node].push(place);
         }
     }
+    let shares: HashMap<String, Vec<usize>> = names
+        .iter()
+        .zip(share_lists)
+        .filter(|(_, places)| !places.is_empty())
+        .map(|(name, places)| ((*name).to_owned(), places))
+        .collect();
     Some(SelectedRecords {
         events,
         places,
@@ -444,13 +510,50 @@ fn select(
     })
 }
 
+/// Fewer bytes than this are read on one thread.
+const READ_ALONE: usize = 8 << 20;
+
+/// The bytes of `path` up to its length when opened: on a long journal read in parts
+/// across threads, since one thread's copy out of the page cache is most of what a
+/// 100 MB first screen used to wait on. A file that came up shorter than its length
+/// was read again whole, which is what a reader of an append-only file never meets.
+fn whole_file(path: &Path) -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::File::open(path).ok()?;
+        let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+        if len >= READ_ALONE {
+            let mut bytes = vec![0_u8; len];
+            let part = len.div_ceil(workers());
+            let read = std::thread::scope(|scope| {
+                let parts: Vec<_> = bytes
+                    .chunks_mut(part)
+                    .enumerate()
+                    .map(|(at, chunk)| {
+                        let file = &file;
+                        scope.spawn(move || file.read_exact_at(chunk, (at * part) as u64))
+                    })
+                    .collect();
+                parts
+                    .into_iter()
+                    .all(|part| part.join().is_ok_and(|read| read.is_ok()))
+            });
+            if read {
+                return Some(bytes);
+            }
+        }
+    }
+    std::fs::read(path).ok()
+}
+
 /// Read a whole journal, parsing only what `selection` keeps.
 ///
 /// A journal that cannot be read reads as one holding nothing, which is the rule
 /// the complete read follows. The module note says what the read rests on.
 #[must_use]
 pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecords {
-    let Ok(bytes) = std::fs::read(journal) else {
+    let Some(bytes) = whole_file(journal) else {
         return SelectedRecords::default();
     };
     crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
@@ -600,7 +703,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A line in any other form is not skimmed: each of these reads through the parse.
+    /// A line in any other form is not skimmed: each of these reads through the parse, a
+    /// second envelope's opening inside it among them.
     #[test]
     fn a_line_in_another_form_is_never_skimmed() {
         let whole = concat!(
@@ -616,13 +720,24 @@ mod tests {
             whole.replace(r#""pipeline""#, r#""elsewhere""#),
             whole.replace(r#""labels":{"node":"n"}"#, r#""labels":{"round":"2"}"#),
             whole.replace(r#","artifacts":[]"#, ""),
-            whole.replace(r#""payload":{}"#, r#""payload":{broken}"#),
-            whole.replace(r#""payload":{}"#, r#""payload":{},"stray":1"#),
+            whole.replace(r#""payload":{}"#, r#""payload":{"inner":{"v":1}}"#),
+            whole.replace(r#","artifacts":[]"#, r#","artifacts":[],"stray":1"#),
             whole.replace(r#"{"v":2"#, r#"{"v":99999999999"#),
             whole[..whole.len() - 4].to_owned(),
             format!(r#"{}{whole}"#, &whole[..whole.len() - 20]),
         ] {
             assert!(skimmed_line(other.as_bytes()).is_none(), "{other}");
         }
+        // What the skim does not look at: a middle nothing keeps is never parsed, so one
+        // broken there is skimmed by its opening, and found only if it is kept.
+        for broken in [
+            whole.replace(r#""payload":{}"#, r#""payload":{broken}"#),
+            whole.replace(r#""payload":{}"#, r#""payload":{},"stray":1"#),
+        ] {
+            assert!(skimmed_line(broken.as_bytes()).is_some(), "{broken}");
+        }
+        let evidence = whole.replace(r#""artifacts":[]"#, r#""artifacts":[{"id":"a"}]"#);
+        assert!(skimmed_line(evidence.as_bytes()).is_some_and(|skim| skim.evidence));
+        assert!(skimmed_line(whole.as_bytes()).is_some_and(|skim| !skim.evidence));
     }
 }

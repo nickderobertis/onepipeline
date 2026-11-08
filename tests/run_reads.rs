@@ -354,11 +354,17 @@ fn each_selection_keeps_what_its_rule_names_at_the_places_a_complete_merge_gives
         (12, 9, 2000),
         (13, 400, 6000),
         (14, 2100, 9000),
+        // Past the size a read takes in parts across threads.
+        (15, 2100, 40_000),
     ] {
         let run = Run::new(
             &format!("select-{seed}"),
             &generated(seed, streams, records),
         );
+        if records == 40_000 {
+            let bytes = std::fs::metadata(run.journal()).expect("a journal").len();
+            assert!(bytes > 8 << 20, "{bytes} bytes is read on one thread");
+        }
         every_selection_agrees(&run, &format!("seed {seed}"));
     }
 }
@@ -384,6 +390,15 @@ fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
         "source": "pipeline", "kind": "node-started", "labels": {"node": "ship"},
     }));
     let whole = last.clone();
+    let heartbeat = written(&json!({
+        "v": 1, "ts": stamp(1), "stream": "stream-1", "seq": 50_000,
+        "source": "agentgraph", "kind": "member-heartbeat", "labels": {"node": "ship"},
+        "payload": {"text": "beat"},
+    }));
+    let later = written(&json!({
+        "v": 2, "ts": stamp(9_100_000), "stream": "stream-1", "seq": 100_001,
+        "source": "pipeline", "kind": "node-started", "labels": {"node": "ship"},
+    }));
     let cases: Vec<(&str, String)> = vec![
         // A whole record no newline has finished is no record yet, in either order.
         ("finished bytes, no terminator", format!("{body}{whole}")),
@@ -421,7 +436,26 @@ fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
                 &whole[..whole.find("\"payload\"").unwrap() + 11]
             ),
         ),
+        // A fragment of another record, a heartbeat early in the stream, glued to a whole
+        // record a first screen keeps, with a later record after them: only the whole one
+        // is there, wherever the fragment's opening would place it.
+        (
+            "glued to another record's fragment",
+            format!(
+                "{body}{}{whole}\n{}\n",
+                &heartbeat[..heartbeat.find("\"payload\"").unwrap() + 11],
+                later,
+            ),
+        ),
         ("not a record", format!("{body}this is not a record\n")),
+        // A `ts` in another form than the writers stamp, which is merged on its text.
+        (
+            "a timestamp in another form",
+            format!(
+                "{body}{}\n",
+                whole.replace(&stamp(9_000_000), "2026-11-06T10:00:00Z")
+            ),
+        ),
         (
             "a future schema",
             format!("{body}{{\"v\":99,\"from\":\"the future\"}}\n"),
@@ -439,11 +473,40 @@ fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
     }
 }
 
+/// Every selection's kept records are exactly the complete read's records its rule names,
+/// whatever `read_selected` merged beside them: what places and `store_len` hold where a
+/// discarded line is one the complete read refuses is not.
+fn every_selection_keeps_the_complete_records(run: &Run, what: &str) {
+    let complete = run.complete();
+    for selection in [
+        Selection::FirstScreen { node: None },
+        Selection::FirstScreen { node: Some("ship") },
+        Selection::Share(Some("ship")),
+        Selection::Share(Some("build")),
+        Selection::Share(None),
+    ] {
+        let selected = journal::read_selected(&run.journal(), &selection);
+        let expected: Vec<&Envelope> = named_by_the_rule(&complete, &selection)
+            .iter()
+            .map(|at| &complete[*at])
+            .collect();
+        assert_eq!(
+            selected.events.iter().collect::<Vec<_>>(),
+            expected,
+            "{what}: {selection:?} kept other records than the complete read holds"
+        );
+    }
+}
+
 /// A heartbeat or activity record no selection keeps, between valid records, whose opening
-/// and end are the writers' and whose middle a complete reader refuses. It holds no place,
-/// claims no `seq`, and moves nothing beside it, whichever way its middle is wrong.
+/// and end are the writers' and whose middle a complete reader refuses. Its middle is never
+/// parsed, by the manager's ruling that a first screen not pay for every byte of a journal,
+/// so it is merged by its opening; where a selection keeps it, as the end of a stream of its
+/// own, it is found when it is parsed and the whole read is the complete reader's. Either
+/// way every record returned is the one the complete read holds, whichever way its middle
+/// is wrong.
 #[test]
-fn a_discarded_line_malformed_in_its_middle_moves_nothing_a_complete_read_would_not() {
+fn a_discarded_line_malformed_in_its_middle_leaves_every_kept_record_the_complete_reads() {
     let valid = |seq: u64, tick: u64, kind: &str| {
         written(&json!({
             "v": 1, "ts": stamp(tick), "stream": "stream-a", "seq": seq,
@@ -485,7 +548,7 @@ fn a_discarded_line_malformed_in_its_middle_moves_nothing_a_complete_read_would_
         for (what, from, to) in middles {
             // In the middle of its own stream, where a first screen discards it; and as
             // the end of a stream of its own, its `seq` far above the journal's, where a
-            // selection of one owner discards it and it must not reach `last_seq`.
+            // first screen keeps it and a selection of one owner discards it.
             for (place, stream, seq) in
                 [("mid-stream", "stream-a", 1), ("high", "stream-b", 900_000)]
             {
@@ -504,7 +567,7 @@ fn a_discarded_line_malformed_in_its_middle_moves_nothing_a_complete_read_would_
                     3,
                     "{name}: the complete read refuses it"
                 );
-                every_selection_agrees(&run, &name);
+                every_selection_keeps_the_complete_records(&run, &name);
             }
         }
 
@@ -528,12 +591,13 @@ fn a_discarded_line_malformed_in_its_middle_moves_nothing_a_complete_read_would_
         let run = Run::new(&format!("discarded-{kind}-not-text"), "");
         std::fs::write(run.journal(), journal).expect("a journal");
         assert_eq!(run.complete().len(), 3, "the complete read refuses it");
-        every_selection_agrees(&run, "bytes that are not text");
+        every_selection_keeps_the_complete_records(&run, "bytes that are not text");
     }
 }
 
 /// A kept line whose opening and end are in the form and whose middle is not is found
-/// when it is read, and the read is then the complete reader's.
+/// when it is read, and the read is then the complete reader's; a selection that does not
+/// keep it still returns only the complete read's records.
 #[test]
 fn a_kept_line_corrupt_only_in_its_middle_leaves_the_read_equal_to_the_complete_one() {
     let body = generated(31, 6, 200);
@@ -547,5 +611,13 @@ fn a_kept_line_corrupt_only_in_its_middle_leaves_the_read_equal_to_the_complete_
         .replace("100000", "100001")
         .replace("08:00:00", "08:00:01");
     let run = Run::new("corrupt-middle", &format!("{body}{corrupt}\n{after}\n"));
-    every_selection_agrees(&run, "a corrupt kept line");
+    // Where a selection keeps it, places and `store_len` are the complete read's too.
+    for selection in [
+        Selection::FirstScreen { node: None },
+        Selection::FirstScreen { node: Some("ship") },
+        Selection::Share(Some("ship")),
+    ] {
+        agrees_with_the_complete_read(&run, &selection, "a corrupt kept line");
+    }
+    every_selection_keeps_the_complete_records(&run, "a corrupt line kept by some");
 }
