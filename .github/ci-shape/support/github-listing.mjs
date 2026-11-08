@@ -33,11 +33,15 @@ export async function githubListing(entries = recordedEntries(), repository = "n
       const prefix = url.searchParams.get("key") ?? "";
       const size = Number(url.searchParams.get("per_page") ?? 30);
       const page = Number(url.searchParams.get("page") ?? 1);
+      if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isInteger(page) || page < 1)
+        return answer(422, { message: "Validation Failed" });
+      // What this double orders by, not a statement of GitHub's accepted values: a query it
+      // does not model fails the test that sent it rather than answering an ordering it made up.
       const field = url.searchParams.get("sort") ?? "created_at";
       const direction = url.searchParams.get("direction") ?? "desc";
-      if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isInteger(page) || page < 1
-        || !["created_at", "last_accessed_at", "size_in_bytes"].includes(field) || !["asc", "desc"].includes(direction))
-        return answer(422, { message: "Validation Failed" });
+      const modelled = { sort: ["created_at", "last_accessed_at", "size_in_bytes"], direction: ["asc", "desc"] };
+      if (!modelled.sort.includes(field) || !modelled.direction.includes(direction))
+        return answer(501, { message: `the double does not model sort=${field}&direction=${direction}` });
       const valueOf = (entry) => (field === "size_in_bytes" ? entry.size_in_bytes : Date.parse(entry[field]));
       const sign = direction === "asc" ? 1 : -1;
       const tie = (entry) => (reorderTies ? Math.imul(entry.id ^ (page * 0x9e3779b9), 0x85ebca6b) >>> 0 : 0);
