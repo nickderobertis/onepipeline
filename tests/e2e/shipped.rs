@@ -421,14 +421,30 @@ fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
 #[cfg(unix)]
 #[test]
 fn status_says_an_adopter_that_died_recorded_no_exit() {
-    let world = World::new("adopter-died");
+    const RETRY: &str = "build-2";
+    let world = World::new("adopter-died").with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "2");
     let path = world.plan("died", &plan_of("died", vec![agent("build", &[])]));
     world.script("build.fail", "1");
     world.run(&["start", &path, "--attach"]);
-    world.script("build.wait", "hold");
+    // A held retry keeps the adopter driving: with nothing left to do it settles
+    // and records its own exit, which can land before the kill below.
+    world.script(&format!("{RETRY}.wait"), "hold");
+    let plan = world.run_json("died", "plan.json");
+    let task = &plan["tasks"][0];
+    world.run_with_stdin(
+        &["reply", "died"],
+        &serde_json::json!({"version": 2, "commands": [{"op": "retry", "id": "build", "node": {
+            "id": RETRY, "persona": task["persona"], "task": task["task"],
+            "repo": task["repo"], "title": task["title"],
+        }}]})
+        .to_string(),
+    );
     world.run(&["adopt", "died", "--detach"]).exited(0);
-    world.until("the adoption to be journalled", |world| {
-        !world.events_of("died", "driver-adopted").is_empty()
+    world.until("the adopter to dispatch the retry", |world| {
+        world
+            .events_of("died", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == RETRY)
     });
     let pid = world.events_of("died", "driver-adopted")[0]["payload"]["pid"]
         .as_u64()
@@ -446,6 +462,7 @@ fn status_says_an_adopter_that_died_recorded_no_exit() {
         "{}",
         status.stdout
     );
+    world.release(&format!("{RETRY}.go"));
 }
 
 /// Every repository origin the example store's tasks name.
