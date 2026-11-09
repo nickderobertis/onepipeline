@@ -91,6 +91,18 @@
         "kind": "question",
         "title": "Which rollout should we use?",
         "body": "Choose the gradual or immediate rollout.",
+        "choices": [
+          {
+            "id": "gradual",
+            "title": "Gradual rollout",
+            "description": "Ten percent first, then **everyone**."
+          },
+          {
+            "id": "all-at-once",
+            "title": "All at once",
+            "description": "Everyone at the same moment."
+          }
+        ],
         "priority": "high",
         "owner": {
           "session": "manager",

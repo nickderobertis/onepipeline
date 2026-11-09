@@ -6128,14 +6128,14 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
         "human_items:\n  enabled: true\n",
     )
     .unwrap();
-    let raised_as = |key: &str, title: &str| {
+    let raised_kind = |key: &str, title: &str, kind: &str| {
         let input = world.root.join(format!("{key}.json"));
         std::fs::write(
             &input,
             json!({
                 "schema_version": 1,
                 "dedup_key": key,
-                "kind": "task",
+                "kind": kind,
                 "title": title,
                 "body": "What it needs from a person.",
                 "priority": "high",
@@ -6153,6 +6153,7 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
             .unwrap()
             .to_owned()
     };
+    let raised_as = |key: &str, title: &str| raised_kind(key, title, "task");
     let item_surface = |id: &str| -> String {
         std::fs::read_to_string(world.run_file("item-surface", "channel/surfaces.jsonl"))
             .unwrap()
@@ -6214,5 +6215,52 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
         !dismissed.contains("zephyrine") && dismissed.contains("withheld"),
         "{dismissed}"
     );
+
+    // An answer is judged too, and one batch's surface is neutral whole: its ids only.
+    let single = raised_kind("single", "Pick the layout", "question");
+    world
+        .run(&[
+            "human-items",
+            "answer",
+            &single,
+            "--text",
+            "The zephyrine one.",
+        ])
+        .exited(0);
+    let answered = item_surface(&single);
+    assert!(answered.starts_with("human-item-answered: "), "{answered}");
+    assert!(
+        !answered.contains("zephyrine") && answered.contains("withheld"),
+        "{answered}"
+    );
+    let one = raised_kind("batch-one", "Pick the first layout", "question");
+    let two = raised_kind("batch-two", "Pick the second layout", "question");
+    let file = world.root.join("batch.json");
+    std::fs::write(
+        &file,
+        json!({"answers": [
+            {"id": one, "text": "The zephyrine one."},
+            {"id": two, "text": "The plain one."},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let batch = world.run(&[
+        "human-items",
+        "answer-batch",
+        "--input",
+        file.to_str().unwrap(),
+    ]);
+    batch.exited(0);
+    let id = batch.json()["batch"].as_str().unwrap().to_owned();
+    let neutral = item_surface(&one);
+    assert_eq!(item_surface(&two), neutral);
+    assert!(neutral.starts_with("human-item-answered: "), "{neutral}");
+    for named in [id.as_str(), one.as_str(), two.as_str(), "withheld"] {
+        assert!(neutral.contains(named), "{named}: {neutral}");
+    }
+    for hidden in ["zephyrine", "Pick the", "plain one"] {
+        assert!(!neutral.contains(hidden), "{hidden}: {neutral}");
+    }
     world.release("generalize.go");
 }

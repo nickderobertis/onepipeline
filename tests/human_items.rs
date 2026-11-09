@@ -748,6 +748,7 @@ fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
     ] {
         input.as_object_mut().unwrap().remove(field);
     }
+    input.as_object_mut().unwrap().remove("choices");
     input["kind"] = json!("task");
     input["dedup_key"] = json!("new-work-hold");
     input["title"] = json!("Unblock the build step");
@@ -885,6 +886,60 @@ fn an_explicit_false_host_selector_selects_every_non_host_item() {
         assert_eq!(host[0]["item"]["id"], "item-1");
     }
     refuse(world.run(&["list", "--host=maybe"]), "error:");
+}
+
+/// `answer-batch --sample` records what it accepts and reports what it refuses, and a
+/// batch accepting nothing has no id and exits nonzero with the receipt printed.
+#[test]
+fn a_sample_batch_answers_what_it_can_and_reports_the_rest() {
+    let world = World::new();
+    let input = world.0.join("batch.json");
+    let answer = |body: Value| {
+        std::fs::write(&input, body.to_string()).unwrap();
+        world.run(&["answer-batch", "--input", input.to_str().unwrap()])
+    };
+    let answered = answer(json!({"answers": [
+        {"id": "item-2", "choice": "gradual", "text": "Start Monday."},
+        {"id": "item-4", "text": "Yes."},
+        {"id": "item-1", "text": "A task."},
+    ]}));
+    assert!(answered.status.success());
+    let receipt: Value = serde_json::from_slice(&answered.stdout).unwrap();
+    assert_eq!(
+        receipt["answered"].as_array().unwrap().len(),
+        2,
+        "{receipt}"
+    );
+    assert_eq!(receipt["refused"][0]["id"], "item-1");
+    assert_eq!(receipt["batch"], "sample-batch");
+    assert_eq!(
+        world.state()["items"][1]["item"]["resolution"]["choice"],
+        "gradual"
+    );
+    let before = std::fs::read(world.sample()).unwrap();
+    let refused = answer(json!({"answers": [{"id": "item-2", "choice": "gradual"}]}));
+    assert!(!refused.status.success());
+    let receipt: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(receipt.get("batch").is_none(), "{receipt}");
+    assert_eq!(receipt["answered"], json!([]));
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+    // An identical repeat is refused here as a single sample answer's is: the fixture
+    // authority keeps no recorded receipt to answer with.
+    let repeat = answer(json!({"answers": [
+        {"id": "item-2", "choice": "gradual", "text": "Start Monday."}
+    ]}));
+    assert!(!repeat.status.success());
+    let receipt: Value = serde_json::from_slice(&repeat.stdout).unwrap();
+    assert!(receipt["refused"][0]["refusal"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("already resolved"));
+    let malformed = answer(json!({"answers": [
+        {"id": "item-3", "text": "a"},
+        {"id": "item-3", "text": "b"},
+    ]}));
+    assert!(!malformed.status.success());
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
 }
 
 #[test]
@@ -1250,5 +1305,43 @@ fn a_sample_reopen_or_note_names_its_actor() {
             })
         );
     }
+    assert_eq!(sample, before);
+}
+
+/// A batch needs `apply_batch`, whose answer is a batch receipt, and names its actor.
+#[test]
+fn a_sample_answer_batch_goes_through_apply_batch() {
+    use onepipeline::human_items::{Actor, HumanItemBatchAnswer};
+    let mut sample: HumanItemSample =
+        serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    let before = sample.clone();
+    let answers = vec![HumanItemBatchAnswer {
+        id: "item-2".into(),
+        choice: Some("gradual".into()),
+        text: None,
+    }];
+    assert_eq!(
+        sample.apply(HumanItemAction::AnswerBatch {
+            answers: answers.clone(),
+            actor: "user".into(),
+            on_behalf_of: None,
+        }),
+        Err(HumanItemRefusal::Conflict {
+            reason: "an answer-batch answers a batch receipt, so it is applied through apply_batch"
+                .into()
+        })
+    );
+    assert_eq!(
+        sample.apply_batch(
+            answers,
+            Actor {
+                actor: " ".into(),
+                on_behalf_of: None,
+            },
+        ),
+        Err(HumanItemRefusal::Conflict {
+            reason: "an action names its actor".into()
+        })
+    );
     assert_eq!(sample, before);
 }
