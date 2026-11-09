@@ -188,15 +188,26 @@ mod tests {
         );
         let bare = with("## What\nx\n");
         assert!(at(&bare, "## What") < at(&bare, HEADING), "{bare}");
-        let context = format!(
-            "## What\nx\n\n{}\nnotes\n",
-            crate::plan::CROSS_REPO_REFERENCES_HEADING
-        );
-        let appended = with(&context);
-        assert!(
-            at(&appended, HEADING) < at(&appended, crate::plan::CROSS_REPO_REFERENCES_HEADING),
-            "{appended}"
-        );
+        let headings = [
+            crate::plan::PLANNER_CONTEXT_HEADING,
+            crate::plan::CROSS_REPO_REFERENCES_HEADING,
+            crate::boundary::SECTION_HEADING,
+        ];
+        for heading in headings {
+            let appended = with(&format!("## What\nx\n\n{heading}\nnotes\n"));
+            assert!(
+                at(&appended, HEADING) < at(&appended, heading),
+                "{appended}"
+            );
+        }
+        // Whichever the rendering appended first, the section is above all of them.
+        let all = with(&format!(
+            "## What\nx\n\n{}\na\n\n{}\nb\n\n{}\nc\n",
+            headings[2], headings[0], headings[1]
+        ));
+        for heading in headings {
+            assert!(at(&all, HEADING) < at(&all, heading), "{heading}: {all}");
+        }
     }
 
     /// A hook can print a fence of its own, which must not close the block
