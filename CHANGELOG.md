@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.105.0](https://github.com/nickderobertis/onepipeline/compare/v0.104.0...v0.105.0) - 2026-11-09
+
+### Added
+
+- *(channel)* [**breaking**] run the bus's message hooks, and state a dropped or changed envelope in the receipt ([#1491](https://github.com/nickderobertis/onepipeline/pull/1491))
+
 ### Breaking
 
 - *(channel)* `--envelope-reviewer` is a hook in behaviour: a reviewer now passes by printing the document it read, and an existing reviewer that prints nothing on a pass is refused as unjudged; its stdout is the document, so narration belongs on stderr
