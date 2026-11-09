@@ -151,6 +151,7 @@ pub struct HumanItemResolution {
     pub text: Option<String>,
     /// The picked choice's id: only an answered question carries one, and it is omitted when null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes `choice` as the picked id's string on this flat resolution; HumanItem's validate refuses one naming no choice of the item and any on a resolution that is not an answer.
     pub choice: Option<String>,
     /// Reason.
     #[serde(deserialize_with = "required_option")]
@@ -583,6 +584,7 @@ pub struct HumanItemReceipt {
 #[serde(deny_unknown_fields)]
 pub struct HumanItemBatchRefused {
     /// The item the entry named.
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes this `id` as the same string every action and record spells an item id with; a newtype here alone would change that wire shape.
     pub id: String,
     /// Why it was refused.
     pub refusal: HumanItemRefusal,
@@ -594,6 +596,7 @@ pub struct HumanItemBatchRefused {
 pub struct HumanItemBatchReceipt {
     /// The engine's opaque id for this batch: absent when no answer was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes `batch` as an opaque id string, absent when nothing was accepted; only append_batch mints one, and a newtype would change that wire shape.
     pub batch: Option<String>,
     /// The accepted entries' receipts, an identical repeat's being its recorded one.
     pub answered: Vec<HumanItemReceipt>,
