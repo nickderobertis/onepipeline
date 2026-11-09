@@ -287,6 +287,13 @@ fn run_stamp() -> String {
 /// thing; none of them is asserted from anywhere a person could not look.
 #[test]
 fn a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances() {
+    // THROWAWAY: fail only the first time this run reaches the journey.
+    let marker = std::path::Path::new(&std::env::var("RUNNER_TEMP").expect("RUNNER_TEMP"))
+        .join("forced-smoke-failure");
+    if !marker.exists() {
+        std::fs::write(&marker, "forced").expect("the marker writes");
+        panic!("forced failure for the re-run demonstration");
+    }
     // Before anything is created, pushed, or merged.
     let slug = scratch_repo();
     let who = authenticated_user();
