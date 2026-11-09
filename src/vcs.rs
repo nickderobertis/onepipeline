@@ -2029,7 +2029,7 @@ fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
 /// copy of a vocabulary this crate does not own — which is what
 /// `src/AGENTS.md` forbids and what let a double script a kind the sibling has
 /// never emitted.
-fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
+pub(crate) fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
     let wire = serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))

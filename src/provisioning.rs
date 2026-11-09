@@ -173,6 +173,32 @@ mod tests {
         }
     }
 
+    /// The section lands above the notes a rendering appended, wherever they begin,
+    /// and a task with none takes it last. A unit, because the rendered headings
+    /// other than `## Additional info` each take a whole plan feature to produce.
+    #[test]
+    fn the_section_sits_above_whichever_notes_the_task_carries() {
+        let failed = failure("out");
+        let with = |task: &str| with_section(task, &failed);
+        let at = |text: &str, what: &str| text.find(what).expect(what);
+        let info = with("## What\nx\n\n## Additional info\nnotes\n");
+        assert!(
+            at(&info, HEADING) < at(&info, "## Additional info"),
+            "{info}"
+        );
+        let bare = with("## What\nx\n");
+        assert!(at(&bare, "## What") < at(&bare, HEADING), "{bare}");
+        let context = format!(
+            "## What\nx\n\n{}\nnotes\n",
+            crate::plan::CROSS_REPO_REFERENCES_HEADING
+        );
+        let appended = with(&context);
+        assert!(
+            at(&appended, HEADING) < at(&appended, crate::plan::CROSS_REPO_REFERENCES_HEADING),
+            "{appended}"
+        );
+    }
+
     /// A hook can print a fence of its own, which must not close the block
     /// holding it and spill the rest of its output into the task as prose.
     #[test]
@@ -185,7 +211,9 @@ mod tests {
     }
 
     /// Each way a hook can end is named for what it was, and a timeout outranks
-    /// the status git's killed checkout happened to leave behind.
+    /// the status git's killed checkout happened to leave behind. A unit, because
+    /// git hands a journey's killed hook back as an exit status (143 for a TERM), so
+    /// only a real status is reachable by one, and that is what the journeys assert.
     #[test]
     fn how_the_hook_ended_names_the_timeout_then_the_signal_then_the_status() {
         let mut failed = failure("");

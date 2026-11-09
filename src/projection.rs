@@ -212,11 +212,13 @@ pub struct RunState {
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
     /// Each node's sessions whose provisioning failed, oldest first, one entry per
     /// session; a later session's success removes nothing. Omitted when empty.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the plain node id every map on this struct is keyed by, which the graph validated; a node-id type for one field would not change what the struct can hold.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
     /// The sessions whose `provisioning-failed` surface is on the journal, so each
     /// raises one. Kept apart from the failures because the relay can journal a
     /// failure, and a refresh fold it, before the loop reaches it. Omitted when empty.
+    // llmlint: ignore[invalid_states_unrepresentable] each is the token exactly as `onevcs` labelled its own record, compared and never parsed, as `provisioning::Failure::session` carries it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(crate) provisioning_surfaced: BTreeSet<String>,
     // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
@@ -3184,6 +3186,46 @@ mod tests {
             tasks: nodes,
             export_edges: Vec::new(),
         }
+    }
+
+    fn provision_failed(seq: u64, node: &str, session: &str) -> Envelope {
+        let mut event = pipeline(journal::PipelineKind::RunStarted, seq, Some(node), &[]);
+        event.source = Source::Vcs;
+        event.kind = crate::vcs::kind_of(onevcs::EventKind::WorktreeProvisionFailed);
+        event.labels.extra.insert(
+            crate::provisioning::SESSION_LABEL.to_owned(),
+            json!(session),
+        );
+        event.payload = json!({
+            "hook": "post-checkout", "trigger": "worktree-add", "worktree": "/w",
+            "exit_status": 1, "signal": null, "timed_out": false, "duration_ms": 1,
+            "output": "", "output_truncated": false, "rerun": "git hook run post-checkout",
+        })
+        .as_object()
+        .expect("an object")
+        .clone();
+        event
+    }
+
+    /// A node re-dispatched onto new sessions keeps one entry per failed session in
+    /// the order they failed, however often the journal replays a record. A unit,
+    /// because no journey makes one node id open two sessions that both fail without
+    /// also driving a whole rework, which `tests/e2e/rework.rs` already pays for once.
+    #[test]
+    fn each_failed_session_is_kept_once_oldest_first() {
+        let mut state = RunState::default();
+        for event in [
+            provision_failed(1, "a", "s-1"),
+            provision_failed(2, "a", "s-2"),
+            provision_failed(1, "a", "s-1"),
+        ] {
+            fold_provisioning(&mut state, &event);
+        }
+        let sessions: Vec<&str> = state.provisioning_failures["a"]
+            .iter()
+            .map(|failure| failure.session.as_str())
+            .collect();
+        assert_eq!(sessions, ["s-1", "s-2"]);
     }
 
     fn pipeline(

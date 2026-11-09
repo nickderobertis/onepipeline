@@ -17,7 +17,7 @@ const HEADING: &str = "## Worktree provisioning failed";
 const KIND: &str = "provisioning-failed";
 
 /// Commit `hook` as the repository's tracked `post-checkout` and point git at it.
-fn tracked_post_checkout(world: &World, repo: &Repository, hook: &str) {
+pub(crate) fn tracked_post_checkout(world: &World, repo: &Repository, hook: &str) {
     let hooks = repo.checkout.join(".githooks");
     std::fs::create_dir_all(&hooks).expect("the tracked hooks directory");
     onepipeline_testfakes::executable(&hooks.join("post-checkout"), hook);
@@ -85,6 +85,45 @@ fn node_of<'a>(results: &'a Value, id: &str) -> &'a Value {
         .iter()
         .find(|node| node["id"] == id)
         .unwrap_or_else(|| panic!("no result for {id}: {results}"))
+}
+
+/// The surface's field labels and output bound, read out of `docs/contract.md`
+/// itself so the layout that document promises cannot drift from what is queued.
+fn documented_layout() -> (Vec<String>, usize) {
+    let doc = std::fs::read_to_string("docs/contract.md").expect("the contract is readable");
+    let from = doc.find("in this order: ").expect("the field list") + "in this order: ".len();
+    let bound = "followed by at most the last ";
+    let to = from + doc[from..].find(bound).expect("the output bound");
+    let labels = doc[from..to]
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|label| label.split('[').next().expect("a label").to_owned())
+        .collect();
+    let lines = doc[to + bound.len()..]
+        .split_whitespace()
+        .next()
+        .expect("a count")
+        .parse()
+        .expect("the bound is a number");
+    (labels, lines)
+}
+
+/// Assert `message` opens with its sentence, then each documented field in order,
+/// and hand back the output lines under the last.
+fn output_lines_under_documented_fields(message: &str) -> Vec<String> {
+    let (labels, _) = documented_layout();
+    let lines: Vec<&str> = message.lines().collect();
+    for (at, label) in labels.iter().enumerate() {
+        assert!(
+            lines[at + 1].starts_with(label.as_str()),
+            "field {at} is not `{label}`: {message}"
+        );
+    }
+    lines[labels.len() + 1..]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Let the holder settle and the run end.
@@ -160,6 +199,13 @@ fn a_failed_hook_reaches_the_workers_first_turn_the_watch_and_the_results() {
     ] {
         assert!(message.contains(expected), "{expected}: {message}");
     }
+    // `onevcs` keeps git's own worktree lines ahead of what the hook printed.
+    assert_eq!(
+        output_lines_under_documented_fields(message)
+            .last()
+            .map(String::as_str),
+        Some("PROVISION-MARKER-LINE")
+    );
 
     settled(&world, run, "service");
     let prompt = first_turn(&world, "service");
@@ -182,6 +228,12 @@ fn a_failed_hook_reaches_the_workers_first_turn_the_watch_and_the_results() {
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert_eq!(failures[0]["hook"], "post-checkout");
     assert_eq!(failures[0]["exit_status"], 3);
+    let trigger = failures[0]["trigger"].as_str().expect("a trigger");
+    assert!(
+        message.contains(&format!("hook: post-checkout ({trigger})")),
+        "{message}"
+    );
+    assert!(section.contains(&format!("`{trigger}`")), "{section}");
     let rerun = failures[0]["rerun"].as_str().expect("a rerun command");
     assert!(section.contains(rerun), "{rerun} not in {section}");
     assert!(message.contains(rerun), "{rerun} not in {message}");
@@ -223,6 +275,9 @@ fn only_the_output_the_event_kept_reaches_the_section_and_the_surface() {
     assert!(message.contains("LAST-LINE-OF-MANY"), "{message}");
     assert!(!message.contains("FIRST-LINE-OF-MANY"), "{message}");
     assert!(message.contains("truncated"), "{message}");
+    let output = output_lines_under_documented_fields(message);
+    assert_eq!(output.len(), documented_layout().1, "{message}");
+    assert_eq!(output.last().expect("a last line"), "LAST-LINE-OF-MANY");
 
     settled(&world, run, "service");
     let prompt = first_turn(&world, "service");
@@ -230,6 +285,51 @@ fn only_the_output_the_event_kept_reaches_the_section_and_the_surface() {
     assert!(section.contains("LAST-LINE-OF-MANY"), "{section}");
     assert!(!section.contains("FIRST-LINE-OF-MANY"), "{section}");
     assert!(section.contains("It was truncated"), "{section}");
+    stop(&world, run);
+}
+
+/// A hook killed by a signal, printing a fence of its own into a task whose author
+/// wrote `## Additional info`: git reports the kill as an exit status, and the
+/// section keeps that output inside a longer fence, above the notes.
+#[test]
+fn a_killed_hooks_fence_stays_inside_a_section_above_the_notes() {
+    let world = World::new("provisioning-signalled");
+    let repo = world.repository("local-direct", &[]);
+    tracked_post_checkout(
+        &world,
+        &repo,
+        "#!/bin/sh\nprintf '```\\nFENCED-OUTPUT\\n```\\n'\nkill -TERM $$\n",
+    );
+    world.script("holder.wait", "hold");
+    world.script("service.work", "the worker wrote this\n");
+    let run = "provisionsignalled";
+    let mut service = lifecycle("service", &[]);
+    let task = format!(
+        "{}\n\n## Additional info\nThe author's notes.",
+        service["task"].as_str().expect("a task")
+    );
+    service["task"] = json!(task);
+    let path = world.plan(run, &plan_of(run, vec![service, agent("holder", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+
+    settled(&world, run, "service");
+    let prompt = first_turn(&world, "service");
+    let heading = prompt.find(HEADING).expect("a failure section");
+    assert!(
+        heading < prompt.find("## Additional info").expect("the notes"),
+        "{prompt}"
+    );
+    let section = &prompt[heading..];
+    assert!(section.contains("exited with status 143"), "{section}");
+    assert!(
+        section.contains("````\n```\nFENCED-OUTPUT\n```\n````"),
+        "{section}"
+    );
+    let results = results_json(&world, run);
+    assert_eq!(
+        node_of(&results, "service")["provisioning_failures"][0]["exit_status"],
+        143
+    );
     stop(&world, run);
 }
 
