@@ -90,7 +90,11 @@
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateTestSource",
+        "crateCoverageSource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-test-rest _ensure-onetaskgraph --variable rest-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -99,9 +103,8 @@
         "coverage-clean"
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
-      ],
-      "cache": false
+        "{workspaceRoot}/target/coverage-units/onepipeline-rest.lcov"
+      ]
     },
     "test": {
       "command": "just _crate-coverage",

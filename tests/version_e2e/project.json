@@ -9,11 +9,14 @@
   "targets": {
     "test": {
       "command": "just _version-e2e-test",
-      "cache": false,
       "inputs": [
-        "e2eSource",
+        "e2eCoverageSource",
+        "coverageTierKey",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _version-e2e-test _ensure-onetaskgraph --variable version-e2e-tier --variable onetaskgraph-version"
         },
         {
           "runtime": "node -p process.platform"
@@ -29,7 +32,7 @@
       ],
       "parallelism": false,
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-version-e2e-*.profraw"
+        "{workspaceRoot}/target/coverage-units/onepipeline-version-e2e.lcov"
       ]
     },
     "test-quick": {

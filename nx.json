@@ -51,77 +51,16 @@
       "{workspaceRoot}/.github/workflows/visual-docs.yml"
     ],
     "crateTestSource": [
-      "rustBuild",
-      "{workspaceRoot}/justfile",
-      "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml",
-      "{workspaceRoot}/README.md",
-      "{workspaceRoot}/.editorconfig",
-      "{workspaceRoot}/.gitattributes",
-      "{workspaceRoot}/.gitignore",
-      "{workspaceRoot}/tests/*.rs",
-      "{workspaceRoot}/tests/golden/**/*",
-      "{workspaceRoot}/tests/recorded/**/*",
-      "{workspaceRoot}/tests/e2e/adoption.rs",
-      "{workspaceRoot}/tests/e2e/host_view.rs",
-      "{workspaceRoot}/tests/e2e/loopcost.rs",
-      "{workspaceRoot}/tests/smoke/repo.rs",
-      "{workspaceRoot}/docs/**/*",
-      "{workspaceRoot}/examples/**/*",
-      "{workspaceRoot}/graphs/**/*",
-      "{workspaceRoot}/personas/**/*",
-      "{workspaceRoot}/scripts/**/*",
-      "{workspaceRoot}/release/release.py",
-      "{workspaceRoot}/screenshots/**/*",
-      "{workspaceRoot}/.github/**/*",
-      "{workspaceRoot}/AGENTS.md",
-      "{workspaceRoot}/CODEOWNERS",
-      "{workspaceRoot}/biome.jsonc",
-      "{workspaceRoot}/budgets.yaml",
-      "{workspaceRoot}/deny.toml",
-      "{workspaceRoot}/gh-secrets.json",
-      "{workspaceRoot}/llmlint.yml",
-      "{workspaceRoot}/oneharness.toml",
-      "{workspaceRoot}/project.json",
-      {
-        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
-      },
-      "{workspaceRoot}/release-plz.toml",
-      "{workspaceRoot}/release-targets.toml",
-      "{workspaceRoot}/screencomp.toml"
+      "crateTestSourceWithoutDocs",
+      "{workspaceRoot}/docs/**/*"
     ],
     "e2eSource": [
-      "rustBuild",
-      "{workspaceRoot}/tests/e2e/**/*",
-      "{workspaceRoot}/tests/golden/**/*",
-      "{workspaceRoot}/tests/recorded/**/*",
-      "{workspaceRoot}/docs/**/*",
-      "{workspaceRoot}/examples/**/*",
-      "{workspaceRoot}/graphs/**/*",
-      "{workspaceRoot}/personas/**/*",
-      "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
-      "{workspaceRoot}/scripts/record-channel-answers.sh",
-      "{workspaceRoot}/oneharness.toml",
-      "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml"
+      "e2eSourceWithoutDocs",
+      "{workspaceRoot}/docs/**/*"
     ],
     "contractSource": [
-      "rustBuild",
-      "{workspaceRoot}/tests/contract.rs",
-      "{workspaceRoot}/tests/contract/**/*",
-      "{workspaceRoot}/tests/golden/**/*",
-      "{workspaceRoot}/tests/recorded/**/*",
-      "{workspaceRoot}/tests/e2e/channel.rs",
-      "{workspaceRoot}/docs/**/*",
-      "{workspaceRoot}/README.md",
-      "{workspaceRoot}/examples/**/*",
-      "{workspaceRoot}/graphs/**/*",
-      "{workspaceRoot}/personas/**/*",
-      "{workspaceRoot}/scripts/check-node.sh",
-      "{workspaceRoot}/scripts/review-envelope.sh",
-      "{workspaceRoot}/scripts/smoke-published.sh",
-      "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml"
+      "contractSourceWithoutDocs",
+      "{workspaceRoot}/docs/**/*"
     ],
     "noteJourneySource": [
       "rustBuild",
@@ -240,6 +179,122 @@
     ],
     "pythonSelection": [
       "{workspaceRoot}/pyproject.toml"
+    ],
+    "e2eSourceWithoutDocs": [
+      "rustBuild",
+      "{workspaceRoot}/tests/e2e/**/*",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
+      "{workspaceRoot}/scripts/record-channel-answers.sh",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
+    "e2eCoverageSource": [
+      "e2eSourceWithoutDocs",
+      "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/docs/contract-divergences.md",
+      "{workspaceRoot}/docs/stop-guard.md"
+    ],
+    "crateTestSourceWithoutDocs": [
+      "rustBuild",
+      "{workspaceRoot}/justfile",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/.editorconfig",
+      "{workspaceRoot}/.gitattributes",
+      "{workspaceRoot}/.gitignore",
+      "{workspaceRoot}/tests/*.rs",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/tests/e2e/adoption.rs",
+      "{workspaceRoot}/tests/e2e/host_view.rs",
+      "{workspaceRoot}/tests/e2e/loopcost.rs",
+      "{workspaceRoot}/tests/smoke/repo.rs",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/release/release.py",
+      "{workspaceRoot}/screenshots/**/*",
+      "{workspaceRoot}/.github/**/*",
+      "{workspaceRoot}/AGENTS.md",
+      "{workspaceRoot}/CODEOWNERS",
+      "{workspaceRoot}/biome.jsonc",
+      "{workspaceRoot}/budgets.yaml",
+      "{workspaceRoot}/deny.toml",
+      "{workspaceRoot}/gh-secrets.json",
+      "{workspaceRoot}/llmlint.yml",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/project.json",
+      {
+        "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
+      },
+      "{workspaceRoot}/release-plz.toml",
+      "{workspaceRoot}/release-targets.toml",
+      "{workspaceRoot}/screencomp.toml"
+    ],
+    "crateCoverageSource": [
+      "crateTestSourceWithoutDocs",
+      "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/docs/contract-divergences.md",
+      "{workspaceRoot}/docs/stop-guard.md",
+      "{workspaceRoot}/docs/test-profile-report.md"
+    ],
+    "coverageTierKey": [
+      "rustBuild",
+      "{workspaceRoot}/scripts/coverage-unit.sh",
+      "{workspaceRoot}/scripts/coverage-merge.mjs",
+      {
+        "env": "COVERAGE_UNIT_IGNORE_REGEX"
+      },
+      {
+        "env": "NEXTEST_PROFILE"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version rustc"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version cargo-llvm-cov"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version cargo-nextest"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version llvm-profdata"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version llvm-cov"
+      },
+      {
+        "runtime": "bash scripts/coverage-unit.sh --tool-version llvm-readobj"
+      }
+    ],
+    "contractSourceWithoutDocs": [
+      "rustBuild",
+      "{workspaceRoot}/tests/contract.rs",
+      "{workspaceRoot}/tests/contract/**/*",
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/tests/e2e/channel.rs",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/examples/**/*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/scripts/check-node.sh",
+      "{workspaceRoot}/scripts/review-envelope.sh",
+      "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml"
+    ],
+    "versionContractCoverageSource": [
+      "contractSourceWithoutDocs",
+      "{workspaceRoot}/docs/contract.md"
     ]
   },
   "targetDefaults": {
