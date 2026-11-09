@@ -1415,12 +1415,29 @@ fn the_scripts_refuse_what_they_cannot_run() {
     }
 }
 
-/// The steps that run `just rerun-failed` hold the four things the workflow
+/// The `NAME: value` entries of a workflow step's own `env:` block, in order.
+fn step_env(step: &str) -> Vec<(&str, &str)> {
+    step.lines()
+        .skip_while(|line| *line != "        env:")
+        .skip(1)
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .take_while(|line| line.starts_with("          "))
+        .map(|line| {
+            line.trim()
+                .split_once(": ")
+                .unwrap_or_else(|| panic!("an env entry is NAME: value: {line}"))
+        })
+        .collect()
+}
+
+/// The steps that run `just rerun-failed` hold the five things the workflow
 /// promises about them: they run only after their job's test step failed, they
 /// cannot change the job's verdict, they re-run from the archive their job's
-/// test step made, and their timeout covers every re-run of a test that hangs
+/// test step made, their timeout covers every re-run of a test that hangs
 /// until nextest ends it, each after the two minutes the justfile allows for
-/// extracting the archive.
+/// extracting the archive, and they get exactly the environment their job's test
+/// step sets: a test that step could run needs it again, and nothing beyond it is
+/// any re-run's to read.
 // llmlint: ignore-block[changed_behavior_has_e2e] a workflow's `if:` and
 // `continue-on-error` are evaluated by GitHub's runner and by nothing on this
 // host, so no test here can execute them. What can be is held here, and the
@@ -1463,7 +1480,17 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .filter(|step| step.starts_with("Does each failed test fail again on this build"))
         .collect();
     assert_eq!(steps.len(), 3, "one rerun step each in the three test jobs");
-    for step in steps {
+    let gates: Vec<&str> = workflow
+        .split("      - name: ")
+        .filter(|step| step.lines().any(|line| line.trim() == "id: gate"))
+        .collect();
+    assert_eq!(gates.len(), 3, "one test step each in the three test jobs");
+    for (step, gate) in steps.into_iter().zip(gates) {
+        assert_eq!(
+            step_env(step),
+            step_env(gate),
+            "a re-run needs the environment its job's test step sets, and no more:\n{step}"
+        );
         let field = |key: &str| {
             step.lines()
                 .find_map(|line| line.trim().strip_prefix(key))

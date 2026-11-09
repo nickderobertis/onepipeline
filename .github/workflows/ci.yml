@@ -426,6 +426,13 @@ jobs:
         if: failure() && steps.gate.outcome == 'failure'
         continue-on-error: true
         timeout-minutes: 25
+        env:
+          # llmlint: ignore-block[least_privilege_grants] the gate step's own two
+          # values, no wider: a failed live-smoke journey re-run here does what it
+          # did there, in a scratch repository the default token cannot reach.
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # llmlint: ignore-end[least_privilege_grants]
+          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
         run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
   # The Windows test job: clippy over the Windows build, the uninstrumented suite
