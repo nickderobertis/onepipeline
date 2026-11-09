@@ -58,7 +58,8 @@ test("formatter and linter exclusions add only the digest-guarded upstream copie
   assert.deepEqual(after, before, "no other lint rule or setting may be loosened");
   const biome = JSON.parse(current("biome.jsonc").split("\n").filter((line) => !line.trim().startsWith("//")).join("\n"));
   assert.deepEqual(biome.files.includes.filter((p) => p.startsWith("!!")), exact.map((p) => `!!${p}`));
-  biome.files.includes = biome.files.includes.filter((p) => !p.startsWith("!!"));
+  // The two coverage test projects joined the format and lint scope after this was pinned.
+  biome.files.includes = biome.files.includes.filter((p) => !p.startsWith("!!") && !p.startsWith("tests/coverage_"));
   assert.deepEqual(biome, JSON.parse(base("biome.json")));
   assert.match(current("llmlint.yml"), /Upstream-owned copies/);
   assert.match(current("biome.jsonc"), /Upstream-owned copies/);

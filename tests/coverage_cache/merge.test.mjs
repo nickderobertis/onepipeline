@@ -26,7 +26,9 @@ const ALL_LCOV = (dir) => TIERS.map((tier) => lcovOf(dir, tier));
 const sorted = [...TIERS].sort();
 const editNote = (dir) => appendFileSync(join(dir, "tests/note/main.rs"), "\n// edited\n");
 
-test("the merge is exact over every tier's report, replayed or re-run", { timeout: 1200000 }, (t) => {
+test("the merge is exact over every tier's report, replayed or re-run", {
+  timeout: 1200000,
+}, (t) => {
   // Enough uncovered lines to fall below the floor, so the failing run prints each file's lines.
   const dir = scratch(t, { uncovered: 200 });
   const cold = nx(dir, test_all);
@@ -37,19 +39,35 @@ test("the merge is exact over every tier's report, replayed or re-run", { timeou
 
   // cargo-llvm-cov's own combined report over the same profiles.
   const own = join(dir, "own.lcov");
-  execFileSync("cargo", ["llvm-cov", "report", "--failure-mode", "all", "--lcov", "--output-path", own], {
-    cwd: dir,
-    encoding: "utf8",
-    env: { ...process.env },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  execFileSync(
+    "cargo",
+    ["llvm-cov", "report", "--failure-mode", "all", "--lcov", "--output-path", own],
+    {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   const ownFiles = readLcov(readFileSync(own, "utf8").replaceAll(`SF:${dir}/`, "SF:"));
   const mergedFiles = new Map();
   for (const path of ALL_LCOV(dir)) readLcov(readFileSync(path, "utf8"), mergedFiles);
   const [ownSummary, mergedSummary] = [summarize(ownFiles), summarize(mergedFiles)];
-  assert.equal(mergedSummary.covered, ownSummary.covered, "lines covered differ from cargo-llvm-cov's combined report");
-  assert.equal(mergedSummary.total, ownSummary.total, "lines total differ from cargo-llvm-cov's combined report");
-  assert.deepEqual([...mergedSummary.uncovered].sort(), [...ownSummary.uncovered].sort(), "uncovered lines differ");
+  assert.equal(
+    mergedSummary.covered,
+    ownSummary.covered,
+    "lines covered differ from cargo-llvm-cov's combined report",
+  );
+  assert.equal(
+    mergedSummary.total,
+    ownSummary.total,
+    "lines total differ from cargo-llvm-cov's combined report",
+  );
+  assert.deepEqual(
+    [...mergedSummary.uncovered].sort(),
+    [...ownSummary.uncovered].sort(),
+    "uncovered lines differ",
+  );
 
   editNote(dir);
   const partial = nx(dir, test_all);
@@ -57,22 +75,45 @@ test("the merge is exact over every tier's report, replayed or re-run", { timeou
   const { executed, replayed } = tierOutcome(partial);
   assert.deepEqual(executed, ["onepipeline-note-journeys"]);
   assert.equal(replayed.length, TIERS.length - 1);
-  assertSameReport(assert, mergeReport(partial.output), sumReports(ALL_LCOV(dir)), "every tier but one replayed");
+  assertSameReport(
+    assert,
+    mergeReport(partial.output),
+    sumReports(ALL_LCOV(dir)),
+    "every tier but one replayed",
+  );
 });
 
-test("a version-only bump replays the non-version tiers and merges to the same line sum", { timeout: 600000 }, (t) => {
+test("a version-only bump replays the non-version tiers and merges to the same line sum", {
+  timeout: 600000,
+}, (t) => {
   const dir = scratch(t, { uncovered: 200 });
   assert.notEqual(nx(dir, test_all).status, 0, "this fixture is below the floor");
   const version = readFileSync(join(dir, "Cargo.toml"), "utf8").match(/\nversion = "([^"]+)"/)[1];
   for (const file of ["Cargo.toml", "Cargo.lock"]) {
-    writeFileSync(join(dir, file), readFileSync(join(dir, file), "utf8").replaceAll(`version = "${version}"`, 'version = "42.0.0"'));
+    writeFileSync(
+      join(dir, file),
+      readFileSync(join(dir, file), "utf8").replaceAll(
+        `version = "${version}"`,
+        'version = "42.0.0"',
+      ),
+    );
   }
   const bumped = nx(dir, test_all);
-  assert.deepEqual(tierOutcome(bumped).replayed, TIERS.filter((tier) => !VERSION_TIERS.includes(tier)).sort());
-  assertSameReport(assert, mergeReport(bumped.output), sumReports(ALL_LCOV(dir)), "after a version-only bump");
+  assert.deepEqual(
+    tierOutcome(bumped).replayed,
+    TIERS.filter((tier) => !VERSION_TIERS.includes(tier)).sort(),
+  );
+  assertSameReport(
+    assert,
+    mergeReport(bumped.output),
+    sumReports(ALL_LCOV(dir)),
+    "after a version-only bump",
+  );
 });
 
-test("onepipeline:test refuses a total under the floor and names the uncovered lines", { timeout: 900000 }, (t) => {
+test("onepipeline:test refuses a total under the floor and names the uncovered lines", {
+  timeout: 900000,
+}, (t) => {
   const dir = scratch(t);
   const passing = nx(dir, test_all);
   assert.equal(passing.status, 0, passing.output);
@@ -83,7 +124,10 @@ test("onepipeline:test refuses a total under the floor and names the uncovered l
   const extra = Math.max(1, Math.ceil(covered * (100 / 95.37 - 1)) - 3);
   writeFileSync(
     join(dir, "src/lib.rs"),
-    library.replace(/pub fn never[\s\S]*$/, `pub fn never(mut v: u64) -> u64 {\n${"    v += 1;\n".repeat(extra)}    v\n}\n`),
+    library.replace(
+      /pub fn never[\s\S]*$/,
+      `pub fn never(mut v: u64) -> u64 {\n${"    v += 1;\n".repeat(extra)}    v\n}\n`,
+    ),
   );
   const failing = nx(dir, test_all);
   assert.notEqual(failing.status, 0);
@@ -102,7 +146,12 @@ test("onepipeline:test refuses a coverage tier it does not count", { timeout: 30
     join(dir, "tests/uncounted/project.json"),
     JSON.stringify({
       name: "onepipeline-uncounted",
-      targets: { test: { command: "true", outputs: ["{workspaceRoot}/target/coverage-units/onepipeline-uncounted.lcov"] } },
+      targets: {
+        test: {
+          command: "true",
+          outputs: ["{workspaceRoot}/target/coverage-units/onepipeline-uncounted.lcov"],
+        },
+      },
     }),
   );
   git(dir, "add", "-A");
@@ -118,40 +167,76 @@ test("onepipeline:test refuses a coverage tier it does not count", { timeout: 30
     join(dir, "tests/uncounted/project.json"),
     JSON.stringify({
       name: "onepipeline-uncounted",
-      targets: { test: { command: "just _note-test", outputs: ["{workspaceRoot}/target/coverage-units/onepipeline-other.lcov"] } },
+      targets: {
+        test: {
+          command: "just _note-test",
+          outputs: ["{workspaceRoot}/target/coverage-units/onepipeline-other.lcov"],
+        },
+      },
     }),
   );
-  const mismatched = spawnSync("node", ["scripts/coverage-tiers.mjs"], { cwd: dir, encoding: "utf8" });
+  const mismatched = spawnSync("node", ["scripts/coverage-tiers.mjs"], {
+    cwd: dir,
+    encoding: "utf8",
+  });
   assert.equal(mismatched.status, 2, mismatched.stderr);
-  assert.match(mismatched.stderr, /declares report onepipeline-other but its recipe _note-test writes unit onepipeline-note-journeys/);
+  assert.match(
+    mismatched.stderr,
+    /declares report onepipeline-other but its recipe _note-test writes unit onepipeline-note-journeys/,
+  );
 });
 
-test("a stale report never reaches the total, and the merge refuses what no tier owns", { timeout: 900000 }, (t) => {
+test("a stale report never reaches the total, and the merge refuses what no tier owns", {
+  timeout: 900000,
+}, (t) => {
   const dir = scratch(t, { uncovered: 200 });
   assert.notEqual(nx(dir, test_all).status, 0, "this fixture is below the floor");
   const cached = new Map(TIERS.map((tier) => [tier, readFileSync(lcovOf(dir, tier), "utf8")]));
 
-  for (const tier of TIERS) writeFileSync(lcovOf(dir, tier), `SF:src/planted-${tier}.rs\nDA:1,1\nend_of_record\n`);
+  for (const tier of TIERS)
+    writeFileSync(lcovOf(dir, tier), `SF:src/planted-${tier}.rs\nDA:1,1\nend_of_record\n`);
   editNote(dir);
   const mixed = nx(dir, test_all);
   const { replayed, executed } = tierOutcome(mixed);
   assert.deepEqual(executed, ["onepipeline-note-journeys"]);
-  for (const tier of replayed) assert.equal(readFileSync(lcovOf(dir, tier), "utf8"), cached.get(tier), `${tier} kept planted content`);
-  assert.doesNotMatch(readFileSync(lcovOf(dir, "onepipeline-note-journeys"), "utf8"), /planted/, "the executed tier kept planted content");
-  assertSameReport(assert, mergeReport(mixed.output), sumReports(ALL_LCOV(dir)), "after stale reports were planted");
+  for (const tier of replayed)
+    assert.equal(
+      readFileSync(lcovOf(dir, tier), "utf8"),
+      cached.get(tier),
+      `${tier} kept planted content`,
+    );
+  assert.doesNotMatch(
+    readFileSync(lcovOf(dir, "onepipeline-note-journeys"), "utf8"),
+    /planted/,
+    "the executed tier kept planted content",
+  );
+  assertSameReport(
+    assert,
+    mergeReport(mixed.output),
+    sumReports(ALL_LCOV(dir)),
+    "after stale reports were planted",
+  );
 
-  writeFileSync(join(unitsDir(dir), "nobody-owns-this.lcov"), "SF:src/x.rs\nDA:1,1\nend_of_record\n");
+  writeFileSync(
+    join(unitsDir(dir), "nobody-owns-this.lcov"),
+    "SF:src/x.rs\nDA:1,1\nend_of_record\n",
+  );
   const stray = spawnSync("just", ["_crate-coverage"], { cwd: dir, encoding: "utf8" });
   assert.equal(stray.status, 2, stray.stdout + stray.stderr);
   assert.match(stray.stderr, /nobody-owns-this\.lcov/);
-  execFileSync("rm", [join(unitsDir(dir), "nobody-owns-this.lcov"), lcovOf(dir, "onepipeline-pooled-slot")]);
+  execFileSync("rm", [
+    join(unitsDir(dir), "nobody-owns-this.lcov"),
+    lcovOf(dir, "onepipeline-pooled-slot"),
+  ]);
   const missing = spawnSync("just", ["_crate-coverage"], { cwd: dir, encoding: "utf8" });
   assert.equal(missing.status, 2, missing.stdout + missing.stderr);
   assert.match(missing.stderr, /no report for unit\(s\) onepipeline-pooled-slot/);
   assert.ok(readdirSync(unitsDir(dir)).every((name) => name.endsWith(".lcov")));
 });
 
-test("a truncated profile in a tier's run leaves its export and the rest of its profiles counted", { timeout: 300000 }, (t) => {
+test("a truncated profile in a tier's run leaves its export and the rest of its profiles counted", {
+  timeout: 300000,
+}, (t) => {
   const dir = scratch(t);
   // Eight bytes as far as a killed child's header got, written where the unit merges its profiles.
   appendFileSync(
@@ -169,6 +254,14 @@ fn plants_a_truncated_profile() {
   assert.equal(run.status, 0, run.output);
   const report = readLcov(readFileSync(lcovOf(dir, "onepipeline-note-journeys"), "utf8"));
   const lines = [...report.get("src/lib.rs").values()];
-  assert.ok(lines.some((count) => count > 0), "the tier's other profiles were not counted");
-  assert.ok(readdirSync(join(dir, "target/llvm-cov-target")).some((name) => name.endsWith(".truncated_0.profraw")), "the truncated profile was not planted");
+  assert.ok(
+    lines.some((count) => count > 0),
+    "the tier's other profiles were not counted",
+  );
+  assert.ok(
+    readdirSync(join(dir, "target/llvm-cov-target")).some((name) =>
+      name.endsWith(".truncated_0.profraw"),
+    ),
+    "the truncated profile was not planted",
+  );
 });

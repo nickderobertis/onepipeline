@@ -3,10 +3,7 @@
   "$schema": "../../node_modules/nx/schemas/project-schema.json",
   "projectType": "library",
   "sourceRoot": "tests/coverage_keys",
-  "tags": [
-    "scope:tests",
-    "lang:js"
-  ],
+  "tags": ["scope:tests", "lang:js"],
   "targets": {
     "bootstrap": {
       "executor": "nx:noop"
@@ -47,21 +44,13 @@
     },
     "check": {
       "executor": "nx:noop",
-      "dependsOn": [
-        "format-check",
-        "lint",
-        "test"
-      ]
+      "dependsOn": ["format-check", "lint", "test"]
     },
     "input-selection": {
       "executor": "nx:noop",
       "cache": false,
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
-      "inputs": [
-        "justfileSelection",
-        "cargoSelection",
-        "npmSelection"
-      ]
+      "inputs": ["justfileSelection", "cargoSelection", "npmSelection"]
     }
   }
 }
