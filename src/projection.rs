@@ -3208,7 +3208,7 @@ mod tests {
     }
 
     /// A node re-dispatched onto new sessions keeps one entry per failed session in
-    /// the order they failed, however often the journal replays a record. A unit,
+    /// the order they failed, however often the journal replays a record and whatever a later session passes. A unit,
     /// because no journey makes one node id open two sessions that both fail without
     /// also driving a whole rework, which `tests/e2e/rework.rs` already pays for once.
     #[test]
@@ -3218,6 +3218,11 @@ mod tests {
             provision_failed(1, "a", "s-1"),
             provision_failed(2, "a", "s-2"),
             provision_failed(1, "a", "s-1"),
+            {
+                let mut passed = provision_failed(3, "a", "s-3");
+                passed.kind = crate::vcs::kind_of(onevcs::EventKind::WorktreeProvisioned);
+                passed
+            },
         ] {
             fold_provisioning(&mut state, &event);
         }

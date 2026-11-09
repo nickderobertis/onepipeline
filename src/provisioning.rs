@@ -213,7 +213,7 @@ mod tests {
     /// Each way a hook can end is named for what it was, and a timeout outranks
     /// the status git's killed checkout happened to leave behind. A unit, because
     /// git hands a journey's killed hook back as an exit status (143 for a TERM), so
-    /// only a real status is reachable by one, and that is what the journeys assert.
+    /// a signal is unreachable by one; a real status and a timeout are journeys.
     #[test]
     fn how_the_hook_ended_names_the_timeout_then_the_signal_then_the_status() {
         let mut failed = failure("");

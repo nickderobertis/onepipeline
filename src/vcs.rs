@@ -2336,8 +2336,8 @@ pub(crate) fn provision_failure(envelope: &Envelope) -> Option<onevcs::WorktreeP
 /// The last `worktree-provision-failed` record of this session's own stream,
 /// stamped with this dispatch's labels and keeping what `onevcs` labelled it with.
 ///
-/// Read from the stream directly, because a launch's source filter decides what
-/// is relayed and this is what a worker must be told regardless.
+/// Read from the stream directly, because the worker's first turn is composed
+/// before anything of this session has been relayed.
 pub(crate) fn provision_failure_in(
     token: &SessionToken,
     labels: &crate::event::Labels,

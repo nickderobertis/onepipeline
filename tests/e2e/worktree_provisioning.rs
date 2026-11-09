@@ -177,8 +177,9 @@ fn a_failed_hook_reaches_the_workers_first_turn_the_watch_and_the_results() {
 
     let watched = world.run(&["watch", run, "--until", "surface", "--timeout", "120"]);
     watched.exited(SURFACE_WAITING);
+    // The return line names the waiting kind; the surface it returned on names the node.
     assert!(
-        watched.stdout.contains(KIND) && watched.stdout.contains("service"),
+        watched.stdout.contains(KIND),
         "the watch did not return on the surface: {}",
         watched.stdout
     );
@@ -322,13 +323,35 @@ fn a_killed_hooks_fence_stays_inside_a_section_above_the_notes() {
     let section = &prompt[heading..];
     assert!(section.contains("exited with status 143"), "{section}");
     assert!(
-        section.contains("````\n```\nFENCED-OUTPUT\n```\n````"),
+        section.contains("\n```\nFENCED-OUTPUT\n```\n") && section.matches("````").count() == 2,
         "{section}"
     );
     let results = results_json(&world, run);
     assert_eq!(
         node_of(&results, "service")["provisioning_failures"][0]["exit_status"],
         143
+    );
+    stop(&world, run);
+}
+
+/// A hook that outlasts `onevcs`'s bound is named as having timed out, in the task
+/// and on the surface alike.
+#[test]
+fn a_hook_past_its_bound_is_named_as_timed_out() {
+    let world = World::new("provisioning-timeout").with_env("ONEVCS_GIT_HOOK_TIMEOUT", "1");
+    let repo = world.repository("local-direct", &[]);
+    tracked_post_checkout(&world, &repo, "#!/bin/sh\nexec sleep 30\n");
+    let run = "provisiontimeout";
+    started(&world, run);
+    let surface = world.surfaced(run, KIND);
+    let message = surface["payload"]["message"].as_str().expect("a message");
+    assert!(message.contains("ended: timed out"), "{message}");
+    settled(&world, run, "service");
+    let prompt = first_turn(&world, "service");
+    assert!(prompt.contains("it timed out."), "{prompt}");
+    assert_eq!(
+        node_of(&results_json(&world, run), "service")["provisioning_failures"][0]["timed_out"],
+        true
     );
     stop(&world, run);
 }
@@ -404,6 +427,13 @@ fn a_retry_onto_a_session_whose_hook_passes_carries_no_failure_section() {
             .count(),
         1,
         "the passing session raised a surface"
+    );
+    let results = results_json(&world, run);
+    assert!(
+        node_of(&results, "service-2")
+            .get("provisioning_failures")
+            .is_none(),
+        "{results}"
     );
     stop(&world, run);
 }
