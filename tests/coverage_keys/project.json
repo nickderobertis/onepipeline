@@ -36,12 +36,12 @@
         "{workspaceRoot}/nx.json",
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/justfile",
-        "{workspaceRoot}/Cargo.toml",
-        "{workspaceRoot}/Cargo.lock",
         "{workspaceRoot}/.github/ci-tool-versions.json",
-        "{workspaceRoot}/CHANGELOG.md",
         {
           "runtime": "node -p process.platform"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
         }
       ]
     },
@@ -59,6 +59,7 @@
       "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
       "inputs": [
         "justfileSelection",
+        "cargoSelection",
         "npmSelection"
       ]
     }
