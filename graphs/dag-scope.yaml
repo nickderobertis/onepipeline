@@ -45,5 +45,6 @@ members:
     oneharness_config: ./oneharness.orchestrator.toml
     persona: ../personas/check-in.yaml
     # Resettable: every planner-visible surface restarts this clock, so a run
-    # that is already reporting does not also get a pacemaker surface.
+    # that is already reporting does not also get a pacemaker surface. That
+    # automatic reset is deprecated and will be removed; `reset_on` replaces it.
     schedule: {every: 1800, resettable: true}

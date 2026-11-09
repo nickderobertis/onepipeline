@@ -679,7 +679,9 @@ pub struct Next {
 /// Rendering is not reading: `monitor` shows a pending surface without
 /// consuming it, and this is what advances the queue, journals
 /// `planner-surfaced`, and restarts the check-in clock of every member the run's
-/// observer graph declares resettable.
+/// observer graph declares resettable. That automatic reset is deprecated and
+/// will be removed (`docs/contract-divergences.md` entry 148); `reset_on` replaces
+/// it.
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
 /// since it was queued — `release::wait_outlived`
@@ -737,9 +739,9 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
         ]),
     )?;
 
-    // The engine's built-in reset, deprecated (`docs/contract-divergences.md`
-    // entry 148) and still working: `reset_on` over the journal the graph follows
-    // is its replacement. Which clocks is the observer graph's own to say: every member it
+    // The engine's automatic reset, deprecated and to be removed
+    // (`docs/contract-divergences.md` entry 148), still working until then:
+    // `reset_on` over the journal the graph follows replaces it. Which clocks is the observer graph's own to say: every member it
     // declared `resettable`, and the engine names none. Addressed by the
     // **graph** run's id, which is what the sibling minted and the only id its
     // signals answer to; this run's id names a run `oneagentgraph` has never

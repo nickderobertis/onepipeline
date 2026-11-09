@@ -2175,9 +2175,9 @@ impl Settled {
 
 /// Restart the clock of every resettable schedule in one graph run.
 ///
-/// **Deprecated, still working** (`docs/contract-divergences.md` entry 148): a
-/// graph declares `reset_on` over the journal its run follows instead, and that
-/// is the only reset a scheduled note's clock answers to. Until this is removed,
+/// **Deprecated and to be removed, still working** (`docs/contract-divergences.md`
+/// entry 148): `reset_on`, which a graph declares over the journal its run
+/// follows, replaces it, and that is the only reset a scheduled note's clock answers to. Until this is removed,
 /// a surface a planner actually read restarts the check-in clock, so a run that
 /// is already reporting does not also get a check-in surface. **Which** clocks is the graph document's to
 /// say, and the engine names no member: a [`oneagentgraph::run::Signal::Reset`]
