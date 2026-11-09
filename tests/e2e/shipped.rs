@@ -10,7 +10,7 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{repo_file, World};
+use crate::harness::{agent, plan_of, repo_file, World};
 use oneagentgraph::config::{GraphConfig, JudgeSide, Member};
 use oneagentgraph::persona::{merge, Persona};
 
@@ -375,8 +375,8 @@ fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
     let live = world.run(&["status", RUN]);
     live.exited(0)
         .out_has("ACTIVE")
-        .out_has(&format!("driver: pid {adopter}, live, adopted"))
-        .out_has("adoption 1");
+        .out_has("driver: live, adopted")
+        .out_has(&format!("pid {adopter}, adoption 1"));
     assert!(
         !live.stdout.contains("driver exited"),
         "the earlier driver's exit was printed beside a live adopter:\n{}",
@@ -405,7 +405,7 @@ fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
         .out_has("driver exited")
         .out_has(&format!("({adopters_exit})"));
     assert!(
-        !exited.stdout.contains("driver: pid"),
+        !exited.stdout.contains("driver: live"),
         "the adopter was still named as live after it exited:\n{}",
         exited.stdout
     );
@@ -414,6 +414,38 @@ fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
             .expect("the reading is JSON");
     assert_eq!(reading["driven"], false, "{reading}");
     assert!(reading["ending"].is_object(), "{reading}");
+}
+
+/// An adopter killed without recording its exit is neither called live nor
+/// reported by the exit of the driver before it.
+#[cfg(unix)]
+#[test]
+fn status_says_an_adopter_that_died_recorded_no_exit() {
+    let world = World::new("adopter-died");
+    let path = world.plan("died", &plan_of("died", vec![agent("build", &[])]));
+    world.script("build.fail", "1");
+    world.run(&["start", &path, "--attach"]);
+    world.script("build.wait", "hold");
+    world.run(&["adopt", "died", "--detach"]).exited(0);
+    world.until("the adoption to be journalled", |world| {
+        !world.events_of("died", "driver-adopted").is_empty()
+    });
+    let pid = world.events_of("died", "driver-adopted")[0]["payload"]["pid"]
+        .as_u64()
+        .expect("the adoption names its driver");
+    crate::harness::end_process(u32::try_from(pid).expect("a pid"));
+    world.until("the driver to read as gone", |world| {
+        !world.run(&["status", "died"]).stdout.contains("ACTIVE")
+    });
+    let status = world.run(&["status", "died"]);
+    status
+        .exited(0)
+        .out_has("driver: exited without recording it, adopted");
+    assert!(
+        !status.stdout.contains("driver exited"),
+        "{}",
+        status.stdout
+    );
 }
 
 /// Every repository origin the example store's tasks name.

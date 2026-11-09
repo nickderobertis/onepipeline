@@ -5167,18 +5167,14 @@ fn adopted_driver_line(event: &Envelope, ago: &str, liveness: DriverLiveness) ->
     } else {
         "live"
     };
-    match serde_json::from_value::<crate::payload::DriverAdopted>(serde_json::Value::Object(
+    let which = serde_json::from_value::<crate::payload::DriverAdopted>(serde_json::Value::Object(
         event.payload.clone(),
-    )) {
-        Ok(adopted) => format!(
-            "  driver: pid {}, {state}, adopted{ago} ({}) — adoption {}\n",
-            adopted.pid, event.ts, adopted.adoption
-        ),
-        Err(_) => format!(
-            "  driver: {state}, adopted{ago} ({}): its driver-adopted record could not be read\n",
-            event.ts
-        ),
-    }
+    ))
+    .map_or_else(
+        |_| String::new(),
+        |adopted| format!(" — pid {}, adoption {}", adopted.pid, adopted.adoption),
+    );
+    format!("  driver: {state}, adopted{ago} ({}){which}\n", event.ts)
 }
 
 /// One `driver-exited` record, as `status` reads it.

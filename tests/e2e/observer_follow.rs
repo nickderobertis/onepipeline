@@ -316,4 +316,21 @@ fn the_built_in_reset_restarts_only_the_resettable_schedule_and_warns() {
         adopted.stderr
     );
     wrapping_up(&world, "deprecated");
+
+    // Attached, the adopter is a process of this test's own, with its warning on
+    // a file because it stays to drive.
+    let log = world.root.join("attached-adopt.stderr");
+    let mut attached = world
+        .agentgraph_cmd(&["adopt", "deprecated"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).expect("a log for the adoption"))
+        .spawn()
+        .expect("the attached adoption starts");
+    world.until("the attached adoption to warn", |_| {
+        std::fs::read_to_string(&log).is_ok_and(|said| said.matches(DEPRECATED).count() == 1)
+    });
+    world.release("observer.go");
+    world.release("turn.go");
+    attached.kill().expect("the attached adoption is ended");
+    attached.wait().expect("the attached adoption is reaped");
 }
