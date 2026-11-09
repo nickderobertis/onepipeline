@@ -1542,7 +1542,11 @@ pub(crate) fn reply(
         } else {
             crate::verbs::ReplyOutcome::Answered {
                 reply,
-                verdict: crate::verbs::VerdictHalf::OnTheQueue,
+                verdict: if offered.envelope.carries_verdict() {
+                    crate::verbs::VerdictHalf::OnTheQueue
+                } else {
+                    crate::verbs::VerdictHalf::NotCarried
+                },
             }
         },
         advice: Vec::new(),

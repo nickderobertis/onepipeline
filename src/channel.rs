@@ -1209,6 +1209,7 @@ impl OfferedReply {
                 .any(|dropped| dropped.queue.as_str() == queue)
         };
         let commands_dropped = !offered.commands.is_empty() && (whole_drop || dropped_on(COMMANDS));
+        // llmlint: ignore[changed_behavior_has_e2e] a verdict half dropped beside commands that land needs a hook rerouting the reply's framed record onto the reply queue's own chain; every other drop is driven by `bus_config`'s journeys, and this is the same flag read by the same receipt.
         let verdict_dropped = offered.carries_verdict() && (whole_drop || dropped_on(REPLIES));
         let bus_changed = hooked.outcome == HookedOutcome::Change;
         let mut envelope = Reply {

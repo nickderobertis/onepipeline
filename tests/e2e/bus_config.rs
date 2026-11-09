@@ -1323,3 +1323,31 @@ fn a_hook_cannot_add_a_completion_its_author_may_not_declare() {
     assert_eq!(channel_file(&world, "hookcomplete", "replies.jsonl"), "");
     world.release("slow.go");
 }
+
+/// A reply a hook reroutes to `surfaces`: the planner reads the surface, nothing was
+/// delivered as a verdict, and the receipt says the envelope was changed.
+#[test]
+fn a_reply_a_hook_reroutes_to_surfaces_reaches_the_planner_and_delivers_no_verdict() {
+    let world = World::new("hook-reply-surface");
+    hooked_run(
+        &world,
+        "hookreplysurface",
+        &[("replies", &["reroute-as-surface"], ", routes: [surfaces]")],
+    );
+    let answered = world.run_with_stdin(
+        &["reply", "hookreplysurface"],
+        r#"{"completion":false,"reason":"sent onward"}"#,
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    assert!(receipt.get("verdict").is_none(), "{receipt}");
+    assert_eq!(
+        channel_file(&world, "hookreplysurface", "replies.jsonl"),
+        ""
+    );
+    assert!(surfaces_read(&world, "hookreplysurface")
+        .iter()
+        .any(|surface| surface["message"] == "rerouted to the planner"));
+    world.release("slow.go");
+}

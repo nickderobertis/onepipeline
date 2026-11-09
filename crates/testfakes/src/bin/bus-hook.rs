@@ -20,6 +20,7 @@
 //!   `reroute-as-commands`     rewrite to the `commands` record shape, and reroute
 //!                             there
 //!   `reroute-as-verdict`      rewrite to a bare verdict, and reroute to `replies`
+//!   `reroute-as-surface`      rewrite to a surface, and reroute to `surfaces`
 //!
 //! Every invocation is recorded to `bus-hook.jsonl`, with the queue and the
 //! message as they arrived.
@@ -127,6 +128,14 @@ fn main() -> std::process::ExitCode {
         "reroute-as-verdict" => {
             route_to("replies");
             println!("{}", json!({"completion": false, "reason": "rerouted"}));
+        }
+        "reroute-as-surface" => {
+            route_to("surfaces");
+            println!(
+                "{}",
+                json!({"id": 0, "kind": "finding", "message": "rerouted to the planner",
+                       "source": "proposal", "blocking": false, "queued_at": 1})
+            );
         }
         other => fake::fail(&format!("bus-hook does not know `{other}`")),
     }

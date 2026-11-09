@@ -2545,3 +2545,38 @@ fn a_flows_reply_a_hook_rewrites_is_held_to_what_a_reply_may_carry() {
         assert_eq!(flow.ended(), 0);
     }
 }
+
+/// A flow's reply a hook reroutes to `surfaces` delivers no verdict, and its
+/// receipt names none rather than claiming one was delivered.
+#[test]
+fn a_flows_reply_a_hook_reroutes_names_no_delivered_verdict() {
+    let world = World::new("flow-hook-routed");
+    let hook = crate::harness::double("bus-hook")
+        .to_string_lossy()
+        .into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, routes: \
+             [surfaces], command: [{hook:?}, reroute-as-surface]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "routed",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let answered = world.run_with_stdin(
+        &["reply", "--flow", "routed"],
+        &json!({"completion": false, "reason": "sent onward"}).to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    assert!(receipt.get("verdict").is_none(), "{receipt}");
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
