@@ -788,8 +788,8 @@ console.log(JSON.stringify(out));"#,
 
 /// The measurement's record says from the kernel which journals each scaling read opened:
 /// `scripts/host-view-trace.mjs` runs a real process under the real `strace` and counts the
-/// bytes it read from each run's journal, including from many processes reading at once, whose
-/// calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
+/// bytes it read from each run's journal, through any call that hands bytes over, including from
+/// many processes reading at once, whose calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
 /// other runs' than the live ones, is refused, naming them; so is a traced command that failed,
 /// a tracer that would not run or left no trace, and a trace with a call it cannot account for.
 #[cfg(target_os = "linux")]
@@ -894,16 +894,41 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         "{none}"
     );
 
-    // A journal read with `pread64` counts as one read with `read`.
-    let pread = traced_opens(
-        &dir,
-        "python3 -I -c \"import os; os.pread(os.open('live-0/events.jsonl', os.O_RDONLY), 64, 0)\"",
-        &[],
-    );
-    assert_eq!(
-        pread["opened"],
-        serde_json::json!({"live-0": live_bytes}),
-        "{pread}"
+    // Every call that hands over a file's bytes counts as a `read` does, whichever the reader
+    // chose: uutils `cat`, Ubuntu 26.04's, reaches a pipe through `splice` alone.
+    let traced_call = |call: &str| {
+        traced_opens(
+            &dir,
+            &format!(
+                "python3 -I -c \"import os, mmap; f = os.open('live-0/events.jsonl', os.O_RDONLY); \
+                 r, w = os.pipe(); {call}\""
+            ),
+            &[],
+        )
+    };
+    for call in [
+        "os.pread(f, 64, 0)",
+        "os.readv(f, [bytearray(64)])",
+        "os.preadv(f, [bytearray(64)], 0)",
+        "os.splice(f, w, 64)",
+        "os.sendfile(w, f, 0, 64)",
+        "os.copy_file_range(f, os.open('copied.out', os.O_WRONLY | os.O_CREAT), 64)",
+    ] {
+        let read = traced_call(call);
+        assert_eq!(
+            read["opened"],
+            serde_json::json!({"live-0": live_bytes}),
+            "{call}: {read}"
+        );
+    }
+
+    // A mapped journal is read with no call to count, which is no reading rather than zero.
+    let mapped = traced_call("mmap.mmap(f, 0, prot=mmap.PROT_READ).read(64)");
+    assert!(
+        mapped["error"].as_str().is_some_and(|error| error
+            .contains("live-0's journal was mapped, so the bytes read cannot be counted"))
+            && mapped.get("opened").is_none(),
+        "{mapped}"
     );
 
     // An open a reader was killed inside has no result to read it by, so it is no observation.
