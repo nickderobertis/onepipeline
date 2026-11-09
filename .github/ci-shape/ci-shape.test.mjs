@@ -34,7 +34,7 @@ const ci = workflows["ci.yml"];
 const warm = workflows["rust-cache-warm.yml"];
 
 const FOUR = {
-  lint: "ubuntu-latest",
+  lint: "ubuntu-24.04",
   "test-linux": "ubuntu-latest",
   "test-windows": "windows-latest",
   "test-macos": "macos-latest",
