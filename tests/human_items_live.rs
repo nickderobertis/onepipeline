@@ -3214,3 +3214,63 @@ fn an_answer_by_the_engine_reaches_its_owner_and_no_run() {
         "the engine's answer surfaced on the run"
     );
 }
+
+/// The limits are inclusive: six choices and fifty answers are accepted. A batch mixing
+/// an identical repeat with new answers keeps the batch's order and counts only the new.
+#[test]
+fn six_choices_and_fifty_answers_fit_and_a_repeat_is_not_counted_in_its_batch() {
+    let world = Live::enabled();
+    let mut six = item("six", "question", "low", "s", json!({"scope": "nothing"}));
+    six["choices"] = json!((0..6)
+        .map(|n| json!({"id": format!("c{n}"), "title": format!("Choice {n}"), "description": "d"}))
+        .collect::<Vec<_>>());
+    let offered = world.raise(&six);
+    assert_eq!(
+        world.json(None, &["show", &offered, "--json"])["item"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    let ids: Vec<String> = (0..50)
+        .map(|n| {
+            let key = format!("q{n}");
+            world.raise(&item(
+                &key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    world.ok(None, &["answer", &ids[3], "--text", "Already."]);
+    let path = world.input(
+        "fifty",
+        &json!({"answers": ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| json!({"id": id, "text": if n == 3 { "Already." } else { "Yes." }}))
+            .collect::<Vec<_>>()}),
+    );
+    let before = world.journal().len();
+    let receipt = world.json(None, &["answer-batch", "--input", &path]);
+    let answered: Vec<&str> = receipt["answered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["item"]["item"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(answered, ids.iter().map(String::as_str).collect::<Vec<_>>());
+    let journal = world.journal();
+    assert_eq!(
+        journal.len(),
+        before + 49,
+        "the repeat is written once, earlier"
+    );
+    let batch = receipt["batch"].as_str().unwrap();
+    for event in &journal[before..] {
+        assert_eq!(event["payload"]["batch"]["id"], batch, "{event}");
+        assert_eq!(event["payload"]["batch"]["size"], 49, "{event}");
+    }
+}
