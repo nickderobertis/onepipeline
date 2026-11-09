@@ -12475,3 +12475,24 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
             .is_valid(&value));
     }
 }
+
+/// The provisioning surface, section and `results` entry are named in the contract
+/// by the word the engine queues, and the kind is one `SurfaceKind` admits.
+#[test]
+fn the_provisioning_failure_names_are_what_the_contract_documents() {
+    let doc = std::fs::read_to_string("docs/contract.md").expect("the contract is readable");
+    for named in [
+        "kind `provisioning-failed`",
+        "## Worktree provisioning failed",
+        "`provisioning_failures`",
+    ] {
+        assert!(
+            doc.contains(named),
+            "docs/contract.md does not name {named}"
+        );
+    }
+    let kind: SurfaceKind = SurfaceKind::PROVISIONING_FAILED
+        .parse()
+        .expect("the kind is a valid word");
+    assert_eq!(kind.as_str(), "provisioning-failed");
+}

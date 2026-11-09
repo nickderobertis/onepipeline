@@ -210,6 +210,17 @@ pub struct RunState {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    /// Each node's sessions whose provisioning failed, oldest first, one entry per
+    /// session; a later session's success removes nothing. Omitted when empty.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the plain node id every map on this struct is keyed by, which the graph validated; a node-id type for one field would not change what the struct can hold.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
+    /// The sessions whose `provisioning-failed` surface is on the journal, so each
+    /// raises one. Kept apart from the failures because the relay can journal a
+    /// failure, and a refresh fold it, before the loop reaches it. Omitted when empty.
+    // llmlint: ignore[invalid_states_unrepresentable] each is the token exactly as `onevcs` labelled its own record, compared and never parsed, as `provisioning::Failure::session` carries it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) provisioning_surfaced: BTreeSet<String>,
     // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
     // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
     // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
@@ -1010,6 +1021,14 @@ impl Closure {
 }
 
 impl RunState {
+    /// Whether this failure's session already has its record on some node.
+    fn provisioning_recorded(&self, failure: &crate::provisioning::Failure) -> bool {
+        self.provisioning_failures
+            .values()
+            .flatten()
+            .any(|recorded| recorded.session == failure.session)
+    }
+
     /// Whether a stop has been recorded at all, however it went, with no
     /// adoption driving the run since.
     ///
@@ -1300,6 +1319,7 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
+        fold_provisioning(state, event);
         fold_landing_commit(state, event);
         fold_push(state, event);
         // A landing that closes issues, kept whole for the closure watch a driver
@@ -1918,7 +1938,10 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
                 state.decisions_pending.remove(reference);
             }
         }
-        Some(journal::PipelineKind::PlannerSurfaceQueued) => state.surfaces_queued += 1,
+        Some(journal::PipelineKind::PlannerSurfaceQueued) => {
+            state.surfaces_queued += 1;
+            fold_provisioning_surface(state, event);
+        }
         Some(journal::PipelineKind::PlannerSurfaced) => {
             state.surfaces_read += 1;
             state.last_surface_at = millis_of(&event.ts);
@@ -2011,6 +2034,43 @@ pub(crate) struct SessionOpened {
     /// The record's own `ts`.
     // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
     pub(crate) at: String,
+}
+
+/// A session's failed provisioning, recorded once under the node that opened it.
+fn fold_provisioning(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    let Some(failure) = crate::provisioning::Failure::of(event) else {
+        return;
+    };
+    if !state.provisioning_recorded(&failure) {
+        state
+            .provisioning_failures
+            .entry(node.clone())
+            .or_default()
+            .push(failure);
+    }
+}
+
+/// The session a `provisioning-failed` surface was queued for.
+fn fold_provisioning_surface(state: &mut RunState, event: &Envelope) {
+    if event
+        .payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        != Some(crate::channel::SurfaceKind::PROVISIONING_FAILED)
+    {
+        return;
+    }
+    if let Some(session) = event
+        .labels
+        .extra
+        .get(crate::provisioning::SESSION_LABEL)
+        .and_then(serde_json::Value::as_str)
+    {
+        state.provisioning_surfaced.insert(session.to_owned());
+    }
 }
 
 /// Fold where a sibling's record says its node's turn is, and what session it
@@ -3126,6 +3186,51 @@ mod tests {
             tasks: nodes,
             export_edges: Vec::new(),
         }
+    }
+
+    fn provision_failed(seq: u64, node: &str, session: &str) -> Envelope {
+        let mut event = pipeline(journal::PipelineKind::RunStarted, seq, Some(node), &[]);
+        event.source = Source::Vcs;
+        event.kind = crate::vcs::kind_of(onevcs::EventKind::WorktreeProvisionFailed);
+        event.labels.extra.insert(
+            crate::provisioning::SESSION_LABEL.to_owned(),
+            json!(session),
+        );
+        event.payload = json!({
+            "hook": "post-checkout", "trigger": "worktree-add", "worktree": "/w",
+            "exit_status": 1, "signal": null, "timed_out": false, "duration_ms": 1,
+            "output": "", "output_truncated": false, "rerun": "git hook run post-checkout",
+        })
+        .as_object()
+        .expect("an object")
+        .clone();
+        event
+    }
+
+    /// A node re-dispatched onto new sessions keeps one entry per failed session in
+    /// the order they failed, however often the journal replays a record and whatever a later session passes. A unit,
+    /// because no journey makes one node id open two sessions that both fail without
+    /// also driving a whole rework, which `tests/e2e/rework.rs` already pays for once.
+    #[test]
+    fn each_failed_session_is_kept_once_oldest_first() {
+        let mut state = RunState::default();
+        for event in [
+            provision_failed(1, "a", "s-1"),
+            provision_failed(2, "a", "s-2"),
+            provision_failed(1, "a", "s-1"),
+            {
+                let mut passed = provision_failed(3, "a", "s-3");
+                passed.kind = crate::vcs::kind_of(onevcs::EventKind::WorktreeProvisioned);
+                passed
+            },
+        ] {
+            fold_provisioning(&mut state, &event);
+        }
+        let sessions: Vec<&str> = state.provisioning_failures["a"]
+            .iter()
+            .map(|failure| failure.session.as_str())
+            .collect();
+        assert_eq!(sessions, ["s-1", "s-2"]);
     }
 
     fn pipeline(

@@ -111,6 +111,7 @@ mod ordering;
 mod plancheck;
 mod pool;
 mod projection;
+mod provisioning;
 mod publicid;
 mod readjust;
 #[cfg(test)]

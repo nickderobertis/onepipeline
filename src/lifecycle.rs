@@ -1228,6 +1228,15 @@ fn restack_open(
     // lifecycle.rs`.
     let mut session = crate::executor::open_session(&request, &labels)
         .map_err(|error| failed(error.to_string()))?;
+    // Told to the manager whether or not a worker is dispatched below, and read
+    // from the stream directly because this session's record is opened by no handle.
+    let provision_failed = crate::vcs::provision_failure_in(&session.token, &labels);
+    let provisioning = provision_failed
+        .as_ref()
+        .and_then(crate::provisioning::Failure::of);
+    if let Some(envelope) = provision_failed {
+        let _ = tx.send(Message::Event(Box::new(envelope)));
+    }
     // A restack brings its base in whatever the identity's base-merge policy says: a
     // session that opened clean on a base whose head its branch does not carry — an open
     // told the restack merges a clean base itself merges only on a conflict — has that
@@ -1243,6 +1252,10 @@ fn restack_open(
         });
     };
     let task = crate::plan::with_merge_in_progress(&task, &merge);
+    let task = match &provisioning {
+        Some(failure) => crate::provisioning::with_section(&task, failure),
+        None => task,
+    };
     let declared_steps = node.steps.is_some();
     let build = |attempt| DispatchRequest {
         graph: graph.clone(),
