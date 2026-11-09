@@ -622,7 +622,7 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
             ("kind", json!(surface.kind)),
             ("message", json!(journal::bounded_text(&surface.message))),
             ("source", json!(surface.source)),
-            ("blocking", json!(false)),
+            ("blocking", json!(surface.blocking)),
             ("correlation", json!(surface.correlation)),
         ]),
     )

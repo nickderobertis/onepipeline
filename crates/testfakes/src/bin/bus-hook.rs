@@ -11,6 +11,7 @@
 //!   `refuse <reason>`         exit 1 with `<reason>` on stderr
 //!   `unjudged`                exit 3
 //!   `set-message <text>`      rewrite `message`, on a surface or a framed reply
+//!   `set-blocking`            mark a surface `blocking: true`
 //!   `keep-first-command`      leave only the first of the envelope's commands
 //!   `strip-verdict`           take the verdict half off a bare envelope
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
@@ -74,6 +75,13 @@ fn main() -> std::process::ExitCode {
                 fake::fail(&format!("set-message was handed no object: {offered}"));
             };
             fields.insert("message".to_owned(), json!(argument));
+            println!("{message}");
+        }
+        "set-blocking" => {
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!("set-blocking was handed no object: {offered}"));
+            };
+            fields.insert("blocking".to_owned(), json!(true));
             println!("{message}");
         }
         "keep-first-command" => {

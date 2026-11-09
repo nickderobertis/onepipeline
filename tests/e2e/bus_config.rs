@@ -868,6 +868,39 @@ fn a_hook_that_rewrites_a_surface_hands_the_planner_the_changed_text() {
     world.release("slow.go");
 }
 
+/// A hook may change a surface's `blocking` as it may its text, and the journal
+/// records the surface as queued rather than as `surface` offered it.
+#[test]
+fn a_hook_that_marks_a_surface_blocking_is_journalled_blocking() {
+    let world = World::new("hook-surface-blocking");
+    hooked_run(
+        &world,
+        "hookblocking",
+        &[("surfaces", &["set-blocking"], "")],
+    );
+    world
+        .run(&[
+            "surface",
+            "hookblocking",
+            "--kind",
+            "finding",
+            "--message",
+            "the report",
+        ])
+        .exited(0);
+    assert_eq!(
+        surfaces_read(&world, "hookblocking")[0]["blocking"],
+        true,
+        "the queue holds what the hook left"
+    );
+    assert_eq!(
+        world.events_of("hookblocking", "planner-surface-queued")[0]["payload"]["blocking"],
+        true,
+        "the journal records what was queued"
+    );
+    world.release("slow.go");
+}
+
 /// (d) A hook rerouting an envelope to `commands`: the reconciler applies it, the
 /// reply queue holds nothing, and the receipt says changed. A route naming a queue
 /// the layout does not declare is refused at the launch.

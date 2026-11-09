@@ -1433,7 +1433,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),
             ("source", json!(queued.source)),
-            ("blocking", json!(false)),
+            ("blocking", json!(queued.blocking)),
         ]),
     )?;
     Ok(surfaced)
