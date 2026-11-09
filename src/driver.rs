@@ -4104,6 +4104,8 @@ fn surface_message(message: Option<&String>, file: Option<&PathBuf>) -> Result<S
 /// operations — that no path can reach and every reader would still have to
 /// answer for.
 pub(crate) enum Submitted {
+    /// Hooks dropped the whole envelope: nothing was queued, applied or delivered.
+    Dropped,
     /// A commandless verdict, queued for whichever reader the run owes one.
     Answered {
         /// The reply's id in the channel.
@@ -4198,6 +4200,10 @@ pub(crate) fn deliver_note_envelope(
         Submitted::Answered { .. } => Err(Error::Refused(
             "a note carries a command, and this envelope was answered as a verdict".to_string(),
         )),
+        // llmlint: ignore[changed_behavior_has_e2e] this arm is the note library call's answer to a dropped envelope, reached by no verb: the receipt path every journey drives is `verbs::submit`'s `Submitted::Dropped`, and the note delivery above it is held by `tests/e2e/channel.rs` as it always was.
+        Submitted::Dropped => Err(Error::Refused(format!(
+            "note: node '{id}': a hook dropped the envelope carrying it, so nothing was delivered"
+        ))),
     }
 }
 
@@ -4309,17 +4315,25 @@ fn note_record(
 fn journal_verdict(
     paths: &RunPaths,
     correlation: Option<&onemessagebus::Correlation>,
-    envelope: &Reply,
+    offered: &crate::channel::OfferedReply,
 ) -> Result<()> {
+    let envelope = &offered.envelope;
     let mut journal = Journal::open(paths);
+    let mut replied = vec![
+        ("author", json!(envelope.author.clone())),
+        ("completion", json!(envelope.completion)),
+        ("reason", json!(envelope.reason)),
+    ];
+    if let Some(message) = &envelope.message {
+        replied.push(("message", json!(journal::bounded_text(message))));
+    }
+    if offered.changed {
+        replied.push(("hooked", json!("changed")));
+    }
     journal.emit(
         journal::PipelineKind::PlannerReplied,
         journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("author", json!(envelope.author.clone())),
-            ("completion", json!(envelope.completion)),
-            ("reason", json!(envelope.reason)),
-        ]),
+        journal::payload(&replied),
     )?;
     if let (Some(reason), None) = (&envelope.reason, correlation) {
         if envelope.completion == Some(true) {
@@ -4336,18 +4350,24 @@ fn journal_verdict(
 /// Queue and journal the verdict half of an envelope whose commands have already
 /// reached the command path.
 ///
-/// [`ChannelState::answer_if_verdict`](crate::channel::ChannelState::answer_if_verdict)
-/// owns the routing — a commands-only envelope leaves the pending surface and its
-/// reader untouched — and this adds the record beside it, so the half that is
-/// delivered is the half that is written down.
+/// [`ChannelState::answer_offered`](crate::channel::ChannelState::answer_offered)
+/// owns the routing — an envelope with no verdict half leaves the pending surface
+/// and its reader untouched — and this adds the record beside it, so the half
+/// that is delivered is the half that is written down.
 fn deliver_verdict_half(
     paths: &RunPaths,
     channel: &ChannelState,
     correlation: Option<&onemessagebus::Correlation>,
-    envelope: &Reply,
+    offered: &crate::channel::OfferedReply,
 ) -> Result<()> {
+    let envelope = &offered.envelope;
+    if !envelope.carries_verdict() {
+        return Ok(());
+    }
     match correlation {
-        None => channel.answer_if_verdict(envelope)?,
+        None => {
+            channel.answer_offered(offered, None)?;
+        }
         // The commands above have already been committed, so a reply naming a
         // reconciler finding *and* carrying the edit that finding asked for finds
         // its own question answered by the time it gets here. Binding it would be
@@ -4361,14 +4381,13 @@ fn deliver_verdict_half(
             if crate::findings::answered_alongside(paths, named, &envelope.commands)
                 || crate::discharge::answered_alongside(paths, named, &envelope.commands) =>
         {
-            channel.answer_if_verdict_alongside(envelope, named)?;
+            channel.answer_offered_alongside(offered, named)?;
         }
-        named => channel.answer_if_verdict_bound(envelope, named)?,
+        named => {
+            channel.answer_offered(offered, named)?;
+        }
     }
-    if envelope.carries_verdict() {
-        journal_verdict(paths, correlation, envelope)?;
-    }
-    Ok(())
+    journal_verdict(paths, correlation, offered)
 }
 
 /// Validate a reply and queue it, or apply it, and say which happened.
@@ -4381,6 +4400,16 @@ pub(crate) fn submit_envelope(
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
 ) -> Result<Submitted> {
+    submit_offered(paths, correlation, envelope).map(|(submitted, _)| submitted)
+}
+
+/// [`submit_envelope`], answering what the hooks made of the envelope beside what
+/// became of it: the receipt describes the envelope as it was queued.
+pub(crate) fn submit_offered(
+    paths: &RunPaths,
+    correlation: Option<&onemessagebus::Correlation>,
+    envelope: &Reply,
+) -> Result<(Submitted, crate::channel::OfferedReply)> {
     // The run's state, launch and channel, and nothing of its store: what this asks
     // before it queues is answered by the fold, so it is read from the checkpoint
     // and what was appended past it rather than from every record the run holds.
@@ -4419,6 +4448,26 @@ pub(crate) fn submit_envelope(
     // turned away rather than half of it.
     channel.allows_completion(envelope.author.clone(), envelope.completion)?;
 
+    // What the configuration's hooks make of it, once: from here on the envelope is
+    // what they left, re-checked where a hook changed it, because a hook's author,
+    // grants or text are no more trusted than the planner's.
+    let offered = channel.offer_reply(envelope)?;
+    if offered.whole_drop {
+        channel.record_offer(&offered)?;
+        return Ok((Submitted::Dropped, offered));
+    }
+    if offered.changed {
+        channel.declares(&offered.envelope.author)?;
+        // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the envelope met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook that rewrites an envelope into a boundary violation is that path over changed input.
+        crate::boundary::guard(
+            &view.state,
+            &serde_json::to_value(&offered.envelope)
+                .map_err(|error| Error::Invalid(error.to_string()))?,
+        )?;
+        channel.allows_completion(offered.envelope.author.clone(), offered.envelope.completion)?;
+    }
+    let envelope = &offered.envelope;
+
     if envelope.commands.is_empty() {
         // A verdict naming its question goes to that question's asker, through
         // the bus's own binding, whether the run is live or settled and whether
@@ -4427,10 +4476,12 @@ pub(crate) fn submit_envelope(
         // still be named is the bus's rule — one never raised here, or already
         // answered, is refused naming it, with nothing appended.
         if let Some(named) = correlation {
-            channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
-            let id = channel.answer_bound(envelope, Some(named))?;
-            journal_verdict(paths, correlation, envelope)?;
-            return Ok(Submitted::Answered { reply: id });
+            channel.record_offer(&offered)?;
+            let id = channel.answer_offered(&offered, Some(named))?;
+            if envelope.carries_verdict() {
+                journal_verdict(paths, correlation, &offered)?;
+            }
+            return Ok((Submitted::Answered { reply: id }, offered));
         }
         // A settled run has no reader left, now or later, so queuing a reply to
         // it would park it where nothing drains it. A surface still awaiting an
@@ -4449,14 +4500,14 @@ pub(crate) fn submit_envelope(
             // nothing drives the run — a driver still closing it out will read
             // nothing more, and the refusal below says so.
             if envelope.completion == Some(true) && envelope.reason.is_some() {
-                channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
+                channel.record_offer(&offered)?;
                 if let Some(lock) = engine::take_if_undriven(paths)? {
-                    journal_verdict(paths, None, envelope)?;
+                    journal_verdict(paths, None, &offered)?;
                     drop(lock);
                     // A verdict with no commands, delivered to the run's own record
                     // rather than to a queue, so there is no id to name: `0`, as
                     // entry 64 states for a verdict written to the run's record.
-                    return Ok(Submitted::Answered { reply: 0 });
+                    return Ok((Submitted::Answered { reply: 0 }, offered));
                 }
             }
             return Err(Error::Refused(format!(
@@ -4465,13 +4516,13 @@ pub(crate) fn submit_envelope(
                 paths.run
             )));
         }
-        // Judged before anything is queued: a verdict is offered to the reply
-        // queue as an edit envelope is, so a validator the run's configuration
-        // names refuses it whole.
-        channel.judge_reply(envelope, None::<edits::EnvelopeReview>)?;
-        let id = channel.answer(envelope)?;
-        journal_verdict(paths, None, envelope)?;
-        return Ok(Submitted::Answered { reply: id });
+        channel.record_offer(&offered)?;
+        let id = channel.answer_offered(&offered, None)?;
+        // A commandless envelope left with no verdict half delivers nothing.
+        if envelope.carries_verdict() {
+            journal_verdict(paths, None, &offered)?;
+        }
+        return Ok((Submitted::Answered { reply: id }, offered));
     }
 
     if envelope.version != Some(crate::channel::REPLY_ENVELOPE_VERSION) {
@@ -4536,7 +4587,10 @@ pub(crate) fn submit_envelope(
         }
         (review, _) => review,
     };
-    channel.judge_reply(envelope, review)?;
+    if let Some(review) = review {
+        review.run()?;
+    }
+    channel.record_offer(&offered)?;
 
     // The one thing an envelope does outside the run before the run takes it: a
     // release a `settle` states is recorded in `onevcs`'s store, by the process the
@@ -4556,280 +4610,273 @@ pub(crate) fn submit_envelope(
     // owner letting go of the run takes across its own last look at the queue —
     // so the answer this fork is taken on is still true when the commands land.
     // See [`engine::accept`].
-    let (id, answered) =
-        match engine::accept(paths, &channel, envelope.author.clone(), &envelope.commands)? {
-            // Nothing is driving the run, but a driver that was claimed envelopes it
-            // never answered: those were submitted ahead of this one, so this one is
-            // queued behind them and the queue reconciled as the run's writer — which
-            // answers theirs first — rather than applied here ahead of them.
-            engine::Accepted::NothingIsDriving(lock)
-                if !channel.claimed_unanswered().is_empty() =>
+    let (id, answered) = match engine::accept(paths, &channel, &offered)? {
+        // Nothing is driving the run, but a driver that was claimed envelopes it
+        // never answered: those were submitted ahead of this one, so this one is
+        // queued behind them and the queue reconciled as the run's writer — which
+        // answers theirs first — rather than applied here ahead of them.
+        engine::Accepted::NothingIsDriving(lock) if !channel.claimed_unanswered().is_empty() => {
+            let id = match channel.submit_offered(&offered) {
+                Ok(id) => id,
+                Err(refused) => {
+                    let_go_or_leave_the_claim(paths, lock);
+                    return Err(refused);
+                }
+            };
+            let reconciled = engine::reconcile_queued(paths);
+            let_go_or_leave_the_claim(paths, lock);
+            reconciled?;
+            (id, channel.outcome_of(id))
+        }
+        engine::Accepted::NothingIsDriving(lock) => {
+            let mut journal = Journal::open(paths);
+            // Applying a `rework` readjusts first, as the loop does: a node its read
+            // finds landed is refused for it, and the replacement is placed on what
+            // has landed. Judged then against the record that read left.
+            let readjusted;
+            let (view, frontier) = if envelope
+                .commands
+                .iter()
+                .any(|command| matches!(command, crate::channel::Command::Rework { .. }))
             {
-                let id = match channel.submit(envelope.author.clone(), &envelope.commands) {
-                    Ok(id) => id,
-                    Err(refused) => {
-                        let_go_or_leave_the_claim(paths, lock);
-                        return Err(refused);
-                    }
-                };
-                let reconciled = engine::reconcile_queued(paths);
-                let_go_or_leave_the_claim(paths, lock);
-                reconciled?;
-                (id, channel.outcome_of(id))
-            }
-            engine::Accepted::NothingIsDriving(lock) => {
-                let mut journal = Journal::open(paths);
-                // Applying a `rework` readjusts first, as the loop does: a node its read
-                // finds landed is refused for it, and the replacement is placed on what
-                // has landed. Judged then against the record that read left.
-                let readjusted;
-                let (view, frontier) = if envelope
-                    .commands
-                    .iter()
-                    .any(|command| matches!(command, crate::channel::Command::Rework { .. }))
-                {
-                    let mut projected = crate::checkpoint::Projected::open(paths);
-                    crate::readjust::run(
-                        paths,
-                        &mut journal,
-                        &mut projected,
-                        crate::payload::ReadjustTrigger::Rework,
-                    )?;
-                    readjusted = RunView::open_current(paths)?;
-                    let frontier = Frontier {
-                        node_validator: readjusted.launch.node_validator().map(str::to_owned),
-                        graph_validation: Some(edits::GraphValidation {
-                            default_graph: oneagentgraph::config::ConfigRef(
-                                readjusted.launch.node_graph.clone(),
-                            ),
-                            launch_node_sets: readjusted.launch.node_sets.clone(),
-                            launch_dir: readjusted.launch.dir.clone(),
-                        }),
-                        ..readjusted.state.frontier()
-                    };
-                    (&readjusted, frontier)
-                } else {
-                    (&view, frontier.clone())
-                };
-                let mut graph = view.state.graph.clone();
-                let mut compiled: Vec<edits::Operation> = Vec::new();
-                // This pass's own copy, walked forward as each command commits, for
-                // the reason the checking pass above holds one.
-                let mut frontier = frontier;
-                // The same three phases the reconcile loop runs, and for the same
-                // reason: which writer judged an envelope is an accident of whether
-                // anything was driving the run, so an envelope is all of its commands
-                // or none of them on both. **Validate every command first**, touching
-                // no conversation — the checking pass above turns away every refusal
-                // `edits::compile` can raise, but a note's own validation is not one
-                // of those and belongs here rather than beside a delivery.
-                let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
-                for command in &envelope.commands {
-                    let step = match validate_here(
-                        paths,
-                        &mut graph,
-                        &frontier,
-                        &view.state,
-                        envelope.author.clone(),
-                        command,
-                    ) {
-                        Ok(step) => step,
-                        Err(error) => {
-                            engine::record_rejection(
-                                paths,
-                                &mut journal,
-                                envelope.author.clone(),
-                                command,
-                                &error,
-                                // Never queued, so no envelope id names it.
-                                None,
-                            )?;
-                            lock.release();
-                            return Err(error);
-                        }
-                    };
-                    edits::advance(&mut frontier, &step.staged());
-                    staged.push(step);
-                }
-                // Then deliver, which is the first thing here that reaches outside
-                // the run. Nothing is driving it, so nothing of it is in flight — the
-                // note is still asked of the member the node's last dispatch
-                // reported, and the conversation's own account of how it ended is
-                // what refuses it.
-                let mut pending: Vec<Vec<edits::Operation>> =
-                    Vec::with_capacity(envelope.commands.len());
-                for (command, step) in envelope.commands.iter().zip(staged) {
-                    let operations = match engine::commits_of(step) {
-                        Ok(operations) => operations,
-                        Err(error) => {
-                            // The refusal is the run's record as much as the caller's
-                            // answer: a note that reached nobody is exactly what a
-                            // manager needs to find in the journal afterwards, and
-                            // with nothing driving the run this is the only writer
-                            // that can put it there.
-                            engine::record_rejection(
-                                paths,
-                                &mut journal,
-                                envelope.author.clone(),
-                                command,
-                                &error,
-                                // Never queued, so no envelope id names it.
-                                None,
-                            )?;
-                            lock.release();
-                            return Err(error);
-                        }
-                    };
-                    pending.push(operations);
-                }
-                // Recorded in the run's command record before anything of it is
-                // journalled, under the next id the queue numbers envelopes by: the
-                // run's record then names it as it names every envelope, a note of it
-                // is withdrawn by that name, and a driver adopting the run finds it
-                // answered rather than applying it a second time.
-                let reply = match engine::record_applying(
+                let mut projected = crate::checkpoint::Projected::open(paths);
+                crate::readjust::run(
                     paths,
-                    &channel,
+                    &mut journal,
+                    &mut projected,
+                    crate::payload::ReadjustTrigger::Rework,
+                )?;
+                readjusted = RunView::open_current(paths)?;
+                let frontier = Frontier {
+                    node_validator: readjusted.launch.node_validator().map(str::to_owned),
+                    graph_validation: Some(edits::GraphValidation {
+                        default_graph: oneagentgraph::config::ConfigRef(
+                            readjusted.launch.node_graph.clone(),
+                        ),
+                        launch_node_sets: readjusted.launch.node_sets.clone(),
+                        launch_dir: readjusted.launch.dir.clone(),
+                    }),
+                    ..readjusted.state.frontier()
+                };
+                (&readjusted, frontier)
+            } else {
+                (&view, frontier.clone())
+            };
+            let mut graph = view.state.graph.clone();
+            let mut compiled: Vec<edits::Operation> = Vec::new();
+            // This pass's own copy, walked forward as each command commits, for
+            // the reason the checking pass above holds one.
+            let mut frontier = frontier;
+            // The same three phases the reconcile loop runs, and for the same
+            // reason: which writer judged an envelope is an accident of whether
+            // anything was driving the run, so an envelope is all of its commands
+            // or none of them on both. **Validate every command first**, touching
+            // no conversation — the checking pass above turns away every refusal
+            // `edits::compile` can raise, but a note's own validation is not one
+            // of those and belongs here rather than beside a delivery.
+            let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
+            for command in &envelope.commands {
+                let step = match validate_here(
+                    paths,
+                    &mut graph,
+                    &frontier,
+                    &view.state,
                     envelope.author.clone(),
-                    &envelope.commands,
+                    command,
                 ) {
-                    Ok(reply) => reply,
+                    Ok(step) => step,
                     Err(error) => {
+                        engine::record_rejection(
+                            paths,
+                            &mut journal,
+                            envelope.author.clone(),
+                            command,
+                            &error,
+                            // Never queued, so no envelope id names it.
+                            None,
+                        )?;
                         lock.release();
                         return Err(error);
                     }
                 };
-                // Each note named by that envelope and its index, as a reconciler
-                // names what it delivers.
-                let pending: Vec<Vec<edits::Operation>> = pending
-                    .iter()
-                    .enumerate()
-                    .map(|(index, operations)| engine::from_envelope(operations, reply, index))
-                    .collect();
-                // Answered as a reconciler answers an envelope it applied, and at once:
-                // every command of it has validated and delivered, so it is applied
-                // whatever follows, and a record left unanswered is one the next
-                // driver would judge and apply a second time.
-                if let Err(error) = channel.answer_commands(&engine::applied_here(
-                    reply,
-                    &envelope.commands,
-                    &pending,
-                )) {
-                    lock.release();
-                    return Err(error);
-                }
-                // Where a journey ends this process with the envelope answered and
-                // nothing of it journalled yet.
-                if let Err(error) = crate::review::failpoint("applied-here-answered") {
-                    lock.release();
-                    return Err(error);
-                }
-                // And only then journal, so a refusal in either phase leaves the
-                // record exactly as it was.
-                for (command, operations) in envelope.commands.iter().zip(&pending) {
-                    compiled.extend(operations.iter().cloned());
-                    journal.emit(
-                        engine::journalled_as(operations),
-                        journal::labels(&paths.run, None),
-                        journal::payload(&[
-                            ("author", json!(envelope.author.clone())),
-                            ("command", json!(command)),
-                            ("operations", json!(operations)),
-                            (
-                                "operation_kinds",
-                                json!(engine::operation_kinds(operations)),
-                            ),
-                        ]),
-                    )?;
-                    engine::record_operation_facts(
-                        paths,
-                        &mut journal,
-                        envelope.author.clone(),
-                        operations,
-                    )?;
-                    // A note this withdrew is its own envelope's to answer again,
-                    // as it is when a driver applies the withdrawal.
-                    crate::withdrawal::answer_each(paths, operations, None)?;
-                    // The planner is told what any other author did here as well as
-                    // in the loop: which of the two applied an edit is an accident of
-                    // whether anything was driving the run, and the planner owns the
-                    // graph either way.
-                    if !envelope.author.is_planner() {
-                        if let Some(raised) =
-                            engine::non_planner_edit(&envelope.author.clone(), command)
-                        {
-                            engine::raise(paths, &mut journal, raised)?;
-                        }
-                    }
-                }
-                // A `settle` stating a landing is a landing with nothing driving the
-                // run to see it, so what it superseded is told to `onevcs` here.
-                crate::supersession::record_landed(paths, &mut journal)?;
-                // Edits that ended the run — its remaining work dropped — end it here,
-                // with nothing driving it to see that: the items holding its work go.
-                let after = crate::checkpoint::current(paths);
-                if graph::state_of(&after.statuses()) != GraphState::Waiting {
-                    crate::human_items::runtime::run_ended(paths);
-                }
-                // This process was the run's writer, so it lets go of it the way a
-                // driver does: under the handover, and not while the queue holds
-                // something another supervisor's edit put there while this one was
-                // being applied.
-                let mut lock = lock;
-                loop {
-                    match let_go_of_reply(paths, lock) {
-                        engine::LettingGo::Released => break,
-                        engine::LettingGo::QueueMoved(back) => {
-                            lock = back;
-                            engine::reconcile_queued(paths)?;
-                        }
-                        // The commands were applied; what could not be done is hand
-                        // the run on safely, so the claim is left standing for the
-                        // next writer to reclaim rather than released into the
-                        // window an edit accepted behind it would fall into.
-                        engine::LettingGo::NotHandedOver(held, why) => {
-                            eprintln!(
-                                "onepipeline: run '{}' is being left claimed rather than \
-                             released: {why}",
-                                paths.run
-                            );
-                            held.abandon();
-                            break;
-                        }
-                    }
-                }
-                deliver_verdict_half(paths, &channel, correlation, envelope)?;
-                return Ok(Submitted::AppliedHere {
-                    reply,
-                    operations: compiled,
-                });
+                edits::advance(&mut frontier, &step.staged());
+                staged.push(step);
             }
-            engine::Accepted::Queued(id) => {
-                let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
-                let mut answered = None;
-                while Instant::now() < deadline {
-                    if let Some(outcome) = channel.outcome_of(id) {
-                        answered = Some(outcome);
+            // Then deliver, which is the first thing here that reaches outside
+            // the run. Nothing is driving it, so nothing of it is in flight — the
+            // note is still asked of the member the node's last dispatch
+            // reported, and the conversation's own account of how it ended is
+            // what refuses it.
+            let mut pending: Vec<Vec<edits::Operation>> =
+                Vec::with_capacity(envelope.commands.len());
+            for (command, step) in envelope.commands.iter().zip(staged) {
+                let operations = match engine::commits_of(step) {
+                    Ok(operations) => operations,
+                    Err(error) => {
+                        // The refusal is the run's record as much as the caller's
+                        // answer: a note that reached nobody is exactly what a
+                        // manager needs to find in the journal afterwards, and
+                        // with nothing driving the run this is the only writer
+                        // that can put it there.
+                        engine::record_rejection(
+                            paths,
+                            &mut journal,
+                            envelope.author.clone(),
+                            command,
+                            &error,
+                            // Never queued, so no envelope id names it.
+                            None,
+                        )?;
+                        lock.release();
+                        return Err(error);
+                    }
+                };
+                pending.push(operations);
+            }
+            // Recorded in the run's command record before anything of it is
+            // journalled, under the next id the queue numbers envelopes by: the
+            // run's record then names it as it names every envelope, a note of it
+            // is withdrawn by that name, and a driver adopting the run finds it
+            // answered rather than applying it a second time.
+            let reply = match engine::record_applying(paths, &channel, &offered) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    lock.release();
+                    return Err(error);
+                }
+            };
+            // Each note named by that envelope and its index, as a reconciler
+            // names what it delivers.
+            let pending: Vec<Vec<edits::Operation>> = pending
+                .iter()
+                .enumerate()
+                .map(|(index, operations)| engine::from_envelope(operations, reply, index))
+                .collect();
+            // Answered as a reconciler answers an envelope it applied, and at once:
+            // every command of it has validated and delivered, so it is applied
+            // whatever follows, and a record left unanswered is one the next
+            // driver would judge and apply a second time.
+            if let Err(error) =
+                channel.answer_commands(&engine::applied_here(reply, &envelope.commands, &pending))
+            {
+                lock.release();
+                return Err(error);
+            }
+            // Where a journey ends this process with the envelope answered and
+            // nothing of it journalled yet.
+            if let Err(error) = crate::review::failpoint("applied-here-answered") {
+                lock.release();
+                return Err(error);
+            }
+            // And only then journal, so a refusal in either phase leaves the
+            // record exactly as it was.
+            for (command, operations) in envelope.commands.iter().zip(&pending) {
+                compiled.extend(operations.iter().cloned());
+                journal.emit(
+                    engine::journalled_as(operations),
+                    journal::labels(&paths.run, None),
+                    journal::payload(&[
+                        ("author", json!(envelope.author.clone())),
+                        ("command", json!(command)),
+                        ("operations", json!(operations)),
+                        (
+                            "operation_kinds",
+                            json!(engine::operation_kinds(operations)),
+                        ),
+                    ]),
+                )?;
+                engine::record_operation_facts(
+                    paths,
+                    &mut journal,
+                    envelope.author.clone(),
+                    operations,
+                )?;
+                // A note this withdrew is its own envelope's to answer again,
+                // as it is when a driver applies the withdrawal.
+                crate::withdrawal::answer_each(paths, operations, None)?;
+                // The planner is told what any other author did here as well as
+                // in the loop: which of the two applied an edit is an accident of
+                // whether anything was driving the run, and the planner owns the
+                // graph either way.
+                if !envelope.author.is_planner() {
+                    if let Some(raised) =
+                        engine::non_planner_edit(&envelope.author.clone(), command)
+                    {
+                        engine::raise(paths, &mut journal, raised)?;
+                    }
+                }
+            }
+            // A `settle` stating a landing is a landing with nothing driving the
+            // run to see it, so what it superseded is told to `onevcs` here.
+            crate::supersession::record_landed(paths, &mut journal)?;
+            // Edits that ended the run — its remaining work dropped — end it here,
+            // with nothing driving it to see that: the items holding its work go.
+            let after = crate::checkpoint::current(paths);
+            if graph::state_of(&after.statuses()) != GraphState::Waiting {
+                crate::human_items::runtime::run_ended(paths);
+            }
+            // This process was the run's writer, so it lets go of it the way a
+            // driver does: under the handover, and not while the queue holds
+            // something another supervisor's edit put there while this one was
+            // being applied.
+            let mut lock = lock;
+            loop {
+                match let_go_of_reply(paths, lock) {
+                    engine::LettingGo::Released => break,
+                    engine::LettingGo::QueueMoved(back) => {
+                        lock = back;
+                        engine::reconcile_queued(paths)?;
+                    }
+                    // The commands were applied; what could not be done is hand
+                    // the run on safely, so the claim is left standing for the
+                    // next writer to reclaim rather than released into the
+                    // window an edit accepted behind it would fall into.
+                    engine::LettingGo::NotHandedOver(held, why) => {
+                        eprintln!(
+                            "onepipeline: run '{}' is being left claimed rather than \
+                             released: {why}",
+                            paths.run
+                        );
+                        held.abandon();
                         break;
                     }
-                    std::thread::sleep(ATTACH_POLL);
                 }
-                // The wait ran out with nothing answering, so the question this fork
-                // was taken on is asked again: is anything still driving this run?
-                // It is a different question now than it was — a driver that held the
-                // run when these commands were accepted can have died holding it
-                // since — and the answer is taken the only way it cannot be raced.
-                let answered = match answered {
-                    Some(outcome) => Some(outcome),
-                    None => take_the_run_over_and_answer(paths, &channel, id)?,
-                };
-                (id, answered)
             }
-        };
+            deliver_verdict_half(paths, &channel, correlation, &offered)?;
+            return Ok((
+                Submitted::AppliedHere {
+                    reply,
+                    operations: compiled,
+                },
+                offered,
+            ));
+        }
+        engine::Accepted::Queued(id) => {
+            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            let mut answered = None;
+            while Instant::now() < deadline {
+                if let Some(outcome) = channel.outcome_of(id) {
+                    answered = Some(outcome);
+                    break;
+                }
+                std::thread::sleep(ATTACH_POLL);
+            }
+            // The wait ran out with nothing answering, so the question this fork
+            // was taken on is asked again: is anything still driving this run?
+            // It is a different question now than it was — a driver that held the
+            // run when these commands were accepted can have died holding it
+            // since — and the answer is taken the only way it cannot be raced.
+            let answered = match answered {
+                Some(outcome) => Some(outcome),
+                None => take_the_run_over_and_answer(paths, &channel, id)?,
+            };
+            (id, answered)
+        }
+    };
     if let Some(outcome) = answered {
-        deliver_verdict_half(paths, &channel, correlation, envelope)?;
+        deliver_verdict_half(paths, &channel, correlation, &offered)?;
         if outcome.applied {
-            return Ok(Submitted::AppliedByRun { reply: id });
+            return Ok((Submitted::AppliedByRun { reply: id }, offered));
         }
         return Err(Error::Refused(
             outcome
@@ -4844,8 +4891,8 @@ pub(crate) fn submit_envelope(
     // reader waiting for it is not the reader waiting for the edits — so
     // it is delivered here as it is on every other path, and only the
     // edits are reported still queued.
-    deliver_verdict_half(paths, &channel, correlation, envelope)?;
-    Ok(Submitted::Queued { reply: id })
+    deliver_verdict_half(paths, &channel, correlation, &offered)?;
+    Ok((Submitted::Queued { reply: id }, offered))
 }
 
 /// Take the run over and reconcile its queue where nothing is driving it any

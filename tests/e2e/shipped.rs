@@ -85,6 +85,7 @@ fn the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in() {
     };
     let schedule = check_in
         .schedule
+        .clone()
         .expect("the check-in member is on a schedule");
     assert!(
         schedule.resettable,

@@ -219,8 +219,8 @@ fn a_refused_envelope_applies_none_of_its_commands_and_an_accepted_one_is_review
     }
 
     // With the review satisfied, the same envelope goes through and both nodes
-    // run. The reviewer narrates on stdout while it does, the way a review that
-    // reports what it checked does — and none of it reaches `reply`'s own
+    // run. The reviewer narrates on stderr while it does, because its stdout is the
+    // document it passes by printing back — and none of it reaches `reply`'s own
     // stdout, which is a machine-readable verdict its caller parses.
     std::fs::remove_file(world.fakes.join("reviewer.refuse")).expect("the review is satisfied");
     let narration = "read the goal, 3 nodes, and 1 new edge";
@@ -791,7 +791,7 @@ fn a_refusal_carries_what_the_reviewer_said_without_its_escape_codes_or_its_trac
         .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
         .exited(REFUSED)
         .err_has("exited 5")
-        .err_has("neither a pass (0) nor a refusal (1)");
+        .err_has("neither an answer (0) nor a refusal (1)");
 
     // And the edits are still refused rather than lost in the noise.
     world.run(&["results", &run]).exited(0).out_lacks("cover");
@@ -1084,5 +1084,98 @@ fn a_review_that_refuses_or_gives_no_verdict_queues_nothing_and_records_no_pass(
         (0, String::new()),
         "no verdict queued or recorded"
     );
+    world.release("slow.go");
+}
+
+/// A reviewer is a hook in behaviour: to pass it prints the document it read. One
+/// that prints nothing, and one that prints a changed document, are each refused
+/// as no verdict, saying that the reviewer changed or dropped what it cannot
+/// change, with nothing applied and no pass recorded.
+#[test]
+fn a_reviewer_that_prints_nothing_or_a_changed_document_is_refused_as_unjudged() {
+    let world = World::new("reviewer-as-a-hook");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let bar = double("reviewer-bar").to_string_lossy().into_owned();
+    world.script("reviewer-bar.fingerprint", "criteria revision 1");
+    let run = live_run(
+        &world,
+        "reviewerhook",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--envelope-reviewer-bar",
+            &bar,
+        ],
+    );
+    let refused = "changed or dropped a document it reviews but cannot change";
+    for scenario in ["reviewer.empty", "reviewer.rewrite"] {
+        world.script(scenario, "");
+        world
+            .run_with_stdin(&["reply", &run], &envelope(two_related_nodes()))
+            .exited(REFUSED)
+            .err_has("gave no verdict")
+            .err_has(refused)
+            .err_has("none of its edits were applied");
+        std::fs::remove_file(world.fakes.join(scenario)).expect("the scenario is lifted");
+        assert_eq!(
+            world.events_of(&run, "edit-committed").len(),
+            0,
+            "{scenario}: an unjudged review applied an edit"
+        );
+    }
+    assert!(
+        !world.run_file(&run, "channel/commands.jsonl").exists()
+            || std::fs::read_to_string(world.run_file(&run, "channel/commands.jsonl"))
+                .expect("the queue reads")
+                .is_empty(),
+        "an unjudged review queued an edit"
+    );
+    world.release("slow.go");
+}
+
+/// A reviewer judges what the bus's hooks left of an envelope: a hook that removes a
+/// command means the reviewer never reads it.
+#[test]
+fn a_reviewer_reads_the_edits_a_hook_left_of_the_envelope() {
+    let world = World::new("reviewer-after-hook");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let hook = double("bus-hook").to_string_lossy().into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+             [{hook:?}, keep-first-command]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let run = live_run(
+        &world,
+        "reviewerafterhook",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--bus-config",
+            config.to_str().expect("a path"),
+        ],
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": agent("kept", &[])},
+                {"op": "add", "node": agent("removed", &[])},
+            ])),
+        )
+        .exited(0);
+    let seen = offered(&world);
+    let document = &seen.last().expect("the envelope was reviewed").1;
+    let names: Vec<&str> = document["changes"]
+        .as_array()
+        .expect("the changes are a list")
+        .iter()
+        .map(|change| change["node"]["id"].as_str().expect("a node"))
+        .collect();
+    assert_eq!(names, ["kept"], "{document}");
     world.release("slow.go");
 }

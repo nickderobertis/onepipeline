@@ -11,7 +11,9 @@
 // model turns to produce, and `dispatch.rs` is where the real `oneagentgraph` binary is
 // driven instead. `harness.rs` carries the same suppression and the full rationale.
 
-use crate::harness::{agent, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR};
+use crate::harness::{
+    agent, double, ended, human, plan_of, World, NOTHING_DRIVING, REFUSED, USAGE_ERROR,
+};
 use serde_json::{json, Value};
 
 /// Start a run detached and wait until it is executing.
@@ -2190,7 +2192,7 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         answered.exited(0);
         let receipt = answered.json();
         // Every commands shape here carries a note, so `notes` rides with them.
-        stated_by_entry_64(&receipt, shape, verdict, commands, commands);
+        stated_by_entry_64(&receipt, shape, verdict, commands, commands, false);
         // And each half's word is its own, so an envelope that did both is not
         // read off one of them: the note landed, and the ruling did too.
         if commands {
@@ -2207,6 +2209,102 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
     }
 
     world.release("build.go");
+
+    // And each shape a hook can leave, launched under a configuration whose hook is
+    // a real command: hooked changed, a dropped half, and a dropped envelope.
+    let command = double("bus-hook").to_string_lossy().into_owned();
+    type HookShape = (
+        &'static str,
+        &'static str,
+        &'static str,
+        Value,
+        bool,
+        bool,
+        bool,
+        Value,
+    );
+    let hooked_shapes: [HookShape; 4] = [
+        (
+            "hook-changed",
+            "replies",
+            "keep-first-command",
+            json!({"version": 3, "commands": [note("first"), note("second")]}),
+            false,
+            true,
+            true,
+            json!({"state": "applied", "commands": "applied", "hooked": "changed"}),
+        ),
+        (
+            "hook-verdict-half",
+            "replies",
+            "strip-verdict",
+            json!({"completion": false, "reason": "taken off", "version": 3,
+                   "commands": [note("still lands")]}),
+            true,
+            true,
+            true,
+            json!({"state": "applied", "verdict": "dropped", "commands": "applied",
+                   "hooked": "changed"}),
+        ),
+        (
+            "hook-half",
+            "commands",
+            "drop",
+            json!({"completion": false, "reason": "carry on", "version": 3,
+                   "commands": [note("dropped half")]}),
+            true,
+            true,
+            false,
+            json!({"state": "delivered", "verdict": "delivered", "commands": "dropped"}),
+        ),
+        (
+            "hook-whole",
+            "replies",
+            "drop",
+            json!({"completion": false, "reason": "ruled", "version": 3,
+                   "commands": [note("dropped too")]}),
+            true,
+            true,
+            false,
+            json!({"state": "dropped", "reply": 0, "verdict": "dropped",
+                   "commands": "dropped"}),
+        ),
+    ];
+    for (name, queue, hook, envelope, verdict, commands, hooked, expected) in hooked_shapes {
+        let world = World::new(name);
+        world.script("build.wait", "hold");
+        let config = world.root.join("onemessagebus.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: {queue}, command: \
+                 {}}}\n",
+                json!([command.as_str(), hook])
+            ),
+        )
+        .expect("the configuration is written");
+        let path = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+        world
+            .run(&[
+                "start",
+                &path,
+                "--detach",
+                "--bus-config",
+                &config.to_string_lossy(),
+            ])
+            .exited(0);
+        world.until("the run to dispatch something", |world| {
+            !world.events_of(name, "node-dispatched").is_empty()
+        });
+        let answered = world.run_with_stdin(&["reply", name], &envelope.to_string());
+        answered.exited(0);
+        let receipt = answered.json();
+        stated_by_entry_64(&receipt, name, verdict, commands, commands, hooked);
+        for (key, word) in expected.as_object().expect("the expected words") {
+            assert_eq!(&receipt[key], word, "{name}: {key}: {receipt}");
+        }
+        world.release("build.go");
+    }
 }
 
 /// Hold one receipt to entry 64 of `docs/contract-divergences.md`: every key it
@@ -2216,7 +2314,14 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
 /// a key whose words are stated as `each`, one each of its values may answer.
 ///
 /// `live_edit.rs`'s `from_entry_57` reads its entry the same way.
-fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: bool, note: bool) {
+fn stated_by_entry_64(
+    receipt: &Value,
+    shape: &str,
+    verdict: bool,
+    commands: bool,
+    note: bool,
+    hooked: bool,
+) {
     let record = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
     )
@@ -2252,6 +2357,7 @@ fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: boo
             "with a verdict half" => verdict,
             "with commands" => commands,
             "with a note, once applied" => note && receipt["state"] == "applied",
+            "when a hook changed the envelope" => hooked,
             other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
         };
         let answer = receipt.get(key);
@@ -3816,7 +3922,14 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     // Held to entry 64 here rather than only in the receipt journey, because this
     // is the one shape that reaches the record's `queued` words.
     let receipt = submitted.json();
-    stated_by_entry_64(&receipt, "a verdict beside queued edits", true, true, true);
+    stated_by_entry_64(
+        &receipt,
+        "a verdict beside queued edits",
+        true,
+        true,
+        true,
+        false,
+    );
     assert_eq!(receipt["state"], "queued");
     assert_eq!(receipt["verdict"], "delivered");
     assert_eq!(receipt["commands"], "queued");

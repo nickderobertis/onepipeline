@@ -2453,7 +2453,9 @@ impl World {
             .members
             .iter()
             .find_map(|(name, member)| match member {
-                Member::Oneharness(member) => member.schedule.map(|schedule| (name, schedule)),
+                Member::Oneharness(member) => {
+                    member.schedule.clone().map(|schedule| (name, schedule))
+                }
                 _ => None,
             })
             .expect("the shipped dag-scope graph declares a pacemaker");

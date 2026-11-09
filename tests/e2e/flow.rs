@@ -2373,3 +2373,210 @@ fn a_surface_on_a_run_that_joins_as_its_flow_ends_is_returned_before_the_ending(
         after.record
     );
 }
+
+/// A flow's channel runs the bus's hooks too: a reply a hook changes reaches the
+/// queue as changed and a surface a hook drops never does, each receipt saying so.
+#[test]
+fn a_flows_channel_runs_the_hooks_its_bus_configuration_declares() {
+    let world = World::new("flow-hooked");
+    let hook = crate::harness::double("bus-hook")
+        .to_string_lossy()
+        .into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+             [{hook:?}, set-message, \"the changed ruling\"]}}\n  - {{on: surfaces, command: \
+             [{hook:?}, drop]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "hooked",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let channel = world.runs.join(".flows/hooked/channel");
+    let answered = world.run_with_stdin(
+        &["reply", "--flow", "hooked"],
+        &json!({"completion": false, "message": "the original ruling"}).to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    let replies = std::fs::read_to_string(channel.join("replies.jsonl")).expect("the queue");
+    assert!(replies.contains("the changed ruling"), "{replies}");
+    assert!(!replies.contains("the original ruling"), "{replies}");
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "hooked",
+            "--kind",
+            "finding",
+            "--message",
+            "never read",
+        ])
+        .exited(0)
+        .out_has("\"dropped\"");
+    assert!(std::fs::read_to_string(channel.join("surfaces.jsonl"))
+        .unwrap_or_default()
+        .is_empty());
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// Each other answer a hook can give a flow's reply: dropped at exit 0 with the
+/// receipt saying so, and refused at exit 2 in the hook's words.
+#[test]
+fn a_flows_reply_a_hook_drops_or_refuses_is_told_apart() {
+    for (name, argv, code, said) in [
+        ("hookdrop", "drop", 0, "\"dropped\""),
+        (
+            "hookrefuse",
+            "refuse, \"not this ruling\"",
+            REFUSED,
+            "not this ruling",
+        ),
+    ] {
+        let world = World::new(name);
+        let hook = crate::harness::double("bus-hook")
+            .to_string_lossy()
+            .into_owned();
+        let config = world.root.join("bus.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+                 [{hook:?}, {argv}]}}\n"
+            ),
+        )
+        .expect("a bus configuration");
+        let flow = Flowing::start_with(
+            &world,
+            name,
+            &["--bus-config", config.to_str().expect("a path")],
+            &[gate(&world, "end")],
+        );
+        let answered = world.run_with_stdin(
+            &["reply", "--flow", name],
+            &json!({"completion": false, "message": "a ruling"}).to_string(),
+        );
+        answered.exited(code);
+        if code == 0 {
+            answered.out_has(said);
+        } else {
+            answered.err_has(said);
+        }
+        assert_eq!(
+            std::fs::read_to_string(
+                world
+                    .runs
+                    .join(format!(".flows/{name}/channel/replies.jsonl"))
+            )
+            .unwrap_or_default(),
+            "",
+            "{name}: the reply was queued"
+        );
+        flow.open("end");
+        assert_eq!(flow.ended(), 0);
+    }
+}
+
+/// What a hook writes on a flow's reply is held to what the reply itself is: a
+/// flow has no graph, and a hook cannot name an author or a completion the
+/// configuration never gave.
+#[test]
+fn a_flows_reply_a_hook_rewrites_is_held_to_what_a_reply_may_carry() {
+    for (name, argv, author, said) in [
+        ("hookcommands", "set-finding-command", "planner", "no graph"),
+        (
+            "hookstranger",
+            "set-author, \"stranger\"",
+            "planner",
+            "stranger",
+        ),
+        (
+            "hookdeclare",
+            "declare-complete",
+            "sentinel",
+            "not something the sentinel may do",
+        ),
+    ] {
+        let world = World::new(name);
+        let hook = crate::harness::double("bus-hook")
+            .to_string_lossy()
+            .into_owned();
+        let config = world.root.join("bus.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
+                 [finding]}}\nhooks:\n  - {{on: replies, command: [{hook:?}, {argv}]}}\n"
+            ),
+        )
+        .expect("a bus configuration");
+        let flow = Flowing::start_with(
+            &world,
+            name,
+            &["--bus-config", config.to_str().expect("a path")],
+            &[gate(&world, "end")],
+        );
+        world
+            .run_with_stdin(
+                &["reply", "--flow", name],
+                &json!({"author": author, "reason": "a ruling"}).to_string(),
+            )
+            .exited(REFUSED)
+            .err_has(said);
+        assert_eq!(
+            std::fs::read_to_string(
+                world
+                    .runs
+                    .join(format!(".flows/{name}/channel/replies.jsonl"))
+            )
+            .unwrap_or_default(),
+            "",
+            "{name}: the reply was queued"
+        );
+        flow.open("end");
+        assert_eq!(flow.ended(), 0);
+    }
+}
+
+/// A flow's reply a hook reroutes to `surfaces` delivers no verdict, and its
+/// receipt names none rather than claiming one was delivered.
+#[test]
+fn a_flows_reply_a_hook_reroutes_names_no_delivered_verdict() {
+    let world = World::new("flow-hook-routed");
+    let hook = crate::harness::double("bus-hook")
+        .to_string_lossy()
+        .into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, routes: \
+             [surfaces], command: [{hook:?}, reroute-as-surface]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "routed",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let answered = world.run_with_stdin(
+        &["reply", "--flow", "routed"],
+        &json!({"completion": false, "reason": "sent onward"}).to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    assert!(receipt.get("verdict").is_none(), "{receipt}");
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}

@@ -142,6 +142,48 @@ pub(crate) fn reply(world: &World, run: &str, commands: Value) -> crate::harness
     )
 }
 
+/// A review comment's surface crosses the channel's hooks like any other, and the
+/// journal records it as queued rather than as discovery offered it.
+#[test]
+fn a_review_surface_a_hook_marks_blocking_is_journalled_blocking() {
+    let world = team_world("review-hook-blocking");
+    let hook = crate::harness::double("bus-hook");
+    let config = world.root.join("review-hook.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: surfaces, command: [{}, set-blocking]}}\n",
+            serde_json::to_string(hook.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    // llmlint: ignore[e2e_not_mocked] The agent subprocess only produces the draft this journey needs a comment on; the layer under test is the compiled binary running a real hook script over the surface discovery offers, and nothing of that is mocked.
+    world.script("a.work", "first draft\n");
+    let project = world.plan("hooked", &plan_of("hooked", vec![lifecycle("a", &[])]));
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &project,
+                "--attach",
+                "--bus-config",
+                config.to_str().unwrap(),
+            ],
+        )
+        .exited(0);
+    let host = host(&world, "hooked", &["a"]);
+    add(&host, 1, comment("hook-a", CommentKind::Conversation, 1));
+    review(&world, "hooked");
+    let journalled: Vec<_> = world
+        .events_of("hooked", "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "review-comment")
+        .collect();
+    assert_eq!(journalled.len(), 1, "{journalled:?}");
+    assert_eq!(journalled[0]["payload"]["blocking"], true);
+}
+
 #[test]
 fn discovery_batches_an_alias_and_its_origin_as_one_repository() {
     let world = team_world("review-alias-batch");

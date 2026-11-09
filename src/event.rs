@@ -164,6 +164,8 @@ pub enum PipelineKind {
     EditRejected,
     /// A surface was *sent*. Delivery is a separate fact.
     PlannerSurfaceQueued,
+    /// A hook kept a surface off the channel, so nothing was queued.
+    PlannerSurfaceDropped,
     /// A surface was *consumed* by the planner. This is what restarts the check-in clock.
     PlannerSurfaced,
     /// The planner answered a consumed surface.
@@ -452,6 +454,7 @@ impl PipelineKind {
             Self::CommandAccepted => "command-accepted",
             Self::EditRejected => "edit-rejected",
             Self::PlannerSurfaceQueued => "planner-surface-queued",
+            Self::PlannerSurfaceDropped => "planner-surface-dropped",
             Self::PlannerSurfaced => "planner-surfaced",
             Self::PlannerReplied => "planner-replied",
             Self::HumanAttested => "human-attested",
@@ -549,6 +552,7 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::CommandAccepted,
     PipelineKind::EditRejected,
     PipelineKind::PlannerSurfaceQueued,
+    PipelineKind::PlannerSurfaceDropped,
     PipelineKind::PlannerSurfaced,
     PipelineKind::PlannerReplied,
     PipelineKind::HumanAttested,
