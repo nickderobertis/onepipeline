@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(channel)* run the bus's hooks on every planner-channel offer: a reply, its command envelope and a surface are applied as the hooks left them, drops are recorded by the bus, and `onepipeline ask` answers `dropped` for a question a hook dropped
 
+## [0.104.0](https://github.com/nickderobertis/onepipeline/compare/v0.103.0...v0.104.0) - 2026-11-09
+
+### Added
+
+- *(human-items)* [**breaking**] offer choices on a question, record choice and text answers, and answer several items as one batch ([#1485](https://github.com/nickderobertis/onepipeline/pull/1485))
+
 ## [0.103.0](https://github.com/nickderobertis/onepipeline/compare/v0.102.3...v0.103.0) - 2026-11-09
 
 ### Added
