@@ -2807,21 +2807,30 @@ fn item_surfaces(world: &World, run: &str) -> Vec<(String, String)> {
 }
 
 /// A real watch armed on `run`, returned once its lease is on disk.
+///
+/// A watch with a surface already waiting returns on its first pass and takes its lease
+/// with it, inside one poll of this wait, so a watch that ended fails here and says so.
 fn armed_watch(world: &World, run: &str) -> onepipeline_testfakes::profile::process::Child {
-    let watch = world
+    let mut watch = world
         .cmd(&["watch", run, "--timeout", "120", "--tick-interval", "0"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("the watch starts");
     let mine = format!("{}-", watch.id());
+    let mut ended = None;
     world.until("the watch to record itself", |w| {
-        std::fs::read_dir(w.run_file(run, "watchers"))
+        let recorded = std::fs::read_dir(w.run_file(run, "watchers"))
             .into_iter()
             .flatten()
             .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&mine));
+        if !recorded {
+            ended = watch.try_wait().expect("the watch can be asked after");
+        }
+        recorded || ended.is_some()
     });
+    assert_eq!(ended, None, "the watch on {run} ended before it could wait");
     watch
 }
 
@@ -3633,6 +3642,9 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
     assert_eq!(answered_of("ops"), std::slice::from_ref(&second_c));
     assert!(answered_of("mgr").is_empty(), "nothing is printed twice");
 
+    // The manager reads the batch's surface: one left waiting would end the next watch on
+    // its first pass, whatever the single answer did.
+    assert_eq!(next_item_surface(&world, "first")["source"], json!(batch));
     let single = raise_question(&world, "single", "mgr", Some("first"), nothing_block(), &[]);
     let watching = armed_watch(&world, "first");
     world
