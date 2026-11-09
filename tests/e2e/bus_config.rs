@@ -1351,3 +1351,34 @@ fn a_reply_a_hook_reroutes_to_surfaces_reaches_the_planner_and_delivers_no_verdi
         .any(|surface| surface["message"] == "rerouted to the planner"));
     world.release("slow.go");
 }
+
+/// An engine-raised surface a hook reroutes lands where it was sent, is not counted
+/// as a queued surface, and the run carries on.
+#[test]
+fn an_engine_raised_surface_a_hook_reroutes_lands_elsewhere_and_is_not_counted_queued() {
+    let world = World::new("hook-engine-route");
+    hooked_run(
+        &world,
+        "hookengineroute",
+        &[("surfaces", &["reroute-as-verdict"], ", routes: [replies]")],
+    );
+    world
+        .run_with_stdin(
+            &["reply", "hookengineroute"],
+            &json!({"version": 3, "commands": [
+                {"op": "finding", "message": "the fixture is slow"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the engine's report to reach the reply queue", |world| {
+        channel_file(world, "hookengineroute", "replies.jsonl").contains("rerouted")
+    });
+    assert!(world
+        .events_of("hookengineroute", "planner-surface-queued")
+        .iter()
+        .all(|event| event["payload"]["kind"] != "finding"));
+    world.run(&["status", "hookengineroute"]).exited(0);
+    assert!(surfaces_read(&world, "hookengineroute").is_empty());
+    world.release("slow.go");
+}
