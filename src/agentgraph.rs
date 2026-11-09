@@ -893,7 +893,9 @@ pub enum Environment {
 /// is released reaches its own exit and takes that thread with it, wherever it
 /// was: a caller reading the record in there meets a graph that has said it is
 /// done and a record that does not say so, and one reading it after such a
-/// teardown meets a record that never will.
+/// teardown meets a record that never will — or, when the exit landed between
+/// the write's truncation and its bytes on a sibling before 0.9.2, no record at
+/// all, which is a run the sibling's own `history` no longer lists.
 ///
 /// So neither launch exits inside the **write**. What the two differ on is the
 /// reap: the launch that will be *read off its record* holds until the sibling's
@@ -928,19 +930,20 @@ const RECORD_WRITE_BOUND: Duration = Duration::from_secs(5);
 /// [`RECORD_WRITE_BOUND`] has passed — whichever comes first.
 ///
 /// The ending is what the sibling writes onto its record after announcing
-/// `graph-settled` and before its final reap. What releases this is the record
-/// **read back with `finished_ms` on it**, as the sibling's own `Record`, so a
-/// launch released here cannot exit ahead of that write and leave a record
-/// that never says the run ended.
+/// `graph-settled` and before its final reap, by renaming a finished record onto
+/// the name while holding that record's lock. What releases this is the record
+/// **read back whole with `finished_ms` on it**, as the sibling's own `Record`,
+/// so a launch released here cannot exit ahead of that rename and leave a record
+/// that never says how it ended.
 ///
 /// Every poll is a read that **cannot block** and that never opens what is not
 /// a regular file — see [`ending_recorded`] for both and why each is needed —
 /// so the bound is the bound whatever stands at the path. The interval this
 /// closes is the one
 /// `dispatch::a_dispatch_records_its_ending_before_its_launch_can_exit` widens
-/// by holding the record's lock, which this poll does not take, and
-/// `dispatch::a_dispatch_whose_ending_never_lands_is_released_on_the_bound`
-/// keeps that lock past the bound.
+/// by holding the record's lock, which is why this poll never takes it: a read
+/// that waited on that lock would outlast the bound. That journey also keeps the
+/// lock past the bound, and holds that the launch is released on it.
 ///
 /// Not the sibling's own `wait`, which returns only after its final reap — the
 /// boundary `a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_
@@ -963,8 +966,9 @@ fn hold_until_ending_recorded(state_dir: &Path, run_id: &GraphRunId) {
 ///
 /// Two readings of what stands there, because each closes a hole the other
 /// leaves. The **path** is asked first, and one that is not a regular file is
-/// not opened at all, because a poll that opened a FIFO would wait on a writer
-/// that may never come. Then the open is **non-blocking** and judged by the **handle**: a path
+/// not opened at all: opening a FIFO's reading end releases a writer held at
+/// its other end before a byte is read, and a poll must never act on the path.
+/// Then the open is **non-blocking** and judged by the **handle**: a path
 /// answered by one call and opened by the next can be replaced between them,
 /// and what is read here is only ever what was opened, through an open that
 /// returns at once whatever it met — so the bound above is the bound whatever

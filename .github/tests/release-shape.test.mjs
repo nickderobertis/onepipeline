@@ -20,7 +20,7 @@ const releasePlz = parse(read(".github/workflows/release-plz.yml"));
 const VERSION = read("Cargo.toml").match(/^\[package\][\s\S]*?^version = "([^"]+)"/m)[1];
 const PLATFORMS = ["linux", "linux-arm64", "macos", "windows"];
 const RUNNERS = {
-  linux: "ubuntu-latest",
+  linux: "ubuntu-24.04",
   "linux-arm64": "ubuntu-24.04-arm",
   macos: "macos-latest",
   windows: "windows-latest",
@@ -92,7 +92,7 @@ describe("the CD jobs", () => {
       assert.equal(job.needs, undefined, `build-${platform} needs no other job`);
       assert.equal(job.strategy, undefined, `build-${platform} is one job, not a matrix`);
     }
-    assert.equal(release.jobs.publish["runs-on"], "ubuntu-latest");
+    assert.equal(release.jobs.publish["runs-on"], "ubuntu-24.04");
     assert.equal(release.jobs.publish["timeout-minutes"], 30);
     assert.deepEqual([...release.jobs.publish.needs].sort(), [
       "build-linux",

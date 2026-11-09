@@ -271,7 +271,7 @@ fn every_linux_target_the_release_builds_is_handed_to_its_own_manylinux_image() 
             .into_iter()
             .map(|(_, runner)| runner)
             .collect::<Vec<_>>(),
-        ["ubuntu-latest", "ubuntu-24.04-arm"],
+        ["ubuntu-24.04", "ubuntu-24.04-arm"],
         "each Linux target builds natively on a runner of its own architecture"
     );
     let maturin = release_maturin_version();
