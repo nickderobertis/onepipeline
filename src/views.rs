@@ -5177,7 +5177,6 @@ fn adopted_driver_line(event: &Envelope, ago: &str, liveness: DriverLiveness) ->
     format!("  driver: {state}, adopted{ago} ({}){which}\n", event.ts)
 }
 
-/// One `driver-exited` record, as `status` reads it.
 fn driver_exited_line(event: &Envelope, ago: &str) -> String {
     match serde_json::from_value::<crate::payload::DriverExited>(serde_json::Value::Object(
         event.payload.clone(),
