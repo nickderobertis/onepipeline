@@ -2491,7 +2491,7 @@ fn a_flows_reply_a_hook_drops_or_refuses_is_told_apart() {
 #[test]
 fn a_flows_reply_a_hook_rewrites_is_held_to_what_a_reply_may_carry() {
     for (name, argv, author, said) in [
-        ("hookcommands", "add-finding-command", "planner", "no graph"),
+        ("hookcommands", "set-finding-command", "planner", "no graph"),
         (
             "hookstranger",
             "set-author, \"stranger\"",

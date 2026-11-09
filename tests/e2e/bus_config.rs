@@ -1382,3 +1382,56 @@ fn an_engine_raised_surface_a_hook_reroutes_lands_elsewhere_and_is_not_counted_q
     assert!(surfaces_read(&world, "hookengineroute").is_empty());
     world.release("slow.go");
 }
+
+/// A hook's refusal of a surface a verb raises reaches its caller in the hook's
+/// words, with nothing queued.
+#[test]
+fn a_surface_a_hook_refuses_is_refused_in_its_words_at_the_verb() {
+    let world = World::new("hook-surface-refuse");
+    hooked_run(
+        &world,
+        "hooksurfacerefuse",
+        &[("surfaces", &["refuse", "no reports today"], "")],
+    );
+    world
+        .run(&[
+            "surface",
+            "hooksurfacerefuse",
+            "--kind",
+            "finding",
+            "--message",
+            "a report",
+        ])
+        .exited(REFUSED)
+        .err_has("no reports today");
+    assert!(channel_file(&world, "hooksurfacerefuse", "surfaces.jsonl").is_empty());
+    world.release("slow.go");
+}
+
+/// With nothing driving the run the reply applies itself, and still applies what
+/// the hooks left of the envelope rather than what was sent.
+#[test]
+fn an_undriven_run_applies_what_the_hooks_left_of_the_envelope() {
+    const RUN: &str = "hook-undriven";
+    let world = World::new(RUN);
+    let file = hooked(&world, &[("replies", &["keep-first-command"], "")]);
+    let path = world.plan(RUN, &plan_of(RUN, vec![human("approve", &[])]));
+    world
+        .run(&["start", &path, "--attach", "--bus-config", &file])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let applied = world.run_with_stdin(
+        &["reply", RUN],
+        &json!({"version": 3, "commands": [
+            {"op": "add", "node": agent("kept", &["approve"])},
+            {"op": "add", "node": agent("removed", &["approve"])}
+        ]})
+        .to_string(),
+    );
+    applied.exited(0);
+    let receipt = applied.json();
+    assert_eq!(receipt["commands"], "applied", "{receipt}");
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    assert!(committed(&world, RUN, "kept"));
+    assert!(!committed(&world, RUN, "removed"));
+}

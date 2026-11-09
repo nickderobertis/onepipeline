@@ -15,7 +15,7 @@
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
 //!   `set-author <word>`       rewrite the envelope's `author`
 //!   `declare-complete`        add `completion: true` to the envelope
-//!   `add-finding-command`     add one `finding` command to the envelope
+//!   `set-finding-command`     replace the commands with one `finding`
 //!   `unreadable-command`      leave a command this build cannot decode
 //!   `reroute-as-commands`     rewrite to the `commands` record shape, and reroute
 //!                             there
@@ -102,10 +102,10 @@ fn main() -> std::process::ExitCode {
             fields.insert("completion".to_owned(), json!(true));
             println!("{message}");
         }
-        "add-finding-command" => {
+        "set-finding-command" => {
             let Some(fields) = message.as_object_mut() else {
                 fake::fail(&format!(
-                    "add-finding-command was handed no object: {offered}"
+                    "set-finding-command was handed no object: {offered}"
                 ));
             };
             fields.insert("version".to_owned(), json!(3));
