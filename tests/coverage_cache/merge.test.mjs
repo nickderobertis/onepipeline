@@ -112,6 +112,18 @@ test("onepipeline:test refuses a coverage tier it does not count", { timeout: 30
   const direct = spawnSync("node", ["scripts/coverage-tiers.mjs"], { cwd: dir, encoding: "utf8" });
   assert.equal(direct.status, 2, direct.stderr);
   assert.match(direct.stderr, /does not depend on coverage tier\(s\): onepipeline-uncounted/);
+
+  // A target whose declared report is not the unit its recipe writes is refused too.
+  writeFileSync(
+    join(dir, "tests/uncounted/project.json"),
+    JSON.stringify({
+      name: "onepipeline-uncounted",
+      targets: { test: { command: "just _note-test", outputs: ["{workspaceRoot}/target/coverage-units/onepipeline-other.lcov"] } },
+    }),
+  );
+  const mismatched = spawnSync("node", ["scripts/coverage-tiers.mjs"], { cwd: dir, encoding: "utf8" });
+  assert.equal(mismatched.status, 2, mismatched.stderr);
+  assert.match(mismatched.stderr, /declares report onepipeline-other but its recipe _note-test writes unit onepipeline-note-journeys/);
 });
 
 test("a stale report never reaches the total, and the merge refuses what no tier owns", { timeout: 900000 }, (t) => {

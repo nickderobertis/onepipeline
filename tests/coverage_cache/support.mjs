@@ -113,10 +113,6 @@ export function realVersion() {
   return readFileSync(join(root, "Cargo.toml"), "utf8").match(/\[package\][\s\S]*?\nversion = "([^"]+)"/)[1];
 }
 
-/**
- * Copy the working tree (tracked and new files) into a fresh repository and replace the Rust
- * code with the fixture crate. `uncovered` sets how many of the fixture's lines no tier reaches.
- */
 // What `_onetaskgraph-preflight` looks for, at the justfile's pin, so the e2e preflight passes offline.
 export function plantOnetaskgraph(dir) {
   const version = readFileSync(join(dir, "justfile"), "utf8").match(/^onetaskgraph-version := "([^"]+)"/m)[1];
@@ -126,6 +122,10 @@ export function plantOnetaskgraph(dir) {
   chmodSync(tool, 0o755);
 }
 
+/**
+ * Copy the working tree (tracked and new files) into a fresh repository and replace the Rust
+ * code with the fixture crate. `uncovered` sets how many of the fixture's lines no tier reaches.
+ */
 export function scratch(t, { uncovered = 6 } = {}) {
   const dir = mkdtempSync(join(stateRoot(), "coverage-cache-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -199,7 +199,7 @@ export function nx(dir, args, { env = {}, path = [] } = {}) {
 
 export const test_all = ["run", "onepipeline:test"];
 
-/** Replayed and executed coverage tiers from a run, asserting nothing else ran unaccounted. */
+/** The coverage tiers a run replayed and executed, each sorted. */
 export function tierOutcome(run) {
   const replayed = TIERS.filter((tier) => run.replayed.has(TASK_OF[tier])).sort();
   const executed = TIERS.filter((tier) => run.executed.has(TASK_OF[tier])).sort();

@@ -12,6 +12,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
 const refuse = (message) => {
   console.error(`coverage-tiers: ${message}`);
   process.exit(2);
@@ -31,13 +33,15 @@ try {
   );
 }
 
-const justfile = readFileSync("justfile", "utf8");
+let justfile;
+try {
+  justfile = readFileSync("justfile", "utf8");
+} catch (error) {
+  refuse(`cannot read the justfile: ${error.message}. ACTION: run this from the repository root`);
+}
 // `_e2e-test: _strace-preflight (_tier-test "onepipeline-e2e" e2e-tier)` -> the recipe's unit.
 const unitOfRecipe = new Map(
-  [...justfile.matchAll(/^(_[\w-]+):.*\(_tier-test "([\w-]+)"/gm)].map(([, recipe, unit]) => [
-    recipe,
-    unit,
-  ]),
+  [...justfile.matchAll(/^(_[\w-]+):.*\(_tier-test "([\w-]+)"/gm)].map(([, recipe, unit]) => [recipe, unit]),
 );
 
 const REPORT = /^\{workspaceRoot\}\/target\/coverage-units\/([\w-]+)\.lcov$/;
@@ -50,24 +54,28 @@ for (const path of tracked) {
   } catch (error) {
     refuse(`${path} cannot be read: ${error.message}. ACTION: repair that project file`);
   }
+  if (!isRecord(project) || (project.targets !== undefined && !isRecord(project.targets))) {
+    refuse(`${path} is not a project object with a targets map. ACTION: repair that project file`);
+  }
   if (project.name === "onepipeline") aggregate = project.targets?.test;
   for (const [target, definition] of Object.entries(project.targets ?? {})) {
     const id = `${project.name}:${target}`;
-    const recipe = String(definition.command ?? "").match(/^just (\S+)/)?.[1];
-    const declared = (definition.outputs ?? [])
-      .map((output) => output.match(REPORT)?.[1])
-      .filter(Boolean);
-    const unit = declared[0] ?? unitOfRecipe.get(recipe);
-    if (unit === undefined) continue;
-    if (declared.length === 0) {
-      refuse(
-        `${id} runs coverage unit ${unit} but declares no target/coverage-units/${unit}.lcov output. ACTION: add it to that target's outputs`,
-      );
+    if (!isRecord(definition) || (definition.outputs !== undefined && !Array.isArray(definition.outputs))) {
+      refuse(`${id} is not a target with an outputs list. ACTION: repair ${path}`);
     }
-    if (tiers.has(unit))
-      refuse(
-        `two targets write coverage unit ${unit}: ${tiers.get(unit)} and ${id}. ACTION: give each tier its own unit name`,
-      );
+    const recipe = String(definition.command ?? "").match(/^just (\S+)/)?.[1];
+    const reports = (definition.outputs ?? []).map((output) => String(output).match(REPORT)?.[1]).filter(Boolean);
+    const recipeUnit = unitOfRecipe.get(recipe);
+    if (reports.length > 1) refuse(`${id} declares several coverage reports: ${reports.join(", ")}. ACTION: give each tier one target/coverage-units report`);
+    const unit = reports[0] ?? recipeUnit;
+    if (unit === undefined) continue;
+    if (reports.length === 0) {
+      refuse(`${id} runs coverage unit ${unit} but declares no target/coverage-units/${unit}.lcov output. ACTION: add it to that target's outputs`);
+    }
+    if (recipeUnit !== undefined && recipeUnit !== unit) {
+      refuse(`${id} declares report ${unit} but its recipe ${recipe} writes unit ${recipeUnit}. ACTION: name the same unit in both`);
+    }
+    if (tiers.has(unit)) refuse(`two targets write coverage unit ${unit}: ${tiers.get(unit)} and ${id}. ACTION: give each tier its own unit name`);
     tiers.set(unit, id);
   }
 }
@@ -80,12 +88,13 @@ if (tiers.size === 0)
   refuse(
     "the project graph holds no coverage tier. ACTION: restore the tiers' target/coverage-units outputs",
   );
+if (!isRecord(aggregate) || !Array.isArray(aggregate.dependsOn ?? [])) refuse("onepipeline:test has no dependsOn list. ACTION: restore it");
 const dependedOn = new Set(
-  (aggregate.dependsOn ?? []).flatMap((need) =>
-    typeof need === "string"
-      ? [`onepipeline:${need}`]
-      : (need.projects ?? []).map((name) => `${name}:${need.target}`),
-  ),
+  (aggregate.dependsOn ?? []).flatMap((need) => {
+    if (typeof need === "string") return [`onepipeline:${need}`];
+    if (!isRecord(need) || !Array.isArray(need.projects ?? [])) refuse("onepipeline:test has a malformed dependsOn entry. ACTION: repair it");
+    return (need.projects ?? []).map((name) => `${name}:${need.target}`);
+  }),
 );
 const uncounted = [...tiers]
   .filter(([, id]) => !dependedOn.has(id))
