@@ -1209,8 +1209,6 @@ impl OfferedReply {
                 .any(|dropped| dropped.queue.as_str() == queue)
         };
         let commands_dropped = !offered.commands.is_empty() && (whole_drop || dropped_on(COMMANDS));
-        // llmlint: ignore[changed_behavior_has_e2e] a verdict half dropped beside commands that land needs a hook rerouting the reply's framed record onto the reply queue's own chain; every other drop is driven by `bus_config`'s journeys, and this is the same flag read by the same receipt.
-        let verdict_dropped = offered.carries_verdict() && (whole_drop || dropped_on(REPLIES));
         let bus_changed = hooked.outcome == HookedOutcome::Change;
         let mut envelope = Reply {
             version: offered.version,
@@ -1240,6 +1238,11 @@ impl OfferedReply {
             envelope.commands = read.commands;
             envelope.version.get_or_insert(REPLY_ENVELOPE_VERSION);
         }
+        // The layout appends a framed verdict without running a chain, so a hook
+        // drops this half beside commands by taking it off the envelope.
+        let verdict_dropped = offered.carries_verdict()
+            && !envelope.carries_verdict()
+            && (whole_drop || !envelope.commands.is_empty());
         // Dropped beside a half that was kept is a change only where the kept
         // half itself differs; the bus says `Change` for both.
         let changed = bus_changed

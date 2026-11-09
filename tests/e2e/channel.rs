@@ -2223,7 +2223,7 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         bool,
         Value,
     );
-    let hooked_shapes: [HookShape; 3] = [
+    let hooked_shapes: [HookShape; 4] = [
         (
             "hook-changed",
             "replies",
@@ -2233,6 +2233,18 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
             true,
             true,
             json!({"state": "applied", "commands": "applied", "hooked": "changed"}),
+        ),
+        (
+            "hook-verdict-half",
+            "replies",
+            "strip-verdict",
+            json!({"completion": false, "reason": "taken off", "version": 3,
+                   "commands": [note("still lands")]}),
+            true,
+            true,
+            true,
+            json!({"state": "applied", "verdict": "dropped", "commands": "applied",
+                   "hooked": "changed"}),
         ),
         (
             "hook-half",

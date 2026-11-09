@@ -12,6 +12,7 @@
 //!   `unjudged`                exit 3
 //!   `set-message <text>`      rewrite `message`, on a surface or a framed reply
 //!   `keep-first-command`      leave only the first of the envelope's commands
+//!   `strip-verdict`           take the verdict half off a bare envelope
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
 //!   `set-author <word>`       rewrite the envelope's `author`
 //!   `declare-complete`        add `completion: true` to the envelope
@@ -78,6 +79,15 @@ fn main() -> std::process::ExitCode {
         "keep-first-command" => {
             let commands = commands_of(&mut message, &offered);
             commands.truncate(1);
+            println!("{message}");
+        }
+        "strip-verdict" => {
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!("strip-verdict was handed no object: {offered}"));
+            };
+            for half in ["completion", "message", "reason"] {
+                fields.remove(half);
+            }
             println!("{message}");
         }
         "rewrite-message" => {

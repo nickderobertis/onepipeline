@@ -1159,6 +1159,53 @@ fn a_dropped_half_beside_a_changed_half_says_changed_and_keeps_no_copy_of_it() {
     world.release("slow.go");
 }
 
+/// A hook taking the verdict half off an envelope and keeping its commands: the edit
+/// lands, the receipt says the verdict was dropped, and the asker hears no ruling.
+#[test]
+fn a_verdict_half_a_hook_drops_beside_applied_commands_reaches_no_asker() {
+    let world = World::new("hook-verdict-half");
+    hooked_run(
+        &world,
+        "hookverdicthalf",
+        &[("replies", &["strip-verdict"], "")],
+    );
+    let mut asking = world.cmd(&["ask", "--timeout", "8", "what next?"]);
+    asking.env("ONEPIPELINE_RUN_ID", "hookverdicthalf");
+    let asking = asking
+        .stdin(onepipeline_testfakes::profile::process::Stdio::null())
+        .stdout(onepipeline_testfakes::profile::process::Stdio::piped())
+        .stderr(onepipeline_testfakes::profile::process::Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    world.until("the question to be queued", |world| {
+        channel_file(world, "hookverdicthalf", "surfaces.jsonl").contains("what next?")
+    });
+    let ruling = "the ruling a hook took off";
+    let answered = world.run_with_stdin(
+        &["reply", "hookverdicthalf"],
+        &json!({"version": 3, "completion": false, "message": ruling,
+                "commands": [add("kept")]})
+        .to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["verdict"], "dropped", "{receipt}");
+    assert_eq!(receipt["commands"], "applied", "{receipt}");
+    world.until("the kept edit to commit", |world| {
+        committed(world, "hookverdicthalf", "kept")
+    });
+    assert_eq!(channel_file(&world, "hookverdicthalf", "replies.jsonl"), "");
+    let output = asking.wait_with_output().expect("ask returns");
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(!said.contains(ruling), "{said}");
+    assert_eq!(
+        serde_json::from_str::<Value>(said.trim()).expect("ask answers JSON")["answer"],
+        "timeout",
+        "{said}"
+    );
+    world.release("slow.go");
+}
+
 /// Mixed halves with a hook on `commands`: the verdict queued beside the edit carries
 /// the changed edits, not the originals.
 #[test]
