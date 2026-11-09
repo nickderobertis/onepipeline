@@ -498,6 +498,29 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         "the slowest single read is the value: {result}"
     );
     let detail = result["detail"].as_str().expect("a detail");
+
+    // A kernel with no per-task I/O accounting counted no bytes: the report says that, not zero.
+    let mut uncounted = host_view_record();
+    *uncounted
+        .pointer_mut("/cold/breakdown/read_bytes")
+        .expect("the cold read's byte count") = serde_json::Value::Null;
+    std::fs::write(&record, uncounted.to_string()).expect("a record");
+    let uncounted_result = dir.join("uncounted.json");
+    let reported = host_view_report(&dir, Some(&uncounted_result));
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let uncounted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&uncounted_result).expect("a result"))
+            .expect("JSON");
+    let says = uncounted["detail"].as_str().expect("a detail");
+    assert!(
+        says.contains("bytes read not counted by this kernel") && !says.contains(" 0 bytes read"),
+        "{says}"
+    );
+    std::fs::write(&record, host_view_record().to_string()).expect("a record");
     for expected in [
         "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
         "reads of /usr/local/bin/onepipeline (built by ci.yml install job: cargo install \
