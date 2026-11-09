@@ -3043,3 +3043,55 @@ fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
     }
     assert_eq!(std::fs::read(&journal).unwrap(), before);
 }
+
+/// The SDK's batch names its actor, and `apply` refuses a batch for `apply_batch`, whose
+/// answer is a batch receipt: neither writes anything.
+#[test]
+fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
+    use onepipeline::human_items::{
+        Actor, HumanItemAction, HumanItemBatchAnswer, HumanItemRefusal, HumanItems,
+    };
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "q",
+        "question",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let before = std::fs::read(world.store().join("events.ndjson")).unwrap();
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    let answers = vec![HumanItemBatchAnswer {
+        id,
+        choice: None,
+        text: Some("Yes.".into()),
+    }];
+    let refused = store
+        .apply_batch(
+            answers.clone(),
+            Actor {
+                actor: "  ".into(),
+                on_behalf_of: None,
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&refused, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
+        "{refused:?}"
+    );
+    let sent = store
+        .apply(HumanItemAction::AnswerBatch {
+            answers,
+            actor: "ui:operator".into(),
+            on_behalf_of: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&sent, HumanItemRefusal::Conflict { reason } if reason.contains("apply_batch")),
+        "{sent:?}"
+    );
+    assert_eq!(
+        std::fs::read(world.store().join("events.ndjson")).unwrap(),
+        before
+    );
+}

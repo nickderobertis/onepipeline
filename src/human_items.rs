@@ -331,6 +331,7 @@ impl HumanItem {
         self.state == HumanItemState::Open && self.block != HumanItemBlock::Nothing
     }
 }
+// llmlint: ignore-block[invalid_states_unrepresentable] One batch entry is the same flat `{id,choice?,text?}` JSON the answer action publishes, and an answer enum would change that wire shape; the store judges each entry by the single-answer rules and refuses one naming neither or a blank text.
 /// One entry of an `answer-batch`, held to the rules of a single answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -344,6 +345,7 @@ pub struct HumanItemBatchAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The authoritative human-item action vocabulary. Tasks use Complete, including design reviews.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -740,6 +742,7 @@ pub enum HumanItemsCommand {
         #[arg(long)]
         json: bool,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] clap holds the two flags the contract publishes as `[--choice] [--text]`; they become HumanItemAction::Answer's optional fields, and an answer naming neither or a blank text is refused where every other caller's is, by the store.
     /// Answer an open question.
     Answer {
         /// Item identifier.
@@ -751,6 +754,7 @@ pub enum HumanItemsCommand {
         #[arg(long, value_parser = parse_answer)]
         text: Option<String>,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Answer several open questions as one batch from a JSON file `{answers: [...]}`.
     AnswerBatch {
         /// JSON batch file.

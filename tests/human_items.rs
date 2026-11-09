@@ -923,6 +923,17 @@ fn a_sample_batch_answers_what_it_can_and_reports_the_rest() {
     assert!(receipt.get("batch").is_none(), "{receipt}");
     assert_eq!(receipt["answered"], json!([]));
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+    // An identical repeat is refused here as a single sample answer's is: the fixture
+    // authority keeps no recorded receipt to answer with.
+    let repeat = answer(json!({"answers": [
+        {"id": "item-2", "choice": "gradual", "text": "Start Monday."}
+    ]}));
+    assert!(!repeat.status.success());
+    let receipt: Value = serde_json::from_slice(&repeat.stdout).unwrap();
+    assert!(receipt["refused"][0]["refusal"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("already resolved"));
     let malformed = answer(json!({"answers": [
         {"id": "item-3", "text": "a"},
         {"id": "item-3", "text": "b"},
@@ -1294,5 +1305,43 @@ fn a_sample_reopen_or_note_names_its_actor() {
             })
         );
     }
+    assert_eq!(sample, before);
+}
+
+/// A batch needs `apply_batch`, whose answer is a batch receipt, and names its actor.
+#[test]
+fn a_sample_answer_batch_goes_through_apply_batch() {
+    use onepipeline::human_items::{Actor, HumanItemBatchAnswer};
+    let mut sample: HumanItemSample =
+        serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    let before = sample.clone();
+    let answers = vec![HumanItemBatchAnswer {
+        id: "item-2".into(),
+        choice: Some("gradual".into()),
+        text: None,
+    }];
+    assert_eq!(
+        sample.apply(HumanItemAction::AnswerBatch {
+            answers: answers.clone(),
+            actor: "user".into(),
+            on_behalf_of: None,
+        }),
+        Err(HumanItemRefusal::Conflict {
+            reason: "an answer-batch answers a batch receipt, so it is applied through apply_batch"
+                .into()
+        })
+    );
+    assert_eq!(
+        sample.apply_batch(
+            answers,
+            Actor {
+                actor: " ".into(),
+                on_behalf_of: None,
+            },
+        ),
+        Err(HumanItemRefusal::Conflict {
+            reason: "an action names its actor".into()
+        })
+    );
     assert_eq!(sample, before);
 }

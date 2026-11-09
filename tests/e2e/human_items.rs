@@ -3639,6 +3639,7 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
     // Adopting a run's driver, whose first pass carries the store over, adds no second.
     #[cfg(unix)]
     {
+        // llmlint: ignore[tests_mirror_real_usage] the adopted-driver dedupe the criteria name is only reached when a carry starts over from the journal's first record, the state `forget_delivery`'s own note says no process outside the dying writer can schedule; the surfaces are read off the real channel afterward.
         assert!(forget_delivery(&world));
         crate::harness::end_process(first_driver);
         world.until("the dead driver to be proved gone", |w| {
@@ -3653,4 +3654,40 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
     world.release("first-step.go");
     world.release("second-step.go");
 }
+/// A question a human step stands for, answered in a batch, attests that step as a single
+/// answer would, and its dependent then runs.
+#[test]
+fn a_batch_answer_releases_the_human_step_it_stands_for() {
+    let world = World::new("human-item-batch-step");
+    enabled(&world);
+    let name = "asked";
+    let mut step = human("ask", &[]);
+    step["human_item"] = json!({
+        "kind": "question",
+        "priority": "low",
+        "title": "Which way?",
+        "body": "Pick one.",
+    });
+    let project = world.plan(name, &plan_of(name, vec![step, agent("after", &["ask"])]));
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let open = items(&world, &[]);
+    let id = id_of(&open[0]);
+    let run = answer_batch(
+        &world,
+        "step",
+        &json!({"answers": [{"id": id, "text": "That way."}]}),
+    );
+    run.exited(0);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
+    assert_eq!(
+        world
+            .events_of(name, "edit-committed")
+            .iter()
+            .filter(|e| e["payload"]["command"]["op"] == "attest")
+            .count(),
+        1
+    );
+}
+
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
