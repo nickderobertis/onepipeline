@@ -152,7 +152,6 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// The envelope's `commands`, or the failure that names a message without them.
 fn commands_of<'a>(message: &'a mut Value, offered: &str) -> &'a mut Vec<Value> {
     match message.get_mut("commands").and_then(Value::as_array_mut) {
         Some(commands) => commands,
@@ -160,7 +159,6 @@ fn commands_of<'a>(message: &'a mut Value, offered: &str) -> &'a mut Vec<Value> 
     }
 }
 
-/// Name `queue` in the route file the bus offered.
 fn route_to(queue: &str) {
     let route = match std::env::var(ROUTE_ENV) {
         Ok(route) => route,
