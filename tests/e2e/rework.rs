@@ -2133,6 +2133,9 @@ fn restacked_onto_failed_provisioning(world: &World, run: &str, conflict: bool) 
         .expect("b's restack is on the record")
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the rule's relevance is a slow test or an external service, and these two are
+// neither: local git and doubled agents, a few seconds each, the same offline shape as
+// every other journey in this module.
 /// A restack that merges cleanly dispatches nobody, so the manager is all there is
 /// to tell.
 #[test]
@@ -2162,6 +2165,7 @@ fn a_conflicted_restack_on_a_failed_provisioning_tells_its_worker() {
         "{last}"
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A restack whose republication the host's checks refuse goes back to the draft's
 /// own worker on the same branch once a trigger reads that verdict red, as a

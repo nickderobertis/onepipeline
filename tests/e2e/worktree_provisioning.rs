@@ -11,6 +11,8 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+#[cfg(unix)]
+use crate::harness::end_process;
 use crate::harness::{agent, git, lifecycle, plan_of, Repository, World, SURFACE_WAITING};
 
 const HEADING: &str = "## Worktree provisioning failed";
@@ -345,6 +347,53 @@ fn a_killed_hooks_fence_stays_inside_a_section_above_the_notes() {
     stop(&world, run);
 }
 
+/// A driver killed after telling the manager, and the adopter that carries the node
+/// on: the session's failure reads again on the way back, and is told only once.
+#[cfg(unix)]
+#[test]
+fn an_adopted_run_does_not_tell_the_manager_about_the_same_session_twice() {
+    let world = World::new("provisioning-adopted");
+    let repo = world.repository("local-direct", &[]);
+    tracked_post_checkout(&world, &repo, "#!/bin/sh\necho ONCE-ONLY\nexit 5\n");
+    world.script("holder.wait", "hold");
+    world.script("service.wait", "hold");
+    let run = "provisionadopted";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![lifecycle("service", &[]), agent("holder", &[])]),
+    );
+    let launched = world.run(&["start", &path, "--detach"]);
+    launched.exited(0);
+    let announced: Value =
+        serde_json::from_str(launched.stdout.trim()).expect("a detached launch announces itself");
+    let pid = u32::try_from(announced["pid"].as_u64().expect("a driver pid")).expect("a pid");
+    let surfaces = |world: &World| {
+        world
+            .events_of(run, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| event["payload"]["kind"] == KIND)
+            .count()
+    };
+    world.until("the manager to be told", |world| surfaces(world) == 1);
+
+    end_process(pid);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the adopter to re-dispatch the held node", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "service")
+            .count()
+            >= 2
+    });
+    world.release("service.go");
+    settled(&world, run, "service");
+    assert_eq!(surfaces(&world), 1, "{}", world.dump());
+    stop(&world, run);
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the rule's relevance is a slow test or an external service, and this is neither:
+// git and `onevcs` run locally, offline, and the bound under test is set to one second.
 /// A hook that outlasts `onevcs`'s bound is named as having timed out, in the task
 /// and on the surface alike.
 #[test]
@@ -366,6 +415,7 @@ fn a_hook_past_its_bound_is_named_as_timed_out() {
     );
     stop(&world, run);
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 #[test]
 fn a_hook_that_passes_is_reported_as_nothing() {
