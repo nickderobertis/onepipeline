@@ -823,7 +823,6 @@ pub(crate) struct PlannerSurfaceQueued {
     pub(crate) blocking: bool,
 }
 
-/// `planner-surfaced`: a surface consumed.
 /// `planner-surface-dropped`: a hook kept a surface off the channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceDropped {
@@ -859,6 +858,7 @@ pub(crate) enum SurfaceDropCause {
     },
 }
 
+/// `planner-surfaced`: a surface consumed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaced {
     /// The surface's kind.

@@ -2050,7 +2050,7 @@
             "description": "A hook or a validator refused it, in its own words."
           }
         ],
-        "description": "`planner-surfaced`: a surface consumed.\n`planner-surface-dropped`: a hook kept a surface off the channel.",
+        "description": "`planner-surface-dropped`: a hook kept a surface off the channel.",
         "title": "PlannerSurfaceDropped",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
@@ -2125,6 +2125,7 @@
           "source",
           "blocking"
         ],
+        "description": "`planner-surfaced`: a surface consumed.",
         "title": "PlannerSurfaced",
         "$schema": "https://json-schema.org/draft/2020-12/schema"
       }

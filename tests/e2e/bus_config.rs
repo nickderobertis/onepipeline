@@ -1435,3 +1435,39 @@ fn an_undriven_run_applies_what_the_hooks_left_of_the_envelope() {
     assert!(committed(&world, RUN, "kept"));
     assert!(!committed(&world, RUN, "removed"));
 }
+
+/// A reply naming a question a hook reroutes away from the reply queue: the question
+/// stands unanswered, the journal records no verdict, and the receipt says changed.
+#[test]
+fn a_correlated_reply_a_hook_reroutes_journals_no_verdict() {
+    let world = World::new("hook-correlated");
+    hooked_run(
+        &world,
+        "hookcorrelated",
+        &[("replies", &["reroute-as-surface"], ", routes: [surfaces]")],
+    );
+    let asked = world
+        .cmd(&["ask", "--timeout", "1", "may I proceed?"])
+        .env("ONEPIPELINE_RUN_ID", "hookcorrelated")
+        .output()
+        .expect("the binary starts");
+    assert_eq!(asked.status.code(), Some(1), "{asked:?}");
+    let correlation: Value = serde_json::from_slice(&asked.stdout).expect("one JSON answer");
+    let correlation = correlation["correlation"]
+        .as_str()
+        .expect("the question was raised")
+        .to_owned();
+    let answered = world.run_with_stdin(
+        &["reply", "hookcorrelated", "--correlation", &correlation],
+        r#"{"completion":false,"reason":"sent onward"}"#,
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    assert!(receipt.get("verdict").is_none(), "{receipt}");
+    assert!(world
+        .events_of("hookcorrelated", "planner-replied")
+        .is_empty());
+    assert_eq!(channel_file(&world, "hookcorrelated", "replies.jsonl"), "");
+    world.release("slow.go");
+}

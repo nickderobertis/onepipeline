@@ -4470,7 +4470,9 @@ pub(crate) fn submit_offered(
         if let Some(named) = correlation {
             channel.record_offer(&offered)?;
             let id = channel.answer_offered(&offered, Some(named))?;
-            journal_verdict(paths, correlation, &offered)?;
+            if envelope.carries_verdict() {
+                journal_verdict(paths, correlation, &offered)?;
+            }
             return Ok((Submitted::Answered { reply: id }, offered));
         }
         // A settled run has no reader left, now or later, so queuing a reply to
