@@ -6251,6 +6251,11 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     );
 } // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a passing run spends
+// `agentgraph.rs`'s five-second `RECORD_WRITE_BOUND`, about 7 seconds on the wall, because the
+// real bound releasing the launch is what it proves; a constant no user can shorten leaves
+// nothing to wait on instead. What it holds is this crate's launch over the linked sibling's
+// record lock, so the narrowest edge it can honestly sit behind is the crate itself.
 /// The hold above is **bounded**: a record whose ending never lands releases the
 /// launch all the same, with its node done, rather than holding a settled run for
 /// a record that is not coming.
@@ -6281,7 +6286,7 @@ fn a_dispatch_whose_ending_never_lands_is_released_on_the_bound() {
         "the record's ending landed, so nothing here spent the bound"
     );
     drop(holding);
-}
+} // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Launch a one-node dispatch attached and stand between its graph's announcement
 /// and the write of its ending: what comes back is the launch, the graph run's
