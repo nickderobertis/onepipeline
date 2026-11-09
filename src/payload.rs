@@ -837,13 +837,26 @@ pub(crate) struct PlannerSurfaceDropped {
     pub(crate) blocking: bool,
     /// Review revision identity, where the surface names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) correlation: Option<String>,
-    /// The hook that dropped it; absent where a hook refused it instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) hook: Option<onemessagebus::HookRef>,
-    /// Why a hook or validator refused it, in its own words.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) refused: Option<String>,
+    pub(crate) correlation: Option<onemessagebus::Correlation>,
+    /// Which hook kept it off the channel, or what refused it.
+    #[serde(flatten)]
+    pub(crate) cause: SurfaceDropCause,
+}
+
+/// Why a surface never reached the channel, as its journal record names it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum SurfaceDropCause {
+    /// A hook dropped it.
+    Dropped {
+        /// The hook that dropped it.
+        hook: onemessagebus::HookRef,
+    },
+    /// A hook or a validator refused it, in its own words.
+    Refused {
+        /// Why.
+        refused: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

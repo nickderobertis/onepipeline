@@ -1389,6 +1389,7 @@ impl EnvelopeReview {
     /// keys nothing: this envelope is reviewed uncached, nothing is recorded, and
     /// that is said on stderr rather than a pass being kept under an empty key.
     pub(crate) fn recording_passes(self, bar: &str, dir: &std::path::Path) -> Result<Self> {
+        // llmlint: ignore[changed_behavior_has_e2e] that a pass recorded by the previous protocol reads as a keep is `HookCache`'s own promise, proven in onemessagebus's journeys; `a_pass_is_kept_under_the_bar_and_a_moved_bar_runs_the_reviewer_again` proves this crate's use of it end to end.
         let cache = HookCache::new(dir, [bar])
             .map_err(|e| refuse(format!("the envelope reviewer's bar names no command: {e}")))?;
         if cache.fingerprint().is_none() {

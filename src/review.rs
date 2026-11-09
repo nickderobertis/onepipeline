@@ -340,29 +340,9 @@ pub(crate) fn pass(
             let offered = Surface {
                 id: 0, kind: "review-comment".to_owned(), message: format!("Node {node}, change request {url}: {} at {}\n{}\n\n{}\n\nAnswer with rework on {node}, naming {} in comments, or decline this comment.", comment.author, location(comment), comment.url, comment.body, comment.id.0), source: crate::channel::source::RECONCILER.to_owned(), blocking: false, queued_at: crate::sys::now_millis(), workstream: Some(node.to_owned()), abandoned: false, asker: None, correlation: Some(correlation),
             };
-            let surface = match channel.push(offered.clone())? {
-                crate::channel::SurfaceOffer::Queued(surface) => surface,
-                crate::channel::SurfaceOffer::Dropped { hook, .. } => {
-                    crate::engine::record_surface_dropped(
-                        paths,
-                        journal,
-                        &offered,
-                        Some(&hook),
-                        None,
-                    )?;
-                    continue;
-                }
-                crate::channel::SurfaceOffer::Refused(reason) => {
-                    crate::engine::record_surface_dropped(
-                        paths,
-                        journal,
-                        &offered,
-                        None,
-                        Some(&reason),
-                    )?;
-                    continue;
-                }
-                crate::channel::SurfaceOffer::Elsewhere => continue,
+            let Some(surface) = crate::engine::offer_surface(paths, journal, &channel, &offered)?
+            else {
+                continue;
             };
             failpoint("after-surface")?;
             record_surface(paths, journal, &surface)?;
@@ -553,27 +533,8 @@ fn not_drafted(
         asker: None,
         correlation: Some(correlation),
     };
-    let surface = match channel.push(offered.clone())? {
-        crate::channel::SurfaceOffer::Queued(surface) => surface,
-        crate::channel::SurfaceOffer::Dropped { hook, .. } => {
-            return crate::engine::record_surface_dropped(
-                paths,
-                journal,
-                &offered,
-                Some(&hook),
-                None,
-            );
-        }
-        crate::channel::SurfaceOffer::Refused(reason) => {
-            return crate::engine::record_surface_dropped(
-                paths,
-                journal,
-                &offered,
-                None,
-                Some(&reason),
-            );
-        }
-        crate::channel::SurfaceOffer::Elsewhere => return Ok(()),
+    let Some(surface) = crate::engine::offer_surface(paths, journal, channel, &offered)? else {
+        return Ok(());
     };
     record_surface(paths, journal, &surface)
 }

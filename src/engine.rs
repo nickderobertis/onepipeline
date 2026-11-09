@@ -12382,17 +12382,9 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 /// record rather than the run's failure: a filter a host wrote to quieten the
 /// channel must not stop the run raising it.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
-    let queued = match ChannelState::of_paths(paths)?.push(surface.clone())? {
-        crate::channel::SurfaceOffer::Queued(queued) => queued,
-        crate::channel::SurfaceOffer::Dropped { hook, .. } => {
-            record_surface_dropped(paths, journal, &surface, Some(&hook), None)?;
-            return Ok(surface);
-        }
-        crate::channel::SurfaceOffer::Refused(reason) => {
-            record_surface_dropped(paths, journal, &surface, None, Some(&reason))?;
-            return Ok(surface);
-        }
-        crate::channel::SurfaceOffer::Elsewhere => return Ok(surface),
+    let Some(queued) = offer_surface(paths, journal, &ChannelState::of_paths(paths)?, &surface)?
+    else {
+        return Ok(surface);
     };
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
@@ -12407,27 +12399,53 @@ pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) 
     Ok(queued)
 }
 
-/// Journal a surface a hook kept off the channel: which hook dropped it, or what
-/// refused it and why.
+/// Offer `surface` to `channel`, journalling what kept it off: the surface as
+/// queued, or `None` where a hook dropped, rerouted or refused it, which is the
+/// run's record rather than the run's failure.
+pub(crate) fn offer_surface(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    channel: &ChannelState,
+    surface: &Surface,
+) -> Result<Option<Surface>> {
+    use crate::channel::SurfaceOffer;
+    use crate::payload::SurfaceDropCause;
+    let cause = match channel.push(surface.clone())? {
+        SurfaceOffer::Queued(queued) => return Ok(Some(queued)),
+        SurfaceOffer::Elsewhere => return Ok(None),
+        SurfaceOffer::Dropped { hook, .. } => SurfaceDropCause::Dropped { hook },
+        SurfaceOffer::Refused(refused) => SurfaceDropCause::Refused { refused },
+    };
+    record_surface_dropped(paths, journal, surface, &cause)?;
+    Ok(None)
+}
+
+/// Journal a surface a hook kept off the channel.
 pub(crate) fn record_surface_dropped(
     paths: &RunPaths,
     journal: &mut Journal,
     surface: &Surface,
-    hook: Option<&onemessagebus::HookRef>,
-    refused: Option<&str>,
+    cause: &crate::payload::SurfaceDropCause,
 ) -> Result<()> {
+    let mut payload = vec![
+        ("kind", json!(surface.kind)),
+        ("message", json!(journal::bounded_text(&surface.message))),
+        ("source", json!(surface.source)),
+        ("blocking", json!(surface.blocking)),
+    ];
+    if let Some(correlation) = &surface.correlation {
+        payload.push(("correlation", json!(correlation)));
+    }
+    match cause {
+        crate::payload::SurfaceDropCause::Dropped { hook } => payload.push(("hook", json!(hook))),
+        crate::payload::SurfaceDropCause::Refused { refused } => {
+            payload.push(("refused", json!(refused)));
+        }
+    }
     journal.emit(
         journal::PipelineKind::PlannerSurfaceDropped,
         journal::labels(&paths.run, surface.workstream.as_deref()),
-        journal::payload(&[
-            ("kind", json!(surface.kind)),
-            ("message", json!(journal::bounded_text(&surface.message))),
-            ("source", json!(surface.source)),
-            ("blocking", json!(surface.blocking)),
-            ("correlation", json!(surface.correlation)),
-            ("hook", json!(hook)),
-            ("refused", json!(refused)),
-        ]),
+        journal::payload(&payload),
     )
 }
 

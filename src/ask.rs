@@ -286,8 +286,9 @@ impl Question {
                         paths,
                         &mut crate::journal::Journal::open(paths),
                         &offered,
-                        Some(&dropped.hook),
-                        None,
+                        &crate::payload::SurfaceDropCause::Dropped {
+                            hook: dropped.hook.clone(),
+                        },
                     )?;
                 }
                 Self::Dropped {

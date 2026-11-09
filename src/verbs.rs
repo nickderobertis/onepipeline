@@ -1277,11 +1277,33 @@ fn note_verdicts(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Surfaced {
     /// The surface's id in the channel, or `0` where a hook dropped it or
-    /// sent it elsewhere.
+    /// rerouted it.
     pub surface: u64,
-    /// Whether a hook kept it off the channel.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub dropped: bool,
+    /// What became of it.
+    pub state: SurfaceState,
+}
+
+/// What a surface offered through a verb became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SurfaceState {
+    /// On the channel.
+    Queued,
+    /// A hook dropped it: the channel holds nothing of it.
+    Dropped,
+    /// A hook sent it to another queue.
+    Rerouted,
+}
+
+impl SurfaceState {
+    /// The word the verb prints.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Dropped => "dropped",
+            Self::Rerouted => "rerouted",
+        }
+    }
 }
 
 /// What a surface offer becomes for the two verbs that print it: a hook's refusal
@@ -1291,11 +1313,15 @@ pub(crate) fn surfaced_of(offer: crate::channel::SurfaceOffer) -> Result<Surface
     match offer {
         SurfaceOffer::Queued(queued) => Ok(Surfaced {
             surface: queued.id,
-            dropped: false,
+            state: SurfaceState::Queued,
         }),
-        SurfaceOffer::Dropped { .. } | SurfaceOffer::Elsewhere => Ok(Surfaced {
+        SurfaceOffer::Dropped { .. } => Ok(Surfaced {
             surface: 0,
-            dropped: true,
+            state: SurfaceState::Dropped,
+        }),
+        SurfaceOffer::Elsewhere => Ok(Surfaced {
+            surface: 0,
+            state: SurfaceState::Rerouted,
         }),
         SurfaceOffer::Refused(reason) => Err(Error::Refused(reason)),
     }
@@ -1365,8 +1391,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
                 workstream: None,
                 correlation: None,
             },
-            Some(hook),
-            None,
+            &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
         )?;
     }
     let surfaced = surfaced_of(offer.clone())?;
@@ -1388,12 +1413,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
 
 /// The line `onepipeline surface` prints.
 pub fn render_surfaced(surfaced: &Surfaced) -> String {
-    let state = if surfaced.dropped {
-        "dropped"
-    } else {
-        "queued"
-    };
-    json!({"surface": surfaced.surface, "state": state}).to_string()
+    json!({"surface": surfaced.surface, "state": surfaced.state.word()}).to_string()
 }
 
 /// Who is stopping a run, and whether they may stop one they do not own.

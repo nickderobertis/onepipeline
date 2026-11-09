@@ -966,7 +966,7 @@ fn a_hook_on_commands_changes_the_edits_the_journal_records() {
     hooked_run(
         &world,
         "hookcommands",
-        &[("commands", &["rewrite-note", "the changed finding"], "")],
+        &[("commands", &["rewrite-message", "the changed finding"], "")],
     );
     let answered = world.run_with_stdin(
         &["reply", "hookcommands"],
@@ -1107,4 +1107,170 @@ fn a_surface_a_hook_drops_is_not_queued_and_the_journal_records_the_hook() {
         .events_of("hooksurfacedrop", "planner-surface-queued")
         .is_empty());
     world.release("slow.go");
+}
+
+/// A hook on `commands` dropping that half while one on `replies` changes the
+/// verdict: the receipt names the verdict delivered and the commands dropped, and
+/// the queued reply carries no copy of the dropped edits.
+#[test]
+fn a_dropped_half_beside_a_changed_half_says_changed_and_keeps_no_copy_of_it() {
+    let world = World::new("hook-half-changed");
+    hooked_run(
+        &world,
+        "hookhalf",
+        &[
+            ("replies", &["set-message", "the changed ruling"], ""),
+            ("commands", &["drop"], ""),
+        ],
+    );
+    let answered = world.run_with_stdin(
+        &["reply", "hookhalf"],
+        &json!({"version": 3, "completion": false, "message": "the original ruling",
+                "commands": [{"op": "finding", "message": "dropped"}]})
+        .to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["state"], "delivered", "{receipt}");
+    assert_eq!(receipt["verdict"], "delivered", "{receipt}");
+    assert_eq!(receipt["commands"], "dropped", "{receipt}");
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    let replies = channel_file(&world, "hookhalf", "replies.jsonl");
+    assert!(replies.contains("the changed ruling"), "{replies}");
+    assert!(!replies.contains("dropped"), "{replies}");
+    assert_eq!(channel_file(&world, "hookhalf", "commands.jsonl"), "");
+    world.release("slow.go");
+}
+
+/// Mixed halves with a hook on `commands`: the verdict queued beside the edit carries
+/// the changed edits, not the originals.
+#[test]
+fn a_queued_verdict_carries_the_edits_a_commands_hook_changed() {
+    let world = World::new("hook-framed");
+    hooked_run(
+        &world,
+        "hookframed",
+        &[("commands", &["rewrite-message", "the changed finding"], "")],
+    );
+    world
+        .run_with_stdin(
+            &["reply", "hookframed"],
+            &json!({"version": 3, "completion": false, "reason": "carry on",
+                    "commands": [{"op": "finding", "message": "the original finding"}]})
+            .to_string(),
+        )
+        .exited(0);
+    let replies = channel_file(&world, "hookframed", "replies.jsonl");
+    assert!(replies.contains("the changed finding"), "{replies}");
+    assert!(!replies.contains("the original finding"), "{replies}");
+    world.release("slow.go");
+}
+
+/// What a hook wrote that this build cannot apply is refused with nothing appended,
+/// and a hook cannot hand an envelope to an author the configuration never declared.
+#[test]
+fn a_hook_leaving_an_unreadable_record_or_an_undeclared_author_is_refused() {
+    let world = World::new("hook-unreadable");
+    hooked_run(
+        &world,
+        "hookunreadable",
+        &[("commands", &["unreadable-command"], "")],
+    );
+    let edit = json!({"version": 3, "commands": [add("kept")]}).to_string();
+    world
+        .run_with_stdin(&["reply", "hookunreadable"], &edit)
+        .exited(REFUSED)
+        .err_has("a hook left a record this build cannot read");
+    assert_eq!(channel_file(&world, "hookunreadable", "commands.jsonl"), "");
+    world.release("slow.go");
+
+    let author = World::new("hook-author");
+    hooked_run(
+        &author,
+        "hookauthor",
+        &[("replies", &["set-author", "stranger"], "")],
+    );
+    author
+        .run_with_stdin(
+            &["reply", "hookauthor"],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(REFUSED)
+        .err_has("stranger");
+    assert_eq!(channel_file(&author, "hookauthor", "replies.jsonl"), "");
+    author.release("slow.go");
+}
+
+/// A hook rerouting a surface off the queue: the verb says rerouted, the planner reads
+/// nothing, and the reply queue holds what the hook wrote.
+#[test]
+fn a_surface_a_hook_reroutes_is_reported_rerouted_and_lands_where_it_was_sent() {
+    let world = World::new("hook-surface-reroute");
+    hooked_run(
+        &world,
+        "hookroutesurface",
+        &[("surfaces", &["reroute-as-verdict"], ", routes: [replies]")],
+    );
+    world
+        .run(&[
+            "surface",
+            "hookroutesurface",
+            "--kind",
+            "finding",
+            "--message",
+            "sent elsewhere",
+        ])
+        .exited(0)
+        .out_has("\"rerouted\"");
+    assert!(surfaces_read(&world, "hookroutesurface").is_empty());
+    assert!(channel_file(&world, "hookroutesurface", "replies.jsonl").contains("rerouted"));
+    world.release("slow.go");
+}
+
+/// A surface the engine itself raises is decided too: a hook dropping it journals
+/// the drop and the hook, and one refusing it journals why, and the run carries on
+/// either way.
+#[test]
+fn an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues() {
+    for (name, argv, cause) in [
+        ("hook-engine-drop", vec!["drop"], "hook"),
+        (
+            "hook-engine-refuse",
+            vec!["refuse", "not this one"],
+            "refused",
+        ),
+    ] {
+        let world = World::new(name);
+        let run = name.replace('-', "");
+        let argv = argv.clone();
+        hooked_run(&world, &run, &[("surfaces", &argv, "")]);
+        world
+            .run_with_stdin(
+                &["reply", &run],
+                &json!({"version": 3, "commands": [
+                    {"op": "finding", "message": "the fixture is slow"}
+                ]})
+                .to_string(),
+            )
+            .exited(0);
+        world.until(
+            "the engine's report to be journalled as kept off",
+            |world| {
+                world
+                    .events_of(&run, "planner-surface-dropped")
+                    .iter()
+                    .any(|event| event["payload"]["kind"] == "finding")
+            },
+        );
+        let recorded = world.events_of(&run, "planner-surface-dropped");
+        assert!(
+            recorded
+                .iter()
+                .any(|event| !event["payload"][cause].is_null()),
+            "{recorded:?}"
+        );
+        world.run(&["status", &run]).exited(0);
+        assert!(surfaces_read(&world, &run).is_empty());
+        world.release("slow.go");
+    }
 }

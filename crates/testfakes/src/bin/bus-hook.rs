@@ -12,9 +12,12 @@
 //!   `unjudged`                exit 3
 //!   `set-message <text>`      rewrite `message`, on a surface or a framed reply
 //!   `keep-first-command`      leave only the first of the envelope's commands
-//!   `rewrite-note <text>`     rewrite the `text` of every command carrying one
+//!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
+//!   `set-author <word>`       rewrite the envelope's `author`
+//!   `unreadable-command`      leave a command this build cannot decode
 //!   `reroute-as-commands`     rewrite to the `commands` record shape, and reroute
 //!                             there
+//!   `reroute-as-verdict`      rewrite to a bare verdict, and reroute to `replies`
 //!
 //! Every invocation is recorded to `bus-hook.jsonl`, with the queue and the
 //! message as they arrived.
@@ -63,34 +66,66 @@ fn main() -> std::process::ExitCode {
             } else {
                 &mut message
             };
-            target["message"] = json!(argument);
+            let Some(fields) = target.as_object_mut() else {
+                fake::fail(&format!("set-message was handed no object: {offered}"));
+            };
+            fields.insert("message".to_owned(), json!(argument));
             println!("{message}");
         }
         "keep-first-command" => {
-            let kept = message["commands"][0].clone();
-            message["commands"] = json!([kept]);
+            let commands = commands_of(&mut message, &offered);
+            commands.truncate(1);
             println!("{message}");
         }
-        "rewrite-note" => {
-            for command in message["commands"].as_array_mut().into_iter().flatten() {
-                if command.get("message").is_some() {
-                    command["message"] = json!(argument);
+        "rewrite-message" => {
+            for command in commands_of(&mut message, &offered).iter_mut() {
+                if let Some(said) = command.get_mut("message") {
+                    *said = json!(argument);
                 }
             }
             println!("{message}");
         }
-        "reroute-as-commands" => {
-            let record = json!({"id": 0, "commands": message["commands"]});
-            let route = match std::env::var(ROUTE_ENV) {
-                Ok(route) => route,
-                Err(error) => fake::fail(&format!("the bus offered no route file: {error}")),
+        "set-author" => {
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!("set-author was handed no object: {offered}"));
             };
-            if let Err(error) = std::fs::write(&route, "commands") {
-                fake::fail(&format!("cannot write the route file: {error}"));
-            }
+            fields.insert("author".to_owned(), json!(argument));
+            println!("{message}");
+        }
+        "unreadable-command" => {
+            *commands_of(&mut message, &offered) =
+                vec![json!({"op": "finding", "no-such-field": true})];
+            println!("{message}");
+        }
+        "reroute-as-commands" => {
+            let record = json!({"id": 0, "commands": message.get("commands").cloned()});
+            route_to("commands");
             println!("{record}");
+        }
+        "reroute-as-verdict" => {
+            route_to("replies");
+            println!("{}", json!({"completion": false, "reason": "rerouted"}));
         }
         other => fake::fail(&format!("bus-hook does not know `{other}`")),
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// The envelope's `commands`, or the failure that names a message without them.
+fn commands_of<'a>(message: &'a mut Value, offered: &str) -> &'a mut Vec<Value> {
+    match message.get_mut("commands").and_then(Value::as_array_mut) {
+        Some(commands) => commands,
+        None => fake::fail(&format!("the message carries no commands: {offered}")),
+    }
+}
+
+/// Name `queue` in the route file the bus offered.
+fn route_to(queue: &str) {
+    let route = match std::env::var(ROUTE_ENV) {
+        Ok(route) => route,
+        Err(error) => fake::fail(&format!("the bus offered no route file: {error}")),
+    };
+    if let Err(error) = std::fs::write(&route, queue) {
+        fake::fail(&format!("cannot write the route file: {error}"));
+    }
 }

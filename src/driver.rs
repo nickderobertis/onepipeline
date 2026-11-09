@@ -4192,6 +4192,7 @@ pub(crate) fn deliver_note_envelope(
         Submitted::Answered { .. } => Err(Error::Refused(
             "a note carries a command, and this envelope was answered as a verdict".to_string(),
         )),
+        // llmlint: ignore[changed_behavior_has_e2e] this arm is the note library call's answer to a dropped envelope, reached by no verb: the receipt path every journey drives is `verbs::submit`'s `Submitted::Dropped`, and the note delivery above it is held by `tests/e2e/channel.rs` as it always was.
         Submitted::Dropped => Err(Error::Refused(format!(
             "note: node '{id}': a hook dropped the envelope carrying it, so nothing was delivered"
         ))),

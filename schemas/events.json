@@ -2005,29 +2005,15 @@
             "description": "Whether it would have held dependents back."
           },
           "correlation": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Review revision identity, where the surface names one."
-          },
-          "hook": {
             "anyOf": [
               {
-                "$ref": "#/$defs/HookRef"
+                "$ref": "#/$defs/Correlation"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "The hook that dropped it; absent where a hook refused it instead."
-          },
-          "refused": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why a hook or validator refused it, in its own words."
+            "description": "Review revision identity, where the surface names one."
           }
         },
         "required": [
@@ -2036,10 +2022,43 @@
           "source",
           "blocking"
         ],
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "hook": {
+                "$ref": "#/$defs/HookRef",
+                "description": "The hook that dropped it."
+              }
+            },
+            "required": [
+              "hook"
+            ],
+            "description": "A hook dropped it."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "refused": {
+                "type": "string",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "refused"
+            ],
+            "description": "A hook or a validator refused it, in its own words."
+          }
+        ],
         "description": "`planner-surfaced`: a surface consumed.\n`planner-surface-dropped`: a hook kept a surface off the channel.",
         "title": "PlannerSurfaceDropped",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
+          "Correlation": {
+            "type": "string",
+            "description": "Which question a reply answers: the token the bus minted when it was asked.",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
           "HookRef": {
             "type": "object",
             "additionalProperties": false,

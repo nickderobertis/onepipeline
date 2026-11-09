@@ -2373,3 +2373,57 @@ fn a_surface_on_a_run_that_joins_as_its_flow_ends_is_returned_before_the_ending(
         after.record
     );
 }
+
+/// A flow's channel runs the bus's hooks too: a reply a hook changes reaches the
+/// queue as changed and a surface a hook drops never does, each receipt saying so.
+#[test]
+fn a_flows_channel_runs_the_hooks_its_bus_configuration_declares() {
+    let world = World::new("flow-hooked");
+    let hook = crate::harness::double("bus-hook")
+        .to_string_lossy()
+        .into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+             [{hook:?}, set-message, \"the changed ruling\"]}}\n  - {{on: surfaces, command: \
+             [{hook:?}, drop]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "hooked",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+    let channel = world.runs.join(".flows/hooked/channel");
+    let answered = world.run_with_stdin(
+        &["reply", "--flow", "hooked"],
+        &json!({"completion": false, "message": "the original ruling"}).to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["hooked"], "changed", "{receipt}");
+    let replies = std::fs::read_to_string(channel.join("replies.jsonl")).expect("the queue");
+    assert!(replies.contains("the changed ruling"), "{replies}");
+    assert!(!replies.contains("the original ruling"), "{replies}");
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "hooked",
+            "--kind",
+            "finding",
+            "--message",
+            "never read",
+        ])
+        .exited(0)
+        .out_has("\"dropped\"");
+    assert!(std::fs::read_to_string(channel.join("surfaces.jsonl"))
+        .unwrap_or_default()
+        .is_empty());
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
