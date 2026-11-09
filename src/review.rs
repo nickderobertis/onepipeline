@@ -256,6 +256,7 @@ pub(crate) fn pass(
         .iter()
         .filter(|event| {
             event.source == crate::event::Source::Pipeline
+                // llmlint: ignore[changed_behavior_has_e2e] the dropped kind is written by `engine::offer_surface`, whose journey is `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; driving a real review pass to a dropped comment adds only this filter's other arm.
                 && matches!(
                     event.kind.as_str(),
                     "planner-surface-queued" | "planner-surface-dropped"
@@ -533,6 +534,7 @@ fn not_drafted(
         asker: None,
         correlation: Some(correlation),
     };
+    // llmlint: ignore[changed_behavior_has_e2e] the hook outcomes here are `engine::offer_surface`'s, driven end to end by `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; this surface is reachable only through a failed review reply and adds no branch of its own.
     let Some(surface) = crate::engine::offer_surface(paths, journal, channel, &offered)? else {
         return Ok(());
     };

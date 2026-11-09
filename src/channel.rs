@@ -1249,7 +1249,7 @@ impl OfferedReply {
                     && (envelope.completion != offered.completion
                         || envelope.message != offered.message
                         || envelope.reason != offered.reason)));
-        if changed {
+        if changed || commands_dropped {
             // A queued verdict carries its envelope, so it must not carry the
             // edits a hook took out of it.
             if let Some(record) = verdict_record.take() {
@@ -1868,6 +1868,16 @@ impl ChannelState {
     /// check-in is ever waiting: the layout supersedes a waiting check-in with
     /// the next, so being ignored makes the harness louder rather than quieter.
     pub(crate) fn push(&self, surface: Surface) -> crate::Result<SurfaceOffer> {
+        self.push_checked(surface, |_| Ok(()))
+    }
+
+    /// [`push`](Self::push), holding what a hook changed the surface into to
+    /// `check` before anything of it is appended.
+    pub(crate) fn push_checked(
+        &self,
+        surface: Surface,
+        check: impl FnOnce(&Value) -> crate::Result<()>,
+    ) -> crate::Result<SurfaceOffer> {
         if !self.judges() {
             return Ok(SurfaceOffer::Queued(
                 self.surfaces()?
@@ -1887,7 +1897,14 @@ impl ChannelState {
             HookedOutcome::Refuse { reason } | HookedOutcome::Unjudged { reason } => {
                 return Ok(SurfaceOffer::Refused(reason.clone()));
             }
-            _ => {}
+            HookedOutcome::Change => {
+                if let Some((_, record)) =
+                    hooked.records.iter().find(|(queue, _)| queue == &surfaces)
+                {
+                    check(record.value())?;
+                }
+            }
+            HookedOutcome::Keep | HookedOutcome::Drop => {}
         }
         let appended = self.bus()?.append_hooked(&hooked).map_err(bus_failure)?;
         if let Some(dropped) = hooked.dropped.first() {

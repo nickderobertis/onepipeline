@@ -1355,25 +1355,30 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
         crate::channel::source::PROPOSAL
     };
     let message_offered = message.clone();
-    let offer = ChannelState::of_paths(paths)?.push(Surface {
-        id: 0,
-        kind: kind.as_str().to_string(),
-        message,
-        source: source.to_string(),
-        // Neither is a request: a check-in update and a finding raised at this
-        // verb are reports, and never hold a subtree back waiting for a
-        // decision. A finding that means to stop one says so through the
-        // envelope's `finding` op, which carries `blocking`.
-        blocking: false,
-        queued_at: crate::sys::now_millis(),
-        abandoned: false,
-        // Raised by a call that answers its caller and is gone, so there is no
-        // listener to name and none to come back: nothing abandons this and
-        // nothing adopts it.
-        asker: None,
-        workstream: None,
-        correlation: None,
-    })?;
+    let offer = ChannelState::of_paths(paths)?.push_checked(
+        Surface {
+            id: 0,
+            kind: kind.as_str().to_string(),
+            message,
+            source: source.to_string(),
+            // Neither is a request: a check-in update and a finding raised at this
+            // verb are reports, and never hold a subtree back waiting for a
+            // decision. A finding that means to stop one says so through the
+            // envelope's `finding` op, which carries `blocking`.
+            blocking: false,
+            queued_at: crate::sys::now_millis(),
+            abandoned: false,
+            // Raised by a call that answers its caller and is gone, so there is no
+            // listener to name and none to come back: nothing abandons this and
+            // nothing adopts it.
+            asker: None,
+            workstream: None,
+            correlation: None,
+        },
+        |changed| {
+            crate::boundary::guard(&view.state, &json!({ "message": changed.get("message") }))
+        },
+    )?;
     let mut journal = Journal::open(paths);
     if let crate::channel::SurfaceOffer::Dropped { hook, .. } = &offer {
         crate::engine::record_surface_dropped(

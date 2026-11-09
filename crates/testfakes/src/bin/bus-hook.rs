@@ -14,6 +14,7 @@
 //!   `keep-first-command`      leave only the first of the envelope's commands
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
 //!   `set-author <word>`       rewrite the envelope's `author`
+//!   `declare-complete`        add `completion: true` to the envelope
 //!   `unreadable-command`      leave a command this build cannot decode
 //!   `reroute-as-commands`     rewrite to the `commands` record shape, and reroute
 //!                             there
@@ -90,6 +91,13 @@ fn main() -> std::process::ExitCode {
                 fake::fail(&format!("set-author was handed no object: {offered}"));
             };
             fields.insert("author".to_owned(), json!(argument));
+            println!("{message}");
+        }
+        "declare-complete" => {
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!("declare-complete was handed no object: {offered}"));
+            };
+            fields.insert("completion".to_owned(), json!(true));
             println!("{message}");
         }
         "unreadable-command" => {

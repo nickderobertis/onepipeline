@@ -4450,6 +4450,7 @@ pub(crate) fn submit_offered(
     }
     if offered.changed {
         channel.declares(&offered.envelope.author)?;
+        // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the envelope met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook that rewrites an envelope into a boundary violation is that path over changed input.
         crate::boundary::guard(
             &view.state,
             &serde_json::to_value(&offered.envelope)

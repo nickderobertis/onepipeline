@@ -1274,3 +1274,52 @@ fn an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_co
         world.release("slow.go");
     }
 }
+
+/// A hook dropping the commands half of a mixed envelope leaves no copy of those
+/// edits in the verdict it does queue.
+#[test]
+fn a_dropped_commands_half_leaves_no_copy_in_the_queued_verdict() {
+    let world = World::new("hook-half-only");
+    hooked_run(&world, "hookhalfonly", &[("commands", &["drop"], "")]);
+    let answered = world.run_with_stdin(
+        &["reply", "hookhalfonly"],
+        &json!({"version": 3, "completion": false, "reason": "carry on",
+                "commands": [{"op": "finding", "message": "never applied"}]})
+        .to_string(),
+    );
+    answered.exited(0);
+    let receipt = answered.json();
+    assert_eq!(receipt["commands"], "dropped", "{receipt}");
+    assert!(receipt.get("hooked").is_none(), "{receipt}");
+    let replies = channel_file(&world, "hookhalfonly", "replies.jsonl");
+    assert!(replies.contains("carry on"), "{replies}");
+    assert!(!replies.contains("never applied"), "{replies}");
+    world.release("slow.go");
+}
+
+/// A hook that adds a completion an author may not declare is refused, before the
+/// reply is queued, as the same verdict sent directly is.
+#[test]
+fn a_hook_cannot_add_a_completion_its_author_may_not_declare() {
+    let world = World::new("hook-completion");
+    let command = double("bus-hook").to_string_lossy().into_owned();
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
+             [finding]}}\nhooks:\n  - {{on: replies, command: [{command:?}, declare-complete]}}\n"
+        ),
+    );
+    let path = plan(&world, "hookcomplete");
+    launched(&world, &path, "hookcomplete", &["--bus-config", &file]);
+    world
+        .run_with_stdin(
+            &["reply", "hookcomplete"],
+            r#"{"author":"sentinel","reason":"looks done"}"#,
+        )
+        .exited(REFUSED)
+        .err_has("not something the sentinel may do");
+    assert_eq!(channel_file(&world, "hookcomplete", "replies.jsonl"), "");
+    world.release("slow.go");
+}

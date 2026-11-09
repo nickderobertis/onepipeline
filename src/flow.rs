@@ -1521,6 +1521,17 @@ pub(crate) fn reply(
     channel.declares(&envelope.author)?;
     channel.allows_completion(envelope.author.clone(), envelope.completion)?;
     let offered = channel.offer_reply(&envelope)?;
+    if offered.changed {
+        if !offered.envelope.commands.is_empty() {
+            return Err(Error::Refused(format!(
+                "a hook left commands on a reply to flow '{}', which has no graph; nothing was \
+                 queued",
+                flow.id()
+            )));
+        }
+        channel.declares(&offered.envelope.author)?;
+        channel.allows_completion(offered.envelope.author.clone(), offered.envelope.completion)?;
+    }
     channel.record_offer(&offered)?;
     let reply = channel.answer_offered(&offered, correlation)?;
     Ok(crate::verbs::Receipt {

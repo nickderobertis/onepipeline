@@ -2427,3 +2427,60 @@ fn a_flows_channel_runs_the_hooks_its_bus_configuration_declares() {
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }
+
+/// Each other answer a hook can give a flow's reply: dropped at exit 0 with the
+/// receipt saying so, and refused at exit 2 in the hook's words.
+#[test]
+fn a_flows_reply_a_hook_drops_or_refuses_is_told_apart() {
+    for (name, argv, code, said) in [
+        ("hookdrop", "drop", 0, "\"dropped\""),
+        (
+            "hookrefuse",
+            "refuse, \"not this ruling\"",
+            REFUSED,
+            "not this ruling",
+        ),
+    ] {
+        let world = World::new(name);
+        let hook = crate::harness::double("bus-hook")
+            .to_string_lossy()
+            .into_owned();
+        let config = world.root.join("bus.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+                 [{hook:?}, {argv}]}}\n"
+            ),
+        )
+        .expect("a bus configuration");
+        let flow = Flowing::start_with(
+            &world,
+            name,
+            &["--bus-config", config.to_str().expect("a path")],
+            &[gate(&world, "end")],
+        );
+        let answered = world.run_with_stdin(
+            &["reply", "--flow", name],
+            &json!({"completion": false, "message": "a ruling"}).to_string(),
+        );
+        answered.exited(code);
+        if code == 0 {
+            answered.out_has(said);
+        } else {
+            answered.err_has(said);
+        }
+        assert_eq!(
+            std::fs::read_to_string(
+                world
+                    .runs
+                    .join(format!(".flows/{name}/channel/replies.jsonl"))
+            )
+            .unwrap_or_default(),
+            "",
+            "{name}: the reply was queued"
+        );
+        flow.open("end");
+        assert_eq!(flow.ended(), 0);
+    }
+}
