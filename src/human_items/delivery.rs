@@ -21,6 +21,11 @@
 //! surface names the event as its `source`, and that run's own queue is what says it
 //! was carried: a crash after a push, a retried carry and an adopted driver all find
 //! it there and push nothing.
+//!
+//! A batch's answers arrive together. They are one write of the journal, carried as one
+//! step — every record onto its owner's queue in one exclusive section, under the journal
+//! lock every carrier holds — and owed to each tied run as one surface whose `source` is
+//! the batch's id, so a watch that finds one finds all and a run is told once.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -87,34 +92,9 @@ const SURFACE_KIND: &str = "human-item";
 /// its text and its reason are theirs and may be private, so the neutral one names only
 /// the id, the action and the actor.
 fn surface_messages(payload: &super::HumanItemEventPayload) -> Option<(String, String)> {
-    use super::HumanItemEventAction as Action;
-    let (actor, on_behalf_of) = match payload.action {
-        Action::Completed | Action::Dismissed => payload
-            .resolution
-            .as_ref()
-            .map(|r| (r.actor.as_str(), r.on_behalf_of.as_deref()))?,
-        Action::Reopened | Action::Noted => payload
-            .by
-            .as_ref()
-            .map(|by| (by.actor.as_str(), by.on_behalf_of.as_deref()))?,
-        Action::Raised | Action::Answered | Action::AutoResolved => return None,
-    };
-    if actor == "engine" {
-        return None;
-    }
-    let action = serde_json::to_value(payload.action)
-        .ok()?
-        .as_str()?
-        .to_owned();
-    let by = on_behalf_of.map_or_else(
-        || actor.to_owned(),
-        |user| format!("{actor} on behalf of {user}"),
-    );
-    let said = payload
-        .resolution
-        .as_ref()
-        .and_then(|r| r.text.as_deref().or(r.reason.as_deref()))
-        .map_or_else(String::new, |text| format!(": {text}"));
+    let by = acted_by(payload)?;
+    let action = action_word(payload.action)?;
+    let said = said_by(payload).map_or_else(String::new, |text| format!(": {text}"));
     Some((
         format!(
             "{action}: {} \"{}\" by {by}{said}",
@@ -128,15 +108,74 @@ fn surface_messages(payload: &super::HumanItemEventPayload) -> Option<(String, S
     ))
 }
 
+/// Who took the event, or `None` when no person did and so no run is told.
+fn acted_by(payload: &super::HumanItemEventPayload) -> Option<String> {
+    use super::HumanItemEventAction as Action;
+    let (actor, on_behalf_of) = match payload.action {
+        Action::Answered | Action::Completed | Action::Dismissed => payload
+            .resolution
+            .as_ref()
+            .map(|r| (r.actor.as_str(), r.on_behalf_of.as_deref()))?,
+        Action::Reopened | Action::Noted => payload
+            .by
+            .as_ref()
+            .map(|by| (by.actor.as_str(), by.on_behalf_of.as_deref()))?,
+        Action::Raised | Action::AutoResolved => return None,
+    };
+    if actor == "engine" {
+        return None;
+    }
+    Some(on_behalf_of.map_or_else(
+        || actor.to_owned(),
+        |user| format!("{actor} on behalf of {user}"),
+    ))
+}
+
+fn action_word(action: super::HumanItemEventAction) -> Option<String> {
+    Some(serde_json::to_value(action).ok()?.as_str()?.to_owned())
+}
+
+/// What the event says: an answer's choice and text, or a resolution's text or reason.
+fn said_by(payload: &super::HumanItemEventPayload) -> Option<String> {
+    super::present::answer(&payload.item).or_else(|| {
+        payload
+            .resolution
+            .as_ref()
+            .and_then(|r| r.text.clone().or_else(|| r.reason.clone()))
+    })
+}
+
+/// The two messages of one batch's surface on one run, which lists `answers`, every
+/// answer of that batch whose item is tied to it.
+fn batch_messages(id: &str, answers: &[&super::HumanItemEventPayload]) -> Option<(String, String)> {
+    let first = answers.first()?;
+    let by = acted_by(first)?;
+    let action = action_word(first.action)?;
+    let lines: Vec<String> = answers
+        .iter()
+        .map(|payload| {
+            let said = said_by(payload).unwrap_or_default();
+            format!("- {} \"{}\": {said}", payload.item_id, payload.item.title)
+        })
+        .collect();
+    let ids: Vec<&str> = answers.iter().map(|p| p.item_id.as_str()).collect();
+    Some((
+        format!("{action}: batch {id} by {by}\n{}", lines.join("\n")),
+        format!(
+            "{action}: batch {id} by {by}: {}; their titles and text are withheld by this run's \
+             publication boundary, and `onepipeline human-items show` prints them",
+            ids.join(", ")
+        ),
+    ))
+}
+
 /// Every listed run `item` is tied to: its owner, the run its work hold names, the runs
 /// of the plan its plan hold names, and for a host hold every run. Read off the listing
 /// because an item's run and plan are a raiser's words, and whether each has ended is
 /// asked when its surface is pushed.
-fn tied_runs(root: &Path, item: &super::HumanItem) -> Vec<String> {
+fn tied_runs(runs: &[crate::ledger::RunPaths], item: &super::HumanItem) -> Vec<String> {
     use super::HumanItemBlock as Block;
-    crate::ledger::all_runs(root)
-        .runs
-        .into_iter()
+    runs.iter()
         .filter(|paths| {
             item.owner.run.as_deref() == Some(paths.run.as_str())
                 || match &item.block {
@@ -149,7 +188,7 @@ fn tied_runs(root: &Path, item: &super::HumanItem) -> Vec<String> {
                     Block::Nothing => false,
                 }
         })
-        .map(|paths| paths.run)
+        .map(|paths| paths.run.clone())
         .collect()
 }
 
@@ -157,13 +196,38 @@ fn owed_for(root: &Path, seq: u64, payload: &super::HumanItemEventPayload) -> Ve
     let Some((message, neutral)) = surface_messages(payload) else {
         return Vec::new();
     };
-    tied_runs(root, &payload.item)
+    tied_runs(&crate::ledger::all_runs(root).runs, &payload.item)
         .into_iter()
         .map(|run| OwedSurface {
             run,
             event: super::live::event_id(seq),
             message: message.clone(),
             neutral: neutral.clone(),
+        })
+        .collect()
+}
+
+/// One surface per run tied to any answer of the batch, naming the answers tied to it.
+fn owed_for_batch(root: &Path, id: &str, records: &[Record<'_>]) -> Vec<OwedSurface> {
+    let runs = crate::ledger::all_runs(root).runs;
+    let mut tied: std::collections::BTreeMap<String, Vec<&super::HumanItemEventPayload>> =
+        std::collections::BTreeMap::new();
+    for record in records {
+        if acted_by(&record.payload).is_some() {
+            for run in tied_runs(&runs, &record.payload.item) {
+                tied.entry(run).or_default().push(&record.payload);
+            }
+        }
+    }
+    tied.into_iter()
+        .filter_map(|(run, answers)| {
+            let (message, neutral) = batch_messages(id, &answers)?;
+            Some(OwedSurface {
+                run,
+                event: id.to_owned(),
+                message,
+                neutral,
+            })
         })
         .collect()
 }
@@ -364,34 +428,117 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
             &serde_json::to_vec(delivered).unwrap_or_default(),
         )
     };
+    let start = delivered.through;
     let mut carried = 0;
     let mut offset = 0usize;
+    let mut group: Vec<Record<'_>> = Vec::new();
+    let mut broken = None;
     while let Some(end) = rest[offset..].iter().position(|b| *b == b'\n') {
         let line = &rest[offset..offset + end];
         // The journal's own records, held to the item event they must carry: one
         // that is not is refused here rather than carried or passed over, and
         // delivery stops at it until it is repaired.
-        let (seq, payload) = super::live::parse_record(line).map_err(|why| {
-            journal_error(
-                &journal,
-                format!(
-                    "the record at byte {} is not an item event: {why}",
-                    delivered.through
-                ),
-            )
-        })?;
-        transport.append(&queue_of(&payload.owner.session), line)?;
-        carried += 1;
+        let (seq, payload) = match super::live::parse_record(line) {
+            Ok(record) => record,
+            Err(why) => {
+                broken = Some(journal_error(
+                    &journal,
+                    format!(
+                        "the record at byte {} is not an item event: {why}",
+                        start + offset as u64
+                    ),
+                ));
+                break;
+            }
+        };
+        let batch = payload.batch.as_ref().map(|b| b.id.clone());
+        if !group.is_empty()
+            && (batch.is_none() || group[0].payload.batch.as_ref().map(|b| &b.id) != batch.as_ref())
+        {
+            carried += carry_group(root, &transport, &mut delivered, &write, &group)?;
+            group.clear();
+        }
+        group.push(Record { line, seq, payload });
         offset += end + 1;
-        delivered.through += end as u64 + 1;
-        delivered.last = digest(line);
-        delivered.owed.extend(owed_for(root, seq, &payload));
-        write(&delivered)?;
+    }
+    if !group.is_empty() {
+        carried += carry_group(root, &transport, &mut delivered, &write, &group)?;
+    }
+    if let Some(broken) = broken {
+        return Err(broken);
     }
     if push_every_owed(root, &mut delivered) {
         write(&delivered)?;
     }
     Ok(carried)
+}
+
+/// One journal record on its way to being carried.
+struct Record<'a> {
+    line: &'a [u8],
+    seq: u64,
+    payload: super::HumanItemEventPayload,
+}
+
+/// Carry one event, or every record of one batch, and move delivery's cursor past it.
+fn carry_group(
+    root: &Path,
+    transport: &LocalTransport,
+    delivered: &mut Delivered,
+    write: &dyn Fn(&Delivered) -> Result<(), TransportError>,
+    group: &[Record<'_>],
+) -> Result<u64, TransportError> {
+    let mut owners: std::collections::BTreeMap<&str, Vec<&[u8]>> =
+        std::collections::BTreeMap::new();
+    for record in group {
+        owners
+            .entry(record.payload.owner.session.as_str())
+            .or_default()
+            .push(record.line);
+    }
+    for (session, lines) in owners {
+        let queue = queue_of(session);
+        if let [line] = lines[..] {
+            transport.append(&queue, line)?;
+        } else {
+            transport.exclusive(&queue, &mut |held| {
+                lines
+                    .iter()
+                    .try_for_each(|line| held.append(&queue, line).map(|_| ()))
+            })?;
+        }
+    }
+    // Only a writer that died during its one write leaves a batch short: its receipt was
+    // never given, so what it did write is carried and the rest is the retried batch's.
+    if let Some(batch) = group[0].payload.batch.as_ref() {
+        let whole = group
+            .iter()
+            .all(|r| r.payload.batch.as_ref() == Some(batch))
+            && batch.size == group.len() as u64;
+        if !whole {
+            eprintln!(
+                "onepipeline: batch {} declares {} answers and the journal holds {}; those \
+                 are carried as they are",
+                batch.id,
+                batch.size,
+                group.len()
+            );
+        }
+    }
+    for record in group {
+        delivered.through += record.line.len() as u64 + 1;
+        delivered.last = digest(record.line);
+    }
+    match group[0].payload.batch.as_ref() {
+        Some(batch) => delivered
+            .owed
+            .extend(owed_for_batch(root, &batch.id, group)),
+        None => delivered
+            .owed
+            .extend(owed_for(root, group[0].seq, &group[0].payload)),
+    }
+    write(delivered)?;
+    Ok(group.len() as u64)
 }
 
 /// Every event delivered to `session` that its watch has not printed, waiting
@@ -423,6 +570,10 @@ pub(crate) fn watch(
         transport
             .wait_for_change(&queue, &since, within)
             .map_err(|e| e.to_string())?;
+        // Woken by a record, while its writer may hold the rest: the journal lock is
+        // held for a batch's whole carry, so this waits for all of it.
+        let _lock = crate::ledger::open_healed_for_append(&journal).map_err(|e| e.to_string())?;
+        catch_up(root).map_err(|e| e.to_string())?;
     }
     // Read, printed and committed as one section over the session's queue, so two
     // watches of one session never print the same events: the second finds them

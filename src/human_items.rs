@@ -149,6 +149,10 @@ pub struct HumanItemResolution {
     #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<String>")]
     pub text: Option<String>,
+    /// The picked choice's id: only an answered question carries one, and it is omitted when null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes `choice` as the picked id's string on this flat resolution; HumanItem's validate refuses one naming no choice of the item and any on a resolution that is not an answer.
+    pub choice: Option<String>,
     /// Reason.
     #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<String>")]
@@ -175,6 +179,30 @@ pub struct HumanItemTracker {
     pub url: String,
 }
 
+/// The most choices one question may offer.
+pub const MAX_CHOICES: usize = 6;
+/// The most characters a choice's title may hold.
+pub const MAX_CHOICE_TITLE_CHARS: usize = 80;
+/// The most answers one batch may carry.
+pub const MAX_BATCH_ANSWERS: usize = 50;
+
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a choice as three JSON strings on this flat record, and the schema and the page validate those. A constrained id or title type would change the published shape; the deserializer and validate_choices at every raise refuse each malformed one.
+validated_record! {
+/// One answer a question offers.
+pub struct HumanItemChoice, HumanItemChoiceWire {
+    /// Unique within its item, lowercase letters, digits and hyphens.
+    #[schemars(regex(pattern = "^[a-z0-9][a-z0-9-]{0,63}$"))]
+    pub id: String,
+    /// One nonblank line.
+    #[schemars(length(min = 1, max = 80), regex(pattern = r"^[^\r\n]*\S[^\r\n]*$"))]
+    pub title: String,
+    /// Nonblank markdown.
+    #[schemars(length(min = 1), pattern(r"\S"))]
+    pub description: String,
+}
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 // llmlint: ignore-block[invalid_states_unrepresentable] The approved Raise input publishes schema_version as a number, title/body as strings, imported Priority and an optional approval reference on a flat record. A different public constructor or a local priority enum would depart from that interface; the decoder and apply boundary check version, nonempty prose, priority and question/approval combinations.
 validated_record! {
 /// Immutable fields supplied when raising a human item.
@@ -196,6 +224,10 @@ pub struct HumanItemInput, HumanItemInputWire {
     #[serde(deserialize_with = "nonempty")]
     #[schemars(length(min = 1), pattern(r"\S"))]
     pub body: String,
+    /// The answers a question offers: at most six, ids unique, none on a task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 6))]
+    pub choices: Vec<HumanItemChoice>,
     /// Priority.
     #[serde(deserialize_with = "priority")]
     #[schemars(schema_with = "priority_schema")]
@@ -259,6 +291,10 @@ pub struct HumanItem, HumanItemWire {
     #[serde(deserialize_with = "nonempty")]
     #[schemars(length(min = 1), pattern(r"\S"))]
     pub body: String,
+    /// The answers a question offers: at most six, ids unique, none on a task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 6))]
+    pub choices: Vec<HumanItemChoice>,
     /// Priority.
     #[serde(deserialize_with = "priority")]
     #[schemars(schema_with = "priority_schema")]
@@ -296,21 +332,39 @@ impl HumanItem {
         self.state == HumanItemState::Open && self.block != HumanItemBlock::Nothing
     }
 }
+// llmlint: ignore-block[invalid_states_unrepresentable] One batch entry is the same flat `{id,choice?,text?}` JSON the answer action publishes, and an answer enum would change that wire shape; the store judges each entry by the single-answer rules and refuses one naming neither or a blank text.
+/// One entry of an `answer-batch`, held to the rules of a single answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemBatchAnswer {
+    /// Id.
+    pub id: String,
+    /// The picked choice's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+    /// The person's own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// The authoritative human-item action vocabulary. Tasks use Complete, including design reviews.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum HumanItemAction {
     /// Raise an item with a required deduplication key.
     Raise(HumanItemInput),
+    // llmlint: ignore-block[invalid_states_unrepresentable] The contract fixes answer as flat optional `choice`, `text` and a batch as a list of those, keeping the JSON a browser and the CLI send; an answer enum or a bounded list would change that wire shape. The store refuses an answer naming neither, a blank text and a malformed batch as a Conflict at both apply boundaries.
     /// Answer an open item.
     Answer {
         /// Id.
         id: String,
-        /// Text.
-        #[serde(deserialize_with = "nonempty")]
-        #[schemars(length(min = 1), pattern(r"\S"))]
-        // llmlint: ignore[invalid_states_unrepresentable] The authoritative Answer action declares text as a JSON string on its flat public variant. Its shared nonempty decoder and apply boundary reject blank answers without introducing another public text type.
-        text: String,
+        /// The picked choice's id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<String>,
+        /// The person's own words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
         /// Actor.
         actor: String,
         /// On behalf of.
@@ -318,6 +372,19 @@ pub enum HumanItemAction {
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
     },
+    /// Answer several open questions as one batch, through `apply_batch`.
+    AnswerBatch {
+        /// One to fifty answers with distinct ids.
+        #[schemars(length(min = 1, max = 50))]
+        answers: Vec<HumanItemBatchAnswer>,
+        /// Actor.
+        actor: String,
+        /// On behalf of.
+        #[serde(deserialize_with = "required_option")]
+        #[schemars(required, schema_with = "nullable::<String>")]
+        on_behalf_of: Option<String>,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Complete an open item.
     Complete {
         /// Id.
@@ -512,6 +579,45 @@ pub struct HumanItemReceipt {
     pub event_id: String,
 }
 
+/// One entry of a batch that was refused and not written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemBatchRefused {
+    /// The item the entry named.
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes this `id` as the same string every action and record spells an item id with; a newtype here alone would change that wire shape.
+    pub id: String,
+    /// Why it was refused.
+    pub refusal: HumanItemRefusal,
+}
+
+/// What an `answer-batch` did, each list in the batch's order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemBatchReceipt {
+    /// The engine's opaque id for this batch: absent when no answer was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // llmlint: ignore[invalid_states_unrepresentable] The contract publishes `batch` as an opaque id string, absent when nothing was accepted; only append_batch mints one, and a newtype would change that wire shape.
+    pub batch: Option<String>,
+    /// The accepted entries' receipts, an identical repeat's being its recorded one.
+    pub answered: Vec<HumanItemReceipt>,
+    /// The entries refused and not written.
+    pub refused: Vec<HumanItemBatchRefused>,
+}
+
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a batch as `{id,size}`, the id an engine-assigned string and size a number; the payload decoder refuses a blank id or a zero size, so neither is read back from a journal.
+/// The batch an answered event belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemEventBatch {
+    /// The batch's opaque id.
+    #[schemars(length(min = 1), pattern(r"\S"))]
+    pub id: String,
+    /// How many answers the batch recorded.
+    #[schemars(range(min = 1))]
+    pub size: u64,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// Who took a reopen or note, which neither a resolver nor a null resolution says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -551,6 +657,9 @@ pub struct HumanItemEventPayload, HumanItemEventPayloadWire {
     /// Who acted: set only on a reopen or a note, and absent from every other kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<HumanItemEventBy>,
+    /// The batch this answer arrived in: set on every answered event of one, absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<HumanItemEventBatch>,
 }
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -590,6 +699,7 @@ pub fn schemas() -> serde_json::Value {
         "HumanItemView": schemars::schema_for!(HumanItemView),
         "HumanItemDetail": schemars::schema_for!(HumanItemDetail),
         "HumanItemReceipt": schemars::schema_for!(HumanItemReceipt),
+        "HumanItemBatchReceipt": schemars::schema_for!(HumanItemBatchReceipt),
         "HumanItemMetadata": schemars::schema_for!(HumanItemMetadata),
         "HumanItemEventPayload": schemars::schema_for!(HumanItemEventPayload),
         "PhaseContext": schemars::schema_for!(phases::PhaseContext)
@@ -635,14 +745,24 @@ pub enum HumanItemsCommand {
         #[arg(long)]
         json: bool,
     },
+    // llmlint: ignore-block[invalid_states_unrepresentable] clap holds the two flags the contract publishes as `[--choice] [--text]`; they become HumanItemAction::Answer's optional fields, and an answer naming neither or a blank text is refused where every other caller's is, by the store.
     /// Answer an open question.
     Answer {
         /// Item identifier.
         id: String,
-        /// Nonempty answer.
+        /// The id of the choice picked.
+        #[arg(long)]
+        choice: Option<String>,
+        /// The person's own words; at least one of this and `--choice`.
         #[arg(long, value_parser = parse_answer)]
-        // llmlint: ignore[invalid_states_unrepresentable] This argument becomes HumanItemAction::Answer's contract-declared String text; parse_answer refuses blank text at the CLI boundary, so no blank answer reaches the action.
-        text: String,
+        text: Option<String>,
+    },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Answer several open questions as one batch from a JSON file `{answers: [...]}`.
+    AnswerBatch {
+        /// JSON batch file.
+        #[arg(long)]
+        input: std::path::PathBuf,
     },
     /// Complete an open task using its stored approval reference, if any.
     Complete {
@@ -737,6 +857,9 @@ pub const PRIORITY_DEFINITIONS: [(&str, &str); 4] = [
 
 /// How an item's title and body are written, as the contract and the README state it.
 pub const AUTHORING_GUIDANCE: &str = "Bodies are pithy and contain only needed input; question titles ask at high level, task titles say what to do.";
+
+/// The rule for asking a person anything, as the contract and the README state it.
+pub const QUESTION_GUIDANCE: &str = "Every question a manager asks a person is a question item, offering choices where a few answers cover it, and a person may always answer in their own words. An asker that must block on its harness's own question tool, because it can do nothing useful until the answer arrives, raises the question as an item first and records the answer that tool returns on that item, acting for the person, so the item store stays the record of every question.";
 
 /// Human-facing priority label; wire values continue to use the imported vocabulary.
 pub fn priority_label(priority: Priority) -> &'static str {
@@ -892,6 +1015,7 @@ impl HumanItemSample {
                 kind: input.kind,
                 title: input.title,
                 body: input.body,
+                choices: input.choices,
                 priority: input.priority,
                 owner: input.owner,
                 block: input.block,
@@ -921,26 +1045,30 @@ impl HumanItemSample {
             HumanItemAction::Note { id, text, .. } => return self.note(&id, text),
             other => other,
         };
+        let mut picked = None;
         let (id, actor, on_behalf_of, state, text, reason, operation) = match action {
             HumanItemAction::Answer {
                 id,
+                choice,
                 text,
                 actor,
                 on_behalf_of,
             } => {
-                if text.trim().is_empty() {
-                    return Err(conflict("answer text must not be blank"));
+                if let Some(why) = answer_refusal(choice.as_deref(), text.as_deref()) {
+                    return Err(conflict(why));
                 }
+                picked = choice;
                 (
                     id,
                     actor,
                     on_behalf_of,
                     HumanItemState::Answered,
-                    Some(text),
+                    text,
                     None,
                     "answered",
                 )
             }
+            HumanItemAction::AnswerBatch { .. } => return Err(conflict(BATCH_ELSEWHERE)),
             HumanItemAction::Complete {
                 id,
                 actor,
@@ -986,6 +1114,9 @@ impl HumanItemSample {
         {
             return Err(conflict("action does not match item kind"));
         }
+        if let Some(why) = picked.as_deref().and_then(|c| unknown_choice(item, c)) {
+            return Err(conflict(why));
+        }
         if state == HumanItemState::Completed {
             if let Some(approval) = &item.approval {
                 let current = self
@@ -1029,6 +1160,7 @@ impl HumanItemSample {
                         actor,
                         on_behalf_of,
                         text: None,
+                        choice: None,
                         reason: Some("Re-read the current document".into()),
                     });
                     obsolete.updated_at = "sample-obsolete".into();
@@ -1054,6 +1186,7 @@ impl HumanItemSample {
             actor,
             on_behalf_of,
             text,
+            choice: picked,
             reason,
         });
         detail.item.updated_at = "sample-resolved".into();
@@ -1064,6 +1197,40 @@ impl HumanItemSample {
         detail.nodes.clear();
         detail.reopen = reopen_availability(&detail.item, true);
         Ok(receipt(detail, operation))
+    }
+
+    /// Answer several sample questions as one batch, by the live store's rules.
+    pub fn apply_batch(
+        &mut self,
+        answers: Vec<HumanItemBatchAnswer>,
+        actor: Actor,
+    ) -> Result<HumanItemBatchReceipt, HumanItemRefusal> {
+        self.validate().map_err(conflict)?;
+        if let Some(why) = batch_refusal(&answers, &actor.actor) {
+            return Err(conflict(why));
+        }
+        let mut receipt = HumanItemBatchReceipt {
+            batch: None,
+            answered: Vec::new(),
+            refused: Vec::new(),
+        };
+        for entry in answers {
+            let id = entry.id.clone();
+            match self.apply(HumanItemAction::Answer {
+                id: entry.id,
+                choice: entry.choice,
+                text: entry.text,
+                actor: actor.actor.clone(),
+                on_behalf_of: actor.on_behalf_of.clone(),
+            }) {
+                Ok(answered) => receipt.answered.push(answered),
+                Err(refusal) => receipt.refused.push(HumanItemBatchRefused { id, refusal }),
+            }
+        }
+        if !receipt.answered.is_empty() {
+            receipt.batch = Some("sample-batch".into());
+        }
+        Ok(receipt)
     }
 
     /// Reopen a sample item. The fixture authority is the undo of every approval it
@@ -1138,6 +1305,50 @@ impl HumanItemSample {
 }
 
 pub(crate) const NOTE_REFUSED: &str = "only a completed or dismissed item takes a note";
+pub(crate) const BATCH_ELSEWHERE: &str =
+    "an answer-batch answers a batch receipt, so it is applied through apply_batch";
+
+/// Why an answer's own words and choice cannot be an answer, whichever item it names.
+pub(crate) fn answer_refusal(choice: Option<&str>, text: Option<&str>) -> Option<&'static str> {
+    match (choice, text) {
+        (_, Some(text)) if text.trim().is_empty() => Some("answer text must not be blank"),
+        (None, None) => Some("an answer names a choice, text, or both"),
+        _ => None,
+    }
+}
+
+/// Why `choice` is not one of the choices `item` offers, if it is not.
+pub(crate) fn unknown_choice(item: &HumanItem, choice: &str) -> Option<String> {
+    if item.choices.is_empty() {
+        return Some(format!(
+            "{} offers no choices, so it takes text only; {choice} is not an answer to it",
+            item.id
+        ));
+    }
+    (!item.choices.iter().any(|c| c.id == choice))
+        .then(|| format!("{} offers no choice {choice}", item.id))
+}
+
+/// Why a batch is malformed and refused whole, if it is.
+pub(crate) fn batch_refusal(answers: &[HumanItemBatchAnswer], actor: &str) -> Option<String> {
+    if actor.trim().is_empty() {
+        return Some("an action names its actor".into());
+    }
+    if answers.is_empty() {
+        return Some("a batch carries at least one answer".into());
+    }
+    if answers.len() > MAX_BATCH_ANSWERS {
+        return Some(format!(
+            "a batch carries at most {MAX_BATCH_ANSWERS} answers, and this one has {}",
+            answers.len()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    answers
+        .iter()
+        .find(|answer| !seen.insert(answer.id.as_str()))
+        .map(|answer| format!("a batch answers each item once, and {} repeats", answer.id))
+}
 
 /// Why `item` cannot be reopened, if it cannot: the one answer the CLI, the browser and
 /// the action itself give. `undoable` is whether a completed approval's adapter declares
@@ -1203,8 +1414,11 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
         .map(|t| format!("tracker {}\n", t.url))
         .unwrap_or_default();
     let blocking = present::blocking(item, blocked);
+    let answered = present::answer(item)
+        .map(|words| format!("answered: {words}\n"))
+        .unwrap_or_default();
     format!(
-        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}\n",
+        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}{}\n",
         item.id,
         priority_label(item.priority),
         item.kind,
@@ -1213,6 +1427,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
         blocking,
         item.title,
         tracker,
+        answered,
         item.body
     )
 }
@@ -1288,12 +1503,33 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 serde_json::from_slice(&input).map_err(|e| Error::Invalid(e.to_string()))?,
             )
         }
-        HumanItemsCommand::Answer { id, text } => HumanItemAction::Answer {
+        HumanItemsCommand::Answer { id, choice, text } => HumanItemAction::Answer {
             id,
+            choice,
             text,
             actor: "sample-operator".into(),
             on_behalf_of: None,
         },
+        HumanItemsCommand::AnswerBatch { input } => {
+            let answers = batch_file(&input)?;
+            let before = sample.clone();
+            let outcome = sample.apply_batch(
+                answers,
+                Actor {
+                    actor: "sample-operator".into(),
+                    on_behalf_of: None,
+                },
+            );
+            if sample != before {
+                std::fs::write(
+                    path,
+                    serde_json::to_vec_pretty(&sample)
+                        .map_err(|e| Error::Invalid(e.to_string()))?,
+                )
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+            }
+            return batch_answered(outcome);
+        }
         HumanItemsCommand::Complete { id } => HumanItemAction::Complete {
             id,
             actor: "sample-operator".into(),
@@ -1341,6 +1577,35 @@ fn refused(refusal: &HumanItemRefusal) -> crate::error::Error {
     crate::error::Error::Refused(
         serde_json::to_string(refusal).unwrap_or_else(|_| refusal.to_string()),
     )
+}
+
+/// The file `answer-batch --input` reads: a JSON document naming its answers.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchFile {
+    answers: Vec<HumanItemBatchAnswer>,
+}
+
+fn batch_file(path: &std::path::Path) -> crate::error::Result<Vec<HumanItemBatchAnswer>> {
+    use crate::error::Error;
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    let file: BatchFile = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    Ok(file.answers)
+}
+
+/// Print a batch's receipt; nonzero only when every entry was refused or it was malformed.
+fn batch_answered(
+    outcome: Result<HumanItemBatchReceipt, HumanItemRefusal>,
+) -> crate::error::Result<i32> {
+    let receipt = outcome.map_err(|e| refused(&e))?;
+    println!("{}", to_json(&receipt)?);
+    Ok(if receipt.answered.is_empty() {
+        crate::error::EXIT_REFUSED
+    } else {
+        0
+    })
 }
 
 fn to_json<T: Serialize>(value: &T) -> crate::error::Result<String> {
@@ -1547,6 +1812,9 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                 0
             });
         }
+        HumanItemsCommand::AnswerBatch { input } => {
+            return batch_answered(store.apply_batch(batch_file(&input)?, actor));
+        }
         HumanItemsCommand::Raise { input, .. } => {
             let input = input.ok_or_else(|| Error::Invalid("raise names --input".into()))?;
             let bytes = std::fs::read(&input)
@@ -1555,8 +1823,9 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                 serde_json::from_slice(&bytes).map_err(|e| Error::Invalid(e.to_string()))?,
             )
         }
-        HumanItemsCommand::Answer { id, text } => HumanItemAction::Answer {
+        HumanItemsCommand::Answer { id, choice, text } => HumanItemAction::Answer {
             id,
+            choice,
             text,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
@@ -1603,8 +1872,58 @@ impl HumanItemInput {
         {
             return Err("human items require title, body and priority".into());
         }
+        validate_choices(self.kind, &self.choices)
+    }
+}
+impl HumanItemChoice {
+    fn validate(&self) -> Result<(), String> {
+        let mut id = self.id.chars();
+        let well_formed = id
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && id.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && self.id.len() <= 64;
+        if !well_formed {
+            return Err(format!(
+                "choice id {:?} must be lowercase letters, digits and hyphens, starting with a \
+                 letter or digit, at most 64 long",
+                self.id
+            ));
+        }
+        if self.title.trim().is_empty()
+            || self.title.contains(['\n', '\r'])
+            || self.title.chars().count() > MAX_CHOICE_TITLE_CHARS
+        {
+            return Err(format!(
+                "choice {}'s title must be one nonblank line of at most \
+                 {MAX_CHOICE_TITLE_CHARS} characters",
+                self.id
+            ));
+        }
+        if self.description.trim().is_empty() {
+            return Err(format!(
+                "choice {}'s description must not be blank",
+                self.id
+            ));
+        }
         Ok(())
     }
+}
+fn validate_choices(kind: HumanItemKind, choices: &[HumanItemChoice]) -> Result<(), String> {
+    if kind == HumanItemKind::Task && !choices.is_empty() {
+        return Err("choices are only valid on questions".into());
+    }
+    if choices.len() > MAX_CHOICES {
+        return Err(format!("a question offers at most {MAX_CHOICES} choices"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for choice in choices {
+        choice.validate()?;
+        if !seen.insert(choice.id.as_str()) {
+            return Err(format!("choice id {} is repeated", choice.id));
+        }
+    }
+    Ok(())
 }
 impl HumanItem {
     fn validate(&self) -> Result<(), String> {
@@ -1617,10 +1936,20 @@ impl HumanItem {
         {
             return Err("human items require title, body and priority".into());
         }
+        validate_choices(self.kind, &self.choices)?;
+        if let Some(choice) = self.resolution.as_ref().and_then(|r| r.choice.as_deref()) {
+            if self.state != HumanItemState::Answered || unknown_choice(self, choice).is_some() {
+                return Err(format!(
+                    "resolution choice {choice} is not one of this answered question's"
+                ));
+            }
+        }
         let valid = match (self.kind, self.state, self.resolution.as_ref()) {
             (_, HumanItemState::Open, None) => true,
             (HumanItemKind::Question, HumanItemState::Answered, Some(r)) => {
-                r.text.as_ref().is_some_and(|s| !s.trim().is_empty()) && r.reason.is_none()
+                r.text.as_ref().is_none_or(|s| !s.trim().is_empty())
+                    && (r.text.is_some() || r.choice.is_some())
+                    && r.reason.is_none()
             }
             (HumanItemKind::Task, HumanItemState::Completed, Some(r)) => {
                 r.text.as_ref().is_none_or(|s| !s.trim().is_empty()) && r.reason.is_none()
@@ -1661,9 +1990,10 @@ fn item_constraints() -> serde_json::Value {
     serde_json::json!([
         {"if":{"properties":{"state":{"const":"open"}}},"then":{"properties":{"resolution":{"type":"null"}}},"else":{"properties":{"resolution":{"type":"object"}}}},
         {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"state":{"enum":["open","completed","dismissed"]}}},"else":{"properties":{"state":{"enum":["open","answered","dismissed"]},"approval":{"type":"null"}}}},
-        {"if":{"properties":{"state":{"const":"answered"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"string","minLength":1,"pattern":"\\S"},"reason":{"type":"null"}},"required":["text"]}}}},
-        {"if":{"properties":{"state":{"const":"dismissed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"null"}}}}}},
-        {"if":{"properties":{"state":{"const":"completed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"reason":{"type":"null"}}}}}}
+        {"if":{"properties":{"state":{"const":"answered"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"reason":{"type":"null"}},"anyOf":[{"properties":{"text":{"type":"string"}},"required":["text"]},{"properties":{"choice":{"type":"string"}},"required":["choice"]}]}}}},
+        {"if":{"properties":{"state":{"const":"dismissed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":"null"},"choice":{"type":"null"}}}}}},
+        {"if":{"properties":{"state":{"const":"completed"}}},"then":{"properties":{"resolution":{"properties":{"text":{"type":["string","null"],"minLength":1,"pattern":"\\S"},"choice":{"type":"null"},"reason":{"type":"null"}}}}}},
+        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"choices":{"maxItems":0}}}}
     ])
 }
 
@@ -1692,7 +2022,10 @@ fn reopen_constraints() -> serde_json::Value {
 }
 
 fn input_constraints() -> serde_json::Value {
-    serde_json::json!([{"if":{"properties":{"kind":{"const":"question"}}},"then":{"properties":{"approval":{"type":"null"}}}}])
+    serde_json::json!([
+        {"if":{"properties":{"kind":{"const":"question"}}},"then":{"properties":{"approval":{"type":"null"}}}},
+        {"if":{"properties":{"kind":{"const":"task"}}},"then":{"properties":{"choices":{"maxItems":0}}}}
+    ])
 }
 
 fn nullable<T: JsonSchema>(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -1873,6 +2206,14 @@ impl HumanItemEventPayload {
         if by != self.by.is_some() {
             return Err("only a reopen or a note, and each of those, says who acted".into());
         }
+        if let Some(batch) = &self.batch {
+            if self.action != HumanItemEventAction::Answered
+                || batch.id.trim().is_empty()
+                || batch.size == 0
+            {
+                return Err("only an answered event carries a batch, named and counted".into());
+            }
+        }
         Ok(())
     }
 }
@@ -1909,6 +2250,9 @@ fn event_constraints() -> serde_json::Value {
             "resolution":{"type":if open { "null" } else { "object" }},
             "by":{"type":if by { "object" } else { "null" }}
         }});
+        if action != Action::Answered {
+            then["properties"]["batch"] = serde_json::json!({"type":"null"});
+        }
         if by {
             then["required"] = serde_json::json!(["by"]);
         }

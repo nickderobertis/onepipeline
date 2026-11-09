@@ -198,6 +198,7 @@ pub(crate) fn complete(
         kind: item.kind,
         title: item.title.clone(),
         body: item.body.clone(),
+        choices: Vec::new(),
         priority: item.priority,
         owner: item.owner.clone(),
         block: item.block.clone(),

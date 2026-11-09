@@ -2807,21 +2807,30 @@ fn item_surfaces(world: &World, run: &str) -> Vec<(String, String)> {
 }
 
 /// A real watch armed on `run`, returned once its lease is on disk.
+///
+/// A watch with a surface already waiting returns on its first pass and takes its lease
+/// with it, inside one poll of this wait, so a watch that ended fails here and says so.
 fn armed_watch(world: &World, run: &str) -> onepipeline_testfakes::profile::process::Child {
-    let watch = world
+    let mut watch = world
         .cmd(&["watch", run, "--timeout", "120", "--tick-interval", "0"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("the watch starts");
     let mine = format!("{}-", watch.id());
+    let mut ended = None;
     world.until("the watch to record itself", |w| {
-        std::fs::read_dir(w.run_file(run, "watchers"))
+        let recorded = std::fs::read_dir(w.run_file(run, "watchers"))
             .into_iter()
             .flatten()
             .flatten()
-            .any(|entry| entry.file_name().to_string_lossy().starts_with(&mine))
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&mine));
+        if !recorded {
+            ended = watch.try_wait().expect("the watch can be asked after");
+        }
+        recorded || ended.is_some()
     });
+    assert_eq!(ended, None, "the watch on {run} ended before it could wait");
     watch
 }
 
@@ -3205,4 +3214,504 @@ fn a_host_hold_reaches_every_live_run_and_one_refusing_holds_no_other_back() {
     assert_eq!(item_surfaces(&world, "taking"), taken);
     assert!(item_surfaces(&world, "finished").is_empty());
 }
+/// A question offering `choices` as `session`, tied by `run` and `block`; answers its id.
+fn raise_question(
+    world: &World,
+    key: &str,
+    session: &str,
+    run: Option<&str>,
+    block: Value,
+    choices: &[&str],
+) -> String {
+    let mut item = input(key, "question", session, run, None, block);
+    if !choices.is_empty() {
+        item["choices"] = json!(choices
+            .iter()
+            .map(|id| json!({
+                "id": id,
+                "title": format!("Take {id}"),
+                "description": format!("What **{id}** means."),
+            }))
+            .collect::<Vec<_>>());
+    }
+    raise(world, key, &item)
+}
+
+fn nothing_block() -> Value {
+    json!({"scope": "nothing"})
+}
+
+fn journal_lines(world: &World) -> Vec<Value> {
+    std::fs::read_to_string(world.runs.join("human-items/events.ndjson"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// `answer-batch` over `body`, with the file written first; answers the finished run.
+fn answer_batch(world: &World, file: &str, body: &Value) -> crate::harness::Run {
+    let path = world.root.join(format!("{file}.json"));
+    std::fs::write(&path, body.to_string()).unwrap();
+    world.run(&[
+        "human-items",
+        "answer-batch",
+        "--input",
+        path.to_str().unwrap(),
+    ])
+}
+
+/// A question is answered with a choice, in the person's own words, or both; `show` holds
+/// each and `report` names the choice, while every way of raising or answering it wrongly
+/// is refused and writes nothing.
+#[test]
+fn a_question_is_answered_by_choice_by_text_or_by_both() {
+    let world = World::new("human-item-choices");
+    enabled(&world);
+    let choices = ["gradual", "all-at-once", "wait"];
+    let by_choice = raise_question(&world, "by-choice", "mgr", None, nothing_block(), &choices);
+    let by_both = raise_question(&world, "by-both", "mgr", None, nothing_block(), &choices);
+    let by_text = raise_question(&world, "by-text", "mgr", None, nothing_block(), &[]);
+
+    world
+        .run(&["human-items", "answer", &by_choice, "--choice", "gradual"])
+        .exited(0);
+    world
+        .run(&["human-items", "answer", &by_text, "--text", "Ship it."])
+        .exited(0);
+    world
+        .run(&[
+            "human-items",
+            "answer",
+            &by_both,
+            "--choice",
+            "wait",
+            "--text",
+            "Until Monday.",
+        ])
+        .exited(0);
+    for (id, choice, text) in [
+        (&by_choice, json!("gradual"), Value::Null),
+        (&by_text, Value::Null, json!("Ship it.")),
+        (&by_both, json!("wait"), json!("Until Monday.")),
+    ] {
+        let item = state_of(&world, id);
+        assert_eq!(item["state"], "answered", "{item}");
+        let resolution = &item["resolution"];
+        assert_eq!(
+            resolution.get("choice").cloned().unwrap_or(Value::Null),
+            choice,
+            "{item}"
+        );
+        assert_eq!(resolution["text"], text, "{item}");
+    }
+    // A text answer's resolution is the record it always was: no choice key at all.
+    assert!(state_of(&world, &by_text)["resolution"]
+        .get("choice")
+        .is_none());
+
+    let report = world.run(&["human-items", "report", "--state", "answered"]);
+    report.exited(0);
+    assert!(
+        report.stdout.contains("Take gradual (gradual)"),
+        "{}",
+        report.stdout
+    );
+    assert!(
+        report.stdout.contains("Take wait (wait): Until Monday."),
+        "{}",
+        report.stdout
+    );
+    let list = world.run(&["human-items", "list", "--state", "answered"]);
+    assert!(list.stdout.contains("Ship it."), "{}", list.stdout);
+    let shown = world.run(&["human-items", "show", &by_both]);
+    assert!(
+        shown.stdout.contains("Take wait (wait): Until Monday."),
+        "{}",
+        shown.stdout
+    );
+
+    let open = raise_question(&world, "still-open", "mgr", None, nothing_block(), &choices);
+    let before = journal_lines(&world).len();
+    let mut task = input("t", "task", "mgr", None, None, nothing_block());
+    task["choices"] = json!([{"id": "a", "title": "A", "description": "a"}]);
+    let raises = [
+        task,
+        {
+            let mut seven = input("seven", "question", "mgr", None, None, nothing_block());
+            seven["choices"] = json!((0..7)
+                .map(|n| json!({"id": format!("c{n}"), "title": "T", "description": "d"}))
+                .collect::<Vec<_>>());
+            seven
+        },
+        {
+            let mut repeated = input("dup", "question", "mgr", None, None, nothing_block());
+            repeated["choices"] = json!([
+                {"id": "same", "title": "One", "description": "d"},
+                {"id": "same", "title": "Two", "description": "d"},
+            ]);
+            repeated
+        },
+    ];
+    for (at, body) in raises.iter().enumerate() {
+        let path = world.root.join(format!("bad-{at}.json"));
+        std::fs::write(&path, body.to_string()).unwrap();
+        let run = world.run(&["human-items", "raise", "--input", path.to_str().unwrap()]);
+        assert_ne!(run.code, 0, "{body}");
+    }
+    for (args, says) in [
+        (
+            vec!["human-items", "answer", open.as_str(), "--choice", "nope"],
+            "offers no choice nope",
+        ),
+        (
+            vec!["human-items", "answer", open.as_str()],
+            "an answer names a choice, text, or both",
+        ),
+    ] {
+        let run = world.run(&args);
+        assert_ne!(run.code, 0, "{args:?}");
+        assert!(run.stderr.contains(says), "{args:?}: {}", run.stderr);
+    }
+    assert_eq!(
+        journal_lines(&world).len(),
+        before,
+        "a refusal wrote nothing"
+    );
+
+    // The same key, raised again while open, updates its choices in place.
+    let mut updated = input("still-open", "question", "mgr", None, None, nothing_block());
+    updated["choices"] = json!([{"id": "only", "title": "Only", "description": "d"}]);
+    assert_eq!(raise(&world, "still-open-2", &updated), open);
+    assert_eq!(state_of(&world, &open)["choices"][0]["id"], "only");
+}
+
+/// One batch over four open questions and one a second process dismissed first: the
+/// receipt answers four and refuses one, the four events share a batch on consecutive
+/// sequences, and a watch already waiting returns once with all four and never part.
+#[test]
+fn a_batch_of_answers_reaches_the_waiting_watch_in_one_delivery() {
+    let world = World::new("human-item-batch");
+    enabled(&world);
+    let choices = ["yes", "no"];
+    let ids: Vec<String> = ["one", "two", "three", "four"]
+        .iter()
+        .map(|key| raise_question(&world, key, "mgr", None, nothing_block(), &choices))
+        .collect();
+    let gone = raise_question(&world, "gone", "mgr", None, nothing_block(), &choices);
+    world
+        .run(&["human-items", "dismiss", &gone, "--reason", "Moot"])
+        .exited(0);
+    let dismissed = state_of(&world, &gone);
+    assert_eq!(
+        watch(&world, "mgr").len(),
+        6,
+        "the raises are drained first"
+    );
+
+    for (body, says) in [
+        (json!({"answers": []}), "at least one answer"),
+        (
+            json!({"answers": (0..51)
+                .map(|n| json!({"id": format!("hi-{n}"), "text": "x"}))
+                .collect::<Vec<_>>()}),
+            "at most 50 answers",
+        ),
+        (
+            json!({"answers": [
+                {"id": ids[0], "text": "x"},
+                {"id": ids[0], "text": "y"},
+            ]}),
+            "repeats",
+        ),
+    ] {
+        let before = journal_lines(&world).len();
+        let run = answer_batch(&world, "malformed", &body);
+        assert_ne!(run.code, 0, "{body}");
+        assert!(run.stderr.contains(says), "{says}: {}", run.stderr);
+        assert_eq!(journal_lines(&world).len(), before, "{body}");
+    }
+
+    let waiting = world
+        .cmd(&[
+            "human-items",
+            "watch",
+            "--session",
+            "mgr",
+            "--timeout",
+            "60",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the watch starts");
+    // It has read the store and is waiting on the queue once its pending check is done;
+    // nothing it could find beforehand exists, so a batch written now is what it wakes on.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let body = json!({"answers": [
+        {"id": ids[0], "choice": "yes"},
+        {"id": ids[1], "choice": "no"},
+        {"id": ids[2], "text": "My own words."},
+        {"id": ids[3], "choice": "yes", "text": "And why."},
+        {"id": gone, "text": "Too late."},
+    ]});
+    let run = answer_batch(&world, "batch", &body);
+    run.exited(0);
+    let receipt: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(
+        receipt["answered"].as_array().unwrap().len(),
+        4,
+        "{receipt}"
+    );
+    let batch = receipt["batch"].as_str().unwrap().to_owned();
+    let refused = receipt["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), 1, "{receipt}");
+    assert_eq!(refused[0]["id"], json!(gone));
+    assert!(
+        refused[0]["refusal"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("already dismissed"),
+        "{receipt}"
+    );
+
+    let lines = journal_lines(&world);
+    let answered: Vec<&Value> = lines
+        .iter()
+        .filter(|e| e["kind"] == "human-item-answered")
+        .collect();
+    assert_eq!(answered.len(), 4);
+    for (at, event) in answered.iter().enumerate() {
+        assert_eq!(event["payload"]["batch"]["id"], json!(batch), "{event}");
+        assert_eq!(event["payload"]["batch"]["size"], 4, "{event}");
+        assert_eq!(
+            event["seq"].as_u64().unwrap(),
+            answered[0]["seq"].as_u64().unwrap() + at as u64,
+            "{event}"
+        );
+    }
+    assert_eq!(
+        state_of(&world, &ids[2])["resolution"]["text"],
+        "My own words."
+    );
+    assert_eq!(state_of(&world, &ids[3])["resolution"]["choice"], "yes");
+    for id in &ids {
+        assert_eq!(state_of(&world, id)["state"], "answered");
+    }
+    assert_eq!(
+        state_of(&world, &gone),
+        dismissed,
+        "the dismissed one is unchanged"
+    );
+
+    let delivered = waiting.wait_with_output().unwrap();
+    assert_eq!(delivered.status.code(), Some(0));
+    let printed: Vec<Value> = String::from_utf8(delivered.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(printed.len(), 4, "{printed:?}");
+    let seqs: Vec<u64> = printed.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+    assert_eq!(
+        seqs,
+        answered
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        watch(&world, "mgr").is_empty(),
+        "the next watch prints none"
+    );
+
+    // An identical repeat answers its recorded receipts and writes nothing; an all-refused
+    // batch prints its receipt and exits nonzero.
+    let before = journal_lines(&world).len();
+    let repeat = answer_batch(
+        &world,
+        "repeat",
+        &json!({"answers": [{"id": ids[0], "choice": "yes"}]}),
+    );
+    repeat.exited(0);
+    let repeated: Value = serde_json::from_str(&repeat.stdout).unwrap();
+    assert_eq!(
+        repeated["answered"][0]["item"],
+        receipt["answered"][0]["item"]
+    );
+    assert!(repeated.get("batch").is_none(), "{repeated}");
+    let none = answer_batch(
+        &world,
+        "none",
+        &json!({"answers": [{"id": gone, "text": "Still no."}]}),
+    );
+    assert_ne!(none.code, 0);
+    let none: Value = serde_json::from_str(&none.stdout).unwrap();
+    assert!(none.get("batch").is_none(), "{none}");
+    assert_eq!(none["refused"].as_array().unwrap().len(), 1);
+    assert_eq!(journal_lines(&world).len(), before);
+}
+
+/// A batch whose answers are tied to two runs is one surface on each, naming only that
+/// run's answers, and a single answer is one surface; an adopted driver adds none.
+#[test]
+fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
+    let world = World::new("human-item-batch-runs");
+    enabled(&world);
+    world.script("first-step.wait", "hold");
+    world.script("second-step.wait", "hold");
+    let launch = |name: &str, step: &str| -> u32 {
+        let project = world.plan(name, &plan_of(name, vec![agent(step, &[])]));
+        let started = world.run(&["start", &project, "--detach"]);
+        started.exited(0);
+        let step = step.to_owned();
+        let run = name.to_owned();
+        world.until("the step to start", move |w| {
+            dispatched(w, &run) == [step.clone()]
+        });
+        started.json()["pid"].as_u64().unwrap() as u32
+    };
+    let first_driver = launch("first", "first-step");
+    launch("second", "second-step");
+    let choices = ["yes", "no"];
+    let first_a = raise_question(&world, "a", "mgr", Some("first"), nothing_block(), &choices);
+    let first_b = raise_question(&world, "b", "mgr", Some("first"), nothing_block(), &[]);
+    let second_c = raise_question(
+        &world,
+        "c",
+        "ops",
+        None,
+        json!({"scope": "work", "run": "second", "node": "later"}),
+        &choices,
+    );
+
+    let on_first = armed_watch(&world, "first");
+    let on_second = armed_watch(&world, "second");
+    let run = answer_batch(
+        &world,
+        "tied",
+        &json!({"answers": [
+            {"id": first_a, "choice": "yes", "text": "Because."},
+            {"id": first_b, "text": "Plain words."},
+            {"id": second_c, "choice": "no"},
+        ]}),
+    );
+    run.exited(0);
+    let batch = run.json()["batch"].as_str().unwrap().to_owned();
+    for watching in [on_first, on_second] {
+        let ended = watching.wait_with_output().unwrap();
+        assert_eq!(ended.status.code(), Some(4));
+    }
+
+    let on_first = item_surfaces(&world, "first");
+    assert_eq!(on_first.len(), 1, "{on_first:?}");
+    assert_eq!(on_first[0].0, batch);
+    for named in [
+        first_a.as_str(),
+        "Decide a",
+        "Take yes (yes)",
+        "Because.",
+        first_b.as_str(),
+        "Decide b",
+        "Plain words.",
+    ] {
+        assert!(on_first[0].1.contains(named), "{named}: {}", on_first[0].1);
+    }
+    assert!(!on_first[0].1.contains(&second_c), "{}", on_first[0].1);
+    let on_second = item_surfaces(&world, "second");
+    assert_eq!(on_second.len(), 1, "{on_second:?}");
+    assert_eq!(on_second[0].0, batch);
+    for named in [second_c.as_str(), "Decide c", "Take no (no)"] {
+        assert!(
+            on_second[0].1.contains(named),
+            "{named}: {}",
+            on_second[0].1
+        );
+    }
+    assert!(!on_second[0].1.contains(&first_a), "{}", on_second[0].1);
+
+    // Each owner's watch holds its own answers of the batch, in order and once.
+    let answered_of = |session: &str| -> Vec<String> {
+        watch(&world, session)
+            .iter()
+            .filter(|event| event["kind"] == "human-item-answered")
+            .map(|event| event["payload"]["item_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(answered_of("mgr"), [first_a.clone(), first_b.clone()]);
+    assert_eq!(answered_of("ops"), std::slice::from_ref(&second_c));
+    assert!(answered_of("mgr").is_empty(), "nothing is printed twice");
+
+    // The manager reads the batch's surface: one left waiting would end the next watch on
+    // its first pass, whatever the single answer did.
+    assert_eq!(next_item_surface(&world, "first")["source"], json!(batch));
+    let single = raise_question(&world, "single", "mgr", Some("first"), nothing_block(), &[]);
+    let watching = armed_watch(&world, "first");
+    world
+        .run(&["human-items", "answer", &single, "--text", "Alone."])
+        .exited(0);
+    assert_eq!(watching.wait_with_output().unwrap().status.code(), Some(4));
+    let carried = item_surfaces(&world, "first");
+    assert_eq!(carried.len(), 2, "{carried:?}");
+    assert!(carried[1].1.contains("Alone."), "{}", carried[1].1);
+    assert!(
+        carried[1].1.starts_with("human-item-answered: "),
+        "{}",
+        carried[1].1
+    );
+
+    // Adopting a run's driver, whose first pass carries the store over, adds no second.
+    #[cfg(unix)]
+    {
+        // llmlint: ignore[tests_mirror_real_usage] the adopted-driver dedupe the criteria name is only reached when a carry starts over from the journal's first record, the state `forget_delivery`'s own note says no process outside the dying writer can schedule; the surfaces are read off the real channel afterward.
+        assert!(forget_delivery(&world));
+        crate::harness::end_process(first_driver);
+        world.until("the dead driver to be proved gone", |w| {
+            w.run(&["status", "first"]).stdout.contains("DRIVER DEAD")
+        });
+        world.run(&["adopt", "first", "--detach"]).exited(0);
+        world.until("the adopted driver to carry", forgotten_delivery_returned);
+        assert_eq!(item_surfaces(&world, "first"), carried);
+    }
+    #[cfg(not(unix))]
+    let _ = first_driver;
+    world.release("first-step.go");
+    world.release("second-step.go");
+}
+/// A question a human step stands for, answered in a batch, attests that step as a single
+/// answer would, and its dependent then runs.
+#[test]
+fn a_batch_answer_releases_the_human_step_it_stands_for() {
+    let world = World::new("human-item-batch-step");
+    enabled(&world);
+    let name = "asked";
+    let mut step = human("ask", &[]);
+    step["human_item"] = json!({
+        "kind": "question",
+        "priority": "low",
+        "title": "Which way?",
+        "body": "Pick one.",
+    });
+    let project = world.plan(name, &plan_of(name, vec![step, agent("after", &["ask"])]));
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let open = items(&world, &[]);
+    let id = id_of(&open[0]);
+    let run = answer_batch(
+        &world,
+        "step",
+        &json!({"answers": [{"id": id, "text": "That way."}]}),
+    );
+    run.exited(0);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
+    assert_eq!(
+        world
+            .events_of(name, "edit-committed")
+            .iter()
+            .filter(|e| e["payload"]["command"]["op"] == "attest")
+            .count(),
+        1
+    );
+}
+
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
