@@ -285,7 +285,10 @@ impl Question {
                     crate::engine::record_surface_dropped(
                         paths,
                         &mut crate::journal::Journal::open(paths),
-                        &offered,
+                        &Surface {
+                            correlation: dropped.correlation.clone(),
+                            ..offered
+                        },
                         &crate::payload::SurfaceDropCause::Dropped {
                             hook: dropped.hook.clone(),
                         },

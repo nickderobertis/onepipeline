@@ -774,6 +774,13 @@ fn a_hook_that_removes_a_command_applies_only_the_rest_and_says_changed() {
     });
     assert!(!committed(&world, "hookremoves", "removed"));
     assert!(!channel_file(&world, "hookremoves", "commands.jsonl").contains("removed"));
+    let invoked =
+        std::fs::read_to_string(world.fakes.join("bus-hook.jsonl")).expect("the hook was run");
+    assert_eq!(
+        invoked.lines().count(),
+        1,
+        "a reply is offered to its hooks once: {invoked}"
+    );
     world.release("slow.go");
 }
 
