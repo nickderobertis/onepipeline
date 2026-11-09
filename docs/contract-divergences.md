@@ -13224,8 +13224,6 @@ which is the rule `EVENTS_BUNDLE_VERSION` states.
 
 ```json
 {
-  "bundle_versions": {"events": "2.0.0"},
-  "start_flag_removed": "--heartbeat-interval",
-  "run_started_optional_fields": ["heartbeat_interval"]
+  "bundle_versions": {"events": "2.0.0"}
 }
 ```
