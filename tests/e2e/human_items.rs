@@ -3630,7 +3630,7 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
             .collect()
     };
     assert_eq!(answered_of("mgr"), [first_a.clone(), first_b.clone()]);
-    assert_eq!(answered_of("ops"), [second_c.clone()]);
+    assert_eq!(answered_of("ops"), std::slice::from_ref(&second_c));
     assert!(answered_of("mgr").is_empty(), "nothing is printed twice");
 
     let single = raise_question(&world, "single", "mgr", Some("first"), nothing_block(), &[]);
