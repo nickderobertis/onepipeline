@@ -1028,6 +1028,9 @@ impl SurfaceKind {
     /// posted, raised non-blocking; the reply is drafted again by the next
     /// `onepipeline review`.
     pub const REVIEW_REPLY_PENDING: &'static str = "review-reply-pending";
+    /// A session whose `post-checkout` provisioning failed, raised non-blocking
+    /// once per failed session.
+    pub const PROVISIONING_FAILED: &'static str = "provisioning-failed";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())

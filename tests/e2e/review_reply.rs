@@ -1566,7 +1566,7 @@ fn both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_de
         let json = world.run(&["results", run, "--json"]);
         assert_eq!(json.code, 0, "{}", json.stderr);
         let json: Value = serde_json::from_str(&json.stdout).unwrap();
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         let comments = json["nodes"]
             .as_array()
             .unwrap()

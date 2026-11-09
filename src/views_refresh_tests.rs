@@ -152,6 +152,27 @@ fn refresh_rereads_out_of_order_records_and_then_resumes_appending() {
     same_as_open(&view);
 }
 
+/// Wait until a write would stamp a later file time than `journal` carries. The
+/// kernel's file times advance by the tick, so a same-length edit landing inside
+/// the tick of the last append is one no reader of the metadata can see, and that
+/// timing is not the edit this journey is about.
+fn past_the_file_time_of(journal: &std::path::Path) {
+    let modified = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .expect("a file time")
+    };
+    let probe = journal.with_extension("tick");
+    loop {
+        std::fs::write(&probe, "").expect("probe");
+        if modified(&probe) > modified(journal) {
+            std::fs::remove_file(&probe).expect("remove probe");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn refresh_rereads_truncation_and_same_length_prefix_edits_including_before_growth() {
     for change in ["truncate", "edit", "replace", "edit-then-append"] {
@@ -159,6 +180,7 @@ fn refresh_rereads_truncation_and_same_length_prefix_edits_including_before_grow
         run.settle("done");
         let mut view = run.open();
         let bytes = std::fs::read_to_string(run.paths.journal()).expect("journal");
+        past_the_file_time_of(&run.paths.journal());
         match change {
             "truncate" => std::fs::write(
                 run.paths.journal(),

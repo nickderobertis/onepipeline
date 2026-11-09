@@ -630,9 +630,10 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes this output-only JSON document’s run and node ids as strings. They borrow the recorded RunPaths and validated graph identities; these DTOs never accept or execute external input. Changing their serialized shape would change that agreed view contract.
 /// The JSON results view's schema version: **2** since an answered comment names the
-/// rework that answered it and the commits its reply links (entry 130), both omitted
-/// where empty, so a version-1 reader reads every version-2 document's other fields.
-pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 2;
+/// rework that answered it and the commits its reply links (entry 130), and **3**
+/// since a node names its sessions whose provisioning failed. Each is omitted where
+/// empty, so an older reader reads every newer document's other fields.
+pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 3;
 
 /// The JSON results view; comment lists are absent when empty.
 #[derive(Serialize)]
@@ -650,5 +651,7 @@ pub(crate) struct ResultNode<'a> {
     pub(crate) outcome: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) comments: Vec<Comment>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub(crate) provisioning_failures: &'a [crate::provisioning::Failure],
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]

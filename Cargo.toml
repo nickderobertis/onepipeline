@@ -900,6 +900,9 @@ rust-version = "1.97"
 oneagentgraph = "0.11.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
+# 0.62 records each `post-checkout` run as `worktree-provisioned` or
+# `worktree-provision-failed` on the session's stream, which `src/vcs.rs` reads
+# through its `EventKind` and `WorktreeProvision`.
 # onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.
 onevcs = "0.63.0"
 # The wire core, and the only bus package in this graph. The agent stack's
