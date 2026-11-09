@@ -34,8 +34,8 @@ const ci = workflows["ci.yml"];
 const warm = workflows["rust-cache-warm.yml"];
 
 const FOUR = {
-  lint: "ubuntu-latest",
-  "test-linux": "ubuntu-latest",
+  lint: "ubuntu-24.04",
+  "test-linux": "ubuntu-24.04",
   "test-windows": "windows-latest",
   "test-macos": "macos-latest",
 };
@@ -167,7 +167,7 @@ describe("the `budgets` job", () => {
     assert.deepEqual(needs(job).sort(), others.sort());
     assert.equal(job.if, "always()");
     assert.equal(job.name, undefined, "`budgets` overrides its name, which renames its check");
-    assert.equal(job["runs-on"], "ubuntu-latest");
+    assert.equal(job["runs-on"], "ubuntu-24.04");
   });
 
   it("is the only job a push to main selects, and a push to main is never cancelled", () => {

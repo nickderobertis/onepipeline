@@ -2856,8 +2856,12 @@ fn a_retry_interrupts_a_publication_waiting_on_its_merge_and_its_replacement_con
     );
     world.run(&["start", &path, "--detach"]).exited(0);
     let run = "retrywatch".to_string();
+    // The host's armed record rather than its ledger of calls: the fake writes
+    // that ledger before it decides whether a merge lands, so a `gh.merged`
+    // scripted on sight of the call can land the superseded attempt's own merge.
     world.until("the publication to be waiting on its merge", |world| {
-        !gh_pr_calls(world, "merge").is_empty()
+        std::fs::read_dir(world.fakes.join("gh-armed"))
+            .is_ok_and(|mut armed| armed.next().is_some())
     });
     // From here the host lands what it is asked to merge. The superseded watch
     // armed its merge before this, so only the replacement's request lands.
