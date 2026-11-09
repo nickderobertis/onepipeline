@@ -1043,6 +1043,11 @@ fn a_question_a_hook_drops_answers_dropped_at_once_and_is_journalled() {
         "{recorded:?}"
     );
 
+    assert!(
+        recorded[0]["payload"]["correlation"].is_string(),
+        "the journal keeps the question's correlation: {recorded:?}"
+    );
+
     // Other surfaces pass: the hook's `when` matched the question alone.
     world
         .run(&[
