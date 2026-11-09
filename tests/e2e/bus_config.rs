@@ -860,6 +860,11 @@ fn a_hook_that_rewrites_a_surface_hands_the_planner_the_changed_text() {
             .all(|surface| surface["message"] != "the original report"),
         "{read:?}"
     );
+    assert_eq!(
+        world.events_of("hooksurface", "planner-surface-queued")[0]["payload"]["message"],
+        "the changed report",
+        "the journal records what was queued"
+    );
     world.release("slow.go");
 }
 
@@ -1481,5 +1486,36 @@ fn a_correlated_reply_a_hook_reroutes_journals_no_verdict() {
         .events_of("hookcorrelated", "planner-replied")
         .is_empty());
     assert_eq!(channel_file(&world, "hookcorrelated", "replies.jsonl"), "");
+    world.release("slow.go");
+}
+
+/// A surface the engine raises that a hook rewrites reaches the planner as rewritten,
+/// and the journal's record of it says what was queued, not what was offered.
+#[test]
+fn an_engine_raised_surface_a_hook_rewrites_is_journalled_as_rewritten() {
+    let world = World::new("hook-engine-rewrite");
+    hooked_run(
+        &world,
+        "hookenginerewrite",
+        &[("surfaces", &["set-message", "the rewritten report"], "")],
+    );
+    world
+        .run_with_stdin(
+            &["reply", "hookenginerewrite"],
+            &json!({"version": 3, "commands": [
+                {"op": "finding", "message": "the original report"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the rewritten report to be journalled", |world| {
+        world
+            .events_of("hookenginerewrite", "planner-surface-queued")
+            .iter()
+            .any(|event| event["payload"]["message"] == "the rewritten report")
+    });
+    assert!(surfaces_read(&world, "hookenginerewrite")
+        .iter()
+        .any(|surface| surface["message"] == "the rewritten report"));
     world.release("slow.go");
 }
