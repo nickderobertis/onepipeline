@@ -406,10 +406,12 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # inputs did not change replays that report and runs nothing. `scripts/coverage-unit.sh`
 # owns the unit's contract, including `-failure-mode=all` over its profiles: the
 # cancellation journeys kill instrumented children, which leaves truncated `.profraw`
-# files, and one of those must not cost the tier its export.
+# files, and one of those must not cost the tier its export. The test doubles under
+# `crates/testfakes` are left out as `cargo llvm-cov report` leaves out a workspace member
+# the run did not select; counting them would hold the floor to code no tier measures.
 _tier-test unit filter:
     @bash scripts/ensure-test-archive.sh coverage
-    @RUSTFLAGS="-D warnings" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
+    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers
 # build it lazily through ensure-test-archive.sh, so cache hits build nothing.
