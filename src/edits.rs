@@ -1429,6 +1429,7 @@ impl EnvelopeReview {
             HookOutcome::Unjudged { reason } => {
                 Err(self.unjudged(&hook_words(&reason, "it gave no reason")))
             }
+            // llmlint: ignore[changed_behavior_has_e2e] `Reroute` cannot occur here: this hook declares no routes, so the bus offers it no route file; the arm exists to be exhaustive, and `Change` and `Drop` are driven by `a_reviewer_that_prints_nothing_or_a_changed_document_is_refused_as_unjudged`.
             HookOutcome::Change(_) | HookOutcome::Reroute { .. } | HookOutcome::Drop => {
                 Err(self.unjudged("it changed or dropped a document it reviews but cannot change"))
             }

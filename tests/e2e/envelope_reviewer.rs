@@ -1132,3 +1132,50 @@ fn a_reviewer_that_prints_nothing_or_a_changed_document_is_refused_as_unjudged()
     );
     world.release("slow.go");
 }
+
+/// A reviewer judges what the bus's hooks left of an envelope: a hook that removes a
+/// command means the reviewer never reads it.
+#[test]
+fn a_reviewer_reads_the_edits_a_hook_left_of_the_envelope() {
+    let world = World::new("reviewer-after-hook");
+    let reviewer = reviewer_named(&world, "review-edit");
+    let hook = double("bus-hook").to_string_lossy().into_owned();
+    let config = world.root.join("bus.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - {{on: replies, command: \
+             [{hook:?}, keep-first-command]}}\n"
+        ),
+    )
+    .expect("a bus configuration");
+    let run = live_run(
+        &world,
+        "reviewerafterhook",
+        &[
+            &spelling("flag"),
+            &reviewer,
+            "--bus-config",
+            config.to_str().expect("a path"),
+        ],
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": agent("kept", &[])},
+                {"op": "add", "node": agent("removed", &[])},
+            ])),
+        )
+        .exited(0);
+    let seen = offered(&world);
+    let document = &seen.last().expect("the envelope was reviewed").1;
+    let names: Vec<&str> = document["changes"]
+        .as_array()
+        .expect("the changes are a list")
+        .iter()
+        .map(|change| change["node"]["id"].as_str().expect("a node"))
+        .collect();
+    assert_eq!(names, ["kept"], "{document}");
+    world.release("slow.go");
+}
