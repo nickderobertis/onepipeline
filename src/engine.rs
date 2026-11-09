@@ -2512,8 +2512,17 @@ fn converge(
                             opened_a_session = true;
                         }
                     }
+                    let provisioning = envelope.labels.node.clone().zip(
+                        crate::provisioning::Failure::of(&envelope).filter(|failure| {
+                            !state.provisioning_surfaced.contains(&failure.session)
+                        }),
+                    );
                     if !journalled {
                         journal.relay(&envelope)?;
+                    }
+                    if let Some((node, failure)) = provisioning {
+                        raise_provisioning_failed(paths, journal, &node, &failure)?;
+                        state.refresh(paths);
                     }
                     // A failing check is told to the manager once, whatever it blocks.
                     checks.observe(paths, journal, state, &envelope)?;
@@ -12378,10 +12387,41 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 
 /// [`raise`], answering the surface as the channel queued it — id and all.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
+    queue_surface(paths, journal, surface, &[])
+}
+
+/// A session's `provisioning-failed` surface, its record labelled with that session
+/// and with the significance the `planner` profile admits.
+fn raise_provisioning_failed(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    node: &str,
+    failure: &crate::provisioning::Failure,
+) -> Result<()> {
+    let stamps = [
+        (
+            "significance",
+            json!(crate::vocabulary::Significance::Attention),
+        ),
+        (crate::provisioning::SESSION_LABEL, json!(failure.session)),
+    ];
+    queue_surface(paths, journal, failure.surface(node), &stamps).map(|_| ())
+}
+
+fn queue_surface(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    surface: Surface,
+    stamps: &[(&str, serde_json::Value)],
+) -> Result<Surface> {
     let queued = ChannelState::new(paths).push(surface)?;
+    let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
+    for (key, value) in stamps {
+        labels.extra.insert((*key).to_owned(), value.clone());
+    }
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, queued.workstream.as_deref()),
+        labels,
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),

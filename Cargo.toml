@@ -902,8 +902,12 @@ rust-version = "1.97"
 oneagentgraph = "0.10.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
-# onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.
-onevcs = "0.60.0"
+# 0.62.0 records each `post-checkout` run as `worktree-provisioned` or
+# `worktree-provision-failed` on the session's stream, which `src/vcs.rs` reads
+# through its `EventKind` and `WorktreeProvision`. A **requirement**, because
+# `^0.60` admits no 0.62.x; onevcs-testing 0.20.4 requires exactly `=0.62.1`,
+# which this floor admits, so the lock resolves that one release.
+onevcs = "0.62.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1178,7 +1182,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.20.0"
+onevcs-testing = "0.20.4"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1407,7 +1411,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.102.3"
+version = "0.103.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

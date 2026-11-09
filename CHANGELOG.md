@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.103.0](https://github.com/nickderobertis/onepipeline/compare/v0.102.3...v0.103.0) - 2026-11-09
+
+### Added
+
+- *(dispatch)* [**breaking**] show a failed worktree provisioning to the worker and the manager ([#1482](https://github.com/nickderobertis/onepipeline/pull/1482))
+- [**breaking**] status stops asking providers by default; long runs read faster ([#1455](https://github.com/nickderobertis/onepipeline/pull/1455))
+
+### Fixed
+
+- make the driver-panic and pacemaker-reset journeys reliable ([#1479](https://github.com/nickderobertis/onepipeline/pull/1479))
+- *(deps)* link the onetaskgraph release that finds earlier Linear counterparts ([#1480](https://github.com/nickderobertis/onepipeline/pull/1480))
+
 ## [0.102.3](https://github.com/nickderobertis/onepipeline/compare/v0.102.2...v0.102.3) - 2026-11-08
 
 ### Fixed

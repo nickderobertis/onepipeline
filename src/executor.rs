@@ -300,6 +300,18 @@ impl Executor for LocalExecutor {
             Some(merge) => crate::plan::with_merge_in_progress(&req.task, &merge),
             None => req.task.clone(),
         };
+        // And a worktree whose provisioning failed is told to its worker, composed
+        // here for the same reason, off this session's own stream alone.
+        let provision_failed = session
+            .as_ref()
+            .and_then(|session| crate::vcs::provision_failure_in(&session.token, &req.labels));
+        let task = match provision_failed
+            .as_ref()
+            .and_then(crate::provisioning::Failure::of)
+        {
+            Some(failure) => crate::provisioning::with_section(&task, &failure),
+            None => task,
+        };
         // The session this dispatch works in: the one just opened, or — for every
         // later dispatch of the same node, which names the worktree rather than
         // asking for a session of its own — the one this executor opened there.
@@ -424,6 +436,7 @@ impl Executor for LocalExecutor {
             cancel: req.cancel,
             labels: req.labels,
             session,
+            provision_failed,
             _claim: claim,
         }))
     }
@@ -808,6 +821,8 @@ struct LocalDispatch {
     cancel: CancellationToken,
     labels: Labels,
     session: Option<onevcs::Session>,
+    /// The session's `worktree-provision-failed` record, relayed after its opening.
+    provision_failed: Option<Envelope>,
     /// This dispatch's entry in the run's registry, held for exactly as long as
     /// the dispatch is: dropping the handle — settled, failed, cancelled,
     /// retried — takes the entry with it, so the registry holds live dispatches
@@ -826,8 +841,13 @@ impl DispatchHandle for LocalDispatch {
             // ledger with nothing saying where it came from.
             Ok(crate::vcs::session_opened_event(session, &self.labels))
         });
+        let provision_failed = self.provision_failed.take().map(Ok);
         match opened {
-            Some(event) => Box::new(std::iter::once(event).chain(self.run.events())),
+            Some(event) => Box::new(
+                std::iter::once(event)
+                    .chain(provision_failed)
+                    .chain(self.run.events()),
+            ),
             None => self.run.events(),
         }
     }

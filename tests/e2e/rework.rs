@@ -2073,6 +2073,100 @@ fn a_restack_whose_worker_fails_its_merge_settles_the_draft_failed() {
     assert_eq!(settled(&world, run, "c")["status"], "done");
 }
 
+/// Launch `a → b` over a tracked hook that fails once `broken` exists, break it,
+/// and rework `a` so `b` is restacked onto a session whose provisioning failed.
+fn restacked_onto_failed_provisioning(world: &World, run: &str, conflict: bool) -> Value {
+    let broken = world.root.join("provisioning-broken");
+    crate::worktree_provisioning::tracked_post_checkout(
+        world,
+        &service(world),
+        &format!(
+            "#!/bin/sh\n[ -f '{}' ] || exit 0\necho RESTACK-MARKER\nexit 5\n",
+            broken.display()
+        ),
+    );
+    world.script("a.work", "a wrote this\n");
+    world.script("b.work", "b changed this\n");
+    world.script("a-rework-1.work", "a reworked this\n");
+    if conflict {
+        for node in ["a", "b", "a-rework-1"] {
+            world.script(&format!("{node}.work-file"), "shared");
+        }
+    }
+    world.script("pr-author.title-check", KEEPS);
+    let drafter = world.pr_author_graph();
+    launched(
+        world,
+        run,
+        vec![lifecycle("a", &[]), lifecycle("b", &["a"])],
+        2,
+        &["--pr-author-graph", &drafter],
+    );
+    settled(world, run, "b");
+    std::fs::write(&broken, "").expect("the hook will now fail");
+    if conflict {
+        world.unscript("b.work");
+        world.script("b.fail", "1");
+    }
+    reply(world, run, json!([rework("a", "rewrite the shared file")])).exited(0);
+    adopt(world, run);
+    let surfaced: Vec<Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["kind"] == "provisioning-failed" && event["labels"]["node"] == "b"
+        })
+        .collect();
+    assert_eq!(
+        surfaced.len(),
+        1,
+        "one surface for b's session: {surfaced:?}"
+    );
+    let message = surfaced[0]["payload"]["message"]
+        .as_str()
+        .expect("a message");
+    assert!(message.contains("RESTACK-MARKER"), "{message}");
+    world
+        .events_of(run, "node-restacked")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "b")
+        .expect("b's restack is on the record")
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the rule's relevance is a slow test or an external service, and these two are
+// neither: local git and doubled agents, a few seconds each, the same offline shape as
+// every other journey in this module.
+/// A restack that merges cleanly dispatches nobody, so the manager is all there is
+/// to tell.
+#[test]
+fn a_clean_restack_on_a_failed_provisioning_still_tells_the_manager() {
+    let world = team_world("rework-provision-clean");
+    let restacked = restacked_onto_failed_provisioning(&world, "provisionclean", false);
+    assert_eq!(
+        restacked["payload"]["agent_dispatched"], false,
+        "{restacked}"
+    );
+}
+
+/// A restack that conflicts hands its worker the failure on the turn it resolves in.
+#[test]
+fn a_conflicted_restack_on_a_failed_provisioning_tells_its_worker() {
+    let world = team_world("rework-provision-conflict");
+    let run = "provisionconflict";
+    let restacked = restacked_onto_failed_provisioning(&world, run, true);
+    assert_eq!(
+        restacked["payload"]["agent_dispatched"], true,
+        "{restacked}"
+    );
+    let tasks = tasks_of(&world, run, "b", "engineer");
+    let last = tasks.last().expect("the restack's worker was dispatched");
+    assert!(
+        last.contains("## Worktree provisioning failed") && last.contains("RESTACK-MARKER"),
+        "{last}"
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// A restack whose republication the host's checks refuse goes back to the draft's
 /// own worker on the same branch once a trigger reads that verdict red, as a
 /// `checks-failed` publication's re-dispatch does — drafted again, since that worker may
