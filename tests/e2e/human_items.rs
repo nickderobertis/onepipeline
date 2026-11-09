@@ -3621,6 +3621,18 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
     }
     assert!(!on_second[0].1.contains(&first_a), "{}", on_second[0].1);
 
+    // Each owner's watch holds its own answers of the batch, in order and once.
+    let answered_of = |session: &str| -> Vec<String> {
+        watch(&world, session)
+            .iter()
+            .filter(|event| event["kind"] == "human-item-answered")
+            .map(|event| event["payload"]["item_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(answered_of("mgr"), [first_a.clone(), first_b.clone()]);
+    assert_eq!(answered_of("ops"), [second_c.clone()]);
+    assert!(answered_of("mgr").is_empty(), "nothing is printed twice");
+
     let single = raise_question(&world, "single", "mgr", Some("first"), nothing_block(), &[]);
     let watching = armed_watch(&world, "first");
     world

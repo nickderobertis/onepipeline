@@ -1933,9 +1933,15 @@ fn a_batch_cut_short_or_followed_by_a_broken_record_loses_nothing_and_is_never_d
     world.ok(None, &["answer-batch", "--input", &two]);
     let bytes = std::fs::read_to_string(&journal).unwrap();
     std::fs::write(&journal, format!("{bytes}not a record\n")).unwrap();
+    // Forgotten as well, so the carry walks the batch and then the garbled record: the
+    // batch is still carried, and the cursor passes it, before delivery stops there.
+    let document = find_delivered(&world.store().join("bus")).expect("delivery has run");
+    std::fs::remove_file(&document).unwrap();
     let failed = world.run(Some("s2"), &["watch"]);
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("not an item event"));
+    let cursor: Value = serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+    assert_eq!(cursor["through"].as_u64(), Some(bytes.len() as u64));
     std::fs::write(&journal, &bytes).unwrap();
     let delivered = world.watch("s2");
     assert_eq!(delivered.len(), 1, "{delivered:?}");
@@ -3062,7 +3068,7 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
     let before = std::fs::read(world.store().join("events.ndjson")).unwrap();
     let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
     let answers = vec![HumanItemBatchAnswer {
-        id,
+        id: id.clone(),
         choice: None,
         text: Some("Yes.".into()),
     }];
@@ -3078,6 +3084,19 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
     assert!(
         matches!(&refused, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
         "{refused:?}"
+    );
+    let single = store
+        .apply(HumanItemAction::Answer {
+            id: id.clone(),
+            choice: None,
+            text: Some("Yes.".into()),
+            actor: " ".into(),
+            on_behalf_of: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&single, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
+        "{single:?}"
     );
     let sent = store
         .apply(HumanItemAction::AnswerBatch {
@@ -3164,5 +3183,34 @@ fn a_batch_judges_each_entry_and_refuses_a_file_of_the_wrong_shape() {
     assert_eq!(
         world.json(None, &["show", &ids[1], "--json"])["item"]["state"],
         "open"
+    );
+}
+
+/// An answer the engine itself records tells its owner and no run: only a person's
+/// resolution is a surface, and answers are no exception.
+#[test]
+fn an_answer_by_the_engine_reaches_its_owner_and_no_run() {
+    use onepipeline::human_items::{HumanItemAction, HumanItems};
+    let world = Live::enabled();
+    let run_dir = world.runs().join("watched");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let mut value = item("q", "question", "low", "s", json!({"scope": "nothing"}));
+    value["owner"]["run"] = json!("watched");
+    let id = world.raise(&value);
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    store
+        .apply(HumanItemAction::Answer {
+            id,
+            choice: None,
+            text: Some("Decided.".into()),
+            actor: "engine".into(),
+            on_behalf_of: None,
+        })
+        .unwrap();
+    let events = world.watch("s");
+    assert_eq!(events.last().unwrap()["kind"], "human-item-answered");
+    assert!(
+        !run_dir.join("channel/surfaces.jsonl").exists(),
+        "the engine's answer surfaced on the run"
     );
 }
