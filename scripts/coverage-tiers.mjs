@@ -19,17 +19,25 @@ const refuse = (message) => {
 
 let tracked;
 try {
-  tracked = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
+  tracked = execFileSync("git", ["ls-files", "-z"], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  })
     .split("\0")
     .filter((path) => path === "project.json" || path.endsWith("/project.json"));
 } catch (error) {
-  refuse(`cannot list the project files: ${error.message}. ACTION: run this inside the repository's checkout`);
+  refuse(
+    `cannot list the project files: ${error.message}. ACTION: run this inside the repository's checkout`,
+  );
 }
 
 const justfile = readFileSync("justfile", "utf8");
 // `_e2e-test: _strace-preflight (_tier-test "onepipeline-e2e" e2e-tier)` -> the recipe's unit.
 const unitOfRecipe = new Map(
-  [...justfile.matchAll(/^(_[\w-]+):.*\(_tier-test "([\w-]+)"/gm)].map(([, recipe, unit]) => [recipe, unit]),
+  [...justfile.matchAll(/^(_[\w-]+):.*\(_tier-test "([\w-]+)"/gm)].map(([, recipe, unit]) => [
+    recipe,
+    unit,
+  ]),
 );
 
 const REPORT = /^\{workspaceRoot\}\/target\/coverage-units\/([\w-]+)\.lcov$/;
@@ -46,26 +54,45 @@ for (const path of tracked) {
   for (const [target, definition] of Object.entries(project.targets ?? {})) {
     const id = `${project.name}:${target}`;
     const recipe = String(definition.command ?? "").match(/^just (\S+)/)?.[1];
-    const declared = (definition.outputs ?? []).map((output) => output.match(REPORT)?.[1]).filter(Boolean);
+    const declared = (definition.outputs ?? [])
+      .map((output) => output.match(REPORT)?.[1])
+      .filter(Boolean);
     const unit = declared[0] ?? unitOfRecipe.get(recipe);
     if (unit === undefined) continue;
     if (declared.length === 0) {
-      refuse(`${id} runs coverage unit ${unit} but declares no target/coverage-units/${unit}.lcov output. ACTION: add it to that target's outputs`);
+      refuse(
+        `${id} runs coverage unit ${unit} but declares no target/coverage-units/${unit}.lcov output. ACTION: add it to that target's outputs`,
+      );
     }
-    if (tiers.has(unit)) refuse(`two targets write coverage unit ${unit}: ${tiers.get(unit)} and ${id}. ACTION: give each tier its own unit name`);
+    if (tiers.has(unit))
+      refuse(
+        `two targets write coverage unit ${unit}: ${tiers.get(unit)} and ${id}. ACTION: give each tier its own unit name`,
+      );
     tiers.set(unit, id);
   }
 }
 
-if (aggregate === undefined) refuse("no project named onepipeline declares a test target. ACTION: restore the aggregate target");
-if (tiers.size === 0) refuse("the project graph holds no coverage tier. ACTION: restore the tiers' target/coverage-units outputs");
+if (aggregate === undefined)
+  refuse(
+    "no project named onepipeline declares a test target. ACTION: restore the aggregate target",
+  );
+if (tiers.size === 0)
+  refuse(
+    "the project graph holds no coverage tier. ACTION: restore the tiers' target/coverage-units outputs",
+  );
 const dependedOn = new Set(
   (aggregate.dependsOn ?? []).flatMap((need) =>
-    typeof need === "string" ? [`onepipeline:${need}`] : (need.projects ?? []).map((name) => `${name}:${need.target}`),
+    typeof need === "string"
+      ? [`onepipeline:${need}`]
+      : (need.projects ?? []).map((name) => `${name}:${need.target}`),
   ),
 );
-const uncounted = [...tiers].filter(([, id]) => !dependedOn.has(id)).map(([unit, id]) => `${unit} (${id})`);
+const uncounted = [...tiers]
+  .filter(([, id]) => !dependedOn.has(id))
+  .map(([unit, id]) => `${unit} (${id})`);
 if (uncounted.length) {
-  refuse(`onepipeline:test does not depend on coverage tier(s): ${uncounted.sort().join(", ")}. ACTION: add each to that target's dependsOn so the floor counts it`);
+  refuse(
+    `onepipeline:test does not depend on coverage tier(s): ${uncounted.sort().join(", ")}. ACTION: add each to that target's dependsOn so the floor counts it`,
+  );
 }
 console.log([...tiers.keys()].sort().join(" "));

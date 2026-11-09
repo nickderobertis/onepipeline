@@ -117,6 +117,15 @@ export function realVersion() {
  * Copy the working tree (tracked and new files) into a fresh repository and replace the Rust
  * code with the fixture crate. `uncovered` sets how many of the fixture's lines no tier reaches.
  */
+// What `_onetaskgraph-preflight` looks for, at the justfile's pin, so the e2e preflight passes offline.
+export function plantOnetaskgraph(dir) {
+  const version = readFileSync(join(dir, "justfile"), "utf8").match(/^onetaskgraph-version := "([^"]+)"/m)[1];
+  const tool = join(dir, "target", "tools", `onetaskgraph-${version}`, "bin", "onetaskgraph");
+  mkdirSync(dirname(tool), { recursive: true });
+  writeFileSync(tool, "#!/bin/sh\nexit 0\n");
+  chmodSync(tool, 0o755);
+}
+
 export function scratch(t, { uncovered = 6 } = {}) {
   const dir = mkdtempSync(join(stateRoot(), "coverage-cache-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -150,12 +159,7 @@ export function scratch(t, { uncovered = 6 } = {}) {
   for (const [path, entries] of Object.entries(FIXTURE_TESTS)) writeFileSync(join(dir, path), testBody(entries));
   writeFileSync(join(dir, "Cargo.toml"), manifest(version, stubs));
   writeFileSync(join(dir, "Cargo.lock"), lockFor(version));
-  // What `_onetaskgraph-preflight` looks for, so the e2e tier's preflight passes offline.
-  const onetaskgraph = readFileSync(join(dir, "justfile"), "utf8").match(/^onetaskgraph-version := "([^"]+)"/m)[1];
-  const tool = join(dir, "target", "tools", `onetaskgraph-${onetaskgraph}`, "bin", "onetaskgraph");
-  mkdirSync(dirname(tool), { recursive: true });
-  writeFileSync(tool, "#!/bin/sh\nexit 0\n");
-  chmodSync(tool, 0o755);
+  plantOnetaskgraph(dir);
   git(dir, "init", "--quiet", "--initial-branch=main");
   git(dir, "add", "-A");
   git(dir, "commit", "--quiet", "--no-verify", "-m", "scratch");
@@ -194,3 +198,89 @@ export function nx(dir, args, { env = {}, path = [] } = {}) {
 }
 
 export const test_all = ["run", "onepipeline:test"];
+
+/** Replayed and executed coverage tiers from a run, asserting nothing else ran unaccounted. */
+export function tierOutcome(run) {
+  const replayed = TIERS.filter((tier) => run.replayed.has(TASK_OF[tier])).sort();
+  const executed = TIERS.filter((tier) => run.executed.has(TASK_OF[tier])).sort();
+  return { replayed, executed };
+}
+
+/** Parse an LCOV text into file -> line -> count, summing repeated records by file and line. */
+export function readLcov(text, into = new Map()) {
+  let file = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith("SF:")) {
+      file = line.slice(3);
+      if (!into.has(file)) into.set(file, new Map());
+    } else if (line.startsWith("DA:")) {
+      const [number, count] = line.slice(3).split(",");
+      const lines = into.get(file);
+      const at = Number(number);
+      lines.set(at, (lines.get(at) ?? 0) + Number(count));
+    } else if (line === "end_of_record") file = null;
+  }
+  return into;
+}
+
+/** `sumReports` over `paths`: { covered, total, uncovered: file -> sorted line numbers }. */
+export function sumReports(paths) {
+  const files = new Map();
+  for (const path of paths) readLcov(readFileSync(path, "utf8"), files);
+  return summarize(files);
+}
+
+export function summarize(files) {
+  let covered = 0;
+  let total = 0;
+  const uncovered = new Map();
+  for (const [file, lines] of files) {
+    for (const [line, count] of lines) {
+      total += 1;
+      if (count > 0) covered += 1;
+      else uncovered.set(file, [...(uncovered.get(file) ?? []), line].sort((a, b) => a - b));
+    }
+  }
+  return { covered, total, uncovered };
+}
+
+/** The numbers and uncovered lines a real merge printed (it prints uncovered lines only below the floor). */
+export function mergeReport(output) {
+  const covered = Number(output.match(/^lines covered: (\d+)$/m)?.[1]);
+  const total = Number(output.match(/^lines total: (\d+)$/m)?.[1]);
+  const percent = Number(output.match(/^lines percent: ([\d.]+)$/m)?.[1]);
+  const uncovered = new Map();
+  for (const [, file, numbers] of output.matchAll(/^(\S+\.rs): ([\d,]+)$/gm)) {
+    uncovered.set(file, numbers.split(",").map(Number).sort((a, b) => a - b));
+  }
+  return { covered, total, percent, uncovered };
+}
+
+export function assertSameReport(assertion, merged, reader, what) {
+  assertion.equal(merged.covered, reader.covered, `${what}: lines covered`);
+  assertion.equal(merged.total, reader.total, `${what}: lines total`);
+  assertion.deepEqual([...merged.uncovered].sort(), [...reader.uncovered].sort(), `${what}: uncovered lines per file`);
+}
+
+export const unitsDir = (dir) => join(dir, "target", "coverage-units");
+export const lcovOf = (dir, tier) => join(unitsDir(dir), `${tier}.lcov`);
+
+/** A PATH directory whose `tool` reports `version` and hands everything else to the real one. */
+export function wrapper(dir, name, tool, versionCheck, real, rewrite = null) {
+  const bin = join(dir, `wrapper-bin-${name}`);
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, tool),
+    `#!/usr/bin/env bash\ncase " $* " in ${versionCheck}) ${rewrite ?? `echo "wrapped-${tool}-version"; exit 0`};; esac\nexec "${real}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  return bin;
+}
+
+export function realTool(name, cwd) {
+  const sysroot = execFileSync("rustc", ["--print", "sysroot"], { cwd, encoding: "utf8" }).trim();
+  const host = execFileSync("rustc", ["-vV"], { cwd, encoding: "utf8" }).match(/^host: (\S+)$/m)[1];
+  const inSysroot = join(sysroot, "lib", "rustlib", host, "bin", name);
+  if (existsSync(inSysroot)) return inSysroot;
+  return execFileSync("bash", ["-c", `command -v ${name}`], { cwd, encoding: "utf8" }).trim();
+}

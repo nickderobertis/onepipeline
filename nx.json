@@ -69,7 +69,9 @@
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/graphs/**/*",
       "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml"
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/tests/e2e/hook.*",
+      "{workspaceRoot}/tests/e2e/probe.*"
     ],
     "smokeSource": [
       "rustBuild",
@@ -183,6 +185,7 @@
     "e2eSourceWithoutDocs": [
       "rustBuild",
       "{workspaceRoot}/tests/e2e/**/*",
+      "{workspaceRoot}/tests/fixtures/check-visibility/**/*",
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
       "{workspaceRoot}/examples/**/*",
@@ -192,7 +195,9 @@
       "{workspaceRoot}/scripts/record-channel-answers.sh",
       "{workspaceRoot}/oneharness.toml",
       "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml"
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/scripts/host-view-measure.mjs",
+      "{workspaceRoot}/scripts/review-round-quota-budget.sh"
     ],
     "e2eCoverageSource": [
       "e2eSourceWithoutDocs",
@@ -210,6 +215,7 @@
       "{workspaceRoot}/.gitattributes",
       "{workspaceRoot}/.gitignore",
       "{workspaceRoot}/tests/*.rs",
+      "{workspaceRoot}/tests/fixtures/**/*",
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
       "{workspaceRoot}/tests/e2e/adoption.rs",
@@ -237,7 +243,8 @@
       },
       "{workspaceRoot}/release-plz.toml",
       "{workspaceRoot}/release-targets.toml",
-      "{workspaceRoot}/screencomp.toml"
+      "{workspaceRoot}/screencomp.toml",
+      "{workspaceRoot}/npm/onepipeline-cli/**/*"
     ],
     "crateCoverageSource": [
       "crateTestSourceWithoutDocs",
@@ -277,6 +284,7 @@
     ],
     "contractSourceWithoutDocs": [
       "rustBuild",
+      "{workspaceRoot}/tests/fixtures/human-items*",
       "{workspaceRoot}/tests/contract.rs",
       "{workspaceRoot}/tests/contract/**/*",
       "{workspaceRoot}/tests/golden/**/*",
