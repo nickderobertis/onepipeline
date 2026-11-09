@@ -826,12 +826,18 @@ pub(crate) struct PlannerSurfaceQueued {
 /// `planner-surface-dropped`: a hook kept a surface off the channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceDropped {
+    // llmlint: ignore-block[invalid_states_unrepresentable] this journals what a queued
+    // surface would have carried, and `PlannerSurfaceQueued` says why that is no closed
+    // set: an engine-raised surface's kind, such as `quiet-worker`, is outside
+    // `channel::SurfaceKind`, and `Surface.source` is free text on the channel itself.
+    // An enum here would refuse records this crate writes.
     /// The surface's kind, as the surface it would have been names it.
     pub(crate) kind: String,
     /// What it said.
     pub(crate) message: String,
     /// What raised it.
     pub(crate) source: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Whether it would have held dependents back.
     pub(crate) blocking: bool,
     /// Review revision identity, where the surface names one.
