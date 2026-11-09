@@ -3095,3 +3095,74 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
         before
     );
 }
+
+/// A batch file of the wrong shape is refused before anything is judged, and an entry
+/// that names nothing or a blank text is refused on its own while the rest are recorded.
+#[test]
+fn a_batch_judges_each_entry_and_refuses_a_file_of_the_wrong_shape() {
+    let world = Live::enabled();
+    let ids: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|key| {
+            world.raise(&item(
+                key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    let before = world.journal().len();
+    for (name, body, says) in [
+        ("extra", json!({"answers": [], "note": 1}), "note"),
+        ("absent", json!({"other": []}), "answers"),
+        ("entry", json!({"answers": [{"choice": "a"}]}), "id"),
+    ] {
+        let path = world.input(name, &body);
+        world.refused(None, &["answer-batch", "--input", &path], says);
+    }
+    assert_eq!(
+        world.journal().len(),
+        before,
+        "a refused file wrote nothing"
+    );
+
+    let path = world.input(
+        "mixed",
+        &json!({"answers": [
+            {"id": ids[0], "text": "Yes."},
+            {"id": ids[1]},
+            {"id": ids[2], "text": "   "},
+        ]}),
+    );
+    let receipt = world.json(None, &["answer-batch", "--input", &path]);
+    assert_eq!(
+        receipt["answered"].as_array().unwrap().len(),
+        1,
+        "{receipt}"
+    );
+    let reasons: Vec<&str> = receipt["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["refusal"]["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "an answer names a choice, text, or both",
+            "answer text must not be blank"
+        ]
+    );
+    assert_eq!(
+        world.journal().len(),
+        before + 1,
+        "only the valid entry is written"
+    );
+    assert_eq!(receipt["refused"][0]["id"], json!(ids[1]));
+    assert_eq!(
+        world.json(None, &["show", &ids[1], "--json"])["item"]["state"],
+        "open"
+    );
+}
