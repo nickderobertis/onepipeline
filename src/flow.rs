@@ -1438,7 +1438,7 @@ pub(crate) fn surface(
     } else {
         crate::channel::source::PROPOSAL
     };
-    let queued = flow.channel().push(Surface {
+    let offer = flow.channel().push(Surface {
         id: 0,
         kind: kind.as_str().to_string(),
         message,
@@ -1451,7 +1451,7 @@ pub(crate) fn surface(
         workstream: None,
         correlation: None,
     })?;
-    Ok(crate::verbs::Surfaced { surface: queued.id })
+    crate::verbs::surfaced_of(offer)
 }
 
 /// `onepipeline next --flow ID`: claim the flow's next surface.
@@ -1520,15 +1520,24 @@ pub(crate) fn reply(
     let channel = flow.channel();
     channel.declares(&envelope.author)?;
     channel.allows_completion(envelope.author.clone(), envelope.completion)?;
-    channel.judge_reply(&envelope, None::<crate::edits::EnvelopeReview>)?;
-    let reply = channel.answer_bound(&envelope, correlation)?;
+    let offered = channel.offer_reply(&envelope)?;
+    channel.record_offer(&offered)?;
+    let reply = channel.answer_offered(&offered, correlation)?;
     Ok(crate::verbs::Receipt {
-        outcome: crate::verbs::ReplyOutcome::Answered {
-            reply,
-            verdict: crate::verbs::VerdictHalf::OnTheQueue,
+        outcome: if offered.whole_drop {
+            crate::verbs::ReplyOutcome::Dropped {
+                verdict: crate::verbs::VerdictHalf::Dropped,
+            }
+        } else {
+            crate::verbs::ReplyOutcome::Answered {
+                reply,
+                verdict: crate::verbs::VerdictHalf::OnTheQueue,
+            }
         },
         advice: Vec::new(),
         notes: std::collections::BTreeMap::new(),
+        changed: offered.changed,
+        commands_dropped: false,
     })
 }
 

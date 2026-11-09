@@ -248,7 +248,7 @@ pub(crate) fn pass(
         crate::payload::ReadjustTrigger::Review,
     )?;
     let state: &RunState = projected;
-    let channel = ChannelState::new(paths);
+    let channel = ChannelState::of_paths(paths)?;
     // Include the queue log: a crash after push and before the journal append must
     // not send the same revision a second time.
     let events = journal::read(&paths.journal());
@@ -256,7 +256,10 @@ pub(crate) fn pass(
         .iter()
         .filter(|event| {
             event.source == crate::event::Source::Pipeline
-                && event.kind.as_str() == "planner-surface-queued"
+                && matches!(
+                    event.kind.as_str(),
+                    "planner-surface-queued" | "planner-surface-dropped"
+                )
                 && event.payload.get("kind").and_then(Value::as_str) == Some("review-comment")
         })
         .filter_map(|event| {
@@ -334,9 +337,33 @@ pub(crate) fn pass(
             let correlation = correlation
                 .parse()
                 .map_err(|error| Error::Invalid(format!("review correlation: {error}")))?;
-            let surface = channel.push(Surface {
+            let offered = Surface {
                 id: 0, kind: "review-comment".to_owned(), message: format!("Node {node}, change request {url}: {} at {}\n{}\n\n{}\n\nAnswer with rework on {node}, naming {} in comments, or decline this comment.", comment.author, location(comment), comment.url, comment.body, comment.id.0), source: crate::channel::source::RECONCILER.to_owned(), blocking: false, queued_at: crate::sys::now_millis(), workstream: Some(node.to_owned()), abandoned: false, asker: None, correlation: Some(correlation),
-            })?;
+            };
+            let surface = match channel.push(offered.clone())? {
+                crate::channel::SurfaceOffer::Queued(surface) => surface,
+                crate::channel::SurfaceOffer::Dropped { hook, .. } => {
+                    crate::engine::record_surface_dropped(
+                        paths,
+                        journal,
+                        &offered,
+                        Some(&hook),
+                        None,
+                    )?;
+                    continue;
+                }
+                crate::channel::SurfaceOffer::Refused(reason) => {
+                    crate::engine::record_surface_dropped(
+                        paths,
+                        journal,
+                        &offered,
+                        None,
+                        Some(&reason),
+                    )?;
+                    continue;
+                }
+                crate::channel::SurfaceOffer::Elsewhere => continue,
+            };
             failpoint("after-surface")?;
             record_surface(paths, journal, &surface)?;
         }
@@ -505,7 +532,7 @@ fn not_drafted(
     let correlation = correlation
         .parse()
         .map_err(|error| Error::Invalid(format!("review reply correlation: {error}")))?;
-    let surface = channel.push(Surface {
+    let offered = Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::REVIEW_REPLY_PENDING.to_owned(),
         message: format!(
@@ -525,7 +552,29 @@ fn not_drafted(
         abandoned: false,
         asker: None,
         correlation: Some(correlation),
-    })?;
+    };
+    let surface = match channel.push(offered.clone())? {
+        crate::channel::SurfaceOffer::Queued(surface) => surface,
+        crate::channel::SurfaceOffer::Dropped { hook, .. } => {
+            return crate::engine::record_surface_dropped(
+                paths,
+                journal,
+                &offered,
+                Some(&hook),
+                None,
+            );
+        }
+        crate::channel::SurfaceOffer::Refused(reason) => {
+            return crate::engine::record_surface_dropped(
+                paths,
+                journal,
+                &offered,
+                None,
+                Some(&reason),
+            );
+        }
+        crate::channel::SurfaceOffer::Elsewhere => return Ok(()),
+    };
     record_surface(paths, journal, &surface)
 }
 

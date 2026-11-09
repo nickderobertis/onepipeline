@@ -824,6 +824,28 @@ pub(crate) struct PlannerSurfaceQueued {
 }
 
 /// `planner-surfaced`: a surface consumed.
+/// `planner-surface-dropped`: a hook kept a surface off the channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct PlannerSurfaceDropped {
+    /// The surface's kind, as the surface it would have been names it.
+    pub(crate) kind: String,
+    /// What it said.
+    pub(crate) message: String,
+    /// What raised it.
+    pub(crate) source: String,
+    /// Whether it would have held dependents back.
+    pub(crate) blocking: bool,
+    /// Review revision identity, where the surface names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<String>,
+    /// The hook that dropped it; absent where a hook refused it instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook: Option<onemessagebus::HookRef>,
+    /// Why a hook or validator refused it, in its own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) refused: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaced {
     /// The surface's kind.
@@ -2452,6 +2474,7 @@ payload_messages! {
     CommandAccepted => "command-accepted";
     EditRejected => "edit-rejected";
     PlannerSurfaceQueued => "planner-surface-queued";
+    PlannerSurfaceDropped => "planner-surface-dropped";
     PlannerSurfaced => "planner-surfaced";
     PlannerReplied => "planner-replied";
     HumanAttested => "human-attested";

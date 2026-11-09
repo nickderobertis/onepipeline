@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use onemessagebus::sdk_schema::Asked as Wire;
-use onemessagebus::{Address, Answer, Asker, Correlation, Pending};
+use onemessagebus::{Address, Answer, AskOffered, Asker, Correlation, HookRef, Pending, QueueName};
 use serde_json::{json, Value};
 
 use crate::channel::layout::SURFACES;
@@ -201,6 +201,13 @@ pub(crate) enum Question {
     },
     /// The bus refused the question; nothing was raised.
     Refused(String),
+    /// A hook dropped it, so no reply will come.
+    Dropped {
+        /// The queue the dropping hook ran on.
+        queue: QueueName,
+        /// The hook that dropped it.
+        hook: HookRef,
+    },
 }
 
 /// Whose channel a question is raised on: a run's, or — where the asker names no
@@ -270,11 +277,24 @@ impl Question {
             workstream: None,
             correlation: None,
         };
+        let offered = question.clone();
         Ok(match channel.ask(question, request.about) {
-            Ok(pending) => Self::Pending {
-                pending: Box::new(pending),
-                window,
-            },
+            Ok(AskOffered::Raised(pending)) => Self::Pending { pending, window },
+            Ok(AskOffered::Dropped(dropped)) => {
+                if let On::Run(paths) = on {
+                    crate::engine::record_surface_dropped(
+                        paths,
+                        &mut crate::journal::Journal::open(paths),
+                        &offered,
+                        Some(&dropped.hook),
+                        None,
+                    )?;
+                }
+                Self::Dropped {
+                    queue: dropped.queue,
+                    hook: dropped.hook,
+                }
+            }
             Err(error) => Self::Refused(error.to_string()),
         })
     }
@@ -284,7 +304,7 @@ impl Question {
     pub(crate) fn window(&self) -> Duration {
         match self {
             Self::Pending { window, .. } => *window,
-            Self::Refused(_) => Duration::ZERO,
+            Self::Refused(_) | Self::Dropped { .. } => Duration::ZERO,
         }
     }
 
@@ -292,7 +312,7 @@ impl Question {
     pub(crate) fn correlation(&self) -> Option<&Correlation> {
         match self {
             Self::Pending { pending, .. } => Some(pending.correlation()),
-            Self::Refused(_) => None,
+            Self::Refused(_) | Self::Dropped { .. } => None,
         }
     }
 
@@ -309,6 +329,10 @@ impl Question {
                     correlation: None,
                     reason,
                 },
+                unmarked: None,
+            },
+            Self::Dropped { queue, hook } => Asked {
+                wire: Wire::Dropped { queue, hook },
                 unmarked: None,
             },
             Self::Pending { pending, window } => {
@@ -378,7 +402,10 @@ impl Asked {
     pub(crate) const fn exit_code(&self) -> i32 {
         match self.wire {
             Wire::Reply { .. } => EXIT_SUCCESS,
-            Wire::Timeout { .. } | Wire::Abandoned { .. } | Wire::Refused { .. } => EXIT_QUEUED,
+            Wire::Timeout { .. }
+            | Wire::Abandoned { .. }
+            | Wire::Refused { .. }
+            | Wire::Dropped { .. } => EXIT_QUEUED,
         }
     }
 
@@ -419,6 +446,10 @@ impl Asked {
                 "the question {correlation} was abandoned and nobody re-attended it; ask again"
             )),
             Wire::Refused { reason, .. } => Some(format!("the question was refused: {reason}")),
+            Wire::Dropped { queue, hook } => Some(format!(
+                "{hook} dropped the question on {queue}, so no reply will come; it is recorded in \
+                 {queue}-dropped"
+            )),
         }
     }
 }

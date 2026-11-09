@@ -887,11 +887,11 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.9.0"
+oneagentgraph = "0.11.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # onevcs-testing 0.20.0 pins that release exactly and supplies the export fixtures.
-onevcs = "0.60.0"
+onevcs = "0.63.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1040,7 +1040,7 @@ onemessagebus = "0.10.0"
 # holds both through the linked graph. Inside `^0.22.0`, so `oneagentgraph` 0.9.x
 # resolves this one copy, over the same `oneharness-core`; the requirement moves
 # so the floor says the fix is in.
-onejudge = "0.22.1"
+onejudge = "0.22.4"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1166,7 +1166,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.20.0"
+onevcs-testing = "0.20.5"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

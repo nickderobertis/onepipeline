@@ -1795,6 +1795,7 @@ impl GraphRun {
             filter: filter.map(sibling_filter).transpose()?,
             state_dir,
             oneharness_bin: oneharness_bin(&run_env),
+            follow_events: None,
         };
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;

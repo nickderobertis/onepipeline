@@ -6803,7 +6803,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 68, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 69, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -7514,7 +7514,7 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
     let Member::Oneharness(check_in) = check_in else {
         panic!("the pacemaker is a single-sided member");
     };
-    let schedule = check_in.schedule.expect("it is a cron member");
+    let schedule = check_in.schedule.clone().expect("it is a cron member");
     assert!(
         schedule.resettable,
         "the contract makes the check-in resettable"
@@ -7926,7 +7926,8 @@ const RULINGS: &[(&str, &str)] = &[
     // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
     ("143.", "`replies-cursor.json.offset`"),
     // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
-    ("147.", "decided against `onemessagebus` 0.9.5"),
+    ("147.", "decided against `onemessagebus`"),
+    ("149.", "planner-surface-dropped"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

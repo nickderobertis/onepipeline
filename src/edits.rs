@@ -13,9 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use onemessagebus::{
-    CommandValidator, PassCache, QueueName, ValidationContext, Validator, Verdict,
-};
+use onemessagebus::{CommandHook, HookCache, HookContext, HookOutcome, QueueName};
 use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -1066,12 +1064,83 @@ fn hook_words(said: &str, otherwise: &str) -> String {
 
 /// The queue a live edit's envelope is offered on, which is what a hook judging
 /// one of its nodes is told it judges.
-fn offered_on(name: &str) -> ValidationContext {
-    ValidationContext::new(
-        QueueName::try_from(name).unwrap_or_else(|_| {
-            unreachable!("{name} is a queue the planner-channel layout declares")
-        }),
-    )
+fn offered_on(name: &str) -> QueueName {
+    QueueName::try_from(name)
+        .unwrap_or_else(|_| unreachable!("{name} is a queue the planner-channel layout declares"))
+}
+
+/// A node validator's answer: its protocol is an exit status and stderr alone,
+/// so anything it narrates on stdout is left where it printed it.
+enum NodeVerdict {
+    /// Exit 0.
+    Pass,
+    /// Exit 1, in the validator's own words.
+    Refuse(String),
+    /// Anything else, or a process that could not be run.
+    Unjudged(String),
+}
+
+/// Run a node validator: the node as one line of JSON on its stdin, its queue in
+/// the variable a validator has always been told it in, and its status the answer.
+fn judge_node(validator: &str, document: &[u8], queue: &QueueName) -> NodeVerdict {
+    use std::io::Write as _;
+    use std::process::{Command as Process, Stdio};
+    let spawned = Process::new(validator)
+        .env("ONEMESSAGEBUS_VALIDATE_QUEUE", queue.as_str())
+        .env_remove("ONEMESSAGEBUS_VALIDATE_CORRELATION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(failure) => {
+            return NodeVerdict::Unjudged(format!(
+                "the validator `{validator}` could not be run: {failure}"
+            ));
+        }
+    };
+    let stdin = child.stdin.take();
+    let mut offered = document.to_vec();
+    offered.push(b'\n');
+    // From a thread of its own, so a validator writing a long refusal before it
+    // reads its input cannot deadlock against this one, and one that exits
+    // without reading it is answered by its status.
+    let writing = std::thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&offered);
+        }
+    });
+    let output = child.wait_with_output();
+    let _ = writing.join();
+    let output = match output {
+        Ok(output) => output,
+        Err(failure) => {
+            return NodeVerdict::Unjudged(format!(
+                "the validator `{validator}` did not finish: {failure}"
+            ));
+        }
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let said = if stderr.trim().is_empty() {
+        String::new()
+    } else {
+        format!("; it said: {}", stderr.trim())
+    };
+    match output.status.code() {
+        Some(0) => NodeVerdict::Pass,
+        Some(1) if stderr.trim().is_empty() => NodeVerdict::Refuse(format!(
+            "the validator `{validator}` refused the message and wrote no reason on stderr"
+        )),
+        Some(1) => NodeVerdict::Refuse(stderr),
+        Some(code) => NodeVerdict::Unjudged(format!(
+            "the validator `{validator}` exited {code}, which is neither a pass (0) nor a \
+             refusal (1){said}"
+        )),
+        None => NodeVerdict::Unjudged(format!(
+            "the validator `{validator}` was ended by a signal before it answered{said}"
+        )),
+    }
 }
 
 /// Offer one node to the validator this run's launch named, if it named one.
@@ -1099,16 +1168,18 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
     let op = crate::channel::op_of(command);
     let document = serde_json::to_vec(node)
         .map_err(|e| refuse(format!("{op}: node '{}' does not serialize: {e}", node.id)))?;
-    let hook = CommandValidator::new([validator])
-        .map_err(|e| refuse(format!("{op}: the node validator names no command: {e}")))?;
-    match hook.judge(&document, &offered_on(crate::channel::layout::COMMANDS)) {
-        Verdict::Pass => Ok(()),
-        Verdict::Refuse { reason } => Err(refuse(format!(
+    match judge_node(
+        validator,
+        &document,
+        &offered_on(crate::channel::layout::COMMANDS),
+    ) {
+        NodeVerdict::Pass => Ok(()),
+        NodeVerdict::Refuse(reason) => Err(refuse(format!(
             "{op}: the node validator refused node '{}': {}",
             node.id,
             hook_words(&reason, "it refused and said nothing on stderr")
         ))),
-        Verdict::Unjudged { reason } => Err(refuse(format!(
+        NodeVerdict::Unjudged(reason) => Err(refuse(format!(
             "{op}: the node validator '{validator}' this run was launched with gave no verdict \
              on node '{}' — {} — so it was checked by nothing and the edit was not applied",
             node.id,
@@ -1244,8 +1315,8 @@ fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&
 pub(crate) struct EnvelopeReview {
     /// The command, as the launch named it.
     reviewer: String,
-    /// The bus's external validator, running that command.
-    hook: CommandValidator,
+    /// The bus's external hook runner, running that command.
+    hook: CommandHook,
     /// The [`EnvelopeUnderReview`] this envelope is, as it crosses the stdin.
     document: Vec<u8>,
     /// Every op the envelope carried, as a refusal names them.
@@ -1297,7 +1368,7 @@ impl EnvelopeReview {
         };
         let document = serde_json::to_vec(&under_review)
             .map_err(|e| refuse(format!("this envelope does not serialize: {e}")))?;
-        let hook = CommandValidator::new([reviewer])
+        let hook = CommandHook::new([reviewer])
             .map_err(|e| refuse(format!("the envelope reviewer names no command: {e}")))?;
         Ok(Some(Self {
             reviewer: reviewer.to_string(),
@@ -1318,7 +1389,7 @@ impl EnvelopeReview {
     /// keys nothing: this envelope is reviewed uncached, nothing is recorded, and
     /// that is said on stderr rather than a pass being kept under an empty key.
     pub(crate) fn recording_passes(self, bar: &str, dir: &std::path::Path) -> Result<Self> {
-        let cache = PassCache::new(dir, [bar])
+        let cache = HookCache::new(dir, [bar])
             .map_err(|e| refuse(format!("the envelope reviewer's bar names no command: {e}")))?;
         if cache.fingerprint().is_none() {
             eprintln!(
@@ -1333,47 +1404,42 @@ impl EnvelopeReview {
         })
     }
 
-    /// The reviewer's verdict on this envelope, in the words a refusal of it
-    /// carries.
-    fn verdict(&self, context: &ValidationContext) -> Verdict {
-        match self.hook.judge(&self.document, context) {
-            Verdict::Pass => Verdict::Pass,
+    /// The reviewer's answer on this envelope, as the submission's check.
+    ///
+    /// A reviewer judges a document it does not own, so it passes by printing it
+    /// back byte for byte; a change, a reroute or a drop of it is no verdict.
+    pub(crate) fn run(&self) -> Result<()> {
+        let context = HookContext::new(offered_on(crate::channel::layout::REPLIES));
+        match self.hook.run(&self.document, &context) {
+            HookOutcome::Keep => Ok(()),
             // What the reviewer declared it objected to, held against the names
             // this envelope actually carries — the same set `carried` prints, so
             // a node the refusal points at is one a reader finds again beside it.
-            Verdict::Refuse { reason } => {
+            HookOutcome::Refuse { reason } => {
                 let objection = Objection::read(&reason);
-                Verdict::Refuse {
-                    reason: format!(
-                        "the envelope reviewer refused this envelope{}, so none of its edits \
-                         were applied — it carried {}: {}",
-                        objection.against(&self.envelope_named),
-                        self.carried,
-                        hook_words(&objection.said, "it refused and said nothing on stderr")
-                    ),
-                }
+                Err(refuse(format!(
+                    "the envelope reviewer refused this envelope{}, so none of its edits \
+                     were applied — it carried {}: {}",
+                    objection.against(&self.envelope_named),
+                    self.carried,
+                    hook_words(&objection.said, "it refused and said nothing on stderr")
+                )))
             }
-            Verdict::Unjudged { reason } => Verdict::Unjudged {
-                reason: format!(
-                    "the envelope reviewer '{}' this run was launched with gave no verdict on \
-                     this envelope — {} — so it was reviewed by nothing and none of its edits \
-                     were applied",
-                    self.reviewer,
-                    hook_words(&reason, "it gave no reason")
-                ),
-            },
+            HookOutcome::Unjudged { reason } => {
+                Err(self.unjudged(&hook_words(&reason, "it gave no reason")))
+            }
+            HookOutcome::Change(_) | HookOutcome::Reroute { .. } | HookOutcome::Drop => {
+                Err(self.unjudged("it changed or dropped a document it reviews but cannot change"))
+            }
         }
     }
-}
 
-/// The review is a validator the reply queue judges an offered envelope by.
-///
-/// What it judges is the document the envelope compiles to rather than the
-/// envelope's own bytes, because that is the review this hook exists for; the
-/// document is built from exactly the envelope offered, before it is offered.
-impl Validator<Value> for EnvelopeReview {
-    fn validate(&self, _offered: &Value, context: &ValidationContext) -> Verdict {
-        self.verdict(context)
+    fn unjudged(&self, why: &str) -> Error {
+        refuse(format!(
+            "the envelope reviewer '{}' this run was launched with gave no verdict on this \
+             envelope — {why} — so it was reviewed by nothing and none of its edits were applied",
+            self.reviewer,
+        ))
     }
 }
 
@@ -1386,12 +1452,9 @@ fn offer_envelope_to_reviewer(
     edited: &Graph,
     launched_with: Option<&crate::plan::Plan>,
 ) -> Result<()> {
-    let Some(review) = EnvelopeReview::of(reviewer, commands, edited, launched_with)? else {
-        return Ok(());
-    };
-    match review.verdict(&offered_on(crate::channel::layout::REPLIES)) {
-        Verdict::Pass => Ok(()),
-        Verdict::Refuse { reason } | Verdict::Unjudged { reason } => Err(refuse(reason)),
+    match EnvelopeReview::of(reviewer, commands, edited, launched_with)? {
+        Some(review) => review.run(),
+        None => Ok(()),
     }
 }
 
@@ -5445,7 +5508,7 @@ mod tests {
         let reviewer = validator(
             &dir,
             "review.sh",
-            &format!("cat > {}\nexit 0\n", seen.display()),
+            &format!("tee {}\nexit 0\n", seen.display()),
         );
         let launched_with = Plan {
             schema_version: PLAN_SCHEMA_VERSION,

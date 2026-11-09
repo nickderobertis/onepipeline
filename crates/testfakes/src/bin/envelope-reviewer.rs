@@ -16,7 +16,7 @@
 //!   `reviewer.objection` present → declare exactly these lines instead, verbatim,
 //!                        an empty file declaring nothing at all; absent → declare
 //!                        the first node the envelope changes
-//!   `reviewer.chatter`   present → write this file's text to **stdout** before
+//!   `reviewer.chatter`   present → write this file's text to **stderr** before
 //!                        answering, the way a review that narrates what it
 //!                        checked does
 //!   `reviewer.silent`    present → refuse without saying anything, which is the
@@ -306,7 +306,17 @@ fn main() -> std::process::ExitCode {
     // A reviewer that narrates on stdout is ordinary — a review prints what it
     // checked — and none of it is the caller's answer.
     if let Some(chatter) = scenario(&dir.join("reviewer.chatter")) {
-        println!("{}", chatter.trim());
+        eprintln!("{}", chatter.trim());
+    }
+    // A reviewer is a hook in behaviour: it passes by printing the document it
+    // was given. `reviewer.empty` passes in the older protocol, printing nothing,
+    // and `reviewer.rewrite` prints a changed document; each is read as no verdict.
+    if marker(&dir.join("reviewer.empty")) {
+        return std::process::ExitCode::SUCCESS;
+    }
+    if marker(&dir.join("reviewer.rewrite")) {
+        println!("{{\"rewritten\":true}}");
+        return std::process::ExitCode::SUCCESS;
     }
 
     // A reviewer that refuses without saying anything is still an answer the
@@ -329,7 +339,10 @@ fn main() -> std::process::ExitCode {
             flood(&dir);
             std::process::ExitCode::from(1)
         }
-        None => std::process::ExitCode::SUCCESS,
+        None => {
+            print!("{document}");
+            std::process::ExitCode::SUCCESS
+        }
     }
 }
 
