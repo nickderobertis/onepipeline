@@ -185,6 +185,7 @@ pub const MAX_CHOICE_TITLE_CHARS: usize = 80;
 /// The most answers one batch may carry.
 pub const MAX_BATCH_ANSWERS: usize = 50;
 
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a choice as three JSON strings on this flat record, and the schema and the page validate those. A constrained id or title type would change the published shape; the deserializer and validate_choices at every raise refuse each malformed one.
 validated_record! {
 /// One answer a question offers.
 pub struct HumanItemChoice, HumanItemChoiceWire {
@@ -199,6 +200,7 @@ pub struct HumanItemChoice, HumanItemChoiceWire {
     pub description: String,
 }
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The approved Raise input publishes schema_version as a number, title/body as strings, imported Priority and an optional approval reference on a flat record. A different public constructor or a local priority enum would depart from that interface; the decoder and apply boundary check version, nonempty prose, priority and question/approval combinations.
 validated_record! {
@@ -349,6 +351,7 @@ pub struct HumanItemBatchAnswer {
 pub enum HumanItemAction {
     /// Raise an item with a required deduplication key.
     Raise(HumanItemInput),
+    // llmlint: ignore-block[invalid_states_unrepresentable] The contract fixes answer as flat optional `choice`, `text` and a batch as a list of those, keeping the JSON a browser and the CLI send; an answer enum or a bounded list would change that wire shape. The store refuses an answer naming neither, a blank text and a malformed batch as a Conflict at both apply boundaries.
     /// Answer an open item.
     Answer {
         /// Id.
@@ -378,6 +381,7 @@ pub enum HumanItemAction {
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Complete an open item.
     Complete {
         /// Id.
@@ -595,6 +599,7 @@ pub struct HumanItemBatchReceipt {
     pub refused: Vec<HumanItemBatchRefused>,
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a batch as `{id,size}`, the id an engine-assigned string and size a number; the payload decoder refuses a blank id or a zero size, so neither is read back from a journal.
 /// The batch an answered event belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -606,6 +611,7 @@ pub struct HumanItemEventBatch {
     #[schemars(range(min = 1))]
     pub size: u64,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Who took a reopen or note, which neither a resolver nor a null resolution says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

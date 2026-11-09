@@ -508,6 +508,23 @@ fn carry_group(
             })?;
         }
     }
+    // Only a writer that died during its one write leaves a batch short: its receipt was
+    // never given, so what it did write is carried and the rest is the retried batch's.
+    if let Some(batch) = group[0].payload.batch.as_ref() {
+        let whole = group
+            .iter()
+            .all(|r| r.payload.batch.as_ref() == Some(batch))
+            && batch.size == group.len() as u64;
+        if !whole {
+            eprintln!(
+                "onepipeline: batch {} declares {} answers and the journal holds {}; those \
+                 are carried as they are",
+                batch.id,
+                batch.size,
+                group.len()
+            );
+        }
+    }
     for record in group {
         delivered.through += record.line.len() as u64 + 1;
         delivered.last = digest(record.line);

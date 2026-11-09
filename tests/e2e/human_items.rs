@@ -3205,8 +3205,6 @@ fn a_host_hold_reaches_every_live_run_and_one_refusing_holds_no_other_back() {
     assert_eq!(item_surfaces(&world, "taking"), taken);
     assert!(item_surfaces(&world, "finished").is_empty());
 }
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-
 /// A question offering `choices` as `session`, tied by `run` and `block`; answers its id.
 fn raise_question(
     world: &World,
@@ -3655,3 +3653,4 @@ fn a_batch_is_one_surface_per_tied_run_and_a_single_answer_wakes_a_run() {
     world.release("first-step.go");
     world.release("second-step.go");
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

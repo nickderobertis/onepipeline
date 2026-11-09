@@ -888,6 +888,49 @@ fn an_explicit_false_host_selector_selects_every_non_host_item() {
     refuse(world.run(&["list", "--host=maybe"]), "error:");
 }
 
+/// `answer-batch --sample` records what it accepts and reports what it refuses, and a
+/// batch accepting nothing has no id and exits nonzero with the receipt printed.
+#[test]
+fn a_sample_batch_answers_what_it_can_and_reports_the_rest() {
+    let world = World::new();
+    let input = world.0.join("batch.json");
+    let answer = |body: Value| {
+        std::fs::write(&input, body.to_string()).unwrap();
+        world.run(&["answer-batch", "--input", input.to_str().unwrap()])
+    };
+    let answered = answer(json!({"answers": [
+        {"id": "item-2", "choice": "gradual", "text": "Start Monday."},
+        {"id": "item-4", "text": "Yes."},
+        {"id": "item-1", "text": "A task."},
+    ]}));
+    assert!(answered.status.success());
+    let receipt: Value = serde_json::from_slice(&answered.stdout).unwrap();
+    assert_eq!(
+        receipt["answered"].as_array().unwrap().len(),
+        2,
+        "{receipt}"
+    );
+    assert_eq!(receipt["refused"][0]["id"], "item-1");
+    assert_eq!(receipt["batch"], "sample-batch");
+    assert_eq!(
+        world.state()["items"][1]["item"]["resolution"]["choice"],
+        "gradual"
+    );
+    let before = std::fs::read(world.sample()).unwrap();
+    let refused = answer(json!({"answers": [{"id": "item-2", "choice": "gradual"}]}));
+    assert!(!refused.status.success());
+    let receipt: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(receipt.get("batch").is_none(), "{receipt}");
+    assert_eq!(receipt["answered"], json!([]));
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+    let malformed = answer(json!({"answers": [
+        {"id": "item-3", "text": "a"},
+        {"id": "item-3", "text": "b"},
+    ]}));
+    assert!(!malformed.status.success());
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+}
+
 #[test]
 fn a_stale_design_replacement_never_duplicates_an_id_or_dedup_key() {
     // An id already held: the replacement takes the next free suffix.

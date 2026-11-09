@@ -1783,6 +1783,177 @@ cp "{runs}/human-items/events.ndjson" "{out}/journal-after"
     );
 }
 
+/// A batch on a full disk, for real: the reserve is released for the one write that
+/// holds the whole batch, its answers keep consecutive sequences and the host item
+/// follows them, and a batch no space can hold is refused with nothing written.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_disk_takes_a_batch_whole_from_its_reserve_or_refuses_all_of_it() {
+    use onepipeline::human_items::item_id_for;
+    let world = Live::enabled();
+    let big = "x".repeat(16 * 1024);
+    let raised: Vec<String> = ["one", "two", "three"]
+        .iter()
+        .map(|key| {
+            world.input(
+                key,
+                &item(key, "question", "low", "s-a", json!({"scope": "nothing"})),
+            )
+        })
+        .collect();
+    let batch = |keys: &[&str]| -> Value {
+        json!({"answers": keys
+            .iter()
+            .map(|key| json!({"id": item_id_for(key), "text": format!("{key}: {big}")}))
+            .collect::<Vec<_>>()})
+    };
+    let first = world.input("batch-first", &batch(&["one", "two"]));
+    let second = world.input("batch-second", &batch(&["three"]));
+    let out = world.root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let runs = world.runs();
+    let script = format!(
+        r#"set -u
+mount -t tmpfs -o size=2m tmpfs "{runs}" || exit 90
+cd "{repo}"
+run() {{ name=$1; shift; "{bin}" human-items "$@" > "{out}/$name.out" 2> "{out}/$name.err"; echo "$name=$?" >> "{out}/codes"; }}
+run raise1 raise --input "{one}"
+run raise2 raise --input "{two}"
+run raise3 raise --input "{three}"
+dd if=/dev/zero of="{runs}/filler" bs=1k 2>/dev/null
+run first answer-batch --input "{first}"
+cp "{runs}/human-items/events.ndjson" "{out}/journal-after-first"
+dd if=/dev/zero of="{runs}/filler2" bs=1k 2>/dev/null
+run second answer-batch --input "{second}"
+cp "{runs}/human-items/events.ndjson" "{out}/journal-after-second"
+"#,
+        runs = runs.display(),
+        repo = world.repo().display(),
+        bin = BIN,
+        out = out.display(),
+        one = raised[0],
+        two = raised[1],
+        three = raised[2],
+    );
+    let status = Command::new("unshare")
+        .args(["-rm", "sh", "-c", &script])
+        .env("ONEPIPELINE_RUNS_DIR", &runs)
+        .env("XDG_CONFIG_HOME", world.root.join("xdg"))
+        .env("USER", "operator")
+        .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    let read = |name: &str| std::fs::read_to_string(out.join(name)).unwrap_or_default();
+    let codes = read("codes");
+    assert!(
+        codes.contains("first=0\n"),
+        "{codes}\n{}",
+        read("first.err")
+    );
+    assert!(!codes.contains("second=0\n"), "{codes}");
+    assert!(read("second.err").contains("could not record this durably"));
+    assert!(read("second.out").is_empty(), "{}", read("second.out"));
+    let events: Vec<Value> = read("journal-after-first")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "human-item-raised",
+            "human-item-raised",
+            "human-item-raised",
+            "human-item-answered",
+            "human-item-answered",
+            "human-item-raised",
+        ],
+        "the host item follows the whole batch"
+    );
+    assert_eq!(events[3]["seq"].as_u64().unwrap() + 1, events[4]["seq"]);
+    assert_eq!(events[3]["payload"]["batch"], events[4]["payload"]["batch"]);
+    assert_eq!(events[5]["payload"]["item"]["block"]["scope"], "host");
+    assert_eq!(read("journal-after-second"), read("journal-after-first"));
+}
+
+/// A batch's records are carried past a torn tail and a garbled record alike: what its
+/// writer wrote is delivered whole, and a record no writer made still stops delivery.
+#[test]
+fn a_batch_cut_short_or_followed_by_a_broken_record_loses_nothing_and_is_never_doubled() {
+    let world = Live::enabled();
+    let ids: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|key| {
+            world.raise(&item(
+                key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    assert_eq!(world.watch("s").len(), 3);
+    let input = world.input(
+        "batch",
+        &json!({"answers": ids.iter().map(|id| json!({"id": id, "text": "Yes."})).collect::<Vec<_>>()}),
+    );
+    let receipt = world.json(None, &["answer-batch", "--input", &input]);
+    assert_eq!(receipt["answered"].as_array().unwrap().len(), 3);
+    assert_eq!(world.watch("s").len(), 3);
+    // Delivery forgotten and the last record cut: the store a writer leaves dying inside
+    // its one write. What it wrote is carried, said to be short, and printed by nobody twice.
+    let journal = world.store().join("events.ndjson");
+    let whole = std::fs::read_to_string(&journal).unwrap();
+    let kept: Vec<&str> = whole.lines().collect();
+    std::fs::write(&journal, format!("{}\n", kept[..kept.len() - 1].join("\n"))).unwrap();
+    let delivered = find_delivered(&world.store().join("bus")).expect("delivery has run");
+    std::fs::remove_file(delivered).unwrap();
+    let again = world.run(Some("s"), &["watch"]);
+    assert!(
+        String::from_utf8_lossy(&again.stderr)
+            .contains("declares 3 answers and the journal holds 2"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(again.stdout.is_empty(), "already watched");
+
+    // Garbled after a new batch: the batch reaches its owner's queue before the refusal,
+    // and with the journal repaired the watch prints it once.
+    let more = world.raise(&item(
+        "d",
+        "question",
+        "low",
+        "s2",
+        json!({"scope": "nothing"}),
+    ));
+    assert_eq!(world.watch("s2").len(), 1);
+    let two = world.input("two", &json!({"answers": [{"id": more, "text": "Fine."}]}));
+    world.ok(None, &["answer-batch", "--input", &two]);
+    let bytes = std::fs::read_to_string(&journal).unwrap();
+    std::fs::write(&journal, format!("{bytes}not a record\n")).unwrap();
+    let failed = world.run(Some("s2"), &["watch"]);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("not an item event"));
+    std::fs::write(&journal, &bytes).unwrap();
+    let delivered = world.watch("s2");
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(delivered[0]["kind"], "human-item-answered");
+    assert!(world.watch("s2").is_empty());
+}
+
+fn find_delivered(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            find_delivered(&path)
+        } else {
+            (entry.file_name() == "delivered.json").then_some(path)
+        }
+    })
+}
+
 /// An authority that cannot be started, or answers anything but the version it
 /// holds for the stored board copy, leaves the task open and records nothing.
 #[test]
