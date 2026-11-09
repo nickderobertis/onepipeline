@@ -25,9 +25,21 @@
     },
     "test": {
       "command": "node --test tests/coverage_keys/*.test.mjs",
-      "//": "Every coverage tier's read set against what real Nx hashes for it. Reads the tiers' sources, so it is keyed on the workspace.",
+      "//": "Every coverage tier's read set against what real Nx hashes for it, so it is keyed on what those tiers' sources and inputs can name.",
       "inputs": [
-        "wholeWorkspace",
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/src/**/*",
+        "{workspaceRoot}/crates/**/*",
+        "{workspaceRoot}/tests/**/*",
+        "{workspaceRoot}/scripts/**/*",
+        "{workspaceRoot}/docs/**/*",
+        "{workspaceRoot}/nx.json",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/Cargo.lock",
+        "{workspaceRoot}/.github/ci-tool-versions.json",
+        "{workspaceRoot}/CHANGELOG.md",
         {
           "runtime": "node -p process.platform"
         }
