@@ -902,6 +902,40 @@ no `undo`. A dismissed design review reopens, since dismissal ran no script, and
 does a plain completed item with no approval.
 Mutation receipts are `{item:HumanItemView,event_id:string}`.
 
+**Choices and answers.** A question's `choices` are `HumanItemChoice
+{id,title,description}`, all strings: `id` matches `^[a-z0-9][a-z0-9-]{0,63}$`, `title`
+is one nonblank line of at most 80 characters and `description` nonblank markdown.
+`HumanItemInput` and `HumanItem` carry at most 6, ids unique within the item, default
+empty and omitted from the serialized record when empty; a task carrying any is
+refused, and raising an open item's dedup key again with different choices updates that
+item as its title, body and priority are. `HumanItemResolution.choice` is the picked
+choice's `id`, omitted when null, and only an answered question carries one. An answered
+question holds at least one of `choice` and nonblank `text`, and may hold both.
+`HumanItemAction` `answer {id,choice?,text?,actor,on_behalf_of}` names a choice, the
+person's own words, or both; an answer naming neither, a blank text or a choice the item
+does not offer is refused as Conflict naming why, and a question with no choices takes
+text only. `list`, `report` and `show` print an answered question's choice by its title
+and id, and its text.
+
+**Batches.** `HumanItemAction` `answer-batch
+{answers:[{id,choice?,text?}],actor,on_behalf_of}` carries 1 to 50 entries with distinct
+ids, each held to the rules of a single answer; the store applies it through
+`HumanItems::apply_batch`, because its answer is a batch receipt. A malformed batch
+(empty, more than 50, a repeated id) is refused whole as Conflict and nothing is written.
+Otherwise each entry is judged on its own: the accepted ones are appended as
+human-item-answered events under one hold of the journal's append lock, with consecutive
+`seq`s, and each refused one is reported without being written. The receipt is
+`HumanItemBatchReceipt {batch,answered:[HumanItemReceipt],refused:[{id,refusal:HumanItemRefusal}]}`,
+in the batch's order; `batch` is an opaque id the engine assigns, null and absent when
+nothing was accepted. An identical repeat of an entry already answered answers its
+recorded receipt, as a single answer does, and writes nothing. `answer-batch --input FILE`
+reads `{answers:[...]}`, prints the receipt and exits nonzero only when every entry was
+refused or the batch was malformed.
+
+An older engine reading a journal that holds a record with `choices`, `choice` or `batch` refuses it, as the store's rules state for any record it cannot read.
+
+Every question a manager asks a person is a question item, offering choices where a few answers cover it, and a person may always answer in their own words. An asker that must block on its harness's own question tool, because it can do nothing useful until the answer arrives, raises the question as an item first and records the answer that tool returns on that item, acting for the person, so the item store stays the record of every question.
+
 CLI (sample switch may precede or follow the subcommand; without it every verb
 acts on the live store):
 
@@ -909,7 +943,8 @@ acts on the live store):
 onepipeline human-items --sample FILE raise --input FILE
 onepipeline human-items --sample FILE list [--kind task|question] [--blocking yes|no] [--priority Critical|High|Medium|Low] [--state open|answered|completed|dismissed] [--session ID] [--run ID] [--plan ID] [--host] [--json]
 onepipeline human-items --sample FILE show ID [--json]
-onepipeline human-items --sample FILE answer ID --text TEXT
+onepipeline human-items --sample FILE answer ID [--choice CHOICE_ID] [--text TEXT]
+onepipeline human-items --sample FILE answer-batch --input FILE
 onepipeline human-items --sample FILE complete ID
 onepipeline human-items --sample FILE dismiss ID [--reason TEXT]
 onepipeline human-items --sample FILE reopen ID
@@ -990,16 +1025,18 @@ ended. Ending a session creates no display state. No run takes the id
 **Delivery.** Each journal record is carried, as the same envelope, onto one
 `onemessagebus` queue per owning session; `onepipeline human-items watch
 [--session ID] [--timeout SECONDS]` prints what that session has not printed and
-commits its cursor only after printing, exiting 5 when nothing was pending. A
-record not yet carried is carried by the next writer or watch, so a resolution
+commits its cursor only after printing, exiting 5 when nothing was pending. Every
+event of one batch is printed in the same invocation, in `seq` order, because a carry
+moves a batch's records onto the owner queue together: a watch that finds one finds
+all, and never returns having printed part of one. A record not yet carried is carried by the next writer or watch, so a resolution
 made while its owner is disconnected reaches the owner's next watch exactly once.
 
 `owner.session` is refused blank at raise, so an item "with no owner" is one whose
 owning session has no watcher: its event stays queued for that session, and reaches a
 manager through a tied run as below.
 
-**Reaching a manager watching a run.** Each human-item-completed, -dismissed, -reopened
-and -noted event not written by actor `engine` is also carried as a non-blocking planner
+**Reaching a manager watching a run.** Each human-item-answered, -completed, -dismissed,
+-reopened and -noted event not written by actor `engine` is also carried as a non-blocking planner
 surface of kind `human-item`, naming the item's id and title, the action, the actor and
 any text or reason, onto the channel of every run that has not ended and is tied to it:
 `owner.run`; `block.work.run`; for `block.plan`, the runs of that plan; for `block: host`,
@@ -1008,21 +1045,27 @@ refuses that text the surface names only the id, the action and the actor. Each 
 carried to each run once, across retried carries and an adopted driver, by the same
 carry that fills the owner queues, so the writer may be a browser server or a CLI with
 no driver of its own; a run's driver also carries what it finds its journal holds and
-delivery has not reached. A channel that refuses its surface is said on standard error,
+delivery has not reached. A batch is one surface per tied run, listing every answer of
+that batch whose item is tied to that run, each naming the item's id and title, its
+choice's title and id, and its text; its `source` is the batch id, and where the run's
+publication boundary refuses that text the surface names only the ids, the action and
+the actor. A channel that refuses its surface is said on standard error,
 keeps it owed for the next carry, and holds nobody else's events back.
 
 Event kinds: human-item-raised, human-item-answered, human-item-completed,
 human-item-dismissed, human-item-auto-resolved, human-item-reopened, human-item-noted.
 Each generic onemessagebus
 Envelope kind/payload transports HumanItemEventPayload
-`{schema_version:1,item_id,owner:{session,run,plan},action,item,resolution,by?}`;
+`{schema_version:1,item_id,owner:{session,run,plan},action,item,resolution,by?,batch?}`;
 action is HumanItemEventAction, a closed string enum with those same seven event
 kind spellings; unknown action ids are refused. The action matches the item's
 state, and item_id, owner and resolution match their copies in the item;
 no new bus domain types. Engine resolutions are human-item-auto-resolved. `by` is
 HumanItemEventBy `{actor,on_behalf_of}`, set only on human-item-reopened and
 human-item-noted and absent from every other kind's serialized record, because neither
-`resolution.actor` nor a null resolution says who took that action.
+`resolution.actor` nor a null resolution says who took that action. `batch` is
+HumanItemEventBatch `{id,size}`, set on every human-item-answered event of a batch,
+`size` the number of answers it recorded, and absent otherwise.
 
 Text and browser priorities are Critical, High, Medium, Low; Critical serializes
 as urgent. Wire priorities remain urgent/high/medium/low; none and P1/P2/P3 are
@@ -1137,6 +1180,18 @@ all work on this host”; detail enumerates every blocked step.
         "kind": "question",
         "title": "Which rollout should we use?",
         "body": "Choose the gradual or immediate rollout.",
+        "choices": [
+          {
+            "id": "gradual",
+            "title": "Gradual rollout",
+            "description": "Ten percent first, then **everyone**."
+          },
+          {
+            "id": "all-at-once",
+            "title": "All at once",
+            "description": "Everyone at the same moment."
+          }
+        ],
         "priority": "high",
         "owner": {
           "session": "manager",

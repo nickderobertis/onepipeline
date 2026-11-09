@@ -748,6 +748,7 @@ fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
     ] {
         input.as_object_mut().unwrap().remove(field);
     }
+    input.as_object_mut().unwrap().remove("choices");
     input["kind"] = json!("task");
     input["dedup_key"] = json!("new-work-hold");
     input["title"] = json!("Unblock the build step");

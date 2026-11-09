@@ -380,6 +380,7 @@ pub fn expand(
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),
+                choices: Vec::new(),
                 priority: Priority::Low,
                 owner: context.owner.clone(),
                 block: HumanItemBlock::Nothing,
@@ -393,6 +394,7 @@ pub fn expand(
         kind: hook.kind,
         title,
         body,
+        choices: Vec::new(),
         priority,
         owner: context.owner.clone(),
         block,

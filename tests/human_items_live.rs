@@ -185,12 +185,17 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             "q",
             &item("q", "question", "low", "s", json!({"scope":"nothing"})),
         );
+        let batch = world.input(
+            "batch",
+            &json!({"answers": [{"id": "hi-x", "text": "yes"}]}),
+        );
         let driven = [
             vec!["list"],
             vec!["report"],
             vec!["show", "hi-x"],
             vec!["raise", "--input", input.as_str()],
             vec!["answer", "hi-x", "--text", "yes"],
+            vec!["answer-batch", "--input", batch.as_str()],
             vec!["complete", "hi-x"],
             vec!["dismiss", "hi-x"],
             vec!["reopen", "hi-x"],
@@ -378,6 +383,16 @@ fn actions_refuse_wrong_kinds_conflicts_and_blank_answers_and_repeat_idempotentl
         None,
         &["answer", &question, "--text", "   "],
         "answer text must not be blank",
+    );
+    world.refused(
+        None,
+        &["answer", &question],
+        "an answer names a choice, text, or both",
+    );
+    world.refused(
+        None,
+        &["answer", &question, "--choice", "a"],
+        "offers no choices",
     );
     world.refused(
         None,

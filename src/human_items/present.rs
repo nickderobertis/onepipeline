@@ -145,8 +145,28 @@ pub(crate) fn description(body: &str) -> String {
     format!("{}…", kept.trim_end())
 }
 
+/// An answered question's answer: its choice by title and id, and its text.
+pub(crate) fn answer(item: &HumanItem) -> Option<String> {
+    let resolution = item
+        .resolution
+        .as_ref()
+        .filter(|_| item.state == HumanItemState::Answered)?;
+    let choice = resolution.choice.as_deref().map(|id| {
+        item.choices.iter().find(|c| c.id == id).map_or_else(
+            || id.to_owned(),
+            |choice| format!("{} ({id})", choice.title),
+        )
+    });
+    match (choice, resolution.text.as_deref()) {
+        (Some(choice), Some(text)) => Some(format!("{choice}: {text}")),
+        (Some(choice), None) => Some(choice),
+        (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
+}
+
 /// One item as a compact entry: title and id, then priority, kind, what it
-/// blocks and its source, then a one-line description.
+/// blocks and its source, then a one-line description and any answer.
 pub(crate) fn compact(view: &HumanItemView) -> String {
     let item = &view.item;
     let kind = match item.kind {
@@ -161,8 +181,11 @@ pub(crate) fn compact(view: &HumanItemView) -> String {
         HumanItemState::Open => String::new(),
         state => format!(" · {}", super::live::state_word(state)),
     };
+    let answered = answer(item)
+        .map(|words| format!("  answered: {words}\n"))
+        .unwrap_or_default();
     format!(
-        "- {} ({})\n  {} {kind} · {blocks} · {}{state}\n  {}\n",
+        "- {} ({})\n  {} {kind} · {blocks} · {}{state}\n  {}\n{answered}",
         item.title.trim(),
         item.id,
         priority_label(item.priority),
