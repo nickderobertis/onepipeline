@@ -1079,3 +1079,32 @@ fn a_bus_config_declaring_hooks_is_kept_and_read_by_status_and_adopt() {
     });
     world.run(&["adopt", "hookrecorded"]).settled();
 }
+
+/// A surface a hook drops is not queued: the verb says so, the planner reads nothing
+/// of it, and the journal records the drop and the hook, as a question's is.
+#[test]
+fn a_surface_a_hook_drops_is_not_queued_and_the_journal_records_the_hook() {
+    let world = World::new("hook-surface-drop");
+    hooked_run(&world, "hooksurfacedrop", &[("surfaces", &["drop"], "")]);
+    let answered = world.run(&[
+        "surface",
+        "hooksurfacedrop",
+        "--kind",
+        "finding",
+        "--message",
+        "never read",
+    ]);
+    answered.exited(0).out_has("\"dropped\"");
+    assert!(surfaces_read(&world, "hooksurfacedrop").is_empty());
+    let recorded = world.events_of("hooksurfacedrop", "planner-surface-dropped");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(
+        recorded[0]["payload"]["message"], "never read",
+        "{recorded:?}"
+    );
+    assert_eq!(recorded[0]["payload"]["hook"]["index"], 0, "{recorded:?}");
+    assert!(world
+        .events_of("hooksurfacedrop", "planner-surface-queued")
+        .is_empty());
+    world.release("slow.go");
+}
