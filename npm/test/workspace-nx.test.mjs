@@ -377,8 +377,7 @@ describe("the offline tier split", () => {
       assert.ok(
         outputs.some(
           (output) =>
-            output.startsWith("{workspaceRoot}/target/coverage-units/") &&
-            output.endsWith(".lcov"),
+            output.startsWith("{workspaceRoot}/target/coverage-units/") && output.endsWith(".lcov"),
         ),
         `${id} declares none of its profiles as outputs: ${JSON.stringify(outputs)}`,
       );
@@ -1009,9 +1008,7 @@ esac
       };
     };
     const tiersIn = (merged) =>
-      merged
-        .map((report) => report.match(/^(onepipeline-[a-z0-9_-]+)\.lcov$/)?.[1])
-        .sort();
+      merged.map((report) => report.match(/^(onepipeline-[a-z0-9_-]+)\.lcov$/)?.[1]).sort();
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
