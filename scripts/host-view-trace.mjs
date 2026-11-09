@@ -12,8 +12,26 @@ import { basename, dirname, resolve } from "node:path";
 const JOURNAL = "events.jsonl";
 // `openat`'s directory, as `-y` annotates it, and its quoted path.
 const OPENAT = /^openat\((?:AT_FDCWD|\d+)<([^>]*)>, "((?:[^"\\]|\\.)*)"/;
-// A read's descriptor, as `-y` annotates it with the file it names.
+// A read's descriptor, as `-y` annotates it with the file it names: the first argument
+// of every call that moves bytes out of a file but `sendfile`, whose source is its second.
 const READ_FD = /^\w+\(\d+<([^>]*)>/;
+const SENDFILE_FD = /^sendfile\(\d+<[^>]*>, \d+<([^>]*)>/;
+// A mapping's descriptor, its fifth argument; an anonymous mapping's is -1 and has none.
+const MMAP_FD = /^mmap\([^,]*, [^,]*, [^,]*, [^,]*, \d+<([^>]*)>/;
+// Every call that hands a process a file's bytes and returns how many. `read` is not the
+// only one a reader reaches for: uutils `cat`, the `cat` of Ubuntu 26.04, sends a file to
+// a pipe with `splice` and never calls `read`. A way of reading left off this list counts
+// as a journal opened and no byte read of it.
+const COUNTED_READS = [
+  "read",
+  "pread64",
+  "readv",
+  "preadv",
+  "preadv2",
+  "splice",
+  "sendfile",
+  "copy_file_range",
+];
 
 /**
  * The run whose journal `path` names, relative to `dir` where it is not absolute,
@@ -61,7 +79,7 @@ export function journalOpens(command, args, into, options = {}) {
       "-qq",
       "-y",
       "-e",
-      "trace=openat,read,pread64",
+      `trace=openat,mmap,${COUNTED_READS.join(",")}`,
       "-e",
       "signal=none",
       "-o",
@@ -109,10 +127,14 @@ export function journalOpens(command, args, into, options = {}) {
       if (head === undefined) throw new Error(`a call resumed that never began: ${raw}`);
       body = `${head}${resumed[2]}`;
     }
-    const isOpen = body.startsWith("openat(");
-    const isRead = body.startsWith("read(") || body.startsWith("pread64(");
-    if (!isOpen && !isRead) continue;
-    const named = body.match(isOpen ? OPENAT : READ_FD);
+    const call = body.match(/^(\w+)\(/)?.[1];
+    const isOpen = call === "openat";
+    const isMap = call === "mmap";
+    const isRead = COUNTED_READS.includes(call);
+    if (!isOpen && !isMap && !isRead) continue;
+    const named = body.match(
+      isOpen ? OPENAT : isMap ? MMAP_FD : call === "sendfile" ? SENDFILE_FD : READ_FD,
+    );
     if (!named) {
       if (body.includes(JOURNAL))
         throw new Error(`a traced call names a journal unreadably: ${raw}`);
@@ -120,6 +142,8 @@ export function journalOpens(command, args, into, options = {}) {
     }
     const run = isOpen ? runOf(named[2], named[1]) : runOf(named[1]);
     if (run === null) continue;
+    // Bytes read through a mapping make no call, so no count exists: unknown, never zero.
+    if (isMap) throw new Error(`${run}'s journal was mapped, so the bytes read cannot be counted`);
     const result = body.match(RESULT);
     if (!result) throw new Error(`a traced call on ${run}'s journal has no result: ${raw}`);
     const count = Number(result[1]);

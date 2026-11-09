@@ -252,7 +252,7 @@ function detail(held) {
     `breakdown: ${breakdown(steady.breakdown)}`,
     "every ended run's journal unreadable to the reads; that none is opened is held under strace by tests/e2e/host_view.rs",
     `cold read (every ended run's derived documents absent): ${fixed(held.cold.read_ms)} ms, ` +
-      `${held.cold.breakdown.cold_journal_bytes ?? 0} journal bytes folded, ${held.cold.breakdown.read_bytes ?? 0} bytes read`,
+      `${held.cold.breakdown.cold_journal_bytes ?? 0} journal bytes folded, ${held.cold.breakdown.read_bytes === null ? "bytes read not counted by this kernel" : `${held.cold.breakdown.read_bytes} bytes read`}`,
   ];
   const increments = (held.scaling.increments ?? [])
     .map(

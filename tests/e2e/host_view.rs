@@ -1221,6 +1221,16 @@ fn phases_of(phases: &Path, invocation: &Invocation) -> Option<Value> {
     Some(line)
 }
 
+/// Whether a phase's bytes are a count where this kernel keeps per-task I/O accounting
+/// and `null` where it does not: a host with no counter never reports zero bytes read.
+fn read_bytes_as_this_kernel_counts_them(bytes: &Value) -> bool {
+    if Path::new("/proc/thread-self/io").exists() {
+        bytes.is_u64()
+    } else {
+        bytes.is_null()
+    }
+}
+
 /// Fail a read whose phase line is missing, or lacks a phase or the quantity it
 /// was expected to record.
 fn recorded(phases: &Option<Value>, names: &[&str], quantity: &str, label: &str) {
@@ -1247,7 +1257,8 @@ fn recorded(phases: &Option<Value>, names: &[&str], quantity: &str, label: &str)
             );
         }
         assert!(
-            phase["read_bytes"].is_u64() && phase["count"].as_u64() >= Some(1),
+            read_bytes_as_this_kernel_counts_them(&phase["read_bytes"])
+                && phase["count"].as_u64() >= Some(1),
             "{label}: `{name}`: {phase}"
         );
     }
@@ -1255,14 +1266,16 @@ fn recorded(phases: &Option<Value>, names: &[&str], quantity: &str, label: &str)
         line["cpu_ms"].as_f64().is_some_and(|ms| ms > 0.0),
         "{label}: {line}"
     );
-    // A fold reads at least the journal bytes it counts.
+    // A fold reads at least the journal bytes it counts, where the kernel counts them.
     let folded = if quantity == "live-journal-bytes" {
         "live-fold"
     } else {
         "cold-fold"
     };
     assert!(
-        line["phases"][folded]["read_bytes"].as_u64() >= line["quantities"][quantity].as_u64(),
+        line["phases"][folded]["read_bytes"].is_null()
+            || line["phases"][folded]["read_bytes"].as_u64()
+                >= line["quantities"][quantity].as_u64(),
         "{label}: `{folded}` read fewer bytes than the journals it folded: {line}"
     );
     assert!(

@@ -55,6 +55,7 @@ pub mod executor;
 pub mod filter;
 /// Human attention contract.
 pub mod human_items;
+pub mod journal;
 pub mod maintenance;
 pub mod note;
 pub mod payload;
@@ -100,7 +101,7 @@ mod home;
 mod hooks;
 mod hostphases;
 mod hostview;
-mod journal;
+mod journal_selected;
 mod labels;
 mod land;
 mod ledger;

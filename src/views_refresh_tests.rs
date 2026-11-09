@@ -1041,3 +1041,473 @@ fn refresh_rereads_dependency_edits_within_the_same_upstream_journal() {
     );
     same_as_open(&view);
 }
+
+/// The answers a first screen is drawn from, each of which a selective view must give
+/// exactly as [`RunView::open`] does.
+fn same_answers(view: &RunView, fresh: &RunView) {
+    assert_eq!(view.state.statuses(), fresh.state.statuses(), "statuses");
+    assert_eq!(
+        reading(view),
+        reading(fresh),
+        "reasons, awaits and outcomes"
+    );
+    assert_eq!(view.summary(), fresh.summary(), "summary");
+    let last_seq = |view: &RunView| view.events.iter().map(|event| event.seq).max();
+    assert_eq!(last_seq(view), last_seq(fresh), "last_seq");
+    assert_eq!(view.refresh.result, fresh.refresh.result, "result");
+    assert_eq!(
+        view.state.last_write_at, fresh.state.last_write_at,
+        "the run's span"
+    );
+    assert_eq!(
+        document(&view.state.landings),
+        document(&fresh.state.landings),
+        "landings"
+    );
+}
+
+fn over_first_screen(paths: &RunPaths) -> RunView {
+    let selected = crate::journal::read_selected(
+        &paths.journal(),
+        &crate::journal::Selection::FirstScreen { node: None },
+    );
+    RunView::over_selected(paths, selected.events).expect("a selective view opens")
+}
+
+/// A node of a selective view's plan, depending on `deps`.
+fn node(id: &str, deps: &[&str]) -> crate::plan::Node {
+    crate::plan::Node {
+        id: id.into(),
+        persona: Some("engineer".into()),
+        task: Some("## What\ndo it".into()),
+        deps: deps.iter().map(|dep| (*dep).to_string()).collect(),
+        ..crate::plan::Node::default()
+    }
+}
+
+/// A relayed record of another stream, stamped `at` milliseconds into a day long past
+/// or, at `0`, now.
+fn relayed(stream: &str, seq: u64, kind: &str, node: Option<&str>, at: u64) -> Envelope {
+    serde_json::from_value(json!({
+        "v": 1,
+        "ts": if at == 0 { sys::now_rfc3339() } else { format!("2020-01-01T00:{:02}:{:02}.{:03}Z", at / 60_000, (at / 1000) % 60, at % 1000) },
+        "stream": stream,
+        "seq": seq,
+        "source": "agentgraph",
+        "kind": kind,
+        "labels": {"run_id": "demo", "node": node},
+        "payload": {"member": "worker", "persona": "engineer"},
+    }))
+    .expect("a relayed record")
+}
+
+fn settled_with(run: &mut Run, id: &str, fields: &[(&str, Value)]) {
+    run.writer
+        .emit(
+            PipelineKind::NodeSettled,
+            journal::labels("demo", Some(id)),
+            journal::payload(fields),
+        )
+        .expect("a settlement");
+}
+
+/// Settled, unsettled and gated nodes, over a journal whose first and last records,
+/// and each stream's, are heartbeat and activity records.
+#[test]
+fn a_view_over_first_screen_records_answers_as_a_complete_open_does_and_refresh_keeps_it_so() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![
+        node("landed", &[]),
+        node("unlanded", &[]),
+        node("failed", &[]),
+        node("after-failed", &["failed"]),
+        node("awaiting", &[]),
+        node("gated", &["run:never-launched#build"]),
+        node("running", &[]),
+    ];
+    let mut run = Run::new("selected", plan);
+    // In front of the run's first record of its own and past its last, on streams of
+    // their own: the span rests on what a first screen is told to keep only as ends.
+    run.writer
+        .relay(&relayed("sibling-a", 0, "member-heartbeat", None, 1))
+        .expect("relay");
+    for seq in 1..40 {
+        let kind = if seq % 2 == 0 {
+            "member-heartbeat"
+        } else {
+            "turn-activity"
+        };
+        run.writer
+            .relay(&relayed("sibling-a", seq, kind, Some("running"), seq * 900))
+            .expect("relay");
+        run.writer
+            .relay(&relayed("sibling-b", seq, kind, Some("landed"), seq * 1000))
+            .expect("relay");
+    }
+    settled_with(
+        &mut run,
+        "landed",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    settled_with(
+        &mut run,
+        "unlanded",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete-but-unlanded")),
+            ("landing", json!("unlanded")),
+        ],
+    );
+    settled_with(
+        &mut run,
+        "failed",
+        &[
+            ("status", json!("failed")),
+            ("outcome", json!("judge-rejected")),
+            ("detail", json!("the judge said no")),
+        ],
+    );
+    settled_with(
+        &mut run,
+        "awaiting",
+        &[
+            ("status", json!("complete-but-held")),
+            (
+                "awaiting",
+                json!([{"producer": "github.com/owner/engine", "target": "crate"}]),
+            ),
+        ],
+    );
+    run.writer
+        .emit(
+            PipelineKind::NodeDispatched,
+            journal::labels("demo", Some("running")),
+            journal::payload(&[]),
+        )
+        .expect("started");
+    run.writer
+        .relay(&relayed(
+            "sibling-c",
+            3,
+            "member-heartbeat",
+            Some("running"),
+            0,
+        ))
+        .expect("relay");
+    ledger::write_json(&run.paths.result(), &json!({"outcome": "unfinished"})).expect("a result");
+
+    let fresh = run.open();
+    let nodes = reading(&fresh);
+    assert_eq!(
+        document(&nodes)["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .filter(|node| node.get("awaiting").is_some())
+            .count(),
+        1,
+        "the fixture holds an awaiting node: {nodes:?}"
+    );
+    let statuses = fresh.state.statuses();
+    assert_eq!(statuses["failed"], NodeStatus::Failed);
+    assert_eq!(statuses["after-failed"], NodeStatus::Skipped);
+    assert_eq!(statuses["gated"], NodeStatus::Blocked);
+
+    let selected = crate::journal::read_selected(
+        &run.paths.journal(),
+        &crate::journal::Selection::FirstScreen { node: None },
+    );
+    assert!(
+        selected.events.len() < fresh.events.len(),
+        "a first screen keeps fewer records than the store holds"
+    );
+    let mut view = RunView::over_selected(&run.paths, selected.events).expect("opens");
+    same_answers(&view, &fresh);
+
+    // Nothing appended: nothing to read.
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+
+    // Appended past the read: folded, and only that, and equal to a fresh open.
+    let before = view.events.len();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    settled_with(
+        &mut run,
+        "gated",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    run.writer
+        .relay(&relayed(
+            "sibling-d",
+            0,
+            "member-heartbeat",
+            Some("running"),
+            0,
+        ))
+        .expect("relay");
+    crate::readprobe::start();
+    assert_eq!(
+        view.refresh().expect("refresh"),
+        Refreshed::Appended { first: before }
+    );
+    let observed = crate::readprobe::finish();
+    assert_eq!(observed.folded.len(), 2, "folded only the appended records");
+    same_answers(&view, &run.open());
+}
+
+/// Records that arrive between the read that chose a view's records and the view are
+/// neither lost nor counted twice, and nor is a record a writer has yet to finish.
+#[test]
+fn what_arrives_between_the_selective_read_and_the_view_is_folded_by_the_first_refresh() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![node("first", &[]), node("second", &[])];
+    let mut run = Run::new("selected-race", plan);
+    settled_with(
+        &mut run,
+        "first",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    let selected = crate::journal::read_selected(
+        &run.paths.journal(),
+        &crate::journal::Selection::FirstScreen { node: None },
+    );
+    settled_with(
+        &mut run,
+        "second",
+        &[
+            ("status", json!("failed")),
+            ("outcome", json!("judge-rejected")),
+        ],
+    );
+    let mut view = RunView::over_selected(&run.paths, selected.events).expect("opens");
+    assert_eq!(view.state.statuses()["second"], NodeStatus::Ready);
+    assert!(matches!(
+        view.refresh().expect("refresh"),
+        Refreshed::Appended { .. }
+    ));
+    assert_eq!(view.state.statuses()["second"], NodeStatus::Failed);
+    same_answers(&view, &run.open());
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+}
+
+/// The premise `resolve_open` rests on: a consumer that has settled no longer reads its
+/// edge, so its status stands whatever its upstream later does, while one that has not
+/// still reads it and follows it, and both read as a full fold does.
+#[test]
+fn a_settled_consumer_stands_whatever_its_upstream_does_and_an_unsettled_one_follows_it() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![
+        node("settled-consumer", &["run:settled-upstream#build"]),
+        node("failed-consumer", &["run:settled-upstream#build"]),
+        node("waiting-consumer", &["run:open-upstream#build"]),
+        // A recorded gate is re-derived against the graph, so it has not settled.
+        node("gated-consumer", &["run:gating-upstream#build"]),
+        // One edge, one consumer settled and one not: the edge is still waited on.
+        node("settled-beside", &["run:shared-upstream#build"]),
+        node("waiting-beside", &["run:shared-upstream#build"]),
+    ];
+    let mut run = Run::new("selected-edges", plan);
+    let upstream = |name: &str| {
+        let paths = RunPaths::under(&run.root, name);
+        paths.create().expect("an upstream");
+        ledger::write_json(&paths.launch(), &super::tests::launch(0)).expect("launch");
+        paths
+    };
+    let settled_upstream = upstream("settled-upstream");
+    let open_upstream = upstream("open-upstream");
+    let gating_upstream = upstream("gating-upstream");
+    let mut settled_writer = Journal::open(&settled_upstream);
+    let mut open_writer = Journal::open(&open_upstream);
+    let mut gating_writer = Journal::open(&gating_upstream);
+    let done = |writer: &mut Journal, run: &str, status: &str| {
+        writer
+            .emit(
+                PipelineKind::NodeSettled,
+                journal::labels(run, Some("build")),
+                journal::payload(&[("status", json!(status))]),
+            )
+            .expect("an upstream settles");
+    };
+    done(&mut settled_writer, "settled-upstream", "done");
+    settled_with(
+        &mut run,
+        "settled-consumer",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    settled_with(
+        &mut run,
+        "failed-consumer",
+        &[
+            ("status", json!("failed")),
+            ("outcome", json!("judge-rejected")),
+        ],
+    );
+    settled_with(&mut run, "gated-consumer", &[("status", json!("blocked"))]);
+    settled_with(
+        &mut run,
+        "settled-beside",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+
+    let current = RunView::open_current(&run.paths).expect("opens");
+    assert!(
+        !current
+            .state
+            .cross_dag
+            .contains_key("run:settled-upstream#build"),
+        "an edge only settled consumers name is not read: {:?}",
+        current.state.cross_dag
+    );
+    assert!(current
+        .state
+        .cross_dag
+        .contains_key("run:open-upstream#build"));
+    assert!(
+        current
+            .state
+            .cross_dag
+            .contains_key("run:shared-upstream#build"),
+        "an edge one unsettled consumer names is read"
+    );
+    assert!(
+        current
+            .state
+            .cross_dag
+            .contains_key("run:gating-upstream#build"),
+        "a recorded gate is no settlement"
+    );
+    let mut expected = current.state.statuses();
+    assert_eq!(expected["settled-consumer"], NodeStatus::Done);
+    assert_eq!(expected["failed-consumer"], NodeStatus::Failed);
+    assert_eq!(expected["waiting-consumer"], NodeStatus::Blocked);
+    assert_eq!(expected["gated-consumer"], NodeStatus::Blocked);
+    assert_eq!(
+        expected,
+        run.open().state.statuses(),
+        "as a full fold reports"
+    );
+    same_answers(&over_first_screen(&run.paths), &run.open());
+
+    // The upstream moves, then goes wrong, then goes altogether: nothing a settled
+    // consumer reports moves.
+    done(&mut settled_writer, "settled-upstream", "failed");
+    crate::crossdag::resolve_for_refresh(&run.root, &run.open().state.graph);
+    assert_eq!(
+        RunView::open_current(&run.paths)
+            .expect("opens")
+            .state
+            .statuses(),
+        expected
+    );
+    assert_eq!(run.open().state.statuses(), expected);
+    drop(settled_writer);
+    std::fs::remove_dir_all(&settled_upstream.dir).expect("the upstream goes");
+    crate::crossdag::resolve_for_refresh(&run.root, &run.open().state.graph);
+    assert_eq!(
+        RunView::open_current(&run.paths)
+            .expect("opens")
+            .state
+            .statuses(),
+        expected
+    );
+    assert_eq!(over_first_screen(&run.paths).state.statuses(), expected);
+
+    // An unsettled consumer's upstream settles: it is read and followed.
+    let mut held = over_first_screen(&run.paths);
+    assert_eq!(held.refresh().expect("refresh"), Refreshed::Unchanged);
+    done(&mut open_writer, "open-upstream", "done");
+    done(&mut gating_writer, "gating-upstream", "done");
+    crate::crossdag::resolve_for_refresh(&run.root, &run.open().state.graph);
+    expected.insert("waiting-consumer".into(), NodeStatus::Ready);
+    expected.insert("gated-consumer".into(), NodeStatus::Ready);
+    let current = RunView::open_current(&run.paths).expect("opens");
+    assert_eq!(current.state.statuses(), expected);
+    assert_eq!(run.open().state.statuses(), expected);
+    assert_eq!(over_first_screen(&run.paths).state.statuses(), expected);
+    assert_eq!(held.refresh().expect("refresh"), Refreshed::Reread);
+    assert_eq!(held.state.statuses(), expected);
+}
+
+/// A retained selective view meets an edit that opens an edge it never resolved: a new
+/// consumer of another run, and a settled consumer asked to run again. Neither edge has
+/// an answer in the view, so it reads the run again, and reports as a fresh open does.
+#[test]
+fn a_selective_view_reads_again_when_an_edit_opens_an_edge_it_never_resolved() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![node("settled-consumer", &["run:first-upstream#build"])];
+    let mut run = Run::new("selected-opened", plan);
+    settled_with(
+        &mut run,
+        "settled-consumer",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    let mut view = over_first_screen(&run.paths);
+    assert!(view.state.cross_dag.is_empty(), "no consumer waits yet");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+
+    let edit = |operation: Value| {
+        let kind = operation["kind"].clone();
+        journal::payload(&[
+            ("author", json!("planner")),
+            ("operations", json!([operation])),
+            ("operation_kinds", json!([kind])),
+        ])
+    };
+    let added = node("new-consumer", &["run:second-upstream#build"]);
+    run.writer
+        .emit(
+            PipelineKind::EditCommitted,
+            journal::labels("demo", None),
+            edit(json!({"kind": "node-added", "node": added})),
+        )
+        .expect("an edit");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Reread);
+    assert_eq!(view.state.statuses()["new-consumer"], NodeStatus::Blocked);
+    same_answers(&view, &run.open());
+
+    let mut view = over_first_screen(&run.paths);
+    assert!(!view
+        .state
+        .cross_dag
+        .contains_key("run:first-upstream#build"));
+    run.writer
+        .emit(
+            PipelineKind::EditCommitted,
+            journal::labels("demo", None),
+            edit(json!({"kind": "node-requeued", "node": "settled-consumer"})),
+        )
+        .expect("an edit");
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Reread);
+    assert!(view
+        .state
+        .cross_dag
+        .contains_key("run:first-upstream#build"));
+    assert_eq!(
+        view.state.statuses()["settled-consumer"],
+        NodeStatus::Blocked
+    );
+    same_answers(&view, &run.open());
+}

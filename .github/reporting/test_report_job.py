@@ -8,7 +8,7 @@ checkout holds this repository's real budgets files and the commands they name, 
 `test-linux`'s upload step runs from `ci.yml` too, through the same real upload code, over results the
 pinned checker really saved.
 
-The workload recorded for `onepipeline-budget-report-command-seconds`: the real catalog's 35 rows, one
+The workload recorded for `onepipeline-budget-report-command-seconds`: the real catalog's 38 rows, one
 rolling file of 20 commits and one saved-results artifact of about 50 KB, with a retried rate limit; a
 base push also reads the merged pull request's run. It asserts behaviour and never a cost: the figures
 are written to `.telemetry/report-job.json` and printed.
@@ -57,7 +57,7 @@ CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_F
 CHECKOUT_FILES = ('Cargo.toml', 'justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
                   '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
-CATALOG_ROWS = 35
+CATALOG_ROWS = 38
 COMMITS = 20
 OMIT_LABEL = 'not-measured-on-pr'
 OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipeline-cd-job-count',

@@ -498,6 +498,29 @@ fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() 
         "the slowest single read is the value: {result}"
     );
     let detail = result["detail"].as_str().expect("a detail");
+
+    // A kernel with no per-task I/O accounting counted no bytes: the report says that, not zero.
+    let mut uncounted = host_view_record();
+    *uncounted
+        .pointer_mut("/cold/breakdown/read_bytes")
+        .expect("the cold read's byte count") = serde_json::Value::Null;
+    std::fs::write(&record, uncounted.to_string()).expect("a record");
+    let uncounted_result = dir.join("uncounted.json");
+    let reported = host_view_report(&dir, Some(&uncounted_result));
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let uncounted: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&uncounted_result).expect("a result"))
+            .expect("JSON");
+    let says = uncounted["detail"].as_str().expect("a detail");
+    assert!(
+        says.contains("bytes read not counted by this kernel") && !says.contains(" 0 bytes read"),
+        "{says}"
+    );
+    std::fs::write(&record, host_view_record().to_string()).expect("a record");
     for expected in [
         "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
         "reads of /usr/local/bin/onepipeline (built by ci.yml install job: cargo install \
@@ -788,8 +811,8 @@ console.log(JSON.stringify(out));"#,
 
 /// The measurement's record says from the kernel which journals each scaling read opened:
 /// `scripts/host-view-trace.mjs` runs a real process under the real `strace` and counts the
-/// bytes it read from each run's journal, including from many processes reading at once, whose
-/// calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
+/// bytes it read from each run's journal, through any call that hands bytes over, including from
+/// many processes reading at once, whose calls the tracer splits. A read that opened or merely tried an ended run's journal, or opened
 /// other runs' than the live ones, is refused, naming them; so is a traced command that failed,
 /// a tracer that would not run or left no trace, and a trace with a call it cannot account for.
 #[cfg(target_os = "linux")]
@@ -894,16 +917,41 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         "{none}"
     );
 
-    // A journal read with `pread64` counts as one read with `read`.
-    let pread = traced_opens(
-        &dir,
-        "python3 -I -c \"import os; os.pread(os.open('live-0/events.jsonl', os.O_RDONLY), 64, 0)\"",
-        &[],
-    );
-    assert_eq!(
-        pread["opened"],
-        serde_json::json!({"live-0": live_bytes}),
-        "{pread}"
+    // Every call that hands over a file's bytes counts as a `read` does, whichever the reader
+    // chose: uutils `cat`, Ubuntu 26.04's, reaches a pipe through `splice` alone.
+    let traced_call = |call: &str| {
+        traced_opens(
+            &dir,
+            &format!(
+                "python3 -I -c \"import os, mmap; f = os.open('live-0/events.jsonl', os.O_RDONLY); \
+                 r, w = os.pipe(); {call}\""
+            ),
+            &[],
+        )
+    };
+    for call in [
+        "os.pread(f, 64, 0)",
+        "os.readv(f, [bytearray(64)])",
+        "os.preadv(f, [bytearray(64)], 0)",
+        "os.splice(f, w, 64)",
+        "os.sendfile(w, f, 0, 64)",
+        "os.copy_file_range(f, os.open('copied.out', os.O_WRONLY | os.O_CREAT), 64)",
+    ] {
+        let read = traced_call(call);
+        assert_eq!(
+            read["opened"],
+            serde_json::json!({"live-0": live_bytes}),
+            "{call}: {read}"
+        );
+    }
+
+    // A mapped journal is read with no call to count, which is no reading rather than zero.
+    let mapped = traced_call("mmap.mmap(f, 0, prot=mmap.PROT_READ).read(64)");
+    assert!(
+        mapped["error"].as_str().is_some_and(|error| error
+            .contains("live-0's journal was mapped, so the bytes read cannot be counted"))
+            && mapped.get("opened").is_none(),
+        "{mapped}"
     );
 
     // An open a reader was killed inside has no result to read it by, so it is no observation.

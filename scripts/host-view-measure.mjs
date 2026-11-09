@@ -152,8 +152,8 @@ function read(args, label) {
     !isMap(line.marks_unix_ns) ||
     !isMap(line.phases) ||
     !isMap(line.quantities) ||
-    !Number.isSafeInteger(line.read_bytes) ||
-    line.read_bytes < 0
+    // `null` is a kernel with no per-task I/O accounting: not counted, never zero.
+    (line.read_bytes !== null && (!Number.isSafeInteger(line.read_bytes) || line.read_bytes < 0))
   ) {
     throw new Error(
       `${label}: the read's phase line lacks its marks, phases, quantities or read bytes: ${text.trim()}`,
