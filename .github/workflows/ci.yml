@@ -48,7 +48,7 @@ jobs:
   # check, the PR title, the suppressions comment and the visual docs.
   lint:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
     # actions need, granted here because they are steps of this job rather than
