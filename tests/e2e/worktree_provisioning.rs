@@ -292,6 +292,10 @@ fn only_the_output_the_event_kept_reaches_the_section_and_the_surface() {
 /// A hook killed by a signal, printing a fence of its own into a task whose author
 /// wrote `## Additional info`: git reports the kill as an exit status, and the
 /// section keeps that output inside a longer fence, above the notes.
+///
+/// Windows has no such kill to stage: the same `kill -TERM $$` under Git for Windows
+/// is not a failure `onevcs` is told of, and no section is composed. There the hook
+/// exits with the status a Unix git reports, so the rest still holds on every host.
 #[test]
 fn a_killed_hooks_fence_stays_inside_a_section_above_the_notes() {
     let world = World::new("provisioning-signalled");
@@ -299,7 +303,14 @@ fn a_killed_hooks_fence_stays_inside_a_section_above_the_notes() {
     tracked_post_checkout(
         &world,
         &repo,
-        "#!/bin/sh\nprintf '```\\nFENCED-OUTPUT\\n```\\n'\nkill -TERM $$\n",
+        &format!(
+            "#!/bin/sh\nprintf '```\\nFENCED-OUTPUT\\n```\\n'\n{}\n",
+            if cfg!(windows) {
+                "exit 143"
+            } else {
+                "kill -TERM $$"
+            }
+        ),
     );
     world.script("holder.wait", "hold");
     world.script("service.work", "the worker wrote this\n");
