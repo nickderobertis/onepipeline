@@ -303,8 +303,8 @@ fn main() -> std::process::ExitCode {
         &serde_json::json!({"as": invoked_as, "envelope": envelope.recorded()}).to_string(),
     );
 
-    // A reviewer that narrates on stdout is ordinary — a review prints what it
-    // checked — and none of it is the caller's answer.
+    // A reviewer that narrates is ordinary — a review says what it checked — and
+    // the narration goes to stderr, because stdout is the verdict.
     if let Some(chatter) = scenario(&dir.join("reviewer.chatter")) {
         eprintln!("{}", chatter.trim());
     }
