@@ -326,6 +326,88 @@ fn runs_lists_grouped_by_default_flat_on_request_and_narrowed_to_a_session() {
     );
 }
 
+/// The published status read, with a stand-in `claude` where the provider sweep would
+/// find it, never starts it: its text is the binary's, and the fields `onepipeline-ui`'s
+/// status route projects from it are those a full fold of the same journal gives.
+#[cfg(unix)]
+#[test]
+fn the_sdks_status_read_asks_no_provider_and_projects_what_a_full_fold_does() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("status-sdk");
+    let _env = fixture.enter();
+    let work = fixture.root.parent().expect("a parent").to_path_buf();
+    let bin = work.join("bin");
+    std::fs::create_dir_all(&bin).expect("a directory");
+    std::fs::create_dir_all(work.join("home")).expect("a home");
+    let starts = work.join("starts");
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        format!("#!/bin/sh\necho started >> '{}'\n", starts.display()),
+    )
+    .expect("a stand-in");
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    let started = || std::fs::read_to_string(&starts).map_or(0, |text| text.lines().count());
+    // What a sweep reads in this process: the real one, finding only the stand-in.
+    std::env::remove_var("ONEPIPELINE_ONEAGENTGRAPH_BIN");
+    let path = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME");
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("HOME", work.join("home"));
+
+    let status = verbs::status(&fixture.root, Some(RUN)).expect("the run reads");
+    let text = verbs::render_status(&status);
+    assert_eq!(started(), 0, "the default read started the provider CLI");
+    same_view(
+        "status RUN",
+        &fixture.binary(&["status", RUN]),
+        &text,
+        EXIT_SUCCESS,
+    );
+    assert_eq!(
+        started(),
+        0,
+        "the binary's default read started the provider CLI"
+    );
+    assert!(!text.contains("providers:"), "{text}");
+
+    let verbs::Status::Run(detail) = &status else {
+        panic!("a run was named");
+    };
+    assert!(
+        detail.view.events.is_empty(),
+        "a status read holds no history of the run"
+    );
+    let full = onepipeline::views::RunView::open(&RunPaths::under(&fixture.root, RUN))
+        .expect("a full fold");
+    assert!(
+        !full.events.is_empty(),
+        "the full fold read the run's history"
+    );
+    assert_eq!(detail.view.liveness(), full.liveness());
+    assert_eq!(
+        detail.view.unread_surfaces().0,
+        full.unread_surfaces().0,
+        "unread count"
+    );
+    assert_eq!(detail.view.state.statuses(), full.state.statuses());
+    assert_eq!(detail.view.summary(), full.summary());
+
+    // The stand-in is what a sweep starts, so its silence above means something.
+    assert!(status.render_with_providers().contains("providers:"));
+    assert!(started() > 0, "the sweep never found the stand-in");
+
+    match path {
+        Some(path) => std::env::set_var("PATH", path),
+        None => std::env::remove_var("PATH"),
+    }
+    match home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
 #[test]
 fn status_lists_every_run_details_one_and_refuses_one_that_is_not_there() {
     let fixture = Fixture::new("status");
@@ -355,6 +437,12 @@ fn status_lists_every_run_details_one_and_refuses_one_that_is_not_there() {
         "status RUN --no-providers",
         &fixture.binary(&["status", RUN, "--no-providers"]),
         &detail.render_without_providers(),
+        EXIT_SUCCESS,
+    );
+    same_view(
+        "status RUN --providers",
+        &fixture.binary(&["status", RUN, "--providers"]),
+        &detail.render_with_providers(),
         EXIT_SUCCESS,
     );
     let missing = verbs::status(&fixture.root, Some("nowhere")).expect_err("no such run");

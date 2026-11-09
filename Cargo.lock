@@ -1705,6 +1705,7 @@ dependencies = [
  "fs4",
  "jsonschema 0.56.0",
  "libc",
+ "memchr",
  "minijinja",
  "oneagentgraph",
  "onebudgetspec-core",

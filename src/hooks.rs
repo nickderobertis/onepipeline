@@ -999,9 +999,8 @@ fn relay_from(log: &Path, from: u64) -> u64 {
 ///
 /// Read from the run's own journal, which is where every one of these records is
 /// written and the only store [`fired`] reads.
-pub(crate) fn results_lines(view: &RunView) -> String {
-    let events = journal::read(&view.paths.journal());
-    let epochs = epochs(&events);
+pub(crate) fn results_lines(paths: &RunPaths, events: &[Envelope]) -> String {
+    let epochs = epochs(events);
     // The edit that ended the epoch the record at `at` is in, where one has.
     let superseded_by = |at: usize| {
         epochs
@@ -1033,7 +1032,7 @@ pub(crate) fn results_lines(view: &RunView) -> String {
                     .unwrap_or("none");
                 // The log is derived from the run rather than taken from a record,
                 // so a view opens only this run's own storage.
-                let log = log_path(&view.paths, hook);
+                let log = log_path(paths, hook);
                 let is_this_hook = |later: &Envelope, kind: PipelineKind| {
                     PipelineKind::from_wire(&later.kind) == Some(kind)
                         && later.payload.get("hook").and_then(Value::as_str) == Some(hook.as_str())

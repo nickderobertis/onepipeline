@@ -1621,12 +1621,14 @@ pub struct OptionalRunArgs {
 pub struct StatusArgs {
     /// The run id. Omitted, the view covers every run.
     pub run: Option<String>,
-    /// Leave out the host's provider report, and do not ask for it: every other
-    /// line is the one the view prints without this flag.
-    ///
-    /// The report is about the host rather than the run, and a supervisor
-    /// watching a run used to cut it off with a shell filter, which is a command
-    /// no allowlist can approve as one simple command.
+    /// Ask the host's providers and end the view with their report. Without this
+    /// flag they are not asked, because the sweep costs a run's reader over twenty
+    /// seconds to learn something about the host rather than about the run.
+    #[arg(long, conflicts_with = "no_providers")]
+    pub providers: bool,
+    /// Leave out the host's provider report, and do not ask for it, which is what
+    /// the view does by default: this flag stays accepted so a caller that already
+    /// names it keeps working, and changes nothing.
     #[arg(long)]
     pub no_providers: bool,
     /// Print the run's reading — its word, whether it is driven, and how it ended

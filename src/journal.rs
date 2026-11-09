@@ -7,9 +7,13 @@
 //! The journal is append-only and the engine loop is its only writer of graph
 //! state. Reading is unlocked and takes no lock a writer needs, which is what
 //! lets every view run beside a live run.
+//!
+//! What this module publishes is the merge's rule, [`merge_order`], and the
+//! selective read, [`read_selected`]. Everything else here is the engine's.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -19,7 +23,8 @@ use crate::event::{Envelope, Labels, Source, ENVELOPE_VERSION, MAX_PAYLOAD_TEXT_
 use crate::ledger::{self, RunPaths};
 use crate::sys;
 
-pub use crate::event::PipelineKind;
+pub(crate) use crate::event::PipelineKind;
+pub use crate::journal_selected::{read_selected, SelectedRecords, Selection};
 
 /// The next sequence number this process's stream may claim on each run's journal,
 /// shared by every writer it opens there. See [`Journal::open`].
@@ -33,7 +38,7 @@ static SEQUENCES: std::sync::Mutex<BTreeMap<std::path::PathBuf, u64>> =
 /// this build cannot read, because a record's readability and its claim on a
 /// sequence number are different questions.
 #[derive(Debug)]
-pub struct Journal {
+pub(crate) struct Journal {
     paths: RunPaths,
     stream: String,
     next_seq: u64,
@@ -293,7 +298,7 @@ fn head(text: &str) -> String {
 ///
 /// No round: execution is continuous, so the reserved `round` key is never
 /// stamped — see [`Labels::round`](crate::event::Labels::round).
-pub fn labels(run: &str, node: Option<&str>) -> Labels {
+pub(crate) fn labels(run: &str, node: Option<&str>) -> Labels {
     Labels {
         run_id: Some(run.to_string()),
         node: node.map(str::to_string),
@@ -302,7 +307,7 @@ pub fn labels(run: &str, node: Option<&str>) -> Labels {
 }
 
 /// A payload built from key/value pairs, in the order they are given.
-pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
+pub(crate) fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
     let mut map = Map::new();
     for (key, value) in fields {
         map.insert((*key).to_string(), value.clone());
@@ -336,7 +341,7 @@ pub(crate) fn object<T: serde::Serialize>(document: &T) -> crate::Result<Map<Str
 /// the shape a writer that died mid-record used to leave behind — hands back the
 /// whole one: it is a record the store really holds, and losing it was how the
 /// event reporting that writer's death disappeared.
-pub fn read(path: &Path) -> Vec<Envelope> {
+pub(crate) fn read(path: &Path) -> Vec<Envelope> {
     ledger::read_envelope_lines(path, 0)
         .into_iter()
         .filter_map(|line| match reading(line, path) {
@@ -597,7 +602,7 @@ pub(crate) fn finished_through_first(
 /// guesses. Every class of loss counts, a fragment as much as a record from a
 /// schema this build does not know — what strict replay is about is that
 /// *something* the graph may have turned on is not there.
-pub fn has_unreadable_lines(path: &Path) -> bool {
+pub(crate) fn has_unreadable_lines(path: &Path) -> bool {
     ledger::read_envelope_lines(path, 0)
         .into_iter()
         .any(|line| {
@@ -679,7 +684,7 @@ fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
 /// from the same struct, whose first field is `v`, so the needle is the whole of
 /// that opening — searching every `{` instead would try a parse per brace, and a
 /// payload has a brace per field.
-fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
+pub(crate) fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
     text.match_indices("{\"v\":")
         .skip_while(|(at, _)| *at == 0)
         .find_map(|(at, _)| {
@@ -692,7 +697,7 @@ fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
 
 /// One record a run's store does not hold whole, and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Loss {
+pub(crate) struct Loss {
     /// The 1-based line it is on.
     pub line: usize,
     /// Where in the file that line begins.
@@ -711,7 +716,7 @@ pub struct Loss {
 /// reader will ever see in the file again and which is the whole reason it is
 /// recorded beside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Integrity {
+pub(crate) struct Integrity {
     /// Records whose writer did not finish them.
     pub truncated: Vec<Loss>,
     /// Whole lines this build cannot read.
@@ -830,11 +835,21 @@ pub(crate) fn integrity(path: &Path) -> Integrity {
 /// the timestamps, so a `ts` tie there is broken by stream id: deterministic
 /// rather than meaningful.
 pub fn merge_order(events: &mut [Envelope]) {
-    let mut merged: Vec<Envelope> = merged_order(events)
-        .into_iter()
-        .map(|index| events[index].clone())
-        .collect();
-    events.swap_with_slice(&mut merged);
+    // Moved into place cycle by cycle rather than cloned: on a long run the records'
+    // payloads are most of the file.
+    let mut order = merged_order(events);
+    for start in 0..order.len() {
+        let mut at = start;
+        loop {
+            let from = order[at];
+            order[at] = at;
+            if from == start {
+                break;
+            }
+            events.swap(at, from);
+            at = from;
+        }
+    }
 }
 
 /// Where each record belongs in the merged order, as indices into `events`.
@@ -844,37 +859,66 @@ pub fn merge_order(events: &mut [Envelope]) {
 /// `sort_by` given an inconsistent comparator produces an order nobody
 /// specified.
 fn merged_order(events: &[Envelope]) -> Vec<usize> {
-    let mut streams: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
-    for (index, event) in events.iter().enumerate() {
-        streams
-            .entry(event.stream.as_str())
-            .or_default()
-            .push_back(index);
+    let key = |index: usize| {
+        let event = &events[index];
+        (event.ts.as_str(), event.stream.as_str(), event.seq)
+    };
+    merge_queues(stream_queues(events.len(), key), key)
+}
+
+/// Each stream's records in its own order, as indices: the first half of the merge.
+///
+/// `key` answers one record's `(ts, stream, seq)`.
+pub(crate) fn stream_queues<'a>(
+    records: usize,
+    key: impl Fn(usize) -> (&'a str, &'a str, u64),
+) -> Vec<(&'a str, Vec<usize>)> {
+    let mut streams: HashMap<&'a str, Vec<usize>> = HashMap::new();
+    for index in 0..records {
+        streams.entry(key(index).1).or_default().push(index);
     }
-    for queue in streams.values_mut() {
-        let mut ordered: Vec<usize> = queue.iter().copied().collect();
+    let mut queues: Vec<(&'a str, Vec<usize>)> = streams.into_iter().collect();
+    for (_, queue) in &mut queues {
         // Stable, so two records of one stream claiming one `seq` — which only
         // a producer in error emits — keep the order they were appended in
         // rather than being reordered by a tie-break that means nothing.
-        ordered.sort_by_key(|index| events[*index].seq);
-        *queue = ordered.into();
+        queue.sort_by_key(|index| key(*index).2);
     }
+    queues
+}
 
-    let mut order = Vec::with_capacity(events.len());
-    // Each pass takes the earliest record still at the head of any stream. A
-    // stream's head is its next `seq`, so its own order is never in question;
-    // what this decides is only which stream goes next.
-    while let Some(stream) = streams
+/// The merged order of [`stream_queues`]' queues: the earliest record still at the
+/// head of any stream, by `(ts, stream)`, next.
+///
+/// A stream's head is its next `seq`, so its own order is never in question; what
+/// this decides is only which stream goes next, and a heap of the heads decides that
+/// in the logarithm of the streams rather than a scan of them per record.
+pub(crate) fn merge_queues<'a>(
+    queues: Vec<(&'a str, Vec<usize>)>,
+    key: impl Fn(usize) -> (&'a str, &'a str, u64),
+) -> Vec<usize> {
+    let records = queues.iter().map(|(_, queue)| queue.len()).sum();
+    // The stream's position in `queues` rides the heap key's end only so a popped
+    // head can find its queue: two heads never tie on a stream id, so it never
+    // decides anything.
+    let mut heads: BinaryHeap<Reverse<(&'a str, &'a str, usize)>> = queues
         .iter()
-        .filter_map(|(stream, queued)| queued.front().map(|index| (&events[*index].ts, *stream)))
-        .min()
-        .map(|(_, stream)| stream)
-    {
-        let index = streams
-            .get_mut(stream)
-            .and_then(VecDeque::pop_front)
-            .expect("the stream this pass chose has a head");
-        order.push(index);
+        .enumerate()
+        .filter_map(|(at, (stream, queue))| {
+            queue
+                .first()
+                .map(|index| Reverse((key(*index).0, *stream, at)))
+        })
+        .collect();
+    let mut cursors = vec![0_usize; queues.len()];
+    let mut order = Vec::with_capacity(records);
+    while let Some(Reverse((_, stream, at))) = heads.pop() {
+        let queue = &queues[at].1;
+        order.push(queue[cursors[at]]);
+        cursors[at] += 1;
+        if let Some(next) = queue.get(cursors[at]) {
+            heads.push(Reverse((key(*next).0, stream, at)));
+        }
     }
     order
 }
@@ -884,7 +928,7 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
 /// Named once because `stop` writes it and the projection reads it, and a run
 /// whose two sides disagree about this field reports work as ended that is still
 /// running.
-pub const STOP_TEARDOWN: &str = "teardown";
+pub(crate) const STOP_TEARDOWN: &str = "teardown";
 
 /// What a `run-stopped` record says its teardown established about the run's
 /// processes.
@@ -973,7 +1017,7 @@ impl StopTeardown {
 /// a run whose two sides disagree about this field is a run that reports work as
 /// landed on the strength of nothing. Absent on a settlement that published no
 /// change of its own — see [`crate::graph::Landing`].
-pub const SETTLED_LANDING: &str = "landing";
+pub(crate) const SETTLED_LANDING: &str = "landing";
 
 /// The `node-settled` payload field naming why a dispatch that ended for a reason
 /// other than the agent's verdict ended.
@@ -982,7 +1026,7 @@ pub const SETTLED_LANDING: &str = "landing";
 /// and `projection` reads it back, and two spellings of one field is a run whose
 /// settlement says a cause its own result document does not. The producer's own
 /// word, and absent on every settlement that carries no classification.
-pub const SETTLED_CAUSE: &str = "cause";
+pub(crate) const SETTLED_CAUSE: &str = "cause";
 
 /// The `node-settled` payload field naming the commit the node's branch was left
 /// at.
@@ -990,7 +1034,7 @@ pub const SETTLED_CAUSE: &str = "cause";
 /// Named once for the same reason. A lifecycle node writes it once its session
 /// has cut a branch, on success as on failure, and it is absent from a settlement
 /// whose branch never existed.
-pub const SETTLED_HEAD: &str = "head";
+pub(crate) const SETTLED_HEAD: &str = "head";
 
 /// The `node-settled` payload field naming the branch the node's change request
 /// is based on: the root, a stack parent's branch, or the stack base merging its
@@ -999,18 +1043,18 @@ pub const SETTLED_HEAD: &str = "head";
 /// Named once for the reason [`SETTLED_LANDING`] is, and absent from a settlement
 /// reached before the node's base was resolved — a lifecycle node refused before
 /// its session opened, and every node that opens none.
-pub const SETTLED_BASE: &str = "base";
+pub(crate) const SETTLED_BASE: &str = "base";
 
 /// The `node-settled` payload field naming the stack a lifecycle node was drafted
 /// on — `{parents: [{node, branch, head}], stack_base}` — present exactly when the
 /// node had stack parents.
-pub const SETTLED_STACK: &str = "stack";
+pub(crate) const SETTLED_STACK: &str = "stack";
 
 /// The `node-settled` payload field naming the releases a node held for them still
 /// awaits — `[{producer, target}]`, in the order its reference rows list them —
 /// present exactly on a `complete-but-held` settlement and on an awaiting-release
 /// `complete-but-draft` one.
-pub const SETTLED_AWAITING: &str = "awaiting";
+pub(crate) const SETTLED_AWAITING: &str = "awaiting";
 
 /// The `node-settled` payload field saying what putting a kept branch on its
 /// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,
@@ -1018,7 +1062,7 @@ pub const SETTLED_AWAITING: &str = "awaiting";
 ///
 /// Written only by a node settled `preserved`, and absent on every other
 /// settlement — a branch nobody asked to keep has no answer to give here.
-pub const SETTLED_REMOTE: &str = "remote";
+pub(crate) const SETTLED_REMOTE: &str = "remote";
 
 /// The `driver-adopted` payload field naming the dispatches the adoption
 /// cleared, and where each one's work is.
@@ -1029,7 +1073,7 @@ pub const SETTLED_REMOTE: &str = "remote";
 /// than reading this back, so an adoption an older build recorded still reports
 /// what it abandoned; this is what a person reading the store, or a tool that
 /// does not fold it, finds at the moment it happened.
-pub const ADOPTED_ABANDONED: &str = "abandoned";
+pub(crate) const ADOPTED_ABANDONED: &str = "abandoned";
 
 /// The `run-started` and `driver-adopted` payload field saying the driver that
 /// wrote it holds the run to the closure rule: its launching session owes it
@@ -1039,7 +1083,7 @@ pub const ADOPTED_ABANDONED: &str = "abandoned";
 /// wrote — which is the whole of its meaning: a run no record of which carries it
 /// was never driven under that rule, and is decided by the rule it was driven
 /// under. Entry 98 of `docs/contract-divergences.md` states both rules.
-pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
+pub(crate) const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 
 /// The `driver-adopted` payload field saying the adoption started a new run-end
 /// hook epoch: it found a fired hook's marker standing over a graph that is
@@ -1048,7 +1092,7 @@ pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 /// `true` wherever it is written, and absent from every other adoption — an
 /// adoption of an ended run, of a run that never fired, and every adoption an
 /// earlier build recorded. `hooks` decides it, and reads it back as the epoch.
-pub const ADOPTED_HOOK_EPOCH: &str = "hook_epoch";
+pub(crate) const ADOPTED_HOOK_EPOCH: &str = "hook_epoch";
 
 /// Whether one `driver-adopted` payload carries [`ADOPTED_HOOK_EPOCH`].
 pub(crate) fn starts_hook_epoch(payload: &Map<String, Value>) -> bool {
@@ -1067,10 +1111,10 @@ pub(crate) fn owed_until_closed(payload: &Map<String, Value>) -> bool {
 /// Its own word, so a reader of the run can tell what the harness watched happen
 /// from what a person told it had happened. The settlement's `detail` is the
 /// evidence they gave, which is the reason the node is in that state.
-pub const SETTLED_FROM_EVIDENCE: &str = "settled-from-evidence";
+pub(crate) const SETTLED_FROM_EVIDENCE: &str = "settled-from-evidence";
 
 /// The payload of a `node-settled` event, as the projection folds it.
-pub fn settled_payload(
+pub(crate) fn settled_payload(
     status: &str,
     outcome: Option<&str>,
     detail: Option<&str>,

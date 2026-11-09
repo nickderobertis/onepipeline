@@ -320,7 +320,8 @@ _crate-lint:
 # binary rather than the instrumented one, so its project
 # (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`, and
 # `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
-# `test` through `just human-items-budget`. Nor
+# `test` through `just human-items-budget`, and `status_read_workload` the same under
+# `onepipeline-status-read` through `just status-read-budget`. Nor
 # are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
 # whole host-shaped workload, so its project (`onepipeline-pool-workload`,
 # `onepipeline-scratch-workload`, `onepipeline-journal-workload`) runs it only
@@ -340,7 +341,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(narrow_write) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
+rest-tier := "not (binary(package_bundle) and test(=the_packaged_crate_carries_the_committed_events_bundle)) and not binary(pooled_slot) and not binary(narrow_write) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload) and not binary(status_read_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e) and not test(=surface::version_reports_the_crate_version)"
 contract-tier := "binary(contract) and not test(=the_contract_names_the_retention_path_and_the_release_it_ships_in)"
@@ -700,6 +701,15 @@ human-items-budget:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
     @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/human-items.json
+
+# The `onepipeline-status-read` project's `test` target: the release-built binary's
+# `status`, `results` and `transcript` over a generated long run, written to
+# `target/budget-records/status-read.json` and then checked against
+# `tests/status_read/budgets.yaml` from that saved recording — never a second timed run.
+status-read-budget:
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
+    @STATUS_READ_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test status_read_workload -- --test-threads 1 --nocapture
+    @cd tests/status_read && ../../node_modules/.bin/onebudgetspec check budgets.yaml --save-results ../../target/budget-results/status-read.json
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

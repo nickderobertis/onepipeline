@@ -1847,23 +1847,39 @@ struct RefreshCursor {
     coverage: crate::checkpoint::Coverage,
     result: Option<serde_json::Value>,
     upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
+    edges: EdgesResolved,
+}
+
+/// Which of a graph's cross-run edges a view holds an answer for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgesResolved {
+    All,
+    /// Only those a consumer still waits on, as [`RunView::over_selected`] resolves
+    /// them, so an upstream only a settled consumer names moving is no reason to read
+    /// anything.
+    Open,
 }
 
 fn upstream_stamps(
     paths: &RunPaths,
     state: &RunState,
+    resolved: EdgesResolved,
 ) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
     let root = paths
         .dir
         .parent()
         .map_or_else(ledger::runs_root, Path::to_path_buf);
-    crate::crossdag::edges(&state.graph)
-        .keys()
+    let edges = match resolved {
+        EdgesResolved::Open => crate::crossdag::open_edges(state),
+        EdgesResolved::All => crate::crossdag::edges(&state.graph).into_keys().collect(),
+    };
+    edges
+        .into_iter()
         .filter_map(|edge| {
-            let reference = crate::crossdag::parse(edge)?;
+            let reference = crate::crossdag::parse(&edge)?;
             let journal = RunPaths::under(&root, &reference.run).journal();
             let stamp = crate::appendstamp::Stamp::read(&journal);
-            Some((edge.clone(), stamp))
+            Some((edge, stamp))
         })
         .collect()
 }
@@ -1924,6 +1940,7 @@ impl RunView {
                 &state.graph,
                 &state.cross_dag,
             ),
+            edges: EdgesResolved::All,
         };
         Ok(Self {
             paths: paths.clone(),
@@ -1967,7 +1984,7 @@ impl RunView {
             .dir
             .parent()
             .map_or_else(ledger::runs_root, Path::to_path_buf);
-        state.cross_dag = crate::crossdag::resolve_quietly(&root, &state.graph);
+        state.cross_dag = crate::crossdag::resolve_open(&root, &state);
         let refresh = RefreshCursor {
             dir: paths.dir.clone(),
             stamp: None,
@@ -1975,11 +1992,87 @@ impl RunView {
             coverage: crate::checkpoint::Coverage::default(),
             result: ledger::read_json_opt(&paths.result()),
             upstreams: None,
+            edges: EdgesResolved::All,
         };
         Ok(Self {
             paths: paths.clone(),
             launch,
             events: Vec::new(),
+            state,
+            refresh,
+        })
+    }
+
+    /// A view of a run over records a reader chose: the
+    /// [`Selection::FirstScreen`](crate::journal::Selection::FirstScreen) records of
+    /// [`read_selected`](crate::journal::read_selected), in that read's order.
+    ///
+    /// The state is folded from those records, and what they leave out decides no
+    /// node's status, reason, awaits or result, the run's summary or `last_seq`, so
+    /// each equals what [`open`](Self::open) reports. `events` holds what was chosen,
+    /// not the run's history, and what the state tallies of the records left out, how
+    /// many events a running node has produced above all, is of what was chosen too.
+    /// Cross-run edges are resolved only where a consumer that
+    /// has not settled still waits on one, since a settled consumer's status no longer
+    /// reads its edge and each edge read is another run's whole ledger.
+    ///
+    /// [`refresh`](Self::refresh) folds what was appended after the read that chose
+    /// these records, including what arrived before this call, and falls back to
+    /// reading the store whole as `open` does where it does for any view.
+    ///
+    /// # Errors
+    ///
+    /// [`NoSuchRun`](crate::Error::NoSuchRun) where the run is not there, or an error
+    /// where its launch record cannot be read.
+    pub fn over_selected(paths: &RunPaths, events: Vec<Envelope>) -> crate::Result<Self> {
+        if !paths.exists() {
+            return Err(crate::Error::NoSuchRun {
+                run: paths.run.clone(),
+                root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            });
+        }
+        let journal = paths.journal();
+        let stamp = crate::appendstamp::Stamp::read(&journal);
+        let receipt = stamp
+            .as_ref()
+            .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
+        let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
+        let mut state = crate::projection::fold(&events);
+        landings_the_run_re_read(&mut state, paths);
+        crate::heartbeat::apply(paths, &mut state);
+        let root = paths
+            .dir
+            .parent()
+            .map_or_else(ledger::runs_root, Path::to_path_buf);
+        state.cross_dag = crate::crossdag::resolve_open(&root, &state);
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in &events {
+            coverage.absorb(Some(event), 0);
+        }
+        coverage.bytes = stamp.as_ref().map_or(0, |stamp| {
+            crate::journal_selected::covered_bytes(&journal, stamp.len, &coverage.streams)
+        });
+        // Where appended bytes lie past what these records cover, the stamp must not
+        // answer "unchanged" for them.
+        let stamp = stamp.filter(|stamp| stamp.len == coverage.bytes);
+        let refresh = RefreshCursor {
+            dir: paths.dir.clone(),
+            stamp,
+            receipt,
+            coverage,
+            result: ledger::read_json_opt(&paths.result()),
+            upstreams: crate::crossdag::stamps_of_answers(
+                &root,
+                crate::crossdag::open_edges(&state),
+                &state.cross_dag,
+            ),
+            edges: EdgesResolved::Open,
+        };
+        Ok(Self {
+            paths: paths.clone(),
+            launch,
+            events,
             state,
             refresh,
         })
@@ -1995,7 +2088,8 @@ impl RunView {
         let mut launch: LaunchRecord = ledger::read_json(&self.paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
         let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
-        let upstreams = upstream_stamps(&self.paths, &self.state);
+        let resolved = self.refresh.edges;
+        let upstreams = upstream_stamps(&self.paths, &self.state, resolved);
         if self.refresh.upstreams.as_ref() != Some(&upstreams) {
             crate::crossdag::resolve_for_refresh(
                 &self
@@ -2055,7 +2149,17 @@ impl RunView {
         for event in &grown {
             crate::projection::fold_one(&mut state, event);
         }
-        if upstream_stamps(&self.paths, &state) != upstreams {
+        // A consumer that settled stops reading its edge, which a view resolving only
+        // open edges has no reason to read anything over; one that stopped being
+        // settled, or a new edge, is an edge it has no answer for.
+        let upstreams_after = upstream_stamps(&self.paths, &state, resolved);
+        let moved = match resolved {
+            EdgesResolved::Open => upstreams_after
+                .iter()
+                .any(|(edge, stamp)| upstreams.get(edge) != Some(stamp)),
+            EdgesResolved::All => upstreams_after != upstreams,
+        };
+        if moved {
             crate::crossdag::resolve_for_refresh(
                 &self
                     .paths
@@ -2076,6 +2180,7 @@ impl RunView {
         self.refresh.coverage.bytes = offset;
         self.refresh.stamp = stamp;
         self.refresh.receipt = receipt;
+        self.refresh.upstreams = Some(upstreams_after);
         Ok(Refreshed::Appended { first })
     }
 
@@ -3384,17 +3489,19 @@ pub fn status(survey: &Survey) -> String {
 }
 
 /// `onepipeline status <RUN>`: one run's **detail** read, its run-level lines
-/// and the block under them saying what each of its nodes is doing.
+/// and the block under them saying what each of its nodes is doing. The host's
+/// providers are not asked: `--providers` is what asks them.
 pub(crate) fn status_of(view: &RunView) -> String {
-    status_reporting(view, Providers::Reported)
+    status_reporting(view, Providers::Omitted)
 }
 
 /// Whether a `status` view ends with the host's provider report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Providers {
+    /// `--providers`: the report is asked for and printed.
     Reported,
-    /// `--no-providers`: the report is neither asked for nor written, and
-    /// nothing else in the view moves.
+    /// The default: the report is neither asked for nor written, and nothing
+    /// else in the view moves.
     Omitted,
 }
 
@@ -5730,9 +5837,12 @@ pub fn results(view: &RunView) -> String {
     }
     out.push_str(&superseded_lines(view));
     // Under the graph, because a hook is the run's rather than any node's.
-    out.push_str(&crate::hooks::results_lines(view));
+    // In the order they were appended, and only this crate's own: no relayed record
+    // decides a graph's ending or a home status, and those are nearly all of a long run.
+    let own_records = crate::journal_selected::pipeline_records(&view.paths.journal());
+    out.push_str(&crate::hooks::results_lines(&view.paths, &own_records));
     // And what the store answered when the run's home was marked `done`, the run's too.
-    out.push_str(&crate::home::results_line(view));
+    out.push_str(&crate::home::results_line(&own_records));
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
     out.push_str(&crate::scratch::lines(view, None));

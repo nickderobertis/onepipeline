@@ -178,6 +178,21 @@ fn answered_alike(release_world: &World, ours_world: &World, args: &[&str]) -> V
     mine
 }
 
+/// `status`, the one verb whose default read moved after [`RELEASE`]: that release
+/// prints the provider report unasked, and this build prints it on `--providers`, so
+/// those are the two reads the same channel has to answer alike.
+fn status_answered_alike(release_world: &World, ours_world: &World) -> Value {
+    let args = ["status", RUN];
+    let theirs = answered(release_world, release(), &args);
+    let mine = answered(ours_world, &binary(), &["status", RUN, "--providers"]);
+    assert_eq!(
+        (&mine["exit"], &mine["stdout"], &mine["stderr"]),
+        (&theirs["exit"], &theirs["stdout"], &theirs["stderr"]),
+        "`onepipeline {args:?}` answered differently from {RELEASE} over the same channel"
+    );
+    mine
+}
+
 fn surface(kind: &str, message: &str, from: &str, blocking: bool, asker: Option<&str>) -> Surface {
     Surface {
         id: 0,
@@ -349,7 +364,7 @@ fn a_channel_this_build_writes_is_read_by_the_0_28_2_wheel_and_what_it_appends_i
 
     // Reads first, then the two claims a supervisor makes: the release and this
     // build answer each alike, and leave all seven files alike.
-    let status = answered_alike(&release_world, &ours_world, &["status", RUN]);
+    let status = status_answered_alike(&release_world, &ours_world);
     let stdout = status["stdout"].as_str().expect("a status");
     for line in [
         "  waiting for planner decision: planner-question — still pending",

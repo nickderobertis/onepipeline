@@ -12,6 +12,10 @@ function list(filter) {
   const doc = JSON.parse(command("cargo", ["nextest", "list", "--locked", "--message-format", "json", "-E", filter]));
   return Object.entries(doc["rust-suites"]).flatMap(([binary, suite]) => Object.entries(suite.testcases).filter(([, t]) => t["filter-match"].status === "matches").map(([name]) => `${binary}::${name}`)).sort();
 }
+// A budget tier added after the pinned justfile, excluded from `rest-tier` by name and
+// run by its own project, so the pinned filters would otherwise still claim it.
+const ownTierSincePin = "binary(status_read_workload)";
+const withoutOwnTier = (filter) => `(${filter}) and not ${ownTierSincePin}`;
 // A binary given its own tier after the base justfile was written leaves `rest` with it. Its `harness::` tests are the
 // e2e binary's own module compiled in again, so its tier leaves them to `e2e`'s; every other test it lists stays selected.
 const splitOut = [["onepipeline::narrow_write", "narrow-write"]];
@@ -26,7 +30,7 @@ test("real nextest listings preserve every test when version readers move to the
       const beforeFilter = command("just", ["--justfile", base, "--evaluate", `${original}-tier`]).trim();
       const afterFilter = command("just", ["--evaluate", `${original}-tier`]).trim();
       const movedFilter = command("just", ["--evaluate", `version-${moved}-tier`]).trim();
-      const before = list(beforeFilter).filter((name) => !inSplit(name));
+      const before = list(withoutOwnTier(beforeFilter)).filter((name) => !inSplit(name));
       const after = list(afterFilter);
       const version = list(movedFilter);
       assert.equal(version.length, 1, `${moved}'s version target must contain exactly its one moved test`);
@@ -45,6 +49,6 @@ test("real nextest listings preserve every test when version readers move to the
     const before = command("just", ["--justfile", base, "--evaluate", "offline-tiers"]).trim();
     const after = command("just", ["--evaluate", "offline-tiers"]).trim();
     const leftToE2e = (name) => inSplit(name) && /::harness::/.test(name) && e2e.includes(asE2e(name));
-    assert.deepEqual(list(after), list(before).filter((name) => !leftToE2e(name)));
+    assert.deepEqual(list(after), list(withoutOwnTier(before)).filter((name) => !leftToE2e(name)));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
