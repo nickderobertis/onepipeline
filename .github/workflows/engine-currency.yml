@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   engines-current:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2

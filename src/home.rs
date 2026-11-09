@@ -16,7 +16,7 @@ use onetaskgraph_core::config::Layer;
 use onetaskgraph_plugin_api::StatusCategory;
 use serde_json::Value;
 
-use crate::journal::{self, PipelineKind};
+use crate::journal::PipelineKind;
 use crate::payload::{HomeOutcome, HomeStatus};
 use crate::taskgraph::{QualifiedId, Store};
 use crate::writeback::FailureClass;
@@ -140,8 +140,7 @@ pub(crate) fn recorded(paths: &crate::ledger::RunPaths) -> bool {
 }
 
 /// What `results` says of the run's `home-status` record, or nothing where it holds none.
-pub(crate) fn results_line(view: &crate::views::RunView) -> String {
-    let events = journal::read(&view.paths.journal());
+pub(crate) fn results_line(events: &[crate::event::Envelope]) -> String {
     let Some(record) = events
         .iter()
         .find(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::HomeStatus))

@@ -1,0 +1,7 @@
+golden  DRIVER DEAD  2/5 done, 1 not landed, 1 never attempted
+  DRIVER DEAD: nothing is driving this run; adopt it or stop it
+  2 planner update(s) waiting (2 finding), unread for <age>
+  not-settled: ready — queued for dispatch
+  failed: the dispatch died rather than failing its task; it left no branch, so nothing of it survived
+  1 node(s) have not landed: unlanded — read as this rendered; `results golden` names the change to open
+  free space: <read off this host>

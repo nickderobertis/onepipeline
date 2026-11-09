@@ -7,12 +7,15 @@
 //! `/proc/thread-self/schedstat`, where the host has it) and the bytes it asked
 //! the kernel for (`/proc/thread-self/io` `rchar`), so wall less CPU less
 //! run-queue wait is time blocked, which on a read like this one is I/O wait.
+//! A kernel built without per-task I/O accounting has no such file, and those
+//! bytes are written as `null`: not counted, which is not none read.
 //! [`add`] counts quantities the timings cannot carry, such as the journal bytes
 //! the read folded.
 //!
 //! Counted and **written** only where [`HOST_PHASES_ENV`] names a file — which
-//! `tests/e2e/host_view.rs` and `scripts/host-view-measure.mjs` do, and no other
-//! run of this binary — and then the read appends one JSON line to it as it ends.
+//! `tests/e2e/host_view.rs`, `scripts/host-view-measure.mjs` and, for `status` and
+//! `results`, `tests/status_read/main.rs` do, and no other run of this binary — and
+//! then the read appends one JSON line to it as it ends.
 //! Absent, no phase samples anything.
 
 use std::cell::RefCell;
@@ -42,7 +45,7 @@ struct Sample {
     wall_ns: u128,
     cpu_ns: u128,
     runq_ns: u128,
-    rchar: u128,
+    rchar: Option<u128>,
 }
 
 #[derive(Debug, Default)]
@@ -50,7 +53,7 @@ struct Totals {
     wall_ns: u128,
     cpu_ns: u128,
     runq_ns: u128,
-    rchar: u128,
+    rchar: Option<u128>,
     count: u64,
 }
 
@@ -73,8 +76,7 @@ fn sample() -> Sample {
     let rchar = io
         .lines()
         .find_map(|line| line.strip_prefix("rchar: "))
-        .and_then(|count| count.trim().parse().ok())
-        .unwrap_or(0);
+        .and_then(|count| count.trim().parse().ok());
     Sample {
         wall_ns,
         cpu_ns,
@@ -105,7 +107,9 @@ impl Drop for Phase {
             entry.wall_ns += now.wall_ns.saturating_sub(began.wall_ns);
             entry.cpu_ns += now.cpu_ns.saturating_sub(began.cpu_ns);
             entry.runq_ns += now.runq_ns.saturating_sub(began.runq_ns);
-            entry.rchar += now.rchar.saturating_sub(began.rchar);
+            if let (Some(now), Some(began)) = (now.rchar, began.rchar) {
+                entry.rchar = Some(entry.rchar.unwrap_or(0) + now.saturating_sub(began));
+            }
             entry.count += 1;
         });
     }
@@ -117,6 +121,11 @@ pub(crate) fn add(name: &'static str, amount: u64) {
             *quantities.entry(name).or_default() += amount;
         });
     }
+}
+
+/// A byte count as the line carries it: `null` where the kernel counted none.
+fn read_bytes(rchar: Option<u128>) -> Option<u64> {
+    rchar.map(|count| u64::try_from(count).unwrap_or(u64::MAX))
 }
 
 /// Note the wall clock (Unix epoch nanoseconds) at a named point, so a caller that
@@ -149,7 +158,7 @@ pub(crate) fn flush() {
                         "blocked_ms": totals
                             .wall_ns
                             .saturating_sub(totals.cpu_ns + totals.runq_ns) as f64 / 1e6,
-                        "read_bytes": u64::try_from(totals.rchar).unwrap_or(u64::MAX),
+                        "read_bytes": read_bytes(totals.rchar),
                         "count": totals.count,
                     }),
                 )
@@ -180,7 +189,7 @@ pub(crate) fn flush() {
         "wall_ms": whole.wall_ns as f64 / 1e6,
         "cpu_ms": whole.cpu_ns as f64 / 1e6,
         "runq_ms": whole.runq_ns as f64 / 1e6,
-        "read_bytes": u64::try_from(whole.rchar).unwrap_or(u64::MAX),
+        "read_bytes": read_bytes(whole.rchar),
         "phases": phases,
         "quantities": quantities,
     });

@@ -32,6 +32,7 @@ use crate::error::Result;
 use crate::graph::{Graph, NodeStatus};
 use crate::journal::{self, Journal};
 use crate::ledger::{self, RunPaths};
+use crate::projection::RunState;
 
 /// The prefix a cross-DAG reference starts with.
 pub const PREFIX: &str = "run:";
@@ -432,6 +433,42 @@ pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String
     resolve_with(root, graph, settled_status)
 }
 
+/// [`resolve_quietly`], over only the edges a consumer in `state` still waits on.
+///
+/// A node that has settled, other than at one of the two gates the status derivation
+/// re-derives, and a parked node, take their status from the journal and never read
+/// a dependency: see `graph::derive`. So an edge all of whose consumers are such
+/// nodes changes nothing a reader of this run is told, whatever its upstream later
+/// does, and reading it would be another run's whole ledger for no answer.
+pub(crate) fn resolve_open(root: &Path, state: &RunState) -> BTreeMap<String, NodeStatus> {
+    open_edges(state)
+        .into_iter()
+        .filter_map(|dependency| {
+            let reference = parse(&dependency)?;
+            let status = satisfied_status(settled_status_recently(root, &reference));
+            Some((dependency, status))
+        })
+        .collect()
+}
+
+/// The dependencies [`resolve_open`] reads for `state`.
+pub(crate) fn open_edges(state: &RunState) -> Vec<String> {
+    let settled = state.settled();
+    edges(&state.graph)
+        .into_iter()
+        .filter(|(_, consumers)| {
+            consumers.iter().any(|consumer| {
+                !crate::graph::status_stands_without_its_dependencies(
+                    &state.graph,
+                    consumer,
+                    &settled,
+                )
+            })
+        })
+        .map(|(dependency, _)| dependency)
+        .collect()
+}
+
 /// The input metadata belonging to the answers a quiet view actually reused.
 /// Never label a cached answer with the metadata of a newer journal. A retained
 /// view can then keep an unchanged answer after the shared cache expires,
@@ -441,9 +478,18 @@ pub(crate) fn resolution_stamps(
     graph: &Graph,
     held: &BTreeMap<String, NodeStatus>,
 ) -> Option<BTreeMap<String, JournalStamp>> {
+    stamps_of_answers(root, edges(graph).into_keys(), held)
+}
+
+/// [`resolution_stamps`], over `dependencies` alone.
+pub(crate) fn stamps_of_answers(
+    root: &Path,
+    dependencies: impl IntoIterator<Item = String>,
+    held: &BTreeMap<String, NodeStatus>,
+) -> Option<BTreeMap<String, JournalStamp>> {
     let answered = answers();
     let mut stamps = BTreeMap::new();
-    for dependency in edges(graph).into_keys() {
+    for dependency in dependencies {
         let Some(reference) = parse(&dependency) else {
             continue;
         };

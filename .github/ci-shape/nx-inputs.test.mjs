@@ -333,7 +333,7 @@ test("narrowing hashes selects the same projects: a justfile edit still touches 
     assert.ok(selected.includes("onepipeline-contract"), "the justfile no longer selects the contract tier");
     // A project added since the base has no selection there to keep; it is held to being selected at all.
     const existed = new Set(projects(base));
-    assert.ok(selected.includes("onepipeline-narrow-write"), "the justfile does not select a project added since the base");
+    for (const added of ["onepipeline-status-read", "onepipeline-narrow-write"]) assert.ok(selected.includes(added), `the justfile does not select ${added}, added since the base`);
     assert.deepEqual(selected.filter((name) => existed.has(name)), affected(base, "justfile"), "the justfile selects other projects than before");
   } finally {
     rmSync(base, { recursive: true, force: true });

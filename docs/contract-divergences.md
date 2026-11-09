@@ -8089,11 +8089,25 @@ release the lock links, over a real `local-md` store.
 
 ## 95. A supervisor's two most frequent reads needed a shell filter and a redirect to be one command — OPEN
 
-**Proposal (for the planner who owns the contract): the views line reads `status [--no-providers] [--json]`,
+**Proposal (for the planner who owns the contract): the views line reads `status [--providers] [--no-providers] [--json]`,
 entry 58's `watch` takes `--log PATH`, and the verbs paragraph names
-`Status::render_without_providers` beside `render_status`.** Neither flag changes a byte of
-either verb's output when it is not given. `--json`, which requires a run, joined the line with
-entry 103 and is stated in the contract itself.
+`Status::render_without_providers` and `Status::render_with_providers` beside `render_status`.**
+`--json`, which requires a run, joined the line with entry 103 and is stated in the contract
+itself.
+
+**The provider report is no longer the default (plan `dag-run-load-speed-2026-11-06`, the
+breaking change of `engine-run-reads`).** By default `status` neither asks for nor prints the
+report, because a reader of one run paid over twenty seconds for it whatever the run's size,
+and under load that sweep timed out and made a healthy run look broken. `--providers` asks for
+it and prints the `providers:` line where it was always printed. `--no-providers` stays accepted
+and changes nothing. Naming both is refused. `verbs::render_status` keeps its signature and
+renders the default text, the same as `Status::render_without_providers`;
+`Status::render_with_providers` renders the report. `verbs::status(root, Some(run))` keeps its
+signature and reads the run through its checkpoint, as the binary already did, so
+`RunStatus.view` holds the run's whole state and no event of its history;
+`verbs::status(root, None)` is unchanged. The surfaces this breaks are the default text of
+`onepipeline status`, the meaning of `verbs::render_status` and the contents of `RunStatus.view`.
+`onepipeline host` is unchanged.
 
 Why: a supervisor approves the commands it runs against an allowlist, and both harnesses it
 runs under — Claude Code and Codex — match a rule only against a command they can parse as
@@ -8106,12 +8120,12 @@ on the commands run most. The user ruled that the engine absorb both shapes as f
 than the host as a wrapper script.
 
 **`status [RUN] --no-providers`.** The `providers:` report, and everything it contributes, is
-left out, and `oneagentgraph health` is not asked at all. Every other line is byte-identical to
-the view without the flag, in the same order and on the same stream — the unread-planner-update
+left out, and `oneagentgraph health` is not asked at all, as it is by default. Every other line
+is byte-identical to the view `--providers` prints, in the same order and on the same stream — the unread-planner-update
 line and the `free space:` lines above the cut included. Given no run the listing carries no
 provider report either way, so the flag leaves it as it is. The library renders it with
-`Status::render_without_providers`, a method rather than a second `render_` function, because
-the verbs paragraph names every function `src/verbs.rs` publishes and is not this repository's
+`Status::render_without_providers` and the report with `Status::render_with_providers`, methods
+rather than more `render_` functions, because the verbs paragraph names every function `src/verbs.rs` publishes and is not this repository's
 to amend.
 
 **`watch RUN ... --log PATH`.** Every human line the watch would have written to standard error
