@@ -157,6 +157,7 @@ fn a_review_surface_a_hook_marks_blocking_is_journalled_blocking() {
         ),
     )
     .unwrap();
+    // llmlint: ignore[e2e_not_mocked] The agent subprocess only produces the draft this journey needs a comment on; the layer under test is the compiled binary running a real hook script over the surface discovery offers, and nothing of that is mocked.
     world.script("a.work", "first draft\n");
     let project = world.plan("hooked", &plan_of("hooked", vec![lifecycle("a", &[])]));
     world
