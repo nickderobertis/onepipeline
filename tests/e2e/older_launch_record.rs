@@ -140,6 +140,11 @@ fn a_settled_run_whose_record_an_older_build_wrote_is_read_adopted_and_fires_its
     let record = world.run_json(RUN, "launch.json");
     assert_eq!(record["adoptions"], json!(1));
     assert_eq!(record["bus_config"], older_bus_config());
+    assert_eq!(
+        record["heartbeat_interval"],
+        json!(1_800),
+        "adoption rewrote the record without the interval it carried"
+    );
     world
         .run(&["status", RUN])
         .exited(0)

@@ -5783,11 +5783,10 @@ pub fn results(view: &RunView) -> String {
 /// longer followed, as `results` and `status` print them: nothing where it named
 /// neither.
 fn check_ending_lines(view: &RunView) -> String {
-    crate::checkwatch::ending_sections(
-        current_driver_record(view).filter(|event| {
-            PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
-        }),
-    )
+    crate::checkwatch::ending_sections(view.state.recalled.iter().rev().find(|event| {
+        event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
+    }))
 }
 
 /// What the run's results say about the nodes a `retry` replaced, or nothing
