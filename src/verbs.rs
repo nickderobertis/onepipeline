@@ -1376,6 +1376,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             correlation: None,
         },
         |changed| {
+            // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the surface met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook rewriting a surface into a boundary violation is that path over changed input.
             crate::boundary::guard(&view.state, &json!({ "message": changed.get("message") }))
         },
     )?;

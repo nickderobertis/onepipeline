@@ -15,6 +15,7 @@
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
 //!   `set-author <word>`       rewrite the envelope's `author`
 //!   `declare-complete`        add `completion: true` to the envelope
+//!   `add-finding-command`     add one `finding` command to the envelope
 //!   `unreadable-command`      leave a command this build cannot decode
 //!   `reroute-as-commands`     rewrite to the `commands` record shape, and reroute
 //!                             there
@@ -98,6 +99,19 @@ fn main() -> std::process::ExitCode {
                 fake::fail(&format!("declare-complete was handed no object: {offered}"));
             };
             fields.insert("completion".to_owned(), json!(true));
+            println!("{message}");
+        }
+        "add-finding-command" => {
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!(
+                    "add-finding-command was handed no object: {offered}"
+                ));
+            };
+            fields.insert("version".to_owned(), json!(3));
+            fields.insert(
+                "commands".to_owned(),
+                json!([{"op": "finding", "message": "added by a hook"}]),
+            );
             println!("{message}");
         }
         "unreadable-command" => {

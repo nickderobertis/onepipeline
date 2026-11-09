@@ -2484,3 +2484,64 @@ fn a_flows_reply_a_hook_drops_or_refuses_is_told_apart() {
         assert_eq!(flow.ended(), 0);
     }
 }
+
+/// What a hook writes on a flow's reply is held to what the reply itself is: a
+/// flow has no graph, and a hook cannot name an author or a completion the
+/// configuration never gave.
+#[test]
+fn a_flows_reply_a_hook_rewrites_is_held_to_what_a_reply_may_carry() {
+    for (name, argv, author, said) in [
+        ("hookcommands", "add-finding-command", "planner", "no graph"),
+        (
+            "hookstranger",
+            "set-author, \"stranger\"",
+            "planner",
+            "stranger",
+        ),
+        (
+            "hookdeclare",
+            "declare-complete",
+            "sentinel",
+            "not something the sentinel may do",
+        ),
+    ] {
+        let world = World::new(name);
+        let hook = crate::harness::double("bus-hook")
+            .to_string_lossy()
+            .into_owned();
+        let config = world.root.join("bus.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
+                 [finding]}}\nhooks:\n  - {{on: replies, command: [{hook:?}, {argv}]}}\n"
+            ),
+        )
+        .expect("a bus configuration");
+        let flow = Flowing::start_with(
+            &world,
+            name,
+            &["--bus-config", config.to_str().expect("a path")],
+            &[gate(&world, "end")],
+        );
+        world
+            .run_with_stdin(
+                &["reply", "--flow", name],
+                &json!({"author": author, "reason": "a ruling"}).to_string(),
+            )
+            .exited(REFUSED)
+            .err_has(said);
+        assert_eq!(
+            std::fs::read_to_string(
+                world
+                    .runs
+                    .join(format!(".flows/{name}/channel/replies.jsonl"))
+            )
+            .unwrap_or_default(),
+            "",
+            "{name}: the reply was queued"
+        );
+        flow.open("end");
+        assert_eq!(flow.ended(), 0);
+    }
+}
