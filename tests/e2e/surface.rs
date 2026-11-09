@@ -181,7 +181,11 @@ fn start_refuses_the_removed_heartbeat_flag_and_records_no_interval() {
         .exited(USAGE_ERROR)
         .err_has("unexpected argument '--heartbeat-interval'");
     assert!(
-        !world.run_file("plain", "launch.json").exists(),
+        !world
+            .run_file("plain", "launch.json")
+            .parent()
+            .expect("a run file sits in its run directory")
+            .exists(),
         "the refused launch created a run directory"
     );
     world.run(&["start", &plan, "--detach"]).exited(0);
