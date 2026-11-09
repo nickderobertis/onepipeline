@@ -185,12 +185,17 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             "q",
             &item("q", "question", "low", "s", json!({"scope":"nothing"})),
         );
+        let batch = world.input(
+            "batch",
+            &json!({"answers": [{"id": "hi-x", "text": "yes"}]}),
+        );
         let driven = [
             vec!["list"],
             vec!["report"],
             vec!["show", "hi-x"],
             vec!["raise", "--input", input.as_str()],
             vec!["answer", "hi-x", "--text", "yes"],
+            vec!["answer-batch", "--input", batch.as_str()],
             vec!["complete", "hi-x"],
             vec!["dismiss", "hi-x"],
             vec!["reopen", "hi-x"],
@@ -378,6 +383,16 @@ fn actions_refuse_wrong_kinds_conflicts_and_blank_answers_and_repeat_idempotentl
         None,
         &["answer", &question, "--text", "   "],
         "answer text must not be blank",
+    );
+    world.refused(
+        None,
+        &["answer", &question],
+        "an answer names a choice, text, or both",
+    );
+    world.refused(
+        None,
+        &["answer", &question, "--choice", "a"],
+        "offers no choices",
     );
     world.refused(
         None,
@@ -1768,6 +1783,183 @@ cp "{runs}/human-items/events.ndjson" "{out}/journal-after"
     );
 }
 
+/// A batch on a full disk, for real: the reserve is released for the one write that
+/// holds the whole batch, its answers keep consecutive sequences and the host item
+/// follows them, and a batch no space can hold is refused with nothing written.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_disk_takes_a_batch_whole_from_its_reserve_or_refuses_all_of_it() {
+    use onepipeline::human_items::item_id_for;
+    let world = Live::enabled();
+    let big = "x".repeat(16 * 1024);
+    let raised: Vec<String> = ["one", "two", "three"]
+        .iter()
+        .map(|key| {
+            world.input(
+                key,
+                &item(key, "question", "low", "s-a", json!({"scope": "nothing"})),
+            )
+        })
+        .collect();
+    let batch = |keys: &[&str]| -> Value {
+        json!({"answers": keys
+            .iter()
+            .map(|key| json!({"id": item_id_for(key), "text": format!("{key}: {big}")}))
+            .collect::<Vec<_>>()})
+    };
+    let first = world.input("batch-first", &batch(&["one", "two"]));
+    let second = world.input("batch-second", &batch(&["three"]));
+    let out = world.root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let runs = world.runs();
+    let script = format!(
+        r#"set -u
+mount -t tmpfs -o size=2m tmpfs "{runs}" || exit 90
+cd "{repo}"
+run() {{ name=$1; shift; "{bin}" human-items "$@" > "{out}/$name.out" 2> "{out}/$name.err"; echo "$name=$?" >> "{out}/codes"; }}
+run raise1 raise --input "{one}"
+run raise2 raise --input "{two}"
+run raise3 raise --input "{three}"
+dd if=/dev/zero of="{runs}/filler" bs=1k 2>/dev/null
+run first answer-batch --input "{first}"
+cp "{runs}/human-items/events.ndjson" "{out}/journal-after-first"
+dd if=/dev/zero of="{runs}/filler2" bs=1k 2>/dev/null
+run second answer-batch --input "{second}"
+cp "{runs}/human-items/events.ndjson" "{out}/journal-after-second"
+"#,
+        runs = runs.display(),
+        repo = world.repo().display(),
+        bin = BIN,
+        out = out.display(),
+        one = raised[0],
+        two = raised[1],
+        three = raised[2],
+    );
+    let status = Command::new("unshare")
+        .args(["-rm", "sh", "-c", &script])
+        .env("ONEPIPELINE_RUNS_DIR", &runs)
+        .env("XDG_CONFIG_HOME", world.root.join("xdg"))
+        .env("USER", "operator")
+        .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    let read = |name: &str| std::fs::read_to_string(out.join(name)).unwrap_or_default();
+    let codes = read("codes");
+    assert!(
+        codes.contains("first=0\n"),
+        "{codes}\n{}",
+        read("first.err")
+    );
+    assert!(!codes.contains("second=0\n"), "{codes}");
+    assert!(read("second.err").contains("could not record this durably"));
+    assert!(read("second.out").is_empty(), "{}", read("second.out"));
+    let events: Vec<Value> = read("journal-after-first")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "human-item-raised",
+            "human-item-raised",
+            "human-item-raised",
+            "human-item-answered",
+            "human-item-answered",
+            "human-item-raised",
+        ],
+        "the host item follows the whole batch"
+    );
+    assert_eq!(events[3]["seq"].as_u64().unwrap() + 1, events[4]["seq"]);
+    assert_eq!(events[3]["payload"]["batch"], events[4]["payload"]["batch"]);
+    assert_eq!(events[5]["payload"]["item"]["block"]["scope"], "host");
+    assert_eq!(read("journal-after-second"), read("journal-after-first"));
+}
+
+/// A batch's records are carried past a torn tail and a garbled record alike: what its
+/// writer wrote is delivered whole, and a record no writer made still stops delivery.
+#[test]
+fn a_batch_cut_short_or_followed_by_a_broken_record_loses_nothing_and_is_never_doubled() {
+    let world = Live::enabled();
+    let ids: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|key| {
+            world.raise(&item(
+                key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    assert_eq!(world.watch("s").len(), 3);
+    let input = world.input(
+        "batch",
+        &json!({"answers": ids.iter().map(|id| json!({"id": id, "text": "Yes."})).collect::<Vec<_>>()}),
+    );
+    let receipt = world.json(None, &["answer-batch", "--input", &input]);
+    assert_eq!(receipt["answered"].as_array().unwrap().len(), 3);
+    assert_eq!(world.watch("s").len(), 3);
+    // Delivery forgotten and the last record cut: the store a writer leaves dying inside
+    // its one write. What it wrote is carried, said to be short, and printed by nobody twice.
+    let journal = world.store().join("events.ndjson");
+    let whole = std::fs::read_to_string(&journal).unwrap();
+    let kept: Vec<&str> = whole.lines().collect();
+    std::fs::write(&journal, format!("{}\n", kept[..kept.len() - 1].join("\n"))).unwrap();
+    let delivered = find_delivered(&world.store().join("bus")).expect("delivery has run");
+    std::fs::remove_file(delivered).unwrap();
+    let again = world.run(Some("s"), &["watch"]);
+    assert!(
+        String::from_utf8_lossy(&again.stderr)
+            .contains("declares 3 answers and the journal holds 2"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(again.stdout.is_empty(), "already watched");
+
+    // Garbled after a new batch: the batch reaches its owner's queue before the refusal,
+    // and with the journal repaired the watch prints it once.
+    let more = world.raise(&item(
+        "d",
+        "question",
+        "low",
+        "s2",
+        json!({"scope": "nothing"}),
+    ));
+    assert_eq!(world.watch("s2").len(), 1);
+    let two = world.input("two", &json!({"answers": [{"id": more, "text": "Fine."}]}));
+    world.ok(None, &["answer-batch", "--input", &two]);
+    let bytes = std::fs::read_to_string(&journal).unwrap();
+    std::fs::write(&journal, format!("{bytes}not a record\n")).unwrap();
+    // Forgotten as well, so the carry walks the batch and then the garbled record: the
+    // batch is still carried, and the cursor passes it, before delivery stops there.
+    let document = find_delivered(&world.store().join("bus")).expect("delivery has run");
+    std::fs::remove_file(&document).unwrap();
+    let failed = world.run(Some("s2"), &["watch"]);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("not an item event"));
+    let cursor: Value = serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
+    assert_eq!(cursor["through"].as_u64(), Some(bytes.len() as u64));
+    std::fs::write(&journal, &bytes).unwrap();
+    let delivered = world.watch("s2");
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(delivered[0]["kind"], "human-item-answered");
+    assert!(world.watch("s2").is_empty());
+}
+
+fn find_delivered(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            find_delivered(&path)
+        } else {
+            (entry.file_name() == "delivered.json").then_some(path)
+        }
+    })
+}
+
 /// An authority that cannot be started, or answers anything but the version it
 /// holds for the stored board copy, leaves the task open and records nothing.
 #[test]
@@ -2856,4 +3048,229 @@ fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
         }
     }
     assert_eq!(std::fs::read(&journal).unwrap(), before);
+}
+
+/// The SDK's batch names its actor, and `apply` refuses a batch for `apply_batch`, whose
+/// answer is a batch receipt: neither writes anything.
+#[test]
+fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
+    use onepipeline::human_items::{
+        Actor, HumanItemAction, HumanItemBatchAnswer, HumanItemRefusal, HumanItems,
+    };
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "q",
+        "question",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let before = std::fs::read(world.store().join("events.ndjson")).unwrap();
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    let answers = vec![HumanItemBatchAnswer {
+        id: id.clone(),
+        choice: None,
+        text: Some("Yes.".into()),
+    }];
+    let refused = store
+        .apply_batch(
+            answers.clone(),
+            Actor {
+                actor: "  ".into(),
+                on_behalf_of: None,
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&refused, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
+        "{refused:?}"
+    );
+    let single = store
+        .apply(HumanItemAction::Answer {
+            id: id.clone(),
+            choice: None,
+            text: Some("Yes.".into()),
+            actor: " ".into(),
+            on_behalf_of: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&single, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
+        "{single:?}"
+    );
+    let sent = store
+        .apply(HumanItemAction::AnswerBatch {
+            answers,
+            actor: "ui:operator".into(),
+            on_behalf_of: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&sent, HumanItemRefusal::Conflict { reason } if reason.contains("apply_batch")),
+        "{sent:?}"
+    );
+    assert_eq!(
+        std::fs::read(world.store().join("events.ndjson")).unwrap(),
+        before
+    );
+}
+
+/// A batch file of the wrong shape is refused before anything is judged, and an entry
+/// that names nothing or a blank text is refused on its own while the rest are recorded.
+#[test]
+fn a_batch_judges_each_entry_and_refuses_a_file_of_the_wrong_shape() {
+    let world = Live::enabled();
+    let ids: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|key| {
+            world.raise(&item(
+                key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    let before = world.journal().len();
+    for (name, body, says) in [
+        ("extra", json!({"answers": [], "note": 1}), "note"),
+        ("absent", json!({"other": []}), "answers"),
+        ("entry", json!({"answers": [{"choice": "a"}]}), "id"),
+    ] {
+        let path = world.input(name, &body);
+        world.refused(None, &["answer-batch", "--input", &path], says);
+    }
+    assert_eq!(
+        world.journal().len(),
+        before,
+        "a refused file wrote nothing"
+    );
+
+    let path = world.input(
+        "mixed",
+        &json!({"answers": [
+            {"id": ids[0], "text": "Yes."},
+            {"id": ids[1]},
+            {"id": ids[2], "text": "   "},
+        ]}),
+    );
+    let receipt = world.json(None, &["answer-batch", "--input", &path]);
+    assert_eq!(
+        receipt["answered"].as_array().unwrap().len(),
+        1,
+        "{receipt}"
+    );
+    let reasons: Vec<&str> = receipt["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["refusal"]["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "an answer names a choice, text, or both",
+            "answer text must not be blank"
+        ]
+    );
+    assert_eq!(
+        world.journal().len(),
+        before + 1,
+        "only the valid entry is written"
+    );
+    assert_eq!(receipt["refused"][0]["id"], json!(ids[1]));
+    assert_eq!(
+        world.json(None, &["show", &ids[1], "--json"])["item"]["state"],
+        "open"
+    );
+}
+
+/// An answer the engine itself records tells its owner and no run: only a person's
+/// resolution is a surface, and answers are no exception.
+#[test]
+fn an_answer_by_the_engine_reaches_its_owner_and_no_run() {
+    use onepipeline::human_items::{HumanItemAction, HumanItems};
+    let world = Live::enabled();
+    let run_dir = world.runs().join("watched");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let mut value = item("q", "question", "low", "s", json!({"scope": "nothing"}));
+    value["owner"]["run"] = json!("watched");
+    let id = world.raise(&value);
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    store
+        .apply(HumanItemAction::Answer {
+            id,
+            choice: None,
+            text: Some("Decided.".into()),
+            actor: "engine".into(),
+            on_behalf_of: None,
+        })
+        .unwrap();
+    let events = world.watch("s");
+    assert_eq!(events.last().unwrap()["kind"], "human-item-answered");
+    assert!(
+        !run_dir.join("channel/surfaces.jsonl").exists(),
+        "the engine's answer surfaced on the run"
+    );
+}
+
+/// The limits are inclusive: six choices and fifty answers are accepted. A batch mixing
+/// an identical repeat with new answers keeps the batch's order and counts only the new.
+#[test]
+fn six_choices_and_fifty_answers_fit_and_a_repeat_is_not_counted_in_its_batch() {
+    let world = Live::enabled();
+    let mut six = item("six", "question", "low", "s", json!({"scope": "nothing"}));
+    six["choices"] = json!((0..6)
+        .map(|n| json!({"id": format!("c{n}"), "title": format!("Choice {n}"), "description": "d"}))
+        .collect::<Vec<_>>());
+    let offered = world.raise(&six);
+    assert_eq!(
+        world.json(None, &["show", &offered, "--json"])["item"]["choices"]
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    let ids: Vec<String> = (0..50)
+        .map(|n| {
+            let key = format!("q{n}");
+            world.raise(&item(
+                &key,
+                "question",
+                "low",
+                "s",
+                json!({"scope": "nothing"}),
+            ))
+        })
+        .collect();
+    world.ok(None, &["answer", &ids[3], "--text", "Already."]);
+    let path = world.input(
+        "fifty",
+        &json!({"answers": ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| json!({"id": id, "text": if n == 3 { "Already." } else { "Yes." }}))
+            .collect::<Vec<_>>()}),
+    );
+    let before = world.journal().len();
+    let receipt = world.json(None, &["answer-batch", "--input", &path]);
+    let answered: Vec<&str> = receipt["answered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["item"]["item"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(answered, ids.iter().map(String::as_str).collect::<Vec<_>>());
+    let journal = world.journal();
+    assert_eq!(
+        journal.len(),
+        before + 49,
+        "the repeat is written once, earlier"
+    );
+    let batch = receipt["batch"].as_str().unwrap();
+    for event in &journal[before..] {
+        assert_eq!(event["payload"]["batch"]["id"], batch, "{event}");
+        assert_eq!(event["payload"]["batch"]["size"], 49, "{event}");
+    }
 }

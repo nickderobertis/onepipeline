@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.105.0](https://github.com/nickderobertis/onepipeline/compare/v0.104.0...v0.105.0) - 2026-11-09
+
+### Added
+
+- *(channel)* [**breaking**] run the bus's message hooks, and state a dropped or changed envelope in the receipt ([#1491](https://github.com/nickderobertis/onepipeline/pull/1491))
+
+### Breaking
+
+- *(channel)* `--envelope-reviewer` is a hook in behaviour: a reviewer now passes by printing the document it read, and an existing reviewer that prints nothing on a pass is refused as unjudged; its stdout is the document, so narration belongs on stderr
+- *(channel)* `verbs::ReplyOutcome` gains `Dropped`, `verbs::Receipt` gains `changed` and `commands_dropped`, and `RecordedBusConfig::config` exposes the `onemessagebus` 0.10 types
+
+### Added
+
+- *(channel)* run the bus's hooks on every planner-channel offer: a reply, its command envelope and a surface are applied as the hooks left them, drops are recorded by the bus, and `onepipeline ask` answers `dropped` for a question a hook dropped
+
+## [0.104.0](https://github.com/nickderobertis/onepipeline/compare/v0.103.0...v0.104.0) - 2026-11-09
+
+### Added
+
+- *(human-items)* [**breaking**] offer choices on a question, record choice and text answers, and answer several items as one batch ([#1485](https://github.com/nickderobertis/onepipeline/pull/1485))
+
 ## [0.103.0](https://github.com/nickderobertis/onepipeline/compare/v0.102.3...v0.103.0) - 2026-11-09
 
 ### Added

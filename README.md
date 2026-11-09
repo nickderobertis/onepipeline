@@ -943,13 +943,22 @@ onepipeline human-items list                 # this session's open items, blocki
 onepipeline human-items report               # the one printable manager report
 onepipeline human-items report --full --all  # every item on the host, with full bodies
 onepipeline human-items show ITEM            # one item and every step it blocks
-onepipeline human-items answer ITEM --text "Use the gradual rollout."
+onepipeline human-items answer ITEM --choice gradual --text "Start on Monday."  # a choice, your own words, or both
+onepipeline human-items answer-batch --input FILE  # several answers from {answers: [{id, choice?, text?}]}, as one delivery
 onepipeline human-items complete ITEM
 onepipeline human-items dismiss ITEM [--reason TEXT]
 onepipeline human-items reopen ITEM          # take a completion or dismissal back
 onepipeline human-items note ITEM --text TEXT  # comment on it, or state why, afterwards
 onepipeline human-items watch                # this session's item events, once each
 ```
+
+A question may offer up to six `choices`, each a title and a description; an answer
+records the picked choice, the person's own words, or both. Several answers sent
+together with `answer-batch` are one batch: the owning manager's `watch` prints the
+batch in one delivery, a run tied to its items wakes on one `human-item` surface, and
+each refused entry is reported without being written.
+
+Every question a manager asks a person is a question item, offering choices where a few answers cover it, and a person may always answer in their own words. An asker that must block on its harness's own question tool, because it can do nothing useful until the answer arrives, raises the question as an item first and records the answer that tool returns on that item, acting for the person, so the item store stays the record of every question.
 
 `list` and `report` print each item as one compact entry — title, priority,
 kind, what it blocks, its source and one line of its body — and `--full` prints

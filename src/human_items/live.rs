@@ -31,10 +31,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
-    HumanItem, HumanItemAction, HumanItemBlock, HumanItemBlocked, HumanItemBlockedPlan,
-    HumanItemDetail, HumanItemEventAction, HumanItemEventBy, HumanItemEventPayload,
-    HumanItemFilter, HumanItemInput, HumanItemKind, HumanItemNode, HumanItemReceipt,
-    HumanItemRefusal, HumanItemResolution, HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
+    HumanItem, HumanItemAction, HumanItemBatchAnswer, HumanItemBatchReceipt, HumanItemBatchRefused,
+    HumanItemBlock, HumanItemBlocked, HumanItemBlockedPlan, HumanItemDetail, HumanItemEventAction,
+    HumanItemEventBatch, HumanItemEventBy, HumanItemEventPayload, HumanItemFilter, HumanItemInput,
+    HumanItemKind, HumanItemNode, HumanItemReceipt, HumanItemRefusal, HumanItemResolution,
+    HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
 };
 use crate::event::{Envelope, Source, ENVELOPE_VERSION};
 
@@ -496,6 +497,36 @@ impl HumanItems {
         // released by the run's driver, so this is said and the receipt stands.
         if let Err(why) = super::runtime::release(&self.root, &receipt.item.item) {
             eprintln!("onepipeline: {why}");
+        }
+        Ok(receipt)
+    }
+
+    /// Answer several open questions as one batch. A malformed batch is refused whole;
+    /// otherwise each entry is judged on its own, the accepted ones are recorded under one
+    /// hold of the journal's lock with consecutive sequences, and each refused one is reported
+    /// without being written.
+    ///
+    /// # Errors
+    ///
+    /// A conflict for a malformed batch or a journal that would not keep it.
+    pub fn apply_batch(
+        &self,
+        answers: Vec<HumanItemBatchAnswer>,
+        actor: Actor,
+    ) -> Result<HumanItemBatchReceipt, HumanItemRefusal> {
+        if let Some(why) = super::batch_refusal(&answers, &actor.actor) {
+            return Err(conflict(why));
+        }
+        let mut writer = Writer::open(self)?;
+        let answered = writer.answer_batch(answers, &actor);
+        writer.finish();
+        let receipt = answered?;
+        // As a single answer's: durable already, and what cannot be released now is
+        // released by the run's driver.
+        for answer in &receipt.answered {
+            if let Err(why) = super::runtime::release(&self.root, &answer.item.item) {
+                eprintln!("onepipeline: {why}");
+            }
         }
         Ok(receipt)
     }
@@ -1480,6 +1511,106 @@ impl<'a> Writer<'a> {
         action: HumanItemEventAction,
         by: Option<HumanItemEventBy>,
     ) -> Result<String, HumanItemRefusal> {
+        let (envelope, line) = self.envelope(self.next_seq, item, action, by, None)?;
+        let appended = self.write(&line)?;
+        let id = self.folded(item);
+        self.carried(&envelope, appended, &item.owner.session)?;
+        Ok(id)
+    }
+
+    /// Record every item as one answer of a batch: one synced write, so the records hold
+    /// consecutive sequences and a carry never finds some of them, and one carry after it.
+    /// Answers the batch's id and each record's event id.
+    fn append_batch(
+        &mut self,
+        items: &[HumanItem],
+    ) -> Result<(String, Vec<String>), HumanItemRefusal> {
+        let seed = format!(
+            "{}:{}:{}",
+            self.next_seq,
+            crate::sys::now_rfc3339(),
+            crate::sys::pid()
+        );
+        let batch = HumanItemEventBatch {
+            id: format!("hb-{}", &hex(seed.as_bytes())[..20]),
+            size: items.len() as u64,
+        };
+        let mut lines = Vec::with_capacity(items.len());
+        let mut last = None;
+        for (at, item) in items.iter().enumerate() {
+            let (envelope, line) = self.envelope(
+                self.next_seq + at as u64,
+                item,
+                HumanItemEventAction::Answered,
+                None,
+                Some(batch.clone()),
+            )?;
+            lines.push(line);
+            last = Some(envelope);
+        }
+        let appended = self.write(&lines.join("\n"))?;
+        let events = items.iter().map(|item| self.folded(item)).collect();
+        if let (Some(envelope), Some(item)) = (&last, items.first()) {
+            self.carried(envelope, appended, &item.owner.session)?;
+        }
+        Ok((batch.id, events))
+    }
+
+    fn write(&mut self, line: &str) -> Result<super::durable::Appended, HumanItemRefusal> {
+        let path = self.store.journal();
+        super::durable::append(&path, &mut self.file, line)
+    }
+
+    /// Note the record just written for `item`, answering its event id.
+    fn folded(&mut self, item: &HumanItem) -> String {
+        let id = event_id(self.next_seq);
+        self.next_seq += 1;
+        self.snapshot.items.insert(item.id.clone(), item.clone());
+        self.snapshot.events.insert(item.id.clone(), id.clone());
+        self.last = Some(id.clone());
+        id
+    }
+
+    /// Carry what was just written, and say a full disk on the reserve it was written into.
+    fn carried(
+        &mut self,
+        envelope: &Envelope,
+        appended: super::durable::Appended,
+        session: &str,
+    ) -> Result<(), HumanItemRefusal> {
+        let from_reserve = appended == super::durable::Appended::FromReserve;
+        if from_reserve {
+            self.reserve_used = true;
+        }
+        super::delivery::deliver(&self.store.root, envelope);
+        if from_reserve {
+            // The record that tells the host its journal is full is written into
+            // the space the reserve released for exactly this.
+            let path = self.store.journal();
+            self.condition(
+                JOURNAL_NO_SPACE,
+                session,
+                "Free space for the human-item journal",
+                &format!(
+                    "The filesystem holding {} has no space left. Human items are being \
+                     recorded into its emergency reserve, which runs out; free space on it. \
+                     This resolves itself once the journal can allocate its reserve again.",
+                    path.display()
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The envelope and journal line of one event, numbered `seq`.
+    fn envelope(
+        &self,
+        seq: u64,
+        item: &HumanItem,
+        action: HumanItemEventAction,
+        by: Option<HumanItemEventBy>,
+        batch: Option<HumanItemEventBatch>,
+    ) -> Result<(Envelope, String), HumanItemRefusal> {
         let payload = HumanItemEventPayload {
             schema_version: 1,
             item_id: item.id.clone(),
@@ -1488,6 +1619,7 @@ impl<'a> Writer<'a> {
             item: item.clone(),
             resolution: item.resolution.clone(),
             by,
+            batch,
         };
         let serde_json::Value::Object(payload) = serde_json::to_value(&payload)
             .map_err(|e| conflict(format!("the item event cannot be serialized: {e}")))?
@@ -1506,7 +1638,7 @@ impl<'a> Writer<'a> {
             v: ENVELOPE_VERSION,
             ts: crate::sys::now_rfc3339(),
             stream: STREAM.to_owned(),
-            seq: self.next_seq,
+            seq,
             source: Source::Pipeline,
             kind: kind.as_str().into(),
             dimensions: Default::default(),
@@ -1516,34 +1648,7 @@ impl<'a> Writer<'a> {
         };
         let line = serde_json::to_string(&envelope)
             .map_err(|e| conflict(format!("the item event cannot be serialized: {e}")))?;
-        let path = self.store.journal();
-        let appended = super::durable::append(&path, &mut self.file, &line)?;
-        let from_reserve = appended == super::durable::Appended::FromReserve;
-        if from_reserve {
-            self.reserve_used = true;
-        }
-        let id = event_id(self.next_seq);
-        self.next_seq += 1;
-        self.snapshot.items.insert(item.id.clone(), item.clone());
-        self.snapshot.events.insert(item.id.clone(), id.clone());
-        self.last = Some(id.clone());
-        super::delivery::deliver(&self.store.root, &envelope);
-        if from_reserve {
-            // The record that tells the host its journal is full is written into
-            // the space the reserve released for exactly this.
-            self.condition(
-                JOURNAL_NO_SPACE,
-                &item.owner.session,
-                "Free space for the human-item journal",
-                &format!(
-                    "The filesystem holding {} has no space left. Human items are being \
-                     recorded into its emergency reserve, which runs out; free space on it. \
-                     This resolves itself once the journal can allocate its reserve again.",
-                    path.display()
-                ),
-            )?;
-        }
-        Ok(id)
+        Ok((envelope, line))
     }
 
     /// The open item a host condition raised, if one is open.
@@ -1583,6 +1688,7 @@ impl<'a> Writer<'a> {
             kind: HumanItemKind::Task,
             title: title.to_owned(),
             body: body.to_owned(),
+            choices: Vec::new(),
             priority: Priority::Urgent,
             owner: super::HumanItemOwner {
                 session: session.to_owned(),
@@ -1636,6 +1742,7 @@ impl<'a> Writer<'a> {
             }
             let unchanged = existing.title == input.title
                 && existing.body == input.body
+                && existing.choices == input.choices
                 && existing.priority == input.priority
                 && existing.approval == input.approval;
             if unchanged || existing.state != HumanItemState::Open {
@@ -1647,6 +1754,7 @@ impl<'a> Writer<'a> {
             let mut updated = existing;
             updated.title = input.title;
             updated.body = input.body;
+            updated.choices = input.choices;
             updated.priority = input.priority;
             updated.approval = input.approval;
             updated.updated_at = now;
@@ -1660,6 +1768,7 @@ impl<'a> Writer<'a> {
             kind: input.kind,
             title: input.title,
             body: input.body,
+            choices: input.choices,
             priority: input.priority,
             owner: input.owner,
             block: input.block,
@@ -1683,15 +1792,7 @@ impl<'a> Writer<'a> {
         text: Option<String>,
         reason: Option<String>,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
-        let mut resolved = item.clone();
-        resolved.state = state;
-        resolved.resolution = Some(HumanItemResolution {
-            actor: actor.actor.clone(),
-            on_behalf_of: actor.on_behalf_of.clone(),
-            text,
-            reason,
-        });
-        resolved.updated_at = crate::sys::now_rfc3339();
+        let resolved = resolved(item, state, actor, None, text, reason);
         let event = self.append(&resolved, action)?;
         Ok(self.receipt(&resolved, event))
     }
@@ -1772,7 +1873,7 @@ impl<'a> Writer<'a> {
         action: HumanItemAction,
         complete: &mut Approve<'_>,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
-        let (id, actor, state, text, reason) = match action {
+        let (id, actor, state, reason) = match action {
             HumanItemAction::Raise(input) => return self.raise(input),
             HumanItemAction::Reopen {
                 id,
@@ -1799,24 +1900,25 @@ impl<'a> Writer<'a> {
             }
             HumanItemAction::Answer {
                 id,
+                choice,
                 text,
                 actor,
                 on_behalf_of,
             } => {
-                if text.trim().is_empty() {
-                    return Err(conflict("answer text must not be blank"));
-                }
-                (
-                    id,
-                    Actor {
-                        actor,
-                        on_behalf_of,
-                    },
-                    HumanItemState::Answered,
-                    Some(text),
-                    None,
-                )
+                let actor = Actor {
+                    actor,
+                    on_behalf_of,
+                };
+                return match self.judge_answer(&id, choice.as_deref(), text.as_deref(), &actor)? {
+                    Answerable::Repeat(receipt) => Ok(*receipt),
+                    Answerable::Open(item) => {
+                        let answered = answered(&item, &actor, choice, text);
+                        let event = self.append(&answered, HumanItemEventAction::Answered)?;
+                        Ok(self.receipt(&answered, event))
+                    }
+                };
             }
+            HumanItemAction::AnswerBatch { .. } => return Err(conflict(super::BATCH_ELSEWHERE)),
             HumanItemAction::Complete {
                 id,
                 actor,
@@ -1828,7 +1930,6 @@ impl<'a> Writer<'a> {
                     on_behalf_of,
                 },
                 HumanItemState::Completed,
-                None,
                 None,
             ),
             HumanItemAction::Dismiss {
@@ -1843,7 +1944,6 @@ impl<'a> Writer<'a> {
                     on_behalf_of,
                 },
                 HumanItemState::Dismissed,
-                None,
                 reason
                     .map(|r| r.trim().to_owned())
                     .filter(|r| !r.is_empty()),
@@ -1858,36 +1958,18 @@ impl<'a> Writer<'a> {
             .get(&id)
             .cloned()
             .ok_or_else(|| conflict(format!("no such human item {id}")))?;
-        if (state == HumanItemState::Answered && item.kind != HumanItemKind::Question)
-            || (state == HumanItemState::Completed && item.kind != HumanItemKind::Task)
-        {
-            let verb = if state == HumanItemState::Answered {
-                "answered; complete or dismiss it"
-            } else {
-                "completed; answer or dismiss it"
-            };
-            return Err(conflict(format!(
-                "{} is a {}, which cannot be {verb}",
-                item.id,
-                match item.kind {
-                    HumanItemKind::Task => "task",
-                    HumanItemKind::Question => "question",
-                }
-            )));
+        if state == HumanItemState::Completed && item.kind != HumanItemKind::Task {
+            return Err(wrong_kind(&item, "completed; answer or dismiss it"));
         }
         if item.state != HumanItemState::Open {
             let held = item.resolution.as_ref();
             let identical =
-                item.state == state && held.is_some_and(|r| r.text == text && r.reason == reason);
+                item.state == state && held.is_some_and(|r| r.text.is_none() && r.reason == reason);
             if identical {
                 let event = self.snapshot.events.get(&id).cloned().unwrap_or_default();
                 return Ok(self.receipt(&item, event));
             }
-            return Err(conflict(format!(
-                "{} is already {}; a different resolution is refused",
-                item.id,
-                state_word(item.state)
-            )));
+            return Err(already(&item));
         }
         if state == HumanItemState::Completed && item.approval.is_some() {
             if let Some(replacement) = complete(&item, &actor)? {
@@ -1908,12 +1990,165 @@ impl<'a> Writer<'a> {
             }
         }
         let action = match state {
-            HumanItemState::Answered => HumanItemEventAction::Answered,
             HumanItemState::Completed => HumanItemEventAction::Completed,
             _ => HumanItemEventAction::Dismissed,
         };
-        self.resolve(&item, state, action, &actor, text, reason)
+        self.resolve(&item, state, action, &actor, None, reason)
     }
+
+    /// Whether one answer may be recorded: the item it may be recorded on, or the receipt
+    /// an identical repeat is answered with.
+    fn judge_answer(
+        &self,
+        id: &str,
+        choice: Option<&str>,
+        text: Option<&str>,
+        actor: &Actor,
+    ) -> Result<Answerable, HumanItemRefusal> {
+        if let Some(why) = super::answer_refusal(choice, text) {
+            return Err(conflict(why));
+        }
+        if actor.actor.trim().is_empty() {
+            return Err(conflict("an action names its actor"));
+        }
+        let item = self
+            .snapshot
+            .items
+            .get(id)
+            .cloned()
+            .ok_or_else(|| conflict(format!("no such human item {id}")))?;
+        if item.kind != HumanItemKind::Question {
+            return Err(wrong_kind(&item, "answered; complete or dismiss it"));
+        }
+        if let Some(why) = choice.and_then(|c| super::unknown_choice(&item, c)) {
+            return Err(conflict(why));
+        }
+        if item.state != HumanItemState::Open {
+            let held = item.resolution.as_ref();
+            let identical = item.state == HumanItemState::Answered
+                && held.is_some_and(|r| r.text.as_deref() == text && r.choice.as_deref() == choice);
+            if identical {
+                let event = self.snapshot.events.get(id).cloned().unwrap_or_default();
+                return Ok(Answerable::Repeat(Box::new(self.receipt(&item, event))));
+            }
+            return Err(already(&item));
+        }
+        Ok(Answerable::Open(Box::new(item)))
+    }
+
+    /// Judge each entry on its own, then record the accepted ones as one batch.
+    fn answer_batch(
+        &mut self,
+        answers: Vec<HumanItemBatchAnswer>,
+        actor: &Actor,
+    ) -> Result<HumanItemBatchReceipt, HumanItemRefusal> {
+        let mut accepted = Vec::new();
+        let mut slots = Vec::with_capacity(answers.len());
+        for entry in answers {
+            let judged = self.judge_answer(
+                &entry.id,
+                entry.choice.as_deref(),
+                entry.text.as_deref(),
+                actor,
+            );
+            slots.push(match judged {
+                Ok(Answerable::Open(item)) => {
+                    accepted.push(answered(&item, actor, entry.choice, entry.text));
+                    Slot::New(accepted.len() - 1)
+                }
+                Ok(Answerable::Repeat(receipt)) => Slot::Repeat(receipt),
+                Err(refusal) => Slot::Refused(entry.id, refusal),
+            });
+        }
+        let (batch, events) = if accepted.is_empty() {
+            (None, Vec::new())
+        } else {
+            let (batch, events) = self.append_batch(&accepted)?;
+            (Some(batch), events)
+        };
+        let mut receipt = HumanItemBatchReceipt {
+            batch,
+            answered: Vec::new(),
+            refused: Vec::new(),
+        };
+        for slot in slots {
+            match slot {
+                Slot::New(at) => receipt
+                    .answered
+                    .push(self.receipt(&accepted[at], events[at].clone())),
+                Slot::Repeat(repeat) => receipt.answered.push(*repeat),
+                Slot::Refused(id, refusal) => {
+                    receipt.refused.push(HumanItemBatchRefused { id, refusal });
+                }
+            }
+        }
+        Ok(receipt)
+    }
+}
+
+/// What judging one answer found.
+enum Answerable {
+    /// An open question, which the answer may resolve.
+    Open(Box<HumanItem>),
+    /// An identical repeat of the answer already recorded.
+    Repeat(Box<HumanItemReceipt>),
+}
+
+/// One batch entry, in the batch's order, between judging and recording.
+enum Slot {
+    New(usize),
+    Repeat(Box<HumanItemReceipt>),
+    Refused(String, HumanItemRefusal),
+}
+
+/// `item`, resolved as a person's action would resolve it.
+fn resolved(
+    item: &HumanItem,
+    state: HumanItemState,
+    actor: &Actor,
+    choice: Option<String>,
+    text: Option<String>,
+    reason: Option<String>,
+) -> HumanItem {
+    let mut resolved = item.clone();
+    resolved.state = state;
+    resolved.resolution = Some(HumanItemResolution {
+        actor: actor.actor.clone(),
+        on_behalf_of: actor.on_behalf_of.clone(),
+        text,
+        choice,
+        reason,
+    });
+    resolved.updated_at = crate::sys::now_rfc3339();
+    resolved
+}
+
+fn answered(
+    item: &HumanItem,
+    actor: &Actor,
+    choice: Option<String>,
+    text: Option<String>,
+) -> HumanItem {
+    resolved(item, HumanItemState::Answered, actor, choice, text, None)
+}
+
+fn wrong_kind(item: &HumanItem, verb: &str) -> HumanItemRefusal {
+    conflict(format!(
+        "{} is a {}, which cannot be {verb}",
+        item.id,
+        match item.kind {
+            HumanItemKind::Task => "task",
+            HumanItemKind::Question => "question",
+        }
+    ))
+}
+
+fn already(item: &HumanItem) -> HumanItemRefusal {
+    conflict(format!(
+        "{} is already {}; a different resolution is refused",
+        item.id,
+        state_word(item.state)
+    ))
 }
 
 pub(crate) fn state_word(state: HumanItemState) -> &'static str {

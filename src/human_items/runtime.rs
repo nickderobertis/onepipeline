@@ -326,6 +326,7 @@ impl Gate {
                 kind: metadata.kind,
                 title: metadata.title,
                 body,
+                choices: Vec::new(),
                 priority: metadata.priority,
                 owner: HumanItemOwner {
                     session: self.session.clone(),

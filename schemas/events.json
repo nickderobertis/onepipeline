@@ -1983,6 +1983,111 @@
       }
     },
     {
+      "id": "agent.pipeline.planner-surface-dropped@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The surface's kind, as the surface it would have been names it."
+          },
+          "message": {
+            "type": "string",
+            "description": "What it said."
+          },
+          "source": {
+            "type": "string",
+            "description": "What raised it."
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether it would have held dependents back."
+          },
+          "correlation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Correlation"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Review revision identity, where the surface names one."
+          }
+        },
+        "required": [
+          "kind",
+          "message",
+          "source",
+          "blocking"
+        ],
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "hook": {
+                "$ref": "#/$defs/HookRef",
+                "description": "The hook that dropped it."
+              }
+            },
+            "required": [
+              "hook"
+            ],
+            "description": "A hook dropped it."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "refused": {
+                "type": "string",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "refused"
+            ],
+            "description": "A hook or a validator refused it, in its own words."
+          }
+        ],
+        "description": "`planner-surface-dropped`: a hook kept a surface off the channel.",
+        "title": "PlannerSurfaceDropped",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Correlation": {
+            "type": "string",
+            "description": "Which question a reply answers: the token the bus minted when it was asked.",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "HookRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "index": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0,
+                "description": "Its position in the chain of the queue it ran on."
+              },
+              "command": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "description": "Its argv, for a hook a configuration declares."
+              }
+            },
+            "required": [
+              "index"
+            ],
+            "description": "Which hook of a queue's chain did something: its position in the chain,\nand its command when it is one a configuration declares.\n\nOn the wire `{\"index\": 0, \"command\": [\"<argv>\"]}`, `command` absent for a\nhook registered in code."
+          }
+        }
+      }
+    },
+    {
       "id": "agent.pipeline.planner-surfaced@2",
       "schema": {
         "type": "object",

@@ -1436,10 +1436,14 @@ pub(crate) enum Accepted {
 pub(crate) fn accept(
     paths: &RunPaths,
     channel: &ChannelState,
-    author: crate::channel::Author,
-    commands: &[Command],
+    offered: &crate::channel::OfferedReply,
 ) -> Result<Accepted> {
-    accept_as(paths, channel, author, commands, ledger::REPLY_VERB)
+    let handover = ledger::Handover::hold(paths)?;
+    let accepted = accepting_under_the_handover(paths, ledger::REPLY_VERB, || {
+        channel.submit_offered(offered)
+    });
+    drop(handover);
+    accepted
 }
 
 /// Coordinate a submission with driver closeout under the handover gate.
@@ -1454,7 +1458,7 @@ pub(crate) fn accept_as(
     // making it: nothing reaches the queue, so nothing is reported accepted that
     // no writer is going to see.
     let handover = ledger::Handover::hold(paths)?;
-    let accepted = accepting_under_the_handover(paths, channel, author, commands, verb);
+    let accepted = accepting_under_the_handover(paths, verb, || channel.submit(author, commands));
     drop(handover);
     accepted
 }
@@ -1482,11 +1486,10 @@ pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>
 pub(crate) fn record_applying(
     paths: &RunPaths,
     channel: &ChannelState,
-    author: crate::channel::Author,
-    commands: &[Command],
+    offered: &crate::channel::OfferedReply,
 ) -> Result<u64> {
     let handover = ledger::Handover::hold(paths)?;
-    let recorded = channel.record_applying(author, commands);
+    let recorded = channel.record_applying(offered);
     drop(handover);
     recorded
 }
@@ -1510,18 +1513,14 @@ pub(crate) fn applied_here(
 /// gate for the reason [`letting_go_under_the_handover`] is.
 fn accepting_under_the_handover(
     paths: &RunPaths,
-    channel: &ChannelState,
-    author: crate::channel::Author,
-    commands: &[Command],
     verb: &str,
+    submit: impl FnOnce() -> Result<u64>,
 ) -> Result<Accepted> {
     match OwnershipLock::acquire(paths, verb) {
         Ok(lock) => Ok(Accepted::NothingIsDriving(lock)),
-        Err(Error::Locked { .. }) => channel.submit(author, commands).map(Accepted::Queued),
+        Err(Error::Locked { .. }) => submit().map(Accepted::Queued),
         // A lock nobody can be named as holding is still a claim on the run.
-        Err(unreadable) if ledger::is_unnamed_claim(&unreadable) => {
-            channel.submit(author, commands).map(Accepted::Queued)
-        }
+        Err(unreadable) if ledger::is_unnamed_claim(&unreadable) => submit().map(Accepted::Queued),
         Err(other) => Err(other),
     }
 }
@@ -12386,6 +12385,11 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 }
 
 /// [`raise`], answering the surface as the channel queued it — id and all.
+///
+/// A hook of the run's configuration decides it as it decides every offer. What a
+/// hook dropped or refused answers the surface as offered, id `0`, and is the run's
+/// record rather than the run's failure: a filter a host wrote to quieten the
+/// channel must not stop the run raising it.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
     queue_surface(paths, journal, surface, &[])
 }
@@ -12414,7 +12418,10 @@ fn queue_surface(
     surface: Surface,
     stamps: &[(&str, serde_json::Value)],
 ) -> Result<Surface> {
-    let queued = ChannelState::new(paths).push(surface)?;
+    let Some(queued) = offer_surface(paths, journal, &ChannelState::of_paths(paths)?, &surface)?
+    else {
+        return Ok(surface);
+    };
     let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
     for (key, value) in stamps {
         labels.extra.insert((*key).to_owned(), value.clone());
@@ -12430,6 +12437,56 @@ fn queue_surface(
         ]),
     )?;
     Ok(queued)
+}
+
+/// Offer `surface` to `channel`, journalling what kept it off: the surface as
+/// queued, or `None` where a hook dropped, rerouted or refused it, which is the
+/// run's record rather than the run's failure.
+pub(crate) fn offer_surface(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    channel: &ChannelState,
+    surface: &Surface,
+) -> Result<Option<Surface>> {
+    use crate::channel::SurfaceOffer;
+    use crate::payload::SurfaceDropCause;
+    let cause = match channel.push(surface.clone())? {
+        SurfaceOffer::Queued(queued) => return Ok(Some(queued)),
+        SurfaceOffer::Elsewhere => return Ok(None),
+        SurfaceOffer::Dropped { hook, .. } => SurfaceDropCause::Dropped { hook },
+        SurfaceOffer::Refused(refused) => SurfaceDropCause::Refused { refused },
+    };
+    record_surface_dropped(paths, journal, surface, &cause)?;
+    Ok(None)
+}
+
+/// Journal a surface a hook kept off the channel.
+pub(crate) fn record_surface_dropped(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    surface: &Surface,
+    cause: &crate::payload::SurfaceDropCause,
+) -> Result<()> {
+    let mut payload = vec![
+        ("kind", json!(surface.kind)),
+        ("message", json!(journal::bounded_text(&surface.message))),
+        ("source", json!(surface.source)),
+        ("blocking", json!(surface.blocking)),
+    ];
+    if let Some(correlation) = &surface.correlation {
+        payload.push(("correlation", json!(correlation)));
+    }
+    match cause {
+        crate::payload::SurfaceDropCause::Dropped { hook } => payload.push(("hook", json!(hook))),
+        crate::payload::SurfaceDropCause::Refused { refused } => {
+            payload.push(("refused", json!(refused)));
+        }
+    }
+    journal.emit(
+        journal::PipelineKind::PlannerSurfaceDropped,
+        journal::labels(&paths.run, surface.workstream.as_deref()),
+        journal::payload(&payload),
+    )
 }
 
 /// Report an in-flight dispatch that has recorded nothing past the threshold.
@@ -12727,16 +12784,15 @@ mod tests {
 
     /// A submitter's section, as `reply` runs it, for a caller holding the gate.
     fn a_supervisor_submits(paths: &RunPaths) -> Accepted {
-        accepting_under_the_handover(
-            paths,
-            &ChannelState::new(paths),
-            crate::channel::Author::planner(),
-            &[Command::Cancel {
-                id: "node".to_owned(),
-                reason: None,
-            }],
-            ledger::REPLY_VERB,
-        )
+        accepting_under_the_handover(paths, ledger::REPLY_VERB, || {
+            ChannelState::new(paths).submit(
+                crate::channel::Author::planner(),
+                &[Command::Cancel {
+                    id: "node".to_owned(),
+                    reason: None,
+                }],
+            )
+        })
         .expect("the submission is answered")
     }
 
@@ -13130,7 +13186,7 @@ mod tests {
         let gate = ledger::Handover::hold(&paths).expect("this thread is inside the gate");
         let accepted = std::thread::scope(|scope| {
             let submitting = scope.spawn(|| {
-                accept(
+                accept_as(
                     &paths,
                     &ChannelState::new(&paths),
                     crate::channel::Author::planner(),
@@ -13138,6 +13194,7 @@ mod tests {
                         id: "node".to_owned(),
                         reason: None,
                     }],
+                    ledger::REPLY_VERB,
                 )
                 .expect("the submission is answered")
             });
@@ -13285,7 +13342,7 @@ mod tests {
         let held = OwnershipLock::acquire(&paths, "drive").expect("the run is driven");
         a_gate_that_cannot_be_taken(&paths);
 
-        let refused = match accept(
+        let refused = match accept_as(
             &paths,
             &ChannelState::new(&paths),
             crate::channel::Author::planner(),
@@ -13293,6 +13350,7 @@ mod tests {
                 id: "node".to_owned(),
                 reason: None,
             }],
+            ledger::REPLY_VERB,
         ) {
             Ok(_) => panic!("commands were accepted without the gate that orders accepting"),
             Err(refused) => refused,

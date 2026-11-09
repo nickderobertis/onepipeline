@@ -3987,7 +3987,7 @@ each change is argued:
   value mean both the shortest wait there is and the longest.
 - `--tick-interval SECONDS` (default 30) is how long a silence may last before
   the stream says it is still there. `0` turns the heartbeat off. Deliberately
-  **not** `--heartbeat-interval`, which `start` no longer takes either (entry 149).
+  **not** `--heartbeat-interval`, which `start` no longer takes either (entry 151).
 - `--cursor CURSOR` resumes from what an earlier watch printed.
 - `--until CONDITION` names what the wait returns on, and is **repeatable**: the
   wait returns on the first of them to fire and the return record says which one
@@ -4750,10 +4750,11 @@ present and two are present only when the envelope carried the half they name:
 ```json
 {
   "reply": {"present": "always", "values": "a whole number"},
-  "state": {"present": "always", "values": ["delivered", "applied", "queued"]},
-  "verdict": {"present": "with a verdict half", "values": ["delivered"]},
-  "commands": {"present": "with commands", "values": ["applied", "queued"]},
-  "notes": {"present": "with a note, once applied", "each": ["queued", "applied"]}
+  "state": {"present": "always", "values": ["delivered", "applied", "queued", "dropped"]},
+  "verdict": {"present": "with a verdict half", "values": ["delivered", "dropped"]},
+  "commands": {"present": "with commands", "values": ["applied", "queued", "dropped"]},
+  "notes": {"present": "with a note, once applied", "each": ["queued", "applied"]},
+  "hooked": {"present": "when a hook changed the envelope", "values": ["changed"]}
 }
 ```
 
@@ -4789,6 +4790,16 @@ reads **this entry** — every key, the words each may answer, and which half ea
 one's presence depends on — and drives an envelope of each shape through the
 verb, so a key, a word, or a presence rule that moves on either side fails there
 rather than drifting.
+
+**Amended: hooks, ruled.** The planner channel's offers run the bus's hooks, and the
+receipt says what they did. `state` answers `dropped` when hooks dropped the whole
+envelope: nothing was queued, applied or delivered, `reply` is `0`, and that is a
+receipt at exit 0 rather than a refusal. `verdict` and `commands` each answer `dropped`
+for a half the envelope carried that a hook dropped, and each half describes the envelope
+as it was queued after the hooks ran. `hooked` is present, answering `changed`, only when
+a hook changed or rerouted any part of the envelope before it was queued, and what was
+applied is then the changed envelope. A hook's refusal, and an unjudged answer, are
+refused at exit 2 in the hook's own words, wrapped exactly as a validator's are.
 
 **Amended: `notes`, ruled.** The manager ruled on the plan node `op-envelope-outcome`, as
 rule 6 of the amendment entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled)
@@ -13169,7 +13180,7 @@ significance, `url` on `change-check`, `follow_checks` and `release_holdup`).
 
 ```json
 {
-  "bundle_versions": {"events": "1.12.0"},
+  "bundle_versions": {"events": "1.13.0"},
   "event_kinds": ["check-failed", "checks-unfollowed"],
   "surface_kinds": ["check-failed", "checks-unfollowed"],
   "planner_profile_adds": {"source": "vcs", "significance": "attention"},
@@ -13201,7 +13212,41 @@ files a run's channel directory holds are 0.9.4's unchanged, so the eleven files
 **Ruling:** the planner ruled the 0.9.5 re-decision and these contract edits (correlation
 `c-f9b1963b0152220a8a18992ffa7e83af`).
 
-## 148. The engine's built-in clock reset on `next` is deprecated, and every observer graph follows its run's journal — OPEN
+## 148. `--envelope-reviewer` is a hook in behaviour — OPEN
+
+**Proposal (for the planner who owns the contract): state the envelope reviewer's protocol as a hook's. The contract's reviewer text predates it and is not amended here.**
+
+**The break.** The envelope reviewer now runs on the bus's hook runner and passes as a
+hook keeps a message: **by printing the document it read, byte for byte**. A change or a
+drop of that document is read as unjudged, and the refusal says the reviewer changed or
+dropped a document it reviews but cannot change, so none of the envelope's edits were
+applied. An existing reviewer that prints nothing on a pass is refused as unjudged.
+
+**Ruled.** By the manager, on this workstream's `onepipeline` node: a reviewer judges a
+document it derives and never edits, and the bus removing validators must not strand it.
+Its bar's passes are kept through `HookCache`, which reads a pass recorded earlier as a
+keep, so a run's recorded passes survive the change. Its stdout is the document now, so
+narration belongs on stderr.
+
+## 149. `planner-surface-dropped`, and the marked bus copy re-decided against onemessagebus 0.10.0 — RESOLVED
+
+**Ruled by the planner, and `docs/contract.md` edited to match** (correlation
+`c-8ec31cb727186aa1d2ce82367746f747`). A surface a hook kept off the channel is journalled
+under a new kind, `planner-surface-dropped`, carrying the surface's `kind`, `message`,
+`source` and `blocking`, its `correlation` where it names one, and the dropping `hook` or
+the `refused` reason; the kind joins the contract's closed set and `schemas/events.json`, at
+bundle `1.13.0`. Reusing `planner-surface-queued` was declined: that kind means sent, and it
+is counted as sent. A dropped surface is never delivered or counted as queued.
+
+The contract's marked copy of the bus's envelope shape and filter grammar is re-decided
+against 0.10.0 with its wording kept: its two statements of the release name 0.10.0 where
+they named 0.9.5, and nothing else in either paragraph changes. 0.10.0 adds hooks and drop
+logs; the envelope and the filter grammar are 0.9.5's.
+
+**Ruling:** the planner ruled the new kind and this re-decision (correlation
+`c-8ec31cb727186aa1d2ce82367746f747`).
+
+## 150. The engine's built-in clock reset on `next` is deprecated, and every observer graph follows its run's journal — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, which is committed verbatim and
 still calls the reset on `next` the check-in reset contract.** `oneagentgraph` 0.10.0's
@@ -13221,7 +13266,7 @@ graph declaring none prints nothing.
 `tests/e2e/observer_follow.rs` holds both halves over all three launch paths, an observer
 restart and an adoption.
 
-## 149. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
+## 151. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, whose driver invocation still
 names the flag.** It was recorded from the engine's first implementation and never paced

@@ -702,7 +702,7 @@ pub struct Next {
 /// consuming it, and this is what advances the queue, journals
 /// `planner-surfaced`, and restarts the check-in clock of every member the run's
 /// observer graph declares resettable. That automatic reset is deprecated and
-/// will be removed (`docs/contract-divergences.md` entry 148); `reset_on` replaces
+/// will be removed (`docs/contract-divergences.md` entry 150); `reset_on` replaces
 /// it.
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
@@ -762,7 +762,7 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
     )?;
 
     // The engine's automatic reset, deprecated and to be removed
-    // (`docs/contract-divergences.md` entry 148), still working until then:
+    // (`docs/contract-divergences.md` entry 150), still working until then:
     // `reset_on` over the journal the graph follows replaces it. Which clocks is the observer graph's own to say: every member it
     // declared `resettable`, and the engine names none. Addressed by the
     // **graph** run's id, which is what the sibling minted and the only id its
@@ -905,6 +905,8 @@ pub enum VerdictHalf {
     NotCarried,
     /// Carried, and on the reply queue for whichever reader claims it.
     OnTheQueue,
+    /// Carried, and a hook dropped it: nothing reached the reply queue.
+    Dropped,
 }
 
 impl VerdictHalf {
@@ -921,6 +923,7 @@ impl VerdictHalf {
         match self {
             Self::NotCarried => None,
             Self::OnTheQueue => Some("delivered"),
+            Self::Dropped => Some("dropped"),
         }
     }
 }
@@ -969,6 +972,12 @@ pub enum ReplyOutcome {
         /// The verdict half that rode along, if one did.
         verdict: VerdictHalf,
     },
+    /// Hooks dropped the whole envelope: nothing was queued, applied or
+    /// delivered, and the bus's drop log records it.
+    Dropped {
+        /// The verdict half, as carried and dropped, if the envelope carried one.
+        verdict: VerdictHalf,
+    },
 }
 
 /// `onepipeline reply`'s answer, whose shape entry 64 of
@@ -993,6 +1002,13 @@ pub struct Receipt {
     /// note or its commands are not answered yet. Entry 64 of
     /// `docs/contract-divergences.md` states the key.
     pub notes: std::collections::BTreeMap<String, crate::channel::CommandVerdict>,
+    /// Whether a hook changed or rerouted any part of the envelope before it was
+    /// queued, so what was applied is the changed envelope. The receipt's
+    /// `hooked` key, present with `changed` only when this holds.
+    pub changed: bool,
+    /// Whether a hook dropped a commands half the envelope carried. The
+    /// receipt's `commands` key then answers `dropped`.
+    pub commands_dropped: bool,
 }
 
 impl Receipt {
@@ -1006,6 +1022,7 @@ impl Receipt {
             | ReplyOutcome::AppliedHere { reply, .. }
             | ReplyOutcome::AppliedByRun { reply, .. }
             | ReplyOutcome::Queued { reply, .. } => reply,
+            ReplyOutcome::Dropped { .. } => 0,
         }
     }
 
@@ -1015,14 +1032,18 @@ impl Receipt {
             ReplyOutcome::Answered { .. } => "delivered",
             ReplyOutcome::AppliedHere { .. } | ReplyOutcome::AppliedByRun { .. } => "applied",
             ReplyOutcome::Queued { .. } => "queued",
+            ReplyOutcome::Dropped { .. } => "dropped",
         }
     }
 
     /// The same word again where there were commands to have one, under a name
     /// saying whose it is, and nothing where the envelope carried none.
     pub fn commands(&self) -> Option<&'static str> {
+        if self.commands_dropped {
+            return Some("dropped");
+        }
         match self.outcome {
-            ReplyOutcome::Answered { .. } => None,
+            ReplyOutcome::Answered { .. } | ReplyOutcome::Dropped { .. } => None,
             _ => Some(self.state()),
         }
     }
@@ -1033,7 +1054,8 @@ impl Receipt {
             ReplyOutcome::Answered { verdict, .. }
             | ReplyOutcome::AppliedHere { verdict, .. }
             | ReplyOutcome::AppliedByRun { verdict, .. }
-            | ReplyOutcome::Queued { verdict, .. } => verdict,
+            | ReplyOutcome::Queued { verdict, .. }
+            | ReplyOutcome::Dropped { verdict } => verdict,
         }
     }
 
@@ -1066,6 +1088,9 @@ impl serde::Serialize for Receipt {
         }
         if !self.notes.is_empty() {
             receipt.serialize_entry("notes", &self.notes)?;
+        }
+        if self.changed {
+            receipt.serialize_entry("hooked", "changed")?;
         }
         receipt.end()
     }
@@ -1156,13 +1181,20 @@ fn submit(
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
 ) -> Result<Receipt> {
-    let verdict = if envelope.carries_verdict() {
+    let (submitted, offered) = driver::submit_offered(paths, correlation, envelope)?;
+    let verdict = if offered.verdict_dropped {
+        VerdictHalf::Dropped
+    } else if offered.envelope.carries_verdict() {
         VerdictHalf::OnTheQueue
     } else {
         VerdictHalf::NotCarried
     };
+    // What a hook left, from here on: the receipt describes the envelope as it
+    // was queued.
+    let envelope = &offered.envelope;
     let mut advice = Vec::new();
-    let outcome = match driver::submit_envelope(paths, correlation, envelope)? {
+    let outcome = match submitted {
+        Submitted::Dropped => ReplyOutcome::Dropped { verdict },
         Submitted::Answered { reply } => ReplyOutcome::Answered { reply, verdict },
         Submitted::AppliedHere { reply, .. } => ReplyOutcome::AppliedHere { reply, verdict },
         Submitted::AppliedByRun { reply } => ReplyOutcome::AppliedByRun { reply, verdict },
@@ -1222,6 +1254,8 @@ fn submit(
         outcome,
         advice,
         notes,
+        changed: offered.changed,
+        commands_dropped: offered.commands_dropped,
     })
 }
 
@@ -1249,7 +1283,9 @@ fn note_verdicts(
             .map(|answer| answer.results.iter().map(|result| result.outcome).collect())
             .unwrap_or_default(),
         ReplyOutcome::AppliedHere { .. } => vec![CommandVerdict::Applied; commands.len()],
-        ReplyOutcome::Answered { .. } | ReplyOutcome::Queued { .. } => Vec::new(),
+        ReplyOutcome::Answered { .. }
+        | ReplyOutcome::Queued { .. }
+        | ReplyOutcome::Dropped { .. } => Vec::new(),
     };
     for (command, verdict) in commands.iter().zip(verdicts) {
         if let Command::Note { id, .. } = command {
@@ -1265,8 +1301,55 @@ fn note_verdicts(
 /// What `onepipeline surface` queued.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Surfaced {
-    /// The surface's id in the channel.
+    /// The surface's id in the channel, or `0` where a hook dropped it or
+    /// rerouted it.
     pub surface: u64,
+    /// What became of it.
+    pub state: SurfaceState,
+}
+
+/// What a surface offered through a verb became.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SurfaceState {
+    /// On the channel.
+    Queued,
+    /// A hook dropped it: the channel holds nothing of it.
+    Dropped,
+    /// A hook sent it to another queue.
+    Rerouted,
+}
+
+impl SurfaceState {
+    /// The word the verb prints.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Dropped => "dropped",
+            Self::Rerouted => "rerouted",
+        }
+    }
+}
+
+/// What a surface offer becomes for the two verbs that print it: a hook's refusal
+/// is the verb's, and what was dropped or rerouted names no id.
+pub(crate) fn surfaced_of(offer: crate::channel::SurfaceOffer) -> Result<Surfaced> {
+    use crate::channel::SurfaceOffer;
+    match offer {
+        SurfaceOffer::Queued(queued) => Ok(Surfaced {
+            surface: queued.id,
+            state: SurfaceState::Queued,
+        }),
+        SurfaceOffer::Dropped { .. } => Ok(Surfaced {
+            surface: 0,
+            state: SurfaceState::Dropped,
+        }),
+        SurfaceOffer::Elsewhere => Ok(Surfaced {
+            surface: 0,
+            state: SurfaceState::Rerouted,
+        }),
+        SurfaceOffer::Refused(reason) => Err(Error::Refused(reason)),
+    }
 }
 
 /// `onepipeline surface RUN --kind KIND --message TEXT`: raise a surface to the
@@ -1296,26 +1379,56 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
     } else {
         crate::channel::source::PROPOSAL
     };
-    let queued = ChannelState::new(paths).push(Surface {
-        id: 0,
-        kind: kind.as_str().to_string(),
-        message,
-        source: source.to_string(),
-        // Neither is a request: a check-in update and a finding raised at this
-        // verb are reports, and never hold a subtree back waiting for a
-        // decision. A finding that means to stop one says so through the
-        // envelope's `finding` op, which carries `blocking`.
-        blocking: false,
-        queued_at: crate::sys::now_millis(),
-        abandoned: false,
-        // Raised by a call that answers its caller and is gone, so there is no
-        // listener to name and none to come back: nothing abandons this and
-        // nothing adopts it.
-        asker: None,
-        workstream: None,
-        correlation: None,
-    })?;
+    let message_offered = message.clone();
+    let offer = ChannelState::of_paths(paths)?.push_checked(
+        Surface {
+            id: 0,
+            kind: kind.as_str().to_string(),
+            message,
+            source: source.to_string(),
+            // Neither is a request: a check-in update and a finding raised at this
+            // verb are reports, and never hold a subtree back waiting for a
+            // decision. A finding that means to stop one says so through the
+            // envelope's `finding` op, which carries `blocking`.
+            blocking: false,
+            queued_at: crate::sys::now_millis(),
+            abandoned: false,
+            // Raised by a call that answers its caller and is gone, so there is no
+            // listener to name and none to come back: nothing abandons this and
+            // nothing adopts it.
+            asker: None,
+            workstream: None,
+            correlation: None,
+        },
+        |changed| {
+            // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the surface met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook rewriting a surface into a boundary violation is that path over changed input.
+            crate::boundary::guard(&view.state, &json!({ "message": changed.get("message") }))
+        },
+    )?;
     let mut journal = Journal::open(paths);
+    if let crate::channel::SurfaceOffer::Dropped { hook, .. } = &offer {
+        crate::engine::record_surface_dropped(
+            paths,
+            &mut journal,
+            &Surface {
+                id: 0,
+                kind: kind.as_str().to_string(),
+                message: message_offered,
+                source: source.to_string(),
+                blocking: false,
+                queued_at: crate::sys::now_millis(),
+                abandoned: false,
+                asker: None,
+                workstream: None,
+                correlation: None,
+            },
+            &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
+        )?;
+    }
+    let surfaced = surfaced_of(offer.clone())?;
+    let crate::channel::SurfaceOffer::Queued(queued) = offer else {
+        return Ok(surfaced);
+    };
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
         journal::labels(&paths.run, None),
@@ -1323,15 +1436,15 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),
             ("source", json!(queued.source)),
-            ("blocking", json!(false)),
+            ("blocking", json!(queued.blocking)),
         ]),
     )?;
-    Ok(Surfaced { surface: queued.id })
+    Ok(surfaced)
 }
 
 /// The line `onepipeline surface` prints.
 pub fn render_surfaced(surfaced: &Surfaced) -> String {
-    json!({"surface": surfaced.surface, "state": "queued"}).to_string()
+    json!({"surface": surfaced.surface, "state": surfaced.state.word()}).to_string()
 }
 
 /// Who is stopping a run, and whether they may stop one they do not own.

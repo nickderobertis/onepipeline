@@ -42,9 +42,10 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use onemessagebus::{
-    Allowlist, AskOptions, Bus, BusError, Config, ConsumerName, Correlation, Fingerprint, Layouts,
-    Lifetime, LocalTransport, Message, OpWord, Pending, QueueError, QueueName, QueueSpec, RawQueue,
-    Read, Registry, SchemaId, Transport, TransportConfig, TransportKinds,
+    Allowlist, AskOffered, AskOptions, Bus, BusError, Config, ConsumerName, Correlation,
+    Fingerprint, HookRef, Hooked, HookedOutcome, Layouts, Lifetime, LocalTransport, Message,
+    OpWord, Pending, QueueError, QueueName, QueueSpec, RawQueue, RawRecord, Read, Registry,
+    SchemaId, Transport, TransportConfig, TransportKinds,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1098,11 +1099,11 @@ pub(crate) struct ChannelState {
     transport: Arc<OnceLock<std::result::Result<Arc<dyn Transport>, String>>>,
     surfaces: Arc<OnceLock<std::result::Result<onemessagebus::Queue<Surface>, String>>>,
     /// The bus the channel's records are appended through: the run's
-    /// configuration with its validators left out, because what is appended has
-    /// already been judged.
+    /// configuration with its hooks and validators left out, because what is
+    /// appended has already been decided.
     bus: Arc<OnceLock<std::result::Result<Bus, String>>>,
-    /// The bus an offer is judged by: the run's configuration, validators and
-    /// all. Resolved only for a run whose configuration declares validators.
+    /// The bus an offer is decided by: the run's configuration, hooks, validators
+    /// and all. Resolved only for a run whose configuration declares either.
     judging: Arc<OnceLock<std::result::Result<Bus, String>>>,
     /// What the last read of the surfaces found, keyed on the transport's change
     /// token for that queue: a reader asking again of a channel nothing has
@@ -1116,6 +1117,192 @@ impl std::fmt::Debug for ChannelState {
             .field("run", &self.paths.run)
             .finish_non_exhaustive()
     }
+}
+
+/// What the channel made of one surface offered to it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SurfaceOffer {
+    /// Queued, as the hooks left it.
+    Queued(Surface),
+    /// A hook dropped it: nothing was queued, and the bus recorded the drop.
+    Dropped {
+        /// The queue the dropping hook ran on.
+        queue: QueueName,
+        /// The hook that dropped it.
+        hook: HookRef,
+    },
+    /// A hook rerouted it to another queue, so there is no surface to hand back.
+    Elsewhere,
+    /// A hook or a validator refused it, or could not decide it, in its own
+    /// words: nothing was appended.
+    Refused(String),
+}
+
+/// One reply envelope as the channel's hooks left it: the envelope to apply, the
+/// records to append for it, and what became of each half the planner sent.
+///
+/// Decided once, by [`ChannelState::offer_reply`]: everything after that applies
+/// this, so a hook runs once per reply however many queues the reply reaches.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OfferedReply {
+    /// The envelope as the hooks left it: what is compiled, journalled and
+    /// applied.
+    pub(crate) envelope: Reply,
+    /// Whether a hook changed or rerouted any part of it.
+    pub(crate) changed: bool,
+    /// Whether a hook dropped a commands half the planner sent.
+    pub(crate) commands_dropped: bool,
+    /// Whether a hook dropped a verdict half the planner sent.
+    pub(crate) verdict_dropped: bool,
+    /// Whether hooks dropped the whole envelope.
+    pub(crate) whole_drop: bool,
+    /// The command queue's record, where a hook decided it.
+    commands_record: Option<RawRecord>,
+    /// The reply queue's framed record, where the envelope carries one.
+    verdict_record: Option<RawRecord>,
+    /// Records that landed on neither half's queue, and the drops: appended at
+    /// the envelope's commit point by [`ChannelState::record_offer`].
+    rest: Hooked,
+}
+
+/// The commands half of a record a hook left on the command queue.
+#[derive(Deserialize)]
+struct HookedCommands {
+    #[serde(default)]
+    author: Author,
+    commands: Vec<Command>,
+}
+
+/// The verdict half of a record a hook left on the reply queue.
+#[derive(Deserialize)]
+struct HookedVerdict {
+    reply: Reply,
+}
+
+impl OfferedReply {
+    /// An envelope nothing is configured to decide: applied as sent.
+    fn undecided(reply: &Reply) -> Self {
+        Self {
+            envelope: reply.clone(),
+            changed: false,
+            commands_dropped: false,
+            verdict_dropped: false,
+            whole_drop: false,
+            commands_record: None,
+            verdict_record: (reply.carries_verdict() || reply.commands.is_empty()).then(|| {
+                RawRecord::from_value(
+                    &serde_json::json!({"id": 0, "reply": reply, "at": crate::sys::now_millis()}),
+                )
+            }),
+            rest: Hooked {
+                outcome: HookedOutcome::Keep,
+                records: Vec::new(),
+                dropped: Vec::new(),
+            },
+        }
+    }
+
+    /// What `hooked` — the bus's decision on `offered` — says to apply.
+    fn of(offered: &Reply, hooked: Hooked) -> crate::Result<Self> {
+        let whole_drop = hooked.outcome == HookedOutcome::Drop;
+        let dropped_on = |queue: &str| {
+            hooked
+                .dropped
+                .iter()
+                .any(|dropped| dropped.queue.as_str() == queue)
+        };
+        let commands_dropped = !offered.commands.is_empty() && (whole_drop || dropped_on(COMMANDS));
+        let bus_changed = hooked.outcome == HookedOutcome::Change;
+        let mut envelope = Reply {
+            version: offered.version,
+            author: offered.author.clone(),
+            ..Reply::default()
+        };
+        let mut commands_record = None;
+        let mut verdict_record = None;
+        let mut rest = Vec::new();
+        for (queue, record) in hooked.records {
+            match queue.as_str() {
+                COMMANDS => commands_record = Some(record),
+                REPLIES => verdict_record = Some(record),
+                _ => rest.push((queue, record)),
+            }
+        }
+        if let Some(record) = &verdict_record {
+            let read: HookedVerdict = unreadable_to_this_build(record)?;
+            envelope.author = read.reply.author;
+            envelope.completion = read.reply.completion;
+            envelope.message = read.reply.message;
+            envelope.reason = read.reply.reason;
+        }
+        if let Some(record) = &commands_record {
+            let read: HookedCommands = unreadable_to_this_build(record)?;
+            envelope.author = read.author;
+            envelope.commands = read.commands;
+            envelope.version.get_or_insert(REPLY_ENVELOPE_VERSION);
+        }
+        // The layout appends a framed verdict without running a chain, so a hook
+        // drops this half beside commands by taking it off the envelope.
+        let verdict_dropped = offered.carries_verdict()
+            && !envelope.carries_verdict()
+            && (whole_drop || !envelope.commands.is_empty());
+        // Dropped beside a half that was kept is a change only where the kept
+        // half itself differs; the bus says `Change` for both.
+        let changed = bus_changed
+            && (hooked.dropped.is_empty()
+                || envelope.author != offered.author
+                || (!commands_dropped && envelope.commands != offered.commands)
+                || (!verdict_dropped
+                    && (envelope.completion != offered.completion
+                        || envelope.message != offered.message
+                        || envelope.reason != offered.reason)));
+        if changed || commands_dropped {
+            // A queued verdict carries its envelope, so it must not carry the
+            // edits a hook took out of it.
+            if let Some(record) = verdict_record.take() {
+                let mut framed = record.into_value();
+                if let Some(reply) = framed.get_mut("reply").and_then(Value::as_object_mut) {
+                    if envelope.commands.is_empty() {
+                        reply.remove("commands");
+                    } else {
+                        reply.insert(
+                            "commands".to_owned(),
+                            serde_json::to_value(&envelope.commands).map_err(|failure| {
+                                crate::Error::Invalid(format!("reply: {failure}"))
+                            })?,
+                        );
+                    }
+                }
+                verdict_record = Some(RawRecord::from_value(&framed));
+            }
+        }
+        Ok(Self {
+            envelope,
+            changed,
+            commands_dropped,
+            verdict_dropped,
+            whole_drop,
+            commands_record,
+            verdict_record,
+            rest: Hooked {
+                outcome: HookedOutcome::Change,
+                records: rest,
+                dropped: hooked.dropped,
+            },
+        })
+    }
+}
+
+/// A record a hook left, as what this build reads: a hook is external input, and
+/// what it wrote that this build cannot apply is refused with nothing appended.
+fn unreadable_to_this_build<T: serde::de::DeserializeOwned>(
+    record: &RawRecord,
+) -> crate::Result<T> {
+    serde_json::from_value(record.value().clone()).map_err(|failure| {
+        crate::Error::Refused(format!(
+            "a hook left a record this build cannot read: {failure}"
+        ))
+    })
 }
 
 /// What is waiting to be read, and what has been read but not answered.
@@ -1472,6 +1659,21 @@ impl ChannelState {
         }
     }
 
+    /// The channel of the run at `paths`, under the configuration its launch
+    /// record names, for a writer that holds only the paths. A run with no launch
+    /// record names none.
+    ///
+    /// # Errors
+    ///
+    /// A launch record that exists and cannot be read.
+    pub(crate) fn of_paths(paths: &crate::ledger::RunPaths) -> crate::Result<Self> {
+        if !paths.launch().is_file() {
+            return Ok(Self::new(paths));
+        }
+        let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
+        Ok(Self::of_run(paths, &launch))
+    }
+
     /// The bus's local transport over this run's channel directory.
     fn transport(&self) -> crate::Result<Arc<dyn Transport>> {
         self.transport
@@ -1512,8 +1714,8 @@ impl ChannelState {
 
     /// The run's bus: the `planner-channel` layout resolved over this run's
     /// channel directory, which is what routes a reply by its halves, asks and
-    /// binds a question by its correlation, and judges an offer by its queue's
-    /// validators.
+    /// binds a question by its correlation, and appends what an offer's hooks
+    /// decided.
     fn bus(&self) -> crate::Result<Bus> {
         self.bus
             .get_or_init(|| self.resolved(false))
@@ -1521,13 +1723,16 @@ impl ChannelState {
             .map_err(crate::Error::Refused)
     }
 
-    /// The bus an offer to this channel is judged by.
-    fn judging_bus(&self) -> crate::Result<Bus> {
-        if self
-            .config
+    /// Whether the run's configuration declares anything that decides an offer.
+    fn judges(&self) -> bool {
+        self.config
             .as_ref()
-            .is_none_or(|config| config.validators.is_empty())
-        {
+            .is_some_and(|config| !config.hooks.is_empty() || !config.validators.is_empty())
+    }
+
+    /// The bus an offer to this channel is decided by.
+    fn judging_bus(&self) -> crate::Result<Bus> {
+        if !self.judges() {
             return self.bus();
         }
         self.judging
@@ -1538,7 +1743,7 @@ impl ChannelState {
 
     /// The run's configuration — or the profile as declared, for a run whose
     /// launch named none — resolved over this run's channel directory, with its
-    /// validators or without them.
+    /// hooks and validators or without them.
     fn resolved(&self, judging: bool) -> std::result::Result<Bus, String> {
         let mut config = match &self.config {
             Some(config) => (**config).clone(),
@@ -1547,21 +1752,12 @@ impl ChannelState {
         .with_transport_dir(self.paths.channel_dir());
         config.profile = Some(PLANNER_CHANNEL.to_owned());
         if !judging {
+            config.hooks.clear();
             config.validators.clear();
         }
         config
             .resolve(&planner_channel(), &TransportKinds::builtin())
             .map_err(|failure| failure.to_string())
-    }
-
-    /// Whether the run's configuration declares a validator on `queue`.
-    fn validates(&self, queue: &str) -> bool {
-        self.config.as_ref().is_some_and(|config| {
-            config
-                .validators
-                .iter()
-                .any(|validator| validator.on.as_str() == queue)
-        })
     }
 
     /// Whether `author` may issue `command` on this run, under the grants its
@@ -1678,24 +1874,59 @@ impl ChannelState {
     /// no id could follow is refused rather than handed out. Exactly one
     /// check-in is ever waiting: the layout supersedes a waiting check-in with
     /// the next, so being ignored makes the harness louder rather than quieter.
-    pub fn push(&self, surface: Surface) -> crate::Result<Surface> {
-        if self.validates(SURFACES) {
-            let surfaces = queue_name(SURFACES);
-            let offered = serde_json::to_value(&surface)
-                .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
-            QueueError::of_verdict(
-                &surfaces,
-                self.judging_bus()?
-                    .validate(&surfaces, offered)
-                    .map_err(bus_failure)?,
-            )
-            .map_err(queue_failure)?;
+    pub(crate) fn push(&self, surface: Surface) -> crate::Result<SurfaceOffer> {
+        self.push_checked(surface, |_| Ok(()))
+    }
+
+    /// [`push`](Self::push), holding what a hook changed the surface into to
+    /// `check` before anything of it is appended.
+    pub(crate) fn push_checked(
+        &self,
+        surface: Surface,
+        check: impl FnOnce(&Value) -> crate::Result<()>,
+    ) -> crate::Result<SurfaceOffer> {
+        if !self.judges() {
+            return Ok(SurfaceOffer::Queued(
+                self.surfaces()?
+                    .push(&surface)
+                    .map_err(queue_failure)?
+                    .record,
+            ));
         }
-        Ok(self
-            .surfaces()?
-            .push(&surface)
-            .map_err(queue_failure)?
-            .record)
+        let surfaces = queue_name(SURFACES);
+        let offered = serde_json::to_value(&surface)
+            .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
+        let hooked = self
+            .judging_bus()?
+            .hooked(&surfaces, RawRecord::from_value(&offered))
+            .map_err(bus_failure)?;
+        match &hooked.outcome {
+            HookedOutcome::Refuse { reason } | HookedOutcome::Unjudged { reason } => {
+                return Ok(SurfaceOffer::Refused(reason.clone()));
+            }
+            HookedOutcome::Change => {
+                if let Some((_, record)) =
+                    hooked.records.iter().find(|(queue, _)| queue == &surfaces)
+                {
+                    check(record.value())?;
+                }
+            }
+            HookedOutcome::Keep | HookedOutcome::Drop => {}
+        }
+        let appended = self.bus()?.append_hooked(&hooked).map_err(bus_failure)?;
+        if let Some(dropped) = hooked.dropped.first() {
+            if hooked.outcome == HookedOutcome::Drop {
+                return Ok(SurfaceOffer::Dropped {
+                    queue: dropped.queue.clone(),
+                    hook: dropped.hook.clone(),
+                });
+            }
+        }
+        Ok(appended
+            .into_iter()
+            .find(|(queue, _)| queue == &surfaces)
+            .and_then(|(_, pushed)| serde_json::from_value(pushed.record).ok())
+            .map_or(SurfaceOffer::Elsewhere, SurfaceOffer::Queued))
     }
 
     /// Claim the next readable surface: **a blocking one first**, and arrival
@@ -1806,32 +2037,84 @@ impl ChannelState {
         reply: &Reply,
         named: Option<&Correlation>,
     ) -> crate::Result<u64> {
-        let bus = self.bus()?;
-        let framed = serde_json::json!({"id": 0, "reply": reply, "at": crate::sys::now_millis()});
-        if let Some(correlation) = named {
-            return Self::bound_through(&bus, correlation, framed);
+        let offered = self.offer_reply(reply)?;
+        self.record_offer(&offered)?;
+        self.answer_offered(&offered, named)
+    }
+
+    /// Run `reply` through the channel's hooks and validators once, appending
+    /// nothing: what they made of it, for the caller to apply. A hook's refusal
+    /// or unjudged answer is refused here, in its own words.
+    pub(crate) fn offer_reply(&self, reply: &Reply) -> crate::Result<OfferedReply> {
+        if !self.judges() {
+            return Ok(OfferedReply::undecided(reply));
         }
-        let id = match self.binding_for(&bus, reply)? {
-            Some(correlation) => Self::bound_through(&bus, &correlation, framed)?,
+        let offered = serde_json::to_value(reply)
+            .map_err(|failure| crate::Error::Invalid(format!("reply: {failure}")))?;
+        let hooked = self
+            .judging_bus()?
+            .hooked(&queue_name(REPLIES), RawRecord::from_value(&offered))
+            .map_err(bus_failure)?;
+        match &hooked.outcome {
+            HookedOutcome::Refuse { reason } | HookedOutcome::Unjudged { reason } => {
+                Err(crate::Error::Refused(reason.clone()))
+            }
+            _ => OfferedReply::of(reply, hooked),
+        }
+    }
+
+    /// Record an offer's drops, and append what it left on neither half's queue:
+    /// called once, where the envelope stops being refusable.
+    pub(crate) fn record_offer(&self, offered: &OfferedReply) -> crate::Result<()> {
+        if offered.rest.records.is_empty() && offered.rest.dropped.is_empty() {
+            return Ok(());
+        }
+        self.bus()?
+            .append_hooked(&offered.rest)
+            .map(|_| ())
+            .map_err(bus_failure)
+    }
+
+    /// Append one record an offer already decided, and answer its id.
+    fn append_decided(&self, bus: &Bus, queue: &str, record: &RawRecord) -> crate::Result<u64> {
+        let appended = bus
+            .append_hooked(&Hooked {
+                outcome: HookedOutcome::Keep,
+                records: vec![(queue_name(queue), record.clone())],
+                dropped: Vec::new(),
+            })
+            .map_err(bus_failure)?;
+        Ok(appended
+            .first()
+            .and_then(|(_, pushed)| pushed.id)
+            .unwrap_or_default())
+    }
+
+    /// Deliver the verdict half of an envelope the hooks already decided, as
+    /// [`answer`](Self::answer) binds one, and answer the reply's id. An envelope
+    /// left with no verdict half delivers nothing, and the pending slot stands.
+    pub(crate) fn answer_offered(
+        &self,
+        offered: &OfferedReply,
+        named: Option<&Correlation>,
+    ) -> crate::Result<u64> {
+        let Some(framed) = &offered.verdict_record else {
+            return Ok(0);
+        };
+        let bus = self.bus()?;
+        if let Some(correlation) = named {
+            return Self::bound_through(&bus, correlation, framed.value().clone());
+        }
+        let id = match self.binding_for(&bus, &offered.envelope)? {
+            Some(correlation) => Self::bound_through(&bus, &correlation, framed.value().clone())?,
             None => {
-                let replies = queue_name(REPLIES);
-                QueueError::of_verdict(
-                    &replies,
-                    bus.validate(&replies, framed.clone())
-                        .map_err(bus_failure)?,
-                )
-                .map_err(queue_failure)?;
                 // Released first and appended after, as 0.28.2 did: a reader that
                 // finds the reply finds the slot already released.
                 self.surfaces()?
                     .raw()
                     .answer_pending()
                     .map_err(queue_failure)?;
-                self.plain(REPLIES)?
-                    .push(framed)
-                    .map_err(queue_failure)?
-                    .id
-                    .unwrap_or_default()
+                self.append_decided(&bus, REPLIES, framed)?
             }
         };
         self.surfaces()?
@@ -1870,52 +2153,37 @@ impl ChannelState {
         reply: &Reply,
         correlation: &Correlation,
     ) -> crate::Result<u64> {
-        let framed = serde_json::json!({"id": 0, "reply": reply, "at": crate::sys::now_millis()});
-        self.append_beside_the_edit(correlation, framed)
+        let offered = self.offer_reply(reply)?;
+        self.record_offer(&offered)?;
+        self.answer_offered_alongside(&offered, correlation)
     }
 
-    /// [`answer_alongside`](Self::answer_alongside) for the verdict half alone:
-    /// a commands-only envelope has nothing to append, and its edit has already
-    /// answered the finding.
+    /// [`answer_alongside`](Self::answer_alongside) for an envelope the hooks
+    /// already decided: a commands-only envelope has nothing to append, and its
+    /// edit has already answered the finding.
     ///
     /// # Errors
     ///
-    /// As [`answer_alongside`](Self::answer_alongside).
-    pub(crate) fn answer_if_verdict_alongside(
+    /// The reason the reply queue refused or could not take the record.
+    pub(crate) fn answer_offered_alongside(
         &self,
-        reply: &Reply,
+        offered: &OfferedReply,
         correlation: &Correlation,
-    ) -> crate::Result<()> {
-        if reply.carries_verdict() {
-            self.answer_alongside(reply, correlation)?;
-        }
-        Ok(())
-    }
-
-    fn append_beside_the_edit(
-        &self,
-        correlation: &Correlation,
-        mut framed: Value,
     ) -> crate::Result<u64> {
-        if let Some(fields) = framed.as_object_mut() {
+        let Some(framed) = offered
+            .verdict_record
+            .as_ref()
+            .filter(|_| offered.envelope.carries_verdict())
+        else {
+            return Ok(0);
+        };
+        let mut stamped = framed.value().clone();
+        if let Some(fields) = stamped.as_object_mut() {
             // Last, which is where `QueuedReply` declares it and where the bus's
             // own stamp puts it, so the line is the line either writer writes.
             fields.insert("correlation".to_owned(), Value::from(correlation.as_str()));
         }
-        let replies = queue_name(REPLIES);
-        QueueError::of_verdict(
-            &replies,
-            self.bus()?
-                .validate(&replies, framed.clone())
-                .map_err(bus_failure)?,
-        )
-        .map_err(queue_failure)?;
-        let id = self
-            .plain(REPLIES)?
-            .push(framed)
-            .map_err(queue_failure)?
-            .id
-            .unwrap_or_default();
+        let id = self.append_decided(&self.bus()?, REPLIES, &RawRecord::from_value(&stamped))?;
         self.surfaces()?
             .raw()
             .answer_pending()
@@ -2029,32 +2297,6 @@ impl ChannelState {
             .collect())
     }
 
-    /// Route a reply that carried edits by the halves it carries.
-    ///
-    /// Its commands have already reached the command path — applied inline, or
-    /// through the durable queue [`submit`](Self::submit) writes — so what is
-    /// left to route is the verdict half. Present, it answers the pending
-    /// surface exactly as a commandless reply does. Absent, this envelope is the
-    /// command path's alone: `pending` is left standing, because a graph edit
-    /// answers no question, and nothing is queued for a reader that could only
-    /// misread it as a ruling.
-    pub fn answer_if_verdict(&self, reply: &Reply) -> crate::Result<()> {
-        self.answer_if_verdict_bound(reply, None)
-    }
-
-    /// [`answer_if_verdict`](Self::answer_if_verdict), bound as
-    /// [`answer_bound`](Self::answer_bound) binds.
-    pub(crate) fn answer_if_verdict_bound(
-        &self,
-        reply: &Reply,
-        named: Option<&Correlation>,
-    ) -> crate::Result<()> {
-        if reply.carries_verdict() {
-            self.answer_bound(reply, named)?;
-        }
-        Ok(())
-    }
-
     /// Every reply the planner has written, in order.
     pub fn replies(&self) -> Vec<QueuedReply> {
         let Ok(replies) = self.plain(REPLIES) else {
@@ -2116,19 +2358,19 @@ impl ChannelState {
     ///
     /// Stamped by the bus with its correlation, its blocking flag, its asker
     /// and what it is `about` — which the layout records as the surface's
-    /// `workstream` — and judged, validated and appended as any surface is.
+    /// `workstream` — and decided, validated and appended as any surface is.
     pub(crate) fn ask(
         &self,
         question: Surface,
         about: Option<onemessagebus::Address>,
-    ) -> crate::Result<Pending<Value>> {
+    ) -> crate::Result<AskOffered<Value>> {
         let options = AskOptions {
             blocking: question.blocking,
             asker: question.asker.clone(),
             about,
         };
         self.judging_bus()?
-            .ask::<Surface, Value>(&queue_name(SURFACES), question, options)
+            .ask_offered::<Surface, Value>(&queue_name(SURFACES), question, options)
             .map_err(bus_failure)
     }
 
@@ -2206,34 +2448,6 @@ impl ChannelState {
             .map_err(|failure| crate::Error::Refused(failure.to_string()))
     }
 
-    /// Judge a reply envelope as the reply queue judges one offered to it,
-    /// appending nothing: the layout's routing and the author's grants, `review`
-    /// registered on the reply queue as a validator of it, and each queue the
-    /// envelope would be routed to by that queue's own validators.
-    pub(crate) fn judge_reply<V: onemessagebus::Validator<Value> + 'static>(
-        &self,
-        reply: &Reply,
-        review: Option<V>,
-    ) -> crate::Result<()> {
-        if review.is_none() && !self.validates(REPLIES) && !self.validates(COMMANDS) {
-            return Ok(());
-        }
-        let replies = queue_name(REPLIES);
-        let offered = serde_json::to_value(reply)
-            .map_err(|failure| crate::Error::Invalid(format!("reply: {failure}")))?;
-        let mut bus = self.judging_bus()?;
-        if let Some(review) = review {
-            bus = bus
-                .with_validator::<Value>(&replies, review)
-                .map_err(bus_failure)?;
-        }
-        QueueError::of_verdict(
-            &replies,
-            bus.validate(&replies, offered).map_err(bus_failure)?,
-        )
-        .map_err(queue_failure)
-    }
-
     /// Append one envelope of edits to the durable command queue.
     ///
     /// Offered through the bus, so the layout checks each op against the
@@ -2250,6 +2464,15 @@ impl ChannelState {
             .unwrap_or_default())
     }
 
+    /// Append the command queue's record of an envelope the hooks already
+    /// decided, or, where nothing decided one, the envelope as it stands.
+    pub(crate) fn submit_offered(&self, offered: &OfferedReply) -> crate::Result<u64> {
+        match &offered.commands_record {
+            Some(record) => self.append_decided(&self.bus()?, COMMANDS, record),
+            None => self.submit(offered.envelope.author.clone(), &offered.envelope.commands),
+        }
+    }
+
     /// Record one envelope the run's writer is applying **itself**, because nothing
     /// was driving the run, and answer its id: appended under the queue's next id,
     /// as [`submit`](Self::submit) appends one. The caller answers it once it is
@@ -2263,12 +2486,8 @@ impl ChannelState {
     /// reconciler applies it again. The caller holds the run's ownership lock and
     /// the handover gate, which keeps a submission from landing between the append
     /// and the claim.
-    pub(crate) fn record_applying(
-        &self,
-        author: Author,
-        commands: &[Command],
-    ) -> crate::Result<u64> {
-        let id = self.submit(author, commands)?;
+    pub(crate) fn record_applying(&self, offered: &OfferedReply) -> crate::Result<u64> {
+        let id = self.submit_offered(offered)?;
         let waiting = self.claimable_commands();
         if waiting.undecodable == 0
             && matches!(waiting.envelopes.as_slice(), [alone] if alone.id == id)
@@ -2951,6 +3170,10 @@ mod tests {
                     },
                     None,
                 )
+                .map(|offered| match offered {
+                    AskOffered::Raised(pending) => pending,
+                    AskOffered::Dropped(_) => unreachable!("this channel declares no hooks"),
+                })
                 .expect("the question is asked")
                 .correlation()
                 .clone()

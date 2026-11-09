@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("149.")["bundle_versions"]["events"],
+        divergence_block("151.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -6803,7 +6803,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 68, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 69, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -7266,7 +7266,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         ]
     );
 
-    // The one form the document names that `start` no longer takes: divergence 149.
+    // The one form the document names that `start` no longer takes: divergence 151.
     assert!(
         Cli::try_parse_from([
             "onepipeline",
@@ -7276,7 +7276,7 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
             "1800"
         ])
         .is_err(),
-        "`start` took the flag divergence 149 records as removed"
+        "`start` took the flag divergence 151 records as removed"
     );
     assert!(
         CONTRACT.contains("`--dag-graph` defaults to `off`"),
@@ -7932,7 +7932,8 @@ const RULINGS: &[(&str, &str)] = &[
     // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
     ("143.", "`replies-cursor.json.offset`"),
     // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
-    ("147.", "decided against `onemessagebus` 0.9.5"),
+    ("147.", "decided against `onemessagebus`"),
+    ("149.", "planner-surface-dropped"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -11362,7 +11363,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
     // The bundle that first carried the landings; later entries raised it, and
-    // entry 149 raised its major, so the compiled-in bundle is that one or later.
+    // entry 151 raised its major, so the compiled-in bundle is that one or later.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
             .split('.')
@@ -12019,6 +12020,18 @@ fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
     let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(flat(CONTRACT).contains(AUTHORING_GUIDANCE));
     assert!(flat(readme).contains(AUTHORING_GUIDANCE));
+    // The question rule is stated in each document's Human items section, not merely
+    // somewhere in it.
+    for (name, document) in [("contract", CONTRACT), ("README", readme)] {
+        assert!(
+            human_items_section(document)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(onepipeline::human_items::QUESTION_GUIDANCE),
+            "the {name}'s Human items section lacks QUESTION_GUIDANCE"
+        );
+    }
     // The shipped example plan states every human node's item, priority included.
     let tasks = repo_root().join("examples/plan-store/tasks/tracked-release");
     for entry in std::fs::read_dir(tasks).unwrap() {
@@ -12028,6 +12041,194 @@ fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
             assert!(text.contains("\"priority\":"), "{text}");
         }
     }
+}
+
+/// Choices, a resolution's choice and an event's batch are declared once: the decoder and
+/// the published schema agree on every shape, and refuse each way of getting one wrong.
+#[test]
+fn human_item_choices_and_batches_reconcile_with_the_published_schema() {
+    use onepipeline::human_items::*;
+    let schema = schemas();
+    let sample: Value = serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    let mut answered = sample["items"][1]["item"].clone();
+    assert_eq!(answered["choices"][0]["id"], "gradual");
+    answered["state"] = json!("answered");
+    answered["resolution"] = json!({"actor": "manager", "on_behalf_of": "operator",
+        "text": "Start on Monday.", "choice": "gradual", "reason": null});
+    let check = |name: &str, value: &Value, valid: bool, decoded: bool| {
+        assert_eq!(
+            jsonschema::validator_for(&schema[name])
+                .unwrap()
+                .is_valid(value),
+            valid,
+            "{name} schema on {value}"
+        );
+        let parsed = match name {
+            "HumanItem" => serde_json::from_value::<HumanItem>(value.clone())
+                .map(|v| serde_json::to_value(v).unwrap()),
+            "HumanItemEventPayload" => {
+                serde_json::from_value::<HumanItemEventPayload>(value.clone())
+                    .map(|v| serde_json::to_value(v).unwrap())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(parsed.is_ok(), decoded, "{name} decoder on {value}");
+        if decoded {
+            assert_eq!(&parsed.unwrap(), value);
+        }
+    };
+    check("HumanItem", &answered, true, true);
+    let mut choice_only = answered.clone();
+    choice_only["resolution"]["text"] = Value::Null;
+    check("HumanItem", &choice_only, true, true);
+    // A second copy of a choice id is outside what a JSON schema can say, so only the
+    // decoder holds it.
+    let mut repeated = answered.clone();
+    repeated["choices"][1]["id"] = json!("gradual");
+    check("HumanItem", &repeated, true, false);
+    let bad: Vec<(&str, Value)> = vec![
+        ("/choices/0/id", json!("Upper")),
+        ("/choices/0/id", json!("-lead")),
+        ("/choices/0/id", json!("a".repeat(65))),
+        ("/choices/0/title", json!("two\nlines")),
+        ("/choices/0/title", json!(" ")),
+        ("/choices/0/title", json!("t".repeat(81))),
+        ("/choices/0/description", json!("  ")),
+        ("/choices", json!(vec![answered["choices"][0].clone(); 7])),
+    ];
+    for (pointer, wrong) in bad {
+        let mut value = answered.clone();
+        *value.pointer_mut(pointer).unwrap() = wrong;
+        check("HumanItem", &value, false, false);
+    }
+    // A task offers no choices.
+    let mut task = sample["items"][0]["item"].clone();
+    task["choices"] = answered["choices"].clone();
+    check("HumanItem", &task, false, false);
+    // An answer holds a choice or text, and only an answered question holds a choice.
+    let mut neither = answered.clone();
+    neither["resolution"]["text"] = Value::Null;
+    neither["resolution"]
+        .as_object_mut()
+        .unwrap()
+        .remove("choice");
+    check("HumanItem", &neither, false, false);
+    let mut unknown = answered.clone();
+    unknown["resolution"]["choice"] = json!("nope");
+    check("HumanItem", &unknown, true, false);
+    let mut dismissed = answered.clone();
+    dismissed["state"] = json!("dismissed");
+    dismissed["resolution"]["text"] = Value::Null;
+    dismissed["resolution"]["reason"] = json!("Moot");
+    check("HumanItem", &dismissed, false, false);
+
+    let event = json!({
+        "schema_version": 1,
+        "item_id": answered["id"],
+        "owner": answered["owner"],
+        "action": "human-item-answered",
+        "item": answered,
+        "resolution": answered["resolution"],
+        "batch": {"id": "hb-1", "size": 4},
+    });
+    check("HumanItemEventPayload", &event, true, true);
+    let mut single = event.clone();
+    single.as_object_mut().unwrap().remove("batch");
+    check("HumanItemEventPayload", &single, true, true);
+    let mut empty = event.clone();
+    empty["batch"]["size"] = json!(0);
+    check("HumanItemEventPayload", &empty, false, false);
+    let mut raised = event.clone();
+    raised["action"] = json!("human-item-raised");
+    raised["item"]["state"] = json!("open");
+    raised["item"]["resolution"] = Value::Null;
+    raised["resolution"] = Value::Null;
+    check("HumanItemEventPayload", &raised, false, false);
+
+    let receipt: Value = json!({
+        "batch": "hb-1",
+        "answered": [{"item": {
+            "item": answered,
+            "blocked": {"total": 0, "plans": []},
+            "reopen": {"available": false, "reason": "an answered question cannot be reopened"},
+        }, "event_id": "human-items:7"}],
+        "refused": [{"id": "gone", "refusal": {"kind": "conflict", "reason": "no such human item gone"}}],
+    });
+    let parsed: HumanItemBatchReceipt = serde_json::from_value(receipt.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), receipt);
+    jsonschema::validator_for(&schema["HumanItemBatchReceipt"])
+        .unwrap()
+        .validate(&receipt)
+        .unwrap();
+    let nothing = HumanItemBatchReceipt {
+        batch: None,
+        answered: vec![],
+        refused: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(&nothing).unwrap(),
+        json!({"answered": [], "refused": []}),
+        "a batch that accepted nothing has no id"
+    );
+}
+
+/// Records written by the engine before choices and batches existed are read and written
+/// back byte for byte: a journal's every line and a sample bundle, both produced by that
+/// earlier build and checked against the schema this build publishes.
+#[test]
+fn records_written_before_choices_and_batches_round_trip_byte_identically() {
+    use onepipeline::human_items::{HumanItemEventPayload, HumanItemSample};
+    let schema = onepipeline::human_items::schemas();
+    let events = jsonschema::validator_for(&schema["HumanItemEventPayload"]).unwrap();
+    let journal = include_str!("fixtures/human-items-pre-choices.ndjson");
+    let mut actions = std::collections::BTreeSet::new();
+    for line in journal.lines() {
+        // `preserve_order` keeps this envelope's keys as the engine wrote them.
+        let mut envelope: Value = serde_json::from_str(line).unwrap();
+        events.validate(&envelope["payload"]).unwrap();
+        let payload: HumanItemEventPayload =
+            serde_json::from_value(envelope["payload"].clone()).unwrap();
+        actions.insert(envelope["kind"].as_str().unwrap().to_owned());
+        envelope["payload"] = serde_json::to_value(&payload).unwrap();
+        assert_eq!(serde_json::to_string(&envelope).unwrap(), line);
+        let written = serde_json::to_string(&payload).unwrap();
+        assert!(line.contains(&written), "{written} is not in {line}");
+    }
+    assert_eq!(
+        actions.into_iter().collect::<Vec<_>>(),
+        [
+            "human-item-answered",
+            "human-item-completed",
+            "human-item-dismissed",
+            "human-item-noted",
+            "human-item-raised",
+            "human-item-reopened"
+        ],
+        "the fixture covers every kind a person writes"
+    );
+    let bundle = include_str!("fixtures/human-items-pre-choices-sample.json");
+    let value: Value = serde_json::from_str(bundle).unwrap();
+    jsonschema::validator_for(&schema["HumanItemSample"])
+        .unwrap()
+        .validate(&value)
+        .unwrap();
+    let sample: HumanItemSample = serde_json::from_str(bundle).unwrap();
+    assert_eq!(serde_json::to_string_pretty(&sample).unwrap(), bundle);
+    for field in ["choices", "\"choice\"", "\"batch\""] {
+        assert!(
+            !journal.contains(field) && !bundle.contains(field),
+            "the fixture predates {field}"
+        );
+    }
+}
+
+/// A document's `## Human items` section.
+fn human_items_section(document: &str) -> &str {
+    let start = document.find("## Human items").expect("the section");
+    let end = document[start + 2..]
+        .find("\n## ")
+        .map_or(document.len(), |at| start + 2 + at);
+    &document[start..end]
 }
 
 /// The configuration shape the contract documents is the public types' own: every
@@ -12320,6 +12521,8 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
     let mut actions = vec![
         raise,
         json!({"action":"answer","id":"q","text":"Yes","actor":"manager","on_behalf_of":"user"}),
+        json!({"action":"answer","id":"q","choice":"gradual","actor":"manager","on_behalf_of":"user"}),
+        json!({"action":"answer-batch","answers":[{"id":"q","choice":"gradual","text":"Monday"},{"id":"r","text":"No"}],"actor":"manager","on_behalf_of":"user"}),
         json!({"action":"complete","id":"t","actor":"user","on_behalf_of":null}),
     ];
     for reason in [
@@ -12349,7 +12552,10 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
     }
     for value in [
         json!({"action":"approve","id":"t"}),
-        json!({"action":"answer","id":"q","text":" ","actor":"user","on_behalf_of":null}),
+        // A blank or absent answer decodes, so the store can refuse it as a Conflict
+        // naming why; a field outside the declared shape never does.
+        json!({"action":"answer","id":"q","text":"Yes","extra":1,"actor":"user","on_behalf_of":null}),
+        json!({"action":"answer-batch","answers":[{"id":"q","note":"x"}],"actor":"user","on_behalf_of":null}),
         json!({"action":"complete","id":"t","actor":"user","on_behalf_of":null,"key":"untrusted"}),
     ] {
         assert!(serde_json::from_value::<HumanItemAction>(value.clone()).is_err());

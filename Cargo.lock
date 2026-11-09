@@ -1583,9 +1583,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.10.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628bb3a56a41e6a2a9759b1efb64e46aab99d84e8c2f568c6a9d2865e34c265"
+checksum = "248b1eda725ee8b946a53c24851208376a3d03f5c5e4fa50e8c476b965d5f2ef"
 dependencies = [
  "clap",
  "libc",
@@ -1659,9 +1659,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.22.2"
+version = "0.22.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ddececd7e1ff49e73eee2eb38d7efb349551e99abb81d732d66ac47a02bd4b0"
+checksum = "2d8a71178dbdcd5425076d869ab62385d5393ef7570620da215e7508f2ebaa36"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1676,9 +1676,9 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.5"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38ac7189e0e48ccf405c82310a8486855a1ea177f2141a4e9e942fffc3c49567"
+checksum = "949aa9f076e710679ff61a44d253d815b873a81c57cce5ca2074a1cef4f59947"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.103.0"
+version = "0.105.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1875,9 +1875,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.62.1"
+version = "0.63.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "775325e2ea50353f114fc5f4e53558c5b6849fefb16e196d1c067a15fe5a8f3d"
+checksum = "66f02655ef29ffaebf15e73e8d3129aba5c33b4e04beec7a0f191354928c9633"
 dependencies = [
  "clap",
  "dunce",
@@ -1910,9 +1910,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.20.4"
+version = "0.20.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27ed3a0389d4b2bf3880abd02cc625686c46c5b03990b4317340abdf7a09093d"
+checksum = "8658dee367cdb84ed27e2f43497e96572abfaf293dacddf622d8dfb6a2da88a8"
 dependencies = [
  "flate2",
  "onevcs",

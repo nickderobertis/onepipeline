@@ -825,6 +825,47 @@ pub(crate) struct PlannerSurfaceQueued {
     pub(crate) blocking: bool,
 }
 
+/// `planner-surface-dropped`: a hook kept a surface off the channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct PlannerSurfaceDropped {
+    // llmlint: ignore-block[invalid_states_unrepresentable] this journals what a queued
+    // surface would have carried, and `PlannerSurfaceQueued` says why that is no closed
+    // set: an engine-raised surface's kind, such as `quiet-worker`, is outside
+    // `channel::SurfaceKind`, and `Surface.source` is free text on the channel itself.
+    // An enum here would refuse records this crate writes.
+    /// The surface's kind, as the surface it would have been names it.
+    pub(crate) kind: String,
+    /// What it said.
+    pub(crate) message: String,
+    /// What raised it.
+    pub(crate) source: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Whether it would have held dependents back.
+    pub(crate) blocking: bool,
+    /// Review revision identity, where the surface names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<onemessagebus::Correlation>,
+    /// Which hook kept it off the channel, or what refused it.
+    #[serde(flatten)]
+    pub(crate) cause: SurfaceDropCause,
+}
+
+/// Why a surface never reached the channel, as its journal record names it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub(crate) enum SurfaceDropCause {
+    /// A hook dropped it.
+    Dropped {
+        /// The hook that dropped it.
+        hook: onemessagebus::HookRef,
+    },
+    /// A hook or a validator refused it, in its own words.
+    Refused {
+        /// Why.
+        refused: String,
+    },
+}
+
 /// `planner-surfaced`: a surface consumed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaced {
@@ -2454,6 +2495,7 @@ payload_messages! {
     CommandAccepted => "command-accepted";
     EditRejected => "edit-rejected";
     PlannerSurfaceQueued => "planner-surface-queued";
+    PlannerSurfaceDropped => "planner-surface-dropped";
     PlannerSurfaced => "planner-surfaced";
     PlannerReplied => "planner-replied";
     HumanAttested => "human-attested";

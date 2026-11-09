@@ -248,7 +248,7 @@ pub(crate) fn pass(
         crate::payload::ReadjustTrigger::Review,
     )?;
     let state: &RunState = projected;
-    let channel = ChannelState::new(paths);
+    let channel = ChannelState::of_paths(paths)?;
     // Include the queue log: a crash after push and before the journal append must
     // not send the same revision a second time.
     let events = journal::read(&paths.journal());
@@ -256,7 +256,11 @@ pub(crate) fn pass(
         .iter()
         .filter(|event| {
             event.source == crate::event::Source::Pipeline
-                && event.kind.as_str() == "planner-surface-queued"
+                // llmlint: ignore[changed_behavior_has_e2e] the dropped kind is written by `engine::offer_surface`, whose journey is `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; driving a real review pass to a dropped comment adds only this filter's other arm.
+                && matches!(
+                    event.kind.as_str(),
+                    "planner-surface-queued" | "planner-surface-dropped"
+                )
                 && event.payload.get("kind").and_then(Value::as_str) == Some("review-comment")
         })
         .filter_map(|event| {
@@ -334,9 +338,13 @@ pub(crate) fn pass(
             let correlation = correlation
                 .parse()
                 .map_err(|error| Error::Invalid(format!("review correlation: {error}")))?;
-            let surface = channel.push(Surface {
+            let offered = Surface {
                 id: 0, kind: "review-comment".to_owned(), message: format!("Node {node}, change request {url}: {} at {}\n{}\n\n{}\n\nAnswer with rework on {node}, naming {} in comments, or decline this comment.", comment.author, location(comment), comment.url, comment.body, comment.id.0), source: crate::channel::source::RECONCILER.to_owned(), blocking: false, queued_at: crate::sys::now_millis(), workstream: Some(node.to_owned()), abandoned: false, asker: None, correlation: Some(correlation),
-            })?;
+            };
+            let Some(surface) = crate::engine::offer_surface(paths, journal, &channel, &offered)?
+            else {
+                continue;
+            };
             failpoint("after-surface")?;
             record_surface(paths, journal, &surface)?;
         }
@@ -505,7 +513,7 @@ fn not_drafted(
     let correlation = correlation
         .parse()
         .map_err(|error| Error::Invalid(format!("review reply correlation: {error}")))?;
-    let surface = channel.push(Surface {
+    let offered = Surface {
         id: 0,
         kind: crate::channel::SurfaceKind::REVIEW_REPLY_PENDING.to_owned(),
         message: format!(
@@ -525,7 +533,11 @@ fn not_drafted(
         abandoned: false,
         asker: None,
         correlation: Some(correlation),
-    })?;
+    };
+    // llmlint: ignore[changed_behavior_has_e2e] the hook outcomes here are `engine::offer_surface`'s, driven end to end by `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; this surface is reachable only through a failed review reply and adds no branch of its own.
+    let Some(surface) = crate::engine::offer_surface(paths, journal, channel, &offered)? else {
+        return Ok(());
+    };
     record_surface(paths, journal, &surface)
 }
 
@@ -610,7 +622,7 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
             ("kind", json!(surface.kind)),
             ("message", json!(journal::bounded_text(&surface.message))),
             ("source", json!(surface.source)),
-            ("blocking", json!(false)),
+            ("blocking", json!(surface.blocking)),
             ("correlation", json!(surface.correlation)),
         ]),
     )
