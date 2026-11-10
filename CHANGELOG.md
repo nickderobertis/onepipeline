@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.106.1](https://github.com/nickderobertis/onepipeline/compare/v0.106.0...v0.106.1) - 2026-11-10
+
+### Fixed
+
+- a view refresh of a rewritten journal cannot hang on Windows ([#1509](https://github.com/nickderobertis/onepipeline/pull/1509))
+
 ## [0.106.0](https://github.com/nickderobertis/onepipeline/compare/v0.105.0...v0.106.0) - 2026-11-10
 
 ### Added
