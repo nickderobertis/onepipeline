@@ -4614,18 +4614,6 @@ pub(crate) fn submit_offered(
         edits::advance(&mut checking, &operations);
     }
 
-    // Every node the envelope introduces or changes, offered to the plan-edit hook this
-    // run's launch named — off the launch record, as the validator is — with the task its
-    // next dispatch would be given, once per node and before anything of it is queued or
-    // applied: a refusal turns the whole envelope away, journalled `edit-rejected`.
-    crate::planedit::judge(
-        paths,
-        &view.launch,
-        &envelope.author,
-        &envelope.commands,
-        &projected,
-    )?;
-
     // And, once every command in it has passed both, the envelope as a whole —
     // offered to the reviewer this run was launched with, before anything of it
     // is queued or committed, so a refusal turns the whole envelope away rather
@@ -4732,6 +4720,9 @@ pub(crate) fn submit_offered(
             // `edits::compile` can raise, but a note's own validation is not one
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
+            // The run as the envelope would leave it, for the plan-edit hook below: each
+            // validated command folded on as the reconciler's own validation folds it.
+            let mut staged_state = view.state.clone();
             for command in &envelope.commands {
                 let step = match validate_here(
                     paths,
@@ -4757,7 +4748,36 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
+                crate::projection::fold_operations(
+                    &mut staged_state,
+                    &step.staged(),
+                    Some(sys::now_millis()),
+                );
                 staged.push(step);
+            }
+            // Every node the envelope introduces or changes, offered to the plan-edit hook
+            // the run's launch named, with the task its next dispatch would be given — this
+            // process being the run's writer, from the inputs a driver starting on the run
+            // composes it from — before anything of the envelope is applied or journalled as
+            // an edit. A refusal turns the whole envelope away, journalled `edit-rejected`.
+            if let Err((index, error)) = crate::planedit::judge(
+                paths,
+                &view.launch,
+                &envelope.commands,
+                &staged_state.graph,
+                &mut |node| crate::composition::of_a_fresh_driver(paths, &staged_state, node),
+            ) {
+                engine::record_rejection(
+                    paths,
+                    &mut journal,
+                    envelope.author.clone(),
+                    &envelope.commands[index],
+                    &error,
+                    // Never queued, so no envelope id names it.
+                    None,
+                )?;
+                lock.release();
+                return Err(error);
             }
             // Then deliver, which is the first thing here that reaches outside
             // the run. Nothing is driving it, so nothing of it is in flight — the

@@ -841,6 +841,16 @@ fn attempt_once(
         // What the node's worker is told, stack and all: the stack parents it is
         // drafted on and the base it is drafted against, after its own task.
         let task = with_stack(step.rendered_task_carrying(node, references, notes), stack);
+        // What the step's own dispatch is given: the same task, composed by the one function
+        // the plan-edit hook is shown it through, boundary section and all.
+        let dispatched = crate::composition::step(
+            step,
+            node,
+            references,
+            notes,
+            stack,
+            launch.boundary.section(),
+        );
         // The stack base is assembled before the session that is cut from it
         // opens, and only by the step that opens it: every later step works in
         // that session's worktree.
@@ -885,7 +895,7 @@ fn attempt_once(
         }
         let build = |attempt| DispatchRequest {
             graph: graph.clone(),
-            task: crate::boundary::with_section(task.clone(), launch.boundary.section()),
+            task: dispatched.clone(),
             labels: engine::dispatch_labels(
                 run,
                 &node.id,

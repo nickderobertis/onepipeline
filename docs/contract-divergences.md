@@ -13313,17 +13313,24 @@ plan-edit hook on live edits* restate it with these decisions made:
   `--check <PATH>` and `--plan-edit-hook <PATH>` each name one executable, the hook's at the
   default 600 seconds and replacing the config's hook entirely (the manager's ruling,
   relayed while this was built).
-- **The hook runs in the reply's submission check**, the one place an envelope can still be
-  refused whole, beside the envelope reviewer, and journals its `edit-rejected` from that
-  process's own stream. An envelope that reaches the reply queue other than through `reply`
-  — a host bus writing it directly — is offered to the hook no more than it is to the
-  reviewer.
-- **The composed task is the node's rendering**: what only the dispatch itself knows — a
-  mixed plan's boundary section, an out-of-repository dependency's reference block, a stack
-  placement, a note a dead conversation read — is appended at dispatch and is not in the
-  hook's `body`. For every node that has none of those, which is every node of a
-  single-visibility plan with no such dependency, the body is the dispatched task byte for
-  byte, which `tests/e2e/plan_edit_hook.rs` holds.
+- **The hook runs where the edit is applied, and is shown exactly the task the node's next
+  dispatch is given** — *ruled by the manager while this was built, so not a divergence of
+  this build's own:* the hook runs in the live driver's validation of the envelope, after the
+  engine's own checks and before any command of it is applied or journalled as an edit, or in
+  the replying process's own apply phase when nothing drives the run. "Before anything is
+  appended or applied" is read as appended to the run's journal. The body is composed by the
+  one function the dispatch is composed by (`src/composition.rs`), from the inputs that
+  process dispatches from: the out-of-repository reference block, the stack the node is
+  drafted on, the notes an attempt waiting to resume carries, and the mixed plan's boundary
+  section; for a node of `steps`, the step its next dispatch is. Only what a session itself
+  reports on its first turn — a provisioning failure, a merge left in progress — is added
+  after the session opens and is not in it. The one visible consequence, also ruled: a hook
+  slower than the reply's own wait leaves the reply answering *queued*, and its refusal then
+  arrives as the journalled `edit-rejected` naming the hook and the node. An envelope a host
+  bus writes to the queue directly is judged by the hook as one sent through `reply` is.
+  Journeys in `tests/e2e/publication_boundary.rs`, `adoption.rs`, `stacked_drafts.rs`,
+  `lifecycle.rs` and `plan_edit_hook.rs` hold each addition byte for byte against the task
+  the node is then dispatched with.
 
 Two journal kinds are added, so the events bundle moves to a new minor: a stream an
 earlier build wrote still validates, and one this build writes carries kinds a validator

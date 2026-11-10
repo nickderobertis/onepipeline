@@ -1256,6 +1256,7 @@ fn driving(
             &launch,
             &mut BTreeMap::new(),
             None,
+            &mut fresh_composer(paths),
         )? {
             moved = true;
         }
@@ -1567,6 +1568,7 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
                     &mut BTreeMap::new(),
                     None,
                     envelope,
+                    &mut fresh_composer(paths),
                 )?;
             }
         }
@@ -1579,6 +1581,7 @@ pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
         &launch,
         &mut BTreeMap::new(),
         None,
+        &mut fresh_composer(paths),
     )?;
     // The queue it reconciled may have settled a node at a landing, and no
     // driver is left to see it.
@@ -1791,6 +1794,29 @@ fn converge(
             derived = None;
             unpublished = true;
         }
+        // What the hook on a live edit is shown is composed from what this loop dispatches
+        // from: its release watch — a node it has yet to describe described as its next
+        // refresh will — and the attempts it holds to resume.
+        let mut compose = |staged: &RunState, node: &Node| -> Result<String> {
+            let references = if releases.describes(&node.id) {
+                releases.references(node)
+            } else {
+                let mut fresh = crate::release::Watch::of_run(paths);
+                fresh.refresh(paths, staged, std::slice::from_ref(node));
+                fresh.references(node)
+            };
+            let statuses = staged.statuses();
+            Ok(crate::composition::Inputs::now(
+                paths,
+                staged,
+                &statuses,
+                node,
+                references,
+                workspaces.pending(&node.id),
+                &same_identity,
+            )?
+            .next_task())
+        };
         if reconcile_edits(
             paths,
             journal,
@@ -1799,6 +1825,7 @@ fn converge(
             launch,
             &mut in_flight,
             Some(&mut deliveries),
+            &mut compose,
         )? {
             derived = None;
             unpublished = true;
@@ -3012,6 +3039,7 @@ fn close_out_and_drain(
         launch,
         in_flight,
         None,
+        &mut fresh_composer(paths),
     )? {
         return Ok(LastClaim::FoundNothing);
     }
@@ -3328,6 +3356,8 @@ impl InPass {
                     &mut BTreeMap::new(),
                     None,
                     envelope,
+                    // Only a `settle` is answered here, and no hook is offered one.
+                    &mut fresh_composer(paths),
                 )
                 .map(|_| ())
             });
@@ -4169,6 +4199,21 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// still processed on this pass — see [`refused_for_failure`]. Only a failure to write that
 /// answer ends the pass, and that answer and what the pass had not reached yet
 /// are kept for the next pass of the same driver.
+/// What composes the task a node's next dispatch is given, from the run as an envelope
+/// would leave it — the plan-edit hook's view of it. The loop's own reads its release watch
+/// and the attempts it holds to resume; every other writer composes as a driver starting on
+/// the run would ([`crate::composition::of_a_fresh_driver`]).
+pub(crate) type Composer<'a> = dyn FnMut(&RunState, &Node) -> Result<String> + 'a;
+
+/// The composer of a writer with no loop: a driver starting on the run now.
+fn fresh_composer(paths: &RunPaths) -> impl FnMut(&RunState, &Node) -> Result<String> + '_ {
+    move |state: &RunState, node: &Node| crate::composition::of_a_fresh_driver(paths, state, node)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the loop's borrowed state, and what composes a dispatch's task beside it"
+)]
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -4177,6 +4222,7 @@ fn reconcile_edits(
     launch: &LaunchRecord,
     in_flight: &mut BTreeMap<String, Dispatch>,
     mut deliveries: Option<&mut NoteDeliveries>,
+    compose: &mut Composer<'_>,
 ) -> Result<bool> {
     let mut changed = false;
     crate::review::failpoint("before-claim")?;
@@ -4246,6 +4292,7 @@ fn reconcile_edits(
             in_flight,
             deliveries.as_deref_mut(),
             envelope,
+            compose,
         ) {
             Ok(moved) => changed |= moved,
             Err(error) => {
@@ -4314,6 +4361,7 @@ fn reconcile_claimed(
     in_flight: &mut BTreeMap<String, Dispatch>,
     mut deliveries: Option<&mut NoteDeliveries>,
     envelope: crate::channel::QueuedCommands,
+    compose: &mut Composer<'_>,
 ) -> Result<bool> {
     crate::review::failing(&format!("fail-envelope-{}", envelope.id))?;
     if let Some(deliveries) = deliveries.as_deref_mut() {
@@ -4333,6 +4381,7 @@ fn reconcile_claimed(
                 launch,
                 in_flight,
             )
+            .0
             .iter()
             .all(std::result::Result::is_ok)
         {
@@ -4340,7 +4389,7 @@ fn reconcile_claimed(
         }
     }
     reconcile_envelope(
-        paths, journal, state, channel, launch, in_flight, deliveries, envelope,
+        paths, journal, state, channel, launch, in_flight, deliveries, envelope, compose,
     )
 }
 
@@ -4846,7 +4895,7 @@ fn refused_again(
     clippy::too_many_arguments,
     reason = "the body `reconcile_edits` ran inline: the run's record, journal, state and \
               channel, the launch it validates against, the dispatches in flight, the \
-              delivery threads, and the envelope"
+              delivery threads, the envelope, and what composes a dispatch's task"
 )]
 fn reconcile_envelope(
     paths: &RunPaths,
@@ -4857,6 +4906,7 @@ fn reconcile_envelope(
     in_flight: &mut BTreeMap<String, Dispatch>,
     deliveries: Option<&mut NoteDeliveries>,
     envelope: crate::channel::QueuedCommands,
+    compose: &mut Composer<'_>,
 ) -> Result<bool> {
     if envelope.commands == [Command::Readjust {}] {
         let result = channel
@@ -4917,7 +4967,8 @@ fn reconcile_envelope(
     let author = envelope.author.clone();
     let commands = &envelope.commands;
 
-    let evaluated = validate_envelope(paths, state, author.clone(), commands, launch, in_flight);
+    let (evaluated, staged_state) =
+        validate_envelope(paths, state, author.clone(), commands, launch, in_flight);
     let staged = match all_or_each_ruling(seated(
         paths,
         envelope.id,
@@ -4954,6 +5005,36 @@ fn reconcile_envelope(
             return Ok(false);
         }
     };
+
+    // Every node the envelope introduces or changes, offered to the plan-edit hook the run's
+    // launch named, with the task its next dispatch would be given from the run as the
+    // envelope leaves it — after every command passed the engine's own checks, and before
+    // anything of it is delivered, applied or journalled as an edit. A refusal is the whole
+    // envelope's, recorded against the command that named the node.
+    if let Err((index, error)) =
+        crate::planedit::judge(paths, launch, commands, &staged_state.graph, &mut |node| {
+            compose(&staged_state, node)
+        })
+    {
+        record_rejection(
+            paths,
+            journal,
+            author.clone(),
+            &commands[index],
+            &error,
+            Some((envelope.id, index)),
+        )?;
+        let mut evaluated: Vec<std::result::Result<Staged, Error>> =
+            staged.into_iter().map(Ok).collect();
+        evaluated[index] = Err(error);
+        answer_through_withdrawals(
+            paths,
+            channel,
+            commands,
+            refused_envelope(envelope.id, commands, &evaluated),
+        )?;
+        return Ok(false);
+    }
 
     // The instant before any note of the envelope is offered, against which
     // the stream is read afterwards: a turn that opened before it cannot be
@@ -6373,7 +6454,7 @@ fn validate_envelope(
     commands: &[Command],
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
-) -> Vec<std::result::Result<Staged, Error>> {
+) -> (Vec<std::result::Result<Staged, Error>>, RunState) {
     let mut staged_state: RunState = (**state).clone();
     let mut evaluated = Vec::with_capacity(commands.len());
     // The run's own grants, as its launch narrowed them.
@@ -6407,7 +6488,7 @@ fn validate_envelope(
         }
         evaluated.push(ruling);
     }
-    evaluated
+    (evaluated, staged_state)
 }
 
 /// Offer every validated note to the conversation its validation resolved, and
@@ -8554,7 +8635,7 @@ struct PlacementShape {
 /// landing node's dependency: a spelling `onevcs` cannot resolve names no
 /// repository this run can place anything on, so it is answered `false` and the
 /// dependency only orders the node.
-fn same_identity(mine: &str, other: &str) -> bool {
+pub(crate) fn same_identity(mine: &str, other: &str) -> bool {
     let identity = |repo: &str| onevcs::release_targets(repo).map(|repository| repository.identity);
     matches!((identity(mine), identity(other)), (Ok(mine), Ok(other)) if mine == other)
 }
@@ -10110,7 +10191,7 @@ fn execute_direct(
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = |attempt| DispatchRequest {
         graph: graph.clone(),
-        task: crate::boundary::with_section(node.rendered_task_with(references), boundary),
+        task: crate::composition::direct(node, references, boundary),
         labels: dispatch_labels(run, &node.id, None, node.persona.as_deref()),
         controls,
         workspace: WorkspaceSpec::Path(project_dir()),
@@ -16597,6 +16678,7 @@ mod tests {
             &launch,
             &mut BTreeMap::new(),
             Some(&mut deliveries),
+            &mut fresh_composer(&paths),
         );
         assert!(
             refused.is_err(),
@@ -16624,6 +16706,7 @@ mod tests {
             &launch,
             &mut BTreeMap::new(),
             Some(&mut deliveries),
+            &mut fresh_composer(&paths),
         )
         .expect("the queue answers again");
         assert!(
@@ -16692,6 +16775,7 @@ mod tests {
             &launch,
             &mut BTreeMap::new(),
             Some(&mut deliveries),
+            &mut fresh_composer(&paths),
         );
         assert!(
             refused.is_err(),
@@ -16719,6 +16803,7 @@ mod tests {
             &launch,
             &mut BTreeMap::new(),
             Some(&mut deliveries),
+            &mut fresh_composer(&paths),
         )
         .expect("the outcome log takes writes again");
         assert!(
@@ -16809,6 +16894,7 @@ mod tests {
                 &launch,
                 &mut BTreeMap::new(),
                 deliveries,
+                &mut fresh_composer(&paths),
             )
             .expect("the pass runs");
             channel.outcomes()
@@ -17022,6 +17108,7 @@ mod tests {
             &launch,
             &mut BTreeMap::new(),
             Some(&mut deliveries),
+            &mut fresh_composer(&paths),
         )
         .expect("the pass runs");
         let answered: Vec<u64> = channel

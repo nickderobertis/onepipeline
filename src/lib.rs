@@ -82,6 +82,7 @@ mod checkpoint;
 mod checkwatch;
 mod closures;
 mod commandstep;
+mod composition;
 mod concurrency;
 mod continuation;
 mod criteria;

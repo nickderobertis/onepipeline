@@ -891,6 +891,12 @@ impl Watch {
         }
     }
 
+    /// Whether this watch has described `node`'s dependencies yet: a node it has not is one
+    /// its next refresh describes before the node is dispatched.
+    pub(crate) fn describes(&self, node: &str) -> bool {
+        self.dependencies.contains_key(node)
+    }
+
     /// The rows a node's dispatch is handed, in the order its `deps` name them.
     ///
     /// **Both adoption modes**, because the block serves both. A fast-adoption

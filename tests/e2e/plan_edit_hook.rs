@@ -724,10 +724,12 @@ fn a_hook_that_cannot_start_or_is_signalled_is_not_judged_and_runs_from_the_laun
 }
 
 /// A `requeue` stating `steps` — and no `task` — is offered like one stating a task, its body
-/// each agent step's task in order: with `task` and `kind`, which the journey above requeues
-/// with, every key the contract names.
+/// the task the node's next dispatch is given: its first agent step's, a person's step and a
+/// later step being no part of it, and byte for byte the task that step is then dispatched
+/// with. With `task` and `kind`, which the journey above requeues with, every key the contract
+/// names.
 #[test]
-fn a_requeue_stating_steps_offers_each_agent_steps_task() {
+fn a_requeue_stating_steps_offers_the_next_steps_task() {
     let world = World::new("plan-edit-hook-steps");
     world.repository("local-direct", &[]);
     let launch = config(&world, 60);
@@ -769,15 +771,13 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
         .as_str()
         .expect("a body")
         .to_owned();
-    let build = body.find("# Step build").expect("the first step");
-    let check = body.find("# Step check").expect("the second step");
-    assert!(build < check, "{body}");
-    // A person's step is dispatched to nobody, so it is no task the hook is shown.
+    assert!(body.starts_with("## What\nDo build."), "{body}");
+    // A person's step is dispatched to nobody, and a later step is a later dispatch.
     assert!(
-        !body.contains("sign-off") && !body.contains("A person signs"),
+        !body.contains("A person signs") && !body.contains("Do check."),
         "{body}"
     );
-    // A ruling on the node binds every agent step: it is under each step's criteria.
+    // A ruling on the node binds its next dispatch, under that step's criteria.
     world
         .run_with_stdin(
             &["reply", &run],
@@ -788,7 +788,16 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
         .as_str()
         .expect("a body")
         .to_owned();
-    assert_eq!(amended.matches(RULING).count(), 2, "{amended}");
+    assert_eq!(amended.matches(RULING).count(), 1, "{amended}");
+    world.release("slow.go");
+    world.until("the first step to be dispatched", |_| {
+        !tasks_dispatched(&world, "build").is_empty()
+    });
+    assert_eq!(
+        tasks_dispatched(&world, "build")[0],
+        amended,
+        "the hook was shown a task other than the one the step was dispatched with"
+    );
     let mut exercised = vec!["kind".to_owned(), "steps".to_owned(), "task".to_owned()];
     exercised.sort();
     assert_eq!(words("requeue_keys"), exercised);
@@ -902,4 +911,48 @@ fn a_refused_edit_never_reaches_the_hook_and_a_relative_hook_is_the_launchs() {
     assert_eq!(count(), 0, "an edit the engine refused reached the hook");
     amend_later(&world, &run).exited(0);
     assert_eq!(count(), 1, "the launch's relative hook was not the one run");
+}
+
+/// A hook slower than the reply's own wait leaves the reply answering *queued*: the hook runs
+/// where the edit is applied, in the live driver, and its refusal arrives afterwards as the
+/// journalled `edit-rejected` naming the hook and the node, with no node's task changed.
+#[test]
+fn a_hook_slower_than_the_replys_wait_is_answered_queued_and_its_refusal_journalled() {
+    let world = World::new("plan-edit-hook-slow");
+    let launch = config(&world, 60);
+    let run = held(
+        &world,
+        "hookslow",
+        vec![noted("later", &["slow"])],
+        &["--launch-config", &launch],
+    );
+    std::fs::write(world.root.join("hook.sleep"), "6").expect("the hold is armed");
+    std::fs::write(world.root.join("hook.exit"), exit("refuse")).expect("the refusal is armed");
+    std::fs::write(
+        world.root.join("hook.say"),
+        "judged too late to stop the reply",
+    )
+    .expect("armed");
+    let mut reply = world.cmd(&["reply", &run]);
+    reply.env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1");
+    let answered = world.run_with_stdin_on(
+        reply,
+        &envelope(json!([{"op": "amend", "id": "later", "text": RULING}])),
+    );
+    answered.exited(0).out_has("\"state\":\"queued\"");
+    world.until("the hook's refusal to be journalled", |world| {
+        !rejected(world, &run).is_empty()
+    });
+    let records = rejected(&world, &run);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let reason = records[0]["payload"]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("plan-edit hook")
+            && reason.contains("'later'")
+            && reason.contains("judged too late to stop the reply"),
+        "{reason}"
+    );
+    assert_eq!(committed(&world, &run), 0);
+    world.run(&["status", &run]).exited(0).out_lacks(RULING);
+    world.run(&["stop", &run]);
 }

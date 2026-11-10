@@ -9702,3 +9702,114 @@ fn returned(watched: &crate::harness::Run) -> serde_json::Value {
     assert_eq!(record["watch"], "return", "{record}");
     record
 }
+
+/// The plan-edit hook is shown the task a resumed attempt is given: a node whose re-dispatch
+/// the identity refused waits to resume as the attempt it was, and a note recorded while it
+/// waits is composed into that attempt under the manager's notes — so a ruling offered then is
+/// shown that composition, byte for byte the task the resumed attempt is dispatched with.
+#[cfg(unix)]
+#[test]
+fn the_plan_edit_hook_is_shown_the_task_a_resumed_attempt_is_given() {
+    let world = World::new("lifecycle-pool-edit-hook");
+    world.write_graphs();
+    let graph = world.graphs().join("node-scope.yaml");
+    let world = world
+        .with_env("ONEPIPELINE_NODE_GRAPH", &graph.to_string_lossy())
+        .with_env("ONEPIPELINE_WORKSPACE_POLL_SECONDS", "1")
+        .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2");
+    let rejected_once = world.root.join("rejected-once");
+    world.repository(
+        "local-direct",
+        &[
+            "sh",
+            "-c",
+            &format!(
+                "if [ -e '{marker}' ]; then exit 0; fi; : > '{marker}'; exit 1",
+                marker = rejected_once.display()
+            ),
+        ],
+    );
+    pool_one_slot_no_overflow(&world);
+    let record = world.root.join("pool-hook");
+    std::fs::create_dir_all(&record).expect("the hook's record directory");
+    let env_hook = opens_the_last_slot_on(&world, &record, 2);
+    let edit_hook = crate::harness::recording_edit_hook(&world);
+    world.script("service.work", "the worker wrote this\n");
+    let path = world.plan(
+        "poolhook",
+        &plan_of("poolhook", vec![lifecycle("service", &[])]),
+    );
+    let mut launcher = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dispatch-env-hook",
+        &env_hook,
+        "--plan-edit-hook",
+        &edit_hook.display().to_string(),
+    ]);
+    let launcher = launcher
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached launcher starts");
+    let run = "poolhook".to_string();
+    world.until(
+        "the refused re-dispatch to be held for its workspace",
+        |world| workspace_hold_of(world, &run, "service").is_some(),
+    );
+
+    // While it waits: a note for its next dispatch, and then a ruling.
+    let note = "The release notes moved to docs/releases.md.";
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "note", "id": "service",
+                "addressee": "worker", "text": note, "deliver": "next"}]})
+            .to_string(),
+        )
+        .exited(0);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [{"op": "amend", "id": "service",
+                "text": "Leave the changelog's older entries as they are."}]})
+            .to_string(),
+        )
+        .exited(0);
+    let body = crate::harness::edit_hook_body(&world, "service");
+    assert!(
+        body.contains("## Manager notes") && body.contains(note),
+        "the hook was not shown the note the resumed attempt carries:\n{body}"
+    );
+
+    // The outside session closes, the identity admits the resumed attempt, and it is
+    // dispatched with exactly what the hook was shown.
+    let opened: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(record.join("opened")).expect("the hook opened a session"),
+    )
+    .expect("the sibling printed the session");
+    world
+        .run_on(
+            world.cmd_on(
+                &crate::harness::onevcs_binary(),
+                &[
+                    "session",
+                    "close",
+                    opened["token"].as_str().expect("a token"),
+                ],
+            ),
+            "onevcs session close",
+        )
+        .exited(0);
+    let ended = launcher.wait_with_output().expect("the launcher ends");
+    assert!(ended.status.success(), "{}", why(&world, &run));
+    let dispatched = crate::harness::dispatched_tasks(&world, "## What\nShip service.");
+    assert_eq!(
+        dispatched
+            .last()
+            .expect("the resumed attempt was dispatched"),
+        &body,
+        "the hook was shown a task other than the one the resumed attempt was dispatched with"
+    );
+}

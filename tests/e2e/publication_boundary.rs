@@ -6264,3 +6264,52 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
     }
     world.release("generalize.go");
 }
+
+/// The plan-edit hook is shown a public consumer's task as its dispatch is given it: the
+/// `## Repository boundary` section included, while the producer it waits on is still running
+/// — and byte for byte the task that consumer is dispatched with once the export is made.
+#[test]
+fn the_plan_edit_hook_is_shown_the_boundary_section_the_consumers_dispatch_is_told() {
+    let (world, _private, _public) = mixed_world("boundary-edit-hook");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work", "what the public node built on it\n");
+    world.script("generalize.wait", "hold");
+    let hook = crate::harness::recording_edit_hook(&world);
+    let name = "hookedboundary";
+    let project = world.plan(name, &exported_plan(name));
+    world
+        .run(&[
+            "start",
+            &project,
+            "--detach",
+            "--plan-edit-hook",
+            &hook.display().to_string(),
+        ])
+        .exited(0);
+    world.until("the producer to be in flight", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    let ruling = "Keep each example to one screen of code.";
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [
+                {"op": "amend", "id": "examples", "text": ruling}]})
+            .to_string(),
+        )
+        .exited(0);
+    let body = crate::harness::edit_hook_body(&world, "examples");
+    assert!(body.contains("## Repository boundary"), "{body}");
+    assert!(body.contains(ruling), "{body}");
+
+    world.release("generalize.go");
+    world.until("the consumer to be dispatched", |world| {
+        !tasks_of(world, "examples").is_empty()
+    });
+    assert_eq!(
+        tasks_of(&world, "examples")[0],
+        body,
+        "the hook was shown a task other than the one the consumer was dispatched with"
+    );
+}

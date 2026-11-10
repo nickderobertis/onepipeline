@@ -8944,3 +8944,60 @@ pub fn contract_block(key: &str) -> Value {
     assert_eq!(found.len(), 1, "expected one contract block naming {key}");
     found.pop().expect("one block")[key].clone()
 }
+
+/// A plan-edit hook that keeps every document it is handed — `edit-hook.<n>.json` under the
+/// world's root — and passes every node: a host's hook as far as the engine can tell, for a
+/// journey about what that hook is shown.
+pub fn recording_edit_hook(world: &World) -> PathBuf {
+    let base = shell_path(&world.root.join("edit-hook"));
+    posix_script(
+        &world.root,
+        "recording-edit-hook",
+        &format!(
+            "n=$(( $(cat '{base}.count' 2>/dev/null || echo 0) + 1 ))\n\
+             echo $n > '{base}.count'\n\
+             cat > '{base}.'$n'.json'\n\
+             exit 0"
+        ),
+    )
+}
+
+/// Every document [`recording_edit_hook`] has been handed, in order.
+pub fn edit_hook_offers(world: &World) -> Vec<Value> {
+    let count = std::fs::read_to_string(world.root.join("edit-hook.count"))
+        .map(|count| count.trim().parse::<usize>().expect("the hook counts"))
+        .unwrap_or(0);
+    (1..=count)
+        .map(|n| {
+            let path = world.root.join(format!("edit-hook.{n}.json"));
+            serde_json::from_slice(&std::fs::read(&path).expect("the hook kept its stdin"))
+                .unwrap_or_else(|error| panic!("{} is not JSON: {error}", path.display()))
+        })
+        .collect()
+}
+
+/// The task body the last offer to [`recording_edit_hook`] naming `node` carried.
+pub fn edit_hook_body(world: &World, node: &str) -> String {
+    edit_hook_offers(world)
+        .iter()
+        .rev()
+        .find(|offer| offer["node"]["id"] == node)
+        .and_then(|offer| offer["task"]["body"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("the hook was never offered {node}:\n{}", world.dump()))
+}
+
+/// The `--task` of every `oneagentgraph run` this world's binary issued whose task opens with
+/// `opening`, in order: what each such dispatch was given.
+pub fn dispatched_tasks(world: &World, opening: &str) -> Vec<String> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .filter(|task| task.starts_with(opening))
+        .collect()
+}

@@ -725,6 +725,83 @@ fn opaque() -> String {
         .collect()
 }
 
+/// The boundary section a dispatch of `node` is told, in a plan resolved as `resolved`, or
+/// `None` in a plan that is not mixed — whatever its export producer has kept yet.
+///
+/// The section's words never depend on the kept branch; only whether the dispatch can start
+/// does, which is [`dispatching`]'s to refuse. So the plan-edit hook is shown the section the
+/// node's dispatch is told even while the producer it waits on is still running.
+pub(crate) fn section(resolved: &Resolved, plan: &Plan, node: &Node) -> Option<String> {
+    resolved.mixed().then(|| {
+        told(
+            resolved.clearance(&node.id),
+            plan.export_edges.iter().find(|edge| edge.from == node.id),
+            consumed_by(plan, &node.id),
+        )
+    })
+}
+
+/// The section one side of a mixed plan's boundary is told: the template context it carries
+/// and the lines of guidance under it.
+fn told(
+    clearance: Clearance,
+    produced: Option<&ExportEdge>,
+    consumed: Option<&ExportEdge>,
+) -> String {
+    let mut context = Context {
+        mixed: Mixed,
+        clearance,
+        export_directory: None,
+        target_directory: None,
+    };
+    let mut lines: Vec<String> = Vec::new();
+    match (clearance, produced, consumed) {
+        (Clearance::Private, Some(edge), _) => {
+            context.export_directory = Some(edge.source_directory.clone());
+            context.target_directory = Some(edge.target_directory.clone());
+            lines.push(format!(
+                "This node is an export producer. Write the generic example under `{}`; \
+                 after this node's branch is kept, exactly that directory is exported into a \
+                 public repository under `{}`.",
+                edge.source_directory, edge.target_directory
+            ));
+            lines.extend(PRODUCER.iter().map(|line| format!("- {line}")));
+        }
+        (Clearance::Private, None, _) => {
+            lines.push(
+                "This node is private. Its work reaches a public node only through an export \
+                 edge."
+                    .to_owned(),
+            );
+            lines.push(summary());
+        }
+        (Clearance::Public, _, consumed) => {
+            if let Some(edge) = consumed {
+                context.target_directory = Some(edge.target_directory.clone());
+                lines.push(format!(
+                    "This node is public, and its branch starts from one neutral commit that \
+                     adds generic examples under `{}`; build on them.",
+                    edge.target_directory
+                ));
+            } else {
+                lines.push("This node is public.".to_owned());
+            }
+            lines.push(
+                "Everything it writes is public: name no private repository, project, plan, \
+                 task, path or identifier in files, commit messages, branch names or \
+                 change-request text."
+                    .to_owned(),
+            );
+        }
+    }
+    let rendered = serde_json::to_string(&serde_json::json!({ "boundary": context }))
+        .expect("a context serializes");
+    format!(
+        "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
+        lines.join("\n")
+    )
+}
+
 /// What one dispatch of `node` is told and given, in a plan resolved as `resolved`.
 ///
 /// Refused — the node settles as an infrastructure failure, before anything is
@@ -753,42 +830,19 @@ pub(crate) fn dispatching(
         .map_or(plan.tasks.len() + 1, |index| index + 1);
     let produced = plan.export_edges.iter().find(|edge| edge.from == node.id);
     let consumed = consumed_by(plan, &node.id);
-    let mut context = Context {
-        mixed: Mixed,
-        clearance,
-        export_directory: None,
-        target_directory: None,
-    };
+    let section = told(clearance, produced, consumed);
     let mut branch_name = None;
     let mut export = None;
-    let mut lines: Vec<String> = Vec::new();
     match (clearance, produced, consumed) {
-        (Clearance::Private, Some(edge), _) => {
-            context.export_directory = Some(edge.source_directory.clone());
-            context.target_directory = Some(edge.target_directory.clone());
+        (Clearance::Private, Some(_), _) => {
             branch_name = Some(format!("export/{}", opaque()));
-            lines.push(format!(
-                "This node is an export producer. Write the generic example under `{}`; \
-                 after this node's branch is kept, exactly that directory is exported into a \
-                 public repository under `{}`.",
-                edge.source_directory, edge.target_directory
-            ));
-            lines.extend(PRODUCER.iter().map(|line| format!("- {line}")));
         }
-        (Clearance::Private, None, _) => {
-            lines.push(
-                "This node is private. Its work reaches a public node only through an export \
-                 edge."
-                    .to_owned(),
-            );
-            lines.push(summary());
-        }
+        (Clearance::Private, None, _) => {}
         (Clearance::Public, _, consumed) => {
             if node.repo.is_some() {
                 branch_name = Some(format!("public/{}/task-{ordinal}", opaque()));
             }
             if let Some(edge) = consumed {
-                context.target_directory = Some(edge.target_directory.clone());
                 let Some(branch) = kept.get(&edge.from) else {
                     return Err(
                         "its export producer settled with no kept branch, so there is nothing \
@@ -814,28 +868,9 @@ pub(crate) fn dispatching(
                     accepted_opaque: edge.accepted_opaque.clone(),
                     ordinal,
                 }));
-                lines.push(format!(
-                    "This node is public, and its branch starts from one neutral commit that \
-                     adds generic examples under `{}`; build on them.",
-                    edge.target_directory
-                ));
-            } else {
-                lines.push("This node is public.".to_owned());
             }
-            lines.push(
-                "Everything it writes is public: name no private repository, project, plan, \
-                 task, path or identifier in files, commit messages, branch names or \
-                 change-request text."
-                    .to_owned(),
-            );
         }
     }
-    let rendered = serde_json::to_string(&serde_json::json!({ "boundary": context }))
-        .expect("a context serializes");
-    let section = format!(
-        "{SECTION_HEADING}\n\nThis plan spans public and private repositories.\n\n```json\n{rendered}\n```\n\n{}",
-        lines.join("\n")
-    );
     let side = match (clearance, branch_name) {
         (Clearance::Public, branch_name) => Side::Public {
             section,

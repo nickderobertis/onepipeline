@@ -1,19 +1,20 @@
 //! The plan-edit hook: every node a reply introduces or changes, offered — with the task
-//! its next dispatch would be given — to the command the run's launch named, before
-//! anything of the reply is queued or applied.
+//! its next dispatch would be given — to the command the run's launch named, before anything
+//! of the reply is applied or journalled as an edit.
 //!
 //! The hook is the engine's rather than a bus validator's because only the engine can
 //! compose the task a node will be dispatched with: a validator on the channel sees an
-//! envelope's bytes, and an `amend` there is a clause with no task around it. So the
-//! submission check composes each such node's task exactly as [`composed_task`] renders it
-//! for dispatch — the amendment under the task's criteria, a carried note, the operational
-//! notes the task states — and hands the hook one document per node on its stdin.
+//! envelope's bytes, and an `amend` there is a clause with no task around it. So it runs
+//! where the edit is applied — in the live driver's validation of the envelope, or in the
+//! replying process when nothing drives the run — and the caller hands it each node's task as
+//! [`crate::composition`] composes it for dispatch, from that process's own dispatch inputs:
+//! the reference block, the stack, a resumed attempt's notes and the boundary section.
 //!
 //! Exit `0` passes the node, `1` refuses the whole reply with the hook's stderr as the
-//! reason, and anything else — another status, a signal, a command that will not start,
-//! or the hook outliving its timeout, whose process tree is then ended — is *could not be
-//! judged*, which refuses it too. A refusal of either kind is journalled `edit-rejected`
-//! naming the hook and the node, and answered to the sender as any refused reply is.
+//! reason, and anything else — another status, a signal, a command that will not start, or
+//! the hook outliving its timeout, whose process tree is then ended — is *could not be
+//! judged*, which refuses it too. The caller journals either refusal as `edit-rejected`
+//! naming the hook and the node, and answers the sender as it answers any refused reply.
 
 use std::io::{Read, Write};
 use std::num::NonZeroU64;
@@ -23,11 +24,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::channel::{Author, Command};
+use crate::channel::Command;
 use crate::error::{Error, Result};
 use crate::filter::PlanEditHook;
 use crate::graph::Graph;
-use crate::journal::Journal;
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::{Node, NodeKind};
 
@@ -69,38 +69,6 @@ fn offered<'a>(command: &Command, graph: &'a Graph) -> Option<&'a Node> {
     graph.get(id)
 }
 
-/// The task a node's next dispatch is given, as the hook is shown it.
-///
-/// The node's own rendering — its amendment placed under the task's acceptance criteria,
-/// above the operational notes, and a carried planner note after them — which is the
-/// task a dispatch composes. A lifecycle node whose work is several `steps` is given one
-/// task per agent step, so its body is each of those in dispatch order, under a
-/// `# Step <id>` line. What only the dispatch itself knows — a mixed plan's boundary
-/// section, an out-of-repository dependency's reference block, a stack placement, a
-/// manager's note a dead conversation read — is appended at dispatch and is not here.
-pub(crate) fn composed_task(node: &Node) -> String {
-    if node.steps.is_none() {
-        return node.rendered_task();
-    }
-    match crate::lifecycle::ordered_steps(node) {
-        Ok(steps) => steps
-            .iter()
-            .filter(|step| step.kind == NodeKind::Agent)
-            .map(|step| {
-                format!(
-                    "# Step {}\n\n{}",
-                    step.id,
-                    step.rendered_task_for(node, &[])
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        // A cycle among its steps is refused by the graph's own check before this is
-        // reached; the node's own prose is what is left to show.
-        Err(_) => node.rendered_task(),
-    }
-}
-
 /// One node, as the hook reads it.
 #[derive(Debug, Serialize)]
 struct Offered<'a> {
@@ -135,7 +103,7 @@ struct Document<'a> {
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl<'a> Document<'a> {
-    fn of(run: &'a str, plan: &'a str, op: &'static str, node: &'a Node) -> Self {
+    fn of(run: &'a str, plan: &'a str, op: &'static str, node: &'a Node, body: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             run,
@@ -155,7 +123,7 @@ impl<'a> Document<'a> {
                     .clone()
                     .or_else(|| node.task_record.as_ref().map(|record| record.title.clone()))
                     .unwrap_or_default(),
-                body: composed_task(node),
+                body,
             },
         }
     }
@@ -176,27 +144,27 @@ enum Verdict {
 /// launch named, once per node, in the order the commands name them — and refuse the whole
 /// reply at the first node the hook refuses or could not judge.
 ///
-/// `edited` is the graph the whole reply leaves behind, so the task each node is shown is
-/// the one it will be dispatched with. A launch naming no hook runs nothing. A refusal is
-/// journalled `edit-rejected` against the command that named the node, by this process's
-/// own stream, before it is answered.
+/// `edited` is the graph the whole reply leaves behind, and `compose` answers the task a
+/// node of it would be given by its next dispatch — the caller's, because only the process
+/// applying the edit holds what that dispatch is composed from. A launch naming no hook runs
+/// nothing and composes nothing.
 ///
 /// # Errors
 ///
-/// The refusal, as [`Error::Refused`] naming the hook and the node; or the journal that
-/// could not record it.
+/// The refusal, as [`Error::Refused`] naming the hook and the node, beside the position of the
+/// command that named that node; the caller journals it there.
 pub(crate) fn judge(
     paths: &RunPaths,
     launch: &LaunchRecord,
-    author: &Author,
     commands: &[Command],
     edited: &Graph,
-) -> Result<()> {
+    compose: &mut dyn FnMut(&Node) -> Result<String>,
+) -> std::result::Result<(), (usize, Error)> {
     let Some(hook) = launch.plan_edit_hook.as_ref() else {
         return Ok(());
     };
     let mut seen = std::collections::BTreeSet::new();
-    for command in commands {
+    for (index, command) in commands.iter().enumerate() {
         let Some(node) = offered(command, edited) else {
             continue;
         };
@@ -204,10 +172,15 @@ pub(crate) fn judge(
             continue;
         }
         let op = crate::channel::op_of(command);
-        let document = serde_json::to_vec(&Document::of(&paths.run, &launch.project, op, node))
-            .map_err(|error| {
-                Error::Invalid(format!("node '{}' does not serialize: {error}", node.id))
-            })?;
+        let body = compose(node).map_err(|error| (index, error))?;
+        let document =
+            serde_json::to_vec(&Document::of(&paths.run, &launch.project, op, node, body))
+                .map_err(|error| {
+                    (
+                        index,
+                        Error::Invalid(format!("node '{}' does not serialize: {error}", node.id)),
+                    )
+                })?;
         let named = hook.command().spelled();
         let refusal = match run(hook, &launch.dir, &document) {
             Verdict::Pass => continue,
@@ -223,17 +196,7 @@ pub(crate) fn judge(
                 node.id
             ),
         };
-        let error = Error::Refused(refusal);
-        let mut journal = Journal::open(paths);
-        crate::engine::record_rejection(
-            paths,
-            &mut journal,
-            author.clone(),
-            command,
-            &error,
-            None,
-        )?;
-        return Err(error);
+        return Err((index, Error::Refused(refusal)));
     }
     Ok(())
 }
@@ -394,30 +357,5 @@ mod tests {
             &graph
         )
         .is_none());
-    }
-
-    #[test]
-    fn a_node_of_steps_is_shown_each_agent_steps_task_in_order() {
-        let mut lifecycle = node("ship", "");
-        lifecycle.task = None;
-        lifecycle.amendment = Some("- It ships on Friday.".into());
-        lifecycle.steps = Some(vec![
-            crate::plan::Step {
-                id: "build".into(),
-                task: Some("## Acceptance criteria\n- It builds.".into()),
-                ..crate::plan::Step::default()
-            },
-            crate::plan::Step {
-                id: "approve".into(),
-                kind: NodeKind::Human,
-                task: Some("Approve it.".into()),
-                deps: vec!["build".into()],
-                ..crate::plan::Step::default()
-            },
-        ]);
-        let body = composed_task(&lifecycle);
-        assert!(body.starts_with("# Step build\n\n"), "{body}");
-        assert!(body.contains("It ships on Friday."), "{body}");
-        assert!(!body.contains("Approve it."), "{body}");
     }
 }
