@@ -1160,6 +1160,18 @@ fn launch_checks_run_in_order_with_their_arguments_and_an_unrunnable_one_refuses
         assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
     }
 
+    // A check given arguments is named by its whole argv, refusing as anywhere else.
+    let refuser = check_script(
+        &world,
+        "refuser",
+        "cat > /dev/null\nprintf '%s' '{\"refusals\": [{\"node\": null, \"field\": null, \
+         \"reason\": \"over budget\"}]}'",
+    );
+    launch(json!([[as_str(&refuser), "--budget", "4h"]]), &[])
+        .exited(REFUSED)
+        .err_has(&format!("{} --budget 4h: over budget", as_str(&refuser)));
+    assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
+
     launch(
         json!([[as_str(&first), "--strict", "fast"], [as_str(&second)]]),
         &["--check", &as_str(&third)],

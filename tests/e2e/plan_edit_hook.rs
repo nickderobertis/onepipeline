@@ -63,6 +63,9 @@ fn exit(verdict: &str) -> String {
 /// A ruling a manager issues, which binds the node's judge.
 const RULING: &str = "Keep the public signature unchanged; callers outside this repository use it.";
 
+/// A planner note a node carries to its next dispatch.
+const CARRIED: &str = "The fixture moved to tests/fixtures/generic last night.";
+
 /// The operational notes the node's own task states, which the composed task keeps.
 const NOTES: &str = "## Additional info\nRun the narrow test module, never the whole suite.";
 
@@ -200,10 +203,13 @@ fn rejected(world: &World, run: &str) -> Vec<Value> {
 fn an_amend_is_offered_with_the_task_the_nodes_next_dispatch_is_given() {
     let world = World::new("plan-edit-hook-amend");
     let launch = config(&world, 60);
+    // A planner note the node carries to its next dispatch is part of what it is given.
+    let mut later = noted("later", &["slow"]);
+    later["context"] = json!(CARRIED);
     let run = held(
         &world,
         "hookamend",
-        vec![noted("later", &["slow"])],
+        vec![later],
         &["--launch-config", &launch],
     );
 
@@ -254,6 +260,17 @@ fn an_amend_is_offered_with_the_task_the_nodes_next_dispatch_is_given() {
     );
     assert!(
         body.contains(onepipeline::plan::AMENDMENT_HEADING),
+        "{body}"
+    );
+    let carried = body
+        .find(CARRIED)
+        .expect("its planner note reached the hook");
+    assert!(
+        notes < carried,
+        "the planner note is not after the notes:\n{body}"
+    );
+    assert!(
+        body.contains(onepipeline::plan::PLANNER_CONTEXT_HEADING),
         "{body}"
     );
 
@@ -760,6 +777,18 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
         !body.contains("sign-off") && !body.contains("A person signs"),
         "{body}"
     );
+    // A ruling on the node binds every agent step: it is under each step's criteria.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "stepped", "text": RULING}])),
+        )
+        .exited(0);
+    let amended = offers(&world)[2]["task"]["body"]
+        .as_str()
+        .expect("a body")
+        .to_owned();
+    assert_eq!(amended.matches(RULING).count(), 2, "{amended}");
     let mut exercised = vec!["kind".to_owned(), "steps".to_owned(), "task".to_owned()];
     exercised.sort();
     assert_eq!(words("requeue_keys"), exercised);
