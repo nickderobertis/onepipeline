@@ -1614,6 +1614,22 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
 
+    // The checks this launch registered — the config's, then each `--check` — offered the
+    // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
+    // and before any run exists: a refusal, or a check that could not be run, refuses the
+    // launch with the report `plan check` prints and mints nothing. `adopt` runs none.
+    let registered: Vec<crate::plancheck::Registered> = declared
+        .checks
+        .iter()
+        .map(|argv| crate::plancheck::Registered::argv(argv))
+        .chain(
+            args.checks
+                .iter()
+                .map(|path| crate::plancheck::Registered::path(path)),
+        )
+        .collect();
+    crate::plancheck::launch(&read, &args.project, &registered)?;
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.

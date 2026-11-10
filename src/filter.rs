@@ -155,8 +155,16 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         BlankValue::Refused,
     ),
     (REVIEW_REPLY_GRAPH_KEY, 13, BlankValue::Kept),
-    (CHECKS_KEY, LAUNCH_CHECKS_SCHEMA_VERSION, BlankValue::Refused),
-    (PLAN_EDIT_HOOK_KEY, LAUNCH_CHECKS_SCHEMA_VERSION, BlankValue::Refused),
+    (
+        CHECKS_KEY,
+        LAUNCH_CHECKS_SCHEMA_VERSION,
+        BlankValue::Refused,
+    ),
+    (
+        PLAN_EDIT_HOOK_KEY,
+        LAUNCH_CHECKS_SCHEMA_VERSION,
+        BlankValue::Refused,
+    ),
 ];
 
 /// The launch-config version that added `checks` and `plan_edit_hook`.
@@ -219,7 +227,8 @@ fn plan_edit_hook_timeout<'de, D: serde::Deserializer<'de>>(
 /// Whether an argv names something to run: at least one word, and a program that
 /// is not blank.
 fn names_a_program(argv: &[String]) -> bool {
-    argv.first().is_some_and(|program| !program.trim().is_empty())
+    argv.first()
+        .is_some_and(|program| !program.trim().is_empty())
 }
 
 /// The launch-config key naming the reply drafter's graph, spelled once for the

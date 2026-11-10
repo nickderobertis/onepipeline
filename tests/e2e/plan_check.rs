@@ -964,3 +964,201 @@ fn a_refusal_beside_an_unrunnable_check_exits_two_and_reports_both() {
     assert_eq!(could_not[0]["check"], json!(as_str(&breaks)), "{answered}");
     assert_eq!(could_not[0]["exit_code"], json!(4), "{answered}");
 }
+
+/// A check a launch registers: it counts each time it is run, keeps the document it was
+/// handed, and refuses `approve` while a `refuse` file sits beside it.
+fn launch_check(world: &World, name: &str) -> PathBuf {
+    let base = world.root.join(name);
+    check_script(
+        world,
+        name,
+        &format!(
+            "cat > '{base}.stdin'\necho run >> '{base}.count'\nif [ -f '{base}.refuse' ]; then \
+             printf '%s' '{{\"refusals\": [{{\"node\": \"approve\", \"field\": null, \"reason\": \
+             \"{name} refuses the launch\"}}]}}'\nelse printf '{{\"refusals\": []}}'\nfi",
+            base = shell_path(&base)
+        ),
+    )
+}
+
+/// How many times the launch check `name` has been run.
+fn runs_of(world: &World, name: &str) -> usize {
+    std::fs::read_to_string(world.root.join(format!("{name}.count")))
+        .map(|count| count.lines().count())
+        .unwrap_or(0)
+}
+
+/// Every run directory under the world's runs root.
+fn run_dirs(world: &World) -> Vec<PathBuf> {
+    std::fs::read_dir(&world.runs)
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.join("launch.json").is_file())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A launch config naming two checks and `start --check` naming a third: each is handed the
+/// loaded plan exactly as `plan check --check` hands it, one refusal refuses the launch with
+/// that check's report and mints no run, all three accepting starts it, and `adopt` runs none.
+#[test]
+fn launch_checks_refuse_a_launch_before_any_run_exists_and_adopt_runs_none_of_them() {
+    let world = World::new("launch-checks");
+    let project = world.plan(
+        "guarded",
+        &plan_of("guarded", vec![crate::harness::human("approve", &[])]),
+    );
+    let first = launch_check(&world, "first");
+    let second = launch_check(&world, "second");
+    let third = launch_check(&world, "third");
+    let config = world.root.join("launch-checks.json");
+    std::fs::write(
+        &config,
+        json!({
+            "schema_version": 14,
+            "checks": [[as_str(&first)], [as_str(&second)]],
+        })
+        .to_string(),
+    )
+    .expect("the launch config is written");
+    let launch = |world: &World| {
+        world.run(&[
+            "start",
+            &project,
+            "--detach",
+            "--launch-config",
+            &as_str(&config),
+            "--check",
+            &as_str(&third),
+        ])
+    };
+
+    let handed = |name: &str| {
+        std::fs::read(world.root.join(format!("{name}.stdin"))).expect("the check kept its stdin")
+    };
+    // What `plan check --check` hands a check, taken before anything is launched.
+    world
+        .run(&["plan", "check", &project, "--check", &as_str(&third)])
+        .exited(0);
+    let checked = handed("third");
+
+    // The second refuses: the launch is refused with its report, every check still ran in
+    // order, and nothing of a run exists.
+    std::fs::write(world.root.join("second.refuse"), "").expect("the refusal is armed");
+    let refused = launch(&world);
+    refused
+        .exited(REFUSED)
+        .err_has("second refuses the launch")
+        .err_has(&format!(
+            "{}: node 'approve': second refuses the launch",
+            as_str(&second)
+        ))
+        .err_lacks("first refuses");
+    assert_eq!(
+        (
+            runs_of(&world, "first"),
+            runs_of(&world, "second"),
+            runs_of(&world, "third")
+        ),
+        (1, 1, 2),
+        "each registered check runs once, in order, refusal or not"
+    );
+    assert_eq!(
+        handed("third"),
+        checked,
+        "a refused launch handed another document"
+    );
+    assert!(
+        run_dirs(&world).is_empty(),
+        "a refused launch created a run directory: {:?}",
+        run_dirs(&world)
+    );
+
+    // All three accept: the run starts, and each was handed the document `plan check
+    // --check` hands a check, byte for byte.
+    std::fs::remove_file(world.root.join("second.refuse")).expect("the refusal is disarmed");
+    let started = launch(&world);
+    started.exited(0);
+    let run = started.json()["run_id"]
+        .as_str()
+        .expect("a detached launch names its run")
+        .to_owned();
+    assert_eq!(
+        (
+            runs_of(&world, "first"),
+            runs_of(&world, "second"),
+            runs_of(&world, "third")
+        ),
+        (2, 2, 3)
+    );
+    let launched = handed("third");
+    assert_eq!(
+        handed("first"),
+        launched,
+        "two checks of one launch were handed two documents"
+    );
+    assert_eq!(
+        handed("second"),
+        launched,
+        "two checks of one launch were handed two documents"
+    );
+    assert_eq!(
+        launched, checked,
+        "`start` handed its checks a document other than the one `plan check` hands"
+    );
+    let document: Value = serde_json::from_slice(&launched).expect("the document is JSON");
+    assert_eq!(document["tasks"][0]["id"], "approve", "{document}");
+    assert_eq!(document["tasks"][0]["kind"], "human", "{document}");
+
+    // An adoption replays the run and runs none of them.
+    world.until("the driver to pause on the approval", |world| {
+        world.run(&["status", &run]).stdout.contains("PAUSED")
+    });
+    world.run(&["adopt", &run]).exited(0);
+    assert_eq!(
+        (
+            runs_of(&world, "first"),
+            runs_of(&world, "second"),
+            runs_of(&world, "third")
+        ),
+        (2, 2, 3),
+        "`adopt` ran a launch check"
+    );
+    world.run(&["stop", &run]);
+}
+
+/// A launch config declaring the schema before `checks` existed is refused by that key's
+/// name, and one naming a check with no program is refused by it too — each before a run.
+#[test]
+fn a_launch_check_key_below_schema_14_or_naming_no_program_is_refused_by_name() {
+    let world = World::new("launch-checks-refused");
+    let project = world.plan(
+        "keyed",
+        &plan_of("keyed", vec![crate::harness::human("approve", &[])]),
+    );
+    for (name, config) in [
+        (
+            "early",
+            json!({"schema_version": 13, "checks": [["./check.sh"]]}),
+        ),
+        ("blank", json!({"schema_version": 14, "checks": [[" "]]})),
+        ("empty", json!({"schema_version": 14, "checks": [[]]})),
+    ] {
+        let path = world.root.join(format!("{name}.json"));
+        std::fs::write(&path, config.to_string()).expect("the launch config is written");
+        world
+            .run(&[
+                "start",
+                &project,
+                "--detach",
+                "--launch-config",
+                &as_str(&path),
+            ])
+            .exited(REFUSED)
+            .err_has("`checks`");
+    }
+    assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
+}
