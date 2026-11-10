@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.106.0](https://github.com/nickderobertis/onepipeline/compare/v0.105.0...v0.106.0) - 2026-11-10
+
+### Added
+
+- *(observer)* [**breaking**] let the observer graph follow the run journal, and deprecate the built-in clock reset ([#1483](https://github.com/nickderobertis/onepipeline/pull/1483))
+
+### Fixed
+
+- make the in-use maintenance sweep journey pass reliably on Windows ([#1504](https://github.com/nickderobertis/onepipeline/pull/1504))
+- give CI's failed-test re-runs what the live smoke needs ([#1501](https://github.com/nickderobertis/onepipeline/pull/1501))
+
 ## [0.105.0](https://github.com/nickderobertis/onepipeline/compare/v0.104.0...v0.105.0) - 2026-11-09
 
 ### Added
