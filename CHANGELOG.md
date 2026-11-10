@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.106.2](https://github.com/nickderobertis/onepipeline/compare/v0.106.1...v0.106.2) - 2026-11-10
+
+### Added
+
+- command steps, launch checks and a live-edit hook ([#1510](https://github.com/nickderobertis/onepipeline/pull/1510))
+
 ## [0.106.1](https://github.com/nickderobertis/onepipeline/compare/v0.106.0...v0.106.1) - 2026-11-10
 
 ### Fixed
