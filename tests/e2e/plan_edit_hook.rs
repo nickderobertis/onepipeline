@@ -575,6 +575,7 @@ fn a_hook_naming_no_program_or_no_time_is_refused_at_launch_and_none_takes_the_d
         json!({"schema_version": 14, "plan_edit_hook": {"command": [" "]}}),
         json!({"schema_version": 14, "plan_edit_hook": {"command": [hook], "timeout_seconds": 0}}),
         json!({"schema_version": 13, "plan_edit_hook": {"command": [hook]}}),
+        json!({"schema_version": 13, "plan_edit_hook": null}),
     ] {
         std::fs::write(&config, refused.to_string()).expect("written");
         world
@@ -752,4 +753,31 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
     exercised.sort();
     assert_eq!(words("requeue_keys"), exercised);
     world.run(&["stop", &run]);
+}
+
+/// A hook that exits while a process it started still holds its stderr is answered on its
+/// own exit — its refusal carrying what it said — without waiting on what it left behind.
+#[test]
+fn a_hook_whose_stderr_outlives_it_is_answered_on_its_own_exit() {
+    let world = World::new("plan-edit-hook-held-stderr");
+    let leaver = posix_script(
+        &world.root,
+        "leaving-hook",
+        "cat > /dev/null\nsleep 20 >&2 &\necho 'refused, and left a sleeper' >&2\nexit 1",
+    );
+    let run = paused(
+        &world,
+        "hookheld",
+        &["--plan-edit-hook", &leaver.display().to_string()],
+        &world.root,
+    );
+    let asked = std::time::Instant::now();
+    amend_later(&world, &run)
+        .exited(REFUSED)
+        .err_has("refused, and left a sleeper");
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(15),
+        "the reply waited on the process the hook left behind"
+    );
+    assert_eq!(rejected(&world, &run).len(), 1);
 }

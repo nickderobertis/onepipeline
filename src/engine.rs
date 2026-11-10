@@ -8734,7 +8734,7 @@ fn start_ready(
             // quiet, since a command records nothing while it runs.
             // The loader refused a command node naming no program, so this is the record of
             // one an earlier build wrote; it is settled rather than started.
-            let argv = match crate::filter::Argv::new(node.command.clone()) {
+            let argv = match crate::filter::Argv::new(node.command.clone().unwrap_or_default()) {
                 Ok(argv) => argv,
                 // llmlint: ignore-block[changed_behavior_has_e2e] `graph::check_node` refuses a
                 // command node naming no program at load and at every live edit, which

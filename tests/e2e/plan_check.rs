@@ -1080,6 +1080,7 @@ fn a_launch_check_key_below_schema_14_or_naming_no_program_is_refused_by_name() 
             "early",
             json!({"schema_version": 13, "checks": [["./check.sh"]]}),
         ),
+        ("emptyearly", json!({"schema_version": 13, "checks": []})),
         ("blank", json!({"schema_version": 14, "checks": [[" "]]})),
         ("empty", json!({"schema_version": 14, "checks": [[]]})),
     ] {

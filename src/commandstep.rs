@@ -194,14 +194,17 @@ fn run(
     };
 
     // Read on a thread of its own, so a command that fills the pipe cannot block on a reader
-    // that is waiting for it to exit.
-    let (tail_tx, tail_rx) = std::sync::mpsc::channel();
+    // that is waiting for it to exit — and into a buffer this thread shares, so what it has
+    // read is still there when a process the command left behind holds the pipe open past
+    // the grace this side waits.
+    let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (drained_tx, drained) = std::sync::mpsc::channel::<()>();
     let mut stderr = child.stderr.take();
     let mut log_for_stderr = log;
+    let kept = std::sync::Arc::clone(&tail);
     let _ = std::thread::Builder::new()
         .name(format!("command-{}-stderr", node.id))
         .spawn(move || {
-            let mut tail: Vec<u8> = Vec::new();
             let mut buffer = [0_u8; 8192];
             if let Some(stderr) = stderr.as_mut() {
                 while let Ok(read) = stderr.read(&mut buffer) {
@@ -209,14 +212,24 @@ fn run(
                         break;
                     }
                     let _ = std::io::Write::write_all(&mut log_for_stderr, &buffer[..read]);
+                    let mut tail = kept
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     tail.extend_from_slice(&buffer[..read]);
                     if tail.len() > STDERR_TAIL_BYTES {
-                        tail.drain(..tail.len() - STDERR_TAIL_BYTES);
+                        let over = tail.len() - STDERR_TAIL_BYTES;
+                        tail.drain(..over);
                     }
                 }
             }
-            let _ = tail_tx.send(tail);
+            let _ = drained_tx.send(());
         });
+    let said = || {
+        let _ = drained.recv_timeout(STDERR_GRACE);
+        tail.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    };
 
     let deadline = node.timeout_seconds.and_then(crate::hooks::deadline_after);
     let stopped = |child: &mut std::process::Child| {
@@ -238,7 +251,7 @@ fn run(
             Ok(None) => std::thread::sleep(POLL),
             Err(error) => {
                 stopped(&mut child);
-                let tail = tail_rx.recv_timeout(STDERR_GRACE).unwrap_or_default();
+                let tail = said();
                 return (
                     CommandEnding::Exited { exit_code: None },
                     Settlement {
@@ -252,7 +265,7 @@ fn run(
             }
         }
     };
-    let tail = tail_rx.recv_timeout(STDERR_GRACE).unwrap_or_default();
+    let tail = said();
     match status {
         Ok(status) if status.success() => (
             CommandEnding::Exited {

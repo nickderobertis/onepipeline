@@ -1802,7 +1802,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         }),
         id: "n".into(),
         kind: NodeKind::Human,
-        command: vec!["./scripts/step.sh".into()],
+        command: Some(vec!["./scripts/step.sh".into()]),
         timeout_seconds: std::num::NonZeroU64::new(600),
         task: Some("t".into()),
         persona: Some("engineer".into()),
@@ -12718,7 +12718,16 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
     let node: Node =
         serde_json::from_value(block["command_node"].clone()).expect("a command node reads");
     assert_eq!(node.kind, NodeKind::Command);
-    assert_eq!(node.command, ["./scripts/publish-notes.sh", "--quiet"]);
+    assert_eq!(
+        node.command.as_deref(),
+        Some(
+            [
+                "./scripts/publish-notes.sh".to_owned(),
+                "--quiet".to_owned()
+            ]
+            .as_slice()
+        )
+    );
     assert_eq!(node.timeout_seconds, NonZeroU64::new(300));
     let written = serde_json::to_value(&node).expect("a node writes");
     assert_eq!(

@@ -923,15 +923,20 @@ impl LaunchConfig {
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
         let config: Self = crate::yaml::from_str(&text).map_err(named)?;
-        if config.schema_version < OVERRIDE_LIST_SCHEMA_VERSION {
+        // The list and object keys are refused by their **presence** in the document, an
+        // empty list and a null included: what they deserialize to cannot tell a key written
+        // empty from one never written, and a document below their version may carry neither.
+        if config.schema_version < LAUNCH_CHECKS_SCHEMA_VERSION {
             let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
-            for (key, _, _) in KEYS_BY_VERSION
-                .iter()
-                .filter(|(_, version, _)| *version == OVERRIDE_LIST_SCHEMA_VERSION)
-            {
+            for (key, version, _) in KEYS_BY_VERSION.iter().filter(|(_, version, _)| {
+                *version == OVERRIDE_LIST_SCHEMA_VERSION || *version == LAUNCH_CHECKS_SCHEMA_VERSION
+            }) {
+                if config.schema_version >= *version {
+                    continue;
+                }
                 if written.get(*key).is_some() {
                     return Err(named(format!(
-                        "`{key}` is a schema {OVERRIDE_LIST_SCHEMA_VERSION} key and this config declares schema_version {} — set `schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}`",
+                        "`{key}` is a schema {version} key and this config declares schema_version {} — set `schema_version: {LAUNCH_CONFIG_SCHEMA_VERSION}`",
                         config.schema_version
                     )));
                 }

@@ -1347,10 +1347,11 @@ pub struct Node {
     #[serde(default, skip_serializing_if = "NodeKind::is_agent")]
     pub kind: NodeKind,
     /// A `kind: command` node's argv: the program and its arguments, run with no
-    /// shell from the launch directory. Required non-empty on such a node, its
-    /// program not blank, and refused on every other kind. Omitted when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command: Vec<String>,
+    /// shell from the launch directory. Required on such a node, non-empty and its
+    /// program not blank, and refused on every other kind — present at all, an empty
+    /// list included. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
     /// How long a `kind: command` node's command may run, in whole seconds, before
     /// its process tree is stopped and the node settles `command-timed-out`.
     /// Absent is no deadline at all. Refused on every other kind, and refused zero.

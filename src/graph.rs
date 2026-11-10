@@ -1030,10 +1030,14 @@ fn check_command(node: &Node) -> std::result::Result<(), Refusal> {
     if node.id.contains(STEP_SEPARATOR) {
         return Err(named("a command id cannot contain '/', which addresses a step").field("id"));
     }
-    if node.command.is_empty() {
+    let Some(command) = node
+        .command
+        .as_deref()
+        .filter(|command| !command.is_empty())
+    else {
         return Err(named("a `kind: command` node needs a `command` to run").field("command"));
-    }
-    if node.command[0].trim().is_empty() {
+    };
+    if command[0].trim().is_empty() {
         return Err(named("a `kind: command` node's `command` names no program").field("command"));
     }
     let unread = [
@@ -1163,15 +1167,15 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     if node.kind == NodeKind::Command {
         return check_command(node);
     }
-    if !node.command.is_empty() || node.timeout_seconds.is_some() {
+    if node.command.is_some() || node.timeout_seconds.is_some() {
         return Err(named(
             "`command` and `timeout_seconds` are a `kind: command` node's, and this node is \
              not one",
         )
-        .field(if node.command.is_empty() {
-            "timeout_seconds"
-        } else {
+        .field(if node.command.is_some() {
             "command"
+        } else {
+            "timeout_seconds"
         }));
     }
 

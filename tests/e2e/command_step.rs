@@ -436,6 +436,15 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
             "`kind: command` node's",
         ),
         (
+            "emptyonagent",
+            {
+                let mut node = agent("c", &[]);
+                node["command"] = json!([]);
+                node
+            },
+            "`kind: command` node's",
+        ),
+        (
             "timeoutonagent",
             {
                 let mut node = agent("c", &[]);
@@ -957,4 +966,112 @@ fn a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_fai
             "{signalled}"
         );
     }
+}
+
+/// A command whose log cannot be opened is not started, and settles `command-failed` saying
+/// why; one that exits while a process it started still holds its stderr settles on its own
+/// exit, its stderr tail as far as it was read.
+#[test]
+fn a_command_whose_log_cannot_open_or_whose_stderr_outlives_it_still_settles() {
+    let world = World::new("command-step-held-stderr");
+    world.script("gate.wait", "hold");
+    let unlogged = script(&world, "unlogged", "echo 'never ran'");
+    let leaver = script(
+        &world,
+        "leaver",
+        "sleep 20 >&2 &\necho 'left a sleeper behind' >&2\nexit 3",
+    );
+    let project = world.plan(
+        "commandheld",
+        &plan_of(
+            "commandheld",
+            vec![
+                agent("gate", &[]),
+                command("unlogged", &["gate"], &unlogged),
+                command("leaver", &[], &leaver),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let run = "commandheld";
+    world.until("the gate to be dispatched", |world| {
+        dispatched(world, run, "gate")
+    });
+    // The log's own path is taken by a directory, so it cannot be opened as a file.
+    std::fs::create_dir_all(log_of(&world, run, "unlogged")).expect("the log's place is taken");
+    world.until("the leaver to settle", |world| {
+        settled_as(world, run, "leaver", "failed")
+    });
+    let left = result(&world, run, "leaver");
+    let detail = left["detail"].as_str().expect("a detail");
+    assert!(detail.contains("status 3"), "{detail}");
+    assert!(detail.contains("left a sleeper behind"), "{detail}");
+    let started = world
+        .events_of(run, "command-started")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "leaver")
+        .expect("it started");
+    let settled = world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "leaver")
+        .expect("it settled");
+    let millis = |event: &Value| chrono_millis(event["ts"].as_str().expect("a stamp"));
+    assert!(
+        millis(&settled) - millis(&started) < 15_000,
+        "the node waited on the process its command left behind"
+    );
+
+    world.release("gate.go");
+    world.until("the unlogged command to settle", |world| {
+        settled_as(world, run, "unlogged", "failed")
+    });
+    let unlogged = result(&world, run, "unlogged");
+    assert!(
+        unlogged["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("could not be opened"),
+        "{unlogged}"
+    );
+    assert!(world
+        .events_of(run, "command-exited")
+        .iter()
+        .any(|event| event["labels"]["node"] == "unlogged"
+            && event["payload"]["ending"] == "not-started"));
+    world.run(&["stop", run]);
+}
+
+/// An RFC 3339 stamp of a journal record, in milliseconds since the epoch.
+fn chrono_millis(stamp: &str) -> i64 {
+    let (date, time) = stamp
+        .trim_end_matches('Z')
+        .split_once('T')
+        .expect("a stamp");
+    let mut day = date
+        .split('-')
+        .map(|part| part.parse::<i64>().expect("a date"));
+    let (year, month, dom) = (
+        day.next().expect("a year"),
+        day.next().expect("a month"),
+        day.next().expect("a day"),
+    );
+    // Days from the civil date, Howard Hinnant's algorithm.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let yoe = shifted - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + dom - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut clock = time.split(':');
+    let hours: i64 = clock.next().expect("hours").parse().expect("hours");
+    let minutes: i64 = clock.next().expect("minutes").parse().expect("minutes");
+    let seconds: f64 = clock.next().expect("seconds").parse().expect("seconds");
+    // Whole milliseconds of a stamp written to the millisecond.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a stamp's seconds are under 61"
+    )]
+    let millis = (seconds * 1000.0).round() as i64;
+    ((days * 24 + hours) * 60 + minutes) * 60_000 + millis
 }

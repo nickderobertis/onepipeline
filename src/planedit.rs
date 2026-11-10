@@ -281,17 +281,31 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
                 let _ = stdin.write_all(&owned);
             }
         });
-    let (said_tx, said_rx) = std::sync::mpsc::channel();
+    // Into a buffer this thread shares, so what the hook said is still read when a process it
+    // left behind holds the pipe open past the grace this side waits.
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (drained_tx, drained) = std::sync::mpsc::channel::<()>();
     let mut stderr = child.stderr.take();
+    let kept = std::sync::Arc::clone(&said);
     let _ = std::thread::Builder::new()
         .name("plan-edit-hook-stderr".to_owned())
         .spawn(move || {
-            let mut said = Vec::new();
+            let mut buffer = [0_u8; 8192];
             if let Some(stderr) = stderr.as_mut() {
-                let _ = stderr.take(MAX_STDERR_BYTES).read_to_end(&mut said);
-                let _ = std::io::copy(stderr, &mut std::io::sink());
+                while let Ok(read) = stderr.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    let mut said = kept
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let room = usize::try_from(MAX_STDERR_BYTES)
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(said.len());
+                    said.extend_from_slice(&buffer[..read.min(room)]);
+                }
             }
-            let _ = said_tx.send(said);
+            let _ = drained_tx.send(());
         });
     let timeout: NonZeroU64 = hook.timeout_seconds();
     let deadline = crate::hooks::deadline_after(timeout);
@@ -315,8 +329,13 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
             }
         }
     };
-    let said = said_rx.recv_timeout(STDERR_GRACE).unwrap_or_default();
-    let said = String::from_utf8_lossy(&said).into_owned();
+    let _ = drained.recv_timeout(STDERR_GRACE);
+    let said = String::from_utf8_lossy(
+        &said
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+    .into_owned();
     match status.code() {
         Some(0) => Verdict::Pass,
         Some(1) => Verdict::Refuse(said),
