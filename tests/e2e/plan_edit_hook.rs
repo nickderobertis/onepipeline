@@ -93,6 +93,7 @@ fn hook(world: &World) -> PathBuf {
              echo $n > '{base}.count'\n\
              cat > '{base}.'$n'.json'\n\
              echo $$ > '{base}.pid'\n\
+             echo \"$*\" > '{base}.args'\n\
              if [ -f '{base}.sleep' ]; then sleep \"$(cat '{base}.sleep')\"; fi\n\
              for refusal in '{base}'.refuse-*; do\n\
                [ -f \"$refusal\" ] || continue\n\
@@ -139,7 +140,10 @@ fn config(world: &World, timeout: u64) -> String {
         &path,
         json!({
             "schema_version": 14,
-            "plan_edit_hook": {"command": [hook(world).display().to_string()], "timeout_seconds": timeout},
+            "plan_edit_hook": {
+                "command": [hook(world).display().to_string(), "--bar", "strict"],
+                "timeout_seconds": timeout,
+            },
         })
         .to_string(),
     )
@@ -213,6 +217,13 @@ fn an_amend_is_offered_with_the_task_the_nodes_next_dispatch_is_given() {
     let offer = offers(&world);
     assert_eq!(offer.len(), 1, "{offer:?}");
     let offer = &offer[0];
+    assert_eq!(
+        std::fs::read_to_string(world.root.join("hook.args"))
+            .expect("the hook kept its arguments")
+            .trim(),
+        "--bar strict",
+        "the hook was not spawned with the arguments its launch config names"
+    );
     let shape = stated("plan_edit_hook_document");
     assert_eq!(keys(offer), keys(&shape), "{offer}");
     assert_eq!(keys(&offer["node"]), keys(&shape["node"]), "{offer}");

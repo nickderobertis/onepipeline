@@ -474,6 +474,13 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
         ("draft", json!(true)),
         ("branch", json!("topic")),
         ("base_branch", json!("main")),
+        ("sets", json!(["members.worker.agent.model=large"])),
+        ("publish", json!("preserve")),
+        (
+            "steps",
+            json!([{"id": "run", "persona": "engineer",
+                    "task": "## What\nrun\n\n## Acceptance criteria\n- It ran."}]),
+        ),
     ];
     for (field, value) in unread {
         let name = format!("unread{}", field.replace('_', ""));
@@ -483,7 +490,7 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
         world
             .run(&["plan", "check", &project])
             .exited(1)
-            .out_has(&format!("`{field}`"));
+            .out_has(&format!("`{field}"));
     }
     for (name, node, refusal) in cases {
         let project = world.plan(name, &plan_of(name, vec![node]));
@@ -686,57 +693,128 @@ fn a_command_that_starts_a_run_in_a_flow_joins_it_and_settles_on_the_inner_runs_
     }
 }
 
-/// A `cancel` that reaches a running command stops its process tree and settles the node
-/// without its command having finished.
-#[test]
-fn a_cancel_stops_a_running_command() {
-    let world = World::new("command-step-cancel");
-    let pid = at(&world, "held.pid");
-    let held = script(&world, "held", &format!("echo $$ > '{pid}'\nsleep 120"));
-    let project = world.plan(
-        "commandcancel",
-        &plan_of("commandcancel", vec![command("held", &[], &held)]),
-    );
-    world.run(&["start", &project, "--detach"]).exited(0);
-    let run = "commandcancel";
-    world.until("the command to be running", |world| {
-        world.root.join("held.pid").is_file()
-    });
-    world
-        .run_with_stdin(
-            &["reply", run],
-            &json!({"version": 2, "commands": [{"op": "cancel", "id": "held"}]}).to_string(),
-        )
-        .exited(0);
-    world.until("the command to end", |world| {
-        !world.events_of(run, "command-exited").is_empty()
-    });
-    let exited = world.events_of(run, "command-exited");
-    assert_eq!(exited[0]["payload"]["ending"], "cancelled", "{exited:?}");
-    assert!(listed("endings", "cancelled"));
-    world.until("the node to settle", |world| {
-        !world.events_of(run, "node-settled").is_empty()
-    });
-    assert!(
-        settled_as(&world, run, "held", "cancelled"),
-        "{:?}",
-        world.events_of(run, "node-settled")
-    );
-    #[cfg(unix)]
-    {
-        let pid = std::fs::read_to_string(world.root.join("held.pid"))
-            .expect("the command wrote its pid")
-            .trim()
-            .to_owned();
-        let alive = std::process::Command::new("kill")
+/// Whether the process whose pid `file` holds is still running. Unix reads its own process
+/// table; elsewhere nothing here can ask, and the journey's other claims stand alone.
+fn still_running(world: &World, file: &str) -> bool {
+    let pid = std::fs::read_to_string(world.root.join(file))
+        .expect("the command wrote its pid")
+        .trim()
+        .to_owned();
+    cfg!(unix)
+        && std::process::Command::new("kill")
             .args(["-0", &pid])
             .stderr(std::process::Stdio::null())
             .status()
             .expect("this host answers about a process it owns")
-            .success();
-        assert!(!alive, "the cancelled command {pid} is still running");
+            .success()
+}
+
+/// A `cancel`, a `drop` or a `retry` that reaches a running command stops its process tree,
+/// and its command ends `cancelled`; the cancelled node settles `cancelled`, and requeued it
+/// runs again with its earlier settlement's detail no longer read as its own.
+#[test]
+fn a_cancel_drop_or_retry_stops_a_running_command() {
+    for op in ["cancel", "drop", "retry"] {
+        let world = World::new(&format!("command-step-{op}"));
+        let pid = at(&world, "held.pid");
+        let held = script(&world, "held", &format!("echo $$ > '{pid}'\nsleep 120"));
+        let name = format!("command{op}");
+        let project = world.plan(&name, &plan_of(&name, vec![command("held", &[], &held)]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the command to be running", |world| {
+            world.root.join("held.pid").is_file()
+        });
+        let stopping = match op {
+            "retry" => json!({"op": "retry", "id": "held", "node": {
+                "id": "held-2", "kind": "command", "command": ["true"]}}),
+            "drop" => json!({"op": "drop", "id": "held", "dependents": "detach"}),
+            _ => json!({"op": op, "id": "held"}),
+        };
+        world
+            .run_with_stdin(
+                &["reply", &name],
+                &json!({"version": 2, "commands": [stopping]}).to_string(),
+            )
+            .exited(0);
+        world.until("the command to end", |world| {
+            !world.events_of(&name, "command-exited").is_empty()
+        });
+        let exited = world.events_of(&name, "command-exited");
+        assert_eq!(
+            exited[0]["payload"]["ending"], "cancelled",
+            "{op}: {exited:?}"
+        );
+        assert!(listed("endings", "cancelled"));
+        assert!(
+            !still_running(&world, "held.pid"),
+            "{op}: the command is still running"
+        );
+        if op == "cancel" {
+            world.until("the node to settle", |world| {
+                settled_as(world, &name, "held", "cancelled")
+            });
+            assert!(result(&world, &name, "held")["detail"].is_string());
+            // Requeued, it runs again — and while it does, it has no settlement whose detail
+            // could be read as its own.
+            std::fs::remove_file(world.root.join("held.pid")).expect("the pid is cleared");
+            world
+                .run_with_stdin(
+                    &["reply", &name],
+                    &json!({"version": 2, "commands": [{"op": "requeue", "id": "held"}]})
+                        .to_string(),
+                )
+                .exited(0);
+            // The run let go once the node settled; an adoption drives the requeued node.
+            world.run(&["adopt", &name, "--detach"]).exited(0);
+            world.until("the command to run again", |world| {
+                world.root.join("held.pid").is_file()
+            });
+            let running = result(&world, &name, "held");
+            assert_eq!(running["status"], "running", "{running}");
+            assert!(running.get("detail").is_none(), "{running}");
+        }
+        if op == "retry" {
+            world.until("the replacement to settle", |world| {
+                settled_as(world, &name, "held-2", "done")
+            });
+        }
+        world.run(&["stop", &name]);
     }
-    world.run(&["stop", run]);
+}
+
+/// Command nodes are counted against the plan's `concurrency` beside agent nodes: at one, a
+/// command waits for the agent dispatch ahead of it to settle before it starts.
+#[test]
+fn a_command_waits_for_a_free_concurrency_slot() {
+    let world = World::new("command-step-concurrency");
+    world.script("first.wait", "hold");
+    let marker = at(&world, "second.ran");
+    let second = script(&world, "second", &format!("touch '{marker}'"));
+    let mut plan = plan_of(
+        "commandslot",
+        vec![agent("first", &[]), command("second", &[], &second)],
+    );
+    plan["concurrency"] = json!(1);
+    let project = world.plan("commandslot", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let run = "commandslot";
+    world.until("the agent node to be dispatched", |world| {
+        dispatched(world, run, "first")
+    });
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        position(&world, run, "command-started", "second").is_none(),
+        "the command started while the one slot was taken"
+    );
+    world.release("first.go");
+    world.until("the command to settle", |world| {
+        settled_as(world, run, "second", "done")
+    });
+    assert!(
+        position(&world, run, "node-settled", "first")
+            < position(&world, run, "command-started", "second"),
+        "the command started before the agent node freed its slot"
+    );
 }
 
 /// Unchanged behaviour: a launch config at the previous schema version and a plan using
