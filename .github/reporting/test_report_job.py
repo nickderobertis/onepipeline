@@ -57,7 +57,7 @@ CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_F
 CHECKOUT_FILES = ('Cargo.toml', 'justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
                   '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
-CATALOG_ROWS = 38
+CATALOG_ROWS = 41
 COMMITS = 20
 OMIT_LABEL = 'not-measured-on-pr'
 OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipeline-cd-job-count',

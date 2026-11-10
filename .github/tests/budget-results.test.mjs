@@ -147,7 +147,7 @@ test("`just budgets` saves all it checked, even when a budget's input is absent"
       !labels.some((label) => ["release-binary", "release-tail", "host-variable"].includes(label)),
   );
   assert.deepEqual(Object.keys(results).sort(), expected.map((budget) => budget.id).sort());
-  assert.equal(expected.length, 11);
+  assert.equal(expected.length, 14);
 });
 
 test("`just host-view-budget`, which the install proof runs, saves `host-view-time` alone", () => {
