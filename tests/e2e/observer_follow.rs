@@ -12,6 +12,8 @@
 
 use serde_json::Value;
 
+#[cfg(target_os = "linux")]
+use crate::harness::epoch_millis;
 use crate::harness::{agent, oneagentgraph_binary, plan_of, World};
 
 /// The scheduled note every graph below declares.
@@ -229,6 +231,137 @@ fn a_launch_composing_the_released_sibling_follows_through_its_run_flag() {
     let run = watching(&world, "binary", "");
     next_resets_the_note(&world, "binary", &run, &command, "one");
     world.run_on(command(&["stop", "binary"]), "stop").exited(0);
+}
+
+/// A shared object that runs its process's wall clock slower than its monotonic
+/// one, by a tenth, from the first instant the process reads it: the host a
+/// time daemon is pulling back toward its source, which `ts` is stamped on while
+/// a span is waited on the monotonic clock.
+#[cfg(target_os = "linux")]
+const SLOWED_WALL_CLOCK: &str = r#"
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdint.h>
+#include <time.h>
+
+typedef int (*clock_gettime_fn)(clockid_t, struct timespec *);
+
+static int64_t base = -1;
+
+int clock_gettime(clockid_t clock, struct timespec *ts) {
+    static clock_gettime_fn real;
+    if (!real) real = (clock_gettime_fn)dlsym(RTLD_NEXT, "clock_gettime");
+    int answered = real(clock, ts);
+    if (answered != 0 || clock != CLOCK_REALTIME) return answered;
+    int64_t now = (int64_t)ts->tv_sec * 1000000000 + ts->tv_nsec;
+    int64_t unset = -1;
+    __atomic_compare_exchange_n(&base, &unset, now, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    int64_t from = __atomic_load_n(&base, __ATOMIC_SEQ_CST);
+    int64_t slowed = from + (now - from) / 10 * 9;
+    ts->tv_sec = slowed / 1000000000;
+    ts->tv_nsec = slowed % 1000000000;
+    return 0;
+}
+"#;
+
+/// The released sibling, behind a launcher that runs it — and everything it
+/// starts — on [`SLOWED_WALL_CLOCK`].
+#[cfg(target_os = "linux")]
+fn sibling_on_a_slowed_wall_clock(world: &World) -> String {
+    let source = world.root.join("slowed-wall-clock.c");
+    let shim = world.root.join("slowed-wall-clock.so");
+    std::fs::write(&source, SLOWED_WALL_CLOCK).expect("the shim's source is written");
+    let built = std::process::Command::new("cc")
+        .args(["-shared", "-fPIC", "-O2", "-o"])
+        .arg(&shim)
+        .arg(&source)
+        .arg("-ldl")
+        .output()
+        .expect("a C compiler runs");
+    assert!(
+        built.status.success(),
+        "the shim did not build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let launcher = world.root.join("oneagentgraph-slowed");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nLD_PRELOAD='{}' exec '{}' \"$@\"\n",
+            shim.display(),
+            oneagentgraph_binary().display()
+        ),
+    )
+    .expect("the launcher is written");
+    let mut permissions = std::fs::metadata(&launcher)
+        .expect("the launcher exists")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&launcher, permissions).expect("the launcher is executable");
+    launcher.display().to_string()
+}
+
+/// The progress report a planner's reading restarts is next stamped a whole
+/// interval after the restart, on a host whose wall clock runs behind its
+/// monotonic one — the run monitor's report the user hears only when they would
+/// not otherwise have heard about the run.
+///
+/// Both instants are the graph's own `ts`, so the shim slows the clock each is
+/// read on alike; a clock counting its span on the monotonic clock alone stamps
+/// the report a tenth of the interval early.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_planner_reading_holds_the_next_report_a_whole_interval_away() {
+    let world = World::new("follow-interval");
+    world.write_graphs();
+    let path = held_plan(&world, "interval");
+    let graph = write_observer(&world, &resetting_note());
+    let sibling = sibling_on_a_slowed_wall_clock(&world);
+    let command = |args: &[&str]| {
+        let mut command = world.agentgraph_cmd(args);
+        command.env("ONEPIPELINE_ONEAGENTGRAPH_BIN", &sibling);
+        command
+    };
+    world
+        .run_on(
+            command(&["start", &path, "--detach", "--dag-graph", &graph]),
+            "start",
+        )
+        .exited(0);
+    let run = watching(&world, "interval", "");
+    next_resets_the_note(&world, "interval", &run, &command, "one");
+
+    let restarted = |journal: &[Value]| {
+        journal
+            .iter()
+            .position(|event| {
+                note_reset(event) && event["payload"]["cause"]["kind"] == "planner-surfaced"
+            })
+            .expect("the reading restarted the note")
+    };
+    world.until("the note's next report after the restart", |world| {
+        let journal = world.graph_journal(&run);
+        journal[restarted(&journal)..].iter().any(|event| {
+            event["kind"] == "cron-fired" && event["payload"]["scheduled_note"] == NOTE
+        })
+    });
+    let journal = world.graph_journal(&run);
+    let from = restarted(&journal);
+    let reset = &journal[from];
+    let fired = journal[from..]
+        .iter()
+        .find(|event| event["kind"] == "cron-fired" && event["payload"]["scheduled_note"] == NOTE)
+        .expect("the note fired after the restart");
+    let stamp = |event: &Value| epoch_millis(event["ts"].as_str().expect("a stamped envelope"));
+    let waited = stamp(fired) - stamp(reset);
+    assert!(
+        waited >= 2_000,
+        "the report came {waited} ms after the reading restarted its 2 s clock: \
+         {reset} then {fired}"
+    );
+    world
+        .run_on(command(&["stop", "interval"]), "stop")
+        .exited(0);
 }
 
 /// The built-in reset reaches the schedule that declared `resettable` and
