@@ -1922,8 +1922,8 @@ fn start(args: &StartArgs) -> Result<i32> {
             .map(|root| root.display().to_string())
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
-        plan_edit_hook,
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        plan_edit_hook,
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
         public_id: public.id.into_string(),
