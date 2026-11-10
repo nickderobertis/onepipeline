@@ -8732,13 +8732,34 @@ fn start_ready(
             // the placement below. It is in flight like a dispatch — counted against the
             // plan's concurrency and cancelled by what cancels one — and is never reported
             // quiet, since a command records nothing while it runs.
+            // The loader refused a command node naming no program, so this is the record of
+            // one an earlier build wrote; it is settled rather than started.
+            let argv = match crate::filter::Argv::new(node.command.clone()) {
+                Ok(argv) => argv,
+                // llmlint: ignore-block[changed_behavior_has_e2e] `graph::check_node` refuses a
+                // command node naming no program at load and at every live edit, which
+                // `command_step.rs`'s loader journey drives; reaching this arm means a journal
+                // edited by hand, which would prove the fixture rather than the code.
+                Err(why) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(format!("the command could not be started: {why}")),
+                            ..failed(&node.id, crate::commandstep::COMMAND_FAILED)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            };
             journal.emit(
                 journal::PipelineKind::CommandStarted,
                 journal::labels(&paths.run, Some(&node.id)),
-                payload_of(&crate::commandstep::started(paths, &node))?,
+                payload_of(&crate::commandstep::started(paths, &node, &argv))?,
             )?;
             let cancel = CancellationToken::new();
-            crate::commandstep::spawn(paths, launch, &node, cancel.clone(), tx.clone())?;
+            crate::commandstep::spawn(paths, launch, &node, &argv, cancel.clone(), tx.clone())?;
             let now = Instant::now();
             in_flight.insert(
                 node.id.clone(),

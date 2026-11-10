@@ -182,6 +182,76 @@ pub const DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = match NonZeroU64:
     None => unreachable!(),
 };
 
+/// A program and its arguments, run with no shell: never empty, and its program never
+/// blank.
+///
+/// What a launch config's `checks` entries and its `plan_edit_hook`'s `command` are, written
+/// in a document as one list of words. A list naming no program is refused where the
+/// document is read, so an argv that can be held is one that can be started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct Argv {
+    program: String,
+    arguments: Vec<String>,
+}
+
+impl Argv {
+    /// The argv `words` spell: the first is the program, the rest its arguments.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for `words` that are empty or whose first is blank.
+    pub fn new(words: Vec<String>) -> Result<Self> {
+        let mut words = words.into_iter();
+        match words.next() {
+            Some(program) if !program.trim().is_empty() => Ok(Self {
+                program,
+                arguments: words.collect(),
+            }),
+            _ => Err(Error::Invalid(NAMES_NO_PROGRAM.to_owned())),
+        }
+    }
+
+    /// The program.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Its arguments, after the program.
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// Every word, the program first, joined by one space: how a refusal names it.
+    pub(crate) fn spelled(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.arguments.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+impl TryFrom<Vec<String>> for Argv {
+    type Error = String;
+
+    fn try_from(words: Vec<String>) -> std::result::Result<Self, String> {
+        Self::new(words).map_err(|_| NAMES_NO_PROGRAM.to_owned())
+    }
+}
+
+impl From<Argv> for Vec<String> {
+    fn from(argv: Argv) -> Self {
+        std::iter::once(argv.program)
+            .chain(argv.arguments)
+            .collect()
+    }
+}
+
+/// What an argv naming no program is refused with: by the two keys that hold one.
+const NAMES_NO_PROGRAM: &str = "names no program — each `checks` entry and `plan_edit_hook`'s \
+                                `command` is the program to run followed by its arguments; give \
+                                it one, or leave the key out to declare that this launch has none";
+
 /// The command a launch offers every node a live edit introduces or changes to,
 /// with the task that node's next dispatch would be given, before the edit is
 /// applied.
@@ -192,15 +262,14 @@ pub const DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = match NonZeroU64:
 /// passes it, `1` refuses it with its stderr as the reason, and any other exit
 /// or the timeout is *could not be judged*. Either refusal refuses the whole
 /// reply before anything is appended or applied.
-///
-/// Its argv always names a program: [`new`](Self::new) — and the document it is
-/// read from — refuse one that is empty or whose program is blank, so a hook that
-/// can be held is one that can be started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "PlanEditHookDocument", into = "PlanEditHookDocument")]
+#[serde(deny_unknown_fields)]
 pub struct PlanEditHook {
-    program: String,
-    arguments: Vec<String>,
+    command: Argv,
+    #[serde(
+        default = "default_plan_edit_hook_timeout",
+        deserialize_with = "plan_edit_hook_timeout"
+    )]
     timeout_seconds: NonZeroU64,
 }
 
@@ -212,68 +281,31 @@ impl PlanEditHook {
     ///
     /// [`Error::Invalid`] for a `command` that is empty or whose program is blank.
     pub fn new(command: Vec<String>, timeout_seconds: NonZeroU64) -> Result<Self> {
-        let mut words = command.into_iter();
-        match words.next() {
-            Some(program) if !program.trim().is_empty() => Ok(Self {
-                program,
-                arguments: words.collect(),
-                timeout_seconds,
-            }),
-            _ => Err(Error::Invalid(NAMES_NO_PROGRAM.to_owned())),
-        }
+        Ok(Self {
+            command: Argv::new(command)?,
+            timeout_seconds,
+        })
+    }
+
+    /// What the hook spawns.
+    pub fn command(&self) -> &Argv {
+        &self.command
     }
 
     /// The program the hook spawns.
     pub fn program(&self) -> &str {
-        &self.program
+        self.command.program()
     }
 
     /// The arguments it is spawned with, after the program.
     pub fn arguments(&self) -> &[String] {
-        &self.arguments
+        self.command.arguments()
     }
 
     /// How long one offer is awaited before the hook is stopped and the edit read as not
     /// judged.
     pub fn timeout_seconds(&self) -> NonZeroU64 {
         self.timeout_seconds
-    }
-}
-
-/// What a hook whose argv names no program is refused with.
-const NAMES_NO_PROGRAM: &str = "`plan_edit_hook.command` names no program — give it the \
-                                program to run and its arguments, or leave `plan_edit_hook` out \
-                                to declare that this launch has none";
-
-/// A plan-edit hook as a document spells it: `command` and `timeout_seconds`.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlanEditHookDocument {
-    command: Vec<String>,
-    #[serde(
-        default = "default_plan_edit_hook_timeout",
-        deserialize_with = "plan_edit_hook_timeout"
-    )]
-    timeout_seconds: NonZeroU64,
-}
-
-impl TryFrom<PlanEditHookDocument> for PlanEditHook {
-    type Error = String;
-
-    fn try_from(document: PlanEditHookDocument) -> std::result::Result<Self, String> {
-        Self::new(document.command, document.timeout_seconds)
-            .map_err(|_| NAMES_NO_PROGRAM.to_owned())
-    }
-}
-
-impl From<PlanEditHook> for PlanEditHookDocument {
-    fn from(hook: PlanEditHook) -> Self {
-        Self {
-            command: std::iter::once(hook.program)
-                .chain(hook.arguments)
-                .collect(),
-            timeout_seconds: hook.timeout_seconds,
-        }
     }
 }
 
@@ -292,13 +324,6 @@ fn plan_edit_hook_timeout<'de, D: serde::Deserializer<'de>>(
              give it a positive number of seconds, or leave it out for 600",
         )
     })
-}
-
-/// Whether an argv names something to run: at least one word, and a program that
-/// is not blank.
-fn names_a_program(argv: &[String]) -> bool {
-    argv.first()
-        .is_some_and(|program| !program.trim().is_empty())
 }
 
 /// The launch-config key naming the reply drafter's graph, spelled once for the
@@ -837,7 +862,7 @@ pub struct LaunchConfig {
     /// may not carry one; an empty argv, or one whose program is blank, is
     /// refused by this key's name. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub checks: Vec<Vec<String>>,
+    pub checks: Vec<Argv>,
     /// The hook every node a live edit introduces or changes is offered to, if
     /// any. `start --plan-edit-hook <PATH>` overrides it.
     ///
@@ -1006,16 +1031,14 @@ impl LaunchConfig {
                 REVIEW_REPLY_GRAPH_KEY,
                 Carried::text(config.review_reply_graph.as_deref()),
             ),
-            // `Blank` is a check that names no program: an empty argv, or one whose
-            // program is blank. An empty list is no key at all.
+            // Never `Blank`: an entry naming no program was refused where the document was
+            // read, by `Argv`. An empty list is no key at all.
             (
                 CHECKS_KEY,
                 if config.checks.is_empty() {
                     Carried::Absent
-                } else if config.checks.iter().all(|argv| names_a_program(argv)) {
-                    Carried::Named
                 } else {
-                    Carried::Blank
+                    Carried::Named
                 },
             ),
             // Never `Blank`: a hook naming no program was refused by name where the document
@@ -1351,12 +1374,14 @@ mod tests {
             require_rendered: Some(true),
             review_reply_graph: Some("./graphs/review-reply.yaml".to_string()),
             checks: vec![
-                vec!["./scripts/check-plan.sh".to_string()],
-                vec![
+                Argv::new(vec!["./scripts/check-plan.sh".to_string()])
+                    .expect("the golden's check names a program"),
+                Argv::new(vec![
                     "python3".to_string(),
                     "./scripts/check-budget.py".to_string(),
                     "--strict".to_string(),
-                ],
+                ])
+                .expect("the golden's check names a program"),
             ],
             plan_edit_hook: Some(
                 PlanEditHook::new(

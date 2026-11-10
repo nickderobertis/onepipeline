@@ -208,10 +208,7 @@ pub(crate) fn judge(
             .map_err(|error| {
                 Error::Invalid(format!("node '{}' does not serialize: {error}", node.id))
             })?;
-        let named = std::iter::once(hook.program())
-            .chain(hook.arguments().iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let named = hook.command().spelled();
         let refusal = match run(hook, &launch.dir, &document) {
             Verdict::Pass => continue,
             Verdict::Refuse(said) => format!(

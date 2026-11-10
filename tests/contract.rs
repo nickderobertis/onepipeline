@@ -12746,6 +12746,9 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
         json!(LAUNCH_CONFIG_SCHEMA_VERSION)
     );
     assert_eq!(config.checks.len(), 2);
+    assert_eq!(config.checks[1].program(), "python3");
+    assert_eq!(config.checks[1].arguments(), ["./scripts/check-budget.py"]);
+    assert!(onepipeline::filter::Argv::new(Vec::new()).is_err());
     let hook = config.plan_edit_hook.expect("the hook is named");
     assert_eq!(hook.program(), "./scripts/judge-edit.sh");
     assert!(hook.arguments().is_empty());

@@ -798,21 +798,11 @@ impl Registered {
 
     /// A check a launch config's `checks` registers: its argv run as the document wrote
     /// it, from the launch directory, and named by its words joined with one space.
-    ///
-    /// # Errors
-    ///
-    /// An argv that is empty or whose program is blank, refused by the key that carried it
-    /// — which the launch config's own reader has already done for every document it read.
-    pub(crate) fn argv(argv: &[String]) -> Result<Self> {
-        match argv.split_first() {
-            Some((program, arguments)) if !program.trim().is_empty() => Ok(Self {
-                program: program.clone(),
-                arguments: arguments.to_vec(),
-                named: argv.join(" "),
-            }),
-            _ => Err(crate::error::Error::Invalid(
-                "a launch config's `checks` entry names no program to run".to_owned(),
-            )),
+    pub(crate) fn argv(argv: &crate::filter::Argv) -> Self {
+        Self {
+            program: argv.program().to_owned(),
+            arguments: argv.arguments().to_vec(),
+            named: argv.spelled(),
         }
     }
 }

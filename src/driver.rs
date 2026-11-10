@@ -1621,8 +1621,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut registered: Vec<crate::plancheck::Registered> = declared
         .checks
         .iter()
-        .map(|argv| crate::plancheck::Registered::argv(argv))
-        .collect::<Result<_>>()?;
+        .map(crate::plancheck::Registered::argv)
+        .collect();
     registered.extend(
         args.checks
             .iter()

@@ -736,14 +736,15 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
                 &json!({"version": 2, "commands": [stopping]}).to_string(),
             )
             .exited(0);
-        world.until("the command to end", |world| {
-            !world.events_of(&name, "command-exited").is_empty()
-        });
-        let exited = world.events_of(&name, "command-exited");
-        assert_eq!(
-            exited[0]["payload"]["ending"], "cancelled",
-            "{op}: {exited:?}"
-        );
+        let held_exited = |world: &World| {
+            world
+                .events_of(&name, "command-exited")
+                .into_iter()
+                .find(|event| event["labels"]["node"] == "held")
+        };
+        world.until("the command to end", |world| held_exited(world).is_some());
+        let exited = held_exited(&world).expect("it ended");
+        assert_eq!(exited["payload"]["ending"], "cancelled", "{op}: {exited}");
         assert!(listed("endings", "cancelled"));
         assert!(
             !still_running(&world, "held.pid"),

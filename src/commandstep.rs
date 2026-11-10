@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use crate::engine::{Message, Settled, Settlement};
 use crate::error::{Error, Result};
 use crate::executor::CancellationToken;
+use crate::filter::Argv;
 use crate::graph::NodeStatus;
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::payload::{CommandEnding, CommandExited, CommandStarted};
@@ -70,12 +71,12 @@ pub(crate) fn log_of(paths: &RunPaths, node: &str) -> PathBuf {
         .join(format!("{node}.log"))
 }
 
-/// What `command-started` records for this node.
-pub(crate) fn started(paths: &RunPaths, node: &Node) -> CommandStarted {
+/// What `command-started` records for this node, running `argv`.
+pub(crate) fn started(paths: &RunPaths, node: &Node, argv: &Argv) -> CommandStarted {
     CommandStarted {
-        command: node.command.clone(),
+        command: argv.clone(),
         log: log_of(paths, &node.id).display().to_string(),
-        timeout_seconds: node.timeout_seconds.map(std::num::NonZeroU64::get),
+        timeout_seconds: node.timeout_seconds,
     }
 }
 
@@ -89,23 +90,24 @@ pub(crate) fn spawn(
     paths: &RunPaths,
     launch: &LaunchRecord,
     node: &Node,
+    argv: &Argv,
     cancel: CancellationToken,
     tx: Sender<Message>,
 ) -> Result<()> {
     let paths = paths.clone();
     let launch = launch.clone();
     let node = node.clone();
+    let argv = argv.clone();
     let named = node.id.clone();
     std::thread::Builder::new()
         .name(format!("command-{}", node.id))
         .spawn(move || {
             let begun = Instant::now();
-            let (ending, exit_code, settlement) = run(&paths, &launch, &node, &cancel);
+            let (ending, settlement) = run(&paths, &launch, &node, &argv, &cancel);
             let _ = tx.send(Message::CommandExited(Box::new((
                 node.id.clone(),
                 CommandExited {
                     ending,
-                    exit_code,
                     duration_ms: u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX),
                 },
             ))));
@@ -128,20 +130,17 @@ fn run(
     paths: &RunPaths,
     launch: &LaunchRecord,
     node: &Node,
+    argv: &Argv,
     cancel: &CancellationToken,
-) -> (CommandEnding, Option<i32>, Settlement) {
+) -> (CommandEnding, Settlement) {
     let not_started = |why: String| {
         (
             CommandEnding::NotStarted,
-            None,
             Settlement {
                 detail: Some(format!("the command could not be started: {why}")),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
             },
         )
-    };
-    let Some((program, arguments)) = node.command.split_first() else {
-        return not_started("it names no program".to_owned());
     };
     let log_path = log_of(paths, &node.id);
     let log = log_path
@@ -166,9 +165,9 @@ fn run(
         Ok(stdout) => stdout,
         Err(error) => return not_started(format!("its log could not be shared: {error}")),
     };
-    let mut spawning = Process::new(program);
+    let mut spawning = Process::new(argv.program());
     spawning
-        .args(arguments)
+        .args(argv.arguments())
         .env(RUN_ID_ENV, &paths.run)
         .env(NODE_ID_ENV, &node.id)
         .env(RUN_ROOT_ENV, crate::hooks::run_root(paths))
@@ -241,8 +240,7 @@ fn run(
                 stopped(&mut child);
                 let tail = tail_rx.recv_timeout(STDERR_GRACE).unwrap_or_default();
                 return (
-                    CommandEnding::Exited,
-                    None,
+                    CommandEnding::Exited { exit_code: None },
                     Settlement {
                         detail: Some(with_tail(
                             format!("the command could not be waited for: {error}"),
@@ -257,13 +255,15 @@ fn run(
     let tail = tail_rx.recv_timeout(STDERR_GRACE).unwrap_or_default();
     match status {
         Ok(status) if status.success() => (
-            CommandEnding::Exited,
-            status.code(),
+            CommandEnding::Exited {
+                exit_code: status.code(),
+            },
             Settlement::plain(&node.id, NodeStatus::Done, None),
         ),
         Ok(status) => (
-            CommandEnding::Exited,
-            status.code(),
+            CommandEnding::Exited {
+                exit_code: status.code(),
+            },
             Settlement {
                 detail: Some(with_tail(
                     match status.code() {
@@ -277,7 +277,6 @@ fn run(
         ),
         Err(CommandEnding::TimedOut) => (
             CommandEnding::TimedOut,
-            None,
             Settlement {
                 detail: Some(with_tail(
                     format!(
@@ -292,7 +291,6 @@ fn run(
         ),
         Err(ending) => (
             ending,
-            None,
             Settlement {
                 detail: Some(
                     "the node was cancelled while its command ran, so its process tree was \
