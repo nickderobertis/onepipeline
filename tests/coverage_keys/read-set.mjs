@@ -99,10 +99,10 @@ function moduleClosure(ws, root, closure = new Set()) {
   }
   for (const [, included] of text.matchAll(INCLUDE)) {
     const file = normalize(join(base, included));
-    if (ws.files.has(file)) {
-      closure.add(file);
-      if (file.endsWith(".rs")) moduleClosure(ws, file, closure);
-    }
+    // An included Rust file is walked as a root of its own, so what it declares and
+    // includes is compiled too; anything else is read as it stands.
+    if (file.endsWith(".rs")) moduleClosure(ws, file, closure);
+    else if (ws.files.has(file)) closure.add(file);
   }
   return closure;
 }

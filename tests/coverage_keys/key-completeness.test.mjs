@@ -153,3 +153,23 @@ test("readSets expands a directory the code joins at the workspace root", (t) =>
   const reads = readSets(dir).get("onepipeline-contract");
   assert.ok(reads.has("docs/windows-journey-audit.md"), "the contract tier walks docs/");
 });
+
+test("readSets follows an included Rust file into what it declares and includes", (t) => {
+  const dir = copyTree(t);
+  mkdirSync(join(dir, "tests/note/included"), { recursive: true });
+  appendFileSync(join(dir, "tests/note/main.rs"), '\ninclude!("included/outer.rs");\n');
+  writeFileSync(
+    join(dir, "tests/note/included/outer.rs"),
+    '#[path = "inner.rs"]\nmod inner;\nconst DATA: &str = include_str!("data.txt");\n',
+  );
+  writeFileSync(join(dir, "tests/note/included/inner.rs"), "pub fn inner() {}\n");
+  writeFileSync(join(dir, "tests/note/included/data.txt"), "data\n");
+  git(dir, "add", "-A");
+  const reads = readSets(dir).get("onepipeline-note-journeys");
+  for (const path of [
+    "tests/note/included/outer.rs",
+    "tests/note/included/inner.rs",
+    "tests/note/included/data.txt",
+  ])
+    assert.ok(reads.has(path), `the note tier compiles ${path}`);
+});
