@@ -12701,3 +12701,5 @@ fn the_provisioning_failure_names_are_what_the_contract_documents() {
         .expect("the kind is a valid word");
     assert_eq!(kind.as_str(), "provisioning-failed");
 }
+
+// Coverage-cache demonstration: this line is the change to one tier's test source.
