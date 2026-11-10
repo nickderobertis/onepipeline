@@ -8,6 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
+import { fixtureEnvironment } from "../coverage_cache/support.mjs";
 
 const TOKEN = /[A-Za-z0-9_./@-]+/g;
 const MOD = /(?:#\[path\s*=\s*"([^"]+)"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z0-9_]+)\s*;/g;
@@ -204,7 +205,7 @@ export function keyGaps(dir, exceptions = {}) {
     [HASHES, "capture", dir, ...[...sets.keys()].map(taskOf), "--out", out],
     {
       cwd: dir,
-      env: { ...process.env, NX_DAEMON: "false" },
+      env: fixtureEnvironment({ NX_DAEMON: "false" }),
       stdio: ["ignore", "ignore", "pipe"],
       maxBuffer: 256 * 1024 * 1024,
     },

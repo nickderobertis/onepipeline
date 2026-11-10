@@ -150,6 +150,34 @@ test("a coverage tier replays until what its run reads changes", { timeout: 1800
   }
 });
 
+test("inside a GitHub Actions job, the run summary still names every tier and no fixture result reaches the job's cache", {
+  timeout: 900000,
+}, (t) => {
+  const enclosing = {
+    GITHUB_ACTIONS: "true",
+    NX_BASE: "a".repeat(40),
+    NX_HEAD: "b".repeat(40),
+    NX_SELF_HOSTED_REMOTE_CACHE_SERVER: "http://127.0.0.1:1",
+    NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: "enclosing-token",
+  };
+  const previous = Object.fromEntries(Object.keys(enclosing).map((key) => [key, process.env[key]]));
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, enclosing);
+  const dir = scratch(t);
+  const cold = nx(dir, test_all);
+  assert.equal(cold.status, 0, cold.output);
+  assert.doesNotMatch(cold.output, /##\[group\]/, "Nx grouped its output for the enclosing job");
+  assert.deepEqual(tierOutcome(cold).executed, [...TIERS].sort(), cold.output);
+  const again = nx(dir, test_all);
+  assert.equal(again.status, 0, again.output);
+  assert.deepEqual(tierOutcome(again).replayed, [...TIERS].sort(), again.output);
+});
+
 function addTracked(dir, path, body) {
   mkdirSync(dirname(join(dir, path)), { recursive: true });
   writeFileSync(join(dir, path), body);

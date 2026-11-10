@@ -9,6 +9,7 @@ import {
   TIERS,
   VERSION_TIERS,
   assertSameReport,
+  fixtureEnvironment,
   git,
   lcovOf,
   mergeReport,
@@ -45,7 +46,7 @@ test("the merge is exact over every tier's report, replayed or re-run", {
     {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env },
+      env: fixtureEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -135,7 +136,11 @@ test("onepipeline:test refuses a total under the floor and names the uncovered l
   assert.ok(percent > 95 && percent < 95.73, `expected between 95 and 95.73, got ${percent}`);
   assert.ok(uncovered.size > 0, failing.output);
   assert.match(failing.output, /below the floor of 95\.73/);
-  const merged = spawnSync("just", ["_crate-coverage"], { cwd: dir, encoding: "utf8" });
+  const merged = spawnSync("just", ["_crate-coverage"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: fixtureEnvironment(),
+  });
   assert.equal(merged.status, 1, merged.stdout + merged.stderr);
 });
 
@@ -158,7 +163,11 @@ test("onepipeline:test refuses a coverage tier it does not count", { timeout: 30
   const run = nx(dir, test_all);
   assert.notEqual(run.status, 0);
   assert.match(run.output, /onepipeline-uncounted/);
-  const direct = spawnSync("node", ["scripts/coverage-tiers.mjs"], { cwd: dir, encoding: "utf8" });
+  const direct = spawnSync("node", ["scripts/coverage-tiers.mjs"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: fixtureEnvironment(),
+  });
   assert.equal(direct.status, 2, direct.stderr);
   assert.match(direct.stderr, /does not depend on coverage tier\(s\): onepipeline-uncounted/);
 
@@ -178,6 +187,7 @@ test("onepipeline:test refuses a coverage tier it does not count", { timeout: 30
   const mismatched = spawnSync("node", ["scripts/coverage-tiers.mjs"], {
     cwd: dir,
     encoding: "utf8",
+    env: fixtureEnvironment(),
   });
   assert.equal(mismatched.status, 2, mismatched.stderr);
   assert.match(
@@ -221,14 +231,22 @@ test("a stale report never reaches the total, and the merge refuses what no tier
     join(unitsDir(dir), "nobody-owns-this.lcov"),
     "SF:src/x.rs\nDA:1,1\nend_of_record\n",
   );
-  const stray = spawnSync("just", ["_crate-coverage"], { cwd: dir, encoding: "utf8" });
+  const stray = spawnSync("just", ["_crate-coverage"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: fixtureEnvironment(),
+  });
   assert.equal(stray.status, 2, stray.stdout + stray.stderr);
   assert.match(stray.stderr, /nobody-owns-this\.lcov/);
   execFileSync("rm", [
     join(unitsDir(dir), "nobody-owns-this.lcov"),
     lcovOf(dir, "onepipeline-pooled-slot"),
   ]);
-  const missing = spawnSync("just", ["_crate-coverage"], { cwd: dir, encoding: "utf8" });
+  const missing = spawnSync("just", ["_crate-coverage"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: fixtureEnvironment(),
+  });
   assert.equal(missing.status, 2, missing.stdout + missing.stderr);
   assert.match(missing.stderr, /no report for unit\(s\) onepipeline-pooled-slot/);
   assert.ok(readdirSync(unitsDir(dir)).every((name) => name.endsWith(".lcov")));
