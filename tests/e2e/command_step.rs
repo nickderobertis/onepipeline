@@ -256,7 +256,13 @@ fn a_command_exiting_non_zero_fails_with_its_status_and_stderr_and_holds_its_dep
 fn a_command_past_its_timeout_is_stopped_and_one_with_none_runs_to_its_end() {
     let world = World::new("command-step-timeout");
     let pid = at(&world, "sleeper.pid");
-    let sleeper = script(&world, "sleeper", &format!("echo $$ > '{pid}'\nsleep 60"));
+    let child = at(&world, "sleeper.child");
+    // It waits on a child of its own, so what is stopped is a tree and not one process.
+    let sleeper = script(
+        &world,
+        "sleeper",
+        &format!("echo $$ > '{pid}'\nsleep 60 &\necho $! > '{child}'\nwait"),
+    );
     let patient = script(&world, "patient", "sleep 4\necho finished");
     let mut bounded = command("bounded", &[], &sleeper);
     bounded["timeout_seconds"] = json!(2);
@@ -292,19 +298,11 @@ fn a_command_past_its_timeout_is_stopped_and_one_with_none_runs_to_its_end() {
         world.dump()
     );
     assert_eq!(result(&world, run, "unbounded")["status"], "done");
-    #[cfg(unix)]
-    {
-        let pid = std::fs::read_to_string(world.root.join("sleeper.pid"))
-            .expect("the command wrote its pid")
-            .trim()
-            .to_owned();
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("this host answers about a process it owns")
-            .success();
-        assert!(!alive, "the command {pid} outlived its timeout");
+    for process in ["sleeper.pid", "sleeper.child"] {
+        assert!(
+            !still_running(&world, process),
+            "the command's {process} outlived its timeout"
+        );
     }
 }
 
@@ -726,12 +724,17 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
     for op in ["cancel", "drop", "retry"] {
         let world = World::new(&format!("command-step-{op}"));
         let pid = at(&world, "held.pid");
-        let held = script(&world, "held", &format!("echo $$ > '{pid}'\nsleep 120"));
+        let child = at(&world, "held.child");
+        let held = script(
+            &world,
+            "held",
+            &format!("echo $$ > '{pid}'\nsleep 120 &\necho $! > '{child}'\nwait"),
+        );
         let name = format!("command{op}");
         let project = world.plan(&name, &plan_of(&name, vec![command("held", &[], &held)]));
         world.run(&["start", &project, "--detach"]).exited(0);
         world.until("the command to be running", |world| {
-            world.root.join("held.pid").is_file()
+            world.root.join("held.child").is_file()
         });
         let stopping = match op {
             "retry" => json!({"op": "retry", "id": "held", "node": {
@@ -755,10 +758,12 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
         let exited = held_exited(&world).expect("it ended");
         assert_eq!(exited["payload"]["ending"], "cancelled", "{op}: {exited}");
         assert!(listed("endings", "cancelled"));
-        assert!(
-            !still_running(&world, "held.pid"),
-            "{op}: the command is still running"
-        );
+        for process in ["held.pid", "held.child"] {
+            assert!(
+                !still_running(&world, process),
+                "{op}: the command's {process} is still running"
+            );
+        }
         if op == "cancel" {
             world.until("the node to settle", |world| {
                 settled_as(world, &name, "held", "cancelled")

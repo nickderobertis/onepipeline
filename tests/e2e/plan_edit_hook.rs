@@ -94,7 +94,7 @@ fn hook(world: &World) -> PathBuf {
              cat > '{base}.'$n'.json'\n\
              echo $$ > '{base}.pid'\n\
              echo \"$*\" > '{base}.args'\n\
-             if [ -f '{base}.sleep' ]; then sleep \"$(cat '{base}.sleep')\"; fi\n\
+             if [ -f '{base}.sleep' ]; then sleep \"$(cat '{base}.sleep')\" & echo $! > '{base}.child'; wait; fi\n\
              for refusal in '{base}'.refuse-*; do\n\
                [ -f \"$refusal\" ] || continue\n\
                id=${{refusal##*.refuse-}}\n\
@@ -517,10 +517,11 @@ fn a_hook_outliving_its_timeout_refuses_the_reply_as_not_judged() {
     assert_eq!(rejected(&world, &run).len(), 1);
     assert_eq!(committed(&world, &run), 0);
     world.run(&["status", &run]).exited(0).out_lacks(RULING);
+    // The hook and the child it waits on: its whole tree was stopped.
     #[cfg(unix)]
-    {
-        let pid = std::fs::read_to_string(world.root.join("hook.pid"))
-            .expect("the hook wrote its pid")
+    for process in ["hook.pid", "hook.child"] {
+        let pid = std::fs::read_to_string(world.root.join(process))
+            .expect("the hook wrote its pids")
             .trim()
             .to_owned();
         let alive = std::process::Command::new("kill")
@@ -529,7 +530,7 @@ fn a_hook_outliving_its_timeout_refuses_the_reply_as_not_judged() {
             .status()
             .expect("this host answers about a process it owns")
             .success();
-        assert!(!alive, "the hook {pid} outlived its timeout");
+        assert!(!alive, "the hook's {process} {pid} outlived its timeout");
     }
     world.run(&["stop", &run]);
 }
