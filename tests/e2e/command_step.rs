@@ -369,6 +369,23 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
             .exited(1)
             .out_has(refusal);
     }
+
+    // A legal one loads, and — having no judged task — is held to no rendering, as a human
+    // node is not: the rendered-only check passes a plan of commands and people.
+    let legal = world.plan(
+        "legal",
+        &plan_of(
+            "legal",
+            vec![
+                json!({"id": "c", "kind": "command", "command": ["true"], "timeout_seconds": 5,
+                       "task": "Publishes the notes; nobody is judged against this."}),
+                human("approve", &["c"]),
+            ],
+        ),
+    );
+    world
+        .run(&["plan", "check", &legal, "--require-rendered", "true"])
+        .exited(0);
 }
 
 /// A plan launched under `onepipeline flow run` whose command node runs `onepipeline start`
