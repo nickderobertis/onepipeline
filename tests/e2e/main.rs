@@ -62,6 +62,7 @@ mod change_telemetry;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod channel;
 mod compatibility;
+mod configured_host;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four journeys, about
 // 40s together, and what they exercise is the fold every view and the reconcile loop read
 // through — `checkpoint`, `views` and `engine` — so a project edged narrower than the crate
