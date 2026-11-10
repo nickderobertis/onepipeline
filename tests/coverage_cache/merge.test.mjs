@@ -120,7 +120,7 @@ test("onepipeline:test refuses a total under the floor and names the uncovered l
   assert.equal(passing.status, 0, passing.output);
   const { covered } = mergeReport(passing.output);
   const library = readFileSync(join(dir, "src/lib.rs"), "utf8");
-  // Uncovered lines that put the merged total at about 95.37%: between today's 95 and the 95.73 floor.
+  // Uncovered lines that put the merged total at about 95.37%: between today's 95 and the 95.74 floor.
   // `never` carries three lines of its own besides its body.
   const extra = Math.max(1, Math.ceil(covered * (100 / 95.37 - 1)) - 3);
   writeFileSync(
@@ -133,9 +133,9 @@ test("onepipeline:test refuses a total under the floor and names the uncovered l
   const failing = nx(dir, test_all);
   assert.notEqual(failing.status, 0);
   const { percent, uncovered } = mergeReport(failing.output);
-  assert.ok(percent > 95 && percent < 95.73, `expected between 95 and 95.73, got ${percent}`);
+  assert.ok(percent > 95 && percent < 95.74, `expected between 95 and 95.74, got ${percent}`);
   assert.ok(uncovered.size > 0, failing.output);
-  assert.match(failing.output, /below the floor of 95\.73/);
+  assert.match(failing.output, /below the floor of 95\.74/);
   const merged = spawnSync("just", ["_crate-coverage"], {
     cwd: dir,
     encoding: "utf8",

@@ -357,7 +357,7 @@ version-package-tier := "binary(package_bundle) and test(=the_packaged_crate_car
 # against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
 offline-tiers := "(" + pooled-slot-tier + ") or (" + narrow-write-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
 
-# 95% line coverage, measured as 95.73% under LCOV, is the gate; lower it only with a
+# 95% line coverage, measured as 95.74% under LCOV, is the gate; lower it only with a
 # documented reason in AGENTS.md. It is measured over the **whole** offline tier: each
 # tier below writes its own LCOV report and `_crate-coverage` holds their merge to the
 # floor, because each tier is its own Nx project and splitting the run must not split
@@ -426,10 +426,11 @@ _crate-test-rest: (_tier-test "onepipeline-rest" rest-tier)
 
 # The one floor, over every tier's report, replayed or run: `scripts/coverage-tiers.mjs`
 # names the units from the project graph and refuses one this target would not count.
-# 95.73 is 95 re-based onto the LCOV measure `coverage-merge.mjs` reads, which runs 0.7257
-# points under `cargo llvm-cov report` on the commit measured when this floor was set.
+# 95.74 is 95 re-based onto the LCOV measure `coverage-merge.mjs` reads, rounded up: over
+# the same profiles of every tier, it read 0.7397 points above `cargo llvm-cov report` on
+# the commit measured when this floor was set.
 _crate-coverage:
-    @units="$(node scripts/coverage-tiers.mjs)" && node scripts/coverage-merge.mjs --fail-under-lines 95.73 --dir target/coverage-units --unit $units
+    @units="$(node scripts/coverage-tiers.mjs)" && node scripts/coverage-merge.mjs --fail-under-lines 95.74 --dir target/coverage-units --unit $units
 
 # The test-tier projects' own targets (`onepipeline-e2e`, `onepipeline-contract`,
 # `onepipeline-note-journeys`, `onepipeline-real-smoke`, `onepipeline-release-compat`),
