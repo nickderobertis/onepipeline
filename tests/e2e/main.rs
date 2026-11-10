@@ -76,6 +76,7 @@ mod checkpoint;
 // a project edged narrower than the crate could not honestly run them, and any change to how a
 // run ends can put the cost back. Entries 132 and 134.
 mod closures;
+mod command_step;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a continuation is read by

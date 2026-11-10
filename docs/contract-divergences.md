@@ -13286,3 +13286,51 @@ which is the rule `EVENTS_BUNDLE_VERSION` states.
   "bundle_versions": {"events": "2.0.0"}
 }
 ```
+
+## 152. Command steps, launch checks and the plan-edit hook — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the ruling for node `op-generic-primitives`.** The ruling states the three
+primitives; the amendments under *Command steps*, *Registered checks at launch* and *A
+plan-edit hook on live edits* restate it with these decisions made:
+
+- **A command node records `running` with `command-started`, never `node-dispatched`.** It
+  dispatches no agent, so a reader counting dispatches counts none for it. An adopting
+  driver drops it from `running` exactly as it drops an abandoned dispatch, which is what
+  runs the command again from the start.
+- **`results --json` moves to `schema_version` 4** so that a failed command's exit status
+  and stderr tail are readable there: every settled node carries its standing
+  settlement's `detail`, omitted where there is none, read as `status --json` reads it.
+- **A cancelled command settles `cancelled`**, its process tree stopped, where a `cancel`,
+  `drop` or `retry` reaches it while it runs.
+- **The fields a command node never reads are refused by name** rather than ignored —
+  `persona`, `max_turns`, `context`, `executor`, `agent_graph`, `repo`, `steps`, `resume`,
+  `expects_no_diff`, `draft`, `branch`, `base_branch`, `sets`, `publish: "preserve"` — and a
+  step of `kind: command` is refused, since a command runs in the launch directory rather
+  than on a node's branch.
+- **A config check's `source` is its argv joined by one space**; a `--check` keeps the path
+  as given, as `plan check` does. A config argv runs as written from the launch directory;
+  `--check <PATH>` and `--plan-edit-hook <PATH>` each name one executable, the hook's at the
+  default 600 seconds and replacing the config's hook entirely (the manager's ruling,
+  relayed while this was built).
+- **The hook runs in the reply's submission check**, the one place an envelope can still be
+  refused whole, beside the envelope reviewer, and journals its `edit-rejected` from that
+  process's own stream. An envelope that reaches the reply queue other than through `reply`
+  — a host bus writing it directly — is offered to the hook no more than it is to the
+  reviewer.
+- **The composed task is the node's rendering**: what only the dispatch itself knows — a
+  mixed plan's boundary section, an out-of-repository dependency's reference block, a stack
+  placement, a note a dead conversation read — is appended at dispatch and is not in the
+  hook's `body`. For every node that has none of those, which is every node of a
+  single-visibility plan with no such dependency, the body is the dispatched task byte for
+  byte, which `tests/e2e/plan_edit_hook.rs` holds.
+
+Two journal kinds are added, so the events bundle moves to a new minor: a stream an
+earlier build wrote still validates, and one this build writes carries kinds a validator
+pinned at the previous bundle has no document for.
+
+```json
+{
+  "bundle_versions": {"events": "2.1.0"}
+}
+```

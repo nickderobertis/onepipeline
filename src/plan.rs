@@ -1265,6 +1265,9 @@ pub enum NodeKind {
     /// An action only an external person or outside system can perform. The
     /// harness never infers or executes it.
     Human,
+    /// A command the engine runs itself — its [`Node::command`] argv, with no shell
+    /// — settling on its exit status. It dispatches no agent and opens no session.
+    Command,
 }
 
 impl NodeKind {
@@ -1343,6 +1346,16 @@ pub struct Node {
     /// node round-trips as the project wrote it.
     #[serde(default, skip_serializing_if = "NodeKind::is_agent")]
     pub kind: NodeKind,
+    /// A `kind: command` node's argv: the program and its arguments, run with no
+    /// shell from the launch directory. Required non-empty on such a node, its
+    /// program not blank, and refused on every other kind. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// How long a `kind: command` node's command may run, in whole seconds, before
+    /// its process tree is stopped and the node settles `command-timed-out`.
+    /// Absent is no deadline at all. Refused on every other kind, and refused zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<std::num::NonZeroU64>,
     /// The task prose: `## What`, `## Why`, `## Acceptance criteria`, then
     /// `## Additional info` only when it is nonempty. A `kind: human` node
     /// carries the action prose alone.

@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("151.")["bundle_versions"]["events"],
+        divergence_block("152.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1802,6 +1802,8 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         }),
         id: "n".into(),
         kind: NodeKind::Human,
+        command: vec!["./scripts/step.sh".into()],
+        timeout_seconds: std::num::NonZeroU64::new(600),
         task: Some("t".into()),
         persona: Some("engineer".into()),
         deps: vec!["other".into()],
@@ -6803,7 +6805,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 69, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 71, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -12699,4 +12701,91 @@ fn the_provisioning_failure_names_are_what_the_contract_documents() {
         .parse()
         .expect("the kind is a valid word");
     assert_eq!(kind.as_str(), "provisioning-failed");
+}
+
+/// The three generic primitives, as the contract's `generic_primitives` block states them,
+/// driven through the public types: a command node reads and round-trips and its fields are
+/// the reserved keys the block names (the loader's rules over it are `plan check`'s, held by
+/// `tests/e2e/command_step.rs`), a schema-14 launch config carrying both keys reads and an earlier
+/// one carrying them is refused by name, the flags are `start`'s, the journal kinds are in
+/// the closed set, and the published versions are the ones this build writes.
+#[test]
+fn the_generic_primitives_block_is_what_this_build_reads() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "generic_primitives"))
+        .expect("the block is JSON");
+    let block = &block["generic_primitives"];
+
+    let node: Node =
+        serde_json::from_value(block["command_node"].clone()).expect("a command node reads");
+    assert_eq!(node.kind, NodeKind::Command);
+    assert_eq!(node.command, ["./scripts/publish-notes.sh", "--quiet"]);
+    assert_eq!(node.timeout_seconds, NonZeroU64::new(300));
+    let written = serde_json::to_value(&node).expect("a node writes");
+    assert_eq!(
+        written, block["command_node"],
+        "a command node does not round-trip"
+    );
+    for key in block["metadata_keys"].as_array().expect("the keys") {
+        let field = key
+            .as_str()
+            .and_then(|key| key.strip_prefix("onepipeline."))
+            .expect("a reserved key");
+        assert!(
+            written.get(field).is_some(),
+            "`{field}` is not a node field"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!("generic-primitives-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("launch.json");
+    std::fs::write(&path, block["launch_config"].to_string()).expect("written");
+    let config = LaunchConfig::load(&path).expect("a schema-14 launch config reads");
+    assert_eq!(
+        block["launch_config"]["schema_version"],
+        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
+    );
+    assert_eq!(config.checks.len(), 2);
+    let hook = config.plan_edit_hook.expect("the hook is named");
+    assert_eq!(hook.command, ["./scripts/judge-edit.sh"]);
+    assert_eq!(hook.timeout_seconds.get(), 120);
+    assert_eq!(
+        block["plan_edit_hook_default_timeout_seconds"],
+        json!(onepipeline::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS.get())
+    );
+    for key in ["checks", "plan_edit_hook"] {
+        let mut earlier = json!({"schema_version": 13});
+        earlier[key] = block["launch_config"][key].clone();
+        std::fs::write(&path, earlier.to_string()).expect("written");
+        let refused = LaunchConfig::load(&path).expect_err("an earlier schema cannot carry it");
+        assert!(
+            refused.to_string().contains(&format!("`{key}`")),
+            "{refused}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let start = Cli::command();
+    let start = start.find_subcommand("start").expect("`start` is a verb");
+    for flag in block["start_flags"].as_array().expect("the flags") {
+        assert!(
+            start.get_arguments().any(|argument| argument
+                .get_long()
+                .map(|long| format!("--{long}"))
+                .as_deref()
+                == flag.as_str()),
+            "`start` takes no {flag}"
+        );
+    }
+    for kind in block["journal_kinds"].as_array().expect("the kinds") {
+        let kind = kind.as_str().expect("a kind");
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.to_owned())).is_some(),
+            "{kind} is not a kind this build emits"
+        );
+    }
+    assert_eq!(
+        block["events_bundle_version"],
+        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
+    );
 }

@@ -579,6 +579,9 @@ pub(crate) enum Message {
     ChainStopped(Box<ChainStopped>),
     /// The dispatch settled.
     Settled(Box<Settled>),
+    /// A `kind: command` node's command ended, ahead of its settlement: the node, and
+    /// what `command-exited` records.
+    CommandExited(Box<(String, crate::payload::CommandExited)>),
     /// The pool-maintenance sweep this driver started has maintained every
     /// identity, and this is what it did.
     Maintained(Box<crate::maintenance::PoolsMaintained>),
@@ -2773,6 +2776,14 @@ fn converge(
                 Message::PublicationDue(due) => publications.push(*due),
                 Message::ReworkDue(due) => reworks_due.push(*due),
                 Message::Raise(surface) => raise(paths, journal, *surface)?,
+                Message::CommandExited(exited) => {
+                    let (node, exited) = *exited;
+                    journal.emit(
+                        journal::PipelineKind::CommandExited,
+                        journal::labels(&paths.run, Some(&node)),
+                        payload_of(&exited)?,
+                    )?;
+                }
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
@@ -8713,6 +8724,34 @@ fn start_ready(
                 journal,
                 &Settlement::plain(&node.id, NodeStatus::Waiting, None),
             )?;
+            settled_here = true;
+            continue;
+        }
+        if node.kind == NodeKind::Command {
+            // A command is run rather than dispatched: no agent, no session, and none of
+            // the placement below. It is in flight like a dispatch — counted against the
+            // plan's concurrency and cancelled by what cancels one — and is never reported
+            // quiet, since a command records nothing while it runs.
+            journal.emit(
+                journal::PipelineKind::CommandStarted,
+                journal::labels(&paths.run, Some(&node.id)),
+                payload_of(&crate::commandstep::started(paths, &node))?,
+            )?;
+            let cancel = CancellationToken::new();
+            crate::commandstep::spawn(paths, launch, &node, cancel.clone(), tx.clone())?;
+            let now = Instant::now();
+            in_flight.insert(
+                node.id.clone(),
+                Dispatch {
+                    node,
+                    cancel,
+                    started: now,
+                    last_progress: now,
+                    reported_quiet: true,
+                    control: None,
+                    presentations: crate::note::Presentations::default(),
+                },
+            );
             settled_here = true;
             continue;
         }

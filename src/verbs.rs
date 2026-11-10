@@ -356,6 +356,20 @@ pub fn render_results_json(results: &Results) -> Result<String> {
                     .copied()
                     .unwrap_or(crate::graph::NodeStatus::Pending),
                 outcome: view.state.outcomes.get(&node.id).map(String::as_str),
+                // The standing settlement's own words, as `status --json` reads them: only
+                // for a node settled, never for one still to run or running again.
+                detail: statuses
+                    .get(&node.id)
+                    .filter(|status| {
+                        !matches!(
+                            status,
+                            crate::graph::NodeStatus::Pending
+                                | crate::graph::NodeStatus::Ready
+                                | crate::graph::NodeStatus::Running
+                        )
+                    })
+                    .and_then(|_| view.state.settled_details.get(&node.id))
+                    .map(String::as_str),
                 comments: comments.get(&node.id).cloned().unwrap_or_default(),
                 provisioning_failures: view
                     .state
