@@ -435,6 +435,14 @@ pub enum PipelineKind {
     ///
     /// Last, so adding it moves no earlier variant's place in the order.
     HomeStatus,
+    /// A `kind: command` node's command was started: its `command` argv, the `log` its
+    /// output is kept in, and its `timeout_seconds` where it has one. Records the node
+    /// running; no agent is dispatched for it.
+    CommandStarted,
+    /// A `kind: command` node's command ended: `ending` (`exited`, `timed-out`,
+    /// `cancelled` or `not-started`), its `exit_code` where it exited with one, and how
+    /// long it ran. The node's `node-settled` follows it.
+    CommandExited,
 }
 
 impl PipelineKind {
@@ -510,6 +518,8 @@ impl PipelineKind {
             Self::ScratchRetained => "scratch-retained",
             Self::CheckFailed => "check-failed",
             Self::ChecksUnfollowed => "checks-unfollowed",
+            Self::CommandStarted => "command-started",
+            Self::CommandExited => "command-exited",
         }
     }
 
@@ -608,6 +618,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ScratchRetained,
     PipelineKind::CheckFailed,
     PipelineKind::ChecksUnfollowed,
+    PipelineKind::CommandStarted,
+    PipelineKind::CommandExited,
 ];
 
 /// The id of a stored artifact.

@@ -1379,6 +1379,21 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
         // from the graph and the recorded settlements, and this record is how a
         // reader sees the moment it happened.
         Some(journal::PipelineKind::NodeReady) => {}
+        // A command node is running from the moment its command starts, exactly as a
+        // dispatched node is: no agent is dispatched for it, so this is its only record
+        // of starting. How it ended is its `node-settled`; `command-exited` adds nothing
+        // the fold reads.
+        Some(journal::PipelineKind::CommandStarted) => {
+            if let Some(node) = &event.labels.node {
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Running));
+                if let Some(ts) = millis_of(&event.ts) {
+                    state.dispatched_at.insert(node.clone(), ts);
+                }
+            }
+        }
+        Some(journal::PipelineKind::CommandExited) => {}
         Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
                 state

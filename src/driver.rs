@@ -1614,6 +1614,20 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
 
+    // The checks this launch registered — the config's, then each `--check` — offered the
+    // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
+    // and before any run exists: a refusal, or a check that could not be run, refuses the
+    // launch with the report `plan check` prints and mints nothing. `adopt` runs none.
+    let mut registered: Vec<crate::plancheck::Registered> = declared
+        .checks
+        .iter()
+        .map(crate::plancheck::Registered::argv)
+        .collect();
+    for path in &args.checks {
+        registered.push(crate::plancheck::Registered::path(path)?);
+    }
+    crate::plancheck::launch(&read, &args.project, &registered)?;
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -1659,6 +1673,18 @@ fn start(args: &StartArgs) -> Result<i32> {
         .dispatch_env_hook_timeout
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
+    // The plan-edit hook, by two rungs: the flag names one executable at the default
+    // timeout and replaces the config's hook entirely. Made absolute against the launch
+    // directory, so every driver that adopts the run — from wherever it was started —
+    // offers edits to the executable this launch named. The config's argv is kept as the
+    // document wrote it, and is run from the launch directory.
+    let plan_edit_hook = match &args.plan_edit_hook {
+        Some(path) => Some(crate::filter::PlanEditHook::new(
+            vec![launch_dir.join(path).display().to_string()],
+            crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+        )?),
+        None => declared.plan_edit_hook.clone(),
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     let launched = |read: &crate::taskgraph::Read,
                     continuation: &crate::continuation::Continuation|
@@ -1897,6 +1923,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        plan_edit_hook,
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
         public_id: public.id.into_string(),
@@ -4693,6 +4720,9 @@ pub(crate) fn submit_offered(
             // `edits::compile` can raise, but a note's own validation is not one
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
+            // The run as the envelope would leave it, for the plan-edit hook below: each
+            // validated command folded on as the reconciler's own validation folds it.
+            let mut staged_state = view.state.clone();
             for command in &envelope.commands {
                 let step = match validate_here(
                     paths,
@@ -4718,7 +4748,36 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
+                crate::projection::fold_operations(
+                    &mut staged_state,
+                    &step.staged(),
+                    Some(sys::now_millis()),
+                );
                 staged.push(step);
+            }
+            // Every node the envelope introduces or changes, offered to the plan-edit hook
+            // the run's launch named, with the task its next dispatch would be given — this
+            // process being the run's writer, from the inputs a driver starting on the run
+            // composes it from — before anything of the envelope is applied or journalled as
+            // an edit. A refusal turns the whole envelope away, journalled `edit-rejected`.
+            if let Err((index, error)) = crate::planedit::judge(
+                paths,
+                &view.launch,
+                &envelope.commands,
+                &staged_state.graph,
+                &mut |node| crate::composition::of_a_fresh_driver(paths, &staged_state, node),
+            ) {
+                engine::record_rejection(
+                    paths,
+                    &mut journal,
+                    envelope.author.clone(),
+                    &envelope.commands[index],
+                    &error,
+                    // Never queued, so no envelope id names it.
+                    None,
+                )?;
+                lock.release();
+                return Err(error);
             }
             // Then deliver, which is the first thing here that reaches outside
             // the run. Nothing is driving it, so nothing of it is in flight — the
@@ -5497,6 +5556,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
