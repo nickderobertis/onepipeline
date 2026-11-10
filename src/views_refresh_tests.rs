@@ -156,17 +156,24 @@ fn refresh_rereads_out_of_order_records_and_then_resumes_appending() {
 /// kernel's file times advance by the tick, so a same-length edit landing inside
 /// the tick of the last append is one no reader of the metadata can see, and that
 /// timing is not the edit this journey is about.
+///
+/// Every probe is a new file with bytes in it. Rewriting one empty probe need not
+/// restamp it: on Windows std truncates an existing file by resetting its
+/// allocation, which leaves an already-empty file's write time where its creation
+/// put it, so a probe created inside the journal's tick never passed it.
 fn past_the_file_time_of(journal: &std::path::Path) {
     let modified = |path: &std::path::Path| {
         std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .expect("a file time")
     };
-    let probe = journal.with_extension("tick");
-    loop {
-        std::fs::write(&probe, "").expect("probe");
-        if modified(&probe) > modified(journal) {
-            std::fs::remove_file(&probe).expect("remove probe");
+    let stamped = modified(journal);
+    for attempt in 0_u64.. {
+        let probe = journal.with_extension(format!("tick{attempt}"));
+        std::fs::write(&probe, "tick").expect("probe");
+        let probed = modified(&probe);
+        std::fs::remove_file(&probe).expect("remove probe");
+        if probed > stamped {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
