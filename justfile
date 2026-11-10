@@ -358,9 +358,10 @@ version-package-tier := "binary(package_bundle) and test(=the_packaged_crate_car
 offline-tiers := "(" + pooled-slot-tier + ") or (" + narrow-write-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
 
 # 95% line coverage, measured as 95.73% under LCOV, is the gate; lower it only with a
-# documented reason in AGENTS.md. It is measured over the **whole** offline tier, which is why the five
-# tier runs below report nothing and one merge reports them all: each tier is its
-# own Nx project, and splitting the run must not split the floor.
+# documented reason in AGENTS.md. It is measured over the **whole** offline tier: each
+# tier below writes its own LCOV report and `_crate-coverage` holds their merge to the
+# floor, because each tier is its own Nx project and splitting the run must not split
+# the floor.
 
 # cargo-llvm-cov's instrumented tree; `tests/coverage.rs` holds this path against
 # `LLVM_PROFILE_FILE`, so a drift fails there rather than cleaning the wrong tree.

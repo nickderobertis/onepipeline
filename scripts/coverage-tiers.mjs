@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const isName = (value) => typeof value === "string" && value.trim() !== "";
 
 const refuse = (message) => {
   console.error(`coverage-tiers: ${message}`);
@@ -60,6 +61,9 @@ for (const path of tracked) {
   if (!isRecord(project) || (project.targets !== undefined && !isRecord(project.targets))) {
     refuse(`${path} is not a project object with a targets map. ACTION: repair that project file`);
   }
+  if (!isName(project.name)) {
+    refuse(`${path} has no project name to identify its targets by. ACTION: give it a name`);
+  }
   if (project.name === "onepipeline") aggregate = project.targets?.test;
   for (const [target, definition] of Object.entries(project.targets ?? {})) {
     const id = `${project.name}:${target}`;
@@ -69,9 +73,15 @@ for (const path of tracked) {
     ) {
       refuse(`${id} is not a target with an outputs list. ACTION: repair ${path}`);
     }
-    const recipe = String(definition.command ?? "").match(/^just (\S+)/)?.[1];
+    if (definition.command !== undefined && typeof definition.command !== "string") {
+      refuse(`${id} has a command that is not a string. ACTION: repair ${path}`);
+    }
+    if (!(definition.outputs ?? []).every((output) => typeof output === "string")) {
+      refuse(`${id} has an output that is not a path string. ACTION: repair ${path}`);
+    }
+    const recipe = (definition.command ?? "").match(/^just (\S+)/)?.[1];
     const reports = (definition.outputs ?? [])
-      .map((output) => String(output).match(REPORT)?.[1])
+      .map((output) => output.match(REPORT)?.[1])
       .filter(Boolean);
     const recipeUnit = unitOfRecipe.get(recipe);
     if (reports.length > 1)
@@ -111,8 +121,15 @@ if (!isRecord(aggregate) || !Array.isArray(aggregate.dependsOn ?? []))
 const dependedOn = new Set(
   (aggregate.dependsOn ?? []).flatMap((need) => {
     if (typeof need === "string") return [`onepipeline:${need}`];
-    if (!isRecord(need) || !Array.isArray(need.projects ?? []))
-      refuse("onepipeline:test has a malformed dependsOn entry. ACTION: repair it");
+    if (
+      !isRecord(need) ||
+      !isName(need.target) ||
+      !Array.isArray(need.projects ?? []) ||
+      !(need.projects ?? []).every(isName)
+    )
+      refuse(
+        "onepipeline:test has a dependsOn entry without a target name and a list of project names. ACTION: repair it",
+      );
     return (need.projects ?? []).map((name) => `${name}:${need.target}`);
   }),
 );
