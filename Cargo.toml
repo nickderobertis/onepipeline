@@ -879,6 +879,17 @@ resolver = "2"
 # through the sibling binary this lock builds. It requires nothing this lock did
 # not already resolve.
 #
+# `oneagentgraph` 0.11.4 is the floor because it keeps a reset clock's next
+# firing a **whole interval after the reset's `ts`** (oneagentgraph #272): it
+# publishes `cron-reset` before it starts counting, and counts a span on the
+# slower of the wall and monotonic clocks. Below it a host whose wall clock was
+# being pulled back stamped the run monitor's next progress report less than an
+# interval after the planner's read restarted it. `tests/e2e/observer_follow.rs`'s
+# `a_planner_reading_holds_the_next_report_a_whole_interval_away` holds it on
+# Linux. (0.11.3 was tagged and never published.) It requires `onejudge
+# ^0.23.0`, which `^0.22.4` admits no version of, so the two requirements move
+# as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -899,7 +910,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.11.2"
+oneagentgraph = "0.11.4"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
@@ -1056,7 +1067,13 @@ onemessagebus = "0.10.0"
 # holds both through the linked graph. Inside `^0.22.0`, so `oneagentgraph` 0.9.x
 # resolves this one copy, over the same `oneharness-core`; the requirement moves
 # so the floor says the fix is in.
-onejudge = "0.22.4"
+#
+# **0.23.0 is taken because `oneagentgraph` 0.11.4 requires it**, and `^0.22.4`
+# admits no 0.23.x, so without the move the lock carries onejudge twice. Nothing
+# here reads anything new from it. It stops at 0.23.0 rather than the newest
+# release because 0.23.1 requires `onemessagebus ^0.11`, which the bus pin and
+# `onevcs` admit no version of: taking it would resolve the bus twice.
+onejudge = "0.23.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
