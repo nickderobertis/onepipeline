@@ -956,3 +956,89 @@ fn a_hook_slower_than_the_replys_wait_is_answered_queued_and_its_refusal_journal
     world.run(&["status", &run]).exited(0).out_lacks(RULING);
     world.run(&["stop", &run]);
 }
+
+/// An envelope a host's bus writes onto the run's queue itself — never through `reply` — is
+/// judged by the hook where the driver applies it: refused, nothing of it applies, and the
+/// refusal is journalled `edit-rejected` naming the hook and the node.
+#[test]
+fn an_envelope_the_bus_queues_directly_is_judged_by_the_hook_too() {
+    let world = World::new("plan-edit-hook-bus");
+    let launch = config(&world, 60);
+    let run = held(
+        &world,
+        "hookbus",
+        vec![noted("later", &["slow"])],
+        &["--launch-config", &launch],
+    );
+    std::fs::write(world.root.join("hook.exit"), exit("refuse")).expect("the refusal is armed");
+    std::fs::write(world.root.join("hook.say"), "not through the bus either").expect("armed");
+    crate::malformed_envelopes::sent_through_the_bus(
+        &world,
+        &run,
+        &json!({"version": 2, "commands": [{"op": "amend", "id": "later", "text": RULING}]}),
+    );
+    world.until("the hook's refusal to be journalled", |world| {
+        !rejected(world, &run).is_empty()
+    });
+    assert_eq!(offered(&world), [("amend".to_owned(), "later".to_owned())]);
+    let reason = rejected(&world, &run)[0]["payload"]["reason"]
+        .as_str()
+        .expect("a reason")
+        .to_owned();
+    assert!(
+        reason.contains("plan-edit hook")
+            && reason.contains("'later'")
+            && reason.contains("not through the bus either"),
+        "{reason}"
+    );
+    assert_eq!(committed(&world, &run), 0);
+    world.run(&["status", &run]).exited(0).out_lacks(RULING);
+    world.run(&["stop", &run]);
+}
+
+/// Two different changes to one node in one envelope — added, then requeued with another task
+/// — are offered once, under the first command that named it, with the task the envelope
+/// leaves it: byte for byte the task it is then dispatched with.
+#[test]
+fn distinct_changes_to_one_node_in_one_envelope_offer_its_final_task_once() {
+    let world = World::new("plan-edit-hook-final");
+    let launch = config(&world, 60);
+    let run = held(
+        &world,
+        "hookfinal",
+        Vec::new(),
+        &["--launch-config", &launch],
+    );
+    let mut fresh = noted("fresh", &["slow"]);
+    fresh["parked"] = json!(true);
+    let restated = format!(
+        "## What\nDo fresh.\n\n## Why\nRestated in the same envelope.\n\n## Acceptance criteria\n- \
+         fresh is done its second way.\n\n{NOTES}"
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([
+                {"op": "add", "node": fresh},
+                {"op": "requeue", "id": "fresh", "amend": {"task": restated}},
+            ])),
+        )
+        .exited(0);
+    assert_eq!(offered(&world), [("add".to_owned(), "fresh".to_owned())]);
+    let body = offers(&world)[0]["task"]["body"]
+        .as_str()
+        .expect("a body")
+        .to_owned();
+    assert!(body.contains("its second way"), "{body}");
+    assert!(!body.contains("fresh is done.\n"), "{body}");
+
+    world.release("slow.go");
+    world.until("the node to be dispatched", |_| {
+        !tasks_dispatched(&world, "fresh").is_empty()
+    });
+    assert_eq!(
+        tasks_dispatched(&world, "fresh")[0],
+        body,
+        "the hook was shown a task other than the one the node was dispatched with"
+    );
+}
