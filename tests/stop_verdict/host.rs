@@ -67,7 +67,6 @@ impl Standing {
     }
 }
 
-/// One declared row.
 #[derive(Debug, Clone)]
 struct Declared {
     identity: String,
@@ -79,7 +78,6 @@ struct Declared {
     state: &'static str,
 }
 
-/// The aged host and what the journey keeps beside it.
 struct Aged {
     host: Host,
     aged: AgedHost,
@@ -194,8 +192,7 @@ fn keys(value: &Value) -> Vec<&str> {
 }
 
 /// Check one JSON listing row by row against the declaration, `acknowledged` naming the
-/// entries standing, and answer its rows' digest. A row the fixture declares unanswered
-/// (`unknown`) is named in `unknown` instead.
+/// entries standing, and answer its rows' digest.
 fn check_document(
     document: &Value,
     declared: &[Declared],
@@ -297,7 +294,6 @@ impl Aged {
             .collect()
     }
 
-    /// The aged state back, confirmed, and the acknowledgements as they were.
     fn restore(&self) {
         self.aged.restore().expect("the aged host restores");
         self.aged
@@ -373,8 +369,9 @@ impl Aged {
         )
     }
 
-    /// The traced call's phases and derivations, read back and cleared.
-    fn traced(&self) -> (BTreeMap<String, f64>, u64, u64) {
+    /// The traced call's phases and derivations, read back and cleared. Each phase in
+    /// `required` must have been recorded: they are what the budget's detail states.
+    fn traced(&self, required: &[&str]) -> (BTreeMap<String, f64>, u64, u64) {
         let line = std::fs::read_to_string(self.trace.join("phases")).expect("a phase line");
         let line: Value = serde_json::from_str(line.trim()).expect("one phase line");
         let mut phases: BTreeMap<String, f64> = line["phases"]
@@ -390,6 +387,12 @@ impl Aged {
                     amount.as_f64().expect("an amount") / 1000.0,
                 );
             }
+        }
+        for phase in required {
+            assert!(
+                phases.contains_key(*phase),
+                "the traced call recorded no {phase} phase: {line}"
+            );
         }
         phases.insert("whole".to_owned(), line["wall_ms"].as_f64().expect("wall"));
         let derived = std::fs::read_to_string(self.trace.join("diagnostics"))
@@ -452,7 +455,7 @@ fn host_listing(aged: &Aged, cold_us: u64) -> HostRead {
     }
     aged.restore();
     aged.host_listing(true);
-    let (phases_ms, rederived, git) = aged.traced();
+    let (phases_ms, rederived, git) = aged.traced(&["onevcs-read", "acknowledgements", "render"]);
     HostRead {
         read: "unpublished-host".into(),
         verdict_sha256: answer.expect("an answer"),
@@ -539,7 +542,8 @@ fn acknowledgements(aged: &Aged, branches: &[String], before: &[String]) -> Host
     aged.restore();
     let (_, code, stdout) = aged.acknowledge(&branches[0], true);
     check_acknowledged(aged, &branches[0], code, &stdout, before);
-    let (phases_ms, rederived, git) = aged.traced();
+    let (phases_ms, rederived, git) =
+        aged.traced(&["branch-read", "write", "listing", "onevcs-read", "render"]);
     HostRead {
         read: "acknowledge".into(),
         verdict_sha256: digest(branches.join("\n").as_bytes()),
@@ -716,7 +720,7 @@ fn stop_guard(aged: &Aged, every: &Path) -> Vec<HostRead> {
             let output = child.wait_with_output().expect("the guard runs");
             let answer = answer.expect("an answer");
             assert_eq!(String::from_utf8_lossy(&output.stdout), answer.as_str());
-            let (phases_ms, rederived, git) = aged.traced();
+            let (phases_ms, rederived, git) = aged.traced(&["session-read", "unwatched"]);
             HostRead {
                 read: format!("stop-guard-{scenario}"),
                 verdict_sha256: digest(answer.as_bytes()),
