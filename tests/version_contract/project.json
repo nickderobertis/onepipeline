@@ -9,11 +9,14 @@
   "targets": {
     "test": {
       "command": "just _version-contract-test",
-      "cache": false,
       "inputs": [
-        "contractSource",
+        "versionContractCoverageSource",
+        "coverageTierKey",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _version-contract-test _ensure-onetaskgraph --variable version-contract-tier --variable onetaskgraph-version"
         },
         {
           "runtime": "node -p process.platform"
@@ -29,7 +32,7 @@
       ],
       "parallelism": false,
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-version-contract-*.profraw"
+        "{workspaceRoot}/target/coverage-units/onepipeline-version-contract.lcov"
       ]
     },
     "test-quick": {

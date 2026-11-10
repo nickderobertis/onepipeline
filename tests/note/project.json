@@ -54,6 +54,10 @@
       "command": "just _note-test",
       "inputs": [
         "noteJourneySource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _note-test _ensure-onetaskgraph --variable note-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -67,9 +71,8 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-note-*.profraw"
-      ],
-      "cache": false
+        "{workspaceRoot}/target/coverage-units/onepipeline-note-journeys.lcov"
+      ]
     },
     "test-quick": {
       "command": "just _note-test-quick",

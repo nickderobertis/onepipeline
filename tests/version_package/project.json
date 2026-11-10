@@ -9,11 +9,14 @@
   "targets": {
     "test": {
       "command": "just _version-package-test",
-      "cache": false,
       "inputs": [
-        "crateTestSource",
+        "crateCoverageSource",
+        "coverageTierKey",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version"
+        },
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _version-package-test _ensure-onetaskgraph --variable version-package-tier --variable onetaskgraph-version"
         },
         {
           "runtime": "node -p process.platform"
@@ -29,7 +32,7 @@
       ],
       "parallelism": false,
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-version-package-*.profraw"
+        "{workspaceRoot}/target/coverage-units/onepipeline-version-package.lcov"
       ]
     },
     "test-quick": {

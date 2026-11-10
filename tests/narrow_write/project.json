@@ -54,6 +54,10 @@
       "command": "just _narrow_write-test",
       "inputs": [
         "narrowWriteSource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _narrow_write-test _ensure-onetaskgraph --variable narrow-write-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -67,9 +71,8 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-narrow_write-*.profraw"
-      ],
-      "cache": false
+        "{workspaceRoot}/target/coverage-units/onepipeline-narrow-write.lcov"
+      ]
     },
     "test-quick": {
       "command": "just _narrow_write-test-quick",

@@ -27,10 +27,12 @@ other binary here.
 - **A tier's inputs are what its tests read.** Its named input in `nx.json`
   lists the sources it compiles *and* every file it opens at run time; one it
   misses replays a cached green run over a change it would have failed on.
-- **One coverage floor.** An offline tier's `test` runs instrumented with
-  `--no-report`, names its profiles `onepipeline-<tier>-*.profraw`, and declares
-  exactly those as its `outputs`, so a replay restores what
-  `onepipeline:test`'s single report merges.
+- **One coverage floor.** An offline tier's `test` runs through
+  `scripts/coverage-unit.sh`, declares its `target/coverage-units/<project>.lcov`
+  as its `outputs`, and replays that report when its key did not move;
+  `onepipeline:test` merges every tier's report through
+  `scripts/coverage-merge.mjs` and `scripts/coverage-tiers.mjs` refuses a tier it
+  would not count. A tier's key names the external tools through `coverageTierKey`.
 - **The live tiers have no `test`.** Their journey is an uncached target of
   its own that no `check` reaches, and refuses — never skips — without its
   credential or network.

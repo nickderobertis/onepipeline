@@ -6809,11 +6809,14 @@ pub fn path_leading_with(dirs: &[PathBuf]) -> std::ffi::OsString {
 ///
 /// Named for the process rather than shared, because the name is what an uplift
 /// replaces — see [`held_alias`]. Removed by the last [`World`] this process
-/// drops, so a suite leaves the target directory as it found it.
+/// drops, so a suite leaves the target directory as it found it. Under `build/`,
+/// which `scripts/coverage-unit.sh` does not scan for objects: another tier's
+/// process removes its own copies here while a concurrent unit's report is built.
 fn held_dir() -> PathBuf {
     binary()
         .parent()
         .expect("the binary is in a directory")
+        .join("build")
         .join("doubles")
         .join(std::process::id().to_string())
 }
