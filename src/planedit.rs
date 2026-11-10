@@ -229,6 +229,9 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
     if !dir.as_os_str().is_empty() {
         spawning.current_dir(dir);
     }
+    // A process the hook leaves behind must not hold this one's own streams open behind it:
+    // the sender of a reply reads them to their end. See [`crate::sys::disown_standard_handles`].
+    crate::sys::disown_standard_handles();
     let mut child = match spawning.spawn() {
         Ok(child) => child,
         Err(error) => return Verdict::Unjudged(format!("it could not be started: {error}")),

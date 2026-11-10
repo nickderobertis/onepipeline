@@ -151,10 +151,19 @@ fn run(
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true);
+            // Windows grants an append-only handle no `FILE_WRITE_DATA`, and a program of the
+            // Cygwin family — git for Windows' `bash` among them — refuses every write to such
+            // a stdout as a bad descriptor. So there it is opened for writing and placed at its
+            // end, which keeps what an earlier run of the command wrote, as appending does.
+            #[cfg(windows)]
+            options.write(true);
+            #[cfg(not(windows))]
+            options.append(true);
+            let mut log = options.open(&log_path)?;
+            std::io::Seek::seek(&mut log, std::io::SeekFrom::End(0))?;
+            Ok(log)
         });
     let log = match log {
         Ok(log) => log,
@@ -198,6 +207,10 @@ fn run(
     if !launch.dir.as_os_str().is_empty() {
         spawning.current_dir(&launch.dir);
     }
+    // A process the command leaves behind must not hold this one's own streams open behind
+    // it: an attached launch's caller reads them to their end. The engine's own spawns name
+    // every stream they hand on, so nothing here is meant to inherit them.
+    crate::sys::disown_standard_handles();
     let mut child = match spawning.spawn() {
         Ok(child) => child,
         Err(error) => return not_started(error.to_string()),

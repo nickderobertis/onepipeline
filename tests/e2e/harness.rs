@@ -2977,7 +2977,14 @@ impl World {
             .enumerate()
             .map(|(index, node)| {
                 let id = node.get("id").and_then(Value::as_str).unwrap_or("unnamed");
-                format!("{index:03}-{id}")
+                // Only the characters some host refuses in a file name are replaced: a
+                // journey about an id the loader refuses — one naming a drive or a
+                // separator — still needs its document written to be refused.
+                let portable: String = id
+                    .chars()
+                    .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+                    .collect();
+                format!("{index:03}-{portable}")
             })
             .collect();
         let named: BTreeMap<&str, &str> = nodes
@@ -8865,8 +8872,8 @@ pub fn posix_script(directory: &Path, name: &str, body: &str) -> PathBuf {
 /// Windows starts no `#!` script, so what the `--check` flag names here is a
 /// batch file and the POSIX body sits beside it: the batch hands it to the
 /// `bash` git for Windows installs, which is the same shell every `just` recipe
-/// on this platform already runs through, and the check's stdin, stdout, stderr
-/// and exit status all reach it through `cmd` unchanged. One body per check
+/// on this platform already runs through, and the check's arguments (`%*`),
+/// stdin, stdout, stderr and exit status all reach it through `cmd` unchanged. One body per check
 /// rather than two, so a journey states what its check does once and neither
 /// spelling can drift from the other.
 ///
@@ -8882,7 +8889,7 @@ pub fn posix_script(directory: &Path, name: &str, body: &str) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            "@echo off\r\n\"{}\" \"{}\"\r\nexit /b %ERRORLEVEL%\r\n",
+            "@echo off\r\n\"{}\" \"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
             bash().display(),
             shell_path(&posix)
         ),
