@@ -192,19 +192,89 @@ pub const DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = match NonZeroU64:
 /// passes it, `1` refuses it with its stderr as the reason, and any other exit
 /// or the timeout is *could not be judged*. Either refusal refuses the whole
 /// reply before anything is appended or applied.
+///
+/// Its argv always names a program: [`new`](Self::new) — and the document it is
+/// read from — refuse one that is empty or whose program is blank, so a hook that
+/// can be held is one that can be started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "PlanEditHookDocument", into = "PlanEditHookDocument")]
 pub struct PlanEditHook {
-    /// The argv the hook is spawned with — no shell. Never empty, and its program
-    /// never blank: either is refused where the document is read.
-    pub command: Vec<String>,
-    /// How long one offer is awaited before the hook is stopped and the edit read
-    /// as not judged, in whole seconds; `600` where the document says nothing.
+    program: String,
+    arguments: Vec<String>,
+    timeout_seconds: NonZeroU64,
+}
+
+impl PlanEditHook {
+    /// The hook spawning `command` — its program, then its arguments, with no shell — and
+    /// awaited for `timeout_seconds` per node.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for a `command` that is empty or whose program is blank.
+    pub fn new(command: Vec<String>, timeout_seconds: NonZeroU64) -> Result<Self> {
+        let mut words = command.into_iter();
+        match words.next() {
+            Some(program) if !program.trim().is_empty() => Ok(Self {
+                program,
+                arguments: words.collect(),
+                timeout_seconds,
+            }),
+            _ => Err(Error::Invalid(NAMES_NO_PROGRAM.to_owned())),
+        }
+    }
+
+    /// The program the hook spawns.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The arguments it is spawned with, after the program.
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// How long one offer is awaited before the hook is stopped and the edit read as not
+    /// judged.
+    pub fn timeout_seconds(&self) -> NonZeroU64 {
+        self.timeout_seconds
+    }
+}
+
+/// What a hook whose argv names no program is refused with.
+const NAMES_NO_PROGRAM: &str = "`plan_edit_hook.command` names no program — give it the \
+                                program to run and its arguments, or leave `plan_edit_hook` out \
+                                to declare that this launch has none";
+
+/// A plan-edit hook as a document spells it: `command` and `timeout_seconds`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanEditHookDocument {
+    command: Vec<String>,
     #[serde(
         default = "default_plan_edit_hook_timeout",
         deserialize_with = "plan_edit_hook_timeout"
     )]
-    pub timeout_seconds: NonZeroU64,
+    timeout_seconds: NonZeroU64,
+}
+
+impl TryFrom<PlanEditHookDocument> for PlanEditHook {
+    type Error = String;
+
+    fn try_from(document: PlanEditHookDocument) -> std::result::Result<Self, String> {
+        Self::new(document.command, document.timeout_seconds)
+            .map_err(|_| NAMES_NO_PROGRAM.to_owned())
+    }
+}
+
+impl From<PlanEditHook> for PlanEditHookDocument {
+    fn from(hook: PlanEditHook) -> Self {
+        Self {
+            command: std::iter::once(hook.program)
+                .chain(hook.arguments)
+                .collect(),
+            timeout_seconds: hook.timeout_seconds,
+        }
+    }
 }
 
 fn default_plan_edit_hook_timeout() -> NonZeroU64 {
@@ -948,13 +1018,14 @@ impl LaunchConfig {
                     Carried::Blank
                 },
             ),
+            // Never `Blank`: a hook naming no program was refused by name where the document
+            // was read, before this one existed.
             (
                 PLAN_EDIT_HOOK_KEY,
-                match &config.plan_edit_hook {
-                    None => Carried::Absent,
-                    Some(hook) if names_a_program(&hook.command) => Carried::Named,
-                    Some(_) => Carried::Blank,
-                },
+                config
+                    .plan_edit_hook
+                    .as_ref()
+                    .map_or(Carried::Absent, |_| Carried::Named),
             ),
         ];
         for (key, value) in carried {
@@ -1287,14 +1358,17 @@ mod tests {
                     "--strict".to_string(),
                 ],
             ],
-            plan_edit_hook: Some(PlanEditHook {
-                command: vec![
-                    "./scripts/judge-edit.sh".to_string(),
-                    "--bar".to_string(),
-                    "./bar.md".to_string(),
-                ],
-                timeout_seconds: DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
-            }),
+            plan_edit_hook: Some(
+                PlanEditHook::new(
+                    vec![
+                        "./scripts/judge-edit.sh".to_string(),
+                        "--bar".to_string(),
+                        "./bar.md".to_string(),
+                    ],
+                    DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+                )
+                .expect("the golden's hook names a program"),
+            ),
         }
     }
 

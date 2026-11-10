@@ -566,12 +566,9 @@ fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reporte
         exit_code,
         stderr,
     };
-    let Some((program, arguments)) = check.argv.split_first() else {
-        return Err(cannot(None, "names no program to run".to_owned()));
-    };
-    let resolved = Path::new(program);
+    let resolved = Path::new(&check.program);
     let mut child = Command::new(resolved)
-        .args(arguments)
+        .args(&check.arguments)
         .env(SCHEMA_ENV, SCHEMA_VERSION)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -773,11 +770,14 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
     }
 }
 
-/// One registered check: the argv it is spawned with, and how its refusals name it.
+/// One registered check: the program it is spawned as and its arguments, with no shell
+/// between them, and how its refusals name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Registered {
-    /// The program and its arguments, with no shell between them.
-    argv: Vec<String>,
+    /// The program; never blank.
+    program: String,
+    /// Its arguments, after the program.
+    arguments: Vec<String>,
     /// The `source` its refusals carry and the `check` its failures name.
     named: String,
 }
@@ -790,17 +790,29 @@ impl Registered {
     /// it was given.
     pub(crate) fn path(path: &Path) -> Self {
         Self {
-            argv: vec![resolve(path).display().to_string()],
+            program: resolve(path).display().to_string(),
+            arguments: Vec::new(),
             named: path.display().to_string(),
         }
     }
 
     /// A check a launch config's `checks` registers: its argv run as the document wrote
     /// it, from the launch directory, and named by its words joined with one space.
-    pub(crate) fn argv(argv: &[String]) -> Self {
-        Self {
-            argv: argv.to_vec(),
-            named: argv.join(" "),
+    ///
+    /// # Errors
+    ///
+    /// An argv that is empty or whose program is blank, refused by the key that carried it
+    /// — which the launch config's own reader has already done for every document it read.
+    pub(crate) fn argv(argv: &[String]) -> Result<Self> {
+        match argv.split_first() {
+            Some((program, arguments)) if !program.trim().is_empty() => Ok(Self {
+                program: program.clone(),
+                arguments: arguments.to_vec(),
+                named: argv.join(" "),
+            }),
+            _ => Err(crate::error::Error::Invalid(
+                "a launch config's `checks` entry names no program to run".to_owned(),
+            )),
         }
     }
 }

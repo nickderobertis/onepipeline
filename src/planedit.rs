@@ -208,7 +208,10 @@ pub(crate) fn judge(
             .map_err(|error| {
                 Error::Invalid(format!("node '{}' does not serialize: {error}", node.id))
             })?;
-        let named = hook.command.join(" ");
+        let named = std::iter::once(hook.program())
+            .chain(hook.arguments().iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
         let refusal = match run(hook, &launch.dir, &document) {
             Verdict::Pass => continue,
             Verdict::Refuse(said) => format!(
@@ -255,12 +258,9 @@ fn words(said: &str, otherwise: &str) -> String {
 /// Run the hook over one document: from the launch directory, the document on its stdin,
 /// its stderr kept, and its process tree ended when it outlives its timeout.
 fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
-    let Some((program, arguments)) = hook.command.split_first() else {
-        return Verdict::Unjudged("it names no program".to_owned());
-    };
-    let mut spawning = Process::new(program);
+    let mut spawning = Process::new(hook.program());
     spawning
-        .args(arguments)
+        .args(hook.arguments())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -296,7 +296,7 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
             }
             let _ = said_tx.send(said);
         });
-    let timeout: NonZeroU64 = hook.timeout_seconds;
+    let timeout: NonZeroU64 = hook.timeout_seconds();
     let deadline = crate::hooks::deadline_after(timeout);
     let status = loop {
         match child.try_wait() {

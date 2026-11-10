@@ -14,7 +14,41 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, human, plan_of, posix_script, shell_path, World};
+use crate::harness::{agent, contract_block, human, plan_of, posix_script, shell_path, World};
+
+/// What the contract's `generic_primitives` block states about one of its keys.
+fn stated(key: &str) -> Value {
+    contract_block("generic_primitives")[key].clone()
+}
+
+/// One word the contract states under `key`, by its own name there.
+fn word(key: &str, name: &str) -> String {
+    stated(key)[name]
+        .as_str()
+        .unwrap_or_else(|| panic!("the contract states no {key}.{name}"))
+        .to_owned()
+}
+
+/// Whether the contract lists `item` under `key`.
+fn listed(key: &str, item: &str) -> bool {
+    stated(key)
+        .as_array()
+        .unwrap_or_else(|| panic!("the contract states no list {key}"))
+        .iter()
+        .any(|listed| listed == item)
+}
+
+/// Where the contract says a command node's output is kept, for this run and node.
+fn log_of(world: &World, run: &str, node: &str) -> PathBuf {
+    let template = stated("log");
+    let relative = template
+        .as_str()
+        .expect("the contract states the log's place")
+        .strip_prefix("<run>/")
+        .expect("under the run")
+        .replace("<node>", node);
+    world.run_file(run, &relative)
+}
 
 /// A command node running `script`.
 fn command(id: &str, deps: &[&str], script: &Path) -> Value {
@@ -74,12 +108,24 @@ fn dispatched(world: &World, run: &str, node: &str) -> bool {
 fn a_command_runs_after_its_dependency_with_the_runs_coordinates_and_a_human_still_gates() {
     let world = World::new("command-step-runs");
     let env = at(&world, "command.env");
+    // Every variable the contract names, one line each, in its order; a run of no flow is
+    // told none of the flow's.
+    let names: Vec<String> = stated("environment")
+        .as_array()
+        .expect("the contract names the environment")
+        .iter()
+        .map(|name| name.as_str().expect("a name").to_owned())
+        .collect();
+    let printed = names
+        .iter()
+        .map(|name| format!("\"${{{name}:-unset}}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
     let recorder = script(
         &world,
         "record",
         &format!(
-            "printf '%s\\n' \"$ONEPIPELINE_RUN_ID\" \"$ONEPIPELINE_NODE_ID\" \
-             \"$ONEPIPELINE_RUN_ROOT\" \"$ONEPIPELINE_PLAN\" > '{env}'\n\
+            "printf '%s\\n' {printed} > '{env}'\n\
              echo 'hello from the command'\necho 'a warning on stderr' >&2"
         ),
     );
@@ -122,19 +168,28 @@ fn a_command_runs_after_its_dependency_with_the_runs_coordinates_and_a_human_sti
     let exited = world.events_of(run, "command-exited");
     assert_eq!(exited.len(), 1, "{exited:?}");
     assert_eq!(exited[0]["payload"]["ending"], "exited");
+    assert!(listed("endings", "exited"));
     assert_eq!(exited[0]["payload"]["exit_code"], 0);
+    assert!(listed("journal_kinds", "command-exited"));
 
     let told = std::fs::read_to_string(world.root.join("command.env")).expect("it wrote its env");
-    let told: Vec<&str> = told.lines().collect();
-    assert_eq!(told[0], run);
-    assert_eq!(told[1], "record");
+    let told: std::collections::BTreeMap<&str, &str> =
+        names.iter().map(String::as_str).zip(told.lines()).collect();
+    assert_eq!(told["ONEPIPELINE_RUN_ID"], run);
+    assert_eq!(told["ONEPIPELINE_NODE_ID"], "record");
     assert!(
-        Path::new(told[2]).join("events.jsonl").is_file(),
-        "ONEPIPELINE_RUN_ROOT is not the run's own directory: {}",
-        told[2]
+        Path::new(told["ONEPIPELINE_RUN_ROOT"])
+            .join("events.jsonl")
+            .is_file(),
+        "ONEPIPELINE_RUN_ROOT is not the run's own directory: {told:?}"
     );
-    assert_eq!(told[3], project);
-    let log = std::fs::read_to_string(world.run_file(run, "commands/record.log"))
+    assert_eq!(told["ONEPIPELINE_PLAN"], project);
+    assert_eq!(
+        told["ONEPIPELINE_FLOW"], "unset",
+        "a run of no flow named one"
+    );
+    assert_eq!(told.len(), 6, "{told:?}");
+    let log = std::fs::read_to_string(log_of(&world, run, "record"))
         .expect("the command's output is kept under the run");
     assert!(log.contains("hello from the command"), "{log}");
     assert!(log.contains("a warning on stderr"), "{log}");
@@ -175,9 +230,16 @@ fn a_command_exiting_non_zero_fails_with_its_status_and_stderr_and_holds_its_dep
     );
     world.run(&["start", &project, "--attach"]).settled();
     let run = "commandfails";
+    let read = world.run(&["results", run, "--json"]);
+    let document: Value = serde_json::from_str(&read.stdout).expect("results --json is JSON");
+    assert_eq!(document["schema_version"], stated("results_schema_version"));
     let settled = result(&world, run, "check");
     assert_eq!(settled["status"], "failed", "{settled}");
-    assert_eq!(settled["outcome"], "command-failed", "{settled}");
+    assert_eq!(
+        settled["outcome"],
+        json!(word("outcomes", "failed")),
+        "{settled}"
+    );
     let detail = settled["detail"].as_str().expect("a detail");
     assert!(detail.contains("status 3"), "{detail}");
     assert!(detail.contains("the fifth broke: no config"), "{detail}");
@@ -214,13 +276,18 @@ fn a_command_past_its_timeout_is_stopped_and_one_with_none_runs_to_its_end() {
     );
     let timed_out = result(&world, run, "bounded");
     assert_eq!(timed_out["status"], "failed", "{timed_out}");
-    assert_eq!(timed_out["outcome"], "command-timed-out", "{timed_out}");
+    assert_eq!(
+        timed_out["outcome"],
+        json!(word("outcomes", "timed_out")),
+        "{timed_out}"
+    );
     assert!(
         world
             .events_of(run, "command-exited")
             .iter()
             .any(|event| event["labels"]["node"] == "bounded"
-                && event["payload"]["ending"] == "timed-out"),
+                && event["payload"]["ending"] == "timed-out"
+                && listed("endings", "timed-out")),
         "{}",
         world.dump()
     );
@@ -260,7 +327,8 @@ fn a_command_its_driver_died_in_is_run_again_by_adopt_and_settles_on_its_second_
             &world,
             "repeated",
             &format!(
-                "echo run >> '{count}'\nwhile [ ! -f '{go}' ]; do sleep 0.1; done\nexit {exit}"
+                "echo run >> '{count}'\necho 'attempt began'\n\
+                 while [ ! -f '{go}' ]; do sleep 0.1; done\nexit {exit}"
             ),
         );
         let name = format!("commandadopt{exit}");
@@ -310,6 +378,12 @@ fn a_command_its_driver_died_in_is_run_again_by_adopt_and_settles_on_its_second_
             runs(&world),
             2,
             "the adopting driver did not run the command again"
+        );
+        let log = std::fs::read_to_string(log_of(&world, &name, "repeat")).expect("its log");
+        assert_eq!(
+            log.matches("attempt began").count(),
+            2,
+            "the second run's output did not join the first's: {log}"
         );
         let exits = world.events_of(&name, "command-exited");
         assert_eq!(exits.len(), 1, "{exits:?}");
@@ -361,7 +435,56 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
             },
             "`kind: command` node's",
         ),
+        (
+            "timeoutonagent",
+            {
+                let mut node = agent("c", &[]);
+                node["timeout_seconds"] = json!(5);
+                node
+            },
+            "`kind: command` node's",
+        ),
+        (
+            "zerotimeout",
+            json!({"id": "c", "kind": "command", "command": ["true"], "timeout_seconds": 0}),
+            "timeout_seconds",
+        ),
+        (
+            "slashed",
+            json!({"id": "a/b", "kind": "command", "command": ["true"]}),
+            "cannot contain '/'",
+        ),
+        (
+            "commandstep",
+            json!({"id": "c", "repo": "service", "title": "feat: c", "steps": [
+                {"id": "run", "kind": "command",
+                 "task": "## What\nrun\n\n## Acceptance criteria\n- It ran."}]}),
+            "never a step's",
+        ),
     ];
+    // Each field only a dispatch, a session or a person reads, refused by its own name.
+    let unread = [
+        ("max_turns", json!(3)),
+        ("context", json!("a note")),
+        ("executor", json!("local")),
+        ("agent_graph", json!("./graph.yaml")),
+        ("repo", json!("service")),
+        ("resume", json!({"branch": "topic"})),
+        ("expects_no_diff", json!(true)),
+        ("draft", json!(true)),
+        ("branch", json!("topic")),
+        ("base_branch", json!("main")),
+    ];
+    for (field, value) in unread {
+        let name = format!("unread{}", field.replace('_', ""));
+        let mut node = json!({"id": "c", "kind": "command", "command": ["true"]});
+        node[field] = value;
+        let project = world.plan(&name, &plan_of(&name, vec![node]));
+        world
+            .run(&["plan", "check", &project])
+            .exited(1)
+            .out_has(&format!("`{field}`"));
+    }
     for (name, node, refusal) in cases {
         let project = world.plan(name, &plan_of(name, vec![node]));
         world
@@ -590,6 +713,7 @@ fn a_cancel_stops_a_running_command() {
     });
     let exited = world.events_of(run, "command-exited");
     assert_eq!(exited[0]["payload"]["ending"], "cancelled", "{exited:?}");
+    assert!(listed("endings", "cancelled"));
     world.until("the node to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
@@ -668,4 +792,90 @@ fn a_schema_13_launch_and_a_plan_naming_none_of_the_primitives_run_as_before() {
         .run_json(run, "launch.json")
         .get("plan_edit_hook")
         .is_none());
+}
+
+/// Every other way a command ends: one that cannot be started settles `command-failed`
+/// `not-started`; one that says more on stderr than the detail keeps leaves only the end of
+/// it there; one a signal ends settles `command-failed` saying so — and each runs from the
+/// directory the run was launched from.
+#[test]
+fn a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_failed() {
+    let world = World::new("command-step-endings");
+    let launch_dir = world.root.join("launched-here");
+    std::fs::create_dir_all(&launch_dir).expect("a launch directory");
+    let cwd = at(&world, "chatty.cwd");
+    let chatty = script(
+        &world,
+        "chatty",
+        &format!(
+            "pwd > '{cwd}'\necho 'EARLY-MARKER' >&2\n\
+             i=0; while [ $i -lt 100 ]; do echo 'padding padding padding padding padding' >&2; \
+             i=$((i+1)); done\necho 'LATE-MARKER' >&2\nexit 1"
+        ),
+    );
+    let mut nodes = vec![
+        command("missing", &[], &world.root.join("no-such-program")),
+        command("chatty", &[], &chatty),
+    ];
+    if cfg!(unix) {
+        nodes.push(command(
+            "signalled",
+            &[],
+            &script(&world, "signalled", "kill -9 $$"),
+        ));
+    }
+    let project = world.plan("commandendings", &plan_of("commandendings", nodes));
+    world
+        .run_from(&launch_dir, &["start", &project, "--attach"])
+        .settled();
+    let run = "commandendings";
+    let failed = word("outcomes", "failed");
+
+    let missing = result(&world, run, "missing");
+    assert_eq!(missing["outcome"], json!(failed), "{missing}");
+    assert!(
+        missing["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("could not be started"),
+        "{missing}"
+    );
+    assert!(listed("endings", "not-started"));
+    assert!(world
+        .events_of(run, "command-exited")
+        .iter()
+        .any(|event| event["labels"]["node"] == "missing"
+            && event["payload"]["ending"] == "not-started"));
+
+    let said = result(&world, run, "chatty");
+    let detail = said["detail"].as_str().expect("a detail");
+    assert_eq!(said["outcome"], json!(failed), "{said}");
+    assert!(detail.contains("LATE-MARKER"), "{detail}");
+    assert!(
+        !detail.contains("EARLY-MARKER"),
+        "the detail kept more than the end of stderr: {detail}"
+    );
+    let log = std::fs::read_to_string(log_of(&world, run, "chatty")).expect("its log");
+    assert!(
+        log.contains("EARLY-MARKER") && log.contains("LATE-MARKER"),
+        "{log}"
+    );
+    #[cfg(unix)]
+    {
+        let ran_in = std::fs::read_to_string(world.root.join("chatty.cwd")).expect("its cwd");
+        assert_eq!(
+            std::fs::canonicalize(ran_in.trim()).expect("a directory"),
+            std::fs::canonicalize(&launch_dir).expect("a directory"),
+            "the command did not run from the launch directory"
+        );
+        let signalled = result(&world, run, "signalled");
+        assert_eq!(signalled["outcome"], json!(failed), "{signalled}");
+        assert!(
+            signalled["detail"]
+                .as_str()
+                .expect("a detail")
+                .contains("ended by a signal"),
+            "{signalled}"
+        );
+    }
 }

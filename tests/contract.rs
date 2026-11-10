@@ -12747,8 +12747,13 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
     );
     assert_eq!(config.checks.len(), 2);
     let hook = config.plan_edit_hook.expect("the hook is named");
-    assert_eq!(hook.command, ["./scripts/judge-edit.sh"]);
-    assert_eq!(hook.timeout_seconds.get(), 120);
+    assert_eq!(hook.program(), "./scripts/judge-edit.sh");
+    assert!(hook.arguments().is_empty());
+    assert_eq!(hook.timeout_seconds().get(), 120);
+    assert!(onepipeline::filter::PlanEditHook::new(Vec::new(), hook.timeout_seconds()).is_err());
+    assert!(
+        onepipeline::filter::PlanEditHook::new(vec![" ".into()], hook.timeout_seconds()).is_err()
+    );
     assert_eq!(
         block["plan_edit_hook_default_timeout_seconds"],
         json!(onepipeline::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS.get())

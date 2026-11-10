@@ -1618,16 +1618,16 @@ fn start(args: &StartArgs) -> Result<i32> {
     // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
     // and before any run exists: a refusal, or a check that could not be run, refuses the
     // launch with the report `plan check` prints and mints nothing. `adopt` runs none.
-    let registered: Vec<crate::plancheck::Registered> = declared
+    let mut registered: Vec<crate::plancheck::Registered> = declared
         .checks
         .iter()
         .map(|argv| crate::plancheck::Registered::argv(argv))
-        .chain(
-            args.checks
-                .iter()
-                .map(|path| crate::plancheck::Registered::path(path)),
-        )
-        .collect();
+        .collect::<Result<_>>()?;
+    registered.extend(
+        args.checks
+            .iter()
+            .map(|path| crate::plancheck::Registered::path(path)),
+    );
     crate::plancheck::launch(&read, &args.project, &registered)?;
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
@@ -1681,10 +1681,10 @@ fn start(args: &StartArgs) -> Result<i32> {
     // offers edits to the executable this launch named. The config's argv is kept as the
     // document wrote it, and is run from the launch directory.
     let plan_edit_hook = match &args.plan_edit_hook {
-        Some(path) => Some(crate::filter::PlanEditHook {
-            command: vec![launch_dir.join(path).display().to_string()],
-            timeout_seconds: crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
-        }),
+        Some(path) => Some(crate::filter::PlanEditHook::new(
+            vec![launch_dir.join(path).display().to_string()],
+            crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+        )?),
         None => declared.plan_edit_hook.clone(),
     };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;

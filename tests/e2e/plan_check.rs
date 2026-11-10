@@ -932,6 +932,11 @@ fn run_dirs(world: &World) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the launch-check journeys
+// run `start` and `adopt` themselves — the config read in `filter`, the checks offered by
+// `plancheck` from inside `driver`'s launch, the adoption that runs none — so no project edged
+// narrower than the crate could honestly run them; the same grounds the block at this file's
+// head gives for `plan check` itself.
 /// A launch config naming two checks and `start --check` naming a third: each is handed the
 /// loaded plan exactly as `plan check --check` hands it, one refusal refuses the launch with
 /// that check's report and mints no run, all three accepting starts it, and `adopt` runs none.
@@ -1093,3 +1098,78 @@ fn a_launch_check_key_below_schema_14_or_naming_no_program_is_refused_by_name() 
     }
     assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
 }
+
+/// Launch checks run in the order the config lists them and then the flags, a config argv is
+/// spawned with its arguments, and a check that could not be run — a path naming nothing, or
+/// an answer this build cannot read — refuses the launch as `plan check` reports it, before
+/// any run exists.
+#[test]
+fn launch_checks_run_in_order_with_their_arguments_and_an_unrunnable_one_refuses() {
+    let world = World::new("launch-checks-order");
+    let project = world.plan(
+        "ordered",
+        &plan_of("ordered", vec![crate::harness::human("approve", &[])]),
+    );
+    let order = shell_path(&world.root.join("order"));
+    let named = |name: &str| {
+        check_script(
+            &world,
+            name,
+            &format!(
+                "cat > /dev/null\necho \"{name} $*\" >> '{order}'\nprintf '{{\"refusals\": []}}'"
+            ),
+        )
+    };
+    let first = named("first");
+    let second = named("second");
+    let third = named("third");
+    let config = world.root.join("ordered.json");
+    let launch = |checks: Value, extra: &[&str]| {
+        std::fs::write(
+            &config,
+            json!({"schema_version": 14, "checks": checks}).to_string(),
+        )
+        .expect("the launch config is written");
+        let mut args = vec![
+            "start".to_owned(),
+            project.clone(),
+            "--detach".to_owned(),
+            "--launch-config".to_owned(),
+            as_str(&config),
+        ];
+        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        world.run(&borrowed)
+    };
+
+    // A check that names nothing to run, and one whose answer is not one: each refuses the
+    // launch as a check that could not be run.
+    let malformed = check_script(&world, "malformed", "cat > /dev/null\necho 'not an answer'");
+    for (unrunnable, said) in [
+        (
+            as_str(&world.root.join("no-such-check")),
+            "could not be run",
+        ),
+        (as_str(&malformed), "cannot read"),
+    ] {
+        launch(json!([[unrunnable]]), &[])
+            .exited(REFUSED)
+            .err_has(&format!("{unrunnable}: could not be run"))
+            .err_has(said);
+        assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
+    }
+
+    launch(
+        json!([[as_str(&first), "--strict", "fast"], [as_str(&second)]]),
+        &["--check", &as_str(&third)],
+    )
+    .exited(0);
+    let ran = std::fs::read_to_string(world.root.join("order")).expect("the checks ran");
+    assert_eq!(
+        ran.lines().map(str::trim_end).collect::<Vec<_>>(),
+        ["first --strict fast", "second", "third"],
+        "the checks did not run in order, with their arguments"
+    );
+    world.run(&["stop", "ordered"]);
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

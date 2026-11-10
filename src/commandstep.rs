@@ -194,7 +194,8 @@ fn run(
         Err(error) => return not_started(error.to_string()),
     };
 
-    // The stderr, copied into the log as it arrives and its tail kept for the detail.
+    // Read on a thread of its own, so a command that fills the pipe cannot block on a reader
+    // that is waiting for it to exit.
     let (tail_tx, tail_rx) = std::sync::mpsc::channel();
     let mut stderr = child.stderr.take();
     let mut log_for_stderr = log;

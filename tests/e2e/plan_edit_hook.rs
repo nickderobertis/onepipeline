@@ -22,7 +22,43 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, human, plan_of, posix_script, shell_path, World, REFUSED};
+use crate::harness::{
+    agent, contract_block, human, plan_of, posix_script, shell_path, World, REFUSED,
+};
+
+/// What the contract's `generic_primitives` block states about one of its keys.
+fn stated(key: &str) -> Value {
+    contract_block("generic_primitives")[key].clone()
+}
+
+/// The keys of a JSON object, sorted.
+fn keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{value} is not an object"))
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The words the contract lists under `key`, sorted.
+fn words(key: &str) -> Vec<String> {
+    let mut words: Vec<String> = stated(key)
+        .as_array()
+        .unwrap_or_else(|| panic!("the contract states no list {key}"))
+        .iter()
+        .map(|word| word.as_str().expect("a word").to_owned())
+        .collect();
+    words.sort();
+    words
+}
+
+/// The exit status the contract gives the hook's `verdict`.
+fn exit(verdict: &str) -> String {
+    stated("plan_edit_hook_exits")[verdict].to_string()
+}
 
 /// A ruling a manager issues, which binds the node's judge.
 const RULING: &str = "Keep the public signature unchanged; callers outside this repository use it.";
@@ -177,7 +213,11 @@ fn an_amend_is_offered_with_the_task_the_nodes_next_dispatch_is_given() {
     let offer = offers(&world);
     assert_eq!(offer.len(), 1, "{offer:?}");
     let offer = &offer[0];
-    assert_eq!(offer["schema_version"], 1);
+    let shape = stated("plan_edit_hook_document");
+    assert_eq!(keys(offer), keys(&shape), "{offer}");
+    assert_eq!(keys(&offer["node"]), keys(&shape["node"]), "{offer}");
+    assert_eq!(keys(&offer["task"]), keys(&shape["task"]), "{offer}");
+    assert_eq!(offer["schema_version"], shape["schema_version"]);
     assert_eq!(offer["run"], run);
     assert!(
         offer["plan"]
@@ -238,7 +278,7 @@ fn a_refusal_or_no_verdict_refuses_the_whole_reply_and_changes_no_node() {
 
     let said = "the amendment names a procedure rather than a property";
     std::fs::write(world.root.join("hook.say"), said).expect("the words are armed");
-    std::fs::write(world.root.join("hook.exit"), "1").expect("the refusal is armed");
+    std::fs::write(world.root.join("hook.exit"), exit("refuse")).expect("the refusal is armed");
     world
         .run_with_stdin(&["reply", &run], &envelope(json!([amend("later")])))
         .exited(REFUSED)
@@ -266,7 +306,7 @@ fn a_refusal_or_no_verdict_refuses_the_whole_reply_and_changes_no_node() {
     // Two nodes, the first passed and the second refused: neither applies, and the journal
     // gains the one rejection.
     std::fs::remove_file(world.root.join("hook.say")).expect("the words are lifted");
-    std::fs::write(world.root.join("hook.exit"), "0").expect("a pass is armed");
+    std::fs::write(world.root.join("hook.exit"), exit("pass")).expect("a pass is armed");
     std::fs::write(world.root.join("hook.refuse-other"), "other may not move").expect("armed");
     let before = offered(&world).len();
     world
@@ -287,7 +327,6 @@ fn a_refusal_or_no_verdict_refuses_the_whole_reply_and_changes_no_node() {
     assert_eq!(rejected(&world, &run).len(), 3);
     unchanged(&world);
 
-    // Passed, it applies.
     std::fs::remove_file(world.root.join("hook.refuse-other")).expect("the refusal is lifted");
     world
         .run_with_stdin(&["reply", &run], &envelope(json!([amend("later")])))
@@ -346,6 +385,11 @@ fn each_op_that_changes_what_a_node_is_judged_against_is_offered_once_and_no_oth
             json!([{"op": "requeue", "id": "kinded", "amend": {"kind": "agent", "persona": "engineer"}}]),
         );
         reply(json!([{"op": "requeue", "id": "bare", "amend": {"max_turns": 7}}]));
+        // Two commands naming one node offer it once.
+        reply(json!([
+            {"op": "amend", "id": "fresh", "text": RULING},
+            {"op": "amend", "id": "fresh", "text": RULING},
+        ]));
         reply(json!([{"op": "note", "id": "fresh", "addressee": "worker",
                       "text": "the fixture is under tests/", "deliver": "next"}]));
         if hooked {
@@ -359,9 +403,14 @@ fn each_op_that_changes_what_a_node_is_judged_against_is_offered_once_and_no_oth
                     ("add", "bare"),
                     ("requeue", "tasked"),
                     ("requeue", "kinded"),
+                    ("amend", "fresh"),
                 ]
                 .map(|(op, id)| (op.to_owned(), id.to_owned())),
             );
+            let mut ops: Vec<String> = offered(&world).into_iter().map(|(op, _)| op).collect();
+            ops.sort();
+            ops.dedup();
+            assert_eq!(ops, words("plan_edit_hook_ops"));
         } else {
             assert!(offered(&world).is_empty(), "a run naming no hook ran it");
         }
@@ -401,12 +450,20 @@ fn an_adopted_run_still_offers_its_edits_to_the_hook_its_launch_named() {
     world.until("the driver to pause on the approval", |world| {
         world.run(&["status", run]).stdout.contains("PAUSED")
     });
+    let recorded = &world.run_json(run, "launch.json")[stated("launch_record_key")
+        .as_str()
+        .expect("the record's key")];
+    assert_eq!(recorded["command"], json!([hook.display().to_string()]));
+    assert_eq!(
+        recorded["timeout_seconds"],
+        stated("plan_edit_hook_default_timeout_seconds")
+    );
     world.run(&["adopt", run]).exited(0);
     world.until("the adopting driver to pause again", |world| {
         world.run(&["status", run]).stdout.contains("PAUSED")
     });
 
-    std::fs::write(world.root.join("hook.exit"), "1").expect("the refusal is armed");
+    std::fs::write(world.root.join("hook.exit"), exit("refuse")).expect("the refusal is armed");
     std::fs::write(world.root.join("hook.say"), "not on an adopted run").expect("armed");
     world
         .run_with_stdin(
@@ -463,5 +520,225 @@ fn a_hook_outliving_its_timeout_refuses_the_reply_as_not_judged() {
             .success();
         assert!(!alive, "the hook {pid} outlived its timeout");
     }
+    world.run(&["stop", &run]);
+}
+
+/// A run paused on a person, so a reply is applied by the replying process itself.
+fn paused(world: &World, name: &str, extra: &[&str], from: &std::path::Path) -> String {
+    let path = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![human("approve", &[]), noted("later", &["approve"])],
+        ),
+    );
+    let mut args = vec!["start", path.as_str(), "--detach"];
+    args.extend(extra);
+    world.run_from(from, &args).exited(0);
+    world.until("the run to pause on the approval", |world| {
+        world.run(&["status", name]).stdout.contains("PAUSED")
+    });
+    name.to_owned()
+}
+
+fn amend_later(world: &World, run: &str) -> crate::harness::Run {
+    world.run_with_stdin(
+        &["reply", run],
+        &envelope(json!([{"op": "amend", "id": "later", "text": RULING}])),
+    )
+}
+
+/// The launch config's hook naming no program, a zero timeout, or the key below schema 14 is
+/// refused by the key's name before any run exists; one naming no timeout takes the default.
+#[test]
+fn a_hook_naming_no_program_or_no_time_is_refused_at_launch_and_none_takes_the_default() {
+    let world = World::new("plan-edit-hook-config");
+    let hook = hook(&world).display().to_string();
+    let path = world.plan(
+        "hookconfig",
+        &plan_of("hookconfig", vec![human("approve", &[])]),
+    );
+    let config = world.root.join("launch.json");
+    for refused in [
+        json!({"schema_version": 14, "plan_edit_hook": {"command": []}}),
+        json!({"schema_version": 14, "plan_edit_hook": {"command": [" "]}}),
+        json!({"schema_version": 14, "plan_edit_hook": {"command": [hook], "timeout_seconds": 0}}),
+        json!({"schema_version": 13, "plan_edit_hook": {"command": [hook]}}),
+    ] {
+        std::fs::write(&config, refused.to_string()).expect("written");
+        world
+            .run(&[
+                "start",
+                &path,
+                "--detach",
+                "--launch-config",
+                &config.display().to_string(),
+            ])
+            .exited(REFUSED)
+            .err_has("plan_edit_hook");
+        assert!(!world.run_file("hookconfig", "launch.json").is_file());
+    }
+    std::fs::write(
+        &config,
+        json!({"schema_version": 14, "plan_edit_hook": {"command": [hook]}}).to_string(),
+    )
+    .expect("written");
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--launch-config",
+            &config.display().to_string(),
+        ])
+        .exited(0);
+    assert_eq!(
+        world.run_json("hookconfig", "launch.json")["plan_edit_hook"]["timeout_seconds"],
+        stated("plan_edit_hook_default_timeout_seconds")
+    );
+    world.run(&["stop", "hookconfig"]);
+}
+
+/// `--plan-edit-hook` replaces the launch config's hook entirely — its command and its
+/// timeout — and the config's hook is never run.
+#[test]
+fn the_flag_replaces_the_configs_hook_and_its_timeout() {
+    let world = World::new("plan-edit-hook-flag");
+    let flagged = hook(&world);
+    let ran = shell_path(&world.root.join("config-hook.ran"));
+    let configured = posix_script(
+        &world.root,
+        "config-hook",
+        &format!("touch '{ran}'\nexit 0"),
+    );
+    let config = world.root.join("launch.json");
+    std::fs::write(
+        &config,
+        json!({"schema_version": 14, "plan_edit_hook": {
+            "command": [configured.display().to_string()], "timeout_seconds": 1}})
+        .to_string(),
+    )
+    .expect("written");
+    let run = paused(
+        &world,
+        "hookflag",
+        &[
+            "--launch-config",
+            &config.display().to_string(),
+            "--plan-edit-hook",
+            &flagged.display().to_string(),
+        ],
+        &world.root,
+    );
+    let recorded = &world.run_json(&run, "launch.json")["plan_edit_hook"];
+    assert_eq!(recorded["command"], json!([flagged.display().to_string()]));
+    assert_eq!(
+        recorded["timeout_seconds"],
+        stated("plan_edit_hook_default_timeout_seconds")
+    );
+    amend_later(&world, &run).exited(0);
+    assert_eq!(offered(&world), [("amend".to_owned(), "later".to_owned())]);
+    assert!(
+        !world.root.join("config-hook.ran").exists(),
+        "the config's hook ran"
+    );
+}
+
+/// A hook that cannot be started, or that a signal ends, gives no verdict: the reply is
+/// refused as not judged and journalled. It runs from the directory the run was launched
+/// from, whatever directory the reply is sent from.
+#[test]
+fn a_hook_that_cannot_start_or_is_signalled_is_not_judged_and_runs_from_the_launch_dir() {
+    let world = World::new("plan-edit-hook-ends");
+    let missing = world.root.join("no-such-hook");
+    let run = paused(
+        &world,
+        "hookmissing",
+        &["--plan-edit-hook", &missing.display().to_string()],
+        &world.root,
+    );
+    amend_later(&world, &run)
+        .exited(REFUSED)
+        .err_has("could not judge node 'later'")
+        .err_has("could not be started");
+    assert_eq!(rejected(&world, &run).len(), 1);
+
+    #[cfg(unix)]
+    {
+        let launch_dir = world.root.join("launched-here");
+        std::fs::create_dir_all(&launch_dir).expect("a launch directory");
+        let cwd = shell_path(&world.root.join("signalled.cwd"));
+        let signalled = posix_script(
+            &world.root,
+            "signalled-hook",
+            &format!("cat > /dev/null\npwd > '{cwd}'\nkill -9 $$"),
+        );
+        let run = paused(
+            &world,
+            "hooksignalled",
+            &["--plan-edit-hook", &signalled.display().to_string()],
+            &launch_dir,
+        );
+        amend_later(&world, &run)
+            .exited(REFUSED)
+            .err_has("could not judge node 'later'")
+            .err_has("ended by a signal");
+        assert_eq!(rejected(&world, &run).len(), 1);
+        let ran_in = std::fs::read_to_string(world.root.join("signalled.cwd")).expect("its cwd");
+        assert_eq!(
+            std::fs::canonicalize(ran_in.trim()).expect("a directory"),
+            std::fs::canonicalize(&launch_dir).expect("a directory"),
+            "the hook did not run from the launch directory"
+        );
+    }
+}
+
+/// A `requeue` stating `steps` — and no `task` — is offered like one stating a task, its body
+/// each agent step's task in order: with `task` and `kind`, which the journey above requeues
+/// with, every key the contract names.
+#[test]
+fn a_requeue_stating_steps_offers_each_agent_steps_task() {
+    let world = World::new("plan-edit-hook-steps");
+    world.repository("local-direct", &[]);
+    let launch = config(&world, 60);
+    let run = held(
+        &world,
+        "hooksteps",
+        Vec::new(),
+        &["--launch-config", &launch],
+    );
+    let step = |id: &str| {
+        json!({"id": id, "persona": "engineer",
+               "task": format!("## What\nDo {id}.\n\n## Acceptance criteria\n- {id} is done.")})
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "add", "node": {
+                "id": "stepped", "repo": "service", "title": "feat: stepped", "parked": true,
+                "deps": ["slow"], "steps": [step("build")]}}])),
+        )
+        .exited(0);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "requeue", "id": "stepped", "amend": {
+                "steps": [step("build"), step("check")]}}])),
+        )
+        .exited(0);
+    assert_eq!(
+        offered(&world),
+        [("add", "stepped"), ("requeue", "stepped")].map(|(op, id)| (op.to_owned(), id.to_owned()))
+    );
+    let body = offers(&world)[1]["task"]["body"]
+        .as_str()
+        .expect("a body")
+        .to_owned();
+    let build = body.find("# Step build").expect("the first step");
+    let check = body.find("# Step check").expect("the second step");
+    assert!(build < check, "{body}");
+    let mut exercised = vec!["kind".to_owned(), "steps".to_owned(), "task".to_owned()];
+    exercised.sort();
+    assert_eq!(words("requeue_keys"), exercised);
     world.run(&["stop", &run]);
 }
