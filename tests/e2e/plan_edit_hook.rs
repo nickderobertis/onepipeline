@@ -736,7 +736,12 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
         .run_with_stdin(
             &["reply", &run],
             &envelope(json!([{"op": "requeue", "id": "stepped", "amend": {
-                "steps": [step("build"), step("check")]}}])),
+            "steps": [
+                step("build"),
+                {"id": "sign-off", "kind": "human", "deps": ["build"],
+                 "task": "A person signs the build off."},
+                step("check"),
+            ]}}])),
         )
         .exited(0);
     assert_eq!(
@@ -750,6 +755,11 @@ fn a_requeue_stating_steps_offers_each_agent_steps_task() {
     let build = body.find("# Step build").expect("the first step");
     let check = body.find("# Step check").expect("the second step");
     assert!(build < check, "{body}");
+    // A person's step is dispatched to nobody, so it is no task the hook is shown.
+    assert!(
+        !body.contains("sign-off") && !body.contains("A person signs"),
+        "{body}"
+    );
     let mut exercised = vec!["kind".to_owned(), "steps".to_owned(), "task".to_owned()];
     exercised.sort();
     assert_eq!(words("requeue_keys"), exercised);
@@ -781,4 +791,40 @@ fn a_hook_whose_stderr_outlives_it_is_answered_on_its_own_exit() {
         "the reply waited on the process the hook left behind"
     );
     assert_eq!(rejected(&world, &run).len(), 1);
+}
+
+/// A hook that says more on stderr than this build reads is still answered on its exit, its
+/// refusal carrying a bounded reason rather than everything it wrote.
+#[test]
+fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
+    let world = World::new("plan-edit-hook-overrun");
+    let talker = posix_script(
+        &world.root,
+        "talking-hook",
+        "cat > /dev/null\necho 'OPENING-WORDS' >&2\n\
+         i=0; while [ $i -lt 4000 ]; do \
+         echo 'the bar names a procedure rather than a property of the tree' >&2; \
+         i=$((i+1)); done\nexit 1",
+    );
+    let run = paused(
+        &world,
+        "hookoverrun",
+        &["--plan-edit-hook", &talker.display().to_string()],
+        &world.root,
+    );
+    let refused = amend_later(&world, &run);
+    refused.exited(REFUSED).err_has("OPENING-WORDS");
+    assert!(
+        refused.stderr.len() < 64 * 1024,
+        "the refusal carried {} bytes of what the hook wrote",
+        refused.stderr.len()
+    );
+    let records = rejected(&world, &run);
+    assert_eq!(records.len(), 1);
+    let reason = records[0]["payload"]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("OPENING-WORDS") && reason.len() < 64 * 1024,
+        "the journalled reason is unbounded: {} bytes",
+        reason.len()
+    );
 }
