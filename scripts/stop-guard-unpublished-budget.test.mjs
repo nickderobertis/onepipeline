@@ -122,6 +122,12 @@ test("a complete current-gate record is read, and the slowest scenario is the on
   assert.equal(hostShaped(read, "acknowledge").warm.median_us, 201_004);
   assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-unreadable");
   assert.equal(hostShaped(read, "stop-guard").warm.median_us, 204_004);
+  // An earlier guard scenario that is the slowest is still the one reported.
+  const guard = (name) => read.host.reads.find((row) => row.read === name);
+  guard("stop-guard-none").warm.median_us = 209_000;
+  assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-none");
+  guard("stop-guard-owed").warm.median_us = 210_000;
+  assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-owed");
   rmSync(dir, { recursive: true });
 });
 
@@ -335,6 +341,27 @@ const refusals = [
       doc.host.moved = 0;
     },
     /was not aged/,
+  ],
+  [
+    "a host whose aging landed nothing",
+    (_dir, doc) => {
+      doc.host.landed = 0;
+    },
+    /was not aged/,
+  ],
+  [
+    "a host-shaped class declared with no branch",
+    (_dir, doc) => {
+      doc.host.class_counts.unknown = 0;
+    },
+    /declares classes/,
+  ],
+  [
+    "a cold first read that took no time",
+    (_dir, doc) => {
+      doc.host.reads[0].cold_us = 0;
+    },
+    /its cold first read took no time/,
   ],
   [
     "a host-shaped class missing",
