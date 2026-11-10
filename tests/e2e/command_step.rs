@@ -370,3 +370,285 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
             .out_has(refusal);
     }
 }
+
+/// A plan launched under `onepipeline flow run` whose command node runs `onepipeline start`
+/// attached on a second project: the inner run's launch record names the outer run's flow
+/// and the same launcher session, a `watch --flow` of that flow reports the inner run
+/// joining, the inner run's own surfaces arrive on its own channel and none of them on the
+/// outer run's, and the command node settles `done` when the inner run settles with every
+/// node done — and `failed` in the case whose inner node fails.
+///
+/// Unix only, as every flow journey is: the flow's program is a shell script.
+#[cfg(unix)]
+#[test]
+fn a_command_that_starts_a_run_in_a_flow_joins_it_and_settles_on_the_inner_runs_ending() {
+    use onepipeline_testfakes::profile::process::Stdio;
+
+    for fails in [false, true] {
+        let tag = if fails { "fails" } else { "settles" };
+        let world = World::new(&format!("command-step-flow-{tag}"))
+            .with_env(crate::harness::STALL_AFTER_ENV, "2");
+        let inner_name = format!("inner{tag}");
+        let outer_name = format!("outer{tag}");
+        let flow = format!("lifecycle-{tag}");
+        world.script("first.wait", "hold");
+        if fails {
+            world.script("asker.fail", "");
+        } else {
+            world.script("asker.wait", "hold");
+        }
+        let inner = world.plan(
+            &inner_name,
+            &plan_of(&inner_name, vec![agent("asker", &[])]),
+        );
+        let launch_inner = json!({
+            "id": "launch",
+            "kind": "command",
+            "command": [
+                crate::harness::binary().display().to_string(),
+                "start", inner, "--attach",
+            ],
+            "deps": ["first"],
+        });
+        let outer = world.plan(
+            &outer_name,
+            &plan_of(&outer_name, vec![agent("first", &[]), launch_inner]),
+        );
+        let program = world.root.join("program.sh");
+        std::fs::write(
+            &program,
+            format!("\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{outer}' --attach >/dev/null\n"),
+        )
+        .expect("the flow's program is written");
+        let mut flowing = world
+            .cmd(&[
+                "flow",
+                "run",
+                "--name",
+                &flow,
+                "--",
+                "sh",
+                program.to_str().expect("a path"),
+            ])
+            .env_remove("ONEPIPELINE_RUN_ID")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("flow run starts");
+        world.until("the outer run to dispatch its first node", |world| {
+            dispatched(world, &outer_name, "first")
+        });
+        assert_eq!(
+            world.run_json(&outer_name, "launch.json")["flow"],
+            json!(flow),
+            "the outer run did not join the flow it was launched in"
+        );
+
+        // Armed before the command runs, so what it reports is the inner run joining.
+        let watch = world
+            .cmd(&[
+                "watch",
+                "--flow",
+                &flow,
+                "--timeout",
+                "600",
+                "--until",
+                "run-joined",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the watch starts");
+        let leases = world.runs.join(".flows").join(&flow).join("watchers");
+        let mine = format!("{}-", watch.id());
+        world.until("the flow watch to record itself", |_| {
+            std::fs::read_dir(&leases).is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(&mine))
+                })
+            })
+        });
+        world.release("first.go");
+        world.until("the inner run to be launched", |world| {
+            world.run_file(&inner_name, "launch.json").is_file()
+        });
+        let inner_record = world.run_json(&inner_name, "launch.json");
+        let outer_record = world.run_json(&outer_name, "launch.json");
+        assert_eq!(inner_record["flow"], json!(flow), "{inner_record}");
+        assert_eq!(
+            inner_record["session"], outer_record["session"],
+            "{inner_record}"
+        );
+        assert_eq!(
+            inner_record["session"],
+            json!(world.session),
+            "{inner_record}"
+        );
+        let output = watch.wait_with_output().expect("the watch returns");
+        let reported: Value = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| record["watch"] == "return")
+            .expect("the watch printed its return record");
+        assert_eq!(reported["condition"], "run-joined", "{reported}");
+        assert_eq!(reported["run_id"], json!(inner_name), "{reported}");
+
+        if !fails {
+            // The inner run's own surface — its held worker reported quiet — is on its own
+            // channel, and the outer run's command, which records nothing while it runs, is
+            // never reported quiet on the outer one.
+            world.until("the inner run to raise its own surface", |world| {
+                world
+                    .queued_surfaces(&inner_name)
+                    .iter()
+                    .any(|surface| surface.to_string().contains("quiet-worker"))
+            });
+            assert!(
+                !world
+                    .events_of(&outer_name, "quiet-worker")
+                    .iter()
+                    .any(|event| event["labels"]["node"] == "launch"),
+                "the command node was reported quiet"
+            );
+            assert!(
+                !world
+                    .queued_surfaces(&outer_name)
+                    .iter()
+                    .any(|surface| surface.to_string().contains("asker")),
+                "the inner run's surface reached the outer run's channel"
+            );
+            world.release("asker.go");
+        }
+        world.until("the command node to settle", |world| {
+            settled_as(
+                world,
+                &outer_name,
+                "launch",
+                if fails { "failed" } else { "done" },
+            )
+        });
+        assert!(settled_as(
+            &world,
+            &inner_name,
+            "asker",
+            if fails { "failed" } else { "done" }
+        ));
+        if fails {
+            assert_eq!(
+                result(&world, &outer_name, "launch")["outcome"],
+                "command-failed"
+            );
+        }
+        let _ = flowing.wait();
+    }
+}
+
+/// A `cancel` that reaches a running command stops its process tree and settles the node
+/// without its command having finished.
+#[test]
+fn a_cancel_stops_a_running_command() {
+    let world = World::new("command-step-cancel");
+    let pid = at(&world, "held.pid");
+    let held = script(&world, "held", &format!("echo $$ > '{pid}'\nsleep 120"));
+    let project = world.plan(
+        "commandcancel",
+        &plan_of("commandcancel", vec![command("held", &[], &held)]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let run = "commandcancel";
+    world.until("the command to be running", |world| {
+        world.root.join("held.pid").is_file()
+    });
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "held"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the command to end", |world| {
+        !world.events_of(run, "command-exited").is_empty()
+    });
+    let exited = world.events_of(run, "command-exited");
+    assert_eq!(exited[0]["payload"]["ending"], "cancelled", "{exited:?}");
+    world.until("the node to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+    assert!(
+        settled_as(&world, run, "held", "cancelled"),
+        "{:?}",
+        world.events_of(run, "node-settled")
+    );
+    #[cfg(unix)]
+    {
+        let pid = std::fs::read_to_string(world.root.join("held.pid"))
+            .expect("the command wrote its pid")
+            .trim()
+            .to_owned();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("this host answers about a process it owns")
+            .success();
+        assert!(!alive, "the cancelled command {pid} is still running");
+    }
+    world.run(&["stop", run]);
+}
+
+/// Unchanged behaviour: a launch config at the previous schema version and a plan using
+/// none of these fields launch, schedule and settle as before — agent, then the person,
+/// then agent — and nothing of the new primitives is recorded.
+#[test]
+fn a_schema_13_launch_and_a_plan_naming_none_of_the_primitives_run_as_before() {
+    let world = World::new("command-step-unchanged");
+    let config = world.root.join("launch-13.json");
+    std::fs::write(
+        &config,
+        json!({"schema_version": 13, "node_sets": ["members.worker.agent.model=node"]}).to_string(),
+    )
+    .expect("the launch config is written");
+    let project = world.plan(
+        "unchanged",
+        &plan_of(
+            "unchanged",
+            vec![
+                agent("build", &[]),
+                human("approve", &["build"]),
+                agent("ship", &["approve"]),
+            ],
+        ),
+    );
+    world
+        .run(&[
+            "start",
+            &project,
+            "--detach",
+            "--launch-config",
+            &config.display().to_string(),
+        ])
+        .exited(0);
+    let run = "unchanged";
+    world.until("the run to pause on the approval", |world| {
+        settled_as(world, run, "approve", "waiting")
+            && world.run(&["status", run]).stdout.contains("PAUSED")
+    });
+    assert!(settled_as(&world, run, "build", "done"));
+    assert!(!dispatched(&world, run, "ship"));
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.run(&["adopt", run]).exited(0);
+    for node in ["build", "approve", "ship"] {
+        assert_eq!(result(&world, run, node)["status"], "done", "{node}");
+    }
+    let kinds = world.kinds(run);
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("command-")),
+        "{kinds:?}"
+    );
+    assert!(world
+        .run_json(run, "launch.json")
+        .get("plan_edit_hook")
+        .is_none());
+}
