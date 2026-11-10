@@ -8926,25 +8926,6 @@ pub fn shell_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// The value under `key` of the one ```json block of `docs/contract.md` that names it.
-///
-/// Read rather than restated, so a journey proving what the contract promises fails the
-/// moment the two disagree — the contract is the source, and the journey its drift gate.
-pub fn contract_block(key: &str) -> Value {
-    let contract =
-        std::fs::read_to_string(repo_file("docs/contract.md")).expect("the contract ships");
-    let needle = format!("\"{key}\"");
-    let mut found: Vec<Value> = contract
-        .split("```json")
-        .skip(1)
-        .filter_map(|rest| rest.split("```").next())
-        .filter(|block| block.contains(&needle))
-        .map(|block| serde_json::from_str::<Value>(block).expect("a contract block is JSON"))
-        .collect();
-    assert_eq!(found.len(), 1, "expected one contract block naming {key}");
-    found.pop().expect("one block")[key].clone()
-}
-
 /// A plan-edit hook that keeps every document it is handed — `edit-hook.<n>.json` under the
 /// world's root — and passes every node: a host's hook as far as the engine can tell, for a
 /// journey about what that hook is shown.

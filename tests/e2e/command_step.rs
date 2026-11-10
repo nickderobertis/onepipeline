@@ -14,11 +14,24 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, contract_block, human, plan_of, posix_script, shell_path, World};
+use crate::harness::{agent, human, plan_of, posix_script, repo_file, shell_path, World};
 
 /// What the contract's `generic_primitives` block states about one of its keys.
+///
+/// Read rather than restated, so a journey proving what the contract promises fails the
+/// moment the two disagree — the contract is the source, and the journey its drift gate.
 fn stated(key: &str) -> Value {
-    contract_block("generic_primitives")[key].clone()
+    let contract =
+        std::fs::read_to_string(repo_file("docs/contract.md")).expect("the contract ships");
+    let block = contract
+        .split("```json")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("\"generic_primitives\""))
+        .expect("the contract carries the generic_primitives block");
+    serde_json::from_str::<Value>(block).expect("a contract block is JSON")["generic_primitives"]
+        [key]
+        .clone()
 }
 
 /// One word the contract states under `key`, by its own name there.
