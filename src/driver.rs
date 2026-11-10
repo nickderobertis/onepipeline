@@ -1659,6 +1659,18 @@ fn start(args: &StartArgs) -> Result<i32> {
         .dispatch_env_hook_timeout
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
+    // The plan-edit hook, by two rungs: the flag names one executable at the default
+    // timeout and replaces the config's hook entirely. Made absolute against the launch
+    // directory, so every driver that adopts the run — from wherever it was started —
+    // offers edits to the executable this launch named. The config's argv is kept as the
+    // document wrote it, and is run from the launch directory.
+    let plan_edit_hook = match &args.plan_edit_hook {
+        Some(path) => Some(crate::filter::PlanEditHook {
+            command: vec![launch_dir.join(path).display().to_string()],
+            timeout_seconds: crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+        }),
+        None => declared.plan_edit_hook.clone(),
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     let launched = |read: &crate::taskgraph::Read,
                     continuation: &crate::continuation::Continuation|
@@ -1896,6 +1908,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .map(|root| root.display().to_string())
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
+        plan_edit_hook,
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
@@ -5497,6 +5510,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),

@@ -702,6 +702,29 @@ pub struct StartArgs {
     /// takes the shipped sixty seconds.
     #[arg(long, value_name = "SECONDS")]
     pub dispatch_env_hook_timeout: Option<NonZeroU64>,
+    /// One executable the loaded plan is offered to before any run exists,
+    /// repeatable, run after the launch config's `checks` in the order given.
+    ///
+    /// Each is run exactly as `plan check --check <PATH>` runs a registered
+    /// check — resolved against the working directory, handed the same JSON
+    /// document on stdin with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1`, answering
+    /// `{"refusals": [...]}` with exit 0 — and any refusal, or a check that could
+    /// not be run, refuses the launch with the report `plan check` prints,
+    /// creating no run directory. `adopt` runs none of them.
+    #[arg(long = "check", value_name = "PATH")]
+    pub checks: Vec<PathBuf>,
+    /// One executable every node a live edit introduces or changes is offered to,
+    /// with the task its next dispatch would be given, before the edit applies.
+    ///
+    /// Run once per such node, from the launch directory, with one JSON document
+    /// on stdin; exit 0 passes the node, 1 refuses the whole reply with the
+    /// hook's stderr as the reason, and any other exit — or outliving 600
+    /// seconds — refuses it as not judged. Given here it replaces the launch
+    /// config's `plan_edit_hook` entirely, at the default 600-second timeout.
+    /// Retained in the launch record and replayed by `adopt`. Naming none runs
+    /// nothing.
+    #[arg(long, value_name = "PATH")]
+    pub plan_edit_hook: Option<PathBuf>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]

@@ -11411,10 +11411,15 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             == Some(flag)),
         "`start` takes no {flag}"
     );
-    assert_eq!(
-        block["launch"]["config_schema_version"],
-        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
-    );
+    // The version that added the key, which later versions go on reading.
+    let added = block["launch"]["config_schema_version"]
+        .as_u64()
+        .expect("the version the key arrived at");
+    assert_eq!(added, 13);
+    assert!(onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .iter()
+        .any(|read| u64::from(*read) == added));
+    assert!(u64::from(LAUNCH_CONFIG_SCHEMA_VERSION) >= added);
     let key = block["launch"]["config_key"].as_str().expect("the key");
     assert_eq!(block["launch"]["launch_record_key"], key);
     let named = LaunchConfig {

@@ -54,9 +54,11 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// `failure_hook` and `hook_timeout`. **10** adds the ordered node and dag
 /// graph override lists, **11** the template a lifecycle node's branch is
 /// named from, `branch_template`, **12** the host's template root and the
-/// rendered-only check, `template_root` and `require_rendered`, and **13** the
-/// graph a review comment's reply is drafted by, `review_reply_graph`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 13;
+/// rendered-only check, `template_root` and `require_rendered`, **13** the
+/// graph a review comment's reply is drafted by, `review_reply_graph`, and **14**
+/// the checks a launch is refused by and the hook a live edit is offered to,
+/// `checks` and `plan_edit_hook`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 14;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -71,12 +73,14 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 13;
 /// about a dispatch-env hook, a version-8 one says nothing about a maintenance
 /// schedule, a version-9 one says nothing about graph overrides, and a
 /// version-10 one says nothing about a branch-name template, a version-11
-/// one says nothing about templates, and a version-12 one says nothing about a
-/// reply drafter, which is what a launch naming none of them means — and
+/// one says nothing about templates, a version-12 one says nothing about a
+/// reply drafter, and a version-13 one says nothing about launch checks or a
+/// plan-edit hook, which is what a launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 13] = [
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 14] = [
     LAUNCH_CONFIG_SCHEMA_VERSION,
+    13,
     12,
     11,
     10,
@@ -151,7 +155,72 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         BlankValue::Refused,
     ),
     (REVIEW_REPLY_GRAPH_KEY, 13, BlankValue::Kept),
+    (CHECKS_KEY, LAUNCH_CHECKS_SCHEMA_VERSION, BlankValue::Refused),
+    (PLAN_EDIT_HOOK_KEY, LAUNCH_CHECKS_SCHEMA_VERSION, BlankValue::Refused),
 ];
+
+/// The launch-config version that added `checks` and `plan_edit_hook`.
+const LAUNCH_CHECKS_SCHEMA_VERSION: u32 = 14;
+
+/// The launch-config key naming the checks a launch is refused by.
+const CHECKS_KEY: &str = "checks";
+
+/// The launch-config key naming the hook a live edit is offered to.
+const PLAN_EDIT_HOOK_KEY: &str = "plan_edit_hook";
+
+/// How long a plan-edit hook is awaited where its launch says nothing: ten minutes.
+pub const DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS: NonZeroU64 = match NonZeroU64::new(600) {
+    Some(seconds) => seconds,
+    None => unreachable!(),
+};
+
+/// The command a launch offers every node a live edit introduces or changes to,
+/// with the task that node's next dispatch would be given, before the edit is
+/// applied.
+///
+/// The launch config's `plan_edit_hook` (schema 14), and `start`'s
+/// `--plan-edit-hook <PATH>`, which names one executable and the default
+/// timeout. Run once per such node with one JSON document on its stdin: exit `0`
+/// passes it, `1` refuses it with its stderr as the reason, and any other exit
+/// or the timeout is *could not be judged*. Either refusal refuses the whole
+/// reply before anything is appended or applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanEditHook {
+    /// The argv the hook is spawned with — no shell. Never empty, and its program
+    /// never blank: either is refused where the document is read.
+    pub command: Vec<String>,
+    /// How long one offer is awaited before the hook is stopped and the edit read
+    /// as not judged, in whole seconds; `600` where the document says nothing.
+    #[serde(
+        default = "default_plan_edit_hook_timeout",
+        deserialize_with = "plan_edit_hook_timeout"
+    )]
+    pub timeout_seconds: NonZeroU64,
+}
+
+fn default_plan_edit_hook_timeout() -> NonZeroU64 {
+    DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS
+}
+
+/// A plan-edit hook's timeout, refused zero by its own name.
+fn plan_edit_hook_timeout<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> std::result::Result<NonZeroU64, D::Error> {
+    let seconds = u64::deserialize(reader)?;
+    NonZeroU64::new(seconds).ok_or_else(|| {
+        serde::de::Error::custom(
+            "`plan_edit_hook.timeout_seconds` is zero, which no hook could answer within — \
+             give it a positive number of seconds, or leave it out for 600",
+        )
+    })
+}
+
+/// Whether an argv names something to run: at least one word, and a program that
+/// is not blank.
+fn names_a_program(argv: &[String]) -> bool {
+    argv.first().is_some_and(|program| !program.trim().is_empty())
+}
 
 /// The launch-config key naming the reply drafter's graph, spelled once for the
 /// readers that refuse and resolve by it.
@@ -680,6 +749,24 @@ pub struct LaunchConfig {
     // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `pr_author_graph` beside it is: resolved against the launch directory at the launch and read there by `oneagentgraph`, whose own boundary refuses a graph it cannot run. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_reply_graph: Option<String>,
+    /// The checks this launch is refused by, each an argv run as `plan check
+    /// --check` runs a registered check, in order, after the engine's own loader
+    /// and before any run exists.
+    ///
+    /// `start --check <PATH>` appends one more after these. `adopt` runs none of
+    /// them. A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it
+    /// may not carry one; an empty argv, or one whose program is blank, is
+    /// refused by this key's name. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Vec<String>>,
+    /// The hook every node a live edit introduces or changes is offered to, if
+    /// any. `start --plan-edit-hook <PATH>` overrides it.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one; a command that is empty or whose program is blank is
+    /// refused by this key's name. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_edit_hook: Option<PlanEditHook>,
 }
 
 impl Default for LaunchConfig {
@@ -705,6 +792,8 @@ impl Default for LaunchConfig {
             template_root: None,
             require_rendered: None,
             review_reply_graph: None,
+            checks: Vec::new(),
+            plan_edit_hook: None,
         }
     }
 }
@@ -761,7 +850,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 16] = [
+        let carried: [(&str, Carried); 18] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -837,6 +926,26 @@ impl LaunchConfig {
             (
                 REVIEW_REPLY_GRAPH_KEY,
                 Carried::text(config.review_reply_graph.as_deref()),
+            ),
+            // `Blank` is a check that names no program: an empty argv, or one whose
+            // program is blank. An empty list is no key at all.
+            (
+                CHECKS_KEY,
+                if config.checks.is_empty() {
+                    Carried::Absent
+                } else if config.checks.iter().all(|argv| names_a_program(argv)) {
+                    Carried::Named
+                } else {
+                    Carried::Blank
+                },
+            ),
+            (
+                PLAN_EDIT_HOOK_KEY,
+                match &config.plan_edit_hook {
+                    None => Carried::Absent,
+                    Some(hook) if names_a_program(&hook.command) => Carried::Named,
+                    Some(_) => Carried::Blank,
+                },
             ),
         ];
         for (key, value) in carried {
@@ -1042,11 +1151,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v13.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v14.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 12] = [
+    const GOLDEN_EARLIER: [(u32, &str); 13] = [
+        (13, include_str!("../tests/golden/launch-config-v13.json")),
         (12, include_str!("../tests/golden/launch-config-v12.json")),
         (11, include_str!("../tests/golden/launch-config-v11.json")),
         (10, include_str!("../tests/golden/launch-config-v10.json")),
@@ -1160,6 +1270,22 @@ mod tests {
             template_root: Some("./templates".to_string()),
             require_rendered: Some(true),
             review_reply_graph: Some("./graphs/review-reply.yaml".to_string()),
+            checks: vec![
+                vec!["./scripts/check-plan.sh".to_string()],
+                vec![
+                    "python3".to_string(),
+                    "./scripts/check-budget.py".to_string(),
+                    "--strict".to_string(),
+                ],
+            ],
+            plan_edit_hook: Some(PlanEditHook {
+                command: vec![
+                    "./scripts/judge-edit.sh".to_string(),
+                    "--bar".to_string(),
+                    "./bar.md".to_string(),
+                ],
+                timeout_seconds: DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+            }),
         }
     }
 
@@ -1234,13 +1360,16 @@ mod tests {
                     dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
                     // Version 11 declared the branch-name template, version 12 the
-                    // template root and the rendered-only check, and none of them the
-                    // reply drafter.
+                    // template root and the rendered-only check, version 13 the reply
+                    // drafter, and none of them a launch check or a plan-edit hook.
                     branch_template: (version >= 11)
                         .then(|| "{{ task.key }}/{{ node.id }}".to_string()),
                     template_root: (version >= 12).then(|| "./templates".to_string()),
                     require_rendered: (version >= 12).then_some(true),
-                    review_reply_graph: None,
+                    review_reply_graph: (version >= 13)
+                        .then(|| "./graphs/review-reply.yaml".to_string()),
+                    checks: Vec::new(),
+                    plan_edit_hook: None,
                 }
             );
             assert!(

@@ -1081,6 +1081,16 @@ pub struct LaunchRecord {
     /// field existed reads as. Omitted when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_rendered: bool,
+    /// The hook every node a live edit introduces or changes is offered to, when
+    /// the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of `--plan-edit-hook` and the launch
+    /// config's `plan_edit_hook` in that order, and replayed by every driver that
+    /// adopts the run — `adopt` takes none of its own. Absent is what a record
+    /// written before this field existed reads as, which is a run whose edits
+    /// are offered to no hook. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_edit_hook: Option<crate::filter::PlanEditHook>,
     /// The run's oneharness pointer file — every harness run under every
     /// launch this run starts appends one line to it saying where its session
     /// went — absolute, as the engine names it to each launch.
@@ -3775,6 +3785,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -4712,6 +4723,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -4762,6 +4774,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),

@@ -16483,6 +16483,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
