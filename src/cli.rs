@@ -22,10 +22,6 @@ use crate::channel::SurfaceKind;
 /// at all, and deterministic code alone drives the run.
 pub const DAG_GRAPH_OFF: &str = "off";
 
-/// The planner-update check-in interval, in seconds, when `start` is given
-/// none.
-pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 1_800;
-
 /// How long a dispatch has to end itself after a `shutdown` asks it to, when
 /// the command names no `--grace`.
 ///
@@ -635,9 +631,6 @@ pub struct StartArgs {
     /// config's `require_rendered`; `false` where none says.
     #[arg(long, value_name = "true|false", action = clap::ArgAction::Set)]
     pub require_rendered: Option<bool>,
-    /// How often the durable planner-update check-in comes due, in seconds.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECONDS)]
-    pub heartbeat_interval: u64,
     /// How long the settlement write-back allows its store per item it writes,
     /// in seconds.
     ///
@@ -1189,10 +1182,8 @@ pub struct WatchArgs {
     /// How long a silence may last before this stream says it is still there,
     /// in seconds. `0` turns the heartbeat off.
     ///
-    /// **The stream's** interval, and deliberately not spelled
-    /// `--heartbeat-interval`: that one is `start`'s, and it sets how often the
-    /// scheduled member surfaces a planner update. The two are different clocks
-    /// on different verbs, and neither verb accepts the other's flag.
+    /// **The stream's** interval, and the only one any verb takes: what surfaces
+    /// a scheduled planner update is the observer graph's own schedule.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_WATCH_TICK_SECONDS)]
     pub tick_interval: u64,
     /// Resume from the cursor an earlier watch printed, emitting nothing it
@@ -1514,6 +1505,10 @@ pub struct DriveArgs {
     /// receives it.
     #[arg(long, value_name = "SPEC")]
     pub event_filter: Option<String>,
+    /// The NDJSON stream this graph follows for its `reset_on` clocks, spelled as
+    /// `oneagentgraph run` spells it.
+    #[arg(long, value_name = "PATH")]
+    pub follow_events: Option<PathBuf>,
     /// Hold this process open until the graph's own run record carries the
     /// ending it stamps *after* announcing its settlement.
     ///

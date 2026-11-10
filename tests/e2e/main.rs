@@ -235,6 +235,8 @@ mod linear_writeback;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] what this guards is `World`'s own environment, which only a target compiling this harness can reach, and it costs under a second.
 mod gh_session_bus;
 mod node_validator;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] these journeys drive the real observer launch paths through this harness, and a change to the launch must not ship without them; they share the tier's build.
+mod observer_follow;
 mod older_launch_record;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey reads a plan out of a GitHub board and has the write-back create a live addition through the linked `github-projects` plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod private_github_home` below.
 mod github_create_retry;

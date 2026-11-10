@@ -357,7 +357,9 @@ pub(crate) struct RunStarted {
     pub(crate) graph: Option<String>,
     /// The directory the run was launched from.
     pub(crate) dir: String,
-    /// The check-in interval, in seconds.
+    /// The retired check-in interval, in seconds, only on a record an earlier
+    /// build wrote; a new launch records none.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) heartbeat_interval: u64,
     /// `true` where the launching driver holds the run to the closure rule;
     /// absent from a record an earlier build wrote.
@@ -2547,6 +2549,12 @@ payload_messages! {
     LandingDied => "landing-died";
     CheckFailed => "check-failed";
     ChecksUnfollowed => "checks-unfollowed";
+}
+
+/// Whether a retained numeric field is the zero a new record leaves it at.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde hands `skip_serializing_if` a reference.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

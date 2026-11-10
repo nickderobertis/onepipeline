@@ -305,6 +305,169 @@ fn both_example_projects_start_a_real_run() {
     }
 }
 
+/// `status` on an adopted run names the driver driving it now, and no reading of
+/// it reports the earlier driver's exit as the run's current state; once the
+/// adopter exits, its own exit is what both read.
+#[test]
+fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
+    const RUN: &str = "single-node";
+    const NODE: &str = "cover-report-failures";
+    const RETRY: &str = "cover-report-failures-2";
+    let world = World::new("shipped-adopted");
+    let example_store = world.root.join("shipped-plan-store");
+    copy_tree(&repo_file("examples/plan-store"), &example_store);
+    for (index, identity) in example_repositories().into_iter().enumerate() {
+        let checkout = world.root.join(format!("example-{index}"));
+        std::fs::create_dir_all(&checkout).expect("an example checkout");
+        assert!(onepipeline_testfakes::profile::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .arg(&checkout)
+            .output()
+            .expect("git initializes the example checkout")
+            .status
+            .success());
+        world.register(&checkout, Some(&format!("https://{identity}.git")));
+    }
+    let world = world
+        .with_env(
+            "ONETASKGRAPH_SOURCES__PLANS__CONFIG__ROOT",
+            &example_store.to_string_lossy(),
+        )
+        .with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "2");
+    world.script(&format!("{NODE}.fail"), "1");
+    world
+        .run(&["start", &format!("plans:{RUN}"), "--attach"])
+        .out_has("\"settlement\":\"unattended\"");
+    world
+        .run(&["status", RUN])
+        .exited(0)
+        .out_has("driver exited")
+        .out_has("settled unattended");
+
+    let plan = world.run_json(RUN, "plan.json");
+    let task = plan["tasks"]
+        .as_array()
+        .and_then(|tasks| tasks.iter().find(|task| task["id"] == NODE))
+        .unwrap_or_else(|| panic!("the plan names the node: {plan}"));
+    let replacement = serde_json::json!({
+        "id": RETRY, "persona": task["persona"], "task": task["task"],
+        "repo": task["repo"], "title": task["title"],
+    });
+    world.script(&format!("{RETRY}.wait"), "hold");
+    // Nothing drives the run yet, so the reply outlives its short wait for an
+    // answer: what matters is that the retry is queued for the adopter.
+    world.run_with_stdin(
+        &["reply", RUN],
+        &serde_json::json!({"version": 2, "commands": [
+            {"op": "retry", "id": NODE, "node": replacement}
+        ]})
+        .to_string(),
+    );
+    world.run(&["adopt", RUN, "--detach"]).exited(0);
+    world.until("the adopter to dispatch the retry", |world| {
+        world
+            .events_of(RUN, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == RETRY)
+    });
+
+    let adopter = world.events_of(RUN, "driver-adopted")[0]["payload"]["pid"].clone();
+    let live = world.run(&["status", RUN]);
+    live.exited(0)
+        .out_has("ACTIVE")
+        .out_has("driver: live, adopted")
+        .out_has(&format!("pid {adopter}, adoption 1"));
+    assert!(
+        !live.stdout.contains("driver exited"),
+        "the earlier driver's exit was printed beside a live adopter:\n{}",
+        live.stdout
+    );
+    let reading: serde_json::Value =
+        serde_json::from_str(&world.run(&["status", RUN, "--json"]).exited(0).stdout)
+            .expect("the reading is JSON");
+    assert_eq!(reading["driven"], true, "{reading}");
+    assert_eq!(reading["word"], "ACTIVE", "{reading}");
+    assert!(reading["ending"].is_null(), "{reading}");
+
+    world.release(&format!("{RETRY}.go"));
+    world.until("the adopter to exit", |world| {
+        world.events_of(RUN, "driver-exited").len() == 2
+    });
+    world.until("the adopter's claim to be released", |world| {
+        !world.run(&["status", RUN]).stdout.contains("ACTIVE")
+    });
+    let exits = world.events_of(RUN, "driver-exited");
+    let adopters_exit = exits[1]["ts"].as_str().expect("a stamped record");
+    assert_ne!(exits[0]["ts"], exits[1]["ts"]);
+    let exited = world.run(&["status", RUN]);
+    exited
+        .exited(0)
+        .out_has("driver exited")
+        .out_has(&format!("({adopters_exit})"));
+    assert!(
+        !exited.stdout.contains("driver: live"),
+        "the adopter was still named as live after it exited:\n{}",
+        exited.stdout
+    );
+    let reading: serde_json::Value =
+        serde_json::from_str(&world.run(&["status", RUN, "--json"]).exited(0).stdout)
+            .expect("the reading is JSON");
+    assert_eq!(reading["driven"], false, "{reading}");
+    assert!(reading["ending"].is_object(), "{reading}");
+}
+
+/// An adopter killed without recording its exit is neither called live nor
+/// reported by the exit of the driver before it.
+#[cfg(unix)]
+#[test]
+fn status_says_an_adopter_that_died_recorded_no_exit() {
+    const RETRY: &str = "build-2";
+    let world = World::new("adopter-died").with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "2");
+    let path = world.plan(
+        "died",
+        &crate::harness::plan_of("died", vec![crate::harness::agent("build", &[])]),
+    );
+    world.script("build.fail", "1");
+    world.run(&["start", &path, "--attach"]);
+    // A held retry keeps the adopter driving: with nothing left to do it settles
+    // and records its own exit, which can land before the kill below.
+    world.script(&format!("{RETRY}.wait"), "hold");
+    let plan = world.run_json("died", "plan.json");
+    let task = &plan["tasks"][0];
+    world.run_with_stdin(
+        &["reply", "died"],
+        &serde_json::json!({"version": 2, "commands": [{"op": "retry", "id": "build", "node": {
+            "id": RETRY, "persona": task["persona"], "task": task["task"],
+            "repo": task["repo"], "title": task["title"],
+        }}]})
+        .to_string(),
+    );
+    world.run(&["adopt", "died", "--detach"]).exited(0);
+    world.until("the adopter to dispatch the retry", |world| {
+        world
+            .events_of("died", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == RETRY)
+    });
+    let pid = world.events_of("died", "driver-adopted")[0]["payload"]["pid"]
+        .as_u64()
+        .expect("the adoption names its driver");
+    crate::harness::end_process(u32::try_from(pid).expect("a pid"));
+    world.until("the driver to read as gone", |world| {
+        !world.run(&["status", "died"]).stdout.contains("ACTIVE")
+    });
+    let status = world.run(&["status", "died"]);
+    status
+        .exited(0)
+        .out_has("driver: exited without recording it, adopted");
+    assert!(
+        !status.stdout.contains("driver exited"),
+        "{}",
+        status.stdout
+    );
+    world.release(&format!("{RETRY}.go"));
+}
+
 /// Every repository origin the example store's tasks name.
 ///
 /// Read out of the documents themselves rather than restated here: a task that

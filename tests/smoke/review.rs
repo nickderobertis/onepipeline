@@ -21,14 +21,18 @@
 // oneharness's own documented per-harness override, as `main.rs` states for this whole tier.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use crate::cleanup::{Created, Tracked};
-use crate::continuation::{change, host, onepipeline, open_pulls, ran, recorded, said};
+use crate::continuation::{change, host, onepipeline, open_pulls, ran, recorded, said, until};
 use crate::harness::{plan_of, World};
 use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, run_stamp, scratch_repo};
+
+/// How long a pull request's head may trail the push that moved it, as GitHub serves it.
+const PULL_REQUEST_READ_LAG: Duration = Duration::from_secs(30);
 
 /// Every reserved key the store's tasks of `project` carry, by node id.
 fn store_keys(world: &World, project: &str) -> Vec<(String, BTreeSet<String>)> {
@@ -414,22 +418,30 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         is_ancestor(&slug, &old_head, &new_head),
         "the previous head {old_head} is not an ancestor of {new_head}"
     );
-    let b_head = gh(&[
-        "pr",
-        "view",
-        &number(&b["change_url"]).to_string(),
-        "--repo",
-        &slug,
-        "--json",
-        "headRefOid",
-        "--jq",
-        ".headRefOid",
-    ])
-    .trim()
-    .to_owned();
-    assert!(
-        is_ancestor(&slug, &new_head, &b_head),
-        "b was not restacked onto the rework's head {new_head}: b is at {b_head}"
+    // GitHub's pull-request read trails the push that moved its head: CI run 42647147419
+    // read b's old head seconds after the restack's merge landed. Only a head that never
+    // comes to contain the rework is a failure.
+    let b_pull = number(&b["change_url"]).to_string();
+    let b_head_now = || {
+        gh(&[
+            "pr",
+            "view",
+            &b_pull,
+            "--repo",
+            &slug,
+            "--json",
+            "headRefOid",
+            "--jq",
+            ".headRefOid",
+        ])
+        .trim()
+        .to_owned()
+    };
+    until(
+        &format!("b to be restacked onto the rework's head {new_head}"),
+        PULL_REQUEST_READ_LAG,
+        || is_ancestor(&slug, &new_head, &b_head_now()),
+        || format!("b is at {}", b_head_now()),
     );
     holds_no_review_state(&second, &project, "after the rework");
     // The rework settled with its verdict deferred to the next trigger, which drafts and

@@ -3987,9 +3987,7 @@ each change is argued:
   value mean both the shortest wait there is and the longest.
 - `--tick-interval SECONDS` (default 30) is how long a silence may last before
   the stream says it is still there. `0` turns the heartbeat off. Deliberately
-  **not** `--heartbeat-interval`: that flag is `start`'s and sets the pacemaker
-  agent's cadence. The two are different clocks on different verbs, and clap
-  refuses each on the other.
+  **not** `--heartbeat-interval`, which `start` no longer takes either (entry 151).
 - `--cursor CURSOR` resumes from what an earlier watch printed.
 - `--until CONDITION` names what the wait returns on, and is **repeatable**: the
   wait returns on the first of them to fire and the return record says which one
@@ -13247,3 +13245,44 @@ logs; the envelope and the filter grammar are 0.9.5's.
 
 **Ruling:** the planner ruled the new kind and this re-decision (correlation
 `c-8ec31cb727186aa1d2ce82367746f747`).
+
+## 150. The engine's built-in clock reset on `next` is deprecated, and every observer graph follows its run's journal — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, which is committed verbatim and
+still calls the reset on `next` the check-in reset contract.** `oneagentgraph` 0.10.0's
+`reset_on` restarts a clock on what a graph declares, against the stream it follows, and
+every observer graph the engine launches, restarts or adopts now follows
+`<runs>/<run>/events.jsonl`: `run::Request::follow_events` in the linked library and at
+the hidden `drive` verb's `--follow-events`, and `run --follow-events` at
+`ONEPIPELINE_ONEAGENTGRAPH_BIN`. The engine names no member and signals nothing for it.
+
+`next` still sends the bare per-member reset after journaling `planner-surfaced`, which
+the linked `oneagentgraph` honours only on a schedule declaring `resettable` and never on
+a scheduled note's clock. Where the launched observer graph declares `resettable: true`
+on any member's schedule, `start` and `adopt` each print one standard-error line saying
+the automatic reset on `next` is deprecated and will be removed, naming `reset_on`; a
+graph declaring none prints nothing.
+
+`tests/e2e/observer_follow.rs` holds both halves over all three launch paths, an observer
+restart and an adoption.
+
+## 151. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, whose driver invocation still
+names the flag.** It was recorded from the engine's first implementation and never paced
+anything. `start` no longer accepts it, and clap's unknown-argument error is the whole
+refusal. A new launch writes no `heartbeat_interval` into `launch.json` or the
+`run-started` payload; readers keep accepting the field where an earlier engine wrote it,
+so runs already on disk are still viewed and adopted, and a record is rewritten with the
+value it carried. `tests/contract.rs` holds the rest of the documented invocation and the
+flag's refusal.
+
+The `run-started` schema stops requiring the field, so the events bundle moves to a new
+major: a stream this build writes is one a validator pinned at the previous bundle refuses,
+which is the rule `EVENTS_BUNDLE_VERSION` states.
+
+```json
+{
+  "bundle_versions": {"events": "2.0.0"}
+}
+```

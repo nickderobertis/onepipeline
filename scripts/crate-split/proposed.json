@@ -402,6 +402,7 @@
         "rustfmt.toml",
         "tests/e2e/driver.rs",
         "tests/e2e/driver_exit.rs",
+        "tests/e2e/observer_follow.rs",
         "tests/e2e/shutdown.rs",
         "tests/e2e/cancellation.rs",
         "tests/e2e/run_ending.rs",
@@ -428,6 +429,7 @@
       "modules": [
         "driver",
         "driver_exit",
+        "observer_follow",
         "shutdown",
         "cancellation",
         "run_ending",

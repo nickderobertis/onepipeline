@@ -90,6 +90,16 @@ fn a_settled_run_whose_record_an_older_build_wrote_is_read_adopted_and_fires_its
     // llmlint: ignore[tests_mirror_real_usage] the state under test is a record an *older* build wrote, which no interface of this build can produce; it is seeded from recorded bytes as `recorded_channel` seeds a recorded channel, and everything after it is the user's own verbs.
     std::fs::write(&launch, &written).expect("the older record is written");
 
+    // Both records carry the retired interval as the previous release wrote it.
+    assert_eq!(record["heartbeat_interval"], json!(1_800), "{record}");
+    assert!(
+        world
+            .events_of(RUN, "run-started")
+            .iter()
+            .all(|event| event["payload"]["heartbeat_interval"].is_u64()),
+        "the seeded run-started does not carry the retired interval"
+    );
+
     // Every view reads the run, and none of them rewrites its record.
     world
         .run(&["status", RUN])
@@ -130,6 +140,11 @@ fn a_settled_run_whose_record_an_older_build_wrote_is_read_adopted_and_fires_its
     let record = world.run_json(RUN, "launch.json");
     assert_eq!(record["adoptions"], json!(1));
     assert_eq!(record["bus_config"], older_bus_config());
+    assert_eq!(
+        record["heartbeat_interval"],
+        json!(1_800),
+        "adoption rewrote the record without the interval it carried"
+    );
     world
         .run(&["status", RUN])
         .exited(0)

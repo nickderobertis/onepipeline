@@ -2483,8 +2483,11 @@ fn a_cursor_either_verb_prints_is_one_the_other_resumes_from() {
     world.script("build.wait", "hold");
     let run = running(&world, "monitorinterchange", vec![agent("build", &[])]);
     world.release("build.go");
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
+    // The driver's exit, not `result.json`: the driver writes that and then
+    // journals its `driver-exited`, so a journey going on at `result.json` could
+    // read the journal's end once before that record and once after it.
+    world.until("the run's driver to exit", |world| {
+        !world.events_of(&run, "driver-exited").is_empty()
     });
     let journal = world.run_file(&run, "events.jsonl");
 
