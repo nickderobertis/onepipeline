@@ -629,6 +629,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // standard output, because that stream is the decision.
             eprint!("{}", unresolved.concat());
             print!("{}", verdict.render(args.format));
+            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         // llmlint: ignore-end[cli_output_contract]
@@ -662,16 +663,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     },
                     graph,
                 )?;
-                eprint!(
-                    "{}",
-                    acknowledged
-                        .listing
-                        .unresolved
-                        .iter()
-                        .map(|line| format!("unpublished: {line}\n"))
-                        .collect::<String>()
-                );
-                print!("{}", verbs::render_unpublished_acknowledged(&acknowledged));
+                {
+                    let _render = crate::hostphases::phase("render");
+                    eprint!(
+                        "{}",
+                        acknowledged
+                            .listing
+                            .unresolved
+                            .iter()
+                            .map(|line| format!("unpublished: {line}\n"))
+                            .collect::<String>()
+                    );
+                    print!("{}", verbs::render_unpublished_acknowledged(&acknowledged));
+                }
+                crate::hostphases::flush();
                 return Ok(acknowledged.listing.exit_code());
             }
             let (target, acknowledging) = if args.host {
@@ -699,20 +704,24 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 disk: args.disk,
                 pr_author_graph: graph,
             })?;
-            match args.format {
-                crate::cli::UnpublishedFormat::Json => println!("{}", listing.json()),
-                crate::cli::UnpublishedFormat::Text => {
-                    eprint!(
-                        "{}",
-                        listing
-                            .unresolved
-                            .iter()
-                            .map(|line| format!("unpublished: {line}\n"))
-                            .collect::<String>()
-                    );
-                    print!("{}", verbs::render_unpublished(&listing));
+            {
+                let _render = crate::hostphases::phase("render");
+                match args.format {
+                    crate::cli::UnpublishedFormat::Json => println!("{}", listing.json()),
+                    crate::cli::UnpublishedFormat::Text => {
+                        eprint!(
+                            "{}",
+                            listing
+                                .unresolved
+                                .iter()
+                                .map(|line| format!("unpublished: {line}\n"))
+                                .collect::<String>()
+                        );
+                        print!("{}", verbs::render_unpublished(&listing));
+                    }
                 }
             }
+            crate::hostphases::flush();
             // llmlint: ignore-end[cli_output_contract]
             Ok(listing.exit_code())
         }
