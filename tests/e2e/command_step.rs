@@ -462,6 +462,21 @@ fn the_loader_refuses_a_command_node_that_names_nothing_to_run_or_a_field_it_nev
             "cannot contain '/'",
         ),
         (
+            "backslashed",
+            json!({"id": "..\\outside", "kind": "command", "command": ["true"]}),
+            "names its log file",
+        ),
+        (
+            "driven",
+            json!({"id": "c:outside", "kind": "command", "command": ["true"]}),
+            "names its log file",
+        ),
+        (
+            "parent",
+            json!({"id": "..", "kind": "command", "command": ["true"]}),
+            "names its log file",
+        ),
+        (
             "commandstep",
             json!({"id": "c", "repo": "service", "title": "feat: c", "steps": [
                 {"id": "run", "kind": "command",

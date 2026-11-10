@@ -104,13 +104,17 @@ pub(crate) fn spawn(
         .spawn(move || {
             let begun = Instant::now();
             let (ending, settlement) = run(&paths, &launch, &node, &argv, &cancel);
-            let _ = tx.send(Message::CommandExited(Box::new((
-                node.id.clone(),
-                CommandExited {
-                    ending,
-                    duration_ms: u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX),
-                },
-            ))));
+            // The node the loop started, so it has an identity; a node without one is a
+            // node the loader refused, and nothing is sent for it but its settlement.
+            if let Some(named) = crate::graph::NodeRef::of(&node) {
+                let _ = tx.send(Message::CommandExited(Box::new((
+                    named,
+                    CommandExited {
+                        ending,
+                        duration_ms: u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    },
+                ))));
+            }
             let (recorded, _) = std::sync::mpsc::channel();
             let _ = tx.send(Message::Settled(Box::new(Settled {
                 settlement,

@@ -581,7 +581,7 @@ pub(crate) enum Message {
     Settled(Box<Settled>),
     /// A `kind: command` node's command ended, ahead of its settlement: the node, and
     /// what `command-exited` records.
-    CommandExited(Box<(String, crate::payload::CommandExited)>),
+    CommandExited(Box<(crate::graph::NodeRef, crate::payload::CommandExited)>),
     /// The pool-maintenance sweep this driver started has maintained every
     /// identity, and this is what it did.
     Maintained(Box<crate::maintenance::PoolsMaintained>),
@@ -2807,7 +2807,7 @@ fn converge(
                     let (node, exited) = *exited;
                     journal.emit(
                         journal::PipelineKind::CommandExited,
-                        journal::labels(&paths.run, Some(&node)),
+                        journal::labels(&paths.run, Some(node.as_str())),
                         payload_of(&exited)?,
                     )?;
                 }

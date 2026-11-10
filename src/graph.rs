@@ -1030,6 +1030,19 @@ fn check_command(node: &Node) -> std::result::Result<(), Refusal> {
     if node.id.contains(STEP_SEPARATOR) {
         return Err(named("a command id cannot contain '/', which addresses a step").field("id"));
     }
+    // The id names the command's log, `<run>/commands/<id>.log`, so it is one file name on
+    // every host: nothing a path could read as a separator, a drive or a parent.
+    let portable = node
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !portable || node.id == "." || node.id == ".." {
+        return Err(named(
+            "a command id names its log file, so it is ASCII letters, digits, '.', '_' and \
+             '-' alone, and never '.' or '..'",
+        )
+        .field("id"));
+    }
     let Some(command) = node
         .command
         .as_deref()
