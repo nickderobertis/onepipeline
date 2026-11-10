@@ -959,9 +959,8 @@ pub(super) fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64
     std::fs::create_dir_all(&host.owed).expect("an acknowledgements directory");
     *preparation_ms += ms(preparation);
 
-    // The cold first read records every branch's decision.
-    let cold = {
-        let started = Instant::now();
+    // A first read records every branch's decision; it is preparation, not a sample.
+    {
         let output = Command::new(binary().0)
             .args([
                 "unpublished",
@@ -977,16 +976,14 @@ pub(super) fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64
             .env("ONEVCS_HOME", &host.fixture.home)
             .current_dir(&host.fixture.root)
             .output()
-            .expect("the cold read runs");
-        let took = micros(started);
+            .expect("the recording read runs");
         assert_eq!(
             output.status.code(),
             Some(7),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        took
-    };
+    }
     let aging = Instant::now();
     let aged = age_host(&host.fixture).expect("the host ages");
     aged.verify()
@@ -1073,6 +1070,20 @@ pub(super) fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64
         baseline,
         trace,
     };
+
+    // The cold first read of the aged state, restored and verified: the first listing
+    // to read it, its figure counted only once its rows and every answer below are
+    // established against what the fixture declares.
+    aged.restore();
+    let (cold, code, document) = aged.host_listing(false);
+    assert_eq!(code, 7, "the cold read owes the host's counted branches");
+    check_document(
+        &document,
+        &aged.declared,
+        &aged.entries(&aged.baseline),
+        &aged.host.fixture.launcher,
+        "owed",
+    );
 
     // Every answer established before any timing counts.
     aged.restore();

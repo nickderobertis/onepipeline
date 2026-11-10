@@ -115,7 +115,7 @@ pub(super) struct HostRead {
     pub verdict_sha256: String,
     /// The ten calls.
     pub warm: Sample,
-    /// The host listing's cold first read, before any decision was recorded, in
+    /// The host listing's cold first read of the aged state, restored and verified, in
     /// microseconds; stated, not budgeted, and `null` for every other read.
     pub cold_us: Option<u64>,
     /// The traced call's phases by name, in milliseconds of wall clock.
