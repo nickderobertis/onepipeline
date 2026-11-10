@@ -1623,11 +1623,9 @@ fn start(args: &StartArgs) -> Result<i32> {
         .iter()
         .map(crate::plancheck::Registered::argv)
         .collect();
-    registered.extend(
-        args.checks
-            .iter()
-            .map(|path| crate::plancheck::Registered::path(path)),
-    );
+    for path in &args.checks {
+        registered.push(crate::plancheck::Registered::path(path)?);
+    }
     crate::plancheck::launch(&read, &args.project, &registered)?;
 
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*

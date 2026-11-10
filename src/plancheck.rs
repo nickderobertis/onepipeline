@@ -290,7 +290,14 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
                     match document(&read) {
                         Ok(document) => {
                             for path in &args.checks {
-                                match offer(&Registered::path(path), &document) {
+                                let answered = Registered::path(path)
+                                    .map_err(|why| Unrunnable {
+                                        check: path.display().to_string(),
+                                        exit_code: None,
+                                        stderr: why.to_string(),
+                                    })
+                                    .and_then(|check| offer(&check, &document));
+                                match answered {
                                     Ok(answered) => refusals.extend(answered),
                                     Err(why) => unrunnable.push(why),
                                 }
@@ -566,9 +573,9 @@ fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reporte
         exit_code,
         stderr,
     };
-    let resolved = Path::new(&check.program);
+    let resolved = Path::new(check.argv.program());
     let mut child = Command::new(resolved)
-        .args(&check.arguments)
+        .args(check.argv.arguments())
         .env(SCHEMA_ENV, SCHEMA_VERSION)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -774,10 +781,8 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
 /// between them, and how its refusals name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Registered {
-    /// The program; never blank.
-    program: String,
-    /// Its arguments, after the program.
-    arguments: Vec<String>,
+    /// What is spawned.
+    argv: crate::filter::Argv,
     /// The `source` its refusals carry and the `check` its failures name.
     named: String,
 }
@@ -788,20 +793,22 @@ impl Registered {
     /// registers a check beside the plan it is checking, and a path that resolved against
     /// anything else would name a different file to the two sides. Named by the path as
     /// it was given.
-    pub(crate) fn path(path: &Path) -> Self {
-        Self {
-            program: resolve(path).display().to_string(),
-            arguments: Vec::new(),
+    ///
+    /// # Errors
+    ///
+    /// A path that is blank, which names no program.
+    pub(crate) fn path(path: &Path) -> Result<Self> {
+        Ok(Self {
+            argv: crate::filter::Argv::new(vec![resolve(path).display().to_string()])?,
             named: path.display().to_string(),
-        }
+        })
     }
 
     /// A check a launch config's `checks` registers: its argv run as the document wrote
     /// it, from the launch directory, and named by its words joined with one space.
     pub(crate) fn argv(argv: &crate::filter::Argv) -> Self {
         Self {
-            program: argv.program().to_owned(),
-            arguments: argv.arguments().to_vec(),
+            argv: argv.clone(),
             named: argv.spelled(),
         }
     }

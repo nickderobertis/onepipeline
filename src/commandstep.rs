@@ -154,18 +154,24 @@ fn run(
         });
     let log = match log {
         Ok(log) => log,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver can write
+        // its journal into and not a log beside it is a host condition — a full disk, a
+        // permission changed under a live run — that no verb or plan produces; staging it means
+        // editing the run's own layout, which proves the fixture. What it must do is settle the
+        // node `command-failed` `not-started` as an unstartable program does, which
+        // `command_step.rs`'s endings journey drives.
         Err(error) => {
             return not_started(format!(
                 "its log {} could not be opened: {error}",
                 log_path.display()
             ))
-        }
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     let stdout = match log.try_clone() {
         Ok(stdout) => stdout,
         Err(error) => return not_started(format!("its log could not be shared: {error}")),
     };
-    let mut spawning = Process::new(argv.program());
+    let mut spawning = Process::new(argv.program_from(&launch.dir));
     spawning
         .args(argv.arguments())
         .env(RUN_ID_ENV, &paths.run)

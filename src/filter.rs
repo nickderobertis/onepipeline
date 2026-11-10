@@ -222,6 +222,24 @@ impl Argv {
         &self.arguments
     }
 
+    /// The program as it is spawned from `dir`: a relative path naming a file — one with a
+    /// separator in it — taken against `dir`, and anything else, a bare name looked up on
+    /// `PATH` included, as written.
+    ///
+    /// Said here rather than left to the host, because a relative program under a child's
+    /// own working directory is resolved against the parent's on one platform and the
+    /// child's on another: a command or hook a launch names beside itself is the file beside
+    /// that launch, wherever the process starting it stands.
+    pub(crate) fn program_from(&self, dir: &std::path::Path) -> std::path::PathBuf {
+        let program = std::path::Path::new(&self.program);
+        let names_a_file = self.program.contains('/') || self.program.contains('\\');
+        if program.is_relative() && names_a_file && !dir.as_os_str().is_empty() {
+            dir.join(program)
+        } else {
+            program.to_path_buf()
+        }
+    }
+
     /// Every word, the program first, joined by one space: how a refusal names it.
     pub(crate) fn spelled(&self) -> String {
         std::iter::once(self.program.as_str())

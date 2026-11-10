@@ -255,7 +255,7 @@ fn words(said: &str, otherwise: &str) -> String {
 /// Run the hook over one document: from the launch directory, the document on its stdin,
 /// its stderr kept, and its process tree ended when it outlives its timeout.
 fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
-    let mut spawning = Process::new(hook.program());
+    let mut spawning = Process::new(hook.command().program_from(dir));
     spawning
         .args(hook.arguments())
         .stdin(Stdio::piped())

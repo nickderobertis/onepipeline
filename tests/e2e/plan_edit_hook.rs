@@ -857,3 +857,49 @@ fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
         reason.len()
     );
 }
+
+/// An edit the engine's own checks refuse never reaches the hook; and a hook the launch
+/// config names by a path relative to the launch directory is that file, wherever the reply
+/// is sent from.
+#[test]
+fn a_refused_edit_never_reaches_the_hook_and_a_relative_hook_is_the_launchs() {
+    let world = World::new("plan-edit-hook-relative");
+    let launch_dir = world.root.join("launched-here");
+    std::fs::create_dir_all(launch_dir.join("hooks")).expect("the launch's hooks");
+    let offered = shell_path(&world.root.join("relative.offered"));
+    let judge = posix_script(
+        &launch_dir.join("hooks"),
+        "judge",
+        &format!("cat > /dev/null\necho offered >> '{offered}'\nexit 0"),
+    );
+    let relative = format!(
+        "./hooks/{}",
+        judge.file_name().expect("a file").to_string_lossy()
+    );
+    let config = launch_dir.join("launch.json");
+    std::fs::write(
+        &config,
+        json!({"schema_version": 14, "plan_edit_hook": {"command": [relative]}}).to_string(),
+    )
+    .expect("written");
+    let run = paused(
+        &world,
+        "hookrelative",
+        &["--launch-config", "launch.json"],
+        &launch_dir,
+    );
+    let count = || {
+        std::fs::read_to_string(world.root.join("relative.offered"))
+            .map(|said| said.lines().count())
+            .unwrap_or(0)
+    };
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "nowhere", "text": RULING}])),
+        )
+        .exited(REFUSED);
+    assert_eq!(count(), 0, "an edit the engine refused reached the hook");
+    amend_later(&world, &run).exited(0);
+    assert_eq!(count(), 1, "the launch's relative hook was not the one run");
+}
