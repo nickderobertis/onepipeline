@@ -8847,3 +8847,81 @@ pub fn a_watch_armed_active_outlasts_the_run_turning_parked(world: &World, run: 
     );
     assert_eq!(output.status.code(), Some(WATCH_ELAPSED), "{last}");
 }
+
+/// One executable written into `directory`, its body POSIX shell, answering with its path.
+///
+/// A real program, spawned by the binary under test, in this platform's spelling: a
+/// `#!/bin/sh` script on Unix, and on Windows a batch file handing the same body to git for
+/// Windows' `bash` (see below).
+#[cfg(unix)]
+pub fn posix_script(directory: &Path, name: &str, body: &str) -> PathBuf {
+    let path = directory.join(format!("{name}.sh"));
+    onepipeline_testfakes::executable(&path, format!("#!/bin/sh\n{body}\n"));
+    path
+}
+
+/// One executable written into `directory`, in this platform's spelling.
+///
+/// Windows starts no `#!` script, so what the `--check` flag names here is a
+/// batch file and the POSIX body sits beside it: the batch hands it to the
+/// `bash` git for Windows installs, which is the same shell every `just` recipe
+/// on this platform already runs through, and the check's stdin, stdout, stderr
+/// and exit status all reach it through `cmd` unchanged. One body per check
+/// rather than two, so a journey states what its check does once and neither
+/// spelling can drift from the other.
+///
+/// Written with **CRLF**, for the reason `harness::write_hook_script` records:
+/// `cmd.exe` seeks by byte offset between commands and the arithmetic assumes
+/// two bytes end a line, so an LF batch file is executed from the middles of
+/// words.
+#[cfg(windows)]
+pub fn posix_script(directory: &Path, name: &str, body: &str) -> PathBuf {
+    let posix = directory.join(format!("{name}.sh"));
+    std::fs::write(&posix, format!("#!/bin/sh\n{body}\n")).expect("the check is written");
+    let path = directory.join(format!("{name}.bat"));
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\n\"{}\" \"{}\"\r\nexit /b %ERRORLEVEL%\r\n",
+            bash().display(),
+            shell_path(&posix)
+        ),
+    )
+    .expect("the check is written");
+    path
+}
+
+/// The `bash` this platform's checks are read by, as an absolute path.
+///
+/// Resolved here rather than left as a bare name in the batch file, so a host
+/// without one fails naming what was looked for instead of leaving every check
+/// reported as one that could not be run.
+#[cfg(windows)]
+fn bash() -> PathBuf {
+    let on_path = std::env::var_os("PATH").unwrap_or_default();
+    let installed = PathBuf::from(
+        std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into()),
+    )
+    .join(r"Git\bin");
+    std::env::split_paths(&on_path)
+        .chain([installed])
+        .map(|dir| dir.join("bash.exe"))
+        .find(|candidate| candidate.is_file())
+        .expect("git for windows installs the bash these checks are written in")
+}
+
+/// A path as the shell that reads these bodies spells it.
+///
+/// The bodies are POSIX on both platforms, and that shell reads `\` as an escape
+/// rather than as a separator, so a native path reaches it spelled with the one
+/// separator both sides accept.
+#[cfg(windows)]
+pub fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// A path as the shell that reads these bodies spells it.
+#[cfg(not(windows))]
+pub fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}

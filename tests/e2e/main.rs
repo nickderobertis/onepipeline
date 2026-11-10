@@ -250,6 +250,7 @@ mod out_of_band;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
+mod plan_edit_hook;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // prove is the record every test in this binary writes — the harness's constructor and
 // teardown and `onepipeline_testfakes::profile` behind them — so they run this binary's own

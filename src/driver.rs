@@ -4616,6 +4616,18 @@ pub(crate) fn submit_offered(
         edits::advance(&mut checking, &operations);
     }
 
+    // Every node the envelope introduces or changes, offered to the plan-edit hook this
+    // run's launch named — off the launch record, as the validator is — with the task its
+    // next dispatch would be given, once per node and before anything of it is queued or
+    // applied: a refusal turns the whole envelope away, journalled `edit-rejected`.
+    crate::planedit::judge(
+        paths,
+        &view.launch,
+        &envelope.author,
+        &envelope.commands,
+        &projected,
+    )?;
+
     // And, once every command in it has passed both, the envelope as a whole —
     // offered to the reviewer this run was launched with, before anything of it
     // is queued or committed, so a refusal turns the whole envelope away rather

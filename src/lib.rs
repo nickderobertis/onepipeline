@@ -109,6 +109,7 @@ mod lifecycle;
 mod loopstats;
 mod ordering;
 mod plancheck;
+mod planedit;
 mod pool;
 mod projection;
 mod provisioning;
