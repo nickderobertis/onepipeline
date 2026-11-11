@@ -67,6 +67,17 @@
               }
             ],
             "description": "The correlation a reply echoes to answer it, when it was raised as a\nquestion through the bus's `ask`. Omitted while absent, so a surface\nraised any other way is written byte for byte as 0.28.2 wrote it."
+          },
+          "declined_ruling": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DeclinedRuling"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a dispatch declined, as typed fields: present on every surface of\nkind `declined-ruling` and on no other, and omitted from the wire while\nabsent, so every other surface — and every one written before the field\nexisted — serializes exactly as it always did. A reader takes the facts\nof a declined ruling from here and never from [`message`](Self::message),\nwhose text is for people."
           }
         },
         "required": [
@@ -89,6 +100,87 @@
             "type": "string",
             "description": "Which question a reply answers: the token the bus minted when it was asked.",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "DeclinedRuling": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "The node the ruling was addressed to."
+              },
+              "ruling": {
+                "type": "string",
+                "description": "The ruling reference `onepipeline decline-ruling` was given: an opaque\ntoken the engine minted, stable for the run's life."
+              },
+              "provenance": {
+                "$ref": "#/$defs/Provenance",
+                "description": "Whose ruling it was: always `manager`, since a user's ruling binds and\ncannot be declined."
+              },
+              "kind": {
+                "$ref": "#/$defs/RulingKind",
+                "description": "What kind of ruling it was."
+              },
+              "reply": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The id of the reply envelope that carried it: the id `onepipeline reply`\nanswered it with — the command envelope's for a note or an amendment, the\nverdict's for an answered question."
+              },
+              "text": {
+                "type": "string",
+                "description": "The ruling's text: the note's, the amendment's clauses, or the answer's\nmessage."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the dispatch declined it, as it said."
+              }
+            },
+            "required": [
+              "node",
+              "ruling",
+              "provenance",
+              "kind",
+              "reply",
+              "text",
+              "reason"
+            ],
+            "description": "The record a `declined-ruling` surface carries: the ruling a dispatch\ndeclined through `onepipeline decline-ruling`, and why.\n\nEvery fact is a field of its own, so a reader — the manager, a browser — takes\nit from here rather than parsing the surface's message."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
+          },
+          "RulingKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "note",
+                "description": "A manager note delivered into, or carried to, the node's dispatch."
+              },
+              {
+                "type": "string",
+                "const": "amendment",
+                "description": "An amendment to the node's bar."
+              },
+              {
+                "type": "string",
+                "const": "answer",
+                "description": "The answer to a question the dispatch asked through `onepipeline ask`."
+              }
+            ],
+            "description": "What kind of ruling a dispatch declined."
           }
         }
       }
@@ -146,7 +238,7 @@
                 ],
                 "format": "uint32",
                 "minimum": 0,
-                "description": "The version it was written against, read at [`REPLY_ENVELOPE_VERSION`]."
+                "description": "The version it was written against: kept as declared, and read at\n[`REPLY_ENVELOPE_VERSION`] where a bare envelope is routed."
               },
               "author": {
                 "$ref": "#/$defs/Author",
@@ -536,7 +628,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "The version it was written against, read at [`REPLY_ENVELOPE_VERSION`]."
+            "description": "The version it was written against: kept as declared, and read at\n[`REPLY_ENVELOPE_VERSION`] where a bare envelope is routed."
           },
           "author": {
             "$ref": "#/$defs/Author",

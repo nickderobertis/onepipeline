@@ -71,12 +71,11 @@
             "$ref": "#/$defs/HumanItemReopen"
           },
           "history": {
-            "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`.",
+            "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`. A live\nitem's always holds its raise; omitted only where it is empty, as a sample\nbundle written before the field existed holds it.",
             "type": "array",
             "items": {
               "$ref": "#/$defs/HumanItemHistoryEntry"
-            },
-            "default": []
+            }
           }
         },
         "additionalProperties": false,
@@ -3298,12 +3297,11 @@
         "$ref": "#/$defs/HumanItemReopen"
       },
       "history": {
-        "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`.",
+        "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`. A live\nitem's always holds its raise; omitted only where it is empty, as a sample\nbundle written before the field existed holds it.",
         "type": "array",
         "items": {
           "$ref": "#/$defs/HumanItemHistoryEntry"
-        },
-        "default": []
+        }
       }
     },
     "additionalProperties": false,

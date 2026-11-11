@@ -603,8 +603,10 @@ pub struct HumanItemDetail, HumanItemDetailWire {
     pub reopen: HumanItemReopen,
     /// Every event the journal recorded for this item, oldest first: who took
     /// each action, when, and whose words it was. The engine's own reading of
-    /// its journal; a reader never derives it again from `events.ndjson`.
-    #[serde(default)]
+    /// its journal; a reader never derives it again from `events.ndjson`. A live
+    /// item's always holds its raise; omitted only where it is empty, as a sample
+    /// bundle written before the field existed holds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<HumanItemHistoryEntry>,
 }
 }

@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("152.")["bundle_versions"]["events"],
+        divergence_block("155.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1246,7 +1246,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("136.")["bundle_versions"]["planner_channel"],
+        divergence_block("155.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -9716,7 +9716,7 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         );
     }
 
-    // An edit envelope requires version 3, refused in the contract's words.
+    // An edit envelope requires version 4, refused in the contract's words.
     let replies: onemessagebus::QueueName = REPLIES.parse().expect("a queue name");
     let grants = PlannerChannel.allowlist();
     let refused = PlannerChannel
@@ -9730,7 +9730,7 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         named.contains(&refused),
         "the contract does not quote `{refused}`"
     );
-    assert_eq!(REPLY_ENVELOPE_VERSION, 3);
+    assert_eq!(REPLY_ENVELOPE_VERSION, 4);
 
     // A bare reply is routed by its halves.
     let routed = |envelope: Value| -> Vec<String> {
@@ -12810,4 +12810,126 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
         block["events_bundle_version"],
         json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
     );
+}
+
+/// The contract's paragraph on rulings is what the public types are: the
+/// `Provenance` words and default, the envelope version and the versions read,
+/// the two verbs, the surface kind, the `RulingKind` words, both precedence
+/// sentences, and the `DeclinedRuling` record field for field — so the
+/// paragraph a reader restates the record from cannot drift from the type.
+#[test]
+fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() {
+    use onepipeline::channel::{
+        DeclinedRuling, RulingKind, SurfaceKind, REPLY_ENVELOPE_VERSION,
+        REPLY_ENVELOPE_VERSIONS_READ,
+    };
+    use onepipeline::provenance::Provenance;
+    let passage = CONTRACT
+        .split("\n\n")
+        .find(|paragraph| paragraph.starts_with("**Whose words a ruling is.**"))
+        .expect("the contract states whose words a ruling is");
+    let named = backticked_in(passage);
+    for word in [
+        "onepipeline::provenance::Provenance",
+        "Manager",
+        "User",
+        "channel::Reply",
+        "channel::layout::ReplyEnvelope",
+        "REPLY_ENVELOPE_VERSION",
+        "REPLY_ENVELOPE_VERSIONS_READ",
+        "verbs::reply_as",
+        "verbs::reply",
+        "reply RUN [FILE] [--as manager|user]",
+        "onepipeline decline-ruling",
+        "plan::AMENDMENT_PRECEDENCE",
+        "plan::USER_AMENDMENT_PRECEDENCE",
+        "## Planner context",
+        "### Amendment",
+        "## Manager notes",
+        "edit-committed",
+        "planner-replied",
+        "note-delivered",
+        "task-amended",
+    ] {
+        assert!(
+            named.contains(word),
+            "the rulings paragraph does not name `{word}`"
+        );
+    }
+    // The words and the default.
+    for (provenance, word) in [(Provenance::Manager, "manager"), (Provenance::User, "user")] {
+        assert_eq!(serde_json::to_value(provenance).unwrap(), json!(word));
+        assert!(
+            named.contains(&format!("\"{word}\"")),
+            "`\"{word}\"` is not named"
+        );
+    }
+    assert_eq!(Provenance::default(), Provenance::Manager);
+    assert!(passage.contains("defaulting to `Manager`"));
+    // The envelope version and what is read.
+    assert_eq!(REPLY_ENVELOPE_VERSION, 4);
+    assert!(passage.contains("`REPLY_ENVELOPE_VERSION` is 4"));
+    assert!(named.contains(&format!("{REPLY_ENVELOPE_VERSIONS_READ:?}")));
+    // The surface kind, and the kinds of ruling.
+    assert_eq!(SurfaceKind::DECLINED_RULING, "declined-ruling");
+    assert!(named.contains(SurfaceKind::DECLINED_RULING));
+    for (kind, word) in [
+        (RulingKind::Note, "note"),
+        (RulingKind::Amendment, "amendment"),
+        (RulingKind::Answer, "answer"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(word));
+        assert!(
+            named.contains(word),
+            "`{word}` is not named as a ruling kind"
+        );
+    }
+    // The record, field for field and type for type, as the paragraph spells it.
+    let spelled = named
+        .iter()
+        .find(|span| span.starts_with("channel::DeclinedRuling {"))
+        .expect("the paragraph spells the declined-ruling record");
+    let fields: Vec<(String, String)> = spelled
+        .trim_start_matches("channel::DeclinedRuling {")
+        .trim_end_matches('}')
+        .split(',')
+        .map(|field| {
+            let (name, ty) = field.split_once(':').expect("a field and its type");
+            (name.trim().to_owned(), ty.trim().to_owned())
+        })
+        .collect();
+    let record = DeclinedRuling {
+        node: "build".into(),
+        ruling: "c3.0".into(),
+        provenance: Provenance::Manager,
+        kind: RulingKind::Note,
+        reply: 3,
+        text: "Keep the diff small.".into(),
+        reason: "The user said otherwise.".into(),
+    };
+    let written = serde_json::to_value(&record).unwrap();
+    let keys: Vec<&String> = written.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        fields.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        "the record's fields are not the ones the paragraph spells"
+    );
+    for (name, ty) in &fields {
+        let value = &written[name.as_str()];
+        let matches = match ty.as_str() {
+            "String" => value.is_string(),
+            "u64" => value.is_u64(),
+            "Provenance" | "RulingKind" => value.is_string(),
+            other => {
+                panic!("the paragraph spells `{name}` as `{other}`, a type this test does not know")
+            }
+        };
+        assert!(matches, "`{name}` is spelled `{ty}` and written as {value}");
+    }
+    let read: DeclinedRuling = serde_json::from_value(written.clone()).unwrap();
+    assert_eq!(read, record);
+    let mut stray = written;
+    stray["stray"] = json!(true);
+    assert!(serde_json::from_value::<DeclinedRuling>(stray).is_err());
+    assert!(passage.contains("never from the surface's `message`"));
 }

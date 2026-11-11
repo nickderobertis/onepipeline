@@ -563,6 +563,37 @@ the lever for a correction that has to reach the live turn *and* still bind a
 re-dispatch, which a `note` deliberately does not do: reaching a running turn and
 being carried to the next dispatch are mutually exclusive.
 
+Every ruling records **whose words it is**. A reply envelope (version 4) may carry
+`"provenance": "manager"` — the default, what an envelope that says nothing is — or
+`"user"`, the user's words relayed by the manager; `reply --as manager|user` says the
+same without editing the envelope, and an envelope stating one while `--as` names the
+other is refused with nothing queued (`verbs::reply_as` is the library form). It is not
+the envelope's `author`, which names who sent it and decides its grants.
+
+```bash
+onepipeline reply run-1 --as user <<<'{"version":4,"commands":[  # the user's own words
+  {"op":"amend","id":"build","text":"Keep the public API unchanged."}]}'
+```
+
+Every ruling a dispatch reads — a note delivered into its live turn (worker and
+supervisor alike), a note carried under `## Planner context`, the notes a
+continuation renders under `## Manager notes`, an amendment under `### Amendment`,
+and the answer `onepipeline ask` prints — opens with one attribution line naming its
+party. A user's ruling binds. A manager's is a strong default the dispatch may
+decline with its reason, and names the **ruling reference** that does it:
+
+```bash
+onepipeline decline-ruling "$ONEPIPELINE_RUN_ID" --ruling c4.0 <<<'The user asked for the opposite.'
+```
+
+A decline raises one non-blocking `declined-ruling` surface for the manager, whose
+`declined_ruling` field is a typed record — `node`, `ruling`, `provenance` (always
+`manager`), `kind` (`note`, `amendment` or `answer`), `reply` (the id `reply` answered
+the carrying envelope with), `text` and `reason` — which a reader takes every fact
+from, never from the surface's message. A user's ruling, an unknown reference and an
+empty reason are refused with nothing appended. The engine does nothing more with it:
+the manager decides, and may take it to the user.
+
 There is **one** manager-note op. The `context` op this crate used to carry was the
 same delivery with fewer fields, and shipping both is what let a manager's approval
 reach a worker and never its judge; an envelope still naming `context` is refused
@@ -951,6 +982,12 @@ onepipeline human-items reopen ITEM          # take a completion or dismissal ba
 onepipeline human-items note ITEM --text TEXT  # comment on it, or state why, afterwards
 onepipeline human-items watch                # this session's item events, once each
 ```
+
+`answer`, `answer-batch`, `complete`, `dismiss`, `reopen` and `note` each take
+`--as manager|user`, defaulting to `manager`: whose words the action is, recorded on
+the resolution or the event's `by` (`raise` takes none — an item is its asker's own).
+`show ITEM --json` returns the item's `history`, oldest first: each event's action, its
+time, who took it and whose words it was, so a reader never reads the journal itself.
 
 A question may offer up to six `choices`, each a title and a description; an answer
 records the picked choice, the person's own words, or both. Several answers sent
