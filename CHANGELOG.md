@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.107.0](https://github.com/nickderobertis/onepipeline/compare/v0.106.4...v0.107.0) - 2026-11-11
+
+### Added
+
+- *(channel)* [**breaking**] link the bus without validators, and refuse offers to runs launched with them ([#1519](https://github.com/nickderobertis/onepipeline/pull/1519))
+
 ## [0.106.4](https://github.com/nickderobertis/onepipeline/compare/v0.106.3...v0.106.4) - 2026-11-11
 
 ### Fixed
