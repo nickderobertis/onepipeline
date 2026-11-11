@@ -1,6 +1,6 @@
 //! A real `oneagentgraph` executable, scripted from a directory.
 //!
-//! It speaks the sibling's command surface — `run`, `reset-timer`, `interrupt`,
+//! It speaks the sibling's command surface — `run`, `history`, `interrupt`,
 //! `health` — emits envelope NDJSON on stdout, and records every invocation so a
 //! test can assert on what `onepipeline` actually asked for.
 //!
@@ -102,7 +102,6 @@ fn main() -> ExitCode {
 
     match args.first().map(String::as_str) {
         Some("run") => run(&args, &dir),
-        Some("reset-timer") => reset_timer(&args, &dir),
         Some("history") => history(&args, &dir),
         Some("interrupt") => interrupt(&args, &dir),
         Some("health") => {
@@ -172,34 +171,6 @@ fn outlived_by(dir: &std::path::Path, key: &str) {
             "this double cannot leave a process behind: {error}"
         ));
     }
-}
-
-/// `oneagentgraph reset-timer RUN MEMBER`
-///
-/// Scripted by `reset-timer.fail`: absent, every reset is taken; present and
-/// empty, every reset is refused; present and naming members, one per
-/// whitespace-separated word, only those are refused and the rest are taken —
-/// which is how a journey holds a reset that reaches several members against
-/// one of them refusing.
-fn reset_timer(args: &[String], dir: &std::path::Path) -> ExitCode {
-    for (at, name) in [(1, "RUN"), (2, "MEMBER")] {
-        if let Err(refusal) = fake::required(args, at, name) {
-            return refusal;
-        }
-    }
-    let refused = match std::fs::read_to_string(dir.join("reset-timer.fail")) {
-        Ok(named) => {
-            let mut named = named.split_whitespace().peekable();
-            named.peek().is_none() || named.any(|member| member == args[2])
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => fake::fail(&format!("cannot read this double's reset script: {error}")),
-    };
-    if refused {
-        eprintln!("no resettable schedule named that member");
-        return ExitCode::from(2);
-    }
-    ExitCode::SUCCESS
 }
 
 /// Where this double keeps which graph document each of its runs was launched

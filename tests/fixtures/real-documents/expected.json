@@ -385,7 +385,7 @@
     }
   },
   "graphs/dag-scope.yaml": {
-    "version": 1,
+    "version": 11,
     "name": "dag-scope",
     "env": {},
     "members": {
@@ -395,7 +395,15 @@
         "persona": "../personas/check-in.yaml",
         "schedule": {
           "every": 1800,
-          "resettable": true
+          "start_after": 0,
+          "reset_on": {
+            "include": [
+              {
+                "source": "pipeline",
+                "kind": "planner-surfaced"
+              }
+            ]
+          }
         }
       },
       "monitor": {
