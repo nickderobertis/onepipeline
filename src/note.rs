@@ -591,6 +591,16 @@ pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Op
     (!left.trim().is_empty()).then_some(left)
 }
 
+/// A planner context with each carried entry's attribution taken off, leaving
+/// the notes as they were written, in order.
+pub(crate) fn without_attributions(context: &str) -> String {
+    context
+        .split(CARRIED_SEPARATOR)
+        .map(|entry| crate::ruling::split_attribution(entry).1)
+        .collect::<Vec<_>>()
+        .join(CARRIED_SEPARATOR)
+}
+
 /// Whether two carried notes are written as the same entry of a planner
 /// context, which is what [`without_carried`] matches and what a withdrawal's
 /// `alike_after` counts: notes whose texts differ only where [`entry_of`] writes

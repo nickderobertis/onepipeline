@@ -4810,9 +4810,11 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
+                // Stamped as its commit will be, so the plan-edit hook is shown each
+                // ruling under the attribution the node's dispatch then reads.
                 crate::projection::fold_operations(
                     &mut staged_state,
-                    &step.staged(),
+                    &engine::from_envelope(&step.staged(), recorded_as, index, envelope.provenance),
                     Some(sys::now_millis()),
                 );
                 staged.push(step);

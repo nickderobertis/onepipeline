@@ -7745,7 +7745,7 @@ fn a_withdrawn_note_written_alike_to_another_leaves_the_other_in_carry_order() {
         let notes = task
             .split_once("## Planner context")
             .and_then(|(_, context)| context.trim().split_once("\n\n"))
-            .map(|(_, notes)| notes.trim().to_owned())
+            .map(|(_, notes)| unattributed(notes.trim()))
             .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
         assert_eq!(
             notes, expected,
@@ -7849,12 +7849,32 @@ fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_afte
     let notes = task
         .split_once("## Planner context")
         .and_then(|(_, context)| context.trim().split_once("\n\n"))
-        .map(|(_, notes)| notes.trim().to_owned())
+        .map(|(_, notes)| unattributed(notes.trim()))
         .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
     assert_eq!(
         notes, expected,
         "the replayed run did not compose later with B then A"
     );
+}
+
+/// The carried notes of a planner context, each entry's attribution line taken
+/// off once it is held to be the manager's, declinable by a reference: what the
+/// notes themselves say, in the order they were composed.
+fn unattributed(notes: &str) -> String {
+    notes
+        .split("\n\n")
+        .map(|entry| {
+            let (attribution, note) = entry
+                .split_once('\n')
+                .unwrap_or_else(|| panic!("a carried note with no attribution: {entry:?}"));
+            assert!(
+                attribution.starts_with("Ruling from the manager (ruling reference `c"),
+                "a carried note is not under the manager's attribution: {entry:?}"
+            );
+            note
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// No assertion in these journeys is a bare presence assertion over metadata the writer

@@ -6504,9 +6504,12 @@ fn validate_envelope(
                 )
             });
         if let Ok(step) = &ruling {
+            // Stamped with the envelope it came in, as its commit will be, so the
+            // state the plan-edit hook is shown composes each ruling under the
+            // attribution the node's dispatch then reads.
             crate::projection::fold_operations(
                 &mut staged_state,
-                &step.staged(),
+                &from_envelope(&step.staged(), envelope.id, index, envelope.provenance),
                 Some(sys::now_millis()),
             );
         }

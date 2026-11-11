@@ -3646,7 +3646,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 out.push_str(&format!(
                     "  {}: amended — {}\n",
                     node.id,
-                    one_line(amendment)
+                    one_line(crate::ruling::split_attribution(amendment).1)
                 ));
             }
         }
@@ -5835,7 +5835,11 @@ pub fn results(view: &RunView) -> String {
         // and rendered before the settlement's own reasons because it is what
         // those reasons were reached against.
         if let Some(amendment) = &node.amendment {
-            out.push_str(&format!("      amendment: {}\n", one_line(amendment)));
+            // The ruling's own words: whose it is is the dispatch's to read.
+            out.push_str(&format!(
+                "      amendment: {}\n",
+                one_line(crate::ruling::split_attribution(amendment).1)
+            ));
         }
         // Why the judge failed it, then which chains ran out, then which
         // recovered — in that order, because that is the order they matter in.
