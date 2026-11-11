@@ -5913,7 +5913,10 @@ mod tests {
             with(serde_json::json!([{"on": "commands"}, {"on": "surfaces"}])),
             ["commands", "surfaces"]
         );
-        assert_eq!(with(serde_json::json!([{"kind": "command"}])), [EVERY_QUEUE]);
+        assert_eq!(
+            with(serde_json::json!([{"kind": "command"}])),
+            [EVERY_QUEUE]
+        );
         assert_eq!(with(serde_json::json!("replies")), [EVERY_QUEUE]);
         assert!(with(serde_json::json!([])).is_empty());
     }

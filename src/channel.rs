@@ -1748,7 +1748,9 @@ impl ChannelState {
     /// A run launched with `validators` on one of `queues`, which nothing this
     /// build links can run: the offer is refused rather than appended unjudged.
     fn judging_bus(&self, queues: &[&str]) -> crate::Result<Bus> {
-        if queues.iter().any(|queue| self.removed_validators.contains(*queue))
+        if queues
+            .iter()
+            .any(|queue| self.removed_validators.contains(*queue))
             || self.removed_validators.contains(crate::ledger::EVERY_QUEUE)
         {
             return Err(crate::Error::Refused(REMOVED_VALIDATORS.to_owned()));
