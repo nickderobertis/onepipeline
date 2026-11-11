@@ -86,7 +86,7 @@ fn window_of(seconds: &[u64]) -> String {
 
 /// `onepipeline ask` as a worker runs it: the run on `ONEPIPELINE_RUN_ID`, and
 /// whatever else the caller names, started and left to wait.
-fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str)]) -> Child {
+pub(crate) fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str)]) -> Child {
     let mut command = world.cmd(&[&["ask"], args].concat());
     command.env("ONEPIPELINE_RUN_ID", run);
     for (key, value) in env {
@@ -101,15 +101,15 @@ fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str)]) -> Chil
 }
 
 /// What one `ask` answered, once it has.
-struct Answered {
-    code: i32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Answered {
+    pub(crate) code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 impl Answered {
     /// Its single line of standard output, as the object it is.
-    fn answer(&self) -> Value {
+    pub(crate) fn answer(&self) -> Value {
         assert_eq!(
             self.stdout.lines().count(),
             1,
@@ -121,7 +121,7 @@ impl Answered {
     }
 }
 
-fn waited(child: Child) -> Answered {
+pub(crate) fn waited(child: Child) -> Answered {
     let output = child.wait_with_output().expect("the question ends");
     Answered {
         code: output.status.code().unwrap_or(-1),
@@ -135,7 +135,7 @@ fn waited(child: Child) -> Answered {
 ///
 /// Polled rather than waited on, because the question is raised by another
 /// process and the manager's side has no signal of its own.
-fn question_on(world: &World, run: &str) -> Value {
+pub(crate) fn question_on(world: &World, run: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let next = world.run(&["next", run]);

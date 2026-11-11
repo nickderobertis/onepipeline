@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "project": "plans:released-rulings-board",
+  "project_metadata": {
+    "onepipeline.concurrency": 4,
+    "onepipeline.driver": {
+      "run": "released-rulings",
+      "host": "lima-hp",
+      "session": "session-released-rulings",
+      "pid": 1441999,
+      "claimed_at": "2026-11-11T16:58:13.960Z",
+      "lease": {
+        "interval_seconds": 300,
+        "cancel_grace_seconds": 300
+      }
+    },
+    "onepipeline.goal": {
+      "text": "Deliver released-rulings"
+    },
+    "onepipeline.schema_version": 3
+  },
+  "items": {
+    "later": {
+      "destination": "plans:released-rulings-board/001-later",
+      "title": "later",
+      "content_sha256": "04c65614d216753229539726693a26b6aaed34462a486a05b92ab9051c5327e7",
+      "status": "queued",
+      "metadata": {
+        "onepipeline.amendment": "Leave the four comment lines as they are.",
+        "onepipeline.context": "The fixture moved to fixtures/v2.",
+        "onepipeline.id": "later",
+        "onepipeline.node": "later",
+        "onepipeline.persona": "engineer"
+      },
+      "delivers": [],
+      "depends_on": [
+        "slow"
+      ]
+    },
+    "slow": {
+      "destination": "plans:released-rulings-board/000-slow",
+      "title": "slow",
+      "content_sha256": "6e36cc38328c403a2319ac1a112d5015218a04e45ea150faf338435d6d5b7de6",
+      "status": "in progress",
+      "metadata": {
+        "onepipeline.id": "slow",
+        "onepipeline.node": "slow",
+        "onepipeline.persona": "engineer"
+      },
+      "delivers": [],
+      "depends_on": []
+    }
+  }
+}

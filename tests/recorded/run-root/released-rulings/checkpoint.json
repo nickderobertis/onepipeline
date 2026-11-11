@@ -1,0 +1,141 @@
+{
+  "schema_version": 14,
+  "run_id": "released-rulings",
+  "coverage": {
+    "bytes": 3376,
+    "records": 8,
+    "at": {
+      "ts": "2026-11-11T16:58:14.397Z",
+      "stream": "lima-hp-1441999"
+    },
+    "streams": {
+      "fake-oneagentgraph-1794416293984-1442014": 1,
+      "lima-hp-1441986": 0,
+      "lima-hp-1441999": 4
+    },
+    "digest": "1c17bdc31b94c49f80c89eedb09136bc"
+  },
+  "state": {
+    "graph": {
+      "concurrency": 4,
+      "nodes": [
+        {
+          "id": "slow",
+          "task": "## What\nDo slow.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- slow is done.",
+          "persona": "engineer",
+          "task_record": {
+            "id": "released-rulings-board/000-slow",
+            "title": ""
+          }
+        },
+        {
+          "id": "later",
+          "task": "## What\nDo later.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- later is done.",
+          "persona": "engineer",
+          "deps": [
+            "slow"
+          ],
+          "context": "The fixture moved to fixtures/v2.",
+          "amendment": "Leave the four comment lines as they are.",
+          "task_record": {
+            "id": "released-rulings-board/001-later",
+            "title": ""
+          }
+        }
+      ]
+    },
+    "plan": {
+      "schema_version": 3,
+      "goal": {
+        "text": "Deliver released-rulings"
+      },
+      "name": "released-rulings",
+      "concurrency": 4,
+      "tasks": [
+        {
+          "id": "slow",
+          "task": "## What\nDo slow.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- slow is done.",
+          "persona": "engineer",
+          "task_record": {
+            "id": "released-rulings-board/000-slow",
+            "title": ""
+          }
+        },
+        {
+          "id": "later",
+          "task": "## What\nDo later.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- later is done.",
+          "persona": "engineer",
+          "deps": [
+            "slow"
+          ],
+          "task_record": {
+            "id": "released-rulings-board/001-later",
+            "title": ""
+          }
+        }
+      ]
+    },
+    "recorded": {
+      "slow": {
+        "at": "running"
+      }
+    },
+    "outcomes": {},
+    "parks": {},
+    "branches": {},
+    "sessions": {},
+    "abandoned": {},
+    "change_urls": {},
+    "causes": {},
+    "heads": {},
+    "landing_commits": {},
+    "landings": {},
+    "completed_steps": {},
+    "dispatched_at": {
+      "slow": 1794416293971
+    },
+    "settled_at": {},
+    "attestations": [],
+    "decisions_pending": {},
+    "holds": {
+      "later": [
+        {
+          "kind": "dependencies",
+          "blocking": [
+            "slow"
+          ]
+        }
+      ]
+    },
+    "completion_requests": [],
+    "surfaces_queued": 0,
+    "surfaces_read": 0,
+    "last_surface_at": null,
+    "last_write_at": 1794416294397,
+    "stop": "not-stopped",
+    "closure": {
+      "owed_until_closed": true,
+      "reopened_at": 1794416294397
+    },
+    "strict": true,
+    "cross_dag_watches": {},
+    "cross_dag_baselines": {},
+    "cross_dag_reported": [],
+    "pending_context": {
+      "later": "The fixture moved to fixtures/v2."
+    },
+    "refusals": {},
+    "served": {},
+    "superseded": {},
+    "activity": {
+      "slow": {
+        "doing": null,
+        "progress": {
+          "events": 2,
+          "last_at": 1794416293984
+        },
+        "last_heartbeat_at": null
+      }
+    }
+  }
+}

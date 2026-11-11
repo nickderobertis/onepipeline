@@ -317,6 +317,7 @@ mod review_reply;
 mod review_round;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod rulings;
 mod run_end_hooks;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is one reading across `views`, `hooks`, `summary`, `unwatched` and the `status`
