@@ -29,7 +29,7 @@
 // journey over the root, two by the budget measurement's own journey (168 s run alone at load1
 // about 17), which runs `scripts/host-view-measure.mjs` whole, once to its record and once to
 // a refused trace. The slowed-binary journey adds a fourth, measuring a stripped stand-in
-// that sleeps 150 ms before running this build (27 s run alone at load1 about 6). They exercise
+// that sleeps 150 ms before running this build (158 s run alone at load1 about 10 on 8 cores). They exercise
 // `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the compiled
 // binary, and read the recorded run under `tests/recorded/` through the generator, so any
 // change under `src/` can move what they hold; the narrowest edge they can honestly sit behind

@@ -166,7 +166,7 @@ mod human_board_projection;
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
 // 100-run root's ~260 MB of journals by this suite's debug build, two of them the budget
 // measurement's, run whole by its own journey; a fourth is that measurement's again, over a
-// slowed stand-in for the budget's failing path (27 s alone). What they exercise is
+// slowed stand-in for the budget's failing path (158 s alone at load1 about 10 on 8 cores). What they exercise is
 // `hostview`, `checkpoint`, `summary`, `views` and `sys` together through the compiled
 // binary, so the narrowest edge they can honestly sit behind is the crate itself, which is
 // this target's; a project edged narrower would drop them out of `nx affected` for the very
