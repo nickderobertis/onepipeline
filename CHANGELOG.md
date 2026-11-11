@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.108.0](https://github.com/nickderobertis/onepipeline/compare/v0.107.0...v0.108.0) - 2026-11-11
+
+### Added
+
+- *(observer)* [**breaking**] remove the built-in clock reset ([#1521](https://github.com/nickderobertis/onepipeline/pull/1521))
+
 ## [0.107.0](https://github.com/nickderobertis/onepipeline/compare/v0.106.4...v0.107.0) - 2026-11-11
 
 ### Added
