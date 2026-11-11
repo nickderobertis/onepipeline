@@ -13385,3 +13385,7 @@ on. The reason names validators, says this engine no longer runs them, and says 
 `tests/e2e/older_launch_record.rs`'s
 `a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer` holds it
 through the binary, over the recorded record under `tests/recorded/launch/`.
+
+**Ruling:** the planner ruled the 0.11.1 re-decision and the dropped validators clause
+(correlation `c-2754696f9652b3420e0ad6754137b217`); the refusal's meaning is the
+manager's ruling on this node.
