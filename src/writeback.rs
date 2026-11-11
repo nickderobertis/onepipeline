@@ -646,6 +646,24 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::NoSources => decided("no-sources"),
         // llmlint: ignore[changed_behavior_has_e2e] reached only by a write-back whose launch directory's layers stop declaring the plan source's plugin between the launch's read and an attempt; the classification is the store's own word, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds against `onetaskgraph_core::Failure`.
         EngineError::IncompleteSource { .. } => decided("incomplete-source"),
+        // A copy whose item's body is larger than its destination holds: the store sizes every
+        // item before the first write and writes nothing, and asking again sends the same body.
+        // llmlint: ignore[changed_behavior_has_e2e] no backend an offline journey writes through states a body limit — `local-md` holds any body and the loopback Linear stores what it is sent — so only a hosted board reaches it; the word is the store's own, which `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds against `onetaskgraph_core::Failure`.
+        EngineError::Oversize { .. } => decided("oversize"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back: these
+        // refuse a batch document, an unnarrowed `task find`, a `task comments --item` outside
+        // its source, a listing whose source repeats a cursor, an `--if-version` beyond one
+        // task, and a member of a plan graph created from a template — none of which a
+        // write-back sends. `writeback::tests` holds each word.
+        EngineError::BatchDocument { .. } => decided("invalid-batch"),
+        EngineError::UnnarrowedQuery { .. } => decided("unnarrowed-query"),
+        EngineError::ItemOutsideSource { .. } => decided("item-outside-source"),
+        EngineError::RepeatedPage { .. } => decided("repeated-page"),
+        EngineError::IfVersionOneTask => decided("if-version-one-task"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        // A plan member that failed after others landed is the failure it wraps, as the store
+        // classes it.
+        EngineError::PlanMember { error, .. } => cause_of(error),
         // llmlint: ignore-block[changed_behavior_has_e2e] These store refusals are
         // unreachable from settlement writes: copies use project members, carry no
         // comments, set no expected version, and read immutable local shadow tasks.
@@ -2749,8 +2767,11 @@ impl Attempt {
     /// Count the fields one targeted update says it wrote, one item apiece.
     fn wrote(&self, fields: &BTreeSet<onetaskgraph_plugin_api::UpdatedField>) {
         let mut written = self.written.borrow_mut();
-        for field in fields {
-            *written.entry(UpdatedField::from(*field)).or_default() += 1;
+        for field in fields
+            .iter()
+            .filter_map(|field| UpdatedField::try_from(*field).ok())
+        {
+            *written.entry(field).or_default() += 1;
         }
     }
 
@@ -5092,7 +5113,8 @@ fn actions(report: &CopyReport) -> ProjectionActions {
             | CopyAction::Unchanged { .. }
             | CopyAction::Orphaned { .. }
             | CopyAction::Failed { .. }
-            | CopyAction::Skipped { .. } => None,
+            | CopyAction::Skipped { .. }
+            | CopyAction::Oversize { .. } => None,
         })
         .collect();
     let mut actions = ProjectionActions::default();
@@ -5100,8 +5122,14 @@ fn actions(report: &CopyReport) -> ProjectionActions {
         let count = match &item.action {
             CopyAction::Orphaned { destination } if rewritten.contains(destination) => continue,
             // Failed items made no mutation and are not successful projections, and a copy
-            // that narrows by no status skips none.
-            CopyAction::Failed { .. } | CopyAction::Skipped { .. } => continue,
+            // that narrows by no status skips none. Only a dry run reports an oversize item —
+            // a real copy refuses whole, as `oversize`, before writing — and a write-back's
+            // copy is never a dry run.
+            CopyAction::Failed { .. }
+            | CopyAction::Skipped { .. }
+            | CopyAction::Oversize { .. } => {
+                continue;
+            }
             CopyAction::Created { .. } => &mut actions.created,
             CopyAction::Updated { .. } => &mut actions.updated,
             CopyAction::Unchanged { .. } => &mut actions.unchanged,
@@ -5341,10 +5369,15 @@ pub enum UpdatedField {
     DependsOn,
 }
 
-impl From<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
-    fn from(field: onetaskgraph_plugin_api::UpdatedField) -> Self {
+/// A store field the record has no key for is handed back as the error: `repositories`, which
+/// the store reports only for an update that sets it, and no targeted update the engine builds
+/// does — an existing item's repositories are not modelled (see this module's head).
+impl TryFrom<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
+    type Error = onetaskgraph_plugin_api::UpdatedField;
+
+    fn try_from(field: onetaskgraph_plugin_api::UpdatedField) -> Result<Self, Self::Error> {
         use onetaskgraph_plugin_api::UpdatedField as Store;
-        match field {
+        Ok(match field {
             Store::Title => Self::Title,
             Store::Content => Self::Content,
             Store::Status => Self::Status,
@@ -5352,7 +5385,8 @@ impl From<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
             Store::Metadata => Self::Metadata,
             Store::Delivers => Self::Delivers,
             Store::DependsOn => Self::DependsOn,
-        }
+            Store::Repositories => return Err(field),
+        })
     }
 }
 
@@ -6466,6 +6500,12 @@ mod tests {
                 id: "plans:doc".into(),
                 expected: "old".into(),
                 found: "new".into(),
+                held: Box::new(onetaskgraph_core::cache::WriteResult {
+                    version: Some("new".into()),
+                    parts: None,
+                    status: None,
+                    priority: None,
+                }),
             },
             EngineError::NoSuchProject {
                 id: "plans:a".into(),
@@ -6783,6 +6823,37 @@ mod tests {
                 destination: "plans".into(),
                 operation: "write_task".into(),
             },
+            // The refusals 0.14.12 added: a copy whose body is larger than its destination
+            // holds, the batch reads and listings a write-back never sends, and a plan member
+            // created from a template, which takes the class and kind of the failure it wraps.
+            EngineError::Oversize {
+                items: vec![onetaskgraph_core::Oversized {
+                    source: id(),
+                    destination: onetaskgraph_plugin_api::SourceName::new("board")
+                        .expect("a source name"),
+                    body_size: 70_000,
+                    limit: 65_536,
+                }],
+            },
+            EngineError::BatchDocument {
+                what: words(),
+                why: words(),
+            },
+            EngineError::UnnarrowedQuery { key: words() },
+            EngineError::ItemOutsideSource {
+                item: "plans:a".into(),
+                source_name: "board".into(),
+            },
+            EngineError::RepeatedPage { token: words() },
+            EngineError::IfVersionOneTask,
+            EngineError::PlanMember {
+                member: "a".into(),
+                landed: vec!["plans:board".into()],
+                error: Box::new(EngineError::SourceRefused {
+                    name: "plans".into(),
+                    error: source.clone(),
+                }),
+            },
         ];
         for failure in &failures {
             let classified = Classified::of_engine(failure);
@@ -6800,6 +6871,35 @@ mod tests {
                 "{failure:?} is classed otherwise than the store classes it"
             );
         }
+    }
+
+    /// Every field a targeted update can report writing is a key of the record's `updated_fields`
+    /// but `repositories`, which no update the engine builds sets, and which is handed back
+    /// rather than counted under another key.
+    #[test]
+    fn every_store_field_but_repositories_is_a_record_key() {
+        use super::UpdatedField;
+        use onetaskgraph_plugin_api::UpdatedField as Store;
+        for (store, record) in [
+            (Store::Title, UpdatedField::Title),
+            (Store::Content, UpdatedField::Content),
+            (Store::Status, UpdatedField::Status),
+            (Store::Priority, UpdatedField::Priority),
+            (Store::Metadata, UpdatedField::Metadata),
+            (Store::Delivers, UpdatedField::Delivers),
+            (Store::DependsOn, UpdatedField::DependsOn),
+        ] {
+            assert_eq!(UpdatedField::try_from(store), Ok(record));
+            // The record's key is the store's own word for it.
+            assert_eq!(
+                serde_json::to_value(record).expect("a field serializes"),
+                serde_json::to_value(store).expect("a field serializes")
+            );
+        }
+        assert_eq!(
+            UpdatedField::try_from(Store::Repositories),
+            Err(Store::Repositories)
+        );
     }
 
     /// A create another attempt holds under a live lease is asked again once the lease ends, one

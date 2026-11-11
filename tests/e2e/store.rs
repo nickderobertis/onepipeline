@@ -3158,7 +3158,10 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                         "a-projection:board",
                     )])
                     .expect("one item"),
-                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: false,
+                        documents: false,
+                    },
                     destination: onetaskgraph_plugin_api::SourceName::new("strict")
                         .expect("a source name"),
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
@@ -4812,7 +4815,10 @@ fn a_live_add_leaves_the_edited_board_project_untouched() {
                         &format!("author:{}", project_id(run)),
                     )])
                     .unwrap(),
-                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: true,
+                        documents: false,
+                    },
                     destination: onetaskgraph_plugin_api::SourceName::new(
                         crate::harness::STORE_SOURCE,
                     )
