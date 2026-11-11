@@ -620,9 +620,13 @@ pub struct HumanItemHistoryEntry {
     /// What the event did.
     pub action: HumanItemEventAction,
     /// When it was recorded, as RFC 3339.
+    #[serde(deserialize_with = "nonempty")]
+    #[schemars(length(min = 1), pattern(r"\S"))]
     pub at: String,
     /// Who took it: the resolver, the actor a reopen or a note names, the asker's
     /// session for a raise, and `engine` for an auto-resolution.
+    #[serde(deserialize_with = "nonempty")]
+    #[schemars(length(min = 1), pattern(r"\S"))]
     pub actor: String,
     /// The human a manager acted for, when one did.
     #[serde(deserialize_with = "required_option")]

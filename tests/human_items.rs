@@ -1446,3 +1446,26 @@ fn sample_actions_append_history_entries_with_the_provenance_each_was_given() {
     assert_eq!(shown["history"][0]["actor"], "session:manager");
     assert_eq!(shown["history"][0]["provenance"], "manager");
 }
+
+/// A history entry is read only with a time and an actor that say something: a
+/// sample bundle whose entry names a blank actor is refused before any query.
+#[test]
+fn a_sample_history_entry_with_a_blank_actor_is_refused() {
+    let world = World::new();
+    let mut bundle = world.state();
+    bundle["items"][0]["history"] = json!([{
+        "action": "human-item-raised", "at": "sample", "actor": "  ",
+        "on_behalf_of": null, "provenance": "manager"
+    }]);
+    world.write(&bundle);
+    let before = std::fs::read(world.sample()).unwrap();
+    refuse(
+        world.run(&["show", "item-1", "--json"]),
+        "must not be blank",
+    );
+    bundle["items"][0]["history"][0]["actor"] = json!("session:manager");
+    world.write(&bundle);
+    let shown = world.json(&["show", "item-1", "--json"], "HumanItemDetail");
+    assert_eq!(shown["history"][0]["actor"], "session:manager");
+    assert_ne!(std::fs::read(world.sample()).unwrap(), before);
+}

@@ -806,11 +806,15 @@
           },
           "at": {
             "description": "When it was recorded, as RFC 3339.",
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "actor": {
             "description": "Who took it: the resolver, the actor a reopen or a note names, the asker's\nsession for a raise, and `engine` for an auto-resolution.",
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "on_behalf_of": {
             "description": "The human a manager acted for, when one did.",
@@ -4032,11 +4036,15 @@
           },
           "at": {
             "description": "When it was recorded, as RFC 3339.",
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "actor": {
             "description": "Who took it: the resolver, the actor a reopen or a note names, the asker's\nsession for a raise, and `engine` for an auto-resolution.",
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "on_behalf_of": {
             "description": "The human a manager acted for, when one did.",
