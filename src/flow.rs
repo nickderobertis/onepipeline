@@ -889,13 +889,7 @@ impl Flow {
 
     /// The flow's own channel, under the configuration it was registered with.
     pub(crate) fn channel(&self) -> ChannelState {
-        ChannelState::configured(
-            &self.paths,
-            self.record
-                .bus_config
-                .as_ref()
-                .map(RecordedBusConfig::config),
-        )
+        ChannelState::configured(&self.paths, self.record.bus_config.as_ref())
     }
 
     /// The bus configuration the flow's channel is kept under, where it names

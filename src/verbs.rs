@@ -1132,7 +1132,7 @@ pub fn render_receipt(receipt: &Receipt) -> Result<String> {
 /// # Errors
 ///
 /// A malformed envelope — read a second time, leniently, to say when a retired
-/// plan field is why — and every refusal the channel, the validators and the
+/// plan field is why — and every refusal the channel, its hooks and the
 /// reconciler can make.
 pub fn reply(
     paths: &RunPaths,

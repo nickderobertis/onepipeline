@@ -594,10 +594,18 @@ fn unattributed_launcher() -> String {
 /// What the record said is what it keeps saying: [`Serialize`] writes the
 /// recorded document byte for byte, so a record `adopt` rewrites for its own
 /// fields carries its bus configuration exactly as it was launched.
+///
+/// A run launched before `onemessagebus` 0.11 removed validators may have named
+/// some under `validators:`. That key is left out of the runtime configuration,
+/// as a missing codec field is filled in, so the run stays readable; what it
+/// declared is remembered, because an offer those validators would have judged
+/// cannot be judged by this engine and is refused (see
+/// [`RecordedBusConfig::launched_with_validators`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedBusConfig {
     recorded: serde_json::Value,
     config: onemessagebus::Config,
+    launched_with_validators: bool,
 }
 
 impl RecordedBusConfig {
@@ -606,13 +614,23 @@ impl RecordedBusConfig {
     pub fn config(&self) -> &onemessagebus::Config {
         &self.config
     }
+
+    /// Whether the recorded document declares validators: a run launched under
+    /// a bus that judged its offers with them, which this engine no longer runs.
+    pub(crate) fn launched_with_validators(&self) -> bool {
+        self.launched_with_validators
+    }
 }
 
 impl From<onemessagebus::Config> for RecordedBusConfig {
     fn from(config: onemessagebus::Config) -> Self {
         let recorded = serde_json::to_value(&config)
             .unwrap_or_else(|_| unreachable!("a bus configuration serializes"));
-        Self { recorded, config }
+        Self {
+            recorded,
+            config,
+            launched_with_validators: false,
+        }
     }
 }
 
@@ -631,6 +649,17 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
     ) -> std::result::Result<Self, D::Error> {
         let recorded = serde_json::Value::deserialize(deserializer)?;
         let mut completed = recorded.clone();
+        // The key the bus before 0.11 judged offers by: kept in the record, left
+        // out of the configuration this build runs, and remembered as declared
+        // unless it declared none.
+        let launched_with_validators = completed
+            .as_object_mut()
+            .and_then(|fields| fields.remove("validators"))
+            .is_some_and(|declared| match declared {
+                serde_json::Value::Null => false,
+                serde_json::Value::Array(validators) => !validators.is_empty(),
+                _ => true,
+            });
         if let Some(codecs) = completed
             .get_mut("codecs")
             .and_then(serde_json::Value::as_object_mut)
@@ -645,7 +674,11 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
             }
         }
         let config = serde_json::from_value(completed).map_err(serde::de::Error::custom)?;
-        Ok(Self { recorded, config })
+        Ok(Self {
+            recorded,
+            config,
+            launched_with_validators,
+        })
     }
 }
 
@@ -5819,7 +5852,7 @@ mod tests {
         assert_eq!(codec.select, "");
         assert!(codec.frames.is_empty());
         assert_eq!(codec.reply_window_seconds.map(NonZeroU64::get), Some(3000));
-        assert_eq!(bus.config().validators.len(), 1);
+        assert!(bus.launched_with_validators());
         assert_eq!(
             serde_json::to_value(&record).expect("the record serializes")["bus_config"],
             recorded["bus_config"],

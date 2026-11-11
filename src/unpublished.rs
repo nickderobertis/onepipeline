@@ -354,6 +354,7 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
                 detail: Detail::Decision,
                 sessions: Vec::new(),
                 labels: BTreeMap::from([(SESSION_LAUNCHER_LABEL.to_owned(), session.clone())]),
+                branch: None,
             }
         }
         Target::Host => Selection {
@@ -368,6 +369,7 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
                 detail: Detail::Decision,
                 sessions: tokens.iter().cloned().map(SessionToken).collect(),
                 labels: BTreeMap::new(),
+                branch: None,
             }
         }
     };

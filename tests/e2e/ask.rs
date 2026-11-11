@@ -715,19 +715,18 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
 #[test]
 fn a_question_the_bus_refuses_is_answered_refused_at_exit_one() {
     let world = World::new("ask-bus-refused");
-    // A real validator on the `surfaces` queue, scripted to decline: the bus
-    // declines the frame rather than the verb declining to send it.
-    let validator = double("bus-validator").to_string_lossy().into_owned();
+    // A real hook on the `surfaces` queue, refusing: the bus declines the frame
+    // rather than the verb declining to send it.
+    let hook = double("bus-hook").to_string_lossy().into_owned();
+    let reason = "a question this run has no manager to answer";
     let run = run_under(
         &world,
         "askdeclined",
         &format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: surfaces, kind: command, command: [{validator:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
+             - {{on: surfaces, command: [{hook:?}, refuse, {reason:?}]}}\n"
         ),
     );
-    let reason = "a question this run has no manager to answer";
-    world.script("bus-validator.refuse", reason);
 
     let refused = waited(asking(&world, &run, &["which bound?"], &[]));
     assert_eq!(refused.code, 1, "{}", refused.stderr);
@@ -737,7 +736,7 @@ fn a_question_the_bus_refuses_is_answered_refused_at_exit_one() {
         answer["reason"]
             .as_str()
             .is_some_and(|it| it.contains(reason)),
-        "the answer does not carry the validator's own words: {answer}"
+        "the answer does not carry the hook's own words: {answer}"
     );
     assert!(
         refused.stderr.contains("the question was refused"),

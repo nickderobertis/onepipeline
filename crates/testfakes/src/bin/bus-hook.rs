@@ -1,10 +1,9 @@
 //! A command hook, as an `onemessagebus` configuration's `hooks` block names one.
 //!
-//! **Not a double for anything in this stack**, for the reason `bus-validator` is
-//! not: the promise is that a command the *host* names decides what is offered to
-//! a queue, so what stands here is a real hook. It reads the message off its stdin
-//! the way the bus hands it one and answers on stdout, by the argv its configuration
-//! names:
+//! **Not a double for anything in this stack**: the promise is that a command
+//! the *host* names decides what is offered to a queue, so what stands here is a
+//! real hook. It reads the message off its stdin the way the bus hands it one and
+//! answers on stdout, by the argv its configuration names:
 //!
 //!   `keep`                    print the message back
 //!   `drop`                    print nothing

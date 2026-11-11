@@ -910,7 +910,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.11.4"
+oneagentgraph = "0.12.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
@@ -918,7 +918,7 @@ oneagentgraph = "0.11.4"
 # through its `EventKind` and `WorktreeProvision`.
 # 0.63.0 is the release onevcs-testing 0.20.5 pins exactly; that crate supplies
 # the export fixtures.
-onevcs = "0.63.0"
+onevcs = "0.65.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -945,7 +945,7 @@ onevcs = "0.63.0"
 # translation, as every sibling release linked beside it does.
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
-onemessagebus = "0.10.0"
+onemessagebus = "0.11.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -1073,7 +1073,7 @@ onemessagebus = "0.10.0"
 # here reads anything new from it. It stops at 0.23.0 rather than the newest
 # release because 0.23.1 requires `onemessagebus ^0.11`, which the bus pin and
 # `onevcs` admit no version of: taking it would resolve the bus twice.
-onejudge = "0.23.0"
+onejudge = "0.23.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1199,7 +1199,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.20.5"
+onevcs-testing = "0.21.1"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.

@@ -13341,3 +13341,38 @@ pinned at the previous bundle has no document for.
   "bundle_versions": {"events": "2.1.0"}
 }
 ```
+
+## 153. Bus validators are removed, and a run launched with them refuses every offer — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, which still names the command
+validators that judge what is offered to a queue as the core's.** This build links
+`onemessagebus` 0.11.1, which removed validators in favour of the hooks this crate
+already runs (entry 148 is the envelope reviewer's move onto them); `oneagentgraph` 0.12.0, `onejudge` 0.23.1 and `onevcs` 0.65.0
+move with it so the lock resolves the bus once. Nothing here reads a configuration's
+`validators` any more, and a `--bus-config` or launch config declaring them is refused at
+the launch by the bus's own unknown-key check, before any run exists. The bullet of the
+earlier entry saying the engine's own surfaces are "not offered to the validators" no
+longer describes anything: there are none to offer them to.
+
+**A run launched with validators stays readable.** A launch record whose bus
+configuration declares `validators:` is read best-effort, as the contract already reads
+a codec an older bus wrote: the recorded document is kept byte for byte, and the configuration this build runs is built
+without that key. `status`, `results`, every other view and `adopt` read such a run, and
+`adopt` writes its bus configuration back exactly as it was recorded.
+
+**What validators would have judged is refused, with nothing appended.** This engine
+cannot judge an offer the way such a run was launched to judge it, and taking it unjudged
+would let a correction past a bar that never saw it. So, ruled by the manager on this
+workstream's `onepipeline` node, every offer to that run's channel is refused: a reply
+carrying commands, a verdict carrying none, a question `ask` raises, a surface the
+`surface` verb raises (each exiting `2`), and a surface the engine raises, which is
+journalled as `planner-surface-dropped` with the reason as `refused` while the run carries
+on. The reason names validators, says this engine no longer runs them, and says what to do:
+
+> this run was launched with onemessagebus validators, which this engine no longer runs,
+> so nothing offered to its channel can be judged as the run requires and nothing was
+> appended; let the run settle, or stop it with `onepipeline stop`
+
+`tests/e2e/older_launch_record.rs`'s
+`a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer` holds it
+through the binary, over the recorded record under `tests/recorded/launch/`.

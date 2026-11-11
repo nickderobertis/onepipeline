@@ -1986,23 +1986,17 @@ fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve()
 /// A flow's reply is judged under the bus configuration the flow was registered
 /// with, and refused whole — with nothing queued — when it is not an envelope,
 /// carries no verdict, names an author the configuration does not declare,
-/// declares a completion its author may not, is refused by a validator the
-/// configuration names, or names a question nobody asked. A check-in raised on a
-/// flow is the scheduled kind's source.
+/// declares a completion its author may not, or names a question nobody asked.
+/// A hook's refusal is `a_flows_reply_a_hook_drops_or_refuses_is_told_apart`'s.
+/// A check-in raised on a flow is the scheduled kind's source.
 #[test]
 fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
     let world = World::new("flow-judged");
-    let validator = crate::harness::double("bus-validator")
-        .to_string_lossy()
-        .into_owned();
     let config = world.root.join("bus.yaml");
     std::fs::write(
         &config,
-        format!(
-            "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
-             [finding]}}\nvalidators:\n  - {{on: replies, kind: command, command: \
-             [{validator:?}]}}\n"
-        ),
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel: {capabilities: \
+         [finding]}\n",
     )
     .expect("a bus configuration");
     let flow = Flowing::start_with(
@@ -2014,7 +2008,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
     let replies = world.runs.join(".flows/judged/channel/replies.jsonl");
     let queued = || std::fs::read_to_string(&replies).unwrap_or_default();
 
-    world.script("bus-validator.refuse", "this ruling names no evidence");
     for (envelope, said) in [
         ("not an envelope".to_owned(), "malformed"),
         (json!({"version": 2}).to_string(), "carries no verdict"),
@@ -2026,10 +2019,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
             json!({"author": "sentinel", "completion": true, "reason": "done"}).to_string(),
             "not something the sentinel may do",
         ),
-        (
-            json!({"completion": false, "reason": "carry on"}).to_string(),
-            "this ruling names no evidence",
-        ),
     ] {
         world
             .run_with_stdin(&["reply", "--flow", "judged"], &envelope)
@@ -2037,7 +2026,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
             .err_has(said);
         assert_eq!(queued(), "", "a refused reply was queued: {envelope}");
     }
-    world.unscript("bus-validator.refuse");
     world
         .run_with_stdin(
             &[
