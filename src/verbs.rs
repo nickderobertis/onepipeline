@@ -1567,11 +1567,21 @@ pub fn decline_ruling(paths: &RunPaths, ruling: &str, reason: &str) -> Result<Su
         correlation: None,
         declined_ruling: Some(declined),
     };
-    // The publication boundary, as every surface meets it.
-    crate::boundary::guard(&view.state, &json!({ "message": surface.message }))?;
+    // The publication boundary, as every surface meets it — over the typed record
+    // as well as the message, since a reader takes its facts from the record.
+    crate::boundary::guard(
+        &view.state,
+        &json!({ "message": surface.message, "declined_ruling": surface.declined_ruling }),
+    )?;
     let offer = ChannelState::of_paths(paths)?.push_checked(surface.clone(), |changed| {
         // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the decline met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`'s decline journey; a hook rewriting a surface into a boundary violation is that path over changed input, as `surface` above says of its own.
-        crate::boundary::guard(&view.state, &json!({ "message": changed.get("message") }))
+        crate::boundary::guard(
+            &view.state,
+            &json!({
+                "message": changed.get("message"),
+                "declined_ruling": changed.get("declined_ruling"),
+            }),
+        )
     })?;
     let mut journal = Journal::open(paths);
     if let crate::channel::SurfaceOffer::Dropped { hook, .. } = &offer {
