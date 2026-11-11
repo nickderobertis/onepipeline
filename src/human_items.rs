@@ -610,6 +610,7 @@ pub struct HumanItemDetail, HumanItemDetailWire {
     pub history: Vec<HumanItemHistoryEntry>,
 }
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a history entry as this flat `{action,at,actor,on_behalf_of,provenance}` record, the strings spelled as the resolution and `by` spell the same values; only the engine's fold of its own journal builds one.
 /// One event of an item's history, as [`HumanItemDetail::history`] lists it.
@@ -632,7 +633,6 @@ pub struct HumanItemHistoryEntry {
     /// version 1.
     pub provenance: Provenance,
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A successful mutation and its event identifier.
