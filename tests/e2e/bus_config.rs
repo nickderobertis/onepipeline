@@ -1449,3 +1449,105 @@ fn an_engine_raised_surface_a_hook_rewrites_is_journalled_as_rewritten() {
         .any(|surface| surface["message"] == "the rewritten report"));
     world.release("slow.go");
 }
+
+/// Amend `spare` on `run`, so the run holds a manager's ruling to decline, and
+/// answer the reference it is declined by.
+fn a_ruling_to_decline(world: &World, run: &str) -> String {
+    let replied = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 4, "commands": [{"op": "amend", "id": "spare",
+            "text": "Keep the diff under fifty lines."}]})
+        .to_string(),
+    );
+    replied.exited(0);
+    let id = replied.json()["reply"].as_u64().expect("the envelope's id");
+    format!("c{id}.0")
+}
+
+/// A declined ruling meets the channel's hooks as any surface `surface` raises
+/// does: a hook rewriting its text queues the rewritten text with the typed
+/// record intact, a hook dropping it queues nothing and journals the drop, and a
+/// hook refusing it refuses the decline in its words, with nothing appended.
+#[test]
+fn a_declined_ruling_meets_the_channels_hooks_as_a_surface_does() {
+    let world = World::new("hook-decline-rewrite");
+    hooked_run(
+        &world,
+        "hookdeclinerewrite",
+        &[("surfaces", &["set-message", "the changed decline"], "")],
+    );
+    let reference = a_ruling_to_decline(&world, "hookdeclinerewrite");
+    world
+        .run_with_stdin(
+            &[
+                "decline-ruling",
+                "hookdeclinerewrite",
+                "--ruling",
+                &reference,
+            ],
+            "The user said otherwise.",
+        )
+        .exited(0)
+        .out_has("\"queued\"");
+    let read = surfaces_read(&world, "hookdeclinerewrite");
+    let declined = read
+        .iter()
+        .find(|surface| surface["kind"] == "declined-ruling")
+        .unwrap_or_else(|| panic!("no decline was queued: {read:?}"));
+    assert_eq!(declined["message"], "the changed decline", "{declined}");
+    assert_eq!(declined["declined_ruling"]["ruling"], json!(reference));
+    assert_eq!(
+        declined["declined_ruling"]["reason"],
+        "The user said otherwise."
+    );
+    assert_eq!(
+        world
+            .events_of("hookdeclinerewrite", "planner-surface-queued")
+            .last()
+            .expect("the decline is journalled")["payload"]["message"],
+        "the changed decline"
+    );
+    world.release("slow.go");
+
+    let world = World::new("hook-decline-drop");
+    hooked_run(&world, "hookdeclinedrop", &[("surfaces", &["drop"], "")]);
+    let reference = a_ruling_to_decline(&world, "hookdeclinedrop");
+    world
+        .run_with_stdin(
+            &["decline-ruling", "hookdeclinedrop", "--ruling", &reference],
+            "The user said otherwise.",
+        )
+        .exited(0)
+        .out_has("\"dropped\"");
+    assert!(surfaces_read(&world, "hookdeclinedrop").is_empty());
+    let dropped = world.events_of("hookdeclinedrop", "planner-surface-dropped");
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert_eq!(
+        dropped[0]["payload"]["kind"], "declined-ruling",
+        "{dropped:?}"
+    );
+    assert_eq!(dropped[0]["payload"]["hook"]["index"], 0, "{dropped:?}");
+    world.release("slow.go");
+
+    let world = World::new("hook-decline-refuse");
+    hooked_run(
+        &world,
+        "hookdeclinerefuse",
+        &[("surfaces", &["refuse", "no declines today"], "")],
+    );
+    let reference = a_ruling_to_decline(&world, "hookdeclinerefuse");
+    world
+        .run_with_stdin(
+            &[
+                "decline-ruling",
+                "hookdeclinerefuse",
+                "--ruling",
+                &reference,
+            ],
+            "The user said otherwise.",
+        )
+        .exited(REFUSED)
+        .err_has("no declines today");
+    assert!(channel_file(&world, "hookdeclinerefuse", "surfaces.jsonl").is_empty());
+    world.release("slow.go");
+}

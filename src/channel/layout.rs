@@ -301,6 +301,7 @@ pub struct DeclinedRuling {
     pub ruling: String,
     /// Whose ruling it was: always `manager`, since a user's ruling binds and
     /// cannot be declined.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this field as a `Provenance`, so a reader states the party in the one vocabulary every other record uses; the deserializer below refuses `user`, and the engine's one constructor, `verbs::decline_ruling`, refuses a user's ruling before building a record.
     pub provenance: Provenance,
     /// What kind of ruling it was.
     pub kind: RulingKind,
