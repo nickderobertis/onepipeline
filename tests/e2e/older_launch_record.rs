@@ -211,7 +211,7 @@ fn channel_logs(world: &crate::harness::World) -> Vec<(String, String)> {
 /// What every refusal of an offer to a run launched with validators says: that
 /// the run was launched with them, that this engine no longer runs them, and
 /// what to do instead.
-const LAUNCHED_WITH_VALIDATORS: [&str; 3] = [
+pub(crate) const LAUNCHED_WITH_VALIDATORS: [&str; 3] = [
     "launched with onemessagebus validators",
     "this engine no longer runs",
     "let the run settle, or stop it",
