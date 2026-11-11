@@ -1986,23 +1986,17 @@ fn a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve()
 /// A flow's reply is judged under the bus configuration the flow was registered
 /// with, and refused whole — with nothing queued — when it is not an envelope,
 /// carries no verdict, names an author the configuration does not declare,
-/// declares a completion its author may not, is refused by a validator the
-/// configuration names, or names a question nobody asked. A check-in raised on a
-/// flow is the scheduled kind's source.
+/// declares a completion its author may not, or names a question nobody asked.
+/// A hook's refusal is `a_flows_reply_a_hook_drops_or_refuses_is_told_apart`'s.
+/// A check-in raised on a flow is the scheduled kind's source.
 #[test]
 fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
     let world = World::new("flow-judged");
-    let validator = crate::harness::double("bus-validator")
-        .to_string_lossy()
-        .into_owned();
     let config = world.root.join("bus.yaml");
     std::fs::write(
         &config,
-        format!(
-            "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
-             [finding]}}\nhooks:\n  - {{on: replies, command: \
-             [{validator:?}]}}\n"
-        ),
+        "version: 1\ntransport: {kind: local}\nauthors:\n  sentinel: {capabilities: \
+         [finding]}\n",
     )
     .expect("a bus configuration");
     let flow = Flowing::start_with(
@@ -2014,7 +2008,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
     let replies = world.runs.join(".flows/judged/channel/replies.jsonl");
     let queued = || std::fs::read_to_string(&replies).unwrap_or_default();
 
-    world.script("bus-validator.refuse", "this ruling names no evidence");
     for (envelope, said) in [
         ("not an envelope".to_owned(), "malformed"),
         (json!({"version": 2}).to_string(), "carries no verdict"),
@@ -2026,10 +2019,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
             json!({"author": "sentinel", "completion": true, "reason": "done"}).to_string(),
             "not something the sentinel may do",
         ),
-        (
-            json!({"completion": false, "reason": "carry on"}).to_string(),
-            "this ruling names no evidence",
-        ),
     ] {
         world
             .run_with_stdin(&["reply", "--flow", "judged"], &envelope)
@@ -2037,7 +2026,6 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
             .err_has(said);
         assert_eq!(queued(), "", "a refused reply was queued: {envelope}");
     }
-    world.unscript("bus-validator.refuse");
     world
         .run_with_stdin(
             &[
@@ -2078,6 +2066,91 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
         "{}",
         queue.stdout
     );
+    flow.open("end");
+    assert_eq!(flow.ended(), 0);
+}
+
+/// A flow an older build registered with `validators:` in its bus configuration —
+/// which `onemessagebus` 0.11 removed — refuses what those validators would have
+/// judged on its own channel, a verdict and a surface alike, saying why and what to
+/// do, with nothing appended; the flow itself runs to its end.
+#[test]
+fn a_flow_registered_with_validators_refuses_every_offer_to_its_channel() {
+    let world = World::new("flow-validated");
+    let config = world.root.join("bus.yaml");
+    std::fs::write(&config, "version: 1\ntransport: {kind: local}\n").expect("a bus configuration");
+    let flow = Flowing::start_with(
+        &world,
+        "validated",
+        &["--bus-config", config.to_str().expect("a path")],
+        &[gate(&world, "end")],
+    );
+
+    // The flow's record, its bus configuration carrying the `validators` a run on
+    // this host was really launched with, as the build before 0.11 recorded them.
+    let older: Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::recorded_support::recorded(
+            "launch/otg-closed-state-writes-status.json",
+        ))
+        .expect("the older launch record reads"),
+    )
+    .expect("the older launch record is JSON");
+    let validators = older["bus_config"]["validators"].clone();
+    assert!(
+        validators
+            .as_array()
+            .is_some_and(|declared| !declared.is_empty()),
+        "the recorded bus configuration declares no validators: {older}"
+    );
+    let path = world.runs.join(".flows/validated/flow.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the flow's record"))
+            .expect("the flow's record is JSON");
+    record["bus_config"]
+        .as_object_mut()
+        .expect("the flow's record keeps its bus configuration")
+        .insert("validators".into(), validators);
+    // llmlint: ignore[tests_mirror_real_usage] the state under test is a flow record an *older* build wrote, with a key this build's bus no longer has, which no interface of this build can produce; the key is spliced in from a real recorded launch, and everything after it is the user's own verbs.
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&record).expect("the record serializes"),
+    )
+    .expect("the older record is written");
+
+    let channel = world.runs.join(".flows/validated/channel");
+    let held = || {
+        ["replies.jsonl", "surfaces.jsonl", "commands.jsonl"]
+            .map(|queue| std::fs::read_to_string(channel.join(queue)).unwrap_or_default())
+    };
+    let before = held();
+    let verdict = json!({"completion": false, "message": "carry on"}).to_string();
+    for (args, stdin) in [
+        (vec!["reply", "--flow", "validated"], verdict.as_str()),
+        (
+            vec![
+                "surface",
+                "--flow",
+                "validated",
+                "--kind",
+                "finding",
+                "--message",
+                "a report",
+            ],
+            "",
+        ),
+    ] {
+        let refused = world.run_with_stdin(&args, stdin);
+        refused.exited(REFUSED);
+        for said in crate::older_launch_record::LAUNCHED_WITH_VALIDATORS {
+            assert!(
+                refused.stderr.contains(said),
+                "{args:?} was not refused saying {said:?}: {}",
+                refused.stderr
+            );
+        }
+    }
+    assert_eq!(held(), before, "a refused offer reached the flow's channel");
+
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }

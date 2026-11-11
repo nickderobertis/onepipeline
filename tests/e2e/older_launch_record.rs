@@ -22,6 +22,7 @@
 
 use serde_json::{json, Value};
 
+use crate::harness::{agent, plan_of, REFUSED};
 use crate::recorded_support::{recorded, recorded_world, seeded_with, RUN};
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 
@@ -149,4 +150,262 @@ fn a_settled_run_whose_record_an_older_build_wrote_is_read_adopted_and_fires_its
         .run(&["status", RUN])
         .exited(0)
         .out_has(&format!("{RUN}  SETTLED  1/1 done"));
+}
+
+/// The older record's bus configuration exactly as that build wrote it: the
+/// bytes of its `bus_config` value, indented where it sits in the record.
+fn older_bus_config_text() -> String {
+    let older = std::fs::read_to_string(recorded(OLDER)).expect("the older launch record reads");
+    bus_config_text(&older)
+}
+
+/// The bytes of a launch record's `bus_config` value, as they stand in `record`.
+fn bus_config_text(record: &str) -> String {
+    let key = "\n  \"bus_config\": ";
+    let start = record
+        .find(key)
+        .expect("the record names a bus configuration")
+        + key.len();
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, byte) in record[start..].bytes().enumerate() {
+        match (in_string, escaped, byte) {
+            (true, true, _) => escaped = false,
+            (true, false, b'\\') => escaped = true,
+            (true, false, b'"') | (false, _, b'"') => in_string = !in_string,
+            (false, _, b'{' | b'[') => depth += 1,
+            (false, _, b'}' | b']') => {
+                depth -= 1;
+                if depth == 0 {
+                    return record[start..=start + offset].to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("the record's bus configuration never closes: {record}");
+}
+
+/// What the channel holds: every queue log, by name.
+fn channel_logs(world: &crate::harness::World) -> Vec<(String, String)> {
+    let channel = world.runs.join(RUN).join("channel");
+    let mut logs: Vec<(String, String)> = std::fs::read_dir(&channel)
+        .expect("the run's channel")
+        .map(|entry| entry.expect("a channel file").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .map(|path| {
+            (
+                path.file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned(),
+                std::fs::read_to_string(&path).expect("a queue log reads"),
+            )
+        })
+        .collect();
+    logs.sort();
+    logs
+}
+
+/// What every refusal of an offer to a run launched with validators says: that
+/// the run was launched with them, that this engine no longer runs them, and
+/// what to do instead.
+pub(crate) const LAUNCHED_WITH_VALIDATORS: [&str; 3] = [
+    "launched with onemessagebus validators",
+    "this engine no longer runs",
+    "let the run settle, or stop it",
+];
+
+/// A run an older build launched with `validators:` in its bus configuration —
+/// which `onemessagebus` 0.11 removed — stays readable by every view and by
+/// `adopt`, which writes its bus configuration back byte for byte; but nothing
+/// those validators would have judged is taken: a reply carrying commands, a
+/// verdict carrying none, a surface a verb raises, a question `ask` raises and
+/// the surfaces the engine raises while `adopt` drives the run are each refused,
+/// saying why and what to do, and the run's channel holds nothing new afterwards.
+/// Nor does this build launch a run under that configuration: `start` refuses it
+/// before a run exists.
+#[test]
+fn a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer() {
+    let world = recorded_world("launched-with-validators");
+    seeded_with(&world, Some(&recorded(&format!("channel/{RUN}"))));
+
+    // The world's copy of the recorded record, its bus configuration spliced in
+    // as the older build wrote it, byte for byte.
+    let launch = world.runs.join(RUN).join("launch.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&launch).expect("the seeded record"))
+            .expect("the seeded record is JSON");
+    let fields = record.as_object_mut().expect("a record object");
+    fields.insert("dir".into(), json!(world.project));
+    fields.remove("bus_config");
+    let recorded_config = older_bus_config_text();
+    assert!(
+        recorded_config.contains("\"validators\": ["),
+        "the recorded bus configuration declares no validators: {recorded_config}"
+    );
+    let unspliced = serde_json::to_string_pretty(&record).expect("the record serializes");
+    let written = format!(
+        "{},\n  \"bus_config\": {recorded_config}\n}}",
+        unspliced
+            .strip_suffix("\n}")
+            .expect("a pretty record closes on its own line")
+    );
+    // llmlint: ignore[tests_mirror_real_usage] the state under test is a record an *older* build wrote, with a key this build's bus no longer has, which no interface of this build can produce; it is seeded from recorded bytes as the journey above seeds its record, and everything after it is the user's own verbs.
+    std::fs::write(&launch, &written).expect("the older record is written");
+
+    // Every view reads the run, and none of them rewrites its record.
+    world
+        .run(&["status", RUN])
+        .exited(0)
+        .out_has(&format!("{RUN}  SETTLED  1/1 done"));
+    world
+        .run(&["results", RUN])
+        .exited(0)
+        .out_has(&format!("{RUN}  complete"));
+    assert_eq!(
+        std::fs::read_to_string(&launch).expect("the record reads"),
+        written,
+        "reading the run rewrote its launch record"
+    );
+    let held = channel_logs(&world);
+    assert!(
+        held.iter().any(|(_, log)| !log.is_empty()),
+        "the seeded channel holds nothing to compare against: {held:?}"
+    );
+
+    // A reply carrying commands, a verdict carrying none, and a surface a verb
+    // raises: each refused, saying why and what to do.
+    let edit = json!({"version": 3, "commands": [
+        {"op": "finding", "message": "the fixture is slow"}
+    ]})
+    .to_string();
+    let verdict = json!({"completion": false, "reason": "carry on"}).to_string();
+    for (args, stdin) in [
+        (vec!["reply", RUN], edit.as_str()),
+        (vec!["reply", RUN], verdict.as_str()),
+        (
+            vec!["surface", RUN, "--kind", "finding", "--message", "a report"],
+            "",
+        ),
+    ] {
+        let refused = world.run_with_stdin(&args, stdin);
+        refused.exited(REFUSED);
+        for said in LAUNCHED_WITH_VALIDATORS {
+            assert!(
+                refused.stderr.contains(said),
+                "{args:?} was not refused saying {said:?}: {}",
+                refused.stderr
+            );
+        }
+    }
+    // A question `ask` raises is refused the same way: answered `refused` at
+    // exit `1`, the bus's reason being this one, with nothing raised.
+    let mut asking = world.cmd(&["ask", "--timeout", "1", "which bound?"]);
+    asking.env("ONEPIPELINE_RUN_ID", RUN);
+    let asked = world.run_with_stdin_on(asking, "");
+    asked.exited(1);
+    let answer: Value = serde_json::from_str(asked.stdout.trim()).expect("one answer on stdout");
+    assert_eq!(answer["answer"], json!("refused"), "{answer}");
+    for said in LAUNCHED_WITH_VALIDATORS {
+        assert!(
+            answer["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(said)),
+            "the question was not refused saying {said:?}: {answer}"
+        );
+    }
+    assert_eq!(
+        channel_logs(&world),
+        held,
+        "a refused offer reached the channel"
+    );
+    assert!(
+        world.events_of(RUN, "planner-surface-dropped").is_empty(),
+        "a refused verb was journalled"
+    );
+
+    // Adopted by its owner, the run is driven to its ending again; every surface
+    // the engine raises on the way is refused for the same reason and journalled,
+    // and the run settles regardless.
+    let queued = world.events_of(RUN, "planner-surface-queued").len();
+    let owner = world.as_session(&owner());
+    owner
+        .run(&["adopt", RUN])
+        .exited(0)
+        .out_has("\"settlement\":\"complete\"");
+    let dropped = world.events_of(RUN, "planner-surface-dropped");
+    assert!(
+        !dropped.is_empty(),
+        "adopting the run raised no surface to refuse: {:?}",
+        world.kinds(RUN)
+    );
+    for event in &dropped {
+        let refused = event["payload"]["refused"].as_str().unwrap_or_default();
+        for said in LAUNCHED_WITH_VALIDATORS {
+            assert!(
+                refused.contains(said),
+                "an engine surface was not refused saying {said:?}: {event}"
+            );
+        }
+    }
+    assert_eq!(
+        world.events_of(RUN, "planner-surface-queued").len(),
+        queued,
+        "adopting the run queued a surface"
+    );
+    assert_eq!(
+        channel_logs(&world),
+        held,
+        "an engine surface reached the channel"
+    );
+
+    // `adopt` rewrote the record for its own fields, and its bus configuration is
+    // still the older build's bytes, validators and all.
+    let rewritten = std::fs::read_to_string(&launch).expect("the record reads");
+    assert_ne!(rewritten, written, "adopt did not rewrite the record");
+    assert_eq!(world.run_json(RUN, "launch.json")["adoptions"], json!(1));
+    assert_eq!(bus_config_text(&rewritten), recorded_config);
+    world
+        .run(&["status", RUN])
+        .exited(0)
+        .out_has(&format!("{RUN}  SETTLED  1/1 done"));
+
+    // Nor will this build launch a run under that recorded configuration:
+    // `start --bus-config` naming it is refused before a run exists, in the bus's
+    // own words naming the removed key and the `hooks:` that replace it.
+    let config = world.root.join("recorded-bus-config.json");
+    std::fs::write(&config, &recorded_config).expect("the recorded configuration is written");
+    let plan = world.plan(
+        "relaunched",
+        &plan_of("relaunched", vec![agent("slow", &[])]),
+    );
+    let runs_before = run_dirs(&world);
+    let relaunched = world.run(&[
+        "start",
+        &plan,
+        "--bus-config",
+        &config.to_string_lossy(),
+        "--detach",
+    ]);
+    relaunched.exited(REFUSED);
+    for said in ["validators", "removed in onemessagebus 0.11.0", "hooks:"] {
+        relaunched.err_has(said);
+    }
+    assert_eq!(
+        run_dirs(&world),
+        runs_before,
+        "a launch under the recorded validators wrote a run"
+    );
+}
+
+/// The runs a world's runs root holds, by name.
+fn run_dirs(world: &crate::harness::World) -> Vec<std::ffi::OsString> {
+    let mut runs: Vec<_> = std::fs::read_dir(&world.runs)
+        .expect("the runs root")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    runs.sort();
+    runs
 }

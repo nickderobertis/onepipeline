@@ -886,11 +886,10 @@ resolver = "2"
 # ^0.23.0`, which `^0.22.4` admits no version of, so the two requirements move
 # as one.
 #
-# `oneagentgraph` 0.12.0 is taken because `onevcs` 0.65 requires `onemessagebus
-# ^0.11`, and 0.12.0 is the first `oneagentgraph` over that bus (it requires
-# `onemessagebus ^0.11.1` and `onejudge ^0.23.1`); `^0.11.4` admits no 0.12.x, so
-# without the move the lock carries the bus twice. Nothing here reads anything new
-# from it.
+# `oneagentgraph` 0.12.0 is the floor because it links `onemessagebus` 0.11.1,
+# the bus without validators (see that pin). It requires `onejudge ^0.23.1`,
+# `onemessagebus ^0.11.1` and `onevcs ^0.65.0` as a dev-dependency, so the four
+# move as one or the lock resolves the bus twice.
 #
 # `oneagentgraph` 0.13.0 is the floor because it removes `resettable`,
 # `run::Signal::Reset` and the `reset-timer` verb (oneagentgraph #280), and this
@@ -969,14 +968,11 @@ onevcs = "0.65.1"
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
 #
-# 0.11 is taken because `onevcs` 0.65 requires it; a **requirement**, because
-# `^0.10` admits no 0.11.x. 0.11.1 is what `oneagentgraph` 0.12.0 requires. 0.11.0
-# **removed `validators`**: a configuration naming them is refused where it is
-# loaded, so `start --bus-config` refuses one in the bus's words, and a command
-# that judged as a validator is named under `hooks:`, printing its input back to
-# pass — which `boundary validate-envelope` now does. A launch record an older
-# build wrote with `validators` is still read, and its channel refuses an offer to
-# a queue they were on (`src/ledger.rs`'s `RecordedBusConfig` says why).
+# **0.11.1 removed validators** in favour of the hooks this crate already runs.
+# A requirement for the same pre-1.0 reason: `^0.10` admits no 0.11.x. Nothing
+# here reads a configuration's `validators` key except the launch-record read
+# in `src/ledger.rs`, which keeps a run launched with them readable and refuses
+# every offer to its channel (`docs/contract-divergences.md` entry 153).
 onemessagebus = "0.11.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
@@ -1102,11 +1098,11 @@ onemessagebus = "0.11.1"
 #
 # **0.23.0 is taken because `oneagentgraph` 0.11.4 requires it**, and `^0.22.4`
 # admits no 0.23.x, so without the move the lock carries onejudge twice. Nothing
-# here reads anything new from it. It stopped at 0.23.0 while the bus pin was
-# `^0.10`, because 0.23.1 requires `onemessagebus ^0.11`.
+# here reads anything new from it.
 #
-# **0.23.1 is taken because `oneagentgraph` 0.12.0 requires it**, beside the bus's
-# move to 0.11. Nothing here reads anything new from it.
+# **0.23.1 links `onemessagebus ^0.11`**, and is taken with the bus pin and
+# `oneagentgraph` 0.12.0, which requires it. Nothing here reads anything new
+# from it.
 onejudge = "0.23.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
@@ -1462,7 +1458,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.106.3"
+version = "0.106.4"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
