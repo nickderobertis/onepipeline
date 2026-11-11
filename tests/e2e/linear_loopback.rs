@@ -657,8 +657,8 @@ impl Linear {
         if !names_its_id(operation, variables) {
             return None;
         }
-        let fault = self.logged(operation, variables);
-        match fault {
+        self.record(operation, variables);
+        match self.take_fault(operation) {
             Some(Fault::Drop) => {
                 self.answer(operation, query, variables);
                 None
@@ -727,13 +727,6 @@ impl Linear {
         }
     }
 
-    /// Log one request and take the fault queued for its operation, if there is one.
-    fn logged(&self, operation: Operation, variables: &Value) -> Option<Fault> {
-        self.record(operation, variables);
-        self.take_fault(operation)
-    }
-
-    /// Log one request, or one alias of a batched one.
     fn record(&self, operation: Operation, variables: &Value) {
         self.lock().log.push(Request {
             operation,
@@ -741,7 +734,8 @@ impl Linear {
         });
     }
 
-    /// Take the fault queued for the next request of `operation`, if there is one.
+    /// A [`Fault::Hold`] taken here sets the one flag every held request waits on, so a single
+    /// [`Linear::release`] lets all of them go.
     fn take_fault(&self, operation: Operation) -> Option<Fault> {
         let mut world = self.lock();
         let fault = world
@@ -754,7 +748,6 @@ impl Linear {
         fault
     }
 
-    /// Wait until the journey lets a held answer go.
     fn wait_for_release(&self) {
         let (lock, changed) = &*self.world;
         let mut world = lock.lock().expect("the loopback's state");
@@ -1626,7 +1619,6 @@ fn names_its_id(operation: Operation, variables: &Value) -> bool {
         .is_some_and(|id| !id.trim().is_empty())
 }
 
-/// What [`Fault::Refuse`] answers a request of `operation` with.
 fn refused(operation: Operation) -> Value {
     json!({"errors": [{
         "message": format!("the loopback refuses this {operation:?}"),
