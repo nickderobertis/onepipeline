@@ -1048,3 +1048,73 @@ fn a_spent_user_note_is_recorded_as_the_users() {
 fn a_spent_manager_note_is_recorded_as_the_managers() {
     a_spent_note("rulingsspentmanager", false);
 }
+
+/// Every agent dispatch is handed its own node as `ONEPIPELINE_NODE_ID`, which
+/// is what `onepipeline ask` names as the node a question is about when the
+/// asker names none — read off the dispatch's own environment, as the
+/// `oneagentgraph` double reports it.
+#[test]
+fn every_agent_dispatch_is_handed_its_own_node() {
+    let world = World::new("rulings-node-env");
+    world.script("dispatch.report-env", "ONEPIPELINE_NODE_ID\n");
+    let path = world.plan(
+        "rulingsnodeenv",
+        &plan_of(
+            "rulingsnodeenv",
+            vec![agent("build", &[]), agent("ship", &["build"])],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let handed: std::collections::BTreeSet<(String, String)> = world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "dispatch-env" && call["args"][1] == "ONEPIPELINE_NODE_ID")
+        .map(|call| {
+            assert_eq!(
+                call["args"][2], "set",
+                "a dispatch was handed no node: {call}"
+            );
+            (
+                call["args"][0].as_str().unwrap().to_owned(),
+                call["args"][3].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let nodes: std::collections::BTreeSet<&str> =
+        handed.iter().map(|(_, node)| node.as_str()).collect();
+    assert_eq!(nodes, ["build", "ship"].into(), "{handed:?}");
+}
+
+/// A ruling sent while nothing drives the run is applied by the replying
+/// process itself, which names its reference before it records the envelope:
+/// the dispatch an adopting driver then makes renders it under that reference,
+/// and the reference resolves to the envelope the receipt named.
+#[test]
+fn a_ruling_applied_with_nothing_driving_is_declined_by_the_reference_it_was_rendered_with() {
+    let world = World::new("rulings-undriven");
+    let run = held(&world, "rulingsundriven", &["managers"]);
+    end_driver(&world, &run);
+    let replied = world.run_with_stdin(
+        &["reply", &run],
+        &envelope(json!([{"op": "amend", "id": "managers", "text": MANAGER_RULING}])),
+    );
+    replied.exited(0).out_has("\"state\":\"applied\"");
+    let id = replied.json()["reply"].as_u64().expect("the envelope's id");
+    let reference = format!("c{id}.0");
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.release("slow.go");
+    world.until("the amended node to be dispatched", |world| {
+        !tasks_dispatched(world, "managers").is_empty()
+    });
+    let managers = &tasks_dispatched(&world, "managers")[0];
+    assert!(
+        managers.contains(&format!("{AMENDMENT_HEADING}\n{}", declinable(&reference))),
+        "the amendment applied with nothing driving is not rendered under its reference:\n{managers}"
+    );
+    declined_as_sent(
+        &world,
+        &run,
+        &reference,
+        &json!({"node": "managers", "kind": "amendment", "reply": id, "text": MANAGER_RULING}),
+    );
+}
