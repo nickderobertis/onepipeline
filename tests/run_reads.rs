@@ -107,6 +107,11 @@ const KINDS: [&str; 6] = [
 /// repeated `(stream, seq)`; records with evidence, with a phase and with labels of
 /// every form; and every tenth line in another field order.
 fn generated(seed: u64, streams: u64, records: u64) -> String {
+    generated_of(seed, streams, records, &KINDS)
+}
+
+/// [`generated`], its records' kinds drawn from `kinds`.
+fn generated_of(seed: u64, streams: u64, records: u64, kinds: &[&str]) -> String {
     let mut rng = Rng(seed);
     let mut next_seq: HashMap<u64, u64> = HashMap::new();
     let mut lines = Vec::new();
@@ -147,7 +152,7 @@ fn generated(seed: u64, streams: u64, records: u64) -> String {
             "stream": format!("stream-{stream}"),
             "seq": this_seq,
             "source": source,
-            "kind": KINDS[rng.below(6) as usize],
+            "kind": kinds[rng.below(kinds.len() as u64) as usize],
             "labels": labels,
             "payload": {"text": "{\"v\":1} is only text here", "n": record, "artifacts": []},
         });
@@ -384,7 +389,14 @@ fn a_journal_that_is_not_there_or_holds_nothing_reads_as_holding_nothing() {
 /// it, in either field order, so places and `store_len` stay equal.
 #[test]
 fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
-    let body = generated(21, 6, 300);
+    for (what, journal) in torn_cases(&generated(21, 6, 300)) {
+        let run = Run::new(&format!("torn-{}", what.replace(' ', "-")), &journal);
+        every_selection_agrees(&run, what);
+    }
+}
+
+/// `body` with what a live writer or a died one leaves after it, each named.
+fn torn_cases(body: &str) -> Vec<(&'static str, String)> {
     let last = written(&json!({
         "v": 2, "ts": stamp(9_000_000), "stream": "stream-1", "seq": 100_000,
         "source": "pipeline", "kind": "node-started", "labels": {"node": "ship"},
@@ -467,10 +479,7 @@ fn torn_glued_and_unreadable_lines_read_as_the_complete_reader_reads_them() {
         ),
         ("carriage return", format!("{body}{whole}\r\n")),
     ];
-    for (what, journal) in cases {
-        let run = Run::new(&format!("torn-{}", what.replace(' ', "-")), &journal);
-        every_selection_agrees(&run, what);
-    }
+    cases
 }
 
 /// Every selection's kept records are exactly the complete read's records its rule names,
@@ -620,4 +629,405 @@ fn a_kept_line_corrupt_only_in_its_middle_leaves_the_read_equal_to_the_complete_
         agrees_with_the_complete_read(&run, &selection, "a corrupt kept line");
     }
     every_selection_keeps_the_complete_records(&run, "a corrupt line kept by some");
+}
+
+/// Every kind a long run's journal holds: the five a heads read folds by their heads, and
+/// kinds whose payloads it parses, a pipeline settlement's among them.
+const EVERY_KIND: [&str; 9] = [
+    "member-heartbeat",
+    "turn-activity",
+    "turn-message",
+    "turn-started",
+    "turn-completed",
+    "change-check",
+    "member-started",
+    "oneharness-session",
+    "node-started",
+];
+
+/// A pipeline record of the driver's stream, at `tick`.
+fn driven(seq: u64, tick: u64, kind: &str, node: Option<&str>, payload: Value) -> String {
+    let mut labels = json!({"run_id": "generated"});
+    if let Some(node) = node {
+        labels["node"] = json!(node);
+    }
+    written(&json!({
+        "v": 2, "ts": stamp(tick), "stream": "driver-1", "seq": seq,
+        "source": "pipeline", "kind": kind, "labels": labels, "payload": payload,
+    }))
+}
+
+/// A run's whole journal: its plan, every node's dispatch and how each settled, a
+/// failed node's dependent left skipped, one awaiting a release and one still running,
+/// beside [`generated_of`]'s records of every kind, which name those nodes.
+fn run_journal(seed: u64, streams: u64, records: u64) -> String {
+    let task = |id: &str, deps: &[&str]| json!({"id": id, "persona": "engineer", "task": "## What\ndo it", "deps": deps});
+    let plan = json!({
+        "schema_version": 3, "name": "generated", "concurrency": 4,
+        "tasks": [task("build", &[]), task("ship", &[]), task("after-ship", &["ship"]),
+                  task("verify", &[]), task("tail", &[])],
+    });
+    let late = records * 1_000;
+    let mut driver = vec![driven(0, 0, "run-started", None, json!({"plan": plan}))];
+    for node in ["build", "ship", "verify", "tail"] {
+        let seq = driver.len() as u64;
+        driver.push(driven(
+            seq,
+            0,
+            "node-dispatched",
+            Some(node),
+            json!({"attempt": 1}),
+        ));
+    }
+    for (node, payload) in [
+        (
+            "build",
+            json!({"status": "done", "outcome": "complete", "landing": "landed"}),
+        ),
+        (
+            "ship",
+            json!({"status": "failed", "outcome": "judge-rejected", "detail": "the judge said \"no\""}),
+        ),
+        (
+            "verify",
+            json!({"status": "complete-but-held",
+                   "awaiting": [{"producer": "github.com/owner/engine", "target": "crate"}]}),
+        ),
+    ] {
+        let seq = driver.len() as u64;
+        driver.push(driven(seq, late, "node-settled", Some(node), payload));
+    }
+    driver.join("\n") + "\n" + &generated_of(seed, streams, records, &EVERY_KIND)
+}
+
+/// A real run directory holding `journal`, with a result beside it.
+fn resulted(name: &str, journal: &str) -> Run {
+    let run = Run::new(name, journal);
+    std::fs::write(
+        run.paths.dir.join("result.json"),
+        json!({"outcome": "unfinished"}).to_string(),
+    )
+    .expect("a result");
+    run
+}
+
+/// What a heads read's view must report as [`RunView::open`] does: every node's
+/// status, reason, awaits and result, through the run's published reading; the
+/// summary; each node's event tally; and the rest of the fold but what a running
+/// node is drawn as doing, which only the payloads it leaves unparsed say.
+fn same_state(view: &RunView, fresh: &RunView, what: &str) {
+    assert_eq!(
+        view.state.statuses(),
+        fresh.state.statuses(),
+        "{what}: statuses"
+    );
+    let reading = |view: &RunView| {
+        serde_json::to_value(onepipeline::views::reading(view)).expect("a reading")
+    };
+    assert_eq!(
+        reading(view),
+        reading(fresh),
+        "{what}: reasons, awaits and results"
+    );
+    assert_eq!(view.summary(), fresh.summary(), "{what}: summary");
+    let tallies = |view: &RunView| -> BTreeMap<String, Option<(u64, u64)>> {
+        view.state
+            .activity
+            .iter()
+            .map(|(node, activity)| {
+                let progress = activity
+                    .progress
+                    .map(|progress| (progress.events(), progress.last_at()));
+                (node.clone(), progress)
+            })
+            .collect()
+    };
+    assert_eq!(tallies(view), tallies(fresh), "{what}: event tallies");
+    let without_doing = |view: &RunView| {
+        let mut state = serde_json::to_value(&view.state).expect("a state");
+        for activity in state["activity"]
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|nodes| nodes.values_mut())
+        {
+            activity
+                .as_object_mut()
+                .expect("an activity")
+                .remove("doing");
+        }
+        state
+    };
+    assert_eq!(
+        without_doing(view),
+        without_doing(fresh),
+        "{what}: the fold"
+    );
+}
+
+/// `RunView::heads` and `fetch` over `run`, held to the complete read of its journal.
+fn heads_agree(run: &Run, what: &str) {
+    let fresh = RunView::open(&run.paths).expect("the run opens");
+    let complete = &fresh.events;
+    let (places, store_len) = store_places(complete);
+    let read = RunView::heads(&run.paths).expect("the heads read");
+    assert!(
+        read.view.events.is_empty(),
+        "{what}: a heads view holds no record"
+    );
+    assert_eq!(
+        read.heads.len(),
+        complete.len(),
+        "{what}: one head per record"
+    );
+    for (at, (head, record)) in read.heads.iter().zip(complete).enumerate() {
+        assert_eq!(
+            (
+                &head.ts,
+                &head.stream,
+                head.seq,
+                head.source,
+                &head.kind,
+                head.phase,
+                &head.labels,
+                head.evidence,
+                head.place,
+            ),
+            (
+                &record.ts,
+                &record.stream,
+                record.seq,
+                record.source,
+                &record.kind,
+                record.dimensions.phase,
+                &record.labels,
+                !record.artifacts.is_empty(),
+                places[at],
+            ),
+            "{what}: the head of record {at}"
+        );
+    }
+    assert_eq!(read.store_len, store_len, "{what}: store_len");
+    assert_eq!(
+        read.last_seq,
+        complete.iter().map(|event| event.seq).max().unwrap_or(0),
+        "{what}: last_seq"
+    );
+    same_state(&read.view, &fresh, what);
+
+    let handles: Vec<journal::RecordHandle> =
+        read.heads.iter().map(|head| head.handle.clone()).collect();
+    assert_eq!(
+        &journal::fetch(&run.journal(), &handles).expect("every record"),
+        complete,
+        "{what}: every record fetched"
+    );
+    assert_eq!(
+        journal::fetch(&run.journal(), &[]).expect("none"),
+        Vec::<Envelope>::new()
+    );
+    // A subset in another order, with a record named twice.
+    let mut rng = Rng(complete.len() as u64);
+    let mut chosen: Vec<usize> = (0..complete.len()).filter(|_| rng.below(5) == 0).collect();
+    chosen.reverse();
+    if let Some(first) = chosen.first().copied() {
+        chosen.push(first);
+    }
+    for swap in 1..chosen.len() {
+        let with = rng.below(swap as u64 + 1) as usize;
+        chosen.swap(swap, with);
+    }
+    let named: Vec<journal::RecordHandle> = chosen.iter().map(|at| handles[*at].clone()).collect();
+    assert_eq!(
+        journal::fetch(&run.journal(), &named).expect("the chosen records"),
+        chosen
+            .iter()
+            .map(|at| complete[*at].clone())
+            .collect::<Vec<_>>(),
+        "{what}: the chosen records, in the order named"
+    );
+}
+
+#[test]
+fn every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens() {
+    for (seed, streams, records) in [(41, 1, 300), (42, 9, 1500), (43, 600, 4000)] {
+        let run = resulted(
+            &format!("heads-{seed}"),
+            &run_journal(seed, streams, records),
+        );
+        let statuses: BTreeMap<String, &str> = RunView::open(&run.paths)
+            .expect("the run opens")
+            .state
+            .statuses()
+            .into_iter()
+            .map(|(node, status)| (node, status.as_str()))
+            .collect();
+        assert_eq!(
+            statuses,
+            BTreeMap::from([
+                ("after-ship".to_owned(), "skipped"),
+                ("build".to_owned(), "done"),
+                ("ship".to_owned(), "failed"),
+                ("tail".to_owned(), "running"),
+                ("verify".to_owned(), "complete-but-held"),
+            ]),
+            "the fixture's nodes stand every way a first screen draws"
+        );
+        heads_agree(&run, &format!("seed {seed}"));
+    }
+    // A run recorded live, its journal as its writers left it.
+    let recorded = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/recorded/run-root/onemessagebus-repair-2/events.jsonl");
+    let run = resulted(
+        "heads-recorded",
+        &std::fs::read_to_string(recorded).expect("a recorded journal"),
+    );
+    heads_agree(&run, "a recorded run");
+}
+
+#[test]
+fn torn_glued_and_unreadable_lines_are_headed_as_the_complete_reader_reads_them() {
+    for (what, journal) in torn_cases(&run_journal(51, 6, 300)) {
+        let run = resulted(&format!("heads-torn-{}", what.replace(' ', "-")), &journal);
+        heads_agree(&run, what);
+    }
+    let run = Run::new("heads-empty", "");
+    heads_agree(&run, "an empty journal");
+    let gone = RunPaths::under(&run.root, "no-such-run");
+    assert!(matches!(
+        RunView::heads(&gone),
+        Err(onepipeline::Error::NoSuchRun { .. })
+    ));
+}
+
+/// Records appended after the heads read are folded by its view's refresh, which then
+/// reports what a fresh open does.
+#[test]
+fn a_heads_views_refresh_equals_a_fresh_open() {
+    let run = resulted("heads-refresh", &run_journal(61, 12, 600));
+    let mut read = RunView::heads(&run.paths).expect("the heads read");
+    let appended = [
+        driven(
+            40,
+            900_000_000,
+            "node-settled",
+            Some("tail"),
+            json!({"status": "done", "outcome": "complete", "landing": "landed"}),
+        ),
+        written(&json!({
+            "v": 1, "ts": stamp(900_000_001), "stream": "stream-late", "seq": 0,
+            "source": "agentgraph", "kind": "turn-activity", "labels": {"node": "tail"},
+            "payload": {"name": "Bash", "detail": "just check"},
+        })),
+    ];
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(run.journal())
+        .expect("the journal");
+    std::io::Write::write_all(&mut journal, (appended.join("\n") + "\n").as_bytes())
+        .expect("appended");
+    drop(journal);
+    read.view.refresh().expect("refreshed");
+    let fresh = RunView::open(&run.paths).expect("the run opens");
+    assert_eq!(read.view.state.statuses()["tail"].as_str(), "done");
+    same_state(&read.view, &fresh, "refreshed");
+}
+
+/// A handle into a journal rewritten after the heads read, so another record's line sits
+/// where the handle's did, answers an error and never that other record.
+#[test]
+fn a_handle_into_a_rewritten_journal_answers_an_error_and_never_another_record() {
+    let run = resulted("heads-rewritten", &run_journal(71, 4, 200));
+    let read = RunView::heads(&run.paths).expect("the heads read");
+    let text = std::fs::read_to_string(run.journal()).expect("the journal");
+    let lines: Vec<&str> = text.lines().collect();
+    // The same lines, each pair swapped where both are of one length, so another
+    // record's line sits at each of those handles' offsets; and every line cut short.
+    let mut swapped: Vec<&str> = lines.clone();
+    let mut moved = 0;
+    for pair in (0..swapped.len() - 1).step_by(2) {
+        if swapped[pair].len() == swapped[pair + 1].len() && swapped[pair] != swapped[pair + 1] {
+            swapped.swap(pair, pair + 1);
+            moved += 1;
+        }
+    }
+    assert!(moved > 0, "the fixture swaps no line");
+    std::fs::write(run.journal(), swapped.join("\n") + "\n").expect("rewritten");
+    let mut refused = 0;
+    for head in &read.heads {
+        match journal::fetch(&run.journal(), std::slice::from_ref(&head.handle)) {
+            Ok(records) => {
+                assert_eq!(
+                    (&records[0].stream, records[0].seq),
+                    (&head.stream, head.seq),
+                    "a fetch answered another record"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    matches!(error, onepipeline::Error::RecordMoved { .. }),
+                    "{error}"
+                );
+                assert!(error.to_string().contains("rewritten"), "{error}");
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!(refused, moved * 2, "every moved line is refused");
+    // A journal shorter than a handle's line, and one that is gone.
+    std::fs::write(run.journal(), &lines[0][..10]).expect("truncated");
+    let last = &read.heads.last().expect("a head").handle;
+    assert!(matches!(
+        journal::fetch(&run.journal(), std::slice::from_ref(last)),
+        Err(onepipeline::Error::RecordMoved { .. })
+    ));
+    std::fs::remove_file(run.journal()).expect("removed");
+    assert!(matches!(
+        journal::fetch(&run.journal(), std::slice::from_ref(last)),
+        Err(onepipeline::Error::Ledger { .. })
+    ));
+}
+
+/// The manager's ruling for a line of a kind the fold reads by its head, whose opening
+/// and end are the writers' and whose middle a complete reader refuses: it is headed by
+/// its opening, folded as that head, and its fetch answers an error.
+#[test]
+fn a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched() {
+    let valid = run_journal(81, 3, 60);
+    let malformed = written(&json!({
+        "v": 1, "ts": stamp(1), "stream": "stream-broken", "seq": 0,
+        "source": "agentgraph", "kind": "turn-activity", "labels": {"node": "build"},
+        "payload": {"text": "intact"},
+    }))
+    .replace("\"intact\"", "intact");
+    let run = resulted("heads-malformed", &format!("{valid}{malformed}\n"));
+    let fresh = RunView::open(&run.paths).expect("the run opens");
+    let read = RunView::heads(&run.paths).expect("the heads read");
+    assert_eq!(
+        read.heads.len(),
+        fresh.events.len() + 1,
+        "headed by its opening"
+    );
+    let head = read
+        .heads
+        .iter()
+        .find(|head| head.stream == "stream-broken")
+        .expect("its head");
+    assert_eq!(
+        (head.seq, head.kind.0.as_str(), head.labels.node.as_deref()),
+        (0, "turn-activity", Some("build"))
+    );
+    assert!(matches!(
+        journal::fetch(&run.journal(), std::slice::from_ref(&head.handle)),
+        Err(onepipeline::Error::RecordMoved { .. })
+    ));
+    // Folded as its head: every value but the node's tally is the complete read's, and
+    // the tally counts it.
+    assert_eq!(read.view.state.statuses(), fresh.state.statuses());
+    assert_eq!(read.view.summary(), fresh.summary());
+    let events = |view: &RunView| {
+        view.state.activity["build"]
+            .progress
+            .map(|progress| progress.events())
+    };
+    assert_eq!(events(&read.view), events(&fresh).map(|events| events + 1));
 }

@@ -119,23 +119,23 @@ fn instant_of(ts: &str) -> Option<u64> {
 
 /// One line of a journal, as far as a selection needs it.
 #[derive(Debug)]
-struct Skim<'a> {
-    line: &'a [u8],
+pub(crate) struct Skim<'a> {
+    pub(crate) line: &'a [u8],
     ts: Cow<'a, str>,
-    stream: Cow<'a, str>,
-    seq: u64,
-    kind: Cow<'a, str>,
+    pub(crate) stream: Cow<'a, str>,
+    pub(crate) seq: u64,
+    pub(crate) kind: Cow<'a, str>,
     node: Option<Cow<'a, str>>,
-    evidence: bool,
+    pub(crate) evidence: bool,
     /// Its `ts` as [`instant_of`] reads it.
     instant: Option<u64>,
     /// The record, where reading this line already parsed it.
-    parsed: Option<Box<Envelope>>,
+    pub(crate) parsed: Option<Box<Envelope>>,
 }
 
 /// The bytes from the start of `line` up to the closing quote of a string with no
 /// escape in it, and what follows that quote.
-fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
+pub(crate) fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let end = memchr::memchr2(b'"', b'\\', line)?;
     if line[end] != b'"' {
         return None;
@@ -144,14 +144,14 @@ fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// [`bytes_of`], where what is wanted is the text.
-fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
+pub(crate) fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
     let (text, rest) = bytes_of(line)?;
     Some((std::str::from_utf8(text).ok()?, rest))
 }
 
 /// The decimal number at the start of `line`, as an envelope's serializer writes
 /// one, and what follows it.
-fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
+pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     let digits = line.iter().position(|byte| !byte.is_ascii_digit())?;
     if digits == 0 || (digits > 1 && line[0] == b'0') {
         return None;
@@ -202,38 +202,47 @@ fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
 
 /// The fields a merge needs off the opening of a line in the writers' form, with nothing
 /// past `labels` looked at. What a reader asks whose answer is the source alone.
-struct Opening<'a> {
-    ts: &'a str,
-    stream: &'a str,
-    seq: u64,
-    source: Source,
-    kind: &'a str,
+pub(crate) struct Opening<'a> {
+    pub(crate) v: u32,
+    pub(crate) ts: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) seq: u64,
+    pub(crate) source: Source,
+    pub(crate) kind: &'a str,
+    pub(crate) phase: Option<Phase>,
     node: Option<&'a str>,
+    /// The line from just inside its `labels` object's opening brace.
+    pub(crate) labels: &'a [u8],
 }
 
-fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
+pub(crate) fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
     let (v, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
-    u32::try_from(v).ok()?;
+    let v = u32::try_from(v).ok()?;
     let (ts, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
     let (stream, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
     let (seq, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
     let (source, rest) = string_of(rest.strip_prefix(b",\"source\":\"")?)?;
     let source = Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()?;
     let (kind, mut rest) = string_of(rest.strip_prefix(b",\"kind\":\"")?)?;
-    if let Some(phase) = rest.strip_prefix(b",\"phase\":\"") {
-        let (phase, after) = string_of(phase)?;
-        Phase::deserialize(StrDeserializer::<ValueError>::new(phase)).ok()?;
+    let mut phase = None;
+    if let Some(stamped) = rest.strip_prefix(b",\"phase\":\"") {
+        let (stamped, after) = string_of(stamped)?;
+        phase = Some(Phase::deserialize(StrDeserializer::<ValueError>::new(stamped)).ok()?);
         rest = after;
     }
-    let (node, rest) = labels_of(rest.strip_prefix(b",\"labels\":{")?)?;
+    let labels = rest.strip_prefix(b",\"labels\":{")?;
+    let (node, rest) = labels_of(labels)?;
     rest.strip_prefix(b",\"payload\":{")?;
     Some(Opening {
+        v,
         ts,
         stream,
         seq,
         source,
         kind,
+        phase,
         node,
+        labels,
     })
 }
 
@@ -254,7 +263,7 @@ const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 // parsed, because validating each one cost a 102 MB journal's first screen 731 ms at the
 // median. No skimmed field is trusted for a record returned: every kept line is the complete
 // reader's own parse, which `tests/run_reads.rs` holds against a complete read.
-fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
+pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
     if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
@@ -274,9 +283,12 @@ fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     })
 } // llmlint: ignore-end[boundary_inputs_validated]
 
-/// A finished line read as the complete reader reads it: a whole record, or the
+/// A finished line parsed whole as the complete reader parses it: a whole record, or the
 /// whole record after a fragment, or nothing.
-fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
+///
+/// The one place this read, the heads read and [`fetch`](crate::journal::fetch) hand a
+/// line to the JSON parser whole, so a test counting what they parse counts it here.
+pub(crate) fn whole_record(line: &[u8]) -> Option<Envelope> {
     let parsed = std::str::from_utf8(line)
         .ok()
         .and_then(|text| serde_json::from_str::<Envelope>(text).ok());
@@ -284,6 +296,83 @@ fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
         let text = String::from_utf8_lossy(line);
         crate::journal::glued_tail(text.trim_end_matches('\r')).map(|(_, event)| event)
     })?;
+    #[cfg(test)]
+    whole_parses::parsed(&event, line);
+    Some(event)
+}
+
+/// What the tests of these reads count: every record [`whole_record`] parsed, on
+/// whichever of a read's threads it parsed it.
+#[cfg(test)]
+pub(crate) mod whole_parses {
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
+
+    use crate::event::Envelope;
+
+    /// One record parsed whole.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Parsed {
+        pub(crate) stream: String,
+        pub(crate) seq: u64,
+        pub(crate) kind: String,
+        /// The line's bytes, all of which went to the parser.
+        pub(crate) line_bytes: usize,
+        /// Its payload's, as the writers serialize it.
+        pub(crate) payload_bytes: usize,
+    }
+
+    type Sink = Arc<Mutex<Vec<Parsed>>>;
+
+    thread_local! {
+        static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    }
+
+    /// Count from here on, on this thread and the workers its reads start.
+    pub(crate) fn start() {
+        SINK.with_borrow_mut(|sink| *sink = Some(Sink::default()));
+    }
+
+    /// What was counted since [`start`], which stops counting.
+    pub(crate) fn finish() -> Vec<Parsed> {
+        let sink = SINK
+            .with_borrow_mut(Option::take)
+            .expect("counting was started");
+        let parsed = sink.lock().expect("the count").clone();
+        parsed
+    }
+
+    /// This thread's count, for a worker it starts to join.
+    pub(super) fn current() -> Option<Sink> {
+        SINK.with_borrow(Clone::clone)
+    }
+
+    /// Count on this worker into `sink`.
+    pub(super) fn join(sink: Option<Sink>) {
+        SINK.with_borrow_mut(|own| *own = sink);
+    }
+
+    pub(super) fn parsed(event: &Envelope, line: &[u8]) {
+        SINK.with_borrow(|sink| {
+            if let Some(sink) = sink {
+                sink.lock().expect("the count").push(Parsed {
+                    stream: event.stream.clone(),
+                    seq: event.seq,
+                    kind: event.kind.0.clone(),
+                    line_bytes: line.len(),
+                    payload_bytes: serde_json::to_string(&event.payload)
+                        .expect("a payload serializes")
+                        .len(),
+                });
+            }
+        });
+    }
+}
+
+/// A finished line read as the complete reader reads it: a whole record, or the
+/// whole record after a fragment, or nothing.
+pub(crate) fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
+    let event = whole_record(line)?;
     Some(Skim {
         line,
         ts: Cow::Owned(event.ts.clone()),
@@ -298,7 +387,7 @@ fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
 }
 
 /// Every finished line of `bytes`, up to where a final unfinished one begins.
-fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(crate) fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut start = 0;
     memchr::memchr_iter(b'\n', bytes).map(move |end| {
         let line = &bytes[start..end];
@@ -308,15 +397,25 @@ fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 /// `work` over each of `items`, in their order, across threads where there are many.
-fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     if items.len() < WORKED_ALONE {
         return items.iter().map(work).collect();
     }
     let work = &work;
+    #[cfg(test)]
+    let counted = whole_parses::current();
     std::thread::scope(|scope| {
         let workers: Vec<_> = items
             .chunks(items.len().div_ceil(workers()))
-            .map(|items| scope.spawn(move || items.iter().map(work).collect::<Vec<_>>()))
+            .map(|items| {
+                #[cfg(test)]
+                let counted = counted.clone();
+                scope.spawn(move || {
+                    #[cfg(test)]
+                    whole_parses::join(counted);
+                    items.iter().map(work).collect::<Vec<_>>()
+                })
+            })
             .collect();
         workers
             .into_iter()
@@ -329,7 +428,7 @@ fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec
 fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
     in_order(lines, |skim| match &skim.parsed {
         Some(event) => Some((**event).clone()),
-        None => serde_json::from_slice::<Envelope>(skim.line).ok(),
+        None => whole_record(skim.line),
     })
 }
 
@@ -339,7 +438,7 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 /// Where every line's `ts` is in the writers' form the heads are compared as numbers,
 /// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
 /// streams, which orders them as their text does; otherwise as the text itself.
-fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
+pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
     let Some(instants) = lines
         .iter()
         .map(|line| line.instant)
@@ -524,7 +623,7 @@ const READ_ALONE: usize = 8 << 20;
 /// across threads, since one thread's copy out of the page cache is most of what a
 /// 100 MB first screen used to wait on. A file that came up shorter than its length
 /// was read again whole, which is what a reader of an append-only file never meets.
-fn whole_file(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn whole_file(path: &Path) -> Option<Vec<u8>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;

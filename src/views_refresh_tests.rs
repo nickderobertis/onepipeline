@@ -1575,3 +1575,126 @@ fn a_selective_view_reads_again_when_an_edit_opens_an_edge_it_never_resolved() {
     );
     same_answers(&view, &run.open());
 }
+
+/// A heads read's view answers as a complete open does, over a journal its writers left
+/// with every headed kind in it, and its refresh folds and appends only what arrived
+/// after it, whole.
+#[test]
+fn a_heads_view_answers_as_open_does_and_its_refresh_appends_whole_records() {
+    let mut plan = super::tests::plan();
+    plan.tasks = vec![
+        node("landed", &[]),
+        node("failed", &[]),
+        node("after-failed", &["failed"]),
+        node("running", &[]),
+    ];
+    let mut run = Run::new("heads", plan);
+    let kinds = [
+        "member-heartbeat",
+        "turn-activity",
+        "turn-message",
+        "turn-started",
+        "turn-completed",
+        "change-check",
+    ];
+    for seq in 0..60 {
+        let node = if seq % 2 == 0 { "running" } else { "landed" };
+        run.writer
+            .relay(&relayed(
+                "sibling-a",
+                seq,
+                kinds[seq as usize % kinds.len()],
+                Some(node),
+                seq * 900,
+            ))
+            .expect("relay");
+    }
+    settled_with(
+        &mut run,
+        "landed",
+        &[
+            ("status", json!("done")),
+            ("outcome", json!("complete")),
+            ("landing", json!("landed")),
+        ],
+    );
+    settled_with(
+        &mut run,
+        "failed",
+        &[
+            ("status", json!("failed")),
+            ("outcome", json!("judge-rejected")),
+        ],
+    );
+    run.writer
+        .emit(
+            PipelineKind::NodeDispatched,
+            journal::labels("demo", Some("running")),
+            journal::payload(&[]),
+        )
+        .expect("started");
+    ledger::write_json(&run.paths.result(), &json!({"outcome": "unfinished"})).expect("a result");
+
+    let answers = |view: &RunView, fresh: &RunView| {
+        assert_eq!(view.state.statuses(), fresh.state.statuses(), "statuses");
+        assert_eq!(
+            reading(view),
+            reading(fresh),
+            "reasons, awaits and outcomes"
+        );
+        assert_eq!(view.summary(), fresh.summary(), "summary");
+        assert_eq!(view.refresh.result, fresh.refresh.result, "result");
+        let tallies = |view: &RunView| -> BTreeMap<String, Option<u64>> {
+            view.state
+                .activity
+                .iter()
+                .map(|(node, activity)| (node.clone(), activity.progress.map(|p| p.events())))
+                .collect()
+        };
+        assert_eq!(tallies(view), tallies(fresh), "event tallies");
+    };
+    let fresh = run.open();
+    assert_eq!(fresh.state.statuses()["after-failed"], NodeStatus::Skipped);
+    let heads = RunView::heads(&run.paths).expect("the heads read");
+    assert!(heads.view.events.is_empty());
+    assert_eq!(heads.heads.len(), fresh.events.len());
+    assert_eq!(
+        Some(heads.last_seq),
+        fresh.events.iter().map(|event| event.seq).max()
+    );
+    let mut view = heads.view;
+    answers(&view, &fresh);
+    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    run.writer
+        .relay(&relayed(
+            "sibling-b",
+            0,
+            "turn-activity",
+            Some("running"),
+            0,
+        ))
+        .expect("relay");
+    run.writer
+        .emit(
+            PipelineKind::NodeSettled,
+            journal::labels("demo", Some("running")),
+            journal::payload(&[("status", json!("done")), ("landing", json!("landed"))]),
+        )
+        .expect("a settlement");
+    crate::readprobe::start();
+    assert_eq!(
+        view.refresh().expect("refresh"),
+        Refreshed::Appended { first: 0 }
+    );
+    let observed = crate::readprobe::finish();
+    assert_eq!(observed.folded.len(), 2, "folded only the appended records");
+    let fresh = run.open();
+    assert_eq!(
+        view.events,
+        fresh.events[fresh.events.len() - 2..],
+        "appended whole"
+    );
+    answers(&view, &fresh);
+}
