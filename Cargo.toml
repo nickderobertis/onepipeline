@@ -1427,14 +1427,17 @@ onevcs-testing = "0.21.2"
 # a repeat copy creates nothing and a document copied right after its project resolves every link
 # to it while Linear's filtered and searched reads lag its writes: the lagging-listings journey in
 # `tests/e2e/linear_launch.rs` fails on 0.14.7. 0.14.8 was tagged but never published its crates.
-onetaskgraph-core = "=0.14.9"
-onetaskgraph-plugin-api = "=0.14.9"
-onetaskgraph-local-md = "=0.14.9"
+# **0.14.12 writes an expandable block in each destination's own form on copy**
+# (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
+# as its collapsible section as well as GitHub as the HTML element.
+onetaskgraph-core = "=0.14.12"
+onetaskgraph-plugin-api = "=0.14.12"
+onetaskgraph-local-md = "=0.14.12"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.9"
+onetaskgraph-linear = "=0.14.12"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"

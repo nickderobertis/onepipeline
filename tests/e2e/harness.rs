@@ -1447,7 +1447,10 @@ impl World {
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
-                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: false,
+                        documents: false,
+                    },
                     destination,
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
                     target_task: None,
