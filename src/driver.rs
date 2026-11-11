@@ -2096,8 +2096,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         );
     }
 
-    warn_of_deprecated_reset(&record);
-
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
         // is about to exit, and the driver it is about to start must not hold
@@ -2156,24 +2154,6 @@ fn plural(count: usize, what: &str) -> String {
     match count {
         1 => format!("1 {what}"),
         _ => format!("{count} {what}s"),
-    }
-}
-
-/// Tell the operator this launch's observer graph leans on the deprecated reset.
-///
-/// One line whichever member and however many declare it: the warning is about
-/// what the engine does on `next`, which is one thing. Read leniently, because a
-/// graph that cannot be read is the observer's launch to report.
-fn warn_of_deprecated_reset(record: &LaunchRecord) {
-    let Some(graph) = record.observer_graph() else {
-        return;
-    };
-    if graph::declares_resettable(graph, &record.dag_sets) {
-        eprintln!(
-            "onepipeline: warning: this run's observer graph declares `resettable`: the engine's \
-             automatic clock reset on `next` is deprecated and will be removed — declare \
-             `reset_on` on the schedule instead"
-        );
     }
 }
 
@@ -3368,8 +3348,7 @@ pub(crate) fn adopt_detached(
     retain: &crate::verbs::Retain,
     budget: Option<u64>,
 ) -> Result<u32> {
-    let (record, _) = validate_and_displace_for_adoption(paths)?;
-    warn_of_deprecated_reset(&record);
+    validate_and_displace_for_adoption(paths)?;
     if let Some(budget) = budget {
         let _lock = engine::claim(paths)?;
         let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
@@ -3394,7 +3373,6 @@ pub(crate) fn adopt_attached(
     said: &mut dyn FnMut(Settlement),
 ) -> Result<Settlement> {
     let (mut record, view) = validate_and_displace_for_adoption(paths)?;
-    warn_of_deprecated_reset(&record);
 
     // And the lock decides, before anything is written: an adoption that
     // recorded itself and *then* lost the race would leave the record naming
