@@ -1551,3 +1551,101 @@ fn a_declined_ruling_meets_the_channels_hooks_as_a_surface_does() {
     assert!(channel_file(&world, "hookdeclinerefuse", "surfaces.jsonl").is_empty());
     world.release("slow.go");
 }
+
+/// How many records the run's surfaces queue holds.
+fn surface_lines(world: &World, run: &str) -> usize {
+    channel_file(world, run, "surfaces.jsonl").lines().count()
+}
+
+/// A declined ruling's record goes with its kind, both ways, after the channel's
+/// hooks as well as before: a hook that strips a decline of its record, renames
+/// it into another kind still carrying the record, or makes it blocking is
+/// refused at `decline-ruling` in the channel's words, with nothing appended.
+#[test]
+fn a_hook_that_breaks_a_declined_rulings_record_is_refused_with_nothing_appended() {
+    for (name, hook, why) in [
+        (
+            "hookdeclinestrip",
+            &["remove-field", "declined_ruling"][..],
+            "carries its typed `declined_ruling` record",
+        ),
+        (
+            "hookdeclinerename",
+            &["set-kind", "finding"][..],
+            "only a `declined-ruling` surface carries a `declined_ruling` record",
+        ),
+        ("hookdeclineblock", &["set-blocking"][..], "never blocks"),
+    ] {
+        let world = World::new(&format!("hook-decline-{name}"));
+        hooked_run(&world, name, &[("surfaces", hook, "")]);
+        let reference = a_ruling_to_decline(&world, name);
+        let before = surface_lines(&world, name);
+        world
+            .run_with_stdin(
+                &["decline-ruling", name, "--ruling", &reference],
+                "The user said otherwise.",
+            )
+            .exited(REFUSED)
+            .err_has(why)
+            .err_has("nothing was appended");
+        assert_eq!(
+            surface_lines(&world, name),
+            before,
+            "{name}: a broken decline was appended"
+        );
+        assert!(
+            world
+                .events_of(name, "planner-surface-queued")
+                .iter()
+                .all(|event| event["payload"]["kind"] != "declined-ruling"),
+            "{name}: a broken decline was journalled queued"
+        );
+        world.release("slow.go");
+    }
+}
+
+/// The same holds for every other writer: a surface a hook renames into a
+/// `declined-ruling` carrying no record is refused, and so is a
+/// `declined-ruling` raised at `surface`, which no record comes with.
+#[test]
+fn no_surface_becomes_a_declined_ruling_without_its_record() {
+    let world = World::new("hook-surface-into-decline");
+    hooked_run(
+        &world,
+        "hookintodecline",
+        &[("surfaces", &["set-kind", "declined-ruling"], "")],
+    );
+    let before = surface_lines(&world, "hookintodecline");
+    world
+        .run(&[
+            "surface",
+            "hookintodecline",
+            "--kind",
+            "finding",
+            "--message",
+            "the fixture moved",
+        ])
+        .exited(REFUSED)
+        .err_has("carries its typed `declined_ruling` record");
+    assert_eq!(surface_lines(&world, "hookintodecline"), before);
+    world.release("slow.go");
+
+    let world = World::new("surface-as-decline");
+    let path = plan(&world, "surfaceasdecline");
+    launched(&world, &path, "surfaceasdecline", &[]);
+    let before = surface_lines(&world, "surfaceasdecline");
+    world
+        .run(&[
+            "surface",
+            "surfaceasdecline",
+            "--kind",
+            "declined-ruling",
+            "--message",
+            "I decline it",
+        ])
+        .exited(REFUSED)
+        .err_has("carries its typed `declined_ruling` record")
+        .err_has("nothing was appended");
+    assert_eq!(surface_lines(&world, "surfaceasdecline"), before);
+    world.release("slow.go");
+}

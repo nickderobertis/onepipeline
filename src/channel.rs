@@ -1930,6 +1930,12 @@ impl ChannelState {
         if self.launched_with_validators {
             return Ok(SurfaceOffer::Refused(LAUNCHED_WITH_VALIDATORS.to_owned()));
         }
+        let offered = serde_json::to_value(&surface)
+            .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
+        // A declined ruling's record goes with its kind, both ways, on every write.
+        if let Err(why) = layout::declined_ruling_holds(&offered) {
+            return Ok(SurfaceOffer::Refused(why));
+        }
         if !self.judges() {
             return Ok(SurfaceOffer::Queued(Box::new(
                 self.surfaces()?
@@ -1939,8 +1945,6 @@ impl ChannelState {
             )));
         }
         let surfaces = queue_name(SURFACES);
-        let offered = serde_json::to_value(&surface)
-            .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
         let hooked = self
             .judging_bus()?
             .hooked(&surfaces, RawRecord::from_value(&offered))
@@ -1953,6 +1957,12 @@ impl ChannelState {
                 if let Some((_, record)) =
                     hooked.records.iter().find(|(queue, _)| queue == &surfaces)
                 {
+                    // And again of what the hooks left: no hook may queue a
+                    // declined ruling stripped of its record, made blocking, or
+                    // renamed into another kind still carrying it.
+                    if let Err(why) = layout::declined_ruling_holds(record.value()) {
+                        return Ok(SurfaceOffer::Refused(why));
+                    }
                     check(record.value())?;
                 }
             }

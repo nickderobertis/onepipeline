@@ -262,11 +262,65 @@ pub struct Surface {
     /// absent, so every other surface — and every one written before the field
     /// existed — serializes exactly as it always did. A reader takes the facts
     /// of a declined ruling from here and never from [`message`](Self::message),
-    /// whose text is for people.
-    // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this as an optional field of the surface record, beside an open `kind` word other producers fill, so "present exactly on `declined-ruling`" cannot be a closed variant without changing what every other surface is on the wire; `verbs::decline_ruling` is the one writer and sets the kind, the workstream and the record together, and `tests/e2e/rulings.rs` holds every other surface free of it.
-    // llmlint: ignore[boundary_inputs_validated] the record is validated as a `DeclinedRuling` wherever it is read; its agreement with the open `kind`, the `workstream` and `blocking` beside it is not checked on read because the host's own hooks may rewrite those fields of a surface, and refusing the rewritten record would make the whole surfaces queue unreadable. A reader keys on this record, never on the kind, as `docs/contract.md` says.
+    /// whose text is for people. Every write of a surface holds it to that, after
+    /// the channel's hooks as well as before: [`declined_ruling_holds`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_ruling: Option<DeclinedRuling>,
+}
+
+/// Whether `surface`, as it is about to be appended, holds the invariant the
+/// declined-ruling record is published under: a surface of kind
+/// `declined-ruling` carries a readable [`DeclinedRuling`], is non-blocking, and
+/// is about the node its record names; a surface of any other kind carries no
+/// such record. Asked of every surface the channel writes, and again of what the
+/// channel's hooks leave of it, so neither a caller nor a hook can queue one
+/// that breaks it.
+///
+/// # Errors
+///
+/// What breaks it, worded for the refusal the writer answers with.
+pub(crate) fn declined_ruling_holds(surface: &Value) -> Result<(), String> {
+    let kind = surface
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let record = surface
+        .get("declined_ruling")
+        .filter(|record| !record.is_null());
+    if kind != crate::channel::SurfaceKind::DECLINED_RULING {
+        return match record {
+            Some(_) => Err(format!(
+                "only a `declined-ruling` surface carries a `declined_ruling` record, and this \
+                 one is of kind `{kind}`; nothing was appended"
+            )),
+            None => Ok(()),
+        };
+    }
+    let Some(record) = record else {
+        return Err(
+            "a `declined-ruling` surface carries its typed `declined_ruling` record, and this one \
+             carries none; nothing was appended"
+                .to_owned(),
+        );
+    };
+    let declined: DeclinedRuling = serde_json::from_value(record.clone()).map_err(|why| {
+        format!("a `declined-ruling` surface's record cannot be read ({why}); nothing was appended")
+    })?;
+    if surface.get("blocking") != Some(&Value::Bool(false)) {
+        return Err(
+            "a `declined-ruling` surface is a report to the manager and never blocks; nothing \
+             was appended"
+                .to_owned(),
+        );
+    }
+    if surface.get("workstream").and_then(Value::as_str) != Some(declined.node.as_str()) {
+        return Err(format!(
+            "a `declined-ruling` surface is about the node its record names, `{}`; nothing was \
+             appended",
+            declined.node
+        ));
+    }
+    Ok(())
 }
 
 /// What kind of ruling a dispatch declined.

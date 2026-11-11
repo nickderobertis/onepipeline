@@ -13467,6 +13467,15 @@ manager made while it was built.
   `onepipeline ask` defaults `--about` to it, so an answered question names the node a decline
   is addressed to. Such a question holds only the asking node's dependents, which wait on that
   node anyway.
+- **The record goes with its kind on every write, after the hooks too.** The channel's one
+  surface write, `ChannelState::push_checked`, refuses — with nothing appended — a
+  `declined-ruling` surface carrying no readable record, made blocking, or about another node
+  than its record names, and a surface of any other kind carrying the record. It asks this of
+  the surface offered and again of what the channel's hooks leave of it, so a hook that strips,
+  renames or blocks a decline is refused at `decline-ruling`, and `surface --kind
+  declined-ruling`, which carries no record, is refused too. A surface the engine raises that a
+  hook breaks this way is journalled as `planner-surface-dropped` with the reason as `refused`,
+  as any surface a hook refuses is. A hook rewriting a decline's message alone is kept.
 - **`RulingKind` is `note`, `amendment` or `answer`.** An answered question's text is the
   reply's `message`, or its `reason` where it carries no message.
 - **`human_items::Actor` gains `provenance`**, because `HumanItems::apply_batch` takes an
