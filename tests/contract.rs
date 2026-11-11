@@ -9420,6 +9420,61 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         Vec<onepipeline::event::Envelope>,
     ) -> onepipeline::Result<onepipeline::views::RunView> =
         onepipeline::views::RunView::over_selected;
+    // The heads read and the fetch beside it, at their signatures, and every field each
+    // answer carries at its type: a head's fields are `Envelope`'s of the same names.
+    let _: fn(&onepipeline::views::RunPaths) -> onepipeline::Result<onepipeline::views::RunHeads> =
+        onepipeline::views::RunView::heads;
+    let _: fn(
+        &std::path::Path,
+        &[onepipeline::journal::RecordHandle],
+    ) -> onepipeline::Result<Vec<onepipeline::event::Envelope>> = onepipeline::journal::fetch;
+    let _ = |heads: onepipeline::views::RunHeads| {
+        let onepipeline::views::RunHeads {
+            view,
+            heads,
+            store_len,
+            last_seq,
+        } = heads;
+        let _: (onepipeline::views::RunView, usize, u64) = (view, store_len, last_seq);
+        let _: Vec<onepipeline::journal::RecordHead> = heads;
+    };
+    let _ = |head: onepipeline::journal::RecordHead, record: onepipeline::event::Envelope| {
+        let onepipeline::journal::RecordHead {
+            ts,
+            stream,
+            seq,
+            source,
+            kind,
+            phase,
+            labels,
+            evidence,
+            place,
+            handle,
+        } = head;
+        let mut record = record;
+        (record.ts, record.stream, record.seq) = (ts, stream, seq);
+        (
+            record.source,
+            record.kind,
+            record.dimensions.phase,
+            record.labels,
+        ) = (source, kind, phase, labels);
+        let _: (bool, Option<usize>) = (evidence, place);
+        let _: onepipeline::journal::RecordHandle = handle.clone();
+        let _ = (handle == handle.clone(), format!("{handle:?}"));
+        let _: std::collections::HashSet<onepipeline::journal::RecordHandle> = [handle].into();
+    };
+    let _ = |error: onepipeline::Error| match error {
+        onepipeline::Error::RecordMoved {
+            path,
+            offset,
+            stream,
+            seq,
+        } => {
+            let _: (std::path::PathBuf, u64, String, u64) = (path, offset, stream, seq);
+        }
+        _ => {}
+    };
     let _: fn(&Path) -> Host = verbs::host;
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
