@@ -715,7 +715,7 @@ pub struct Next {
 /// consuming it, and this is what advances the queue and journals
 /// `planner-surfaced`. It signals nothing to the observer graph: a graph whose
 /// clock a read should restart declares `reset_on` over the journal it follows
-/// (`docs/contract-divergences.md` entry 156).
+/// (`docs/contract-divergences.md` entry 155).
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
 /// since it was queued — `release::wait_outlived`
