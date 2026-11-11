@@ -695,7 +695,7 @@ fn a_live_note_and_its_continuation(name: &str, user: bool) {
     let (judge, worker): (Vec<&String>, Vec<&String>) = all
         .iter()
         .partition(|prompt| prompt.contains(SUPERVISOR_OPENING));
-    let live = format!("{attribution}");
+    let live = attribution.clone();
     assert!(
         worker
             .iter()

@@ -1138,8 +1138,9 @@ impl std::fmt::Debug for ChannelState {
 /// What the channel made of one surface offered to it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SurfaceOffer {
-    /// Queued, as the hooks left it.
-    Queued(Surface),
+    /// Queued, as the hooks left it. Boxed: a surface is the one large variant,
+    /// and a declined ruling's record rides on it.
+    Queued(Box<Surface>),
     /// A hook dropped it: nothing was queued, and the bus recorded the drop.
     Dropped {
         /// The queue the dropping hook ran on.
@@ -1930,12 +1931,12 @@ impl ChannelState {
             return Ok(SurfaceOffer::Refused(LAUNCHED_WITH_VALIDATORS.to_owned()));
         }
         if !self.judges() {
-            return Ok(SurfaceOffer::Queued(
+            return Ok(SurfaceOffer::Queued(Box::new(
                 self.surfaces()?
                     .push(&surface)
                     .map_err(queue_failure)?
                     .record,
-            ));
+            )));
         }
         let surfaces = queue_name(SURFACES);
         let offered = serde_json::to_value(&surface)
@@ -1970,7 +1971,9 @@ impl ChannelState {
             .into_iter()
             .find(|(queue, _)| queue == &surfaces)
             .and_then(|(_, pushed)| serde_json::from_value(pushed.record).ok())
-            .map_or(SurfaceOffer::Elsewhere, SurfaceOffer::Queued))
+            .map_or(SurfaceOffer::Elsewhere, |queued| {
+                SurfaceOffer::Queued(Box::new(queued))
+            }))
     }
 
     /// Claim the next readable surface: **a blocking one first**, and arrival

@@ -12664,7 +12664,7 @@ pub(crate) fn offer_surface(
     use crate::channel::SurfaceOffer;
     use crate::payload::SurfaceDropCause;
     let cause = match channel.push(surface.clone())? {
-        SurfaceOffer::Queued(queued) => return Ok(Some(queued)),
+        SurfaceOffer::Queued(queued) => return Ok(Some(*queued)),
         SurfaceOffer::Elsewhere => return Ok(None),
         SurfaceOffer::Dropped { hook, .. } => SurfaceDropCause::Dropped { hook },
         SurfaceOffer::Refused(refused) => SurfaceDropCause::Refused { refused },
