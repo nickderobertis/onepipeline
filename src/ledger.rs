@@ -650,16 +650,13 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
         let recorded = serde_json::Value::deserialize(deserializer)?;
         let mut completed = recorded.clone();
         // The key the bus before 0.11 judged offers by: kept in the record, left
-        // out of the configuration this build runs, and remembered as declared
-        // unless it declared none.
+        // out of the configuration this build runs, and remembered whenever it is
+        // there. Every bus that had the key omitted it when it named nothing, so a
+        // record carrying it was launched with validators, whatever it holds.
         let launched_with_validators = completed
             .as_object_mut()
             .and_then(|fields| fields.remove("validators"))
-            .is_some_and(|declared| match declared {
-                serde_json::Value::Null => false,
-                serde_json::Value::Array(validators) => !validators.is_empty(),
-                _ => true,
-            });
+            .is_some();
         if let Some(codecs) = completed
             .get_mut("codecs")
             .and_then(serde_json::Value::as_object_mut)
@@ -5864,6 +5861,41 @@ mod tests {
             serde_json::to_value(&launched).expect("it serializes"),
             serde_json::to_value(bus.config()).expect("it serializes")
         );
+    }
+
+    /// A record whose bus configuration carries `validators` was launched with
+    /// them whatever the key holds, and is written back holding exactly that; one
+    /// without the key was not.
+    #[test]
+    fn a_recorded_validators_key_marks_the_run_launched_with_them_whatever_it_holds() {
+        for declared in [
+            serde_json::json!([]),
+            serde_json::Value::Null,
+            serde_json::json!("not a list"),
+        ] {
+            let mut recorded: serde_json::Value =
+                serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
+            recorded["bus_config"]["validators"] = declared.clone();
+            let record: LaunchRecord =
+                serde_json::from_value(recorded.clone()).expect("the record is read");
+            let bus = record.bus_config.as_ref().expect("a bus config");
+            assert!(bus.launched_with_validators(), "{declared}");
+            assert_eq!(
+                serde_json::to_value(&record).expect("it serializes")["bus_config"],
+                recorded["bus_config"]
+            );
+        }
+        let mut recorded: serde_json::Value =
+            serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
+        recorded["bus_config"]
+            .as_object_mut()
+            .expect("a bus config object")
+            .remove("validators");
+        let record: LaunchRecord = serde_json::from_value(recorded).expect("the record is read");
+        assert!(!record
+            .bus_config
+            .expect("a bus config")
+            .launched_with_validators());
     }
 
     /// A record whose bus configuration is not one at all is still refused, and
