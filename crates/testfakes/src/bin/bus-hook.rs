@@ -9,6 +9,10 @@
 //!   `drop`                    print nothing
 //!   `refuse <reason>`         exit 1 with `<reason>` on stderr
 //!   `unjudged`                exit 3
+//!   `scripted`                refuse with the text of `bus-hook.refuse` in the
+//!                             script directory while that file stands, and
+//!                             keep the message once it is gone — a refusal a
+//!                             journey can lift without relaunching its run
 //!   `set-message <text>`      rewrite `message`, on a surface or a framed reply
 //!   `set-blocking`            mark a surface `blocking: true`
 //!   `keep-first-command`      leave only the first of the envelope's commands
@@ -70,6 +74,13 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         }
         "unjudged" => return std::process::ExitCode::from(3),
+        "scripted" => {
+            if let Ok(reason) = std::fs::read_to_string(dir.join("bus-hook.refuse")) {
+                eprint!("{}", reason.trim());
+                return std::process::ExitCode::from(1);
+            }
+            print!("{offered}");
+        }
         "set-message" => {
             let target = if message.get("reply").is_some() {
                 &mut message["reply"]

@@ -22,7 +22,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::REFUSED;
+use crate::harness::{agent, plan_of, REFUSED};
 use crate::recorded_support::{recorded, recorded_world, seeded_with, RUN};
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 
@@ -224,6 +224,8 @@ pub(crate) const LAUNCHED_WITH_VALIDATORS: [&str; 3] = [
 /// verdict carrying none, a surface a verb raises, a question `ask` raises and
 /// the surfaces the engine raises while `adopt` drives the run are each refused,
 /// saying why and what to do, and the run's channel holds nothing new afterwards.
+/// Nor does this build launch a run under that configuration: `start` refuses it
+/// before a run exists.
 #[test]
 fn a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer() {
     let world = recorded_world("launched-with-validators");
@@ -369,4 +371,41 @@ fn a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer() 
         .run(&["status", RUN])
         .exited(0)
         .out_has(&format!("{RUN}  SETTLED  1/1 done"));
+
+    // Nor will this build launch a run under that recorded configuration:
+    // `start --bus-config` naming it is refused before a run exists, in the bus's
+    // own words naming the removed key and the `hooks:` that replace it.
+    let config = world.root.join("recorded-bus-config.json");
+    std::fs::write(&config, &recorded_config).expect("the recorded configuration is written");
+    let plan = world.plan(
+        "relaunched",
+        &plan_of("relaunched", vec![agent("slow", &[])]),
+    );
+    let runs_before = run_dirs(&world);
+    let relaunched = world.run(&[
+        "start",
+        &plan,
+        "--bus-config",
+        &config.to_string_lossy(),
+        "--detach",
+    ]);
+    relaunched.exited(REFUSED);
+    for said in ["validators", "removed in onemessagebus 0.11.0", "hooks:"] {
+        relaunched.err_has(said);
+    }
+    assert_eq!(
+        run_dirs(&world),
+        runs_before,
+        "a launch under the recorded validators wrote a run"
+    );
+}
+
+/// The runs a world's runs root holds, by name.
+fn run_dirs(world: &crate::harness::World) -> Vec<std::ffi::OsString> {
+    let mut runs: Vec<_> = std::fs::read_dir(&world.runs)
+        .expect("the runs root")
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    runs.sort();
+    runs
 }
