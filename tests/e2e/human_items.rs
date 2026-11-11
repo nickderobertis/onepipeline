@@ -4005,3 +4005,31 @@ fn a_journal_of_schema_version_1_events_lists_shows_and_resolves_as_the_managers
     assert_eq!(history[0]["provenance"], "manager");
     assert_eq!(history[1]["provenance"], "user");
 }
+
+/// A schema version 1 event predates provenance, so it is the manager's: one
+/// claiming the user's words is a record no engine wrote, and the store refuses
+/// it by name rather than listing it as the user's.
+#[test]
+fn a_schema_version_1_event_claiming_the_users_words_is_refused_by_name() {
+    let world = World::new("human-item-v1-user");
+    enabled(&world);
+    let into = world.runs.join("human-items");
+    std::fs::create_dir_all(&into).unwrap();
+    let released = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/recorded/human-items-v1/events.ndjson"),
+    )
+    .expect("the released journal reads");
+    let mut claimed: Value =
+        serde_json::from_str(released.lines().last().expect("a completion")).unwrap();
+    assert_eq!(claimed["payload"]["schema_version"], 1);
+    claimed["seq"] = json!(claimed["seq"].as_u64().unwrap() + 1);
+    claimed["payload"]["resolution"]["provenance"] = json!("user");
+    claimed["payload"]["item"]["resolution"]["provenance"] = json!("user");
+    std::fs::write(into.join("events.ndjson"), format!("{released}{claimed}\n")).unwrap();
+    world
+        .run(&["human-items", "list", "--json"])
+        .exited(2)
+        .err_has("cannot be read")
+        .err_has("schema version 1 event is the manager's");
+}

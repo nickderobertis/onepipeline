@@ -657,7 +657,37 @@ fn an_answer_to_a_question_says_whose_it_is_and_a_managers_can_be_declined() {
     user_ruling_refused(&world, run, &user_reference);
 }
 
-// The live note and the continuation the engine composes after it.
+/// An answer may carry its ruling as a `reason` alone, with no `message`, and
+/// the declined record's text is then that reason.
+#[test]
+fn a_declined_answer_given_as_a_reason_alone_carries_that_reason_as_its_text() {
+    let world = World::new("rulings-ask-reason");
+    let path = world.plan(
+        "rulingsreason",
+        &plan_of("rulingsreason", vec![agent("build", &[])]),
+    );
+    world.run(&["start", &path, "--attach"]).settled();
+    let run = "rulingsreason";
+    let asked = crate::ask::asking(&world, run, &["--about", "build", "Which way?"], &[]);
+    let question = crate::ask::question_on(&world, run);
+    let correlation = question["correlation"].as_str().expect("a correlation");
+    world
+        .run_with_stdin(
+            &["reply", run, "--correlation", correlation],
+            &json!({"completion": false, "reason": MANAGER_RULING}).to_string(),
+        )
+        .exited(0);
+    let answered = crate::ask::waited(asked);
+    assert_eq!(answered.code, 0, "{}", answered.stderr);
+    let reply = answered.answer()["reply"].clone();
+    let reply_id = reply["id"].as_u64().expect("the reply's id");
+    declined_as_sent(
+        &world,
+        run,
+        &format!("a{reply_id}"),
+        &json!({"node": "build", "kind": "answer", "reply": reply_id, "text": MANAGER_RULING}),
+    );
+}
 
 const SUPERVISOR_OPENING: &str = "You are the simulated USER and completion supervisor";
 
@@ -824,8 +854,6 @@ fn a_users_live_note_binds_both_parties_and_its_continuation() {
 fn a_managers_live_note_is_declinable_in_both_parties_and_its_continuation() {
     a_live_note_and_its_continuation("rulingslivemanager", false);
 }
-
-// A run directory the released engine wrote before any of this existed.
 
 const RELEASED: &str = "released-rulings";
 

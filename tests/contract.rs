@@ -12856,7 +12856,6 @@ fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() 
             "the rulings paragraph does not name `{word}`"
         );
     }
-    // The words and the default.
     for (provenance, word) in [(Provenance::Manager, "manager"), (Provenance::User, "user")] {
         assert_eq!(serde_json::to_value(provenance).unwrap(), json!(word));
         assert!(
@@ -12866,11 +12865,9 @@ fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() 
     }
     assert_eq!(Provenance::default(), Provenance::Manager);
     assert!(passage.contains("defaulting to `Manager`"));
-    // The envelope version and what is read.
     assert_eq!(REPLY_ENVELOPE_VERSION, 4);
     assert!(passage.contains("`REPLY_ENVELOPE_VERSION` is 4"));
     assert!(named.contains(&format!("{REPLY_ENVELOPE_VERSIONS_READ:?}")));
-    // The surface kind, and the kinds of ruling.
     assert_eq!(SurfaceKind::DECLINED_RULING, "declined-ruling");
     assert!(named.contains(SurfaceKind::DECLINED_RULING));
     for (kind, word) in [

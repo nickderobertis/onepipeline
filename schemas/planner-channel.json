@@ -145,7 +145,7 @@
               "text",
               "reason"
             ],
-            "description": "The record a `declined-ruling` surface carries: the ruling a dispatch\ndeclined through `onepipeline decline-ruling`, and why.\n\nEvery fact is a field of its own, so a reader — the manager, a browser — takes\nit from here rather than parsing the surface's message."
+            "description": "The record a `declined-ruling` surface carries: the ruling a dispatch\ndeclined through `onepipeline decline-ruling`, and why.\n\nEvery fact is a field of its own, so a reader — the manager, a browser — takes\nit from here rather than parsing the surface's message.\n\nRead through its validation: a record whose party is not the manager's, or\nwhose node, reference or reason is blank, is refused, since no decline can\nproduce one."
           },
           "Provenance": {
             "oneOf": [

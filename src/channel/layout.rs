@@ -263,27 +263,9 @@ pub struct Surface {
     /// existed — serializes exactly as it always did. A reader takes the facts
     /// of a declined ruling from here and never from [`message`](Self::message),
     /// whose text is for people.
-    ///
-    /// Read leniently, as [`asker`](Self::asker) is: a record that does not read
-    /// as a [`DeclinedRuling`] reads as none, since refusing it would refuse the
-    /// whole queue around it rather than one field.
     // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this as an optional field of the surface record, beside an open `kind` word other producers fill, so "present exactly on `declined-ruling`" cannot be a closed variant without changing what every other surface is on the wire; `verbs::decline_ruling` is the one writer and sets the kind, the workstream and the record together, and `tests/e2e/rulings.rs` holds every other surface free of it.
-    #[serde(
-        default,
-        deserialize_with = "recorded_declined_ruling",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_ruling: Option<DeclinedRuling>,
-}
-
-/// Read the declined ruling a surface carries, reading one that is not a
-/// declined ruling as none, for the reason [`recorded_asker`] reads a blank
-/// asker as none.
-fn recorded_declined_ruling<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<DeclinedRuling>, D::Error> {
-    Ok(Option::<Value>::deserialize(deserializer)?
-        .and_then(|record| serde_json::from_value(record).ok()))
 }
 
 /// What kind of ruling a dispatch declined.
