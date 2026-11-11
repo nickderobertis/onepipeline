@@ -630,19 +630,6 @@ pub(crate) fn dispatch_sets(
     Ok(sets)
 }
 
-/// Whether the graph at `reference`, under `sets`, declares `resettable` on any
-/// member's schedule. A graph that cannot be read declares nothing here: reading
-/// it is the launch's own to report.
-pub(crate) fn declares_resettable(reference: &str, sets: &[String]) -> bool {
-    validate_graph_sets(reference, sets, "dag-scope").is_ok_and(|graph| {
-        graph.members.values().any(|member| {
-            member
-                .schedule()
-                .is_some_and(|schedule| schedule.resettable)
-        })
-    })
-}
-
 /// Apply a complete ordered list through oneagentgraph's loader and schema, answering with the
 /// graph it validated.
 pub(crate) fn validate_graph_sets(

@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::agentgraph;
 use crate::channel::{
     Author, ChannelState, Command, CommandOutcome, QueuedCommands, QueuedReply, Reply, Surface,
     SurfaceKind,
@@ -713,18 +712,17 @@ pub struct Next {
 /// `onepipeline next RUN` — the channel's only consumer.
 ///
 /// Rendering is not reading: `monitor` shows a pending surface without
-/// consuming it, and this is what advances the queue, journals
-/// `planner-surfaced`, and restarts the check-in clock of every member the run's
-/// observer graph declares resettable. That automatic reset is deprecated and
-/// will be removed (`docs/contract-divergences.md` entry 150); `reset_on` replaces
-/// it.
+/// consuming it, and this is what advances the queue and journals
+/// `planner-surfaced`. It signals nothing to the observer graph: a graph whose
+/// clock a read should restart declares `reset_on` over the journal it follows
+/// (`docs/contract-divergences.md` entry 155).
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
 /// since it was queued — `release::wait_outlived`
 /// says which record cleared it. It is claimed, so the queue moves past it, and
 /// withheld rather than delivered: said on stderr, and recorded neither as
-/// `planner-surfaced`, which it was not, nor by restarting any check-in clock,
-/// which a reading nobody made does not. The next surface waiting is handed out
+/// `planner-surfaced`, which it was not, so no `reset_on` reads it as a
+/// reading. The next surface waiting is handed out
 /// in its place.
 ///
 /// # Errors
@@ -775,22 +773,9 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
         ]),
     )?;
 
-    // The engine's automatic reset, deprecated and to be removed
-    // (`docs/contract-divergences.md` entry 150), still working until then:
-    // `reset_on` over the journal the graph follows replaces it. Which clocks is the observer graph's own to say: every member it
-    // declared `resettable`, and the engine names none. Addressed by the
-    // **graph** run's id, which is what the sibling minted and the only id its
-    // signals answer to; this run's id names a run `oneagentgraph` has never
-    // heard of. A run that launched no observer graph has no clock to restart
-    // and nothing to report. A failure to reach the sibling is reported and does
-    // not fail the read: the planner has the surface either way.
-    if view.launch.observer_graph().is_some() {
-        if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
-            .and_then(|graph_run| agentgraph::reset_resettable(&graph_run))
-        {
-            eprintln!("onepipeline: could not restart the check-in clock: {error}");
-        }
-    }
+    // No clock is restarted here: an observer graph that wants a read to
+    // restart one declares `reset_on` matching `planner-surfaced`, over the
+    // journal its run follows (`docs/contract-divergences.md` entry 155).
 
     // The surface is delivered whatever the profile said. A profile shapes the
     // **event view** and nothing else: which surfaces exist, and the unread

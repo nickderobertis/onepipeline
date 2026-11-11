@@ -1,10 +1,10 @@
-//! The observer graph follows its run's own journal, and the engine's built-in
-//! clock reset is deprecated beside it.
+//! The observer graph follows its run's own journal, and that is the only way a
+//! planner's reading restarts one of its clocks.
 //!
 //! A graph's clock restarts on the records `reset_on` names with no signal from
 //! the engine, along all three observer launch paths and across a restart and an
-//! adoption; `resettable`, the bare per-member reset, keeps working and reaches
-//! only the schedule that declared it.
+//! adoption; the engine leaves no signal for any member and says nothing about a
+//! reset at `start` or at an adoption.
 
 // llmlint: ignore-file[e2e_not_mocked] the graph is the real `oneagentgraph`, linked, retained or at its released binary; only the paid harness below onejudge is doubled, at its subprocess boundary, as `harness.rs` sets out.
 
@@ -19,8 +19,34 @@ use crate::harness::{agent, oneagentgraph_binary, plan_of, World};
 /// The scheduled note every graph below declares.
 const NOTE: &str = "progress-report";
 
-/// The deprecation `start` and `adopt` print for a graph declaring `resettable`.
-const DEPRECATED: &str = "automatic clock reset on `next` is deprecated";
+/// The lines of `stderr` that call something about a reset deprecated — the
+/// warning an engine with a built-in reset printed at `start` and at adoption.
+fn reset_deprecations(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.contains("deprecated") && line.contains("reset"))
+        .collect()
+}
+
+/// The signals left in one graph run's signal directory for a member's clock —
+/// what an engine restarting clocks itself writes there, and nothing following
+/// the journal ever does.
+fn reset_signals(world: &World, graph_run: &str) -> Vec<String> {
+    std::fs::read_dir(
+        world
+            .graph_state()
+            .join(graph_run)
+            .join(oneagentgraph::run::SIGNAL_DIR),
+    )
+    .map(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".reset"))
+            .collect()
+    })
+    .unwrap_or_default()
+}
 
 /// An observer graph of one held two-party member declaring `clocks`.
 fn write_observer(world: &World, clocks: &str) -> String {
@@ -174,8 +200,8 @@ fn a_detached_launch_resets_its_note_and_so_do_a_restart_and_an_adoption() {
     let started = world.run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", &graph]);
     started.exited(0);
     assert!(
-        !started.stderr.contains(DEPRECATED),
-        "a graph declaring no `resettable` was warned: {}",
+        reset_deprecations(&started.stderr).is_empty(),
+        "`start` warned about a reset: {}",
         started.stderr
     );
     let command = |args: &[&str]| world.agentgraph_cmd(args);
@@ -205,21 +231,52 @@ fn a_detached_launch_resets_its_note_and_so_do_a_restart_and_an_adoption() {
     wrapping_up(&world, "detached");
     let adopted = world.run_on_agentgraph(&["adopt", "detached", "--detach"]);
     adopted.exited(0);
-    assert!(!adopted.stderr.contains(DEPRECATED), "{}", adopted.stderr);
+    assert!(
+        reset_deprecations(&adopted.stderr).is_empty(),
+        "an adoption warned about a reset: {}",
+        adopted.stderr
+    );
     let adopting = watching(&world, "detached", &restarted);
     next_resets_the_note(&world, "detached", &adopting, &command, "three");
     wrapping_up(&world, "detached");
 }
 
+/// The released sibling behind a launcher that appends each argv it is run with
+/// to `log`, one line per invocation, before running it unchanged.
+fn sibling_recording_its_invocations(world: &World, log: &std::path::Path) -> String {
+    let launcher = world.root.join("oneagentgraph-recorded");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh
+printf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            oneagentgraph_binary().display()
+        ),
+    )
+    .expect("the launcher is written");
+    let mut permissions = std::fs::metadata(&launcher)
+        .expect("the launcher exists")
+        .permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    std::fs::set_permissions(&launcher, permissions).expect("the launcher is executable");
+    launcher.display().to_string()
+}
+
+/// Composing the released executable, a reading restarts the note through the
+/// journal the graph run follows, and the engine never runs the sibling for
+/// anything but that run: no `reset-timer`, and no signal file in the run.
 #[test]
 fn a_launch_composing_the_released_sibling_follows_through_its_run_flag() {
     let world = World::new("follow-binary");
     world.write_graphs();
     let path = held_plan(&world, "binary");
     let graph = write_observer(&world, &resetting_note());
+    let invocations = world.root.join("sibling-invocations.log");
+    let sibling = sibling_recording_its_invocations(&world, &invocations);
     let command = |args: &[&str]| {
         let mut command = world.agentgraph_cmd(args);
-        command.env("ONEPIPELINE_ONEAGENTGRAPH_BIN", oneagentgraph_binary());
+        command.env("ONEPIPELINE_ONEAGENTGRAPH_BIN", &sibling);
         command
     };
     world
@@ -230,6 +287,25 @@ fn a_launch_composing_the_released_sibling_follows_through_its_run_flag() {
         .exited(0);
     let run = watching(&world, "binary", "");
     next_resets_the_note(&world, "binary", &run, &command, "one");
+    // llmlint: ignore-block[tests_mirror_real_usage] which verbs the engine ran the
+    // sibling's executable with is on no product surface — `next` hands the surface
+    // over either way — so the launcher's own record of its argv, and the sibling's
+    // signal directory, are where a reset the engine sent would show.
+    let ran = std::fs::read_to_string(&invocations).expect("the sibling was run");
+    assert!(
+        ran.lines().any(|line| line.starts_with("run ")),
+        "the launcher recorded no `run`, so it is not what the engine composed: {ran}"
+    );
+    assert!(
+        !ran.lines().any(|line| line.starts_with("reset-timer")),
+        "the engine ran `reset-timer`:\n{ran}"
+    );
+    assert_eq!(
+        reset_signals(&world, &run),
+        Vec::<String>::new(),
+        "the engine left a reset signal in the graph run"
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.run_on(command(&["stop", "binary"]), "stop").exited(0);
 }
 
@@ -364,22 +440,26 @@ fn a_planner_reading_holds_the_next_report_a_whole_interval_away() {
         .exited(0);
 }
 
-/// The built-in reset reaches the schedule that declared `resettable` and
-/// nothing else, and `start` and `adopt` say it is on its way out.
+/// A reading restarts a **schedule** that declares `reset_on` matching
+/// `planner-surfaced`, through the journal alone: the engine leaves no reset
+/// signal in the graph run, a note whose own `reset_on` matches nothing is not
+/// touched, and neither `start` nor either form of adoption says anything about
+/// a reset.
 ///
 /// The note's clock fires once, well after the reading: a firing beside an
 /// untaken copy would withdraw that copy as `superseded`, which is what this
 /// journey says the reading must not cause.
 #[test]
-fn the_built_in_reset_restarts_only_the_resettable_schedule_and_warns() {
-    let world = World::new("deprecated-reset");
+fn a_reading_restarts_a_schedule_through_the_journal_and_the_engine_signals_nothing() {
+    let world = World::new("journal-reset");
     world.write_graphs();
-    let path = held_plan(&world, "deprecated");
+    let path = held_plan(&world, "journalled");
     let graph = write_observer(
         &world,
         &format!(
             "    background: false\n    \
-             schedule: {{every: 3600, start_after: 3600, resettable: true}}\n    \
+             schedule: {{every: 3600, start_after: 3600, reset_on: {{include: [{{source: \
+             pipeline, kind: planner-surfaced}}]}}}}\n    \
              scheduled_notes:\n      - {{id: {NOTE}, every: 3600, start_after: 8, addressee: \
              supervisor, text: Report., reset_on: {{include: [{{source: pipeline, kind: \
              nothing-journals-this}}]}}}}\n"
@@ -387,35 +467,37 @@ fn the_built_in_reset_restarts_only_the_resettable_schedule_and_warns() {
     );
     let started = world.run_on_agentgraph(&["start", &path, "--detach", "--dag-graph", &graph]);
     started.exited(0);
-    assert_eq!(
-        started.stderr.matches(DEPRECATED).count(),
-        1,
-        "{}",
+    assert!(
+        reset_deprecations(&started.stderr).is_empty(),
+        "`start` warned about a reset: {}",
         started.stderr
     );
-    assert!(started.stderr.contains("reset_on"), "{}", started.stderr);
 
-    let run = watching(&world, "deprecated", "");
+    let run = watching(&world, "journalled", "");
     world
         .run_on_agentgraph(&[
             "surface",
-            "deprecated",
+            "journalled",
             "--kind",
             "check-in",
             "--message",
             "m",
         ])
         .exited(0);
-    world.run_on_agentgraph(&["next", "deprecated"]).exited(0);
-    world.until("the resettable schedule to restart", |world| {
-        world.graph_journal(&run).iter().any(|event| {
-            event["kind"] == "cron-reset" && event["payload"]["scheduled_note"].is_null()
-        })
+    world
+        .run_on_agentgraph(&["next", "journalled"])
+        .exited(0)
+        .out_has("\"m\"");
+    let schedule_reset = |event: &Value| {
+        event["kind"] == "cron-reset" && event["payload"]["scheduled_note"].is_null()
+    };
+    world.until("the schedule to restart on the reading", |world| {
+        world.graph_journal(&run).iter().any(schedule_reset)
     });
     let reset_at = |journal: &[Value]| {
         journal
             .iter()
-            .position(|event| event["kind"] == "cron-reset")
+            .position(schedule_reset)
             .expect("the schedule restarted")
     };
     world.until("the note's clock to go on to its firing", |world| {
@@ -425,6 +507,20 @@ fn the_built_in_reset_restarts_only_the_resettable_schedule_and_warns() {
         })
     });
     let journal = world.graph_journal(&run);
+    let resets: Vec<&Value> = journal
+        .iter()
+        .filter(|event| schedule_reset(event))
+        .collect();
+    assert_eq!(
+        resets.len(),
+        1,
+        "one reading restarted the schedule {resets:?}"
+    );
+    assert_eq!(
+        resets[0]["payload"]["cause"]["kind"], "planner-surfaced",
+        "the schedule restarted for another cause: {resets:?}"
+    );
+    assert_eq!(resets[0]["payload"]["cause"]["source"], "pipeline");
     let touched: Vec<&Value> = journal
         .iter()
         .filter(|event| {
@@ -436,34 +532,44 @@ fn the_built_in_reset_restarts_only_the_resettable_schedule_and_warns() {
         .collect();
     assert!(
         touched.is_empty(),
-        "the bare reset reached the note: {touched:?}"
+        "the reading reached a note that does not reset on it: {touched:?}"
+    );
+    // llmlint: ignore[tests_mirror_real_usage] a reset signal is the sibling's own file under the graph run's directory and appears on no product surface; its absence is the claim that the engine sent none.
+    assert_eq!(
+        reset_signals(&world, &run),
+        Vec::<String>::new(),
+        "the engine left a reset signal in the graph run"
     );
 
-    wrapping_up(&world, "deprecated");
-    let adopted = world.run_on_agentgraph(&["adopt", "deprecated", "--detach"]);
+    wrapping_up(&world, "journalled");
+    let adopted = world.run_on_agentgraph(&["adopt", "journalled", "--detach"]);
     adopted.exited(0);
-    assert_eq!(
-        adopted.stderr.matches(DEPRECATED).count(),
-        1,
-        "{}",
+    assert!(
+        reset_deprecations(&adopted.stderr).is_empty(),
+        "a detached adoption warned about a reset: {}",
         adopted.stderr
     );
-    wrapping_up(&world, "deprecated");
+    let adopting = watching(&world, "journalled", &run);
+    wrapping_up(&world, "journalled");
 
-    // Attached, the adopter is a process of this test's own, with its warning on
-    // a file because it stays to drive.
+    // Attached, the adopter is a process of this test's own, with its stderr on
+    // a file because it stays to drive; it has said what it will say at launch
+    // once its graph run is up.
     let log = world.root.join("attached-adopt.stderr");
     let mut attached = world
-        .agentgraph_cmd(&["adopt", "deprecated"])
+        .agentgraph_cmd(&["adopt", "journalled"])
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&log).expect("a log for the adoption"))
         .spawn()
         .expect("the attached adoption starts");
-    world.until("the attached adoption to warn", |_| {
-        std::fs::read_to_string(&log).is_ok_and(|said| said.matches(DEPRECATED).count() == 1)
-    });
+    watching(&world, "journalled", &adopting);
+    let said = std::fs::read_to_string(&log).expect("the adoption's stderr");
     world.release("observer.go");
     world.release("turn.go");
     attached.kill().expect("the attached adoption is ended");
     attached.wait().expect("the attached adoption is reaped");
+    assert!(
+        reset_deprecations(&said).is_empty(),
+        "an attached adoption warned about a reset: {said}"
+    );
 }

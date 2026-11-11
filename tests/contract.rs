@@ -6232,17 +6232,6 @@ fn the_contract_declares_an_open_surface_kind_vocabulary() {
     assert_eq!(host_kind.as_str(), "host-defined");
     assert!(CONTRACT.contains("--kind KIND"));
     assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
-    assert!(
-        CONTRACT.contains(
-            "restarts the check-in clock of **every member the run's recorded observer graph \
-             declares `resettable` in its `schedule`**"
-        ),
-        "consuming a surface restarts the resettable clocks"
-    );
-    assert!(
-        !CONTRACT.contains("reset-timer RUN check-in"),
-        "the contract names a member of one host's observer graph"
-    );
     // The one kind the engine raises of its own, stated with its source and its
     // message.
     assert!(CONTRACT.contains("`edit-applied`, queued non-blocking"));
@@ -7483,12 +7472,15 @@ fn a_command_outside_the_surface_is_refused() {
 }
 
 #[test]
-fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
-    assert!(CONTRACT.contains(
-        "the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a \
-         resettable-cron `check-in` member; a host copies it or brings its own, and the \
-         engine names no member of it"
-    ));
+fn the_dag_scope_graph_is_a_monitor_plus_a_check_in() {
+    // The contract's word for the `check-in` member's clock is not held here: the
+    // shipped graph restarts it through `reset_on`, because the linked
+    // `oneagentgraph` has no other reset (`docs/contract-divergences.md` entry
+    // 155). The rest of the sentence holds.
+    assert!(CONTRACT
+        .contains("the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a"));
+    assert!(CONTRACT
+        .contains("a host copies it or brings its own, and the engine names no member of it"));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -7523,9 +7515,21 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
         panic!("the pacemaker is a single-sided member");
     };
     let schedule = check_in.schedule.clone().expect("it is a cron member");
+    let reset_on = serde_json::to_value(
+        schedule
+            .reset_on
+            .clone()
+            .expect("a planner's reading restarts the check-in"),
+    )
+    .expect("the filter serialises");
     assert!(
-        schedule.resettable,
-        "the contract makes the check-in resettable"
+        reset_on["include"]
+            .as_array()
+            .is_some_and(|matchers| matchers
+                .iter()
+                .any(|matcher| matcher["source"] == "pipeline"
+                    && matcher["kind"] == "planner-surfaced")),
+        "the check-in does not restart on a planner's reading: {reset_on}"
     );
     assert_eq!(
         schedule.every, 1_800,

@@ -13266,6 +13266,8 @@ graph declaring none prints nothing.
 `tests/e2e/observer_follow.rs` holds both halves over all three launch paths, an observer
 restart and an adoption.
 
+Entry 155 removes the reset this entry deprecated, and the warning with it.
+
 ## 151. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, whose driver invocation still
@@ -13387,3 +13389,33 @@ paragraph changes. Between 0.10.0 and 0.11.1 the bus's `envelope.rs`, `filter.rs
 
 **Ruling:** the planner ruled this re-decision (correlation
 `c-baf0ff4e8212bf6e643144331e77da02`).
+
+## 155. The engine's built-in clock reset on `next` is removed, and the shipped `check-in` declares `reset_on` — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, which is committed verbatim and
+still says consuming a surface restarts the check-in clock of every member the recorded
+observer graph declares `resettable`, and calls the shipped `check-in` member
+resettable-cron.** Entry 150 deprecated that reset. `oneagentgraph` 0.13.0 removes
+`config::Schedule::resettable`, `run::Signal::Reset` and the `reset-timer` verb, and this
+build links it, so the reset is gone rather than deprecated:
+
+- **`next` restarts no clock and signals nothing to the observer graph.** It journals
+  `planner-surfaced` as before, and a graph whose clock a reading should restart declares
+  `reset_on` matching that record over the journal it follows — the only reset mechanism
+  there is. A run with no observer graph is unaffected.
+- **`start` and adoption print no deprecation line**, since there is nothing left to
+  deprecate.
+- **`graphs/dag-scope.yaml` moves from schema 1 to 11**, the first in which a schedule may
+  declare `reset_on`, and its `check-in` schedule declares
+  `reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}` and `start_after: 0`,
+  so it restarts on the same reading it used to and still takes its first turn at launch.
+  A `resettable` key is refused by the linked library's schema, so a host graph that still
+  declares it is refused at launch in that library's own words.
+- The library's public surface re-exports `oneagentgraph` types (`note`,
+  `config::ConfigRef`, `event::*`) across this pre-1.0 minor, so the release is a breaking
+  one.
+
+`tests/e2e/observer_follow.rs` holds the journal reset through the real binary over all
+three launch paths, with no `reset-timer` run and no reset signal left in the graph run, and
+no deprecation line at `start` or either form of adoption; `tests/e2e/shipped.rs` and
+`tests/contract.rs` hold the shipped graph's filter.

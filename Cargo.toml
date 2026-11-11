@@ -872,11 +872,7 @@ resolver = "2"
 # `tests/e2e/observer_follow.rs` holds it. It also keeps 0.9.3's replacing a
 # graph run's record whole, written to a sibling and renamed into place, so a
 # reader never opens it empty or half-written, and on Windows a read never meets
-# the record in the middle of that replace. Below 0.9.3 the real sibling's
-# `reset-timer` could read a run's state mid-write and refuse with `EOF while
-# parsing a value`. `tests/e2e/dispatch.rs`'s
-# `consuming_a_surface_restarts_the_real_pacemakers_clock` drives that read
-# through the sibling binary this lock builds. It requires nothing this lock did
+# the record in the middle of that replace. It requires nothing this lock did
 # not already resolve.
 #
 # `oneagentgraph` 0.11.4 is the floor because it keeps a reset clock's next
@@ -895,6 +891,16 @@ resolver = "2"
 # `onemessagebus ^0.11.1` and `onejudge ^0.23.1`); `^0.11.4` admits no 0.12.x, so
 # without the move the lock carries the bus twice. Nothing here reads anything new
 # from it.
+#
+# `oneagentgraph` 0.13.0 is the floor because it removes `resettable`,
+# `run::Signal::Reset` and the `reset-timer` verb (oneagentgraph #280), and this
+# engine calls none of them: `next` restarts no clock, and an observer graph
+# restarts one only through `reset_on` over the journal it follows. A
+# requirement, because `^0.12` admits no 0.13.x, and this crate re-exports the
+# sibling's types (`note`, `config::ConfigRef`, `event::*`), so the move is a
+# breaking one for a consumer. `tests/e2e/observer_follow.rs` holds it over all
+# three launch paths, and `graphs/dag-scope.yaml` declares the `reset_on` its
+# `check-in` used to get from the engine.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -916,7 +922,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.12.0"
+oneagentgraph = "0.13.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
