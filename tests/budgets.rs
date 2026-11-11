@@ -581,27 +581,28 @@ fn host_view_verdict(name: &str, reads: [f64; 5]) -> (Verdict, Option<f64>) {
     (result.verdict, result.actual)
 }
 
-/// The budget judges the view, not the runner's load on one read: test-linux run 43002330270's
-/// five reads, one held up by the job's other targets at load 8.4 on 4 cores, are within it,
-/// while a binary whose reads are genuinely over 100 ms — every read, or most of them with the
-/// rest fast — is over it.
+/// How the budget aggregates five reads, over records whose reads are written here rather
+/// than measured: test-linux run 43002330270's five reads, one held up by the job's other
+/// targets at load 8.4 on 4 cores, are within it, while five reads over 100 ms, or three over
+/// with two fast, are over it. That a measured read of a genuinely slower binary fails it is
+/// `tests/e2e/host_view.rs`'s `the_budget_fails_a_measured_host_read_slower_than_its_threshold`.
 #[cfg(unix)]
 #[test]
-fn the_host_view_budget_fails_a_slow_view_and_not_one_slowed_read() {
+fn the_host_view_budget_aggregates_reads_by_their_median_not_their_slowest() {
     assert_eq!(
         host_view_verdict("host-view-loaded", [120.8, 77.5, 70.4, 75.4, 85.1]),
         (Verdict::Within, Some(77.5)),
         "one read the runner's load delayed failed the budget"
     );
     assert_eq!(
-        host_view_verdict("host-view-slow", [101.2, 104.9, 102.3, 140.0, 103.1]),
+        host_view_verdict("host-view-all-over", [101.2, 104.9, 102.3, 140.0, 103.1]),
         (Verdict::Over, Some(103.1)),
-        "a view slower than its threshold on every read passed"
+        "five reads over the threshold passed"
     );
     assert_eq!(
-        host_view_verdict("host-view-mostly-slow", [21.0, 104.0, 22.0, 108.0, 101.0]),
+        host_view_verdict("host-view-most-over", [21.0, 104.0, 22.0, 108.0, 101.0]),
         (Verdict::Over, Some(101.0)),
-        "a view slower than its threshold on most reads passed"
+        "three of five reads over the threshold passed"
     );
 }
 

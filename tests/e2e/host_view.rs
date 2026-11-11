@@ -28,7 +28,8 @@
 // generated 100-run root's ~260 MB of journals by this suite's debug build — one by the
 // journey over the root, two by the budget measurement's own journey (168 s run alone at load1
 // about 17), which runs `scripts/host-view-measure.mjs` whole, once to its record and once to
-// a refused trace. They exercise
+// a refused trace. The slowed-binary journey adds a fourth, measuring a stripped stand-in
+// that sleeps 150 ms before running this build (27 s run alone at load1 about 6). They exercise
 // `hostview`, `checkpoint`, `summary`, `views`, `sys` and `freespace` through the compiled
 // binary, and read the recorded run under `tests/recorded/` through the generator, so any
 // change under `src/` can move what they hold; the narrowest edge they can honestly sit behind
@@ -2562,4 +2563,162 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
         !missing_record.exists(),
         "a measurement over a template it could not copy recorded it"
     );
+}
+
+/// The `host-view-time` budget fails a host read that is genuinely over its threshold,
+/// measured rather than written: `scripts/host-view-measure.mjs` times a stripped release-
+/// shaped binary whose every invocation first sleeps [`SLOWED_BY_MS`] and then executes a
+/// stripped copy of this suite's build, so each read is a real `host` read with a bounded,
+/// CPU-free delay added. `onebudgetspec check`, the checker `just host-view-budget` runs, is
+/// then run over that record with `budgets.yaml`'s own `host-view-time` entry and the
+/// committed reporter, and refuses it: the median read is over the unchanged 100 ms.
+#[test]
+fn the_budget_fails_a_measured_host_read_slower_than_its_threshold() {
+    /// What every invocation of the slowed binary waits before it runs the real one.
+    const SLOWED_BY_MS: u64 = 150;
+    let world = World::new("host-view-slowed");
+    let _fixture = Fixture::generate(&world);
+    let cache = fixture_cache(&world);
+    let strip = |binary: &Path| {
+        let stripped = Command::new("strip")
+            .arg(binary)
+            .status()
+            .expect("binutils' strip runs");
+        assert!(stripped.success(), "strip refused {}", binary.display());
+    };
+    let built = world.root.join("built");
+    std::fs::create_dir_all(&built).expect("a directory");
+    let real = built.join("onepipeline-real");
+    std::fs::copy(crate::harness::binary(), &real).expect("a copy of the binary");
+    strip(&real);
+    // The slowed binary: a real ELF executable, built and stripped as the release profile
+    // leaves one, so the measurement's strip guard holds it as it holds the release build.
+    let source = built.join("slowed.rs");
+    std::fs::write(
+        &source,
+        format!(
+            "use std::os::unix::process::CommandExt;\n\
+             fn main() {{\n\
+             std::thread::sleep(std::time::Duration::from_millis({SLOWED_BY_MS}));\n\
+             let error = std::process::Command::new({real:?}).args(std::env::args_os().skip(1)).exec();\n\
+             eprintln!(\"the slowed binary could not run the real one: {{error}}\");\n\
+             std::process::exit(127);\n\
+             }}\n"
+        ),
+    )
+    .expect("the slowed binary's source");
+    let slowed = built.join("onepipeline");
+    let compiled = Command::new("rustc")
+        .args(["--edition", "2021", "-O", "-o"])
+        .arg(&slowed)
+        .arg(&source)
+        .output()
+        .expect("rustc runs");
+    assert!(
+        compiled.status.success(),
+        "rustc refused the slowed binary: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    strip(&slowed);
+
+    let record = world.root.join("host-view.json");
+    let measured = Command::new("node")
+        .arg(crate::harness::repo_file("scripts/host-view-measure.mjs"))
+        .arg(&slowed)
+        .arg(&record)
+        .env(
+            "ONEPIPELINE_HOST_VIEW_BUILT_BY",
+            "tests/e2e/host_view.rs: this suite's build, slowed by a sleep before each run",
+        )
+        .env("ONEPIPELINE_TEST_HOST_FIXTURE", &cache)
+        .stdin(Stdio::null())
+        .output()
+        .expect("node runs the measurement");
+    assert!(
+        measured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&measured.stderr)
+    );
+    let held = read_json(&record);
+    assert_eq!(held["steady"]["strip_guard"], "stripped", "{held}");
+    let reads: Vec<f64> = held["steady"]["reads_ms"]
+        .as_array()
+        .expect("the steady reads")
+        .iter()
+        .map(|read| read.as_f64().expect("a read in milliseconds"))
+        .collect();
+    assert_eq!(reads.len(), 5, "{held}");
+    assert!(
+        reads.iter().all(|&read| read >= SLOWED_BY_MS as f64),
+        "a steady read was faster than the delay every run carries: {reads:?}"
+    );
+
+    // The checker as `just host-view-budget` runs it, from a directory holding the committed
+    // budgets file and reporter beside this checkout's locked packages, with the record where
+    // the budget's command reads it: the checkout's own record is never touched.
+    let checked = world.root.join("checked");
+    std::fs::create_dir_all(checked.join("scripts")).expect("a scripts directory");
+    std::fs::create_dir_all(checked.join("target/budget-records")).expect("a records directory");
+    std::fs::copy(
+        crate::harness::repo_file("budgets.yaml"),
+        checked.join("budgets.yaml"),
+    )
+    .expect("the budgets file");
+    std::fs::copy(
+        crate::harness::repo_file("scripts/host-view-budget.mjs"),
+        checked.join("scripts/host-view-budget.mjs"),
+    )
+    .expect("the reporter");
+    std::os::unix::fs::symlink(
+        crate::harness::repo_file("node_modules"),
+        checked.join("node_modules"),
+    )
+    .expect("the locked packages are linked");
+    std::fs::copy(
+        &record,
+        checked.join("target/budget-records/host-view.json"),
+    )
+    .expect("the record");
+    let check = Command::new(checked.join("node_modules/.bin/onebudgetspec"))
+        .args([
+            "check",
+            "budgets.yaml",
+            "--id",
+            "host-view-time",
+            "--exclude-label",
+            "release-tail",
+            "--exclude-label",
+            "host-variable",
+        ])
+        .current_dir(&checked)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the checker runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert_eq!(check.status.code(), Some(1), "{said}");
+    let verdict = said
+        .lines()
+        .find(|line| line.starts_with("budget host-view-time: actual "))
+        .unwrap_or_else(|| panic!("the checker gave host-view-time no verdict: {said}"));
+    let actual: f64 = verdict
+        .trim_start_matches("budget host-view-time: actual ")
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("no value in {verdict}"));
+    assert!(
+        verdict.contains("budget 100 milliseconds") && verdict.contains("— over"),
+        "{verdict}"
+    );
+    let mut sorted = reads.clone();
+    sorted.sort_by(f64::total_cmp);
+    assert!(
+        (actual - sorted[2]).abs() < 1e-3,
+        "the value {actual} is not the median of {reads:?}"
+    );
+    eprintln!("slowed reads {reads:?} ms; {verdict}");
 }
