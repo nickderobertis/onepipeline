@@ -1096,14 +1096,18 @@ pub(crate) struct ChannelState {
     paths: crate::ledger::RunPaths,
     /// The configuration the run's launch named, checked at the launch.
     config: Option<Arc<Config>>,
+    /// The queues that launch named `validators` on, which the linked bus
+    /// removed: an offer to one of them is refused rather than judged without
+    /// them.
+    removed_validators: Arc<std::collections::BTreeSet<String>>,
     transport: Arc<OnceLock<std::result::Result<Arc<dyn Transport>, String>>>,
     surfaces: Arc<OnceLock<std::result::Result<onemessagebus::Queue<Surface>, String>>>,
     /// The bus the channel's records are appended through: the run's
-    /// configuration with its hooks and validators left out, because what is
+    /// configuration with its hooks left out, because what is
     /// appended has already been decided.
     bus: Arc<OnceLock<std::result::Result<Bus, String>>>,
-    /// The bus an offer is decided by: the run's configuration, hooks, validators
-    /// and all. Resolved only for a run whose configuration declares either.
+    /// The bus an offer is decided by: the run's configuration, hooks and all.
+    /// Resolved only for a run whose configuration declares any.
     judging: Arc<OnceLock<std::result::Result<Bus, String>>>,
     /// What the last read of the surfaces found, keyed on the transport's change
     /// token for that queue: a reader asking again of a channel nothing has
@@ -1548,6 +1552,12 @@ fn declared(text: &str) -> QueueSpec {
         .unwrap_or_else(|| unreachable!("the planner-channel layout declares {text}"))
 }
 
+/// Why an offer to a run launched under `validators` is refused.
+pub(crate) const REMOVED_VALIDATORS: &str = "this run was launched under a bus configuration \
+     declaring `validators`, which onemessagebus 0.11.0 removed, so this build cannot judge \
+     what is offered to its channel as the run was launched to; relaunch it under a \
+     configuration declaring them under `hooks:`";
+
 /// A queue's refusal or failure, in the words this channel has always used for
 /// it where it had words of its own.
 fn queue_failure(failure: QueueError) -> crate::Error {
@@ -1557,10 +1567,6 @@ fn queue_failure(failure: QueueError) -> crate::Error {
             "surface: the channel has no id left to allocate; the last one, {last}, has already \
              been queued"
         )),
-        // A validator's own words, unaltered.
-        QueueError::Refused { reason, .. } | QueueError::Unjudged { reason, .. } => {
-            crate::Error::Refused(reason)
-        }
         other => crate::Error::Refused(other.to_string()),
     }
 }
@@ -1620,6 +1626,7 @@ impl ChannelState {
         Self {
             paths: paths.clone(),
             config: None,
+            removed_validators: Arc::default(),
             transport: Arc::default(),
             surfaces: Arc::default(),
             bus: Arc::default(),
@@ -1631,19 +1638,13 @@ impl ChannelState {
     /// The channel of one run, under the bus configuration its launch named.
     ///
     /// Every writer that authors, judges or waits on the channel opens it this
-    /// way, so the grants, validators and reply window a run enforces are the
+    /// way, so the grants, hooks and reply window a run enforces are the
     /// ones it was launched under wherever it is written from.
     pub(crate) fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
     ) -> Self {
-        Self {
-            config: launch
-                .bus_config
-                .as_ref()
-                .map(|recorded| Arc::new(recorded.config().clone())),
-            ..Self::new(paths)
-        }
+        Self::configured(paths, launch.bus_config.as_ref())
     }
 
     /// The channel kept in `paths`' channel directory under `config` — or the
@@ -1651,10 +1652,15 @@ impl ChannelState {
     /// carries the configuration of: a flow's own.
     pub(crate) fn configured(
         paths: &crate::ledger::RunPaths,
-        config: Option<&onemessagebus::Config>,
+        config: Option<&crate::ledger::RecordedBusConfig>,
     ) -> Self {
         Self {
-            config: config.map(|config| Arc::new(config.clone())),
+            config: config.map(|recorded| Arc::new(recorded.config().clone())),
+            removed_validators: Arc::new(
+                config
+                    .map(|recorded| recorded.removed_validators().clone())
+                    .unwrap_or_default(),
+            ),
             ..Self::new(paths)
         }
     }
@@ -1723,15 +1729,30 @@ impl ChannelState {
             .map_err(crate::Error::Refused)
     }
 
-    /// Whether the run's configuration declares anything that decides an offer.
+    /// Whether the run's configuration declares anything that decides an offer —
+    /// the `validators` the linked bus removed among them, which decide every
+    /// offer to their queues by refusing it.
     fn judges(&self) -> bool {
-        self.config
-            .as_ref()
-            .is_some_and(|config| !config.hooks.is_empty() || !config.validators.is_empty())
+        !self.removed_validators.is_empty()
+            || self
+                .config
+                .as_ref()
+                .is_some_and(|config| !config.hooks.is_empty())
     }
 
-    /// The bus an offer to this channel is decided by.
-    fn judging_bus(&self) -> crate::Result<Bus> {
+    /// The bus an offer to `queues` — the one it is offered to and any it is
+    /// routed on to — is decided by.
+    ///
+    /// # Errors
+    ///
+    /// A run launched with `validators` on one of `queues`, which nothing this
+    /// build links can run: the offer is refused rather than appended unjudged.
+    fn judging_bus(&self, queues: &[&str]) -> crate::Result<Bus> {
+        if queues.iter().any(|queue| self.removed_validators.contains(*queue))
+            || self.removed_validators.contains(crate::ledger::EVERY_QUEUE)
+        {
+            return Err(crate::Error::Refused(REMOVED_VALIDATORS.to_owned()));
+        }
         if !self.judges() {
             return self.bus();
         }
@@ -1743,7 +1764,7 @@ impl ChannelState {
 
     /// The run's configuration — or the profile as declared, for a run whose
     /// launch named none — resolved over this run's channel directory, with its
-    /// hooks and validators or without them.
+    /// hooks or without them.
     fn resolved(&self, judging: bool) -> std::result::Result<Bus, String> {
         let mut config = match &self.config {
             Some(config) => (**config).clone(),
@@ -1753,7 +1774,6 @@ impl ChannelState {
         config.profile = Some(PLANNER_CHANNEL.to_owned());
         if !judging {
             config.hooks.clear();
-            config.validators.clear();
         }
         config
             .resolve(&planner_channel(), &TransportKinds::builtin())
@@ -1897,7 +1917,7 @@ impl ChannelState {
         let offered = serde_json::to_value(&surface)
             .map_err(|failure| crate::Error::Invalid(format!("surface: {failure}")))?;
         let hooked = self
-            .judging_bus()?
+            .judging_bus(&[SURFACES])?
             .hooked(&surfaces, RawRecord::from_value(&offered))
             .map_err(bus_failure)?;
         match &hooked.outcome {
@@ -2042,7 +2062,7 @@ impl ChannelState {
         self.answer_offered(&offered, named)
     }
 
-    /// Run `reply` through the channel's hooks and validators once, appending
+    /// Run `reply` through the channel's hooks once, appending
     /// nothing: what they made of it, for the caller to apply. A hook's refusal
     /// or unjudged answer is refused here, in its own words.
     pub(crate) fn offer_reply(&self, reply: &Reply) -> crate::Result<OfferedReply> {
@@ -2051,8 +2071,9 @@ impl ChannelState {
         }
         let offered = serde_json::to_value(reply)
             .map_err(|failure| crate::Error::Invalid(format!("reply: {failure}")))?;
+        // A reply's commands are routed on to `commands`, judged there too.
         let hooked = self
-            .judging_bus()?
+            .judging_bus(&[REPLIES, COMMANDS])?
             .hooked(&queue_name(REPLIES), RawRecord::from_value(&offered))
             .map_err(bus_failure)?;
         match &hooked.outcome {
@@ -2369,7 +2390,7 @@ impl ChannelState {
             asker: question.asker.clone(),
             about,
         };
-        self.judging_bus()?
+        self.judging_bus(&[SURFACES])?
             .ask_offered::<Surface, Value>(&queue_name(SURFACES), question, options)
             .map_err(bus_failure)
     }

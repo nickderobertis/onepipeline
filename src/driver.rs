@@ -247,6 +247,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             if let Some(reason) = judged.reason() {
                 eprintln!("{reason}");
             }
+            // A pass prints the document back unchanged: under the bus's hook
+            // protocol, which is the only one `onemessagebus` 0.11 names a command
+            // under, that is a keep, where printing nothing would drop it.
+            if judged == crate::boundary::Judged::Pass {
+                print!("{stdin}");
+            }
             Ok(judged.exit_code())
         }
         Verb::Template(command) => {

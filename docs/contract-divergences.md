@@ -13341,3 +13341,35 @@ pinned at the previous bundle has no document for.
   "bundle_versions": {"events": "2.1.0"}
 }
 ```
+
+## 153. `boundary validate-envelope` is a command hook, and `validators` are gone with onemessagebus 0.11 — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, which still calls
+`onepipeline boundary validate-envelope --run RUN` "a `command` validator under the
+message bus's own protocol" and names the core's "command validators that judge what is
+offered to a queue".** `onemessagebus` 0.11.0, which `onevcs` 0.65 requires, removed
+validators: a configuration declaring `validators` is refused where it is loaded, and a
+command that judges what is offered to a queue is named under `hooks:`, where exit 0 with
+nothing on stdout is a **drop**. This build decides, on the manager's rulings for node
+`engine-unpublished-reads`:
+
+- **`validate-envelope` prints the document it was handed back on stdout, unchanged, when
+  it passes** — a keep under the hook protocol. Its exit codes (`0` pass, `1` refuse with
+  a neutral reason on stderr, `2` undecided), its stderr and `--fingerprint` are
+  unchanged. A bus configuration names it under `hooks:` with the same `command` and
+  `cache`; the bus reads a pass a validator cache recorded earlier as a keep.
+- **`start --bus-config` naming `validators` is refused before any run exists**, in the
+  bus's own words naming the removed key and `hooks:`. This build does not translate a
+  validator into a hook, because the two read a silent exit `0` oppositely.
+- **A launch record an older build wrote with `validators` is still read**, best-effort as
+  the contract reads a codec's missing fields: every view reads the run, `adopt` drives it,
+  and the record is written back byte for byte. What those validators judged no build
+  linking 0.11 can judge, so the run's channel **refuses an offer to a queue one of them
+  was `on`** — a reply also when one was on `commands`, which its edits are routed to —
+  naming the removal, and an entry naming no queue counts as on every queue. Offers to
+  any other queue proceed as before.
+
+`tests/e2e/bus_config.rs` holds the launch refusal and the older record's refusal,
+`tests/e2e/older_launch_record.rs` the views and `adopt` over the recorded one, and
+`tests/e2e/publication_boundary.rs` a pass printing its input back and the boundary judged
+as a hook.

@@ -5,7 +5,7 @@
 //! run's channel could not be kept under, and keeps the one it accepts in the
 //! launch record. What these journeys hold is that the configuration a launch
 //! accepts is the one the run enforces: the grants its `authors` block narrowed,
-//! the validators its `validators` block names, and the reply window its
+//! the judging hooks its `hooks` block names, and the reply window its
 //! `codecs.onejudge` block sets — each against the same plan launched without the
 //! file, so what is enforced is the configuration's doing and not the profile's.
 
@@ -226,6 +226,75 @@ fn a_bus_config_naming_another_profile_is_refused_before_a_run_exists() {
         "version: 1\ntransport: {kind: local}\nprofile: another-layout\n",
         &["profile", "`another-layout`"],
     );
+}
+
+/// `onemessagebus` 0.11.0 removed a configuration's `validators`, so a launch
+/// naming one is refused before a run exists, in the bus's own words naming the
+/// removed key and the `hooks:` that replace it, rather than run with nothing
+/// judging what its validators would have.
+#[test]
+fn a_bus_config_naming_the_removed_validators_is_refused_before_a_run_exists() {
+    let world = World::new("bus-config-validators");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    refused_before_a_run_exists(
+        &world,
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+        ),
+        &["validators", "removed in onemessagebus 0.11.0", "hooks:"],
+    );
+}
+
+/// A run an older build launched under `validators` — the bus configuration
+/// spliced into its launch record as that build wrote it — is still read by every
+/// view, but a reply offered to its channel is refused naming the removed key and
+/// queued nowhere, rather than appended with nothing judging it as the run was
+/// launched to; and the record keeps the configuration exactly as written.
+#[test]
+fn a_run_launched_under_the_removed_validators_is_read_and_refuses_what_it_cannot_judge() {
+    let world = World::new("bus-config-older-validators");
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        "version: 1\ntransport: {kind: local}\n",
+    );
+    let path = plan(&world, "olderjudged");
+    launched(&world, &path, "olderjudged", &["--bus-config", &file]);
+
+    let launch = world.run_file("olderjudged", "launch.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&launch).expect("the launch record"))
+            .expect("the launch record is JSON");
+    record["bus_config"]["validators"] = json!([
+        {"on": "replies", "kind": "command", "command": ["scripts/envelope-review.sh"]}
+    ]);
+    let written = serde_json::to_string_pretty(&record).expect("the record serializes");
+    // llmlint: ignore[tests_mirror_real_usage] the state under test is a record an *older* build wrote, under a bus key this build's bus removed, which no interface of this build can produce; everything after it is the user's own verbs, as `older_launch_record.rs` does for a recorded one.
+    std::fs::write(&launch, &written).expect("the older record is written");
+
+    world
+        .run(&["status", "olderjudged"])
+        .exited(0)
+        .out_has("slow: running");
+    world
+        .run_with_stdin(
+            &["reply", "olderjudged"],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(REFUSED)
+        .err_has("`validators`, which onemessagebus 0.11.0 removed");
+    assert_eq!(
+        channel_file(&world, "olderjudged", "replies.jsonl"),
+        "",
+        "a reply nothing could judge was queued"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&launch).expect("the record reads"),
+        written,
+        "reading the run rewrote its launch record"
+    );
+    world.release("slow.go");
 }
 
 /// A host may declare an author the built-in layout has never named.
@@ -569,8 +638,8 @@ fn a_validator_a_bus_config_names_refuses_a_reply_in_its_own_words_and_queues_it
         &world,
         "onemessagebus.yaml",
         &format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
+             - {{on: replies, command: [{validator:?}]}}\n"
         ),
     );
     let path = plan(&world, "busvalidated");
@@ -651,8 +720,8 @@ fn a_validator_on_the_commands_queue_judges_the_edits_a_reply_carries() {
         &world,
         "onemessagebus.yaml",
         &format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: commands, kind: command, command: [{validator:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
+             - {{on: commands, command: [{validator:?}]}}\n"
         ),
     );
     let path = plan(&world, "buscommands");

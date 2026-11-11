@@ -2000,7 +2000,7 @@ fn a_flows_reply_is_judged_under_its_own_bus_configuration() {
         &config,
         format!(
             "version: 1\ntransport: {{kind: local}}\nauthors:\n  sentinel: {{capabilities: \
-             [finding]}}\nvalidators:\n  - {{on: replies, kind: command, command: \
+             [finding]}}\nhooks:\n  - {{on: replies, command: \
              [{validator:?}]}}\n"
         ),
     )

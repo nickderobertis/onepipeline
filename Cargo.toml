@@ -890,6 +890,12 @@ resolver = "2"
 # ^0.23.0`, which `^0.22.4` admits no version of, so the two requirements move
 # as one.
 #
+# `oneagentgraph` 0.12.0 is taken because `onevcs` 0.65 requires `onemessagebus
+# ^0.11`, and 0.12.0 is the first `oneagentgraph` over that bus (it requires
+# `onemessagebus ^0.11.1` and `onejudge ^0.23.1`); `^0.11.4` admits no 0.12.x, so
+# without the move the lock carries the bus twice. Nothing here reads anything new
+# from it.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -910,7 +916,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.11.4"
+oneagentgraph = "0.12.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
@@ -924,7 +930,12 @@ oneagentgraph = "0.11.4"
 # rather than the whole host's. onevcs-testing 0.21.0 pins it exactly and carries
 # the host-shaped fixture (`recovery::build_host`, `age_host`) that
 # `tests/stop_verdict` times both reads over.
-onevcs = "0.64.0"
+# 0.65.1 is the floor because it assembles a stack's base
+# without racing its own fetch: below it `review_round`'s busy round failed four
+# CI tries in five on `cannot lock ref`. It requires `onemessagebus ^0.11`, which
+# moves the bus, `oneagentgraph` and `onejudge` with it; onevcs-testing 0.21.2
+# pins it exactly.
+onevcs = "0.65.1"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -951,7 +962,16 @@ onevcs = "0.64.0"
 # translation, as every sibling release linked beside it does.
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
-onemessagebus = "0.10.0"
+#
+# 0.11 is taken because `onevcs` 0.65 requires it; a **requirement**, because
+# `^0.10` admits no 0.11.x. 0.11.1 is what `oneagentgraph` 0.12.0 requires. 0.11.0
+# **removed `validators`**: a configuration naming them is refused where it is
+# loaded, so `start --bus-config` refuses one in the bus's words, and a command
+# that judged as a validator is named under `hooks:`, printing its input back to
+# pass — which `boundary validate-envelope` now does. A launch record an older
+# build wrote with `validators` is still read, and its channel refuses an offer to
+# a queue they were on (`src/ledger.rs`'s `RecordedBusConfig` says why).
+onemessagebus = "0.11.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -1076,10 +1096,12 @@ onemessagebus = "0.10.0"
 #
 # **0.23.0 is taken because `oneagentgraph` 0.11.4 requires it**, and `^0.22.4`
 # admits no 0.23.x, so without the move the lock carries onejudge twice. Nothing
-# here reads anything new from it. It stops at 0.23.0 rather than the newest
-# release because 0.23.1 requires `onemessagebus ^0.11`, which the bus pin and
-# `onevcs` admit no version of: taking it would resolve the bus twice.
-onejudge = "0.23.0"
+# here reads anything new from it. It stopped at 0.23.0 while the bus pin was
+# `^0.10`, because 0.23.1 requires `onemessagebus ^0.11`.
+#
+# **0.23.1 is taken because `oneagentgraph` 0.12.0 requires it**, beside the bus's
+# move to 0.11. Nothing here reads anything new from it.
+onejudge = "0.23.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1205,7 +1227,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.0"
+onevcs-testing = "0.21.2"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
