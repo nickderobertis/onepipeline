@@ -2052,6 +2052,13 @@ fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run 
     );
     if validated.code != 0 {
         names_no_node(world, run, &validated.stderr);
+    } else {
+        // A pass is a keep under the bus's hook protocol: the document back, unchanged.
+        assert_eq!(
+            validated.stdout,
+            document.to_string(),
+            "a pass did not print back the document it was handed"
+        );
     }
     validated
 }

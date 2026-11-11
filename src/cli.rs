@@ -308,9 +308,9 @@ pub enum BoundaryCommand {
     /// carries, written once.
     Guidance(BoundaryGuidanceArgs),
     /// Judge one message bus envelope, read from stdin, against a run's boundary: exit 0
-    /// to pass it, 1 to refuse it with a neutral reason on stderr, and 2 where the check
-    /// cannot decide, which a bus never sends. The `command` validator a bus
-    /// configuration names.
+    /// printing it back unchanged to pass it, 1 to refuse it with a neutral reason on
+    /// stderr, and 2 where the check cannot decide, which a bus never sends. The
+    /// command hook a bus configuration's `hooks` names.
     ValidateEnvelope(ValidateEnvelopeArgs),
 }
 

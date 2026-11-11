@@ -228,6 +228,21 @@ fn a_bus_config_naming_another_profile_is_refused_before_a_run_exists() {
     );
 }
 
+/// `onemessagebus` 0.11.0 removed a configuration's `validators`, so a launch
+/// naming one is refused before a run exists, in the bus's own words naming the
+/// removed key and the `hooks:` that replace it, rather than run with nothing
+/// judging what its validators would have.
+#[test]
+fn a_bus_config_naming_the_removed_validators_is_refused_before_a_run_exists() {
+    let world = World::new("bus-config-validators");
+    refused_before_a_run_exists(
+        &world,
+        "version: 1\ntransport: {kind: local}\nvalidators:\n  \
+         - {on: replies, kind: command, command: [judge]}\n",
+        &["validators", "removed in onemessagebus 0.11.0", "hooks:"],
+    );
+}
+
 /// A host may declare an author the built-in layout has never named.
 #[test]
 fn a_bus_config_declares_an_open_author() {

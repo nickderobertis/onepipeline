@@ -1115,8 +1115,9 @@ pub(crate) enum Judged {
 
 impl Judged {
     /// The exit code `onepipeline boundary validate-envelope` answers this with: the bus
-    /// validator protocol's `0` for a pass and `1` for a refusal, and anything else —
-    /// here `2` — for a check that could not decide, which the bus never sends.
+    /// hook protocol's `0` for a pass — the document printed back, a keep — and `1` for
+    /// a refusal, and anything else — here `2` — for a check that could not decide, which
+    /// the bus never sends.
     pub(crate) fn exit_code(&self) -> i32 {
         match self {
             Self::Pass => 0,

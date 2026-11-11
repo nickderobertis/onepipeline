@@ -13363,7 +13363,7 @@ contract changes.
 
 This build links
 `onemessagebus` 0.11.1, which removed validators in favour of the hooks this crate
-already runs (entry 148 is the envelope reviewer's move onto them); `oneagentgraph` 0.12.0, `onejudge` 0.23.1 and `onevcs` 0.65.0
+already runs (entry 148 is the envelope reviewer's move onto them); `oneagentgraph` 0.12.0, `onejudge` 0.23.1 and `onevcs` 0.65.1
 move with it so the lock resolves the bus once. Nothing here reads a configuration's
 `validators` any more, and a `--bus-config` or launch config declaring them is refused at
 the launch by the bus's own unknown-key check, before any run exists. The bullet of the
@@ -13395,5 +13395,30 @@ on. The reason names validators, says this engine no longer runs them, and says 
 through the binary, over the recorded record under `tests/recorded/launch/`.
 
 **Ruling:** the planner ruled the 0.11.1 re-decision and the dropped validators clause
-(correlation `c-2754696f9652b3420e0ad6754137b217`); the refusal's meaning is the
-manager's ruling on this node.
+(correlation `c-2754696f9652b3420e0ad6754137b217`; `main` carried the same re-decision as
+its own entry, ruled under correlation `c-baf0ff4e8212bf6e643144331e77da02`, folded in
+here when the two lines merged); the refusal's meaning is the manager's ruling on this
+node.
+
+## 154. `boundary validate-envelope` prints the document back on a pass — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, whose repository publication
+boundary paragraph says that a bus runs `onepipeline boundary validate-envelope --run RUN`
+as a hook "through a wrapper that hands it the message and keeps the message on a pass,
+and the verb and its exit statuses are unchanged".** `onepipeline` 0.106.4 moved to
+`onemessagebus` 0.11 on a line of its own (node `engine-unpublished-reads`) and, on that
+node's manager rulings, made the verb print the document it was handed back on stdout,
+unchanged, when it passes: under the hook protocol a silent exit `0` is a **drop**, so a
+configuration naming the verb directly under `hooks:` keeps what it passes. That release
+is published, so this build keeps it rather than take a released keep back into a drop.
+Its exit codes (`0` pass, `1` refuse with a neutral reason on stderr, `2` undecided), its
+stderr and `--fingerprint` are unchanged, and a wrapper that keeps the message on a pass —
+the `bus-hook` fake's `judge` verb, which `tests/e2e/publication_boundary.rs`'s bussed
+journeys run it through — still works, since it reads the exit status and not the
+verb's stdout. The proposal is that the contract's sentence say both: the verb echoes what
+it passes, so a bus may name it under `hooks:` directly or through such a wrapper.
+
+The same line read a run launched with `validators` as refusing an offer only to a queue
+one of them was `on`. Entry 153's ruling supersedes that: such a run refuses **every**
+offer to its channel, in the words entry 153 quotes, and `tests/e2e/older_launch_record.rs`
+holds it.

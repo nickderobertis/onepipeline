@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.106.4](https://github.com/nickderobertis/onepipeline/compare/v0.106.3...v0.106.4) - 2026-11-11
+
+### Fixed
+
+- *(deps)* answer every unpublished read in a second, and acknowledge any branch ([#1511](https://github.com/nickderobertis/onepipeline/pull/1511))
+
+## [0.106.3](https://github.com/nickderobertis/onepipeline/compare/v0.106.2...v0.106.3) - 2026-11-10
+
+### Fixed
+
+- *(deps)* link oneagentgraph 0.11.4 so a reset scheduled note waits a whole interval ([#1514](https://github.com/nickderobertis/onepipeline/pull/1514))
+
 ## [0.106.2](https://github.com/nickderobertis/onepipeline/compare/v0.106.1...v0.106.2) - 2026-11-10
 
 ### Added
