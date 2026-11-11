@@ -773,10 +773,6 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
         ]),
     )?;
 
-    // No clock is restarted here: an observer graph that wants a read to
-    // restart one declares `reset_on` matching `planner-surfaced`, over the
-    // journal its run follows (`docs/contract-divergences.md` entry 155).
-
     // The surface is delivered whatever the profile said. A profile shapes the
     // **event view** and nothing else: which surfaces exist, and the unread
     // accounting over them, belong to the channel, so a blocking surface reaches
