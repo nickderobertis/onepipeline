@@ -12928,8 +12928,23 @@ fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() 
     }
     let read: DeclinedRuling = serde_json::from_value(written.clone()).unwrap();
     assert_eq!(read, record);
-    let mut stray = written;
+    let mut stray = written.clone();
     stray["stray"] = json!(true);
     assert!(serde_json::from_value::<DeclinedRuling>(stray).is_err());
+    // No decline produces a user's record or a blank reason, node or reference,
+    // so none is read.
+    for (field, value) in [
+        ("provenance", json!("user")),
+        ("reason", json!("  ")),
+        ("node", json!("")),
+        ("ruling", json!("")),
+    ] {
+        let mut refused = written.clone();
+        refused[field] = value;
+        assert!(
+            serde_json::from_value::<DeclinedRuling>(refused).is_err(),
+            "a declined ruling with that `{field}` was read"
+        );
+    }
     assert!(passage.contains("never from the surface's `message`"));
 }

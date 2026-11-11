@@ -2333,7 +2333,10 @@ mod tests {
                 ),
                 reached: crate::note::Reached::Carried { reason: None },
                 provenance: crate::provenance::Provenance::User,
-                ruling: Some("c4.1".to_owned()),
+                ruling: Some(crate::ruling::Reference::Command {
+                    envelope: 4,
+                    index: 1,
+                }),
             },
         ];
         let rendered = step.rendered_task_carrying(&node, &[], &notes);

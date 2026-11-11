@@ -726,7 +726,7 @@ pub(crate) struct RecordedNote {
     /// the envelope it came in. Omitted otherwise, and absent from every record
     /// written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ruling: Option<String>,
+    pub ruling: Option<crate::ruling::Reference>,
 }
 
 impl RecordedNote {
@@ -734,7 +734,7 @@ impl RecordedNote {
     pub(crate) fn origin(&self) -> crate::ruling::Origin {
         crate::ruling::Origin {
             provenance: self.provenance,
-            reference: self.ruling.as_deref().and_then(|word| word.parse().ok()),
+            reference: self.ruling,
         }
     }
 }
@@ -761,8 +761,7 @@ impl RecordedNote {
             criterion: criterion.clone(),
             reached: reached.clone(),
             provenance: *provenance,
-            ruling: crate::ruling::Origin::of_record(*provenance, *envelope, *index)
-                .reference_word(),
+            ruling: crate::ruling::Origin::of_record(*provenance, *envelope, *index).reference,
         })
     }
 }

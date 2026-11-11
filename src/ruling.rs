@@ -121,10 +121,26 @@ impl Origin {
         }
         self.attributed(text)
     }
+}
 
-    /// The reference's spelling, where there is one.
-    pub(crate) fn reference_word(&self) -> Option<String> {
-        self.reference.map(|reference| reference.to_string())
+/// A reference is written as its token, and read only as one this engine mints.
+impl serde::Serialize for Reference {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Reference {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let token = String::deserialize(deserializer)?;
+        token
+            .parse()
+            .map_err(|()| serde::de::Error::custom(format!("`{token}` is not a ruling reference")))
     }
 }
 
@@ -188,6 +204,7 @@ pub(crate) fn provenance_of(attribution: &str) -> Provenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// The node it was addressed to.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the `String` every record and command of this crate spells one with (the note's and the amendment's own `id`, a surface's `workstream`), and `DeclinedRuling::node`, which the contract fixes as a string, is built from this; a private newtype would be converted back at the one place it is read.
     pub(crate) node: String,
     /// Whose words it is.
     pub(crate) provenance: Provenance,

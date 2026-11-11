@@ -333,6 +333,59 @@ fn an_amendment_names_whose_ruling_it_is_and_only_a_managers_can_be_declined() {
     assert_eq!(surface_records(&world, &run), before);
 }
 
+/// `decline-ruling` reads its reason from a file as well as from stdin, as
+/// `surface` reads its message; a file that cannot be read is refused with
+/// nothing appended.
+#[test]
+fn a_decline_reads_its_reason_from_a_file_and_refuses_one_it_cannot_read() {
+    let world = World::new("rulings-decline-file");
+    let run = held(&world, "rulingsdeclinefile", &["managers"]);
+    let id = reply(
+        &world,
+        &run,
+        &envelope(json!([{"op": "amend", "id": "managers", "text": MANAGER_RULING}])),
+        false,
+    );
+    let reference = format!("c{id}.0");
+    let before = surface_records(&world, &run);
+    let missing = world.root.join("no-such-reason.md");
+    world
+        .run(&[
+            "decline-ruling",
+            &run,
+            "--ruling",
+            &reference,
+            missing.to_str().unwrap(),
+        ])
+        .exited(REFUSED);
+    assert_eq!(
+        surface_records(&world, &run),
+        before,
+        "an unread reason appended"
+    );
+
+    let reason = "The diff has to touch the whole module.\nThe user said so.\n";
+    let file = world.root.join("reason.md");
+    std::fs::write(&file, reason).unwrap();
+    world
+        .run(&[
+            "decline-ruling",
+            &run,
+            "--ruling",
+            &reference,
+            file.to_str().unwrap(),
+        ])
+        .exited(0)
+        .out_has("\"state\":\"queued\"");
+    let declined = surfaces(&world, &run)
+        .into_iter()
+        .find(|surface| surface["kind"] == "declined-ruling")
+        .expect("the decline is on the channel");
+    assert_eq!(declined["declined_ruling"]["reason"], json!(reason.trim()));
+    assert_eq!(declined["declined_ruling"]["kind"], json!("amendment"));
+    assert_eq!(declined["declined_ruling"]["ruling"], json!(reference));
+}
+
 /// The two ways `reply` is told whose words an envelope carries cannot
 /// disagree: an envelope stating the manager's sent `--as user` is refused with
 /// nothing queued, and a verdict sent `--as user` is recorded as the user's.

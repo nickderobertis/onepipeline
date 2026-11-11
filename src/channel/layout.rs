@@ -263,8 +263,27 @@ pub struct Surface {
     /// existed — serializes exactly as it always did. A reader takes the facts
     /// of a declined ruling from here and never from [`message`](Self::message),
     /// whose text is for people.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Read leniently, as [`asker`](Self::asker) is: a record that does not read
+    /// as a [`DeclinedRuling`] reads as none, since refusing it would refuse the
+    /// whole queue around it rather than one field.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this as an optional field of the surface record, beside an open `kind` word other producers fill, so "present exactly on `declined-ruling`" cannot be a closed variant without changing what every other surface is on the wire; `verbs::decline_ruling` is the one writer and sets the kind, the workstream and the record together, and `tests/e2e/rulings.rs` holds every other surface free of it.
+    #[serde(
+        default,
+        deserialize_with = "recorded_declined_ruling",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub declined_ruling: Option<DeclinedRuling>,
+}
+
+/// Read the declined ruling a surface carries, reading one that is not a
+/// declined ruling as none, for the reason [`recorded_asker`] reads a blank
+/// asker as none.
+fn recorded_declined_ruling<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DeclinedRuling>, D::Error> {
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|record| serde_json::from_value(record).ok()))
 }
 
 /// What kind of ruling a dispatch declined.
@@ -284,7 +303,11 @@ pub enum RulingKind {
 ///
 /// Every fact is a field of its own, so a reader — the manager, a browser — takes
 /// it from here rather than parsing the surface's message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// Read through its validation: a record whose party is not the manager's, or
+/// whose node, reference or reason is blank, is refused, since no decline can
+/// produce one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeclinedRuling {
     /// The node the ruling was addressed to.
@@ -307,7 +330,52 @@ pub struct DeclinedRuling {
     /// message.
     pub text: String,
     /// Why the dispatch declined it, as it said.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract fixes the reason as a string field of this record; the deserializer below refuses a blank one, and `verbs::decline_ruling` refuses one before any record is written.
     pub reason: String,
+}
+
+/// [`DeclinedRuling`] as it arrives, before it is validated.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclinedRulingWire {
+    node: String,
+    ruling: String,
+    provenance: Provenance,
+    kind: RulingKind,
+    reply: u64,
+    text: String,
+    reason: String,
+}
+
+impl<'de> Deserialize<'de> for DeclinedRuling {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = DeclinedRulingWire::deserialize(deserializer)?;
+        if wire.provenance != Provenance::Manager {
+            return Err(serde::de::Error::custom(
+                "a declined ruling is the manager's: a user's ruling cannot be declined",
+            ));
+        }
+        for (field, value) in [
+            ("node", &wire.node),
+            ("ruling", &wire.ruling),
+            ("reason", &wire.reason),
+        ] {
+            if value.trim().is_empty() {
+                return Err(serde::de::Error::custom(format!(
+                    "a declined ruling's `{field}` is blank"
+                )));
+            }
+        }
+        Ok(Self {
+            node: wire.node,
+            ruling: wire.ruling,
+            provenance: wire.provenance,
+            kind: wire.kind,
+            reply: wire.reply,
+            text: wire.text,
+            reason: wire.reason,
+        })
+    }
 }
 
 impl Message for Surface {

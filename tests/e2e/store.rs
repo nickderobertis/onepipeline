@@ -7814,6 +7814,31 @@ fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_afte
     world.until_store("the withdrawal to reach the board", |world| {
         later_context(world) == Some(json!(expected))
     });
+    // The board holds each ruling's own words, never the attribution this run
+    // composes it under — the carried notes above, and an amendment alike — so a
+    // run launched from the board later inherits no reference of this one's.
+    let ruling = "Keep the loader's public signature.";
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 4, "commands": [{"op": "amend", "id": "later", "text": ruling}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.until_store("the amendment to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .is_some_and(|task| task["item"]["metadata"]["onepipeline.amendment"] == json!(ruling))
+    });
+    assert!(
+        !world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task.to_string().contains("Ruling from the")),
+        "an attribution reached the board"
+    );
 
     // Replayed: a driver taking the run over folds the journal, withdrawal and all,
     // and projects what it folded.

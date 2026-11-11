@@ -1353,3 +1353,96 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
     );
     assert_eq!(sample, before);
 }
+
+/// The sample adapter keeps each item's history as the live store does: every
+/// action appends one entry, oldest first, naming who took it and whose words
+/// it was — `--as user` the user's, no `--as` the manager's — and the raise of
+/// a new item is its asker's own.
+#[test]
+fn sample_actions_append_history_entries_with_the_provenance_each_was_given() {
+    let world = World::new();
+    let history = |id: &str| -> Vec<(String, String)> {
+        world.json(&["show", id, "--json"], "HumanItemDetail")["history"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry["action"].as_str().unwrap().to_owned(),
+                            entry["provenance"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let pair = |action: &str, whose: &str| (action.to_owned(), whose.to_owned());
+    // A fixture item written before histories existed holds none, and each
+    // action from then on is listed.
+    assert_eq!(history("item-3"), []);
+    world.json(&["complete", "item-3", "--as", "user"], "HumanItemReceipt");
+    world.json(
+        &["note", "item-3", "--text", "Read it.", "--as", "user"],
+        "HumanItemReceipt",
+    );
+    world.json(&["reopen", "item-3"], "HumanItemReceipt");
+    assert_eq!(
+        history("item-3"),
+        [
+            pair("human-item-completed", "user"),
+            pair("human-item-noted", "user"),
+            pair("human-item-reopened", "manager"),
+        ]
+    );
+    world.json(&["dismiss", "item-1", "--as", "user"], "HumanItemReceipt");
+    assert_eq!(history("item-1"), [pair("human-item-dismissed", "user")]);
+    assert_eq!(
+        world.state()["items"][0]["item"]["resolution"]["provenance"],
+        "user"
+    );
+    world.json(&["answer", "item-4", "--text", "Yes"], "HumanItemReceipt");
+    assert_eq!(history("item-4"), [pair("human-item-answered", "manager")]);
+    assert!(world.state()["items"][3]["item"]["resolution"]
+        .get("provenance")
+        .is_none());
+    let batch = world.0.join("batch.json");
+    std::fs::write(
+        &batch,
+        json!({"answers": [{"id": "item-2", "choice": "gradual"}]}).to_string(),
+    )
+    .unwrap();
+    world.ok(&[
+        "answer-batch",
+        "--input",
+        batch.to_str().unwrap(),
+        "--as",
+        "user",
+    ]);
+    assert_eq!(history("item-2"), [pair("human-item-answered", "user")]);
+
+    // A raised item's history opens with its raise, its asker's own.
+    let input = world.0.join("raise.json");
+    let mut raised = world.state()["items"][3]["item"].clone();
+    for field in [
+        "id",
+        "state",
+        "resolution",
+        "tracker",
+        "created_at",
+        "updated_at",
+    ] {
+        raised.as_object_mut().unwrap().remove(field);
+    }
+    raised["dedup_key"] = json!("sample-raised");
+    std::fs::write(&input, raised.to_string()).unwrap();
+    let receipt = world.json(
+        &["raise", "--input", input.to_str().unwrap()],
+        "HumanItemReceipt",
+    );
+    let id = receipt["item"]["item"]["id"].as_str().unwrap().to_owned();
+    let shown = world.json(&["show", &id, "--json"], "HumanItemDetail");
+    assert_eq!(shown["history"][0]["action"], "human-item-raised");
+    assert_eq!(shown["history"][0]["actor"], "session:manager");
+    assert_eq!(shown["history"][0]["provenance"], "manager");
+}

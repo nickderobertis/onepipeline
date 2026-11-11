@@ -2440,6 +2440,19 @@ impl HumanItemEventPayload {
                 "event identity, owner, version or resolution differs from its item".into(),
             );
         }
+        // Version 1 predates provenance, so every one of its events is the
+        // manager's: one claiming to be the user's was written by no engine.
+        let users = self
+            .resolution
+            .as_ref()
+            .is_some_and(|resolution| resolution.provenance == Provenance::User)
+            || self
+                .by
+                .as_ref()
+                .is_some_and(|by| by.provenance == Provenance::User);
+        if self.schema_version == 1 && users {
+            return Err("a schema version 1 event is the manager's, and this one says user".into());
+        }
         let (states, by) = event_rule(self.action);
         if !states.contains(&self.item.state) {
             return Err("event action and item state conflict".into());

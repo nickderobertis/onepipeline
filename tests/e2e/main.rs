@@ -317,7 +317,15 @@ mod review_reply;
 mod review_round;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
+// exercise is whose words a ruling is through the whole engine at once — `channel`, the
+// layout, `edits`, `engine`'s reconcile and live delivery, `note`, `plan`'s rendering,
+// `ask`, `verbs`' decline, `projection` across a checkpoint and an adoption, and the
+// supervised conversation the real `oneagentgraph` runs — so any Rust source can move what
+// they prove, and the narrowest edge they can honestly sit behind is the crate's own, as
+// for `mod retirement` above. The slowest takes about three seconds.
 mod rulings;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is one reading across `views`, `hooks`, `summary`, `unwatched` and the `status`
