@@ -791,6 +791,14 @@ pub(crate) struct StackParent {
 pub(crate) struct EditCommitted {
     /// Who submitted it.
     pub(crate) author: AuthorWord,
+    /// Whose words it carried: the manager's own ruling, or the user's relayed.
+    /// Absent from a record written before the field existed, which reads as
+    /// the manager's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::provenance::Provenance::is_manager"
+    )]
+    pub(crate) provenance: crate::provenance::Provenance,
     /// The command as submitted.
     pub(crate) command: Object,
     /// The operations it compiled to.
@@ -808,6 +816,14 @@ pub(crate) struct EditCommitted {
 pub(crate) struct CommandAccepted {
     /// Who submitted it.
     pub(crate) author: AuthorWord,
+    /// Whose words it carried: the manager's own ruling, or the user's relayed.
+    /// Absent from a record written before the field existed, which reads as
+    /// the manager's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::provenance::Provenance::is_manager"
+    )]
+    pub(crate) provenance: crate::provenance::Provenance,
     /// The command as submitted.
     pub(crate) command: Object,
     /// The operations it compiled to.
@@ -938,6 +954,14 @@ pub(crate) struct PlannerSurfaced {
 pub(crate) struct PlannerReplied {
     /// Who replied.
     pub(crate) author: AuthorWord,
+    /// Whose words it carried: the manager's own ruling, or the user's relayed.
+    /// Absent from a record written before the field existed, which reads as
+    /// the manager's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::provenance::Provenance::is_manager"
+    )]
+    pub(crate) provenance: crate::provenance::Provenance,
     /// Whether it declared completion, `null` for no word.
     #[serde(default)]
     pub(crate) completion: Option<bool>,

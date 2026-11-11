@@ -7383,6 +7383,7 @@ mod tests {
                     asker: None,
                     workstream: None,
                     correlation: None,
+                    declined_ruling: None,
                 })
                 .expect("the surface queues");
         };
@@ -7618,6 +7619,7 @@ mod tests {
                 asker: None,
                 workstream: Some("build".into()),
                 correlation: None,
+                declined_ruling: None,
             })
             .expect("the surface queues");
 
@@ -7655,6 +7657,7 @@ mod tests {
                 asker: None,
                 workstream: Some("build".into()),
                 correlation: Some(correlation.clone()),
+                declined_ruling: None,
             })
             .expect("the finding queues");
         assert!(blocking_surface(&paths), "the finding is not a decision");

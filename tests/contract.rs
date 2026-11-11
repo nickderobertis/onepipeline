@@ -2732,6 +2732,7 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         asker: None,
         workstream: Some("consumer".into()),
         correlation: None,
+        declined_ruling: None,
     })
     .expect("a surface serializes");
     assert_eq!(
@@ -9772,6 +9773,7 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         abandoned: false,
         asker: None,
         correlation: None,
+        declined_ruling: None,
     };
     for (message, from) in [
         ("an observer's first", source::PROPOSAL),

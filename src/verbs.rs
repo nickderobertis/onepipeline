@@ -1161,6 +1161,50 @@ pub fn reply(
     submit(paths, correlation, &envelope)
 }
 
+/// `onepipeline reply RUN [FILE] --as manager|user`: [`reply`], recording whose
+/// words the envelope carries as `provenance` rather than as the envelope says.
+///
+/// The envelope may say it too, and then it must say the same: an envelope
+/// stating one provenance while `provenance` names the other is refused, with
+/// nothing queued, because which of two contradicting statements is true is not
+/// this call's to guess.
+///
+/// # Errors
+///
+/// Every refusal [`reply`] makes, and the conflict above.
+pub fn reply_as(
+    paths: &RunPaths,
+    correlation: Option<&onemessagebus::Correlation>,
+    envelope_json: &str,
+    provenance: crate::provenance::Provenance,
+) -> Result<Receipt> {
+    reply(paths, correlation, &stated_as(envelope_json, provenance)?)
+}
+
+/// `envelope_json` with its `provenance` set to `provenance`, or the refusal for
+/// an envelope that states the other one. Text that is not a JSON object is
+/// returned as it came, so the caller's own parse refuses it in its own words.
+pub(crate) fn stated_as(
+    envelope_json: &str,
+    provenance: crate::provenance::Provenance,
+) -> Result<String> {
+    let Ok(serde_json::Value::Object(mut envelope)) =
+        serde_json::from_str::<serde_json::Value>(envelope_json.trim())
+    else {
+        return Ok(envelope_json.to_owned());
+    };
+    if let Some(stated) = envelope.get("provenance") {
+        if stated != &json!(provenance) {
+            return Err(Error::Refused(format!(
+                "the envelope states `\"provenance\": {stated}` and `--as` names `{provenance}`; \
+                 say whose words these are once. Nothing was queued"
+            )));
+        }
+    }
+    envelope.insert("provenance".to_owned(), json!(provenance));
+    Ok(serde_json::Value::Object(envelope).to_string())
+}
+
 /// `onepipeline attest RUN REF` — the shorthand for a reply carrying one
 /// `attest`.
 ///
@@ -1413,6 +1457,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             asker: None,
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         },
         |changed| {
             // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the surface met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook rewriting a surface into a boundary violation is that path over changed input.
@@ -1435,6 +1480,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
                 asker: None,
                 workstream: None,
                 correlation: None,
+                declined_ruling: None,
             },
             &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
         )?;
@@ -1446,6 +1492,102 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
         journal::labels(&paths.run, None),
+        journal::payload(&[
+            ("kind", json!(queued.kind)),
+            ("message", json!(queued.message)),
+            ("source", json!(queued.source)),
+            ("blocking", json!(queued.blocking)),
+        ]),
+    )?;
+    Ok(surfaced)
+}
+
+/// `onepipeline decline-ruling RUN --ruling REF [FILE]`: decline a manager's
+/// ruling with a reason, raising one non-blocking surface of kind
+/// [`SurfaceKind::DECLINED_RULING`] that carries what was declined as the typed
+/// [`DeclinedRuling`](crate::channel::DeclinedRuling) record.
+///
+/// The engine acts on the surface no further: it is a report to the manager,
+/// who may take it to the user. A user's ruling binds, so it cannot be declined.
+///
+/// # Errors
+///
+/// [`Error::Refused`], with nothing appended, for a reason with nothing in it
+/// once trimmed, a reference the run does not know, a ruling that is the user's,
+/// and a channel that refuses the push.
+pub fn decline_ruling(paths: &RunPaths, ruling: &str, reason: &str) -> Result<Surfaced> {
+    let reason = reason.trim().to_owned();
+    if reason.is_empty() {
+        return Err(Error::Refused(
+            "a declined ruling carries the reason it was declined, and this one carried none; \
+             nothing was appended"
+                .to_owned(),
+        ));
+    }
+    let ruling = ruling.trim().to_owned();
+    let resolved = crate::ruling::resolve(paths, &ruling)?;
+    if resolved.provenance != crate::provenance::Provenance::Manager {
+        return Err(Error::Refused(format!(
+            "ruling `{ruling}` is the user's, relayed by the manager: a user's ruling binds and \
+             cannot be declined. Raise what is wrong with it through `onepipeline ask` instead; \
+             nothing was appended"
+        )));
+    }
+    let view = crate::views::RunView::open(paths)?;
+    let declined = crate::channel::DeclinedRuling {
+        node: resolved.node,
+        ruling,
+        provenance: resolved.provenance,
+        kind: resolved.kind,
+        reply: resolved.reply,
+        text: resolved.text,
+        reason,
+    };
+    let kind_word = match declined.kind {
+        crate::channel::RulingKind::Note => "note",
+        crate::channel::RulingKind::Amendment => "amendment",
+        crate::channel::RulingKind::Answer => "answer to its question",
+    };
+    let message = format!(
+        "node '{}' declined the manager's {kind_word} (ruling `{}`, reply {}).\n\nThe ruling:\n{}\n\n\
+         Why it was declined:\n{}",
+        declined.node, declined.ruling, declined.reply, declined.text, declined.reason
+    );
+    let surface = Surface {
+        id: 0,
+        kind: SurfaceKind::DECLINED_RULING.to_owned(),
+        message,
+        source: crate::channel::source::PROPOSAL.to_owned(),
+        // A report to the manager rather than a request: it holds nothing.
+        blocking: false,
+        queued_at: crate::sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: Some(declined.node.clone()),
+        correlation: None,
+        declined_ruling: Some(declined),
+    };
+    // The publication boundary, as every surface meets it.
+    crate::boundary::guard(&view.state, &json!({ "message": surface.message }))?;
+    let offer = ChannelState::of_paths(paths)?.push_checked(surface.clone(), |changed| {
+        crate::boundary::guard(&view.state, &json!({ "message": changed.get("message") }))
+    })?;
+    let mut journal = Journal::open(paths);
+    if let crate::channel::SurfaceOffer::Dropped { hook, .. } = &offer {
+        crate::engine::record_surface_dropped(
+            paths,
+            &mut journal,
+            &surface,
+            &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
+        )?;
+    }
+    let surfaced = surfaced_of(offer.clone())?;
+    let crate::channel::SurfaceOffer::Queued(queued) = offer else {
+        return Ok(surfaced);
+    };
+    journal.emit(
+        journal::PipelineKind::PlannerSurfaceQueued,
+        journal::labels(&paths.run, queued.workstream.as_deref()),
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),

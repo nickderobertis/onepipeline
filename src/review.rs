@@ -340,6 +340,7 @@ pub(crate) fn pass(
                 .map_err(|error| Error::Invalid(format!("review correlation: {error}")))?;
             let offered = Surface {
                 id: 0, kind: "review-comment".to_owned(), message: format!("Node {node}, change request {url}: {} at {}\n{}\n\n{}\n\nAnswer with rework on {node}, naming {} in comments, or decline this comment.", comment.author, location(comment), comment.url, comment.body, comment.id.0), source: crate::channel::source::RECONCILER.to_owned(), blocking: false, queued_at: crate::sys::now_millis(), workstream: Some(node.to_owned()), abandoned: false, asker: None, correlation: Some(correlation),
+                declined_ruling: None,
             };
             let Some(surface) = crate::engine::offer_surface(paths, journal, &channel, &offered)?
             else {
@@ -533,6 +534,7 @@ fn not_drafted(
         abandoned: false,
         asker: None,
         correlation: Some(correlation),
+        declined_ruling: None,
     };
     // llmlint: ignore[changed_behavior_has_e2e] the hook outcomes here are `engine::offer_surface`'s, driven end to end by `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; this surface is reachable only through a failed review reply and adds no branch of its own.
     let Some(surface) = crate::engine::offer_surface(paths, journal, channel, &offered)? else {

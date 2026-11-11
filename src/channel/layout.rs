@@ -34,9 +34,9 @@
 //! - **A bare reply is routed by its halves**: its commands to [`COMMANDS`], its
 //!   verdict to [`REPLIES`], and an envelope carrying commands and no verdict to
 //!   [`COMMANDS`] alone.
-//! - **An edit envelope requires version 3**: a version this build reads is read
+//! - **An edit envelope requires version 4**: a version this build reads is read
 //!   at [`REPLY_ENVELOPE_VERSION`], and an edit envelope at any other is refused
-//!   as `an edit envelope requires version 3`.
+//!   as `an edit envelope requires version 4`.
 
 use std::sync::Arc;
 
@@ -52,6 +52,8 @@ use onemessagebus::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+use crate::provenance::Provenance;
 
 /// The layout's name, as a configuration's `profile` gives it.
 pub const PLANNER_CHANNEL: &str = "planner-channel";
@@ -107,11 +109,11 @@ pub const ASKER_ENV: &str = "ONEPIPELINE_CHANNEL_ASKER";
 
 /// The reply envelope version an edit envelope must be read at, and the version
 /// this crate writes.
-pub const REPLY_ENVELOPE_VERSION: u32 = 3;
+pub const REPLY_ENVELOPE_VERSION: u32 = 4;
 
 /// Every reply envelope version read, newest first; each is read at
 /// [`REPLY_ENVELOPE_VERSION`].
-pub const REPLY_ENVELOPE_VERSIONS_READ: &[u32] = &[REPLY_ENVELOPE_VERSION, 2];
+pub const REPLY_ENVELOPE_VERSIONS_READ: &[u32] = &[REPLY_ENVELOPE_VERSION, 3, 2];
 
 /// The reply envelope's schema family: `agent.reply-envelope`.
 ///
@@ -143,6 +145,7 @@ pub const READ_REPLY_ENVELOPE_SCHEMA: SchemaId =
 
 const REPLY_ENVELOPE_V2: &str = include_str!("../../schemas/reply-envelope-v2.schema.json");
 const REPLY_ENVELOPE_V3: &str = include_str!("../../schemas/reply-envelope-v3.schema.json");
+const REPLY_ENVELOPE_V4: &str = include_str!("../../schemas/reply-envelope-v4.schema.json");
 
 /// What raised a surface.
 ///
@@ -254,6 +257,57 @@ pub struct Surface {
         skip_serializing_if = "Option::is_none"
     )]
     pub correlation: Option<Correlation>,
+    /// What a dispatch declined, as typed fields: present on every surface of
+    /// kind `declined-ruling` and on no other, and omitted from the wire while
+    /// absent, so every other surface — and every one written before the field
+    /// existed — serializes exactly as it always did. A reader takes the facts
+    /// of a declined ruling from here and never from [`message`](Self::message),
+    /// whose text is for people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined_ruling: Option<DeclinedRuling>,
+}
+
+/// What kind of ruling a dispatch declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RulingKind {
+    /// A manager note delivered into, or carried to, the node's dispatch.
+    Note,
+    /// An amendment to the node's bar.
+    Amendment,
+    /// The answer to a question the dispatch asked through `onepipeline ask`.
+    Answer,
+}
+
+/// The record a `declined-ruling` surface carries: the ruling a dispatch
+/// declined through `onepipeline decline-ruling`, and why.
+///
+/// Every fact is a field of its own, so a reader — the manager, a browser — takes
+/// it from here rather than parsing the surface's message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeclinedRuling {
+    /// The node the ruling was addressed to.
+    // llmlint: ignore[invalid_states_unrepresentable] a node id is the `String` every record of this channel spells one with (`Surface::workstream` beside it); a `NodeId` newtype is a public item `docs/contract.md` does not name, and the engine writes this only from a ruling it resolved against the run's own records.
+    pub node: String,
+    /// The ruling reference `onepipeline decline-ruling` was given: an opaque
+    /// token the engine minted, stable for the run's life.
+    // llmlint: ignore[invalid_states_unrepresentable] the reference is opaque to every reader by contract, so its one structure is the engine's private parse; this record carries it exactly as the decline named it, which the engine resolved before writing it.
+    pub ruling: String,
+    /// Whose ruling it was: always `manager`, since a user's ruling binds and
+    /// cannot be declined.
+    pub provenance: Provenance,
+    /// What kind of ruling it was.
+    pub kind: RulingKind,
+    /// The id of the reply envelope that carried it: the id `onepipeline reply`
+    /// answered it with — the command envelope's for a note or an amendment, the
+    /// verdict's for an answered question.
+    pub reply: u64,
+    /// The ruling's text: the note's, the amendment's clauses, or the answer's
+    /// message.
+    pub text: String,
+    /// Why the dispatch declined it, as it said.
+    pub reason: String,
 }
 
 impl Message for Surface {
@@ -267,19 +321,21 @@ fn is_planner(author: &Author) -> bool {
     author.as_str() == "planner"
 }
 
-/// A declared version this build reads is read as the version it writes; any
+/// A declared version this build reads, read as the version it writes; any
 /// other is left as declared, so the refusal naming the version an edit
 /// envelope requires is made where it always was.
-fn read_at_a_version_this_build_reads<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u32>, D::Error> {
-    Ok(Option::<u32>::deserialize(deserializer)?.map(|version| {
+///
+/// Applied to a **bare** envelope as it is routed, and never on reading the
+/// type: a framed record is checked and kept whole, so a reply a reader reads
+/// and writes back is the bytes it read, whichever version it declared.
+fn read_at_a_version_this_build_reads(version: Option<u32>) -> Option<u32> {
+    version.map(|version| {
         if REPLY_ENVELOPE_VERSIONS_READ.contains(&version) {
             REPLY_ENVELOPE_VERSION
         } else {
             version
         }
-    }))
+    })
 }
 
 /// One reply envelope as the layout reads it: a verdict, a list of graph edits,
@@ -293,16 +349,18 @@ fn read_at_a_version_this_build_reads<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyEnvelope {
-    /// The version it was written against, read at [`REPLY_ENVELOPE_VERSION`].
-    #[serde(
-        default,
-        deserialize_with = "read_at_a_version_this_build_reads",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// The version it was written against: kept as declared, and read at
+    /// [`REPLY_ENVELOPE_VERSION`] where a bare envelope is routed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// Who wrote it. Omitted, the planner.
     #[serde(default = "planner", skip_serializing_if = "is_planner")]
     pub author: Author,
+    /// Whose words it carries: `manager`, the manager's own ruling, or `user`,
+    /// the user's words relayed. Omitted, `manager`, and omitted from the wire
+    /// while it is that.
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
     /// The verdict: whether the author considers the run complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<bool>,
@@ -326,6 +384,7 @@ impl Default for ReplyEnvelope {
         Self {
             version: None,
             author: planner(),
+            provenance: Provenance::Manager,
             completion: None,
             message: None,
             reason: None,
@@ -383,6 +442,11 @@ pub struct QueuedCommands {
     /// Who submitted it.
     #[serde(default = "planner")]
     pub author: Author,
+    /// Whose words the commands are, as the envelope carrying them said.
+    /// Omitted, `manager`, and omitted from the wire while it is that, so a
+    /// record of the manager's is the bytes it always was.
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
     /// The commands, each an object naming its `op`.
     pub commands: Vec<Map<String, Value>>,
 }
@@ -820,7 +884,11 @@ pub fn registry() -> Registry {
     registry
         .register::<ReplyEnvelope>()
         .expect("the read reply envelope schema registers");
-    for (version, document) in [(2, REPLY_ENVELOPE_V2), (3, REPLY_ENVELOPE_V3)] {
+    for (version, document) in [
+        (2, REPLY_ENVELOPE_V2),
+        (3, REPLY_ENVELOPE_V3),
+        (4, REPLY_ENVELOPE_V4),
+    ] {
         let schema: Value = serde_json::from_str(document).expect("a committed schema is JSON");
         registry
             .register_schema(
@@ -863,8 +931,9 @@ impl PlannerChannel {
         if !envelope.is_object() {
             return Err("the reply is malformed: a reply envelope is a JSON object".to_owned());
         }
-        let envelope: ReplyEnvelope = serde_json::from_value(envelope)
+        let mut envelope: ReplyEnvelope = serde_json::from_value(envelope)
             .map_err(|failure| format!("the reply is malformed: {failure}"))?;
+        envelope.version = read_at_a_version_this_build_reads(envelope.version);
         let author = envelope.author.clone();
         ensure_declared(allowlist, &author)?;
         allows_completion(allowlist, &author, envelope.completion)?;
@@ -882,14 +951,15 @@ impl PlannerChannel {
                     .ok_or("a command names its `op`")?;
                 allows(allowlist, &author, word)?;
             }
-            routed.push((
-                name(COMMANDS),
-                serde_json::json!({
-                    "id": 0,
-                    "author": envelope.author,
-                    "commands": envelope.commands,
-                }),
-            ));
+            let mut record = serde_json::json!({
+                "id": 0,
+                "author": envelope.author,
+                "commands": envelope.commands,
+            });
+            if !envelope.provenance.is_manager() {
+                record["provenance"] = serde_json::json!(envelope.provenance);
+            }
+            routed.push((name(COMMANDS), record));
         }
         if envelope.carries_verdict() || envelope.commands.is_empty() {
             routed.push((
@@ -1187,6 +1257,7 @@ impl Channel {
         let pushed = self.commands.push(&QueuedCommands {
             id: 0,
             author,
+            provenance: Provenance::Manager,
             commands,
         })?;
         Ok(pushed.id.unwrap_or_default())
@@ -1288,11 +1359,18 @@ mod tests {
     #[test]
     fn a_read_version_is_carried_to_the_written_one_and_an_unread_one_is_left() {
         for version in REPLY_ENVELOPE_VERSIONS_READ {
+            // Read as declared, so a framed record is kept whole...
             let envelope: ReplyEnvelope =
                 serde_json::from_value(serde_json::json!({"version": version}))
                     .expect("an envelope at a read version parses");
-            assert_eq!(envelope.version, Some(REPLY_ENVELOPE_VERSION));
+            assert_eq!(envelope.version, Some(*version));
+            // ...and carried to the written version where a bare one is routed.
+            assert_eq!(
+                read_at_a_version_this_build_reads(envelope.version),
+                Some(REPLY_ENVELOPE_VERSION)
+            );
         }
+        assert_eq!(read_at_a_version_this_build_reads(Some(1)), Some(1));
         let envelope: ReplyEnvelope = serde_json::from_value(serde_json::json!({"version": 1}))
             .expect("an envelope at an unread version still parses");
         assert_eq!(envelope.version, Some(1));
@@ -1331,21 +1409,47 @@ mod tests {
             .flat_map(|op| op["properties"].as_object().into_iter().flatten())
             .map(|(field, _)| field.as_str())
             .collect();
-        for (version, document) in [(2, REPLY_ENVELOPE_V2), (3, REPLY_ENVELOPE_V3)] {
+        for (version, document) in [
+            (2, REPLY_ENVELOPE_V2),
+            (3, REPLY_ENVELOPE_V3),
+            (4, REPLY_ENVELOPE_V4),
+        ] {
             let document: Value = serde_json::from_str(document).expect("a committed schema");
             assert_eq!(document["properties"]["version"]["const"], version);
             assert_eq!(document["additionalProperties"], false);
             let properties = document["properties"].as_object().expect("properties");
+            // The fields a later version added, which a document of an earlier
+            // one rightly does not name: version 4's `provenance`.
+            let added_since: &[&str] = if version < 4 { &["provenance"] } else { &[] };
             for schema in &generated {
                 let theirs = schema["properties"].as_object().expect("properties");
                 assert_eq!(
                     properties.keys().collect::<Vec<_>>(),
-                    theirs.keys().collect::<Vec<_>>(),
+                    theirs
+                        .keys()
+                        .filter(|field| !added_since.contains(&field.as_str()))
+                        .collect::<Vec<_>>(),
                     "version {version}'s document names other fields than {}",
                     schema["title"]
                 );
                 for (field, property) in properties {
                     if field == "author" || field == "version" {
+                        continue;
+                    }
+                    if field == "provenance" {
+                        // A closed word: the document's enum is the type's.
+                        let words: Vec<Value> = schema["$defs"]["Provenance"]["oneOf"]
+                            .as_array()
+                            .expect("the provenance words")
+                            .iter()
+                            .map(|word| word["const"].clone())
+                            .collect();
+                        assert_eq!(
+                            property["enum"],
+                            Value::Array(words),
+                            "version {version}'s `provenance` names other words than {}",
+                            schema["title"]
+                        );
                         continue;
                     }
                     let theirs = wire(&theirs[field]);
@@ -1391,6 +1495,7 @@ mod tests {
                 abandoned: false,
                 asker: None,
                 correlation: None,
+                declined_ruling: None,
             })
             .expect("queued");
         channel.claim().expect("a claim").expect("the surface");

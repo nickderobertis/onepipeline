@@ -824,6 +824,7 @@ fn merged_elsewhere(
             asker: None,
             workstream: Some(node.to_owned()),
             correlation: Some(correlation),
+            declined_ruling: None,
         },
     )
 }
@@ -1028,6 +1029,7 @@ pub(crate) fn notify(
             asker: None,
             workstream: Some(node.to_owned()),
             correlation: None,
+            declined_ruling: None,
         },
     )
 }

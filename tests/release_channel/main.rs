@@ -205,6 +205,7 @@ fn surface(kind: &str, message: &str, from: &str, blocking: bool, asker: Option<
         abandoned: false,
         asker: asker.map(|name| Asker::new(name, "the journey").expect("an asker")),
         correlation: None,
+        declined_ruling: None,
     }
 }
 

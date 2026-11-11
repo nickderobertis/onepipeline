@@ -169,10 +169,13 @@ pub(crate) fn asker() -> Result<Option<Asker>> {
 /// # Errors
 ///
 /// A value the bus would refuse, refused here by that name before anything is
-/// raised.
-pub(crate) fn about(args: &AskArgs) -> Result<Option<Address>> {
+/// raised. Omitted, the node `dispatched` names — the dispatch's own,
+/// `ONEPIPELINE_NODE_ID`, read in the binary's arm — so a ruling answering a
+/// dispatch's question is addressed to the node that asked it.
+pub(crate) fn about(args: &AskArgs, dispatched: Option<&str>) -> Result<Option<Address>> {
     args.about
         .as_deref()
+        .or(dispatched.filter(|node| !node.trim().is_empty()))
         .map(|text| {
             text.parse::<Address>()
                 .map_err(|refusal| Error::Invalid(format!("--about: {refusal}")))
@@ -276,6 +279,7 @@ impl Question {
             // Stamped by the bus off `about`, never written here.
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         };
         let offered = question.clone();
         Ok(match channel.ask(question, request.about) {
@@ -423,6 +427,39 @@ impl Asked {
             json!({"answer": "refused", "reason": format!("the answer could not be rendered: {error}")})
                 .to_string()
         })
+    }
+
+    /// The answer with the ruling it carries attributed: on a reply, the
+    /// reply's record gains `provenance` — stated outright, `manager` included —
+    /// the `attribution` sentence every ruling a dispatch reads is rendered
+    /// beside, and, for the manager's, the `ruling` reference
+    /// `onepipeline decline-ruling` takes. Any other answer is no ruling and is
+    /// left as the bus gave it.
+    pub(crate) fn attributed(mut self) -> Self {
+        if let Wire::Reply { reply, .. } = &mut self.wire {
+            let provenance = reply
+                .get("reply")
+                .and_then(|envelope| envelope.get("provenance"))
+                .and_then(|word| serde_json::from_value(word.clone()).ok())
+                .unwrap_or_default();
+            let reference = reply
+                .get("id")
+                .and_then(Value::as_u64)
+                .map(|reply| crate::ruling::Reference::Answer { reply });
+            if let Value::Object(record) = reply {
+                let reference =
+                    reference.filter(|_| provenance == crate::provenance::Provenance::Manager);
+                record.insert("provenance".to_owned(), json!(provenance));
+                record.insert(
+                    "attribution".to_owned(),
+                    json!(crate::ruling::attribution(provenance, reference.as_ref())),
+                );
+                if let Some(reference) = reference {
+                    record.insert("ruling".to_owned(), json!(reference.to_string()));
+                }
+            }
+        }
+        self
     }
 
     /// What to do next, for standard error, where the answer is not a reply.

@@ -53,6 +53,7 @@ use serde_json::{Map, Value};
 
 use crate::note::{Addressee, Criterion, NoteText};
 use crate::plan::Node;
+use crate::provenance::Provenance;
 
 pub mod deliveries;
 pub mod layout;
@@ -62,8 +63,8 @@ use layout::{
     SURFACES,
 };
 pub use layout::{
-    source, CommandOutcome, CommandResult, CommandVerdict, Surface, ASKER_ENV,
-    REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
+    source, CommandOutcome, CommandResult, CommandVerdict, DeclinedRuling, RulingKind, Surface,
+    ASKER_ENV, REPLY_ENVELOPE_VERSION, REPLY_ENVELOPE_VERSIONS_READ,
 };
 
 /// Every schema the `planner-channel` layout registers, built once per process.
@@ -296,6 +297,13 @@ pub struct Reply {
     /// Who wrote it. Omitted, [`Author::planner()`].
     #[serde(default, skip_serializing_if = "Author::is_planner")]
     pub author: Author,
+    /// Whose words it carries: the manager's own ruling, or the user's relayed.
+    /// Omitted, [`Provenance::Manager`] — every envelope written before the field
+    /// existed was the manager's — and omitted from the wire while it is that, so
+    /// an envelope of the manager's is the bytes it always was. Not
+    /// [`author`](Self::author), which names who sent it and decides its grants.
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
     /// The legacy verdict: whether the planner considers the run complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<bool>,
@@ -1031,6 +1039,10 @@ impl SurfaceKind {
     /// A session whose `post-checkout` provisioning failed, raised non-blocking
     /// once per failed session.
     pub const PROVISIONING_FAILED: &'static str = "provisioning-failed";
+    /// A manager ruling a dispatch declined, with its reason, through
+    /// `onepipeline decline-ruling`: raised non-blocking, carrying the typed
+    /// [`DeclinedRuling`] record.
+    pub const DECLINED_RULING: &'static str = "declined-ruling";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())
@@ -1175,6 +1187,8 @@ pub(crate) struct OfferedReply {
 struct HookedCommands {
     #[serde(default)]
     author: Author,
+    #[serde(default)]
+    provenance: Provenance,
     commands: Vec<Command>,
 }
 
@@ -1221,6 +1235,7 @@ impl OfferedReply {
         let mut envelope = Reply {
             version: offered.version,
             author: offered.author.clone(),
+            provenance: offered.provenance,
             ..Reply::default()
         };
         let mut commands_record = None;
@@ -1236,6 +1251,7 @@ impl OfferedReply {
         if let Some(record) = &verdict_record {
             let read: HookedVerdict = unreadable_to_this_build(record)?;
             envelope.author = read.reply.author;
+            envelope.provenance = read.reply.provenance;
             envelope.completion = read.reply.completion;
             envelope.message = read.reply.message;
             envelope.reason = read.reply.reason;
@@ -1243,6 +1259,7 @@ impl OfferedReply {
         if let Some(record) = &commands_record {
             let read: HookedCommands = unreadable_to_this_build(record)?;
             envelope.author = read.author;
+            envelope.provenance = read.provenance;
             envelope.commands = read.commands;
             envelope.version.get_or_insert(REPLY_ENVELOPE_VERSION);
         }
@@ -1256,6 +1273,7 @@ impl OfferedReply {
         let changed = bus_changed
             && (hooked.dropped.is_empty()
                 || envelope.author != offered.author
+                || envelope.provenance != offered.provenance
                 || (!commands_dropped && envelope.commands != offered.commands)
                 || (!verdict_dropped
                     && (envelope.completion != offered.completion
@@ -1351,6 +1369,11 @@ pub struct QueuedCommands {
     /// Who submitted it, which is what decides the ops it may carry.
     #[serde(default)]
     pub author: Author,
+    /// Whose words its commands are, as the envelope that carried them said.
+    /// Absent from every record written before the field existed, and from one
+    /// of the manager's own, which reads as [`Provenance::Manager`].
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
     /// The commands, reconciled in order.
     pub commands: Vec<Command>,
 }
@@ -2477,7 +2500,22 @@ impl ChannelState {
     /// Offered through the bus, so the layout checks each op against the
     /// author's grants before anything is appended.
     pub fn submit(&self, author: Author, commands: &[Command]) -> crate::Result<u64> {
-        let offered = serde_json::json!({"id": 0, "author": author, "commands": commands});
+        self.submit_as(author, Provenance::Manager, commands)
+    }
+
+    /// [`submit`](Self::submit), recording whose words the commands are. The
+    /// manager's own is written as no key at all, so its record is the one
+    /// [`submit`](Self::submit) always wrote.
+    pub(crate) fn submit_as(
+        &self,
+        author: Author,
+        provenance: Provenance,
+        commands: &[Command],
+    ) -> crate::Result<u64> {
+        let mut offered = serde_json::json!({"id": 0, "author": author, "commands": commands});
+        if !provenance.is_manager() {
+            offered["provenance"] = serde_json::json!(provenance);
+        }
         let sent = self
             .bus()?
             .send(&queue_name(COMMANDS), offered)
@@ -2493,7 +2531,11 @@ impl ChannelState {
     pub(crate) fn submit_offered(&self, offered: &OfferedReply) -> crate::Result<u64> {
         match &offered.commands_record {
             Some(record) => self.append_decided(&self.bus()?, COMMANDS, record),
-            None => self.submit(offered.envelope.author.clone(), &offered.envelope.commands),
+            None => self.submit_as(
+                offered.envelope.author.clone(),
+                offered.envelope.provenance,
+                &offered.envelope.commands,
+            ),
         }
     }
 
@@ -2739,6 +2781,19 @@ impl ChannelState {
             .rfind(|outcome| outcome.id == id)
     }
 
+    /// The id the command queue will give the next envelope appended to it: the
+    /// number of envelopes before it.
+    ///
+    /// What a writer applying an envelope itself, with nothing driving the run,
+    /// names the rulings it delivers by before it appends the envelope — it holds
+    /// the run's ownership lock, so the envelope it appends next is the next one.
+    pub(crate) fn next_command_id(&self) -> u64 {
+        self.plain(COMMANDS)
+            .ok()
+            .and_then(|commands| commands.log(None).ok())
+            .map_or(0, |log| log.len() as u64)
+    }
+
     /// The commands envelope `id` was sent with, as the command queue holds it,
     /// or `None` for an id it holds no envelope under.
     pub(crate) fn commands_of(&self, id: u64) -> Option<QueuedCommands> {
@@ -2861,14 +2916,17 @@ mod tests {
     /// it is the only thing that stops a field being renamed, an optional one
     /// becoming an explicit null, or the version moving without anyone deciding
     /// to move it.
-    const ENVELOPE_GOLDEN: &str = include_str!("../tests/golden/reply-envelope-v3.json");
+    const ENVELOPE_GOLDEN: &str = include_str!("../tests/golden/reply-envelope-v4.json");
 
     /// The checked-in envelope at the version before this one.
     ///
     /// A bump is only additive if the envelopes written against the version it
     /// leaves behind are still read, so the one this build has to go on reading
     /// is checked in beside the one it writes rather than described.
-    const ENVELOPE_GOLDEN_BEFORE: &str = include_str!("../tests/golden/reply-envelope-v2.json");
+    const ENVELOPE_GOLDEN_BEFORE: &str = include_str!("../tests/golden/reply-envelope-v3.json");
+
+    /// The checked-in envelope two versions back, which this build still reads.
+    const ENVELOPE_GOLDEN_V2: &str = include_str!("../tests/golden/reply-envelope-v2.json");
 
     /// The envelope the golden pins, as the types hold it.
     ///
@@ -2897,6 +2955,9 @@ mod tests {
         Reply {
             version: Some(REPLY_ENVELOPE_VERSION),
             author: Author::planner(),
+            // The one field version 4 added, at the value that is written: the
+            // manager's own is the default and is never on the wire.
+            provenance: Provenance::User,
             commands: vec![
                 settled(
                     "publish",
@@ -2961,7 +3022,11 @@ mod tests {
             .expect("this crate's envelope schema registers");
         let profile = layout::registry();
         let at = |version: u32| SchemaId::literal("agent", "reply-envelope", version);
-        for (golden, version) in [(ENVELOPE_GOLDEN, 3), (ENVELOPE_GOLDEN_BEFORE, 2)] {
+        for (golden, version) in [
+            (ENVELOPE_GOLDEN, 4),
+            (ENVELOPE_GOLDEN_BEFORE, 3),
+            (ENVELOPE_GOLDEN_V2, 2),
+        ] {
             let document: Value = serde_json::from_str(golden).expect("the golden is JSON");
             own.check(&Reply::SCHEMA, &document)
                 .unwrap_or_else(|failure| {
@@ -2977,7 +3042,12 @@ mod tests {
         let mut stray: Value = serde_json::from_str(ENVELOPE_GOLDEN).expect("the golden is JSON");
         stray["stray"] = json!(true);
         assert!(own.check(&Reply::SCHEMA, &stray).is_err());
-        assert!(profile.check(&at(3), &stray).is_err());
+        assert!(profile.check(&at(4), &stray).is_err());
+        // And the one field version 4 added is a closed word in both.
+        let mut unknown: Value = serde_json::from_str(ENVELOPE_GOLDEN).expect("the golden is JSON");
+        unknown["provenance"] = json!("planner");
+        assert!(own.check(&Reply::SCHEMA, &unknown).is_err());
+        assert!(profile.check(&at(4), &unknown).is_err());
     }
 
     /// An envelope written against the version before this one is still read, and
@@ -2992,10 +3062,25 @@ mod tests {
     /// the one every reader downstream asks about.
     #[test]
     fn an_envelope_at_the_version_before_this_one_is_still_read() {
+        // Version 3, the one immediately before: read at this version, and read as
+        // the manager's, since it carries no provenance.
+        let three: Reply =
+            serde_json::from_str(ENVELOPE_GOLDEN_BEFORE).expect("the version 3 envelope reads");
+        assert_eq!(three.version, Some(REPLY_ENVELOPE_VERSION));
+        assert_eq!(three.provenance, Provenance::Manager);
+        assert!(REPLY_ENVELOPE_VERSIONS_READ.contains(&3));
+        assert!(
+            serde_json::to_value(&three)
+                .expect("it serialises")
+                .get("provenance")
+                .is_none(),
+            "an envelope of the manager's wrote the default back"
+        );
+
         let before: Reply =
-            serde_json::from_str(ENVELOPE_GOLDEN_BEFORE).expect("the older envelope still reads");
-        let declared: Value =
-            serde_json::from_str(ENVELOPE_GOLDEN_BEFORE).expect("the golden is JSON");
+            serde_json::from_str(ENVELOPE_GOLDEN_V2).expect("the older envelope still reads");
+        assert_eq!(before.provenance, Provenance::Manager);
+        let declared: Value = serde_json::from_str(ENVELOPE_GOLDEN_V2).expect("the golden is JSON");
         assert_eq!(
             declared["version"],
             json!(2),
@@ -3116,9 +3201,12 @@ mod tests {
         assert_eq!(read, golden);
         let old = json!({"version": 3, "commands": [{"op": "add", "node": {"id": "plain", "task": "prose"}}]});
         let read: Reply = serde_json::from_value(old.clone()).expect("the old envelope reads");
+        // Read at the version this build reads it at, and otherwise unchanged.
+        let mut at_this_version = old;
+        at_this_version["version"] = json!(REPLY_ENVELOPE_VERSION);
         assert_eq!(
             serde_json::to_value(read).expect("the old envelope writes"),
-            old
+            at_this_version
         );
         let bad = json!({"version": 3, "commands": [{"op": "add", "node": {"id": "bad", "assets_from": "unqualified"}}]});
         assert!(serde_json::from_value::<Reply>(bad).is_err());
@@ -3191,6 +3279,7 @@ mod tests {
                         abandoned: false,
                         asker: None,
                         correlation: None,
+                        declined_ruling: None,
                     },
                     None,
                 )
