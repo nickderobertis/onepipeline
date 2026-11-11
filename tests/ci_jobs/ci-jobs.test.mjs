@@ -245,6 +245,39 @@ describe("the jobs' target lists", () => {
     );
   });
 
+  // Both installs build into the job's one target directory, and cargo locks it for
+  // the build but not for the copy `cargo install` makes of target/release/onepipeline
+  // afterwards: the default branch's build relinked that file under install-smoke's
+  // copy in run 43040157700. Every job that runs the two must plan them in order.
+  for (const job of ["test-linux", "test-windows", "test-macos"]) {
+    it(`plan ${job}'s documented install after the install proof of this revision`, () => {
+      const { status, stdout, stderr } = spawnSync(
+        "bash",
+        [
+          "scripts/nx.sh",
+          "run-many",
+          "-t",
+          listed(job).join(","),
+          "-p",
+          "onepipeline",
+          "--graph=stdout",
+        ],
+        { cwd: root, encoding: "utf8", env: { ...process.env, ONEPIPELINE_NX_SHOW_OUTPUT: "1" } },
+      );
+      assert.equal(status, 0, stderr);
+      const graph = JSON.parse(stdout.slice(stdout.indexOf("{")));
+      assert.ok(
+        graph.tasks.tasks["onepipeline:install-documented"],
+        `${job} plans no install-documented`,
+      );
+      assert.deepEqual(
+        graph.tasks.dependencies["onepipeline:install-documented"],
+        ["onepipeline:install-smoke"],
+        "Nx may copy one install's binary while the other's build relinks it",
+      );
+    });
+  }
+
   it("cover every target `just check-cross` runs, on Windows and macOS alike", () => {
     const justfile = readFileSync(join(root, "justfile"), "utf8");
     const recipes = /^check-cross: (.+)$/m.exec(justfile)[1].split(" ");

@@ -11,6 +11,13 @@
 //! answer is refused as a GraphQL error naming it, so a journey that reaches one fails on what was
 //! asked rather than on a guess.
 //!
+//! A document the plugin batches — several of its own single documents, each aliased `a<i>`, as
+//! `graphql::composed` spells them — is answered alias by alias as each single document would be,
+//! under its alias, and is logged as one [`Request`] per alias: what a journey counts is the
+//! items a copy wrote, however many of them shared a request. As Linear applies such a document,
+//! one alias refused refuses the whole of it, with that alias's error under its `path` and no
+//! `data`, and nothing of any other alias is kept.
+//!
 //! A journey can make the next request of one operation fail the way a hosted Linear fails: a
 //! GraphQL error ([`Fault::Refuse`]), a connection closed with no answer ([`Fault::Drop`]), or an
 //! answer held back until the journey lets it go ([`Fault::Hold`]).
@@ -195,7 +202,8 @@ impl Operation {
     }
 }
 
-/// One request this endpoint was sent, as it arrived.
+/// One request this endpoint was sent, as it arrived — or one alias of a batched document, with
+/// the variables its own single document takes.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub operation: Operation,
@@ -249,7 +257,7 @@ struct Document {
     content: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct World {
     states: Vec<Named>,
     statuses: Vec<Named>,
@@ -613,62 +621,12 @@ impl Linear {
             {
                 return;
             }
-            let operation = Operation::of(query);
-            if matches!(
-                operation,
-                Operation::Issue
-                    | Operation::IssueResolved
-                    | Operation::IssueRelations
-                    | Operation::Project
-                    | Operation::ProjectRelations
-                    | Operation::IssueUpdate
-                    | Operation::ProjectUpdate
-                    | Operation::Document
-                    | Operation::DocumentUpdate
-                    | Operation::IssueRelationDelete
-                    | Operation::IssueDelete
-                    | Operation::ProjectDelete
-                    | Operation::DocumentDelete
-            ) && !variables["id"]
-                .as_str()
-                .is_some_and(|id| !id.trim().is_empty())
-            {
-                return;
-            }
-            let fault = {
-                let mut world = self.lock();
-                world.log.push(Request {
-                    operation,
-                    variables: variables.clone(),
-                });
-                let fault = world
-                    .faults
-                    .get_mut(&operation)
-                    .and_then(VecDeque::pop_front);
-                if matches!(fault, Some(Fault::Hold)) {
-                    world.held = true;
-                }
-                fault
+            let answer = match graphql::decomposed(query) {
+                Some(singles) => self.aliased(&singles, &variables),
+                None => self.single(query, &variables),
             };
-            let answer = match fault {
-                Some(Fault::Drop) => {
-                    self.answer(operation, query, &variables);
-                    return;
-                }
-                Some(Fault::Refuse) => json!({"errors": [{
-                    "message": format!("the loopback refuses this {operation:?}"),
-                    "extensions": {"code": "INVALID_INPUT"}
-                }]}),
-                Some(Fault::Hold) => {
-                    let (lock, changed) = &*self.world;
-                    let mut world = lock.lock().expect("the loopback's state");
-                    while world.held {
-                        world = changed.wait(world).expect("the loopback's state");
-                    }
-                    drop(world);
-                    self.answer(operation, query, &variables)
-                }
-                None => self.answer(operation, query, &variables),
+            let Some(answer) = answer else {
+                return;
             };
             // Linear sends its not-found answer under HTTP 400, and every other answer here
             // under HTTP 200 — an id conflict among them.
@@ -689,6 +647,112 @@ impl Linear {
             if written.and_then(|()| writer.flush()).is_err() {
                 return;
             }
+        }
+    }
+
+    /// What one single document is answered with, or `None` when the connection is to close
+    /// unanswered: a request naming no id where its operation needs one, or a dropped answer.
+    fn single(&self, query: &str, variables: &Value) -> Option<Value> {
+        let operation = Operation::of(query);
+        if !names_its_id(operation, variables) {
+            return None;
+        }
+        self.record(operation, variables);
+        match self.take_fault(operation) {
+            Some(Fault::Drop) => {
+                self.answer(operation, query, variables);
+                None
+            }
+            Some(Fault::Refuse) => Some(refused(operation)),
+            Some(Fault::Hold) => {
+                self.wait_for_release();
+                Some(self.answer(operation, query, variables))
+            }
+            None => Some(self.answer(operation, query, variables)),
+        }
+    }
+
+    /// What a batched document is answered with: each alias as its own single document would be,
+    /// under its alias — or, when one alias is refused, that alias's error alone under its
+    /// `path`, with no `data` and nothing of any alias kept, as Linear applies one. The first
+    /// alias a fault is queued for takes it, and it is the whole request's.
+    fn aliased(&self, singles: &[&'static str], variables: &Value) -> Option<Value> {
+        let each: Vec<(Operation, Value)> = singles
+            .iter()
+            .enumerate()
+            .map(|(at, single)| {
+                (
+                    Operation::of(single),
+                    graphql::alias_variables(variables, at),
+                )
+            })
+            .collect();
+        if !each
+            .iter()
+            .all(|(operation, variables)| names_its_id(*operation, variables))
+        {
+            return None;
+        }
+        // One request takes at most one fault, as a single document does: the first alias whose
+        // operation has one queued.
+        let mut fault = None;
+        for (at, (operation, variables)) in each.iter().enumerate() {
+            self.record(*operation, variables);
+            if fault.is_none() {
+                fault = self.take_fault(*operation).map(|taken| (at, taken));
+            }
+        }
+        match fault {
+            Some((at, Fault::Refuse)) => return Some(at_alias(refused(each[at].0), at)),
+            Some((_, Fault::Hold)) => self.wait_for_release(),
+            Some((_, Fault::Drop)) | None => {}
+        }
+        let before = self.lock().clone();
+        let mut data = Map::new();
+        for (at, ((operation, variables), single)) in each.iter().zip(singles).enumerate() {
+            let answer = self.answer(*operation, single, variables);
+            let Some(root) = answer["data"].as_object() else {
+                self.lock().restore(before);
+                return Some(at_alias(answer, at));
+            };
+            let value = match root.len() {
+                1 => root.values().next().cloned().unwrap_or(Value::Null),
+                _ => Value::Object(root.clone()),
+            };
+            data.insert(format!("a{at}"), value);
+        }
+        match fault {
+            Some((_, Fault::Drop)) => None,
+            _ => Some(json!({"data": data})),
+        }
+    }
+
+    fn record(&self, operation: Operation, variables: &Value) {
+        self.lock().log.push(Request {
+            operation,
+            variables: variables.clone(),
+        });
+    }
+
+    /// A [`Fault::Hold`] taken here sets the one flag every held request waits on, so a single
+    /// [`Linear::release`] lets all of them go.
+    fn take_fault(&self, operation: Operation) -> Option<Fault> {
+        let mut world = self.lock();
+        let fault = world
+            .faults
+            .get_mut(&operation)
+            .and_then(VecDeque::pop_front);
+        if matches!(fault, Some(Fault::Hold)) {
+            world.held = true;
+        }
+        fault
+    }
+
+    fn wait_for_release(&self) {
+        let (lock, changed) = &*self.world;
+        let mut world = lock.lock().expect("the loopback's state");
+        while world.held {
+            world = changed.wait(world).expect("the loopback's state");
         }
     }
 
@@ -1000,6 +1064,20 @@ impl Linear {
 }
 
 impl World {
+    /// Take back every record a refused batch wrote: the records `before` held, and the log,
+    /// the faults and the hold as they stand now, which the refusal does not undo.
+    fn restore(&mut self, before: World) {
+        let log = std::mem::take(&mut self.log);
+        let faults = std::mem::take(&mut self.faults);
+        let held = self.held;
+        *self = World {
+            log,
+            faults,
+            held,
+            ..before
+        };
+    }
+
     /// Whether `id` names the project, once there is one.
     fn holds(&self, id: &str) -> bool {
         self.project_held && id == self.project_id
@@ -1516,6 +1594,46 @@ fn empty_page() -> Value {
 /// plugin's own `*_NOT_FOUND_MESSAGE` for the kind it addressed.
 fn not_found(message: &str) -> Value {
     json!({"errors": [{"message": message}]})
+}
+
+/// Whether a request of `operation` names the non-blank `id` that operation is sent with — every
+/// operation on one record by its id is.
+fn names_its_id(operation: Operation, variables: &Value) -> bool {
+    !matches!(
+        operation,
+        Operation::Issue
+            | Operation::IssueResolved
+            | Operation::IssueRelations
+            | Operation::Project
+            | Operation::ProjectRelations
+            | Operation::IssueUpdate
+            | Operation::ProjectUpdate
+            | Operation::Document
+            | Operation::DocumentUpdate
+            | Operation::IssueRelationDelete
+            | Operation::IssueDelete
+            | Operation::ProjectDelete
+            | Operation::DocumentDelete
+    ) || variables["id"]
+        .as_str()
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
+fn refused(operation: Operation) -> Value {
+    json!({"errors": [{
+        "message": format!("the loopback refuses this {operation:?}"),
+        "extensions": {"code": "INVALID_INPUT"}
+    }]})
+}
+
+/// A single document's errored answer, as Linear answers it at alias `a<at>` of a batch: each
+/// error's `path` starts at that alias, and there is no `data`.
+fn at_alias(mut answer: Value, at: usize) -> Value {
+    let mut errors = answer["errors"].take();
+    for error in errors.as_array_mut().into_iter().flatten() {
+        error["path"] = json!([format!("a{at}")]);
+    }
+    json!({"errors": errors})
 }
 
 fn refusal(message: &str) -> Value {
@@ -2702,33 +2820,7 @@ fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers(
         "Planned",
     );
     let issue = linear.file("work", "description", "Todo");
-    let post = |query: &str, variables: Value| -> (String, Value) {
-        let mut stream =
-            TcpStream::connect(("127.0.0.1", linear.port)).expect("connect to the loopback");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("bounded response read");
-        let body = json!({"query": query, "variables": variables}).to_string();
-        write!(
-            stream,
-            "POST /graphql HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .expect("the request is sent");
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("the request is finished");
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .expect("the loopback answers");
-        let (head, body) = response.split_once("\r\n\r\n").expect("an HTTP response");
-        let status = head.lines().next().expect("a status line").to_owned();
-        (
-            status,
-            serde_json::from_str(body).expect("a GraphQL response"),
-        )
-    };
+    let post = |query: &str, variables: Value| posted(&linear, query, variables);
     for (query, held, missing) in [
         (
             graphql::ISSUE,
@@ -2814,6 +2906,131 @@ fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers(
         "{answer}"
     );
     assert_eq!(linear.project_id(), "project-fresh");
+}
+
+/// One GraphQL request posted to `linear` on a connection of its own: the status line it was
+/// answered under, and the answer.
+fn posted(linear: &Linear, query: &str, variables: Value) -> (String, Value) {
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", linear.port)).expect("connect to the loopback");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("bounded response read");
+    let body = json!({"query": query, "variables": variables}).to_string();
+    write!(
+        stream,
+        "POST /graphql HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .expect("the request is sent");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("the request is finished");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("the loopback answers");
+    let (head, body) = response.split_once("\r\n\r\n").expect("an HTTP response");
+    let status = head.lines().next().expect("a status line").to_owned();
+    (
+        status,
+        serde_json::from_str(body).expect("a GraphQL response"),
+    )
+}
+
+/// A document the linked plugin batches is answered alias by alias, each as its own single
+/// document would be, and logged as one request per alias — and, as Linear applies one, an alias
+/// refused refuses the whole of it under that alias's `path`, keeping nothing of any other; a
+/// fault queued for the next request of an operation is taken once by the whole document.
+#[test]
+fn a_batched_document_is_answered_per_alias_and_refused_whole() {
+    use onetaskgraph_linear::graphql;
+    let linear = Linear::serve(
+        &[("Todo", "unstarted")],
+        &[("Planned", "planned")],
+        "generic",
+        "",
+        "Planned",
+    );
+    let held = linear.file("work", "description", "Todo");
+    let create = |id: &str| {
+        json!({"input": {
+            "id": id, "title": id, "description": "", "stateId": "state-0",
+        }})
+    };
+    let creates = |ids: &[&str]| {
+        posted(
+            &linear,
+            &graphql::aliased(graphql::ISSUE_CREATE, ids.len()),
+            graphql::aliased_variables(&ids.iter().map(|id| create(id)).collect::<Vec<_>>()),
+        )
+    };
+
+    // The second alias names an id a record holds: the whole document is refused at `a1`, and
+    // the first alias, which the loopback had filed, is taken back with it.
+    let (status, answer) = creates(&["issue-fresh-a", held.as_str(), "issue-fresh-b"]);
+    assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+    assert!(answer.get("data").is_none(), "{answer}");
+    assert_eq!(
+        answer["errors"][0]["message"],
+        graphql::ISSUE_ID_CONFLICT_MESSAGE,
+        "{answer}"
+    );
+    assert_eq!(answer["errors"][0]["path"], json!(["a1"]), "{answer}");
+    assert_eq!(linear.issues().len(), 1, "{:#?}", linear.issues());
+
+    // Under ids nothing holds, every alias is filed and answered under its own alias.
+    let logged = linear.log().len();
+    let (status, answer) = creates(&["issue-fresh-a", "issue-fresh-b"]);
+    assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+    for (at, id) in ["issue-fresh-a", "issue-fresh-b"].into_iter().enumerate() {
+        assert_eq!(
+            answer["data"][format!("a{at}")]["issue"]["id"],
+            id,
+            "{answer}"
+        );
+    }
+    assert_eq!(linear.issues().len(), 3, "{:#?}", linear.issues());
+    let sent: Vec<_> = linear.log()[logged..]
+        .iter()
+        .map(|request| (request.operation, request.variables.clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (Operation::IssueCreate, create("issue-fresh-a")),
+            (Operation::IssueCreate, create("issue-fresh-b")),
+        ],
+        "each alias is logged with its own single document's variables"
+    );
+
+    // A batched read of an id nothing holds is Linear's not-found, under that alias's path.
+    let ids = [held.as_str(), "id-nothing-holds"];
+    let (status, answer) = posted(
+        &linear,
+        &graphql::aliased(graphql::ISSUE, ids.len()),
+        graphql::aliased_variables(&ids.map(|id| json!({"id": id}))),
+    );
+    assert_eq!(status, "HTTP/1.1 400 Bad Request", "{answer}");
+    assert_eq!(
+        answer,
+        json!({"errors": [{
+            "message": graphql::ISSUE_NOT_FOUND_MESSAGE,
+            "path": ["a1"],
+        }]})
+    );
+
+    // Two refusals queued for creates: one batched document takes one of them, and the next
+    // request takes the other.
+    linear.fail_next(Operation::IssueCreate, Fault::Refuse);
+    linear.fail_next(Operation::IssueCreate, Fault::Refuse);
+    let (_, answer) = creates(&["issue-fresh-c", "issue-fresh-d"]);
+    assert_eq!(answer["errors"][0]["path"], json!(["a0"]), "{answer}");
+    let (_, answer) = creates(&["issue-fresh-c"]);
+    assert_eq!(answer["errors"][0]["path"], json!(["a0"]), "{answer}");
+    let (_, answer) = creates(&["issue-fresh-c", "issue-fresh-d"]);
+    assert!(answer.get("errors").is_none(), "{answer}");
+    assert_eq!(linear.issues().len(), 5, "{:#?}", linear.issues());
 }
 
 /// The editor state's base64 is the standard padded alphabet: RFC 4648 §10's vectors, plus the
