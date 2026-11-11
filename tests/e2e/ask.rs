@@ -722,8 +722,8 @@ fn a_question_the_bus_refuses_is_answered_refused_at_exit_one() {
         &world,
         "askdeclined",
         &format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: surfaces, kind: command, command: [{validator:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
+             - {{on: surfaces, command: [{validator:?}]}}\n"
         ),
     );
     let reason = "a question this run has no manager to answer";

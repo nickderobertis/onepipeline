@@ -760,7 +760,7 @@ pub struct LaunchConfig {
     ///
     /// Read once, at the launch, and retained in the launch record as the
     /// document it read: its `authors` block narrows what each author may issue,
-    /// its `validators` judge what is offered to the channel's queues, and its
+    /// its `hooks` decide what is offered to the channel's queues, and its
     /// `codecs.onejudge` block sets what the host bus server waits and reads. A
     /// `--bus-config` given inline overrides this.
     ///

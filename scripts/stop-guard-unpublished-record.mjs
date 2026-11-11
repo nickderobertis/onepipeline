@@ -182,7 +182,43 @@ export function readRecord(directory = recordDirectory, sourceRoot = repositoryR
       }
     }
   }
+  const host = record.host;
+  if (host.shape.join(",") !== schema["x-host-shape"].join(","))
+    throw new Error("foreign host-shaped workload");
+  if (host.moved <= 0 || host.landed <= 0)
+    throw new Error("the host-shaped workload was not aged: nothing moved or landed");
+  const declared = Object.keys(host.class_counts).sort().join(",");
+  if (
+    declared !== "acknowledged,in-flight,in-part,landed,owed,unknown" ||
+    Object.values(host.class_counts).some((n) => n <= 0)
+  ) {
+    throw new Error(`the host-shaped workload declares classes ${declared}`);
+  }
+  const reads = host.reads.map((read) => read.read).join(",");
+  if (reads !== schema["x-host-reads"].join(","))
+    throw new Error(`the host-shaped reads are ${reads}`);
+  for (const read of host.reads) {
+    const what = `host-shaped ${read.read}`;
+    if (!digest(read.verdict_sha256)) throw new Error(`${what} carries no verdict`);
+    sample(read.warm, what);
+    if ((read.read === "unpublished-host") !== (read.cold_us !== null))
+      throw new Error(`${what}: only the host listing states its cold first read`);
+    if (read.cold_us !== null && read.cold_us <= 0)
+      throw new Error(`${what}: its cold first read took no time`);
+    if (read.read !== "stop-guard-unreadable" && read.git <= 0)
+      throw new Error(`${what} counted no git`);
+  }
   return record;
+}
+
+/** The host-shaped read a `--host-shaped` budget reports: the named one, or for the
+ *  guard the slowest of its three scenarios. */
+export function hostShaped(record, name) {
+  const reads = record.host.reads.filter((read) =>
+    name === "stop-guard" ? read.read.startsWith("stop-guard-") : read.read === name,
+  );
+  if (reads.length === 0) throw new Error(`no host-shaped read ${name}`);
+  return reads.reduce((worst, read) => (read.warm.median_us > worst.warm.median_us ? read : worst));
 }
 
 /** The slowest scenario of one mode at one scale, and its median in microseconds. */

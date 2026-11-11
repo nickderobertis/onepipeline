@@ -1407,8 +1407,8 @@ fn a_correlated_ruling_the_reply_validator_refuses_leaves_the_question_standing(
     std::fs::write(
         &config,
         format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
-             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
+             - {{on: replies, command: [{validator:?}]}}\n"
         ),
     )
     .expect("the bus configuration is written");

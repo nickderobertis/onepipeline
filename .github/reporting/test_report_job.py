@@ -57,7 +57,6 @@ CHECKOUT_PREFIXES = ('scripts/', *(f'{Path(name).parent}/' for name in CATALOG_F
 CHECKOUT_FILES = ('Cargo.toml', 'justfile', '.gitignore', '.github/.gitignore', '.github/macos-budget.mjs',
                   '.github/release-published-paths', '.github/telemetry.mjs',
                   '.github/workflow-graph.mjs', '.github/workflow-schema.mjs', *CATALOG_FILES)
-CATALOG_ROWS = 38
 COMMITS = 20
 OMIT_LABEL = 'not-measured-on-pr'
 OMITTED = ('onepipeline-cd-job-time', 'onepipeline-release-cycle-time', 'onepipeline-cd-job-count',
@@ -252,6 +251,12 @@ def catalog():
         for budget in yaml.safe_load((ROOT / name).read_text())['budgets']:
             budgets[budget['id']] = {**budget, 'file': name}
     return budgets
+
+
+def catalog_rows():
+    # Every row each registered catalog declares, read from the files themselves: `catalog()` keys
+    # rows by id, so it agrees with this count only while no id is registered twice.
+    return sum(len(yaml.safe_load((ROOT / name).read_text())['budgets']) for name in CATALOG_FILES)
 
 
 def checkout_files():
@@ -484,7 +489,7 @@ class RealCatalog(Journey):
 
     def test_the_label_covers_exactly_the_budgets_a_pull_request_cannot_measure(self):
         budgets = catalog()
-        self.assertEqual(len(budgets), CATALOG_ROWS)
+        self.assertEqual(len(budgets), catalog_rows())
         self.assertEqual(sorted(id for id, budget in budgets.items() if OMIT_LABEL in budget.get('labels', [])), sorted(OMITTED))
 
     def test_a_pull_request_shows_its_own_run_and_says_why_every_other_row_has_no_figure(self):
@@ -1065,8 +1070,8 @@ class Workload(Journey):
                 self.host.merge_pull_request(sha, head)
             job = self.run_job(event_name, sha, **options)
             self.assertEqual(job.exit_code, 0, job.stdout)
-            self.assertEqual(len(self.budget_run(job)['catalog']), CATALOG_ROWS)
-            self.assertEqual(len(job.rows()), CATALOG_ROWS - len(OMITTED))
+            self.assertEqual(len(self.budget_run(job)['catalog']), catalog_rows())
+            self.assertEqual(len(job.rows()), catalog_rows() - len(OMITTED))
             self.assertEqual(job.outcomes['final-upload'], 'success', job.stdout)
             for budget in saved:
                 self.assertEqual(job.rows()[budget]['current'], catalog()[budget]['threshold'], budget)

@@ -1,12 +1,14 @@
-//! A command validator, as an `onemessagebus` configuration's `validators` block
-//! names one.
+//! A command hook that judges and never rewrites: what an `onemessagebus`
+//! configuration's `validators` block named before 0.11.0 removed it, declared now
+//! under `hooks:` with the same `on` and `command`.
 //!
 //! **Not a double for anything in this stack**, for the reason `node-validator`
 //! is not: the promise is that a command the *host* names judges what is offered
-//! to a queue, so what stands here is a real validator. It reads the message off
-//! its stdin the way the bus hands it one — one JSON document, the queue named in
-//! `ONEMESSAGEBUS_VALIDATE_QUEUE` — and answers with an exit status and its own
-//! words on stderr.
+//! to a queue, so what stands here is a real hook. It reads the message off its
+//! stdin the way the bus hands it one — one JSON document, the queue named in
+//! `ONEMESSAGEBUS_HOOK_QUEUE` — and answers with an exit status, its own words on
+//! stderr, and, when it passes, the message printed back unchanged, which the
+//! hook protocol reads as a keep (printing nothing would be a drop).
 //!
 //! It is scripted from the same directory the sibling doubles are:
 //!
@@ -24,7 +26,7 @@ use std::io::Read;
 use onepipeline_testfakes as fake;
 
 /// The variable the bus names the queue a message is offered to in.
-const QUEUE_ENV: &str = "ONEMESSAGEBUS_VALIDATE_QUEUE";
+const QUEUE_ENV: &str = "ONEMESSAGEBUS_HOOK_QUEUE";
 
 fn main() -> std::process::ExitCode {
     let dir = fake::script_dir();
@@ -63,6 +65,10 @@ fn main() -> std::process::ExitCode {
             eprintln!("{}", reason.trim());
             std::process::ExitCode::from(1)
         }
-        Err(_) => std::process::ExitCode::SUCCESS,
+        Err(_) => {
+            // A keep: the message back exactly as it arrived.
+            print!("{offered}");
+            std::process::ExitCode::SUCCESS
+        }
     }
 }

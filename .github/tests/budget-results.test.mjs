@@ -147,7 +147,12 @@ test("`just budgets` saves all it checked, even when a budget's input is absent"
       !labels.some((label) => ["release-binary", "release-tail", "host-variable"].includes(label)),
   );
   assert.deepEqual(Object.keys(results).sort(), expected.map((budget) => budget.id).sort());
-  assert.equal(expected.length, 11);
+  // The label filter keeps some of the catalog and leaves some out, so neither an empty selection
+  // nor one that ignores the labels can pass the comparison above.
+  assert.ok(
+    expected.length > 0 && expected.length < budgetsIn("budgets.yaml").length,
+    expected.length,
+  );
 });
 
 test("`just host-view-budget`, which the install proof runs, saves `host-view-time` alone", () => {

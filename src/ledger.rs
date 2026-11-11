@@ -591,6 +591,14 @@ fn unattributed_launcher() -> String {
 /// checks it, and is refused naming it (`codecs.<name>.select is not a
 /// dot-separated object path`, `codecs.<name>.frames is empty`).
 ///
+/// A key the linked bus **removed** is set aside the same way: `onemessagebus`
+/// 0.11.0 removed `validators`, so a record launched with them is read without
+/// them, and every view reads that run. What the removed key did — judge what
+/// was offered to one of the run's queues — nothing this build runs can do, so
+/// the run's channel refuses an offer to a queue one of them was `on`
+/// ([`removed_validators`](Self::removed_validators)) rather than pass what its
+/// validators would have refused.
+///
 /// What the record said is what it keeps saying: [`Serialize`] writes the
 /// recorded document byte for byte, so a record `adopt` rewrites for its own
 /// fields carries its bus configuration exactly as it was launched.
@@ -598,7 +606,11 @@ fn unattributed_launcher() -> String {
 pub struct RecordedBusConfig {
     recorded: serde_json::Value,
     config: onemessagebus::Config,
+    removed_validators: std::collections::BTreeSet<String>,
 }
+
+/// The key `onemessagebus` 0.11.0 removed from its configuration.
+const REMOVED_VALIDATORS: &str = "validators";
 
 impl RecordedBusConfig {
     /// The configuration this build runs the channel under.
@@ -606,13 +618,25 @@ impl RecordedBusConfig {
     pub fn config(&self) -> &onemessagebus::Config {
         &self.config
     }
+
+    /// The queues the run was launched with `validators` on, which the linked
+    /// bus removed and so cannot run; empty for a run launched without them. An
+    /// entry naming no queue it can be read as being `on` is taken to be on every
+    /// queue, which is what nothing judging it can be said to be safe for.
+    pub(crate) fn removed_validators(&self) -> &std::collections::BTreeSet<String> {
+        &self.removed_validators
+    }
 }
 
 impl From<onemessagebus::Config> for RecordedBusConfig {
     fn from(config: onemessagebus::Config) -> Self {
         let recorded = serde_json::to_value(&config)
             .unwrap_or_else(|_| unreachable!("a bus configuration serializes"));
-        Self { recorded, config }
+        Self {
+            recorded,
+            config,
+            removed_validators: std::collections::BTreeSet::new(),
+        }
     }
 }
 
@@ -644,10 +668,41 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
                 }
             }
         }
+        let removed_validators = completed
+            .as_object_mut()
+            .and_then(|fields| fields.remove(REMOVED_VALIDATORS))
+            .map(|validators| removed_queues(&validators))
+            .unwrap_or_default();
         let config = serde_json::from_value(completed).map_err(serde::de::Error::custom)?;
-        Ok(Self { recorded, config })
+        Ok(Self {
+            recorded,
+            config,
+            removed_validators,
+        })
     }
 }
+
+/// The queues the removed `validators` of a recorded configuration were `on`,
+/// or [`EVERY_QUEUE`] for one that does not say.
+fn removed_queues(validators: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let Some(entries) = validators.as_array() else {
+        return std::iter::once(EVERY_QUEUE.to_owned()).collect();
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("on")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(EVERY_QUEUE)
+                .to_owned()
+        })
+        .collect()
+}
+
+/// What [`RecordedBusConfig::removed_validators`] names for a validator that
+/// does not say which queue it was on.
+pub(crate) const EVERY_QUEUE: &str = "*";
 
 /// Every field the linked bus's codec configuration requires, with the empty
 /// value of the type its JSON Schema gives it — read from that schema, so a field
@@ -5819,7 +5874,12 @@ mod tests {
         assert_eq!(codec.select, "");
         assert!(codec.frames.is_empty());
         assert_eq!(codec.reply_window_seconds.map(NonZeroU64::get), Some(3000));
-        assert_eq!(bus.config().validators.len(), 1);
+        // The `validators` the bus has since removed are set aside, not lost.
+        assert_eq!(
+            bus.removed_validators().iter().collect::<Vec<_>>(),
+            ["replies"]
+        );
+        assert!(recorded["bus_config"]["validators"].is_array());
         assert_eq!(
             serde_json::to_value(&record).expect("the record serializes")["bus_config"],
             recorded["bus_config"],
@@ -5827,10 +5887,38 @@ mod tests {
         );
         // A configuration this build launched is written as the bus writes it.
         let launched = RecordedBusConfig::from(bus.config().clone());
+        assert!(launched.removed_validators().is_empty());
         assert_eq!(
             serde_json::to_value(&launched).expect("it serializes"),
             serde_json::to_value(bus.config()).expect("it serializes")
         );
+    }
+
+    /// Each removed validator is read as being on the queue it names, and one
+    /// that names none — or a `validators` that is no list — as on every queue.
+    #[test]
+    fn the_removed_validators_are_read_as_the_queues_they_were_on() {
+        let (_, recorded) = older_record();
+        let with = |validators: serde_json::Value| {
+            let mut config = recorded["bus_config"].clone();
+            config["validators"] = validators;
+            serde_json::from_value::<RecordedBusConfig>(config)
+                .expect("the configuration is read")
+                .removed_validators()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            with(serde_json::json!([{"on": "commands"}, {"on": "surfaces"}])),
+            ["commands", "surfaces"]
+        );
+        assert_eq!(
+            with(serde_json::json!([{"kind": "command"}])),
+            [EVERY_QUEUE]
+        );
+        assert_eq!(with(serde_json::json!("replies")), [EVERY_QUEUE]);
+        assert!(with(serde_json::json!([])).is_empty());
     }
 
     /// A record whose bus configuration is not one at all is still refused, and

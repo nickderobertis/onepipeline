@@ -2052,6 +2052,13 @@ fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run 
     );
     if validated.code != 0 {
         names_no_node(world, run, &validated.stderr);
+    } else {
+        // A pass is a keep under the bus's hook protocol: the document back, unchanged.
+        assert_eq!(
+            validated.stdout,
+            document.to_string(),
+            "a pass did not print back the document it was handed"
+        );
     }
     validated
 }
@@ -2249,8 +2256,8 @@ fn bussed_run(world: &World, run: &str) -> std::path::PathBuf {
     std::fs::write(
         &config,
         format!(
-            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  - on: replies\n    kind: \
-             command\n    command: [{validator:?}, boundary, validate-envelope, --run, \
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - on: replies\n    command: \
+             [{validator:?}, boundary, validate-envelope, --run, \
              {run}]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
              boundary, validate-envelope, --run, {run}, --fingerprint]\n"
         ),
