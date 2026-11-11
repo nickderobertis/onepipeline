@@ -1118,3 +1118,60 @@ fn a_ruling_applied_with_nothing_driving_is_declined_by_the_reference_it_was_ren
         &json!({"node": "managers", "kind": "amendment", "reply": id, "text": MANAGER_RULING}),
     );
 }
+
+/// A reference resolves only to a ruling the run applied, so each way one can
+/// name nothing declinable is refused, saying which, with nothing appended: a
+/// command that is no note or amendment, an index its envelope does not carry,
+/// a note the run did not apply — withdrawn before any dispatch read it — a
+/// reply the channel does not hold, and a reply that answered no question.
+#[test]
+fn a_reference_naming_nothing_declinable_is_refused_saying_why() {
+    let world = World::new("rulings-unresolved");
+    let run = held(&world, "rulingsunresolved", &["later"]);
+    let finding = reply(
+        &world,
+        &run,
+        &envelope(json!([{"op": "finding", "message": "the fixture moved"}])),
+        false,
+    );
+    let carried = reply(
+        &world,
+        &run,
+        &envelope(json!([{"op": "note", "id": "later", "addressee": "worker",
+            "text": "Read the fixture from v2.", "deliver": "next"}])),
+        false,
+    );
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(
+                json!([{"op": "withdraw-note", "envelope": carried.to_string(),
+                "index": 0, "reason": "the fixture moved back"}]),
+            ),
+        )
+        .exited(0);
+    let verdict = world.run_with_stdin(
+        &["reply", &run],
+        &json!({"completion": false, "message": "carry on"}).to_string(),
+    );
+    verdict.exited(0);
+    let unbound = verdict.json()["reply"].as_u64().expect("the verdict's id");
+    let before = surface_records(&world, &run);
+    for (reference, why) in [
+        (format!("c{finding}.0"), "no note or amendment"),
+        (format!("c{carried}.5"), "carries no such command"),
+        (format!("c{carried}.0"), "did not apply that command"),
+        ("a999".to_owned(), "holds no such reply"),
+        (format!("a{unbound}"), "answers no question about a node"),
+    ] {
+        decline(&world, &run, &reference, "I disagree.")
+            .exited(REFUSED)
+            .err_has(&reference)
+            .err_has(why);
+    }
+    assert_eq!(
+        surface_records(&world, &run),
+        before,
+        "a refused decline appended"
+    );
+}
