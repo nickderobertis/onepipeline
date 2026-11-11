@@ -13380,8 +13380,9 @@ without that key. `status`, `results`, every other view and `adopt` read such a 
 cannot judge an offer the way such a run was launched to judge it, and taking it unjudged
 would let a correction past a bar that never saw it. So, ruled by the manager on this
 workstream's `onepipeline` node, every offer to that run's channel is refused: a reply
-carrying commands, a verdict carrying none, a question `ask` raises, a surface the
-`surface` verb raises (each exiting `2`), and a surface the engine raises, which is
+carrying commands, a verdict carrying none and a surface the `surface` verb raises, each
+exiting `2`; a question `ask` raises, answered `refused` with this reason at exit `1`; and a
+surface the engine raises, which is
 journalled as `planner-surface-dropped` with the reason as `refused` while the run carries
 on. The reason names validators, says this engine no longer runs them, and says what to do:
 
