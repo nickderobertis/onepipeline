@@ -246,54 +246,149 @@ fn a_bus_config_naming_the_removed_validators_is_refused_before_a_run_exists() {
     );
 }
 
-/// A run an older build launched under `validators` — the bus configuration
-/// spliced into its launch record as that build wrote it — is still read by every
-/// view, but a reply offered to its channel is refused naming the removed key and
-/// queued nowhere, rather than appended with nothing judging it as the run was
-/// launched to; and the record keeps the configuration exactly as written.
-#[test]
-fn a_run_launched_under_the_removed_validators_is_read_and_refuses_what_it_cannot_judge() {
-    let world = World::new("bus-config-older-validators");
+/// Launch `run` under a configuration declaring nothing that judges, then splice
+/// `validators` into its launch record's bus configuration as an older build wrote
+/// it: the state a record launched before `onemessagebus` 0.11.0 is in. Answers
+/// the record as written.
+fn launched_under_removed_validators(world: &World, run: &str, validators: &Value) -> String {
     let file = configuration(
-        &world,
-        "onemessagebus.yaml",
+        world,
+        &format!("{run}.yaml"),
         "version: 1\ntransport: {kind: local}\n",
     );
-    let path = plan(&world, "olderjudged");
-    launched(&world, &path, "olderjudged", &["--bus-config", &file]);
-
-    let launch = world.run_file("olderjudged", "launch.json");
+    let path = plan(world, run);
+    launched(world, &path, run, &["--bus-config", &file]);
+    let launch = world.run_file(run, "launch.json");
     let mut record: Value =
         serde_json::from_str(&std::fs::read_to_string(&launch).expect("the launch record"))
             .expect("the launch record is JSON");
-    record["bus_config"]["validators"] = json!([
-        {"on": "replies", "kind": "command", "command": ["scripts/envelope-review.sh"]}
-    ]);
+    record["bus_config"]["validators"] = validators.clone();
     let written = serde_json::to_string_pretty(&record).expect("the record serializes");
     // llmlint: ignore[tests_mirror_real_usage] the state under test is a record an *older* build wrote, under a bus key this build's bus removed, which no interface of this build can produce; everything after it is the user's own verbs, as `older_launch_record.rs` does for a recorded one.
     std::fs::write(&launch, &written).expect("the older record is written");
+    written
+}
 
+/// The words an offer to a queue a removed validator was on is refused in.
+const REMOVED: &str = "`validators`, which onemessagebus 0.11.0 removed";
+
+/// A verdict-only reply.
+const VERDICT: &str = r#"{"completion":false,"reason":"carry on"}"#;
+
+/// `reply` to `run`: refused naming the removal with nothing queued on either of
+/// a reply's queues, or queued.
+fn reply_refused(world: &World, run: &str, refused: bool) {
+    let replied = world.run_with_stdin(&["reply", run], VERDICT);
+    if refused {
+        replied.exited(REFUSED).err_has(REMOVED);
+        for file in ["replies.jsonl", "commands.jsonl"] {
+            assert_eq!(
+                channel_file(world, run, file),
+                "",
+                "a reply nothing could judge reached {file}"
+            );
+        }
+    } else {
+        replied.exited(0);
+        assert!(
+            channel_file(world, run, "replies.jsonl").contains("carry on"),
+            "a reply to a queue no removed validator was on was not queued"
+        );
+    }
+}
+
+/// `surface` a check-in on `run`: refused naming the removal with nothing
+/// queued, or queued.
+fn surface_refused(world: &World, run: &str, refused: bool) {
+    let message = format!("{run} checking in");
+    let surfaced = world.run(&["surface", run, "--kind", "check-in", "--message", &message]);
+    let queued = channel_file(world, run, "surfaces.jsonl").contains(&message);
+    if refused {
+        surfaced.exited(REFUSED).err_has(REMOVED);
+        assert!(!queued, "a surface nothing could judge was queued");
+    } else {
+        surfaced.exited(0);
+        assert!(
+            queued,
+            "a surface to a queue no removed validator was on was not queued"
+        );
+    }
+}
+
+/// A run an older build launched under `validators` is still read by every view,
+/// and its channel refuses an offer to a queue one of them was `on` — naming the
+/// removal and queueing nothing — rather than append it with nothing judging it as
+/// the run was launched to, while an offer to any other queue proceeds; and the
+/// record keeps the configuration exactly as written.
+#[test]
+fn a_run_launched_under_the_removed_validators_is_read_and_refuses_what_it_cannot_judge() {
+    let world = World::new("bus-config-older-validators");
+
+    // On `replies`: a reply is refused, a surface is not.
+    let run = "olderreplies";
+    let written = launched_under_removed_validators(
+        &world,
+        run,
+        &json!([{"on": "replies", "kind": "command", "command": ["scripts/envelope-review.sh"]}]),
+    );
     world
-        .run(&["status", "olderjudged"])
+        .run(&["status", run])
         .exited(0)
         .out_has("slow: running");
-    world
-        .run_with_stdin(
-            &["reply", "olderjudged"],
-            r#"{"completion":false,"reason":"carry on"}"#,
-        )
-        .exited(REFUSED)
-        .err_has("`validators`, which onemessagebus 0.11.0 removed");
+    reply_refused(&world, run, true);
+    surface_refused(&world, run, false);
     assert_eq!(
-        channel_file(&world, "olderjudged", "replies.jsonl"),
-        "",
-        "a reply nothing could judge was queued"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&launch).expect("the record reads"),
+        std::fs::read_to_string(world.run_file(run, "launch.json")).expect("the record reads"),
         written,
         "reading the run rewrote its launch record"
     );
+
+    // On `commands`, where a reply's edits are routed on to: a reply is refused.
+    let run = "oldercommands";
+    launched_under_removed_validators(
+        &world,
+        run,
+        &json!([{"on": "commands", "kind": "command", "command": ["judge"]}]),
+    );
+    reply_refused(&world, run, true);
+    surface_refused(&world, run, false);
+
+    // On `surfaces`: a surface and a question are refused, a reply is not.
+    let run = "oldersurfaces";
+    launched_under_removed_validators(
+        &world,
+        run,
+        &json!([{"on": "surfaces", "kind": "command", "command": ["judge"]}]),
+    );
+    surface_refused(&world, run, true);
+    let asked = world
+        .cmd(&["ask", "which bound?"])
+        .env("ONEPIPELINE_RUN_ID", run)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(1), "{stdout}");
+    let answer: Value = serde_json::from_str(stdout.trim()).expect("the answer is JSON");
+    assert_eq!(answer["answer"], json!("refused"), "{answer}");
+    assert!(
+        answer["reason"]
+            .as_str()
+            .is_some_and(|it| it.contains(REMOVED)),
+        "the refusal does not name the removal: {answer}"
+    );
+    reply_refused(&world, run, false);
+
+    // Naming no queue it can be read as being on: every offer is refused.
+    let run = "oldereverywhere";
+    launched_under_removed_validators(
+        &world,
+        run,
+        &json!([{"kind": "command", "command": ["judge"]}]),
+    );
+    reply_refused(&world, run, true);
+    surface_refused(&world, run, true);
+
     world.release("slow.go");
 }
 
