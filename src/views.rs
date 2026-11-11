@@ -2059,7 +2059,9 @@ impl RunView {
     /// A line in the writers' form whose middle a complete reader refuses, the case
     /// [`read_selected`](crate::journal::read_selected) rules on for a line it
     /// discards, is one whose middle this read never parses unless its kind is folded
-    /// whole: where it is one of the five it is headed and folded by its opening, so
+    /// whole, since knowing the complete reader refuses it would mean parsing the payload
+    /// this read exists not to parse: where it is one of the five it is headed and folded
+    /// by its opening, so
     /// its head and the places after it can differ from the complete read's, and
     /// `fetch` answers [`RecordMoved`](crate::Error::RecordMoved) for its handle.
     ///

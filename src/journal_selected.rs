@@ -261,8 +261,18 @@ const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 // llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a line the
 // selection discards is read for its merge fields, node and artifact emptiness and never
 // parsed, because validating each one cost a 102 MB journal's first screen 731 ms at the
-// median. No skimmed field is trusted for a record returned: every kept line is the complete
-// reader's own parse, which `tests/run_reads.rs` holds against a complete read.
+// median. No skimmed field is trusted for a record `read_selected` returns: every kept line is
+// the complete reader's own parse. The heads read (`src/journal_heads.rs`) does take fields
+// from a line it never parses whole, for the five kinds `HEADED_KINDS` names, and no others:
+// `v`, `ts`, `stream`, `seq`, `source`, `kind`, `phase` and `labels` off this opening, and
+// `evidence` off the artifacts' end, because parsing those kinds' payloads is most of what a
+// large run's first view waited on. A line outside the writers' form, or with an escape in
+// any of those fields, is parsed whole instead. `tests/run_reads.rs`'s
+// `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds
+// every such head equal to the complete read's record for every line the writers produce. A
+// line in the form whose middle a complete reader refuses is still headed by its opening, the
+// one departure the planner ruled for that cost, which
+// `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds.
 pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
