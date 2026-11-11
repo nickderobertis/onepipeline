@@ -501,7 +501,8 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
 /// every later edit to it. What an edit states is held to C6b where the edit is
 /// compiled, and a run's whole graph where it is loaded or adopted.
 pub(crate) fn check_criteria(node: &Node) -> std::result::Result<(), Refusal> {
-    if node.kind == NodeKind::Human {
+    // Neither a human action nor a command is judged: nothing is dispatched for either.
+    if matches!(node.kind, NodeKind::Human | NodeKind::Command) {
         return Ok(());
     }
     if let Some(task) = &node.task {
@@ -629,6 +630,19 @@ pub(crate) fn dispatch_sets(
     Ok(sets)
 }
 
+/// Whether the graph at `reference`, under `sets`, declares `resettable` on any
+/// member's schedule. A graph that cannot be read declares nothing here: reading
+/// it is the launch's own to report.
+pub(crate) fn declares_resettable(reference: &str, sets: &[String]) -> bool {
+    validate_graph_sets(reference, sets, "dag-scope").is_ok_and(|graph| {
+        graph.members.values().any(|member| {
+            member
+                .schedule()
+                .is_some_and(|schedule| schedule.resettable)
+        })
+    })
+}
+
 /// Apply a complete ordered list through oneagentgraph's loader and schema, answering with the
 /// graph it validated.
 pub(crate) fn validate_graph_sets(
@@ -686,7 +700,7 @@ pub(crate) fn validate_dispatch_sets(
 ) -> Result<()> {
     // A dispatch no override list touches is the graph's as shipped, and what is
     // wrong with that is oneagentgraph's to say, in its own words, when it runs.
-    if node.kind == NodeKind::Human
+    if matches!(node.kind, NodeKind::Human | NodeKind::Command)
         || node.expects_no_diff
         || (run_sets.is_empty() && node.sets.is_empty())
     {
@@ -1002,6 +1016,67 @@ pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate
 pub(crate) const RESERVED_REPLY_PERSONA: &str = "`review-reply` is the persona this crate \
      dispatches a review comment's reply drafting under, so a node's own worker cannot run as it";
 
+/// A `kind: command` node's own rules: an argv naming a program, and none of the fields
+/// that only a dispatch, a session or a person reads.
+///
+/// A command runs in the launch directory and settles on its exit status, so a field that
+/// steers an agent (`persona`, `max_turns`, `sets`, `agent_graph`, `executor`, `context`),
+/// opens a session (`repo` and everything a lifecycle node publishes with) or settles
+/// without running (`expects_no_diff`) would be read by nothing — refused by name rather
+/// than quietly ignored. Its `task`, where it has one, is a description nobody is judged
+/// against.
+fn check_command(node: &Node) -> std::result::Result<(), Refusal> {
+    let named = |what: &str| Refusal::node(&node.id, what);
+    if node.id.contains(STEP_SEPARATOR) {
+        return Err(named("a command id cannot contain '/', which addresses a step").field("id"));
+    }
+    // The id names the command's log, `<run>/commands/<id>.log`, so it is one file name on
+    // every host: nothing a path could read as a separator, a drive or a parent.
+    let portable = node
+        .id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !portable || node.id == "." || node.id == ".." {
+        return Err(named(
+            "a command id names its log file, so it is ASCII letters, digits, '.', '_' and \
+             '-' alone, and never '.' or '..'",
+        )
+        .field("id"));
+    }
+    let Some(command) = node
+        .command
+        .as_deref()
+        .filter(|command| !command.is_empty())
+    else {
+        return Err(named("a `kind: command` node needs a `command` to run").field("command"));
+    };
+    if command[0].trim().is_empty() {
+        return Err(named("a `kind: command` node's `command` names no program").field("command"));
+    }
+    let unread = [
+        ("persona", node.persona.is_some()),
+        ("max_turns", node.max_turns.is_some()),
+        ("context", node.context.is_some()),
+        ("executor", node.executor.is_some()),
+        ("agent_graph", node.agent_graph.is_some()),
+        ("repo", node.repo.is_some()),
+        ("steps", node.steps.is_some()),
+        ("resume", node.resume.is_some()),
+        ("expects_no_diff", node.expects_no_diff),
+        ("draft", node.draft),
+        ("branch", node.branch.is_some()),
+        ("base_branch", node.base_branch.is_some()),
+    ];
+    if let Some((field, _)) = unread.iter().find(|(_, carried)| *carried) {
+        return Err(named(&format!(
+            "a `kind: command` node runs its command and dispatches nothing, so `{field}` would \
+             be read by nothing"
+        ))
+        .field(field));
+    }
+    Ok(())
+}
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     check_node(node).map_err(Error::from)
@@ -1015,7 +1090,9 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
             named(&format!("invalid `sets` entry {entry:?}: {why}")).field("sets")
         })?;
     }
-    if !node.sets.is_empty() && (node.kind == NodeKind::Human || node.expects_no_diff) {
+    if !node.sets.is_empty()
+        && (matches!(node.kind, NodeKind::Human | NodeKind::Command) || node.expects_no_diff)
+    {
         return Err(named("`sets` needs an agent dispatch; this node has none").field("sets"));
     }
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
@@ -1031,6 +1108,8 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     if node.publish == crate::plan::Publish::Preserve {
         let keeps_nothing = if node.kind == NodeKind::Human {
             Some("a `kind: human` node")
+        } else if node.kind == NodeKind::Command {
+            Some("a `kind: command` node")
         } else if node.expects_no_diff {
             Some("an `expects_no_diff` node")
         } else if node.repo.is_none() {
@@ -1096,6 +1175,21 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
             ))
             .field("consumes"));
         }
+    }
+
+    if node.kind == NodeKind::Command {
+        return check_command(node);
+    }
+    if node.command.is_some() || node.timeout_seconds.is_some() {
+        return Err(named(
+            "`command` and `timeout_seconds` are a `kind: command` node's, and this node is \
+             not one",
+        )
+        .field(if node.command.is_some() {
+            "command"
+        } else {
+            "timeout_seconds"
+        }));
     }
 
     if node.kind == NodeKind::Human {
@@ -1296,6 +1390,13 @@ fn check_steps(node: &Node, steps: &[Step]) -> std::result::Result<(), Refusal> 
         }
         if !seen.insert(step.id.clone()) {
             return Err(named(format!("duplicate step id '{}'", step.id)));
+        }
+        if step.kind == NodeKind::Command {
+            return Err(named(format!(
+                "step '{}' is `kind: command`, which is a node's kind and never a step's: a \
+                 command runs in the launch directory, not on the node's branch",
+                step.id
+            )));
         }
         if step.kind == NodeKind::Human {
             if step.id.contains(STEP_SEPARATOR) {

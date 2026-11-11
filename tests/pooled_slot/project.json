@@ -54,6 +54,10 @@
       "command": "just _pooled_slot-test",
       "inputs": [
         "pooledSlotSource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _pooled_slot-test _ensure-onetaskgraph --variable pooled-slot-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -67,9 +71,8 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-pooled_slot-*.profraw"
-      ],
-      "cache": false
+        "{workspaceRoot}/target/coverage-units/onepipeline-pooled-slot.lcov"
+      ]
     },
     "test-quick": {
       "command": "just _pooled_slot-test-quick",

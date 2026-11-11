@@ -630,10 +630,12 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes this output-only JSON document’s run and node ids as strings. They borrow the recorded RunPaths and validated graph identities; these DTOs never accept or execute external input. Changing their serialized shape would change that agreed view contract.
 /// The JSON results view's schema version: **2** since an answered comment names the
-/// rework that answered it and the commits its reply links (entry 130), and **3**
-/// since a node names its sessions whose provisioning failed. Each is omitted where
-/// empty, so an older reader reads every newer document's other fields.
-pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 3;
+/// rework that answered it and the commits its reply links (entry 130), **3**
+/// since a node names its sessions whose provisioning failed, and **4** since a settled
+/// node carries its settlement's `detail` — a failed command's exit status and stderr
+/// tail among them. Each is omitted where empty, so an older reader reads every newer
+/// document's other fields.
+pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 4;
 
 /// The JSON results view; comment lists are absent when empty.
 #[derive(Serialize)]
@@ -649,6 +651,9 @@ pub(crate) struct ResultNode<'a> {
     pub(crate) status: crate::graph::NodeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<&'a str>,
+    /// What its standing settlement said beyond its outcome; absent for a node with none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) detail: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) comments: Vec<Comment>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]

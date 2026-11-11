@@ -799,9 +799,9 @@ fn state_comes_from_current_host_replies_and_rework_provenance() {
     let output = world.run(&["results", run, "--json"]);
     assert_eq!(output.code, 0, "{}", output.stderr);
     let results: Value = serde_json::from_str(&output.stdout).unwrap();
-    assert_eq!(results["schema_version"], 3);
+    assert_eq!(results["schema_version"], 4);
     let golden: Value =
-        serde_json::from_str(include_str!("../golden/review-results-v3.json")).unwrap();
+        serde_json::from_str(include_str!("../golden/review-results-v4.json")).unwrap();
     let mut selected = results.clone();
     selected["nodes"]
         .as_array_mut()

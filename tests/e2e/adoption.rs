@@ -7808,3 +7808,56 @@ fn a_node_naming_local_direct_itself_is_held_on_a_change_request_identity() {
     );
     assert_eq!(host.bases(), (base_before, checkout_before));
 }
+
+/// The plan-edit hook is shown a fast consumer's task as its dispatch is given it: the
+/// out-of-repository reference block naming the landed dependency included — and byte for byte
+/// the task that consumer is dispatched with.
+#[test]
+fn the_plan_edit_hook_is_shown_the_reference_block_the_consumers_dispatch_is_given() {
+    let world = watching("adoption-edit-hook");
+    world.write_graphs();
+    let (engine_repo, _consumer) = two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
+    world.releases(&instructed(&script));
+    releases_at(&answer, "0.1.0");
+    // The consumer waits on a gate as well as the engine, so a ruling reaches it after the
+    // engine has landed and before it is dispatched.
+    world.script("gate.wait", "hold");
+    let hook = crate::harness::recording_edit_hook(&world);
+    let mut gated = consumer(Some("fast"));
+    gated["deps"] = json!([ENGINE, "gate"]);
+    let run = start_with(
+        &world,
+        "adoption-edit-hook",
+        vec![engine(), crate::harness::agent("gate", &[]), gated],
+        &["--plan-edit-hook", &hook.display().to_string()],
+    );
+    world.until("the engine to land", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == ENGINE && event["payload"]["status"] == "done")
+    });
+    let ruling = "Build against the engine's public API only.";
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 2, "commands": [
+                {"op": "amend", "id": "consumer", "text": ruling}]})
+            .to_string(),
+        )
+        .exited(0);
+    let body = crate::harness::edit_hook_body(&world, "consumer");
+    assert!(body.contains(CROSS_REPO_REFERENCES_HEADING), "{body}");
+    assert!(body.contains("| engine |"), "{body}");
+
+    world.release("gate.go");
+    world.until("the consumer to be dispatched", |world| {
+        !tasks_of(world, "consumer").is_empty()
+    });
+    assert_eq!(
+        tasks_of(&world, "consumer")[0],
+        body,
+        "the hook was shown a task other than the one the consumer was dispatched with"
+    );
+}

@@ -369,16 +369,15 @@ describe("the offline tier split", () => {
       ),
     ];
     assert.deepEqual(waitedOn.sort(), tiers.sort());
-    // A tier replayed from the cache restores exactly the profiles it wrote, so
-    // the report merges what it would have merged had every tier run.
+    // A tier replayed from the cache restores exactly its report, so the merge
+    // counts what it would have counted had every tier run.
     for (const id of tiers) {
       const [name, target] = id.split(":");
       const outputs = project(name).targets[target].outputs ?? [];
       assert.ok(
         outputs.some(
           (output) =>
-            output.startsWith("{workspaceRoot}/target/llvm-cov-target/") &&
-            output.endsWith(".profraw"),
+            output.startsWith("{workspaceRoot}/target/coverage-units/") && output.endsWith(".lcov"),
         ),
         `${id} declares none of its profiles as outputs: ${JSON.stringify(outputs)}`,
       );
@@ -951,24 +950,22 @@ describe("affected selection over real commits", () => {
 });
 
 describe("coverage execution and quick-tier replay", () => {
-  // Coverage profiles belong to the versioned binary, so every instrumented
-  // tier and the aggregate run again. Quick tiers still replay. Real Nx and
+  // A version-only edit replays every tier that does not read the version; the
+  // aggregate still merges them. Quick tiers replay as they always did. Real Nx and
   // the committed graph run here; the existing just double records invocations
   // and produces the named profile/report files the aggregate consumes.
   const DOUBLE = `#!/usr/bin/env bash
 ${PASS_DUMP_TO_REAL_JUST}echo "$1" >> "$JUST_CALLS"
-tree=target/llvm-cov-target
+tree=target/coverage-units
 case "$1" in
-  _crate-coverage-clean) rm -rf "$tree" ;;
+  _crate-coverage-clean) ;;
   _crate-test-archive | _crate-lint | *-test-quick) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
     tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_-]*\\)\\".*/\\1/p" justfile)"
     [ -n "$tier" ] || { echo "just double: '$1' runs no tier" >&2; exit 1; }
-    name="$(sed -n 's/.*LLVM_PROFILE_FILE_NAME="\\([^"]*\\)".*/\\1/p' justfile)"
-    name="\${name//\\$1/$tier}"; name="\${name//%p/$$}"; name="\${name//%14m/0}"
-    mkdir -p "$tree" && echo profile > "$tree/$name"
-    if [ "$tier" = e2e ]; then
+    mkdir -p "$tree" && echo report > "$tree/$tier.lcov"
+    if [ "$tier" = onepipeline-e2e ]; then
       mkdir -p target/budget-records && echo '{}' > target/budget-records/stacked-spikes-stage.json
     fi
     ;;
@@ -987,7 +984,7 @@ esac
     "_version-package-test",
   ];
 
-  it("reruns every coverage tier and the aggregate after release version edits", (t) => {
+  it("reruns only the version-reading coverage tiers and the aggregate after release version edits", (t) => {
     const repo = scratchRepository(t);
     mkdirSync(join(repo.path, "bin"));
     writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
@@ -1011,23 +1008,21 @@ esac
       };
     };
     const tiersIn = (merged) =>
-      merged
-        .map((profile) => profile.match(/^onepipeline-([a-z0-9_-]+)-[0-9]+-[0-9]+\.profraw$/)?.[1])
-        .sort();
+      merged.map((report) => report.match(/^(onepipeline-[a-z0-9_-]+)\.lcov$/)?.[1]).sort();
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
     assert.deepEqual(tiersIn(cold.merged), [
-      "codex_server",
-      "contract",
-      "e2e",
-      "narrow_write",
-      "note",
-      "pooled_slot",
-      "rest",
-      "version-contract",
-      "version-e2e",
-      "version-package",
+      "onepipeline-codex-server",
+      "onepipeline-contract",
+      "onepipeline-e2e",
+      "onepipeline-narrow-write",
+      "onepipeline-note-journeys",
+      "onepipeline-pooled-slot",
+      "onepipeline-rest",
+      "onepipeline-version-contract",
+      "onepipeline-version-e2e",
+      "onepipeline-version-package",
     ]);
 
     rmSync(join(repo.path, "target", "budget-records"), { recursive: true, force: true });
@@ -1045,25 +1040,24 @@ esac
         `name = "onepipeline"\nversion = "${next}"`,
       ),
     );
-    repo.change("Cargo.toml");
     const warm = aggregate();
     assert.deepEqual(
       warm.ran.filter((recipe) => TIER_RECIPES.includes(recipe)).sort(),
-      [...TIER_RECIPES].sort(),
-      `every instrumented tier must rerun: ${warm.ran.join(" ")}`,
+      ["_version-contract-test", "_version-e2e-test", "_version-package-test"],
+      `only the tiers that read the version may rerun: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
     assert.deepEqual(tiersIn(warm.merged), [
-      "codex_server",
-      "contract",
-      "e2e",
-      "narrow_write",
-      "note",
-      "pooled_slot",
-      "rest",
-      "version-contract",
-      "version-e2e",
-      "version-package",
+      "onepipeline-codex-server",
+      "onepipeline-contract",
+      "onepipeline-e2e",
+      "onepipeline-narrow-write",
+      "onepipeline-note-journeys",
+      "onepipeline-pooled-slot",
+      "onepipeline-rest",
+      "onepipeline-version-contract",
+      "onepipeline-version-e2e",
+      "onepipeline-version-package",
     ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),

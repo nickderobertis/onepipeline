@@ -861,18 +861,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             print!("{}", verbs::render_telemetry(&measured, args.breakdown)?);
             Ok(EXIT_SUCCESS)
         }
-        Verb::Drive(args) => agentgraph::drive(
-            &args.graph,
-            &args.task,
-            &args.dir,
-            &args.labels,
-            &args.sets,
-            args.event_filter.as_deref(),
-            match args.await_ending {
-                true => agentgraph::Ending::Recorded,
-                false => agentgraph::Ending::Announced,
-            },
-        ),
+        Verb::Drive(args) => agentgraph::drive(&args),
     }
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
 }
@@ -1634,6 +1623,20 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
 
+    // The checks this launch registered — the config's, then each `--check` — offered the
+    // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
+    // and before any run exists: a refusal, or a check that could not be run, refuses the
+    // launch with the report `plan check` prints and mints nothing. `adopt` runs none.
+    let mut registered: Vec<crate::plancheck::Registered> = declared
+        .checks
+        .iter()
+        .map(crate::plancheck::Registered::argv)
+        .collect();
+    for path in &args.checks {
+        registered.push(crate::plancheck::Registered::path(path)?);
+    }
+    crate::plancheck::launch(&read, &args.project, &registered)?;
+
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -1679,6 +1682,18 @@ fn start(args: &StartArgs) -> Result<i32> {
         .dispatch_env_hook_timeout
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
+    // The plan-edit hook, by two rungs: the flag names one executable at the default
+    // timeout and replaces the config's hook entirely. Made absolute against the launch
+    // directory, so every driver that adopts the run — from wherever it was started —
+    // offers edits to the executable this launch named. The config's argv is kept as the
+    // document wrote it, and is run from the launch directory.
+    let plan_edit_hook = match &args.plan_edit_hook {
+        Some(path) => Some(crate::filter::PlanEditHook::new(
+            vec![launch_dir.join(path).display().to_string()],
+            crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
+        )?),
+        None => declared.plan_edit_hook.clone(),
+    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     let launched = |read: &crate::taskgraph::Read,
                     continuation: &crate::continuation::Continuation|
@@ -1875,7 +1890,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         host: String::new(),
         started: String::new(),
         started_at: sys::now_rfc3339(),
-        heartbeat_interval: args.heartbeat_interval,
+        // Retired: nothing paced by it, and a new launch records none.
+        heartbeat_interval: 0,
         writeback_item_budget: writeback_item_budget.get(),
         // The timeout only beside a hook it bounds, so a launch naming none
         // writes the record it always wrote.
@@ -1916,6 +1932,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        plan_edit_hook,
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
         public_id: public.id.into_string(),
@@ -2018,7 +2035,6 @@ fn start(args: &StartArgs) -> Result<i32> {
             // infer which directory a run's members worked in from the process
             // that happened to launch them.
             ("dir", json!(launch_dir)),
-            ("heartbeat_interval", json!(args.heartbeat_interval)),
             (journal::OWED_UNTIL_CLOSED, json!(true)),
         ]),
     )?;
@@ -2073,6 +2089,8 @@ fn start(args: &StartArgs) -> Result<i32> {
             }
         );
     }
+
+    warn_of_deprecated_reset(&record);
 
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
@@ -2132,6 +2150,24 @@ fn plural(count: usize, what: &str) -> String {
     match count {
         1 => format!("1 {what}"),
         _ => format!("{count} {what}s"),
+    }
+}
+
+/// Tell the operator this launch's observer graph leans on the deprecated reset.
+///
+/// One line whichever member and however many declare it: the warning is about
+/// what the engine does on `next`, which is one thing. Read leniently, because a
+/// graph that cannot be read is the observer's launch to report.
+fn warn_of_deprecated_reset(record: &LaunchRecord) {
+    let Some(graph) = record.observer_graph() else {
+        return;
+    };
+    if graph::declares_resettable(graph, &record.dag_sets) {
+        eprintln!(
+            "onepipeline: warning: this run's observer graph declares `resettable`: the engine's \
+             automatic clock reset on `next` is deprecated and will be removed — declare \
+             `reset_on` on the schedule instead"
+        );
     }
 }
 
@@ -2926,6 +2962,8 @@ fn launch_graph(
             launched: crate::agents::Launched::Observer,
         },
     )?);
+    let journal_to_follow = std::path::absolute(paths.journal())
+        .map_err(|error| Error::Invalid(format!("the run's journal has no path: {error}")))?;
     let mut launched = agentgraph::GraphRun::start(&agentgraph::Launch {
         graph: &record.graph,
         task: &task,
@@ -2942,6 +2980,11 @@ fn launch_graph(
         // launch is what does not relay, rather than this process reading the
         // firehose and dropping most of it.
         filter: record.filters.agentgraph.as_ref(),
+        // The run's own journal, at every launch, restart and adoption: what lets
+        // a clock's own `reset_on` restart on this engine's records with no signal
+        // from here. Absolute because the graph may run from another directory
+        // than the one `ONEPIPELINE_RUNS_DIR` was named relative to.
+        follow_events: Some(&journal_to_follow),
         output,
         // Nothing here waits for the terminal envelope: a launcher is the one
         // caller that never waits for what it started, and what a driver asks
@@ -3319,7 +3362,8 @@ pub(crate) fn adopt_detached(
     retain: &crate::verbs::Retain,
     budget: Option<u64>,
 ) -> Result<u32> {
-    validate_and_displace_for_adoption(paths)?;
+    let (record, _) = validate_and_displace_for_adoption(paths)?;
+    warn_of_deprecated_reset(&record);
     if let Some(budget) = budget {
         let _lock = engine::claim(paths)?;
         let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
@@ -3344,6 +3388,7 @@ pub(crate) fn adopt_attached(
     said: &mut dyn FnMut(Settlement),
 ) -> Result<Settlement> {
     let (mut record, view) = validate_and_displace_for_adoption(paths)?;
+    warn_of_deprecated_reset(&record);
 
     // And the lock decides, before anything is written: an adoption that
     // recorded itself and *then* lost the race would leave the record naming
@@ -4684,6 +4729,9 @@ pub(crate) fn submit_offered(
             // `edits::compile` can raise, but a note's own validation is not one
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
+            // The run as the envelope would leave it, for the plan-edit hook below: each
+            // validated command folded on as the reconciler's own validation folds it.
+            let mut staged_state = view.state.clone();
             for command in &envelope.commands {
                 let step = match validate_here(
                     paths,
@@ -4709,7 +4757,36 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
+                crate::projection::fold_operations(
+                    &mut staged_state,
+                    &step.staged(),
+                    Some(sys::now_millis()),
+                );
                 staged.push(step);
+            }
+            // Every node the envelope introduces or changes, offered to the plan-edit hook
+            // the run's launch named, with the task its next dispatch would be given — this
+            // process being the run's writer, from the inputs a driver starting on the run
+            // composes it from — before anything of the envelope is applied or journalled as
+            // an edit. A refusal turns the whole envelope away, journalled `edit-rejected`.
+            if let Err((index, error)) = crate::planedit::judge(
+                paths,
+                &view.launch,
+                &envelope.commands,
+                &staged_state.graph,
+                &mut |node| crate::composition::of_a_fresh_driver(paths, &staged_state, node),
+            ) {
+                engine::record_rejection(
+                    paths,
+                    &mut journal,
+                    envelope.author.clone(),
+                    &envelope.commands[index],
+                    &error,
+                    // Never queued, so no envelope id names it.
+                    None,
+                )?;
+                lock.release();
+                return Err(error);
             }
             // Then deliver, which is the first thing here that reaches outside
             // the run. Nothing is driving it, so nothing of it is in flight — the
@@ -5488,6 +5565,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),

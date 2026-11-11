@@ -1308,7 +1308,11 @@ pub(crate) fn check_plan(
     for node in &read.plan.tasks {
         // A node with steps carries no task of its own to be a rendering: its steps' tasks
         // are what is dispatched, and C6b has already held each of them.
-        if node.kind == crate::plan::NodeKind::Human || node.steps.is_some() {
+        if matches!(
+            node.kind,
+            crate::plan::NodeKind::Human | crate::plan::NodeKind::Command
+        ) || node.steps.is_some()
+        {
             continue;
         }
         let checkout = || match &node.repo {

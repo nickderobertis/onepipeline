@@ -936,16 +936,10 @@ pub struct LaunchRecord {
     /// age it accordingly.
     #[serde(default)]
     pub started_at: String,
-    /// The check-in interval, in seconds, or `0` on a record that names none.
-    ///
-    /// Read through [`pacemaker_interval`](Self::pacemaker_interval), which is
-    /// where `0` becomes "the record does not say" again: the shipped default,
-    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`], or no check-in at all —
-    /// and never a zero-second one. A check-in that fires continuously is worse
-    /// than a run with none: it buries every real surface under its own.
-    ///
-    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
-    #[serde(default)]
+    /// The retired `--heartbeat-interval` an earlier engine recorded, or `0` on a
+    /// record that names none, which every launch now is. Nothing reads it; it
+    /// stays so a run already on disk reads and round-trips as it was written.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub heartbeat_interval: u64,
     /// The write-back's per-item budget, in seconds, or `0` on a record that
     /// names none.
@@ -1087,6 +1081,16 @@ pub struct LaunchRecord {
     /// field existed reads as. Omitted when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_rendered: bool,
+    /// The hook every node a live edit introduces or changes is offered to, when
+    /// the launch named one.
+    ///
+    /// **Resolved once, at the launch**, out of `--plan-edit-hook` and the launch
+    /// config's `plan_edit_hook` in that order, and replayed by every driver that
+    /// adopts the run — `adopt` takes none of its own. Absent is what a record
+    /// written before this field existed reads as, which is a run whose edits
+    /// are offered to no hook. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_edit_hook: Option<crate::filter::PlanEditHook>,
     /// The run's oneharness pointer file — every harness run under every
     /// launch this run starts appends one line to it saying where its session
     /// went — absolute, as the engine names it to each launch.
@@ -1282,20 +1286,6 @@ impl LaunchRecord {
     /// no caller invents a date for a record that carries none.
     pub fn launched_at(&self) -> Option<&str> {
         (!self.started_at.is_empty()).then_some(self.started_at.as_str())
-    }
-
-    /// The check-in interval this launch recorded, when it recorded one.
-    ///
-    /// `None` for the `0` a record carrying no interval defaults to, and a
-    /// caller that must pace something takes the shipped default —
-    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`] — or paces nothing. **Never
-    /// `Some(0)`**: a zero-second check-in fires continuously, and a run whose
-    /// every surface is its own check-in's is worse off than a run with no
-    /// check-in at all.
-    ///
-    /// [`cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS`]: crate::cli::DEFAULT_HEARTBEAT_INTERVAL_SECONDS
-    pub fn pacemaker_interval(&self) -> Option<u64> {
-        (self.heartbeat_interval > 0).then_some(self.heartbeat_interval)
     }
 
     /// The write-back's per-item budget this launch recorded, in seconds, when
@@ -3795,6 +3785,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -3963,16 +3954,6 @@ mod tests {
                 }
                 "heartbeat_interval" => {
                     assert_eq!(read.heartbeat_interval, 0);
-                    assert_eq!(
-                        read.pacemaker_interval(),
-                        None,
-                        "a record naming no interval produced a check-in interval"
-                    );
-                    assert_ne!(
-                        read.pacemaker_interval(),
-                        Some(0),
-                        "a zero-second check-in was served as an interval"
-                    );
                 }
                 "writeback_item_budget" => {
                     assert_eq!(read.writeback_item_budget, 0);
@@ -4043,7 +4024,6 @@ mod tests {
         assert_eq!(oldest.driver_pid(), None);
         assert_eq!(oldest.recorded_host(), None);
         assert_eq!(oldest.launched_at(), None);
-        assert_eq!(oldest.pacemaker_interval(), None);
         assert_eq!(oldest.item_budget(), None);
         // What it does say, it still says — the run it names most of all, since
         // a row a reader cannot key is a row that reaches nobody.
@@ -4066,7 +4046,7 @@ mod tests {
         assert_eq!(whole.driver_pid(), NonZeroU32::new(1));
         assert_eq!(whole.recorded_host(), Some("h"));
         assert!(whole.launched_at().is_some());
-        assert_eq!(whole.pacemaker_interval(), Some(1_800));
+        assert_eq!(whole.heartbeat_interval, 1_800);
         assert_eq!(whole.item_budget(), NonZeroU64::new(10));
     }
 
@@ -4743,6 +4723,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -4793,6 +4774,7 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
+            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),

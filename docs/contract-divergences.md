@@ -3987,9 +3987,7 @@ each change is argued:
   value mean both the shortest wait there is and the longest.
 - `--tick-interval SECONDS` (default 30) is how long a silence may last before
   the stream says it is still there. `0` turns the heartbeat off. Deliberately
-  **not** `--heartbeat-interval`: that flag is `start`'s and sets the pacemaker
-  agent's cadence. The two are different clocks on different verbs, and clap
-  refuses each on the other.
+  **not** `--heartbeat-interval`, which `start` no longer takes either (entry 151).
 - `--cursor CURSOR` resumes from what an earlier watch printed.
 - `--until CONDITION` names what the wait returns on, and is **repeatable**: the
   wait returns on the first of them to fire and the return record says which one
@@ -13247,3 +13245,99 @@ logs; the envelope and the filter grammar are 0.9.5's.
 
 **Ruling:** the planner ruled the new kind and this re-decision (correlation
 `c-8ec31cb727186aa1d2ce82367746f747`).
+
+## 150. The engine's built-in clock reset on `next` is deprecated, and every observer graph follows its run's journal — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, which is committed verbatim and
+still calls the reset on `next` the check-in reset contract.** `oneagentgraph` 0.10.0's
+`reset_on` restarts a clock on what a graph declares, against the stream it follows, and
+every observer graph the engine launches, restarts or adopts now follows
+`<runs>/<run>/events.jsonl`: `run::Request::follow_events` in the linked library and at
+the hidden `drive` verb's `--follow-events`, and `run --follow-events` at
+`ONEPIPELINE_ONEAGENTGRAPH_BIN`. The engine names no member and signals nothing for it.
+
+`next` still sends the bare per-member reset after journaling `planner-surfaced`, which
+the linked `oneagentgraph` honours only on a schedule declaring `resettable` and never on
+a scheduled note's clock. Where the launched observer graph declares `resettable: true`
+on any member's schedule, `start` and `adopt` each print one standard-error line saying
+the automatic reset on `next` is deprecated and will be removed, naming `reset_on`; a
+graph declaring none prints nothing.
+
+`tests/e2e/observer_follow.rs` holds both halves over all three launch paths, an observer
+restart and an adoption.
+
+## 151. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, whose driver invocation still
+names the flag.** It was recorded from the engine's first implementation and never paced
+anything. `start` no longer accepts it, and clap's unknown-argument error is the whole
+refusal. A new launch writes no `heartbeat_interval` into `launch.json` or the
+`run-started` payload; readers keep accepting the field where an earlier engine wrote it,
+so runs already on disk are still viewed and adopted, and a record is rewritten with the
+value it carried. `tests/contract.rs` holds the rest of the documented invocation and the
+flag's refusal.
+
+The `run-started` schema stops requiring the field, so the events bundle moves to a new
+major: a stream this build writes is one a validator pinned at the previous bundle refuses,
+which is the rule `EVENTS_BUNDLE_VERSION` states.
+
+```json
+{
+  "bundle_versions": {"events": "2.0.0"}
+}
+```
+
+## 152. Command steps, launch checks and the plan-edit hook — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the ruling for node `op-generic-primitives`.** The ruling states the three
+primitives; the amendments under *Command steps*, *Registered checks at launch* and *A
+plan-edit hook on live edits* restate it with these decisions made:
+
+- **A command node records `running` with `command-started`, never `node-dispatched`.** It
+  dispatches no agent, so a reader counting dispatches counts none for it. An adopting
+  driver drops it from `running` exactly as it drops an abandoned dispatch, which is what
+  runs the command again from the start.
+- **`results --json` moves to `schema_version` 4** so that a failed command's exit status
+  and stderr tail are readable there: every settled node carries its standing
+  settlement's `detail`, omitted where there is none, read as `status --json` reads it.
+- **A cancelled command settles `cancelled`**, its process tree stopped, where a `cancel`,
+  `drop` or `retry` reaches it while it runs.
+- **The fields a command node never reads are refused by name** rather than ignored —
+  `persona`, `max_turns`, `context`, `executor`, `agent_graph`, `repo`, `steps`, `resume`,
+  `expects_no_diff`, `draft`, `branch`, `base_branch`, `sets`, `publish: "preserve"` — and a
+  step of `kind: command` is refused, since a command runs in the launch directory rather
+  than on a node's branch.
+- **A config check's `source` is its argv joined by one space**; a `--check` keeps the path
+  as given, as `plan check` does. A config argv runs as written from the launch directory;
+  `--check <PATH>` and `--plan-edit-hook <PATH>` each name one executable, the hook's at the
+  default 600 seconds and replacing the config's hook entirely (the manager's ruling,
+  relayed while this was built).
+- **The hook runs where the edit is applied, and is shown exactly the task the node's next
+  dispatch is given** — *ruled by the manager while this was built, so not a divergence of
+  this build's own:* the hook runs in the live driver's validation of the envelope, after the
+  engine's own checks and before any command of it is applied or journalled as an edit, or in
+  the replying process's own apply phase when nothing drives the run. "Before anything is
+  appended or applied" is read as appended to the run's journal. The body is composed by the
+  one function the dispatch is composed by (`src/composition.rs`), from the inputs that
+  process dispatches from: the out-of-repository reference block, the stack the node is
+  drafted on, the notes an attempt waiting to resume carries, and the mixed plan's boundary
+  section; for a node of `steps`, the step its next dispatch is. Only what a session itself
+  reports on its first turn — a provisioning failure, a merge left in progress — is added
+  after the session opens and is not in it. The one visible consequence, also ruled: a hook
+  slower than the reply's own wait leaves the reply answering *queued*, and its refusal then
+  arrives as the journalled `edit-rejected` naming the hook and the node. An envelope a host
+  bus writes to the queue directly is judged by the hook as one sent through `reply` is.
+  Journeys in `tests/e2e/publication_boundary.rs`, `adoption.rs`, `stacked_drafts.rs`,
+  `lifecycle.rs` and `plan_edit_hook.rs` hold each addition byte for byte against the task
+  the node is then dispatched with.
+
+Two journal kinds are added, so the events bundle moves to a new minor: a stream an
+earlier build wrote still validates, and one this build writes carries kinds a validator
+pinned at the previous bundle has no document for.
+
+```json
+{
+  "bundle_versions": {"events": "2.1.0"}
+}
+```

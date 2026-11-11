@@ -21,10 +21,10 @@ use onepipeline::channel::{
 };
 use onepipeline::cli::{
     Cli, Command, DAG_GRAPH_OFF, DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS,
-    DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_HOOK_TIMEOUT_SECONDS,
-    DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS, WRITEBACK_CLASSIFIED_COMMANDS,
-    WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV, WRITEBACK_MEMBER_READ,
-    WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES,
+    DEFAULT_HOOK_TIMEOUT_SECONDS, DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS,
+    WRITEBACK_CLASSIFIED_COMMANDS, WRITEBACK_COMMAND_FLOOR_SECONDS, WRITEBACK_ITEM_BUDGET_ENV,
+    WRITEBACK_MEMBER_READ, WRITEBACK_PROJECTIONS_FILE, WRITEBACK_REFUSED_CLASS,
+    WRITEBACK_TARGETED_WRITES,
 };
 use onepipeline::controls::NodeControls;
 use onepipeline::error::{
@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("146.")["bundle_versions"]["events"],
+        divergence_block("152.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1802,6 +1802,8 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         }),
         id: "n".into(),
         kind: NodeKind::Human,
+        command: Some(vec!["./scripts/step.sh".into()]),
+        timeout_seconds: std::num::NonZeroU64::new(600),
         task: Some("t".into()),
         persona: Some("engineer".into()),
         deps: vec!["other".into()],
@@ -6803,7 +6805,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 69, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 71, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -7230,8 +7232,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         "graphs/dag-scope.yaml",
         "--pr-author-graph",
         "graphs/pr-author.yaml",
-        "--heartbeat-interval",
-        "1800",
         "--set",
         "members.monitor.agent.model=dag one",
         "--set=members.check-in.model=dag=two",
@@ -7252,7 +7252,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         args.pr_author_graph.as_deref(),
         Some("graphs/pr-author.yaml")
     );
-    assert_eq!(args.heartbeat_interval, 1_800);
     assert!(args.acknowledge_concurrent);
     assert_eq!(
         args.dag_sets,
@@ -7269,8 +7268,18 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         ]
     );
 
-    // The document's numbers and its default are this crate's.
-    assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 1_800);
+    // The one form the document names that `start` no longer takes: divergence 151.
+    assert!(
+        Cli::try_parse_from([
+            "onepipeline",
+            "start",
+            "plans:demo",
+            "--heartbeat-interval",
+            "1800"
+        ])
+        .is_err(),
+        "`start` took the flag divergence 151 records as removed"
+    );
     assert!(
         CONTRACT.contains("`--dag-graph` defaults to `off`"),
         "the contract no longer states the shipped default"
@@ -7287,7 +7296,6 @@ fn the_driver_contracts_invocation_parses_exactly_as_written() {
         args.pr_author_graph, None,
         "a change request is drafted by no graph unless one is asked for"
     );
-    assert_eq!(args.heartbeat_interval, DEFAULT_HEARTBEAT_INTERVAL_SECONDS);
 }
 
 /// The verbs an agent used to drive the engine with, which no longer exist.
@@ -7520,8 +7528,8 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
         "the contract makes the check-in resettable"
     );
     assert_eq!(
-        schedule.every, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-        "its period is the driver's default heartbeat interval"
+        schedule.every, 1_800,
+        "its period is the half hour the shipped graph declares"
     );
 }
 
@@ -8994,16 +9002,6 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         .filter_map(|span| span.split_whitespace().next())
         .filter_map(|word| word.strip_prefix("--"))
     {
-        // The one flag the passage names that this verb must not take: it is
-        // `start`'s pacemaker cadence, and the sentence saying the two are
-        // different clocks is the point of naming it.
-        if mentioned == "heartbeat-interval" {
-            assert!(
-                !offered.contains(mentioned),
-                "`watch` took `start`'s pacemaker flag, which the README says it refuses"
-            );
-            continue;
-        }
         assert!(
             offered.contains(mentioned),
             "the README's watch passage names `--{mentioned}`, which the verb does not take"
@@ -11366,8 +11364,8 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
         serde_json::from_value::<onepipeline::vocabulary::Significance>(word.clone())
             .unwrap_or_else(|why| panic!("{kind}'s word {word} is not onevcs's: {why}"));
     }
-    // The bundle that first carried the landings; entries 127, 128 and 130 raised
-    // it since, so the compiled-in bundle is that one or a later minor.
+    // The bundle that first carried the landings; later entries raised it, and
+    // entry 151 raised its major, so the compiled-in bundle is that one or later.
     let release = |text: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = text
             .split('.')
@@ -11382,10 +11380,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
     );
     let compiled = release(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION);
     assert_eq!(carried, (1, 4, 0));
-    assert!(
-        carried.0 == compiled.0 && carried <= compiled,
-        "{compiled:?}"
-    );
+    assert!(carried <= compiled, "{compiled:?}");
 }
 
 /// Entry 130's reply surface is this build's own: the flag is `start`'s and the key
@@ -11418,10 +11413,15 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             == Some(flag)),
         "`start` takes no {flag}"
     );
-    assert_eq!(
-        block["launch"]["config_schema_version"],
-        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
-    );
+    // The version that added the key, which later versions go on reading.
+    let added = block["launch"]["config_schema_version"]
+        .as_u64()
+        .expect("the version the key arrived at");
+    assert_eq!(added, 13);
+    assert!(onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
+        .iter()
+        .any(|read| u64::from(*read) == added));
+    assert!(u64::from(LAUNCH_CONFIG_SCHEMA_VERSION) >= added);
     let key = block["launch"]["config_key"].as_str().expect("the key");
     assert_eq!(block["launch"]["launch_record_key"], key);
     let named = LaunchConfig {
@@ -12701,4 +12701,108 @@ fn the_provisioning_failure_names_are_what_the_contract_documents() {
         .parse()
         .expect("the kind is a valid word");
     assert_eq!(kind.as_str(), "provisioning-failed");
+}
+
+/// The three generic primitives, as the contract's `generic_primitives` block states them,
+/// driven through the public types: a command node reads and round-trips and its fields are
+/// the reserved keys the block names (the loader's rules over it are `plan check`'s, held by
+/// `tests/e2e/command_step.rs`), a schema-14 launch config carrying both keys reads and an earlier
+/// one carrying them is refused by name, the flags are `start`'s, the journal kinds are in
+/// the closed set, and the published versions are the ones this build writes.
+#[test]
+fn the_generic_primitives_block_is_what_this_build_reads() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "generic_primitives"))
+        .expect("the block is JSON");
+    let block = &block["generic_primitives"];
+
+    let node: Node =
+        serde_json::from_value(block["command_node"].clone()).expect("a command node reads");
+    assert_eq!(node.kind, NodeKind::Command);
+    assert_eq!(
+        node.command.as_deref(),
+        Some(
+            [
+                "./scripts/publish-notes.sh".to_owned(),
+                "--quiet".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(node.timeout_seconds, NonZeroU64::new(300));
+    let written = serde_json::to_value(&node).expect("a node writes");
+    assert_eq!(
+        written, block["command_node"],
+        "a command node does not round-trip"
+    );
+    for key in block["metadata_keys"].as_array().expect("the keys") {
+        let field = key
+            .as_str()
+            .and_then(|key| key.strip_prefix("onepipeline."))
+            .expect("a reserved key");
+        assert!(
+            written.get(field).is_some(),
+            "`{field}` is not a node field"
+        );
+    }
+
+    let dir = std::env::temp_dir().join(format!("generic-primitives-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let path = dir.join("launch.json");
+    std::fs::write(&path, block["launch_config"].to_string()).expect("written");
+    let config = LaunchConfig::load(&path).expect("a schema-14 launch config reads");
+    assert_eq!(
+        block["launch_config"]["schema_version"],
+        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
+    );
+    assert_eq!(config.checks.len(), 2);
+    assert_eq!(config.checks[1].program(), "python3");
+    assert_eq!(config.checks[1].arguments(), ["./scripts/check-budget.py"]);
+    assert!(onepipeline::filter::Argv::new(Vec::new()).is_err());
+    let hook = config.plan_edit_hook.expect("the hook is named");
+    assert_eq!(hook.program(), "./scripts/judge-edit.sh");
+    assert!(hook.arguments().is_empty());
+    assert_eq!(hook.timeout_seconds().get(), 120);
+    assert!(onepipeline::filter::PlanEditHook::new(Vec::new(), hook.timeout_seconds()).is_err());
+    assert!(
+        onepipeline::filter::PlanEditHook::new(vec![" ".into()], hook.timeout_seconds()).is_err()
+    );
+    assert_eq!(
+        block["plan_edit_hook_default_timeout_seconds"],
+        json!(onepipeline::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS.get())
+    );
+    for key in ["checks", "plan_edit_hook"] {
+        let mut earlier = json!({"schema_version": 13});
+        earlier[key] = block["launch_config"][key].clone();
+        std::fs::write(&path, earlier.to_string()).expect("written");
+        let refused = LaunchConfig::load(&path).expect_err("an earlier schema cannot carry it");
+        assert!(
+            refused.to_string().contains(&format!("`{key}`")),
+            "{refused}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let start = Cli::command();
+    let start = start.find_subcommand("start").expect("`start` is a verb");
+    for flag in block["start_flags"].as_array().expect("the flags") {
+        assert!(
+            start.get_arguments().any(|argument| argument
+                .get_long()
+                .map(|long| format!("--{long}"))
+                .as_deref()
+                == flag.as_str()),
+            "`start` takes no {flag}"
+        );
+    }
+    for kind in block["journal_kinds"].as_array().expect("the kinds") {
+        let kind = kind.as_str().expect("a kind");
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.to_owned())).is_some(),
+            "{kind} is not a kind this build emits"
+        );
+    }
+    assert_eq!(
+        block["events_bundle_version"],
+        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
+    );
 }

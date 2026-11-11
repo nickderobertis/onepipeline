@@ -1544,8 +1544,12 @@ fn a_sweep_answered_in_use_no_slots_and_no_command_journals_nothing() {
 
     let every = schedule(&world, "quiet", "1s", "");
     held_run(&world, "quiet", 2, &["--maintenance-config", &every]).exited(0);
-    until_sweeps(&world, "quiet", 2);
-    world.until("the second sweep to end", |world| !sweeping(world, "quiet"));
+    // A third sweep begun is what proves the second ended: a driver runs one at a
+    // time and takes up a sweep's reports before it starts the next. Not the marker
+    // going, which is no sign to wait for here: a sweep that outlasts the one-second
+    // pace is followed at once by the next one's marker, and on a Windows runner
+    // (run 42632429580, 67 sweeps) no poll ever landed between the two.
+    until_sweeps(&world, "quiet", 3);
     assert!(records(&world, "quiet").is_empty(), "{}", world.dump());
     assert_eq!(marker_lines(&world), 0);
     assert_eq!(the_slot(&world)["state"]["state"], "in-use");

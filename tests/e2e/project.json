@@ -53,7 +53,11 @@
     "test": {
       "command": "just _e2e-test",
       "inputs": [
-        "e2eSource",
+        "e2eCoverageSource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test _ensure-onetaskgraph --variable e2e-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -67,7 +71,7 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-e2e-*.profraw",
+        "{workspaceRoot}/target/coverage-units/onepipeline-e2e.lcov",
         "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json",
         "{workspaceRoot}/target/budget-records/host-view-debug.json",
         "{workspaceRoot}/target/budget-records/review-round-quota.json",
@@ -75,8 +79,7 @@
         "{workspaceRoot}/target/budget-records/store-operations/*.json",
         "{workspaceRoot}/target/test-profile/e2e/*.json"
       ],
-      "parallelism": false,
-      "cache": false
+      "parallelism": false
     },
     "test-quick": {
       "command": "just _e2e-test-quick",

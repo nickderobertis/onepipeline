@@ -356,6 +356,20 @@ pub fn render_results_json(results: &Results) -> Result<String> {
                     .copied()
                     .unwrap_or(crate::graph::NodeStatus::Pending),
                 outcome: view.state.outcomes.get(&node.id).map(String::as_str),
+                // The standing settlement's own words, as `status --json` reads them: only
+                // for a node settled, never for one still to run or running again.
+                detail: statuses
+                    .get(&node.id)
+                    .filter(|status| {
+                        !matches!(
+                            status,
+                            crate::graph::NodeStatus::Pending
+                                | crate::graph::NodeStatus::Ready
+                                | crate::graph::NodeStatus::Running
+                        )
+                    })
+                    .and_then(|_| view.state.settled_details.get(&node.id))
+                    .map(String::as_str),
                 comments: comments.get(&node.id).cloned().unwrap_or_default(),
                 provisioning_failures: view
                     .state
@@ -701,7 +715,9 @@ pub struct Next {
 /// Rendering is not reading: `monitor` shows a pending surface without
 /// consuming it, and this is what advances the queue, journals
 /// `planner-surfaced`, and restarts the check-in clock of every member the run's
-/// observer graph declares resettable.
+/// observer graph declares resettable. That automatic reset is deprecated and
+/// will be removed (`docs/contract-divergences.md` entry 150); `reset_on` replaces
+/// it.
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
 /// since it was queued — `release::wait_outlived`
@@ -759,8 +775,9 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
         ]),
     )?;
 
-    // Consumption is what restarts the check-in clock — the whole reset
-    // contract. Which clocks is the observer graph's own to say: every member it
+    // The engine's automatic reset, deprecated and to be removed
+    // (`docs/contract-divergences.md` entry 150), still working until then:
+    // `reset_on` over the journal the graph follows replaces it. Which clocks is the observer graph's own to say: every member it
     // declared `resettable`, and the engine names none. Addressed by the
     // **graph** run's id, which is what the sibling minted and the only id its
     // signals answer to; this run's id names a run `oneagentgraph` has never

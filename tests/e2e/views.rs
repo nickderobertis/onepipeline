@@ -2324,8 +2324,9 @@ fn a_run_root_written_before_any_of_the_five_launch_keys_is_still_reported() {
         record["run_id"] = serde_json::json!(name);
         let fields = record.as_object_mut().expect("a launch record");
         for key in without {
+            // This build's launches record no interval; the rest are always written.
             assert!(
-                fields.remove(*key).is_some(),
+                fields.remove(*key).is_some() || *key == "heartbeat_interval",
                 "the record this build wrote carries no `{key}` to take away"
             );
         }

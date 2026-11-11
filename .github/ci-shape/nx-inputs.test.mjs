@@ -287,8 +287,8 @@ test("a justfile edit moves the tasks that run or read what it changed, and no o
     for (const [what, edited, expected] of [
       ["a recipe one task runs", editRecipe("_crate-doc"), running("_crate-doc")],
       ["a recipe many tasks run", editRecipe("_tier-lint"), running("_tier-lint")],
-      ["a recipe reached only through a script a recipe names", editRecipe("_crate-test-quick-archive"), quickTiers],
-      ["the variable the journeys read from the file", original.replace(/^onetaskgraph-version := "/m, 'onetaskgraph-version := "9'), quickTiers],
+      ["a recipe reached only through a script a recipe names", editRecipe("_crate-test-quick-archive"), [...quickTiers, ...tasks.filter((id) => targets.get(id).inputs?.includes("coverageTierKey"))]],
+      ["the variable the journeys read from the file", original.replace(/^onetaskgraph-version := "/m, 'onetaskgraph-version := "9'), [...quickTiers, ...tasks.filter((id) => targets.get(id).inputs?.includes("coverageTierKey"))]],
       ["a comment", `# a comment nothing runs\n${original}`, []],
     ]) {
       assert.notEqual(edited, original, what);

@@ -413,6 +413,12 @@ impl Workspaces {
         };
     }
 
+    /// Where `node` would resume from, left in place: what its next dispatch is composed
+    /// from, for a reader that is not that dispatch — the plan-edit hook.
+    pub(crate) fn pending(&self, node: &str) -> Option<&crate::lifecycle::Continuation> {
+        self.resuming.get(node).map(std::convert::AsRef::as_ref)
+    }
+
     /// Where `node` resumes from, taken for the dispatch about to leave on it:
     /// `None` for a node that starts from the plan's own node.
     pub(crate) fn resuming(&mut self, node: &str) -> Option<Box<crate::lifecycle::Continuation>> {

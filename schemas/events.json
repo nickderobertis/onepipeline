@@ -1,5 +1,5 @@
 {
-  "version": "1.13.0",
+  "version": "2.1.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -705,7 +705,7 @@
             "type": "integer",
             "format": "uint64",
             "minimum": 0,
-            "description": "The check-in interval, in seconds."
+            "description": "The retired check-in interval, in seconds, only on a record an earlier\nbuild wrote; a new launch records none."
           },
           "owed_until_closed": {
             "anyOf": [
@@ -721,8 +721,7 @@
         },
         "required": [
           "plan",
-          "dir",
-          "heartbeat_interval"
+          "dir"
         ],
         "description": "`run-started`: the plan the run was launched with, and how it is driven.",
         "title": "RunStarted",
@@ -5796,6 +5795,124 @@
             "description": "One check a `checks-unfollowed` names."
           }
         }
+      }
+    },
+    {
+      "id": "agent.pipeline.command-started@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The argv, as the plan states it: never empty, its program never blank.",
+            "minItems": 1
+          },
+          "log": {
+            "type": "string",
+            "description": "Where its stdout and stderr are kept: `<run>/commands/<node>.log`, absolute."
+          },
+          "timeout_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 1,
+            "description": "Its deadline in seconds, where the node states one."
+          }
+        },
+        "required": [
+          "command",
+          "log"
+        ],
+        "description": "`command-started`: a `kind: command` node's command, as it was started.",
+        "title": "CommandStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.command-exited@2",
+      "schema": {
+        "type": "object",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Its exit status; absent where a signal ended it."
+              },
+              "ending": {
+                "type": "string",
+                "const": "exited"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It exited — with its status, where the host reported one."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "timed-out"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It outlived its `timeout_seconds`, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "cancelled"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "Its node was cancelled while it ran, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "not-started"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It could not be started at all."
+          }
+        ],
+        "description": "`command-exited`: how a `kind: command` node's command ended.",
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How long it ran, in milliseconds."
+          }
+        },
+        "required": [
+          "duration_ms"
+        ],
+        "title": "CommandExited",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
       }
     }
   ]

@@ -137,7 +137,7 @@ fn every_optional_form_the_contract_names_reaches_the_binary() {
     // could read it with no node at all. Another project's file is outside that read.
     for (name, form) in [
         ("one", ["--dag-graph", "off"]),
-        ("two", ["--heartbeat-interval", "1800"]),
+        ("two", ["--label", "kind=demo"]),
     ] {
         let plan = world.plan(
             name,
@@ -167,14 +167,48 @@ fn a_command_outside_the_surface_is_a_usage_error() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
 }
 
+/// The removed flag gets clap's ordinary refusal, and launches nothing; a launch
+/// without it records no interval in either record.
+#[test]
+fn start_refuses_the_removed_heartbeat_flag_and_records_no_interval() {
+    let world = World::new("surface-heartbeat-removed");
+    let plan = world.plan(
+        "plain",
+        &crate::harness::plan_of("plain", vec![crate::harness::agent("build", &[])]),
+    );
+    world
+        .run(&["start", &plan, "--detach", "--heartbeat-interval", "60"])
+        .exited(USAGE_ERROR)
+        .err_has("unexpected argument '--heartbeat-interval'");
+    assert!(
+        !world
+            .run_file("plain", "launch.json")
+            .parent()
+            .expect("a run file sits in its run directory")
+            .exists(),
+        "the refused launch created a run directory"
+    );
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    let launch = world.run_json("plain", "launch.json");
+    assert!(launch.get("heartbeat_interval").is_none(), "{launch}");
+    let started = world.events_of("plain", "run-started");
+    assert!(
+        !started.is_empty()
+            && started
+                .iter()
+                .all(|event| event["payload"].get("heartbeat_interval").is_none()),
+        "{started:?}"
+    );
+}
+
 #[test]
 fn a_missing_required_argument_is_a_usage_error() {
     for args in [
         vec!["attest", "run-1"],
         vec!["channel"],
-        // The interval is seconds, so a non-numeric value is rejected before
+        // The timeout is seconds, so a non-numeric value is rejected before
         // anything is launched rather than silently defaulted.
-        vec!["start", "plans:demo", "--heartbeat-interval", "half-hourly"],
+        vec!["start", "plans:demo", "--hook-timeout", "half-hourly"],
     ] {
         let output = onepipeline().args(&args).output().expect("it runs");
         assert_eq!(

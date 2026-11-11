@@ -357,7 +357,9 @@ pub(crate) struct RunStarted {
     pub(crate) graph: Option<String>,
     /// The directory the run was launched from.
     pub(crate) dir: String,
-    /// The check-in interval, in seconds.
+    /// The retired check-in interval, in seconds, only on a record an earlier
+    /// build wrote; a new launch records none.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) heartbeat_interval: u64,
     /// `true` where the launching driver holds the run to the closure rule;
     /// absent from a record an earlier build wrote.
@@ -687,6 +689,50 @@ pub(crate) struct DriverTakenOver {
 pub(crate) struct DriverSuperseded {
     /// The claim the driver read.
     pub(crate) by: DriverClaim,
+}
+
+/// `command-started`: a `kind: command` node's command, as it was started.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct CommandStarted {
+    /// The argv, as the plan states it: never empty, its program never blank.
+    #[schemars(with = "Vec<String>", length(min = 1))]
+    pub(crate) command: crate::filter::Argv,
+    /// Where its stdout and stderr are kept: `<run>/commands/<node>.log`, absolute.
+    pub(crate) log: String,
+    /// Its deadline in seconds, where the node states one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timeout_seconds: Option<std::num::NonZeroU64>,
+}
+
+/// How a `kind: command` node's command ended, written as the record's `ending` beside the
+/// `exit_code` only the one ending that exited can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "ending", rename_all = "kebab-case")]
+pub(crate) enum CommandEnding {
+    /// It exited — with its status, where the host reported one.
+    Exited {
+        /// Its exit status; absent where a signal ended it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    /// It outlived its `timeout_seconds`, and its process tree was stopped.
+    TimedOut,
+    /// Its node was cancelled while it ran, and its process tree was stopped.
+    Cancelled,
+    /// It could not be started at all.
+    NotStarted,
+}
+
+/// `command-exited`: how a `kind: command` node's command ended.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct CommandExited {
+    /// How it ended, and its exit status where it exited.
+    #[serde(flatten)]
+    pub(crate) ending: CommandEnding,
+    /// How long it ran, in milliseconds.
+    pub(crate) duration_ms: u64,
 }
 
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
@@ -2547,6 +2593,14 @@ payload_messages! {
     LandingDied => "landing-died";
     CheckFailed => "check-failed";
     ChecksUnfollowed => "checks-unfollowed";
+    CommandStarted => "command-started";
+    CommandExited => "command-exited";
+}
+
+/// Whether a retained numeric field is the zero a new record leaves it at.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde hands `skip_serializing_if` a reference.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

@@ -400,7 +400,7 @@ budgets:
 
   # Workload: the newest release with evidence when the command runs, carrying 1 to 9 merged
   # pull requests at 3 pushes each and 4 CI jobs per push, with 542 minutes at p90 from
-  # promotion to the release pull request. Instrumented coverage runs uncached. Count every
+  # promotion to the release pull request. Each coverage tier replays its LCOV report. Count every
   # current cacheable execution and its preceding failed/throttled attempts; evidence that
   # ordinary conditions removed is counted as unavailable, and the figure is taken over what
   # is measurable.

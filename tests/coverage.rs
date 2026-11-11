@@ -585,7 +585,11 @@ fn a_truncated_profile_left_by_a_killed_child_does_not_fail_the_coverage_step() 
         // cross-platform legs, where there is no merge to survive.
         return;
     };
-    let planted = dir.join("truncated-by-a-killed-child_0.profraw");
+    // Named as this tier's unit names its profiles, so `coverage-unit.sh` merges it.
+    let planted = dir.join(format!(
+        "{}.truncated-by-a-killed-child_0.profraw",
+        coverage_unit()
+    ));
     fs::write(&planted, TRUNCATED_HEADER)
         .unwrap_or_else(|e| panic!("could not plant {}: {e}", planted.display()));
 
@@ -664,6 +668,20 @@ fn profile_directory() -> Option<PathBuf> {
         dir.display()
     );
     Some(dir.to_path_buf())
+}
+
+/// The coverage unit this tier runs as: the name its profiles start with.
+fn coverage_unit() -> String {
+    let pattern = PathBuf::from(env::var_os("LLVM_PROFILE_FILE").expect("instrumented"));
+    let name = pattern
+        .file_name()
+        .expect("$LLVM_PROFILE_FILE names a file")
+        .to_string_lossy()
+        .into_owned();
+    name.split_once('.')
+        .unwrap_or_else(|| panic!("$LLVM_PROFILE_FILE {name:?} starts with no unit name"))
+        .0
+        .to_string()
 }
 
 /// `llvm-profdata`, found the way `cargo llvm-cov` finds it: an explicit override

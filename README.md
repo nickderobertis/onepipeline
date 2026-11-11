@@ -137,7 +137,7 @@ A plan is one **onetaskgraph project**, and a node is one task in it. A run is
 launched by naming that project's qualified id:
 
 ```bash
-onepipeline start plans:tracked-release --heartbeat-interval 1800
+onepipeline start plans:tracked-release
 ```
 
 Which backend that store is — a folder of Markdown, Linear, GitHub Projects — is
@@ -288,7 +288,12 @@ the running loop.
 `--dag-graph REF` attaches an agent graph as an **observer** — the shipped one is
 a `monitor` member that watches the stream and raises what does not line up, plus
 a resettable-cron `check-in` member that surfaces a status when nobody has
-reported one for a while. It never drives the engine. Attached, `start` returns
+reported one for a while. It never drives the engine. Reading a surface with
+`next` restarts that `resettable` clock through the engine's automatic reset,
+which is deprecated and will be removed: `reset_on` replaces it, declared on the
+schedule against the run's own journal, which every observer graph follows. A
+graph that still declares `resettable` keeps working and prints one warning at
+`start` and `adopt`. Attached, `start` returns
 when the run settles; exit `3` means nothing is driving the run, and
 `onepipeline adopt RUN` attaches a fresh driver to the intact ledger, and takes
 the same `--attach`/`--detach` pair `start` does: detached, it prints the launch
@@ -853,9 +858,8 @@ run that launched no observer graph. The human form writes the same as a few lin
 after the ending line, and when nothing arrived it says so plainly: "no planner
 surface arrived during this 35m00s wait; the run's observer graph is dead". What that
 means for a given host is the host's to read.
-`--tick-interval` is **this stream's** clock and is not `start`'s
-`--heartbeat-interval`, which sets the pacemaker agent's cadence; neither verb
-accepts the other's flag. `--log PATH` appends the human lines to `PATH` instead
+`--tick-interval` is **this stream's** clock alone; what surfaces a scheduled
+planner update is the observer graph's own schedule. `--log PATH` appends the human lines to `PATH` instead
 of standard error, each flushed as it is written, so a quiet run and a dead one
 still read apart through a file; it is created when absent and never truncated, so
 a re-armed watch appends to the same log. Standard output, the exit statuses and

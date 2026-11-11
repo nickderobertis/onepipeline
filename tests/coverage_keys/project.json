@@ -1,0 +1,56 @@
+{
+  "name": "onepipeline-coverage-keys",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/coverage_keys",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/coverage_keys"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/coverage_keys"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/coverage_keys"
+    },
+    "test": {
+      "command": "node --test tests/coverage_keys/*.test.mjs",
+      "//": "Every coverage tier's read set against what real Nx hashes for it, so it is keyed on what those tiers' sources and inputs can name.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/src/**/*",
+        "{workspaceRoot}/crates/**/*",
+        "{workspaceRoot}/tests/**/*",
+        "{workspaceRoot}/scripts/**/*",
+        "{workspaceRoot}/docs/**/*",
+        "{workspaceRoot}/nx.json",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/.github/ci-tool-versions.json",
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["justfileSelection", "cargoSelection", "npmSelection"]
+    }
+  }
+}

@@ -145,6 +145,13 @@ class Normaliser:
             lambda m: self._ordinal("driver", m.group(0), lambda nth: f"{41000 + nth}"),
             text,
         )
+        # An adopted driver's `status` line names its pid: the same family again,
+        # because it is the pid that driver's stream carries.
+        text = re.sub(
+            r"(?<=— pid )\d+",
+            lambda m: self._ordinal("driver", m.group(0), lambda nth: f"{41000 + nth}"),
+            text,
+        )
         return text
 
 

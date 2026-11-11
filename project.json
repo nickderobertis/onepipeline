@@ -90,7 +90,11 @@
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateTestSource",
+        "crateCoverageSource",
+        "coverageTierKey",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _crate-test-rest _ensure-onetaskgraph --variable rest-tier --variable onetaskgraph-version"
+        },
         {
           "runtime": "node -p process.platform"
         }
@@ -99,9 +103,8 @@
         "coverage-clean"
       ],
       "outputs": [
-        "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
-      ],
-      "cache": false
+        "{workspaceRoot}/target/coverage-units/onepipeline-rest.lcov"
+      ]
     },
     "test": {
       "command": "just _crate-coverage",
@@ -116,7 +119,7 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's profiles, including the separate version-reading tests, so this report depends on each tier's test. LLVM profiles belong to the versioned binary, so the coverage tiers and this aggregate stay uncached; quick tiers replay separately and archives build when a tier runs.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's LCOV report, including the separate version-reading tests', so this aggregate depends on each tier's test. Each tier is a cached coverage unit that replays its report while its inputs are unchanged; this aggregate stays uncached, so the merge always reads the current set, and archives build only when a tier runs.",
       "dependsOn": [
         "test-rest",
         {

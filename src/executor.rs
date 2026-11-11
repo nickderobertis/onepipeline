@@ -395,6 +395,7 @@ impl Executor for LocalExecutor {
             environment: Environment::PerLaunch,
             sets: &node_sets,
             filter: filters.agentgraph.as_ref(),
+            follow_events: None,
             output: GraphOutput::Relayed,
             // The dispatch settles on the terminal envelope this launch relays,
             // which is the answer the graph gives before its own final teardown

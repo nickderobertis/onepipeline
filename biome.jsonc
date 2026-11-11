@@ -16,8 +16,14 @@
       "tests/llmlint_diff/**/*.json",
       "tests/ci_jobs/**/*.mjs",
       "tests/ci_jobs/**/*.json",
+      "tests/coverage_cache/**/*.mjs",
+      "tests/coverage_cache/**/*.json",
+      "tests/coverage_keys/**/*.mjs",
+      "tests/coverage_keys/**/*.json",
       // Upstream-owned copies are held byte-identical by the shared-script drift test.
       "!!scripts/actions-cache-prune.mjs",
+      "!!scripts/coverage-merge.mjs",
+      "!!scripts/coverage-unit.sh",
       "!!scripts/nx-remote-cache.mjs",
       "!!scripts/nx-version-free-inputs.mjs"
     ]

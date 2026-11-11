@@ -83,7 +83,8 @@ selects each project. `nx.json` stays global because Nx's own hash planner adds 
 
 ## Invariants (non-negotiable)
 
-- **Coverage is enforced at 95% line coverage.** `just check` fails below it.
+- **Coverage is enforced at 95% line coverage**, which is 95.74 on the LCOV measure
+  `coverage-merge.mjs` reads. `just check` fails below it.
   Lower the bar only with the reason written here.
 - **Tests are realistic — never mock the layer under test.** Drive the compiled
   binary as a subprocess and assert on exit code, stdout, and stderr; assemble

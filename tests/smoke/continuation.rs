@@ -335,7 +335,12 @@ fn waited(
 
 /// Wait up to `bound` for `ready`, reading the real services, or fail naming `what` and
 /// what `why` says the hosts recorded.
-fn until(what: &str, bound: Duration, ready: impl FnMut() -> bool, why: impl FnOnce() -> String) {
+pub(crate) fn until(
+    what: &str,
+    bound: Duration,
+    ready: impl FnMut() -> bool,
+    why: impl FnOnce() -> String,
+) {
     if let Err(timed_out) = waited(&Wall(Instant::now()), what, bound, ready, why) {
         panic!("{timed_out}");
     }

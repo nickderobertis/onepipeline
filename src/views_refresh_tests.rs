@@ -156,21 +156,63 @@ fn refresh_rereads_out_of_order_records_and_then_resumes_appending() {
 /// kernel's file times advance by the tick, so a same-length edit landing inside
 /// the tick of the last append is one no reader of the metadata can see, and that
 /// timing is not the edit this journey is about.
+///
+/// Every probe is a new file with bytes in it. Rewriting one empty probe need not
+/// restamp it: on Windows std truncates an existing file by resetting its
+/// allocation, which leaves an already-empty file's write time where its creation
+/// put it, so a probe created inside the journal's tick never passed it.
 fn past_the_file_time_of(journal: &std::path::Path) {
     let modified = |path: &std::path::Path| {
         std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .expect("a file time")
     };
-    let probe = journal.with_extension("tick");
-    loop {
-        std::fs::write(&probe, "").expect("probe");
-        if modified(&probe) > modified(journal) {
-            std::fs::remove_file(&probe).expect("remove probe");
+    let stamped = modified(journal);
+    for attempt in 0_u64.. {
+        let probe = journal.with_extension(format!("tick{attempt}"));
+        std::fs::write(&probe, "tick").expect("probe");
+        let probed = modified(&probe);
+        std::fs::remove_file(&probe).expect("remove probe");
+        if probed > stamped {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+}
+
+/// The order a probe created inside the journal's own file-time tick produces,
+/// forced: the journal is stamped ahead of every probe the wait starts with.
+#[test]
+fn the_wait_for_a_later_file_time_passes_a_journal_stamped_ahead_of_its_first_probe() {
+    let root = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join(format!("refresh-file-time-{}", sys::pid()));
+    std::fs::create_dir_all(&root).expect("scratch directory");
+    let journal = root.join("events.jsonl");
+    std::fs::write(&journal, "{}\n").expect("journal");
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_millis(250);
+    std::fs::File::options()
+        .write(true)
+        .open(&journal)
+        .and_then(|file| file.set_modified(ahead))
+        .expect("stamp the journal ahead");
+
+    let (passed, waited) = std::sync::mpsc::channel();
+    let waiting = journal.clone();
+    std::thread::spawn(move || {
+        past_the_file_time_of(&waiting);
+        passed.send(()).expect("report the wait ended");
+    });
+    waited
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the wait never saw a file time past the journal's");
+
+    std::fs::write(&journal, "{}\n{}\n").expect("edit");
+    let edited = std::fs::metadata(&journal)
+        .and_then(|metadata| metadata.modified())
+        .expect("a file time");
+    assert!(edited > ahead, "{edited:?} is not past {ahead:?}");
+    std::fs::remove_dir_all(&root).expect("remove scratch");
 }
 
 #[test]
