@@ -1075,9 +1075,10 @@ fn a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetc
 }
 
 /// A line of a kind the fold parses whole, in the writers' form but malformed in its
-/// middle, is found when the fold parses it, and the heads read is then the complete
-/// reader's line by line: every head, place, fetched record and the state are the
-/// complete read's, and the malformed line has no head.
+/// middle, is dropped when its whole parse refuses it, before the merge, as the complete
+/// read drops it: every head, place, fetched record and the state are the complete
+/// read's, and the malformed line has no head. That no headed record is parsed whole for
+/// it is held by the engine's own `journal_heads` test, whose counter only tests compile.
 #[test]
 fn a_folded_line_malformed_in_its_middle_leaves_the_heads_read_the_complete_ones() {
     let body = run_journal(91, 6, 300);

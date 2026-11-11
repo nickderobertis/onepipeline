@@ -19,8 +19,8 @@ use serde_json::{Map, Value};
 
 use crate::event::{Envelope, EventKind, Labels, Phase, Source};
 use crate::journal_selected::{
-    finished_lines, in_order, merged, number_of, opening_of, parsed_line, skimmed_line, string_of,
-    whole_file, whole_record, Skim,
+    finished_lines, in_order, merged, number_of, parsed_line, skimmed_opening, string_of,
+    whole_file, whole_record, Opening, Skim,
 };
 
 /// Where one record's line sits in a run's journal, and which record it is: enough for
@@ -141,14 +141,51 @@ fn labels_of(mut rest: &[u8]) -> Option<Labels> {
     }
 }
 
-/// A head and what the fold reads of one line, `None` where the line's record is one
-/// only its whole parse can say and that parse refuses it.
+/// One line as the heads read takes it, before the merge: the skim the merge reads, and
+/// the opening and labels it is headed off where it is one of [`HEADED_KINDS`] in the
+/// writers' form. Every other line is the complete reader's own parse, whose record the
+/// skim holds, so a line that parse refuses is dropped here, as the complete read drops
+/// it, and is never merged.
+type Taken<'a> = (Skim<'a>, Option<(Opening<'a>, Labels)>);
+
+// llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a
+// line of one of `HEADED_KINDS` in the writers' form is headed off its opening, whose
+// every field `opening_of` and `labels_of` read at `Envelope`'s own types (a `Source` and
+// a `Phase` through their deserializers, `seq` and `round` as numbers, every string
+// unescaped or else the line is parsed whole), and its middle is never validated, because
+// knowing the complete reader refuses it means parsing the payload this read exists not to
+// parse. Such a line is headed where the complete read holds no record, which
+// `RunView::heads`'s rustdoc and `docs/contract.md` state; `fetch` answers `RecordMoved`
+// for it, never a record, and `tests/run_reads.rs`'s
+// `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds
+// that. Every line the writers produce is headed equal to the complete read's record, which
+// `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds.
+// Every other line, a malformed one of a kind the fold parses included, is the complete
+// reader's own parse, and dropped where that parse refuses it.
+fn taken(line: &[u8]) -> Option<Taken<'_>> {
+    if let Some((skim, opening)) = skimmed_opening(line) {
+        if HEADED_KINDS.contains(&opening.kind) {
+            if let Some(labels) = labels_of(opening.labels) {
+                return Some((skim, Some((opening, labels))));
+            }
+        }
+    }
+    parsed_line(line).map(|skim| (skim, None))
+}
+
+/// A head and what the fold reads of one line taken by [`taken`].
 fn head_of(
     skim: &Skim<'_>,
+    opened: Option<&(Opening<'_>, Labels)>,
     place: Option<usize>,
     handle: RecordHandle,
-) -> Option<(RecordHead, Envelope)> {
-    let whole = |record: Envelope| {
+) -> (RecordHead, Envelope) {
+    let Some((opening, labels)) = opened else {
+        let record = skim
+            .parsed
+            .as_deref()
+            .cloned()
+            .expect("a line not headed off its opening is parsed whole");
         let head = RecordHead {
             ts: record.ts.clone(),
             stream: record.stream.clone(),
@@ -159,33 +196,10 @@ fn head_of(
             labels: record.labels.clone(),
             evidence: !record.artifacts.is_empty(),
             place,
-            handle: handle.clone(),
+            handle,
         };
-        (head, record)
+        return (head, record);
     };
-    if let Some(record) = &skim.parsed {
-        return Some(whole((**record).clone()));
-    }
-    // llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a
-    // line of one of `HEADED_KINDS` in the writers' form is headed off its opening, whose
-    // every field `opening_of` and `labels_of` read at `Envelope`'s own types (a `Source` and
-    // a `Phase` through their deserializers, `seq` and `round` as numbers, every string
-    // unescaped or else the line is parsed whole), and its middle is never validated, because
-    // knowing the complete reader refuses it means parsing the payload this read exists not to
-    // parse. Such a line is headed where the complete read holds no record, which
-    // `RunView::heads`'s rustdoc and `docs/contract.md` state; `fetch` answers `RecordMoved`
-    // for it, never a record, and `tests/run_reads.rs`'s
-    // `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds
-    // that. Every line the writers produce is headed equal to the complete read's record, which
-    // `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds.
-    let headed =
-        opening_of(skim.line).and_then(|opening| Some((labels_of(opening.labels)?, opening)));
-    let Some((labels, opening)) = headed else {
-        return whole_record(skim.line).map(whole);
-    };
-    if !HEADED_KINDS.contains(&opening.kind) {
-        return whole_record(skim.line).map(whole);
-    }
     let head = RecordHead {
         ts: opening.ts.to_owned(),
         stream: opening.stream.to_owned(),
@@ -193,7 +207,7 @@ fn head_of(
         source: opening.source,
         kind: EventKind(opening.kind.to_owned()),
         phase: opening.phase,
-        labels,
+        labels: labels.clone(),
         evidence: skim.evidence,
         place,
         handle,
@@ -210,18 +224,26 @@ fn head_of(
         payload: Map::new(),
         artifacts: Vec::new(),
     };
-    Some((head, folded))
-    // llmlint: ignore-end[boundary_inputs_validated]
+    (head, folded)
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
-/// The heads of `bytes`' lines, read by `skim`; `None` where a line whose record
-/// the fold needs whole turned out to be no record.
-fn heads_of(bytes: &[u8], skim: for<'a> fn(&'a [u8]) -> Option<Skim<'a>>) -> Option<Heads> {
-    let finished: Vec<&[u8]> = finished_lines(bytes).collect();
-    let lines: Vec<Skim<'_>> = in_order(&finished, |line| skim(line))
-        .into_iter()
-        .flatten()
-        .collect();
+/// Every record's head, and what the fold reads of each.
+///
+/// A journal that cannot be read reads as one holding nothing, which is the rule the
+/// complete read follows. Each line is read once, by [`taken`], and the journal is never
+/// read through a second time.
+pub(crate) fn read_heads(journal: &Path) -> Heads {
+    let Some(bytes) = whole_file(journal) else {
+        return Heads::default();
+    };
+    crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
+    let finished: Vec<&[u8]> = finished_lines(&bytes).collect();
+    let (lines, opened): (Vec<Skim<'_>>, Vec<Option<(Opening<'_>, Labels)>>) =
+        in_order(&finished, |line| taken(line))
+            .into_iter()
+            .flatten()
+            .unzip();
     let (queues, order) = merged(&lines);
     // Each line's stream, shared by every handle of it, and whether it repeats the
     // `(stream, seq)` before it in its stream.
@@ -254,7 +276,7 @@ fn heads_of(bytes: &[u8], skim: for<'a> fn(&'a [u8]) -> Option<Skim<'a>>) -> Opt
         })
         .collect();
     let start = bytes.as_ptr() as usize;
-    let read = in_order(&placed, |(index, place)| {
+    let (heads, folded) = in_order(&placed, |(index, place)| {
         let skim = &lines[*index];
         let handle = RecordHandle {
             offset: (skim.line.as_ptr() as usize - start) as u64,
@@ -266,39 +288,16 @@ fn heads_of(bytes: &[u8], skim: for<'a> fn(&'a [u8]) -> Option<Skim<'a>>) -> Opt
             ),
             seq: skim.seq,
         };
-        head_of(skim, *place, handle)
-    });
-    let mut heads = Vec::with_capacity(read.len());
-    let mut folded = Vec::with_capacity(read.len());
-    for line in read {
-        let (head, record) = line?;
-        heads.push(head);
-        folded.push(record);
-    }
-    Some(Heads {
+        head_of(skim, opened[*index].as_ref(), *place, handle)
+    })
+    .into_iter()
+    .unzip();
+    Heads {
         heads,
         folded,
         store_len,
         last_seq,
-    })
-}
-
-/// Every record's head, and what the fold reads of each.
-///
-/// A journal that cannot be read reads as one holding nothing, which is the rule the
-/// complete read follows. Where a line in the writers' form whose record the fold reads
-/// whole is no record, the whole read is the complete reader's, line by line, as the
-/// selective read's is.
-pub(crate) fn read_heads(journal: &Path) -> Heads {
-    let Some(bytes) = whole_file(journal) else {
-        return Heads::default();
-    };
-    crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
-    heads_of(&bytes, |line| {
-        skimmed_line(line).or_else(|| parsed_line(line))
-    })
-    .or_else(|| heads_of(&bytes, parsed_line))
-    .unwrap_or_default()
+    }
 }
 
 /// A positioned read, so the fetch's workers share one open file without a cursor
@@ -444,6 +443,11 @@ mod tests {
     }
 
     fn written(name: &str) -> Written {
+        written_with(name, &[])
+    }
+
+    /// [`written`], with `spliced` written into the middle of its journal as they are.
+    fn written_with(name: &str, spliced: &[String]) -> Written {
         let root = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
             .map_or_else(std::env::temp_dir, PathBuf::from)
             .join(format!("heads-{name}-{}", std::process::id()));
@@ -527,6 +531,17 @@ mod tests {
         }
         drop(writer);
         let mut text = std::fs::read_to_string(paths.journal()).expect("the journal");
+        if !spliced.is_empty() {
+            let lines: Vec<&str> = text.lines().collect();
+            let (before, after) = lines.split_at(lines.len() / 2);
+            text = before
+                .iter()
+                .copied()
+                .chain(spliced.iter().map(String::as_str))
+                .chain(after.iter().copied())
+                .map(|line| format!("{line}\n"))
+                .collect();
+        }
         for line in appended {
             text.push_str(&line);
             text.push('\n');
@@ -649,5 +664,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A line of a kind the fold parses whole, in the writers' form but malformed in its
+    /// middle, among records of the five headed kinds: it is dropped as the complete read
+    /// drops it, every head keeps the complete read's place, and no unfetched headed record
+    /// is parsed whole, since the heads read never reads the journal through again.
+    #[test]
+    fn a_malformed_folded_line_is_dropped_without_parsing_a_headed_record_whole() {
+        let record: Envelope = serde_json::from_value(json!({
+            "v": 1, "ts": "2026-11-06T10:00:00.600Z", "stream": "graph-checks", "seq": 0,
+            "source": "agentgraph", "kind": "change-check",
+            "labels": {"run_id": "demo", "node": "build"},
+            "payload": {"text": "intact"},
+        }))
+        .expect("a record");
+        let malformed = serde_json::to_string(&record)
+            .expect("a line")
+            .replace("\"intact\"", "intact");
+        assert!(
+            crate::journal_selected::skimmed_line(malformed.as_bytes()).is_some(),
+            "the malformed line is in the writers' form"
+        );
+        let run = written_with("malformed", std::slice::from_ref(&malformed));
+        let complete = RunView::open(&run.paths).expect("opens");
+        assert!(
+            !complete
+                .events
+                .iter()
+                .any(|record| record.stream == "graph-checks"),
+            "the complete read drops the malformed line"
+        );
+        let mut folded_whole: BTreeSet<Key> = complete
+            .events
+            .iter()
+            .filter(|record| {
+                !NEVER_PARSED.contains(&record.kind.0.as_str())
+                    || run
+                        .out_of_form
+                        .contains(&(record.stream.clone(), record.seq))
+            })
+            .map(|record| (record.stream.clone(), record.seq))
+            .collect();
+
+        whole_parses::start();
+        let read = RunView::heads(&run.paths).expect("the heads read");
+        let parsed = whole_parses::finish();
+        let parsed_keys: BTreeSet<Key> = keys(&parsed).into_iter().collect();
+        for parsed in &parsed {
+            let key = (parsed.stream.clone(), parsed.seq);
+            assert!(
+                !NEVER_PARSED.contains(&parsed.kind.as_str()) || run.out_of_form.contains(&key),
+                "{key:?}, a {}, was parsed whole and nobody fetched it",
+                parsed.kind
+            );
+        }
+        assert_eq!(parsed_keys, std::mem::take(&mut folded_whole));
+
+        // Every head is the complete read's record at its place.
+        assert_eq!(read.heads.len(), complete.events.len());
+        let mut seen = BTreeSet::new();
+        let mut place = 0;
+        for (head, record) in read.heads.iter().zip(&complete.events) {
+            let expected = seen.insert((record.stream.clone(), record.seq)).then(|| {
+                place += 1;
+                place - 1
+            });
+            assert_eq!(
+                (
+                    &head.ts,
+                    &head.stream,
+                    head.seq,
+                    head.source,
+                    &head.kind,
+                    head.phase,
+                    &head.labels,
+                    head.evidence,
+                    head.place,
+                ),
+                (
+                    &record.ts,
+                    &record.stream,
+                    record.seq,
+                    record.source,
+                    &record.kind,
+                    record.dimensions.phase,
+                    &record.labels,
+                    !record.artifacts.is_empty(),
+                    expected,
+                ),
+            );
+        }
+        assert_eq!(read.store_len, place);
+        assert_eq!(
+            read.last_seq,
+            complete
+                .events
+                .iter()
+                .map(|record| record.seq)
+                .max()
+                .unwrap_or(0)
+        );
+        // And the state it folded is `open`'s.
+        assert_eq!(read.view.state.statuses(), complete.state.statuses());
+        assert_eq!(read.view.summary(), complete.summary());
+        let reading =
+            |view: &RunView| serde_json::to_value(crate::views::reading(view)).expect("a reading");
+        assert_eq!(reading(&read.view), reading(&complete));
+        let tally = |view: &RunView| {
+            view.state.activity["build"]
+                .progress
+                .map(|progress| progress.events())
+        };
+        assert_eq!(tally(&read.view), tally(&complete));
     }
 }

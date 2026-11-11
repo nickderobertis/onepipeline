@@ -274,13 +274,18 @@ const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 // one departure the planner ruled for that cost, which
 // `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds.
 pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
+    skimmed_opening(line).map(|(skim, _)| skim)
+}
+
+/// [`skimmed_line`], with the opening it read the line's skim off.
+pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
     if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
         return None;
     }
     let artifacts = memchr::memmem::rfind(body, ARTIFACTS)?;
-    Some(Skim {
+    let skim = Skim {
         line,
         ts: Cow::Borrowed(opening.ts),
         stream: Cow::Borrowed(opening.stream),
@@ -290,7 +295,8 @@ pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
         evidence: artifacts + ARTIFACTS.len() < body.len(),
         instant: instant_of(opening.ts),
         parsed: None,
-    })
+    };
+    Some((skim, opening))
 } // llmlint: ignore-end[boundary_inputs_validated]
 
 /// A finished line parsed whole as the complete reader parses it: a whole record, or the
