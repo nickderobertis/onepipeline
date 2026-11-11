@@ -7939,6 +7939,9 @@ const RULINGS: &[(&str, &str)] = &[
     // The 0.11.1 link: validators are gone from the bus, so the marked copy is
     // re-decided against it and the core no longer names them.
     ("153.", "decided against `onemessagebus` 0.11.1"),
+    // The heads read heads a writers'-form line of an unparsed kind by its opening, even
+    // where the complete reader refuses its middle.
+    ("155.", "which is headed by its opening"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

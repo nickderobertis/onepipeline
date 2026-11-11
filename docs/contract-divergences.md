@@ -13422,3 +13422,42 @@ The same line read a run launched with `validators` as refusing an offer only to
 one of them was `on`. Entry 153's ruling supersedes that: such a run refuses **every**
 offer to its channel, in the words entry 153 quotes, and `tests/e2e/older_launch_record.rs`
 holds it.
+
+## 155. The heads read heads a writers'-form line its complete reader refuses — RESOLVED
+
+**Ruled by the manager on this workstream's `engine-first-screen-read` node** (correlation
+`c-53ff0b9a9873ff444ac9bb118ce9de40`, option (A)). The task that specified
+`RunView::heads` and `journal::fetch` says "a line the complete read holds as no record has
+no head". The heads read cannot keep that for one kind of line without parsing the payloads
+it exists not to parse: a line in the writers' field order, of one of the five kinds
+`RunView::heads`'s rustdoc names (`member-heartbeat`, `turn-activity`, `turn-message`,
+`turn-started`, `turn-completed`), whose opening reads cleanly but whose middle (payload or
+artifacts) a complete reader refuses. Knowing that it refuses means handing that line's
+payload to the JSON parser, which on the measured corpus is about 87 MB. This is the same
+cost the planner already ruled on for `read_selected`'s discarded lines (the
+`boundary_inputs_validated` suppression over `skimmed_line`).
+
+What such a line does under the ruling:
+
+- **Heads:** it gets a head read off its opening, so `heads` holds one more head than the
+  complete read has records.
+- **Places:** it takes a place in the merged store, so its own place and every place after
+  it are one more than the complete read gives, and `store_len` is one more.
+- **Folded state:** it is folded by its head with an empty payload. Every node status,
+  reason, awaits, result and the summary are what `RunView::open` reports, and the node's
+  event tally counts it, so that tally is one more than `open`'s.
+- **Fetch:** `fetch` answers `Error::RecordMoved` for its handle and never returns a
+  record for it. Every other handle fetches the complete read's record.
+
+Every line the writers produce is unaffected, and a line of any other kind is parsed whole,
+so the complete reader's refusal applies to it. `docs/contract.md`'s paragraph on the heads
+read states this departure, as the rustdoc on `RunView::heads` does.
+`tests/run_reads.rs`'s
+`a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds
+all four effects, and
+`a_folded_line_malformed_in_its_middle_leaves_the_heads_read_the_complete_ones` holds the
+other kinds.
+
+**Ruling:** keep the line headed by its opening, and state the departure with its cost
+reason in `RunView::heads`'s rustdoc and in `docs/contract.md`, which now say "headed by
+its opening".
