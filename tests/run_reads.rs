@@ -1031,3 +1031,39 @@ fn a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetc
     };
     assert_eq!(events(&read.view), events(&fresh).map(|events| events + 1));
 }
+
+/// A line of a kind the fold parses whole, in the writers' form but malformed in its
+/// middle, is found when the fold parses it, and the heads read is then the complete
+/// reader's line by line: every head, place, fetched record and the state are the
+/// complete read's, and the malformed line has no head.
+#[test]
+fn a_folded_line_malformed_in_its_middle_leaves_the_heads_read_the_complete_ones() {
+    let body = run_journal(91, 6, 300);
+    let good = written(&json!({
+        "v": 1, "ts": stamp(150_000), "stream": "stream-checks", "seq": 0,
+        "source": "agentgraph", "kind": "change-check", "labels": {"node": "build"},
+        "payload": {"text": "intact"},
+    }));
+    let corrupt = good.replace("\"intact\"", "intact");
+    let after = good
+        .replace("\"seq\":0", "\"seq\":1")
+        .replace(&stamp(150_000), &stamp(150_001));
+    let run = resulted(
+        "heads-folded-corrupt",
+        &format!("{body}{corrupt}\n{after}\n"),
+    );
+    let complete = run.complete();
+    assert!(
+        complete
+            .iter()
+            .any(|record| record.stream == "stream-checks"),
+        "the valid record beside it is held"
+    );
+    assert!(
+        !complete
+            .iter()
+            .any(|record| record.stream == "stream-checks" && record.seq == 0),
+        "the complete read refuses the corrupt line"
+    );
+    heads_agree(&run, "a corrupt line the fold parses");
+}

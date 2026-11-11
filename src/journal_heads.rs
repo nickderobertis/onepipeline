@@ -288,7 +288,8 @@ pub(crate) fn read_heads(journal: &Path) -> Heads {
     .unwrap_or_default()
 }
 
-/// `buffer` filled from `file` at `offset`.
+/// A positioned read, so the fetch's workers share one open file without a cursor
+/// between them; a file too short for `buffer` answers `UnexpectedEof`.
 fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
     #[cfg(unix)]
     {
