@@ -11,6 +11,9 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
+Entry **155** is **accepted** by that planner with `docs/contract.md` left unedited: it
+records the ruling and names, by line, each approved passage it supersedes.
+
 Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–127 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
@@ -13390,12 +13393,22 @@ paragraph changes. Between 0.10.0 and 0.11.1 the bus's `envelope.rs`, `filter.rs
 **Ruling:** the planner ruled this re-decision (correlation
 `c-baf0ff4e8212bf6e643144331e77da02`).
 
-## 155. The engine's built-in clock reset on `next` is removed, and the shipped `check-in` declares `reset_on` — OPEN
+## 155. The engine's built-in clock reset on `next` is removed, and the shipped `check-in` declares `reset_on` — ACCEPTED
 
-**Proposal to the planner who owns `docs/contract.md`, which is committed verbatim and
-still says consuming a surface restarts the check-in clock of every member the recorded
-observer graph declares `resettable`, and calls the shipped `check-in` member
-resettable-cron.** Entry 150 deprecated that reset. `oneagentgraph` 0.13.0 removes
+**Ruled accepted by the planner who owns `docs/contract.md`, which stays unedited.** The
+ruling leaves the approved text verbatim, so it records the passages this entry
+supersedes rather than amending them, and each of them is superseded by this entry
+wherever it still describes the built-in reset:
+
+- `docs/contract.md:528`, the channel contract's closing sentences from *Surface
+  consumption restarts the check-in clock of every member the run's recorded observer
+  graph declares `resettable`* through *That is the whole check-in reset contract.*,
+  including its `oneagentgraph reset-timer RUN MEMBER` invocation; and
+- `docs/contract.md:292`, the driver contract's description of the shipped
+  `graphs/dag-scope.yaml` as an observer member beside a *resettable-cron* `check-in`
+  member.
+
+Entry 150 deprecated that reset. `oneagentgraph` 0.13.0 removes
 `config::Schedule::resettable`, `run::Signal::Reset` and the `reset-timer` verb, and this
 build links it, so the reset is gone rather than deprecated:
 
@@ -13419,3 +13432,7 @@ build links it, so the reset is gone rather than deprecated:
 three launch paths, with no `reset-timer` run and no reset signal left in the graph run, and
 no deprecation line at `start` or either form of adoption; `tests/e2e/shipped.rs` and
 `tests/contract.rs` hold the shipped graph's filter.
+
+**Ruling:** the planner ruled this entry accepted, and directed that `docs/contract.md`
+is left unedited and that this entry name every approved passage it supersedes, which
+the list above does.

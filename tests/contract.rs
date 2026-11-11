@@ -7471,6 +7471,39 @@ fn a_command_outside_the_surface_is_refused() {
         .expect_err("the surface is exactly what the contract names");
 }
 
+/// Entry 155 is accepted with the contract left verbatim, so it is where the
+/// approved text describing the removed reset is named as superseded: the
+/// channel contract's `reset-timer` paragraph and the driver contract's
+/// resettable-cron `check-in`, each at the line the entry points at.
+#[test]
+fn the_removed_reset_names_every_approved_passage_it_supersedes() {
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("155."))
+        .expect("the divergence record carries entry 155");
+    assert!(entry
+        .lines()
+        .next()
+        .is_some_and(|heading| heading.ends_with("— ACCEPTED")));
+    let lines: Vec<&str> = CONTRACT.lines().collect();
+    for (line, superseded) in [
+        (528, "`oneagentgraph reset-timer RUN MEMBER` for each"),
+        (528, "That is the whole check-in reset contract."),
+        (292, "beside a resettable-cron `check-in` member"),
+    ] {
+        assert!(
+            lines[line - 1].contains(superseded),
+            "docs/contract.md:{line} no longer carries `{superseded}`"
+        );
+        assert!(
+            entry.contains(&format!("`docs/contract.md:{line}`")),
+            "entry 155 does not name docs/contract.md:{line}, which says `{superseded}`"
+        );
+    }
+}
+
 #[test]
 fn the_dag_scope_graph_is_a_monitor_plus_a_check_in() {
     // The contract's word for the `check-in` member's clock is not held here: the
@@ -8046,6 +8079,38 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
                 section.contains("Superseded by entry"),
                 "divergence `{heading}` is marked superseded and its prose does not say so"
             );
+            continue;
+        }
+        // Or accepted with the contract left verbatim: the planner ruled the
+        // proposal in and directed that `docs/contract.md` stay unedited, so the
+        // entry is where the superseded approved text is named. It records the
+        // ruling and points at each passage by line, and every line it points at
+        // is one the contract has, so a pointer cannot outlive the text it names.
+        if heading.ends_with("— ACCEPTED") {
+            assert!(
+                section.contains("**Ruling:"),
+                "divergence `{heading}` is marked accepted but records no ruling"
+            );
+            let lines: Vec<usize> = section
+                .split("`docs/contract.md:")
+                .skip(1)
+                .map(|rest| {
+                    rest.split('`')
+                        .next()
+                        .and_then(|number| number.parse().ok())
+                        .unwrap_or_else(|| panic!("`{heading}` names a contract line oddly"))
+                })
+                .collect();
+            assert!(
+                !lines.is_empty(),
+                "divergence `{heading}` is accepted and names no contract passage it supersedes"
+            );
+            for line in lines {
+                assert!(
+                    (1..=CONTRACT.lines().count()).contains(&line),
+                    "`{heading}` names docs/contract.md:{line}, which the contract does not have"
+                );
+            }
             continue;
         }
         assert!(
