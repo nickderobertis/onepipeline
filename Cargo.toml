@@ -890,6 +890,11 @@ resolver = "2"
 # ^0.23.0`, which `^0.22.4` admits no version of, so the two requirements move
 # as one.
 #
+# `oneagentgraph` 0.12.0 is the floor because it links `onemessagebus` 0.11.1,
+# the bus without validators (see that pin). It requires `onejudge ^0.23.1`,
+# `onemessagebus ^0.11.1` and `onevcs ^0.65.0` as a dev-dependency, so the four
+# move as one or the lock resolves the bus twice.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -918,6 +923,9 @@ oneagentgraph = "0.12.0"
 # through its `EventKind` and `WorktreeProvision`.
 # 0.63.0 is the release onevcs-testing 0.20.5 pins exactly; that crate supplies
 # the export fixtures.
+# 0.65.0 links `onemessagebus ^0.11`, the bus without validators, and is the
+# release onevcs-testing 0.21.1 pins exactly. It adds `Selection::branch`, which
+# `src/unpublished.rs` leaves unset.
 onevcs = "0.65.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -945,6 +953,12 @@ onevcs = "0.65.0"
 # translation, as every sibling release linked beside it does.
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
+#
+# **0.11.1 removed validators** in favour of the hooks this crate already runs.
+# A requirement for the same pre-1.0 reason: `^0.10` admits no 0.11.x. Nothing
+# here reads a configuration's `validators` key except the launch-record read
+# in `src/ledger.rs`, which keeps a run launched with them readable and refuses
+# every offer to its channel (`docs/contract-divergences.md` entry 153).
 onemessagebus = "0.11.1"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
@@ -1070,9 +1084,11 @@ onemessagebus = "0.11.1"
 #
 # **0.23.0 is taken because `oneagentgraph` 0.11.4 requires it**, and `^0.22.4`
 # admits no 0.23.x, so without the move the lock carries onejudge twice. Nothing
-# here reads anything new from it. It stops at 0.23.0 rather than the newest
-# release because 0.23.1 requires `onemessagebus ^0.11`, which the bus pin and
-# `onevcs` admit no version of: taking it would resolve the bus twice.
+# here reads anything new from it.
+#
+# **0.23.1 links `onemessagebus ^0.11`**, and is taken with the bus pin and
+# `oneagentgraph` 0.12.0, which requires it. Nothing here reads anything new
+# from it.
 onejudge = "0.23.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
