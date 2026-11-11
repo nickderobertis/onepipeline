@@ -7936,6 +7936,8 @@ const RULINGS: &[(&str, &str)] = &[
     // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
     ("147.", "decided against `onemessagebus`"),
     ("149.", "planner-surface-dropped"),
+    // The 0.11.1 link: the marked bus copy is re-decided against it, wording kept.
+    ("154.", "decided against `onemessagebus` 0.11.1"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

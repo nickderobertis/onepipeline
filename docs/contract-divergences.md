@@ -13373,3 +13373,17 @@ nothing on stdout is a **drop**. This build decides, on the manager's rulings fo
 `tests/e2e/older_launch_record.rs` the views and `adopt` over the recorded one, and
 `tests/e2e/publication_boundary.rs` a pass printing its input back and the boundary judged
 as a hook.
+
+## 154. The marked copy of the bus contract re-decided against onemessagebus 0.11.1 — RESOLVED
+
+**Ruled by the planner, and `docs/contract.md` edited to match** (correlation
+`c-baf0ff4e8212bf6e643144331e77da02`). `onevcs` 0.65 requires `onemessagebus ^0.11`, so
+the lock resolves the bus at 0.11.1. The contract's marked copy of the bus's envelope
+shape and filter grammar is re-decided against it with its wording kept: its two
+statements of the release name 0.11.1 where they named 0.10.0, and nothing else in either
+paragraph changes. Between 0.10.0 and 0.11.1 the bus's `envelope.rs`, `filter.rs` and
+`read.rs` are byte-identical; what changed is the removal of validators (entry 153) and
+`When` moving to its own module.
+
+**Ruling:** the planner ruled this re-decision (correlation
+`c-baf0ff4e8212bf6e643144331e77da02`).
