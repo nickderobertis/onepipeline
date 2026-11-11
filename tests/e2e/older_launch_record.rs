@@ -221,9 +221,9 @@ const LAUNCHED_WITH_VALIDATORS: [&str; 3] = [
 /// which `onemessagebus` 0.11 removed — stays readable by every view and by
 /// `adopt`, which writes its bus configuration back byte for byte; but nothing
 /// those validators would have judged is taken: a reply carrying commands, a
-/// verdict carrying none, a surface a verb raises and the surfaces the engine
-/// raises while `adopt` drives the run are each refused, saying why and what to
-/// do, and the run's channel holds nothing new afterwards.
+/// verdict carrying none, a surface a verb raises, a question `ask` raises and
+/// the surfaces the engine raises while `adopt` drives the run are each refused,
+/// saying why and what to do, and the run's channel holds nothing new afterwards.
 #[test]
 fn a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer() {
     let world = recorded_world("launched-with-validators");
@@ -297,6 +297,22 @@ fn a_run_launched_with_validators_is_read_and_adopted_and_refuses_every_offer() 
                 refused.stderr
             );
         }
+    }
+    // A question `ask` raises is refused the same way: answered `refused` at
+    // exit `1`, the bus's reason being this one, with nothing raised.
+    let mut asking = world.cmd(&["ask", "--timeout", "1", "which bound?"]);
+    asking.env("ONEPIPELINE_RUN_ID", RUN);
+    let asked = world.run_with_stdin_on(asking, "");
+    asked.exited(1);
+    let answer: Value = serde_json::from_str(asked.stdout.trim()).expect("one answer on stdout");
+    assert_eq!(answer["answer"], json!("refused"), "{answer}");
+    for said in LAUNCHED_WITH_VALIDATORS {
+        assert!(
+            answer["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(said)),
+            "the question was not refused saying {said:?}: {answer}"
+        );
     }
     assert_eq!(
         channel_logs(&world),

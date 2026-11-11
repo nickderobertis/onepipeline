@@ -13342,10 +13342,19 @@ pinned at the previous bundle has no document for.
 }
 ```
 
-## 153. Bus validators are removed, and a run launched with them refuses every offer — OPEN
+## 153. Bus validators are removed, and a run launched with them refuses every offer — RESOLVED
 
-**Proposal to the planner who owns `docs/contract.md`, which still names the command
-validators that judge what is offered to a queue as the core's.** This build links
+**Ruled by the planner, and `docs/contract.md` edited to match** (correlation
+`c-2754696f9652b3420e0ad6754137b217`). The contract's marked copy of the bus's envelope
+shape and filter grammar is re-decided against 0.11.1 with its wording kept: its two
+statements of the release name 0.11.1 where they named 0.10.0. The published 0.10.0 and
+0.11.1 crate sources carry the same `src/envelope.rs` and `src/filter.rs`; what changed is
+the configuration, hooks, ask, queue and schema modules, `validate.rs` removed and
+`when.rs` added. The clause naming "the command validators that judge what is offered to
+a queue" among the core's is dropped from the same paragraph, since the core no longer has
+them. Nothing else in the contract changes.
+
+This build links
 `onemessagebus` 0.11.1, which removed validators in favour of the hooks this crate
 already runs (entry 148 is the envelope reviewer's move onto them); `oneagentgraph` 0.12.0, `onejudge` 0.23.1 and `onevcs` 0.65.0
 move with it so the lock resolves the bus once. Nothing here reads a configuration's
