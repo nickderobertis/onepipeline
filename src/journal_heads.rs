@@ -166,6 +166,18 @@ fn head_of(
     if let Some(record) = &skim.parsed {
         return Some(whole((**record).clone()));
     }
+    // llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a
+    // line of one of `HEADED_KINDS` in the writers' form is headed off its opening, whose
+    // every field `opening_of` and `labels_of` read at `Envelope`'s own types (a `Source` and
+    // a `Phase` through their deserializers, `seq` and `round` as numbers, every string
+    // unescaped or else the line is parsed whole), and its middle is never validated, because
+    // knowing the complete reader refuses it means parsing the payload this read exists not to
+    // parse. Such a line is headed where the complete read holds no record, which
+    // `RunView::heads`'s rustdoc and `docs/contract.md` state; `fetch` answers `RecordMoved`
+    // for it, never a record, and `tests/run_reads.rs`'s
+    // `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds
+    // that. Every line the writers produce is headed equal to the complete read's record, which
+    // `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds.
     let headed =
         opening_of(skim.line).and_then(|opening| Some((labels_of(opening.labels)?, opening)));
     let Some((labels, opening)) = headed else {
@@ -199,6 +211,7 @@ fn head_of(
         artifacts: Vec::new(),
     };
     Some((head, folded))
+    // llmlint: ignore-end[boundary_inputs_validated]
 }
 
 /// The heads of `bytes`' lines, read by `skim`; `None` where a line whose record

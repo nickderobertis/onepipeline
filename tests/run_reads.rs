@@ -1020,6 +1020,48 @@ fn a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetc
         journal::fetch(&run.journal(), std::slice::from_ref(&head.handle)),
         Err(onepipeline::Error::RecordMoved { .. })
     ));
+    // Every other line, the writers' own, is headed and fetched as the complete read
+    // holds it, in its order; only the places from the malformed line's on move by it.
+    let others: Vec<&journal::RecordHead> = read
+        .heads
+        .iter()
+        .filter(|head| head.stream != "stream-broken")
+        .collect();
+    assert_eq!(others.len(), fresh.events.len());
+    let (places, _) = store_places(&fresh.events);
+    let broken_place = head.place.expect("a place of its own");
+    for (at, (other, record)) in others.iter().zip(&fresh.events).enumerate() {
+        assert_eq!(
+            (
+                &other.ts,
+                &other.stream,
+                other.seq,
+                &other.kind,
+                &other.labels,
+                other.evidence
+            ),
+            (
+                &record.ts,
+                &record.stream,
+                record.seq,
+                &record.kind,
+                &record.labels,
+                !record.artifacts.is_empty()
+            ),
+            "the head of record {at}"
+        );
+        assert_eq!(
+            other.place,
+            places[at].map(|place| place + usize::from(place >= broken_place)),
+            "the place of record {at}"
+        );
+    }
+    let handles: Vec<journal::RecordHandle> =
+        others.iter().map(|other| other.handle.clone()).collect();
+    assert_eq!(
+        journal::fetch(&run.journal(), &handles).expect("every other record"),
+        fresh.events
+    );
     // Folded as its head: every value but the node's tally is the complete read's, and
     // the tally counts it.
     assert_eq!(read.view.state.statuses(), fresh.state.statuses());
