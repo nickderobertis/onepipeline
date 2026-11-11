@@ -1559,8 +1559,10 @@ fn surface_lines(world: &World, run: &str) -> usize {
 
 /// A declined ruling's record goes with its kind, both ways, after the channel's
 /// hooks as well as before: a hook that strips a decline of its record, renames
-/// it into another kind still carrying the record, or makes it blocking is
-/// refused at `decline-ruling` in the channel's words, with nothing appended.
+/// it into another kind still carrying the record, makes it blocking, leaves a
+/// record that cannot be read, or moves it onto another node than its record
+/// names is refused at `decline-ruling` in the channel's words, with nothing
+/// appended.
 #[test]
 fn a_hook_that_breaks_a_declined_rulings_record_is_refused_with_nothing_appended() {
     for (name, hook, why) in [
@@ -1575,6 +1577,22 @@ fn a_hook_that_breaks_a_declined_rulings_record_is_refused_with_nothing_appended
             "only a `declined-ruling` surface carries a `declined_ruling` record",
         ),
         ("hookdeclineblock", &["set-blocking"][..], "never blocks"),
+        (
+            "hookdeclineunread",
+            // Well-formed for the surface's schema, and still no record a decline
+            // writes: a user's ruling cannot be declined.
+            &[
+                "set-field",
+                "declined_ruling",
+                r#"{"node": "spare", "ruling": "c0.0", "provenance": "user", "kind": "amendment", "reply": 0, "text": "Keep the diff under fifty lines.", "reason": "The user said otherwise."}"#,
+            ][..],
+            "record cannot be read",
+        ),
+        (
+            "hookdeclinemoved",
+            &["set-field", "workstream", r#""slow""#][..],
+            "about the node its record names, `spare`",
+        ),
     ] {
         let world = World::new(&format!("hook-decline-{name}"));
         hooked_run(&world, name, &[("surfaces", hook, "")]);

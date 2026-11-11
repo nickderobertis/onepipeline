@@ -17,6 +17,7 @@
 //!   `set-blocking`            mark a surface `blocking: true`
 //!   `set-kind <kind>`         rewrite a surface's `kind`
 //!   `remove-field <name>`     take the top-level field `<name>` off the message
+//!   `set-field <name> <json>` set the top-level field `<name>` to the JSON `<json>`
 //!   `keep-first-command`      leave only the first of the envelope's commands
 //!   `strip-verdict`           take the verdict half off a bare envelope
 //!   `rewrite-message <text>`  rewrite the `message` of every command carrying one
@@ -114,6 +115,17 @@ fn main() -> std::process::ExitCode {
                 fake::fail(&format!("remove-field was handed no object: {offered}"));
             };
             fields.remove(&argument);
+            println!("{message}");
+        }
+        "set-field" => {
+            let value: Value = serde_json::from_str(args.get(2).map_or("null", String::as_str))
+                .unwrap_or_else(|error| {
+                    fake::fail(&format!("set-field's value is not JSON: {error}"))
+                });
+            let Some(fields) = message.as_object_mut() else {
+                fake::fail(&format!("set-field was handed no object: {offered}"));
+            };
+            fields.insert(argument.clone(), value);
             println!("{message}");
         }
         "keep-first-command" => {
