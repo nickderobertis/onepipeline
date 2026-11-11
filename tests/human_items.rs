@@ -312,6 +312,7 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
                 reason: reason.map(str::to_owned),
                 actor: "manager".into(),
                 on_behalf_of: Some("operator".into()),
+                provenance: onepipeline::provenance::Provenance::Manager,
             })
             .unwrap();
         assert_eq!(receipt.item.item.state, HumanItemState::Dismissed);
@@ -341,7 +342,8 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
                 .apply(HumanItemAction::Complete {
                     id: "item-1".into(),
                     actor: "user".into(),
-                    on_behalf_of: None
+                    on_behalf_of: None,
+                    provenance: onepipeline::provenance::Provenance::Manager,
                 })
                 .is_err(),
             "invalid constructed {field}"
@@ -355,7 +357,8 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
         .apply(HumanItemAction::Complete {
             id: "item-1".into(),
             actor: "user".into(),
-            on_behalf_of: None
+            on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .is_err());
     let fixture: Value = serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
@@ -403,6 +406,7 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
             id: "item-3".into(),
             actor: "manager".into(),
             on_behalf_of: Some("operator".into()),
+            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap();
     assert_eq!(
@@ -1290,12 +1294,14 @@ fn a_sample_reopen_or_note_names_its_actor() {
             id: "item-1".into(),
             actor: " ".into(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         },
         HumanItemAction::Note {
             id: "item-1".into(),
             text: "said".into(),
             actor: String::new(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         },
     ] {
         assert_eq!(
@@ -1325,6 +1331,7 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
             answers: answers.clone(),
             actor: "user".into(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         }),
         Err(HumanItemRefusal::Conflict {
             reason: "an answer-batch answers a batch receipt, so it is applied through apply_batch"
@@ -1337,6 +1344,7 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
             Actor {
                 actor: " ".into(),
                 on_behalf_of: None,
+                provenance: onepipeline::provenance::Provenance::Manager,
             },
         ),
         Err(HumanItemRefusal::Conflict {

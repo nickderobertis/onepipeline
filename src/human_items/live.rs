@@ -33,16 +33,17 @@ use sha2::{Digest, Sha256};
 use super::{
     HumanItem, HumanItemAction, HumanItemBatchAnswer, HumanItemBatchReceipt, HumanItemBatchRefused,
     HumanItemBlock, HumanItemBlocked, HumanItemBlockedPlan, HumanItemDetail, HumanItemEventAction,
-    HumanItemEventBatch, HumanItemEventBy, HumanItemEventPayload, HumanItemFilter, HumanItemInput,
-    HumanItemKind, HumanItemNode, HumanItemReceipt, HumanItemRefusal, HumanItemResolution,
-    HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
+    HumanItemEventBatch, HumanItemEventBy, HumanItemEventPayload, HumanItemFilter,
+    HumanItemHistoryEntry, HumanItemInput, HumanItemKind, HumanItemNode, HumanItemReceipt,
+    HumanItemRefusal, HumanItemResolution, HumanItemState, HumanItemView, Priority, JOURNAL_PATH,
 };
 use crate::event::{Envelope, Source, ENVELOPE_VERSION};
 
 /// The one stream every host human-item event is written on.
 pub(crate) const STREAM: &str = "human-items";
-/// The read index's own format version; any other is rebuilt.
-const INDEX_VERSION: u32 = 1;
+/// The read index's own format version; any other is rebuilt. Version 2 keeps
+/// each item's history beside it.
+const INDEX_VERSION: u32 = 2;
 /// How much of a run journal's end its cache key digests.
 const RUN_TAIL: u64 = 512;
 /// The reason every item a run's end retires carries.
@@ -118,6 +119,8 @@ pub struct Actor {
     pub actor: String,
     /// The human a manager acted for, when one did.
     pub on_behalf_of: Option<String>,
+    /// Whose words the action is: the manager's own, or the user's relayed.
+    pub provenance: super::Provenance,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -137,10 +140,12 @@ impl Actor {
             Some(session) => Self {
                 actor: format!("session:{session}"),
                 on_behalf_of: Some(format!("user:{user}")),
+                provenance: super::Provenance::Manager,
             },
             None => Self {
                 actor: format!("user:{user}"),
                 on_behalf_of: None,
+                provenance: super::Provenance::Manager,
             },
         }
     }
@@ -190,6 +195,9 @@ struct Index {
     journal: Position,
     items: BTreeMap<String, HumanItem>,
     events: BTreeMap<String, String>,
+    /// Every item's history, oldest first, folded with the item: what a detail
+    /// read serves without reading the journal again.
+    histories: BTreeMap<String, Vec<HumanItemHistoryEntry>>,
     runs: BTreeMap<String, RunDag>,
     checksum: String,
 }
@@ -302,6 +310,7 @@ pub struct HumanItems {
 pub(crate) struct Snapshot {
     pub items: BTreeMap<String, HumanItem>,
     events: BTreeMap<String, String>,
+    histories: BTreeMap<String, Vec<HumanItemHistoryEntry>>,
     pub runs: BTreeMap<String, RunDag>,
 }
 
@@ -383,6 +392,7 @@ impl HumanItems {
         let engine = Actor {
             actor: "engine".into(),
             on_behalf_of: None,
+            provenance: super::Provenance::Manager,
         };
         let mut writer = Writer::open(self)?;
         let (receipt, retired) = match expanded {
@@ -576,6 +586,7 @@ impl HumanItems {
                 &Actor {
                     actor: "engine".into(),
                     on_behalf_of: None,
+                    provenance: super::Provenance::Manager,
                 },
                 None,
                 Some(RUN_ENDED.to_owned()),
@@ -738,6 +749,7 @@ impl HumanItems {
             &Actor {
                 actor: "engine".into(),
                 on_behalf_of: None,
+                provenance: super::Provenance::Manager,
             },
             None,
             Some(reason.to_owned()),
@@ -762,6 +774,7 @@ impl HumanItems {
             Snapshot {
                 items: index.items,
                 events: index.events,
+                histories: index.histories,
                 runs: index.runs,
             },
             telemetry,
@@ -893,7 +906,7 @@ impl HumanItems {
         while let Some(end) = rest[offset..].iter().position(|b| *b == b'\n') {
             let line = &rest[offset..offset + end];
             let at = index.journal.consumed;
-            let (seq, payload) = parse_record(line).map_err(|why| {
+            let (seq, at, payload) = parse_record_at(line).map_err(|why| {
                 conflict(format!(
                     "the human-item journal {} holds a record at byte {at} that cannot be read ({why}); \
                      it is never skipped, so nothing is listed until it is repaired",
@@ -927,6 +940,11 @@ impl HumanItems {
             })?;
             index.journal.next_seq = index.journal.next_seq.max(after);
             index.events.insert(payload.item_id.clone(), event_id(seq));
+            index
+                .histories
+                .entry(payload.item_id.clone())
+                .or_default()
+                .push(history_entry(at, &payload));
             index.items.insert(payload.item_id.clone(), payload.item);
             folded.0 += 1;
             folded.1 += end as u64 + 1;
@@ -1111,6 +1129,46 @@ pub(crate) fn first_tracked(journal: &Path, id: &str) -> Option<HumanItem> {
 
 /// One record of the host journal: its sequence and the item event it carries.
 pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
+    parse_record_at(line).map(|(seq, _, payload)| (seq, payload))
+}
+
+/// One event of an item's history, read off the record that journalled it at
+/// `at`: who took it is what the record says — the actor a reopen or a note
+/// names, the resolver of a resolution — and a raise, which names nobody, is its
+/// asker's own, the session that owns the item. Whose words it was is what the
+/// record says too, and the manager's wherever it says nothing: a raise, an
+/// auto-resolution, and every event of schema version 1.
+pub(crate) fn history_entry(at: String, payload: &HumanItemEventPayload) -> HumanItemHistoryEntry {
+    let asker = || {
+        (
+            format!("session:{}", payload.owner.session),
+            None,
+            super::Provenance::Manager,
+        )
+    };
+    let (actor, on_behalf_of, provenance) = match (&payload.by, &payload.resolution) {
+        (Some(by), _) => (by.actor.clone(), by.on_behalf_of.clone(), by.provenance),
+        (None, _) if payload.action == HumanItemEventAction::Raised => asker(),
+        (None, Some(resolution)) => (
+            resolution.actor.clone(),
+            resolution.on_behalf_of.clone(),
+            resolution.provenance,
+        ),
+        // No event of this kind is written without a resolution or a `by`; one
+        // is still an event of the item, and is listed as its asker's.
+        (None, None) => asker(),
+    };
+    HumanItemHistoryEntry {
+        action: payload.action,
+        at,
+        actor,
+        on_behalf_of,
+        provenance,
+    }
+}
+
+/// [`parse_record`], with the instant the record was journalled at.
+pub(crate) fn parse_record_at(line: &[u8]) -> Result<(u64, String, HumanItemEventPayload), String> {
     let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
     if envelope.stream != STREAM {
         return Err(format!("it is on stream {:?}", envelope.stream));
@@ -1134,7 +1192,7 @@ pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), 
             envelope.kind.0
         ));
     }
-    Ok((envelope.seq, payload))
+    Ok((envelope.seq, envelope.ts, payload))
 }
 
 /// A run journal's cache key: its length and a digest of its final bytes.
@@ -1318,6 +1376,11 @@ pub(crate) fn detail(
         blocked: impact(&groups),
         nodes: groups.into_iter().flat_map(|(_, nodes)| nodes).collect(),
         reopen: reopen_of(config, item),
+        history: snapshot
+            .histories
+            .get(&item.id)
+            .cloned()
+            .unwrap_or_default(),
     }
 }
 
@@ -1612,7 +1675,7 @@ impl<'a> Writer<'a> {
         batch: Option<HumanItemEventBatch>,
     ) -> Result<(Envelope, String), HumanItemRefusal> {
         let payload = HumanItemEventPayload {
-            schema_version: 1,
+            schema_version: super::EVENT_SCHEMA_VERSION,
             item_id: item.id.clone(),
             owner: item.owner.clone(),
             action,
@@ -1712,6 +1775,7 @@ impl<'a> Writer<'a> {
             &Actor {
                 actor: "engine".into(),
                 on_behalf_of: None,
+                provenance: super::Provenance::Manager,
             },
             None,
             Some(reason.to_owned()),
@@ -1819,6 +1883,7 @@ impl<'a> Writer<'a> {
         let by = HumanItemEventBy {
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance: actor.provenance,
         };
         let event = self.append_by(&item, action, Some(by))?;
         Ok(self.receipt(&item, event))
@@ -1879,10 +1944,12 @@ impl<'a> Writer<'a> {
                 id,
                 actor,
                 on_behalf_of,
+                provenance,
             } => {
                 let actor = Actor {
                     actor,
                     on_behalf_of,
+                    provenance,
                 };
                 return self.reopen(&id, actor);
             }
@@ -1891,10 +1958,12 @@ impl<'a> Writer<'a> {
                 text,
                 actor,
                 on_behalf_of,
+                provenance,
             } => {
                 let actor = Actor {
                     actor,
                     on_behalf_of,
+                    provenance,
                 };
                 return self.note(&id, text, actor);
             }
@@ -1904,10 +1973,12 @@ impl<'a> Writer<'a> {
                 text,
                 actor,
                 on_behalf_of,
+                provenance,
             } => {
                 let actor = Actor {
                     actor,
                     on_behalf_of,
+                    provenance,
                 };
                 return match self.judge_answer(&id, choice.as_deref(), text.as_deref(), &actor)? {
                     Answerable::Repeat(receipt) => Ok(*receipt),
@@ -1923,11 +1994,13 @@ impl<'a> Writer<'a> {
                 id,
                 actor,
                 on_behalf_of,
+                provenance,
             } => (
                 id,
                 Actor {
                     actor,
                     on_behalf_of,
+                    provenance,
                 },
                 HumanItemState::Completed,
                 None,
@@ -1937,11 +2010,13 @@ impl<'a> Writer<'a> {
                 reason,
                 actor,
                 on_behalf_of,
+                provenance,
             } => (
                 id,
                 Actor {
                     actor,
                     on_behalf_of,
+                    provenance,
                 },
                 HumanItemState::Dismissed,
                 reason
@@ -2118,6 +2193,7 @@ fn resolved(
         text,
         choice,
         reason,
+        provenance: actor.provenance,
     });
     resolved.updated_at = crate::sys::now_rfc3339();
     resolved

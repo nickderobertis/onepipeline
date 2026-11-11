@@ -15,6 +15,8 @@ pub use onetaskgraph_plugin_api::Priority;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use crate::provenance::Provenance;
+
 /// The human-item journal relative to the engine home (the runs root).
 pub const JOURNAL_PATH: &str = "human-items/events.ndjson";
 
@@ -44,6 +46,17 @@ fn version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     match u32::deserialize(d)? {
         1 => Ok(1),
         _ => Err(serde::de::Error::custom("expected schema_version 1")),
+    }
+}
+
+/// The human-item event schema version this build writes: 2, whose actions,
+/// resolutions and `by` say whose words they are.
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
+
+fn event_version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    match u32::deserialize(d)? {
+        version @ (1 | EVENT_SCHEMA_VERSION) => Ok(version),
+        _ => Err(serde::de::Error::custom("expected schema_version 1 or 2")),
     }
 }
 
@@ -157,6 +170,11 @@ pub struct HumanItemResolution {
     #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<String>")]
     pub reason: Option<String>,
+    /// Whose words it is: the manager's own, or the user's relayed. Omitted while
+    /// it is the manager's, and absent from every record written before the field
+    /// existed, which reads as the manager's.
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
 }
 
 /// An opaque approval authority reference captured when raised.
@@ -371,6 +389,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     /// Answer several open questions as one batch, through `apply_batch`.
     AnswerBatch {
@@ -383,6 +404,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Complete an open item.
@@ -395,6 +419,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     /// Dismiss an open item.
     Dismiss {
@@ -409,6 +436,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     // llmlint: ignore-block[invalid_states_unrepresentable] The contract fixes reopen and note as flat `{id,actor,on_behalf_of}` variants of JSON strings, as Answer, Complete and Dismiss already are, and a consumer validates against that schema. A validated identity type would change the published action shape; a blank actor is refused at both apply boundaries and an unknown id answers a typed conflict.
     /// Reopen a completed or dismissed item, taking its resolution back.
@@ -421,6 +451,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     /// Say something after the fact on a completed or dismissed item: its comment
     /// or its reason, replacing the stored text and leaving the resolver as it is.
@@ -438,6 +471,9 @@ pub enum HumanItemAction {
         #[serde(deserialize_with = "required_option")]
         #[schemars(required, schema_with = "nullable::<String>")]
         on_behalf_of: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+        provenance: Provenance,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
@@ -565,8 +601,36 @@ pub struct HumanItemDetail, HumanItemDetailWire {
     pub nodes: Vec<HumanItemNode>,
     /// Whether it can be reopened.
     pub reopen: HumanItemReopen,
+    /// Every event the journal recorded for this item, oldest first: who took
+    /// each action, when, and whose words it was. The engine's own reading of
+    /// its journal; a reader never derives it again from `events.ndjson`.
+    #[serde(default)]
+    pub history: Vec<HumanItemHistoryEntry>,
 }
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] The contract publishes a history entry as this flat `{action,at,actor,on_behalf_of,provenance}` record, the strings spelled as the resolution and `by` spell the same values; only the engine's fold of its own journal builds one.
+/// One event of an item's history, as [`HumanItemDetail::history`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanItemHistoryEntry {
+    /// What the event did.
+    pub action: HumanItemEventAction,
+    /// When it was recorded, as RFC 3339.
+    pub at: String,
+    /// Who took it: the resolver, the actor a reopen or a note names, the asker's
+    /// session for a raise, and `engine` for an auto-resolution.
+    pub actor: String,
+    /// The human a manager acted for, when one did.
+    #[serde(deserialize_with = "required_option")]
+    #[schemars(required, schema_with = "nullable::<String>")]
+    pub on_behalf_of: Option<String>,
+    /// Whose words it was. A raise is its asker's own and an auto-resolution
+    /// the engine's, both read as `manager`, as is every event of schema
+    /// version 1.
+    pub provenance: Provenance,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A successful mutation and its event identifier.
@@ -631,16 +695,23 @@ pub struct HumanItemEventBy {
     #[serde(deserialize_with = "required_option")]
     #[schemars(required, schema_with = "nullable::<String>")]
     pub on_behalf_of: Option<String>,
+    /// Whose words it is: the manager's own, or the user's relayed. Omitted while
+    /// it is the manager's, and absent from every record written before the field
+    /// existed, which reads as the manager's.
+    #[serde(default, skip_serializing_if = "Provenance::is_manager")]
+    pub provenance: Provenance,
 }
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The event contract publishes item_id, owner, item, resolution and a numeric version together. Keep those flat public fields; the boundary verifies the duplicated identity/resolution and action/state consistency instead of replacing the prescribed envelope payload.
 validated_record! {
-/// Version-one payload transported by a generic bus envelope.
+/// The payload transported by a generic bus envelope: written at
+/// [`EVENT_SCHEMA_VERSION`], and read at version 1 too, whose every action reads
+/// as the manager's.
 #[schemars(extend("allOf" = event_constraints()))]
 pub struct HumanItemEventPayload, HumanItemEventPayloadWire {
-    /// Schema version.
-    #[serde(deserialize_with = "version")]
-    #[schemars(range(min = 1, max = 1))]
+    /// Schema version: 2, or 1 for an event written before provenance existed.
+    #[serde(deserialize_with = "event_version")]
+    #[schemars(range(min = 1, max = 2))]
     pub schema_version: u32,
     /// Item id.
     pub item_id: String,
@@ -756,6 +827,9 @@ pub enum HumanItemsCommand {
         /// The person's own words; at least one of this and `--choice`.
         #[arg(long, value_parser = parse_answer)]
         text: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Answer several open questions as one batch from a JSON file `{answers: [...]}`.
@@ -763,11 +837,17 @@ pub enum HumanItemsCommand {
         /// JSON batch file.
         #[arg(long)]
         input: std::path::PathBuf,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     /// Complete an open task using its stored approval reference, if any.
     Complete {
         /// Item identifier.
         id: String,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     /// Dismiss an open item.
     Dismiss {
@@ -776,11 +856,17 @@ pub enum HumanItemsCommand {
         /// Optional dismissal reason.
         #[arg(long)]
         reason: Option<String>,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     /// Reopen a completed or dismissed item, running its approval adapter's undo if it has one.
     Reopen {
         /// Item identifier.
         id: String,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     /// Comment on a completed item, or state a dismissed item's reason, after the fact.
     Note {
@@ -790,6 +876,9 @@ pub enum HumanItemsCommand {
         #[arg(long, value_parser = parse_note)]
         // llmlint: ignore[invalid_states_unrepresentable] This argument becomes HumanItemAction::Note's contract-declared String text; parse_note refuses blank text at the CLI boundary, so no blank note reaches the action.
         text: String,
+        /// Whose words the action is: `manager`, the default, or `user`.
+        #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
+        provenance: Provenance,
     },
     /// Report matching items, counting and grouping the blocking ones first:
     /// this session's own and those holding its work unless a filter or
@@ -1027,11 +1116,18 @@ impl HumanItemSample {
                 updated_at: "sample".into(),
             };
             let reopen = reopen_availability(&item, true);
+            let history = vec![sample_entry(
+                HumanItemEventAction::Raised,
+                format!("session:{}", item.owner.session),
+                None,
+                Provenance::Manager,
+            )];
             self.items.push(HumanItemDetail {
                 item,
                 blocked,
                 nodes,
                 reopen,
+                history,
             });
             return Ok(receipt(self.items.last().expect("just appended"), "raised"));
         }
@@ -1041,11 +1137,23 @@ impl HumanItemSample {
             {
                 return Err(conflict("an action names its actor"));
             }
-            HumanItemAction::Reopen { id, .. } => return self.reopen(&id),
-            HumanItemAction::Note { id, text, .. } => return self.note(&id, text),
+            HumanItemAction::Reopen {
+                id,
+                actor,
+                on_behalf_of,
+                provenance,
+            } => return self.reopen(&id, sample_by(actor, on_behalf_of, provenance)),
+            HumanItemAction::Note {
+                id,
+                text,
+                actor,
+                on_behalf_of,
+                provenance,
+            } => return self.note(&id, text, sample_by(actor, on_behalf_of, provenance)),
             other => other,
         };
         let mut picked = None;
+        let whose;
         let (id, actor, on_behalf_of, state, text, reason, operation) = match action {
             HumanItemAction::Answer {
                 id,
@@ -1053,11 +1161,13 @@ impl HumanItemSample {
                 text,
                 actor,
                 on_behalf_of,
+                provenance,
             } => {
                 if let Some(why) = answer_refusal(choice.as_deref(), text.as_deref()) {
                     return Err(conflict(why));
                 }
                 picked = choice;
+                whose = provenance;
                 (
                     id,
                     actor,
@@ -1073,25 +1183,33 @@ impl HumanItemSample {
                 id,
                 actor,
                 on_behalf_of,
-            } => (
-                id,
-                actor,
-                on_behalf_of,
-                HumanItemState::Completed,
-                None,
-                None,
-                "completed",
-            ),
+                provenance,
+            } => {
+                whose = provenance;
+                (
+                    id,
+                    actor,
+                    on_behalf_of,
+                    HumanItemState::Completed,
+                    None,
+                    None,
+                    "completed",
+                )
+            }
             HumanItemAction::Dismiss {
                 id,
                 reason,
                 actor,
                 on_behalf_of,
+                provenance,
             } => (
                 id,
                 actor,
                 on_behalf_of,
-                HumanItemState::Dismissed,
+                {
+                    whose = provenance;
+                    HumanItemState::Dismissed
+                },
                 None,
                 reason.filter(|s| !s.trim().is_empty()),
                 "dismissed",
@@ -1154,16 +1272,30 @@ impl HumanItemSample {
                     replacement.item.dedup_key = dedup_key;
                     replacement.item.created_at = "sample-replacement".into();
                     replacement.item.updated_at = "sample-replacement".into();
+                    // A new item, raised by the asker of the one it replaces.
+                    replacement.history = vec![sample_entry(
+                        HumanItemEventAction::Raised,
+                        format!("session:{}", replacement.item.owner.session),
+                        None,
+                        Provenance::Manager,
+                    )];
                     let obsolete = &mut self.items[index].item;
                     obsolete.state = HumanItemState::Dismissed;
                     obsolete.resolution = Some(HumanItemResolution {
-                        actor,
-                        on_behalf_of,
+                        actor: actor.clone(),
+                        on_behalf_of: on_behalf_of.clone(),
                         text: None,
                         choice: None,
                         reason: Some("Re-read the current document".into()),
+                        provenance: whose,
                     });
                     obsolete.updated_at = "sample-obsolete".into();
+                    self.items[index].history.push(sample_entry(
+                        HumanItemEventAction::Dismissed,
+                        actor,
+                        on_behalf_of,
+                        whose,
+                    ));
                     self.items[index].blocked = HumanItemBlocked {
                         total: 0,
                         plans: vec![],
@@ -1182,12 +1314,23 @@ impl HumanItemSample {
         }
         let detail = &mut self.items[index];
         detail.item.state = state;
+        detail.history.push(sample_entry(
+            match state {
+                HumanItemState::Answered => HumanItemEventAction::Answered,
+                HumanItemState::Completed => HumanItemEventAction::Completed,
+                _ => HumanItemEventAction::Dismissed,
+            },
+            actor.clone(),
+            on_behalf_of.clone(),
+            whose,
+        ));
         detail.item.resolution = Some(HumanItemResolution {
             actor,
             on_behalf_of,
             text,
             choice: picked,
             reason,
+            provenance: whose,
         });
         detail.item.updated_at = "sample-resolved".into();
         detail.blocked = HumanItemBlocked {
@@ -1222,6 +1365,7 @@ impl HumanItemSample {
                 text: entry.text,
                 actor: actor.actor.clone(),
                 on_behalf_of: actor.on_behalf_of.clone(),
+                provenance: actor.provenance,
             }) {
                 Ok(answered) => receipt.answered.push(answered),
                 Err(refusal) => receipt.refused.push(HumanItemBatchRefused { id, refusal }),
@@ -1235,7 +1379,11 @@ impl HumanItemSample {
 
     /// Reopen a sample item. The fixture authority is the undo of every approval it
     /// recorded, and refuses one for a version it no longer holds, as a script may.
-    fn reopen(&mut self, id: &str) -> Result<HumanItemReceipt, HumanItemRefusal> {
+    fn reopen(
+        &mut self,
+        id: &str,
+        by: HumanItemEventBy,
+    ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let index = self
             .items
             .iter()
@@ -1274,11 +1422,22 @@ impl HumanItemSample {
         detail.item.state = HumanItemState::Open;
         detail.item.resolution = None;
         detail.item.updated_at = "sample-reopened".into();
+        detail.history.push(sample_entry(
+            HumanItemEventAction::Reopened,
+            by.actor,
+            by.on_behalf_of,
+            by.provenance,
+        ));
         detail.reopen = reopen_availability(&detail.item, true);
         Ok(receipt(detail, "reopened"))
     }
 
-    fn note(&mut self, id: &str, text: String) -> Result<HumanItemReceipt, HumanItemRefusal> {
+    fn note(
+        &mut self,
+        id: &str,
+        text: String,
+        by: HumanItemEventBy,
+    ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         if text.trim().is_empty() {
             return Err(conflict("a note's text must not be blank"));
         }
@@ -1300,7 +1459,43 @@ impl HumanItemSample {
             resolution.reason = Some(text);
         }
         detail.item.updated_at = "sample-noted".into();
+        detail.history.push(sample_entry(
+            HumanItemEventAction::Noted,
+            by.actor,
+            by.on_behalf_of,
+            by.provenance,
+        ));
         Ok(receipt(detail, "noted"))
+    }
+}
+
+/// Who took a sample reopen or note.
+fn sample_by(
+    actor: String,
+    on_behalf_of: Option<String>,
+    provenance: Provenance,
+) -> HumanItemEventBy {
+    HumanItemEventBy {
+        actor,
+        on_behalf_of,
+        provenance,
+    }
+}
+
+/// One entry of a sample item's history: the fixture keeps no clock, so every
+/// entry is `at` the fixture's own word, as its items' times are.
+fn sample_entry(
+    action: HumanItemEventAction,
+    actor: String,
+    on_behalf_of: Option<String>,
+    provenance: Provenance,
+) -> HumanItemHistoryEntry {
+    HumanItemHistoryEntry {
+        action,
+        at: "sample".into(),
+        actor,
+        on_behalf_of,
+        provenance,
     }
 }
 
@@ -1472,6 +1667,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                     vec![]
                 },
                 reopen: current.reopen,
+                history: detail.history.clone(),
             };
             if json {
                 println!(
@@ -1503,14 +1699,20 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 serde_json::from_slice(&input).map_err(|e| Error::Invalid(e.to_string()))?,
             )
         }
-        HumanItemsCommand::Answer { id, choice, text } => HumanItemAction::Answer {
+        HumanItemsCommand::Answer {
+            id,
+            choice,
+            text,
+            provenance,
+        } => HumanItemAction::Answer {
             id,
             choice,
             text,
             actor: "sample-operator".into(),
             on_behalf_of: None,
+            provenance,
         },
-        HumanItemsCommand::AnswerBatch { input } => {
+        HumanItemsCommand::AnswerBatch { input, provenance } => {
             let answers = batch_file(&input)?;
             let before = sample.clone();
             let outcome = sample.apply_batch(
@@ -1518,6 +1720,7 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
                 Actor {
                     actor: "sample-operator".into(),
                     on_behalf_of: None,
+                    provenance,
                 },
             );
             if sample != before {
@@ -1530,27 +1733,39 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
             }
             return batch_answered(outcome);
         }
-        HumanItemsCommand::Complete { id } => HumanItemAction::Complete {
+        HumanItemsCommand::Complete { id, provenance } => HumanItemAction::Complete {
             id,
             actor: "sample-operator".into(),
             on_behalf_of: None,
+            provenance,
         },
-        HumanItemsCommand::Dismiss { id, reason } => HumanItemAction::Dismiss {
+        HumanItemsCommand::Dismiss {
+            id,
+            reason,
+            provenance,
+        } => HumanItemAction::Dismiss {
             id,
             reason,
             actor: "sample-operator".into(),
             on_behalf_of: None,
+            provenance,
         },
-        HumanItemsCommand::Reopen { id } => HumanItemAction::Reopen {
+        HumanItemsCommand::Reopen { id, provenance } => HumanItemAction::Reopen {
             id,
             actor: "sample-operator".into(),
             on_behalf_of: None,
+            provenance,
         },
-        HumanItemsCommand::Note { id, text } => HumanItemAction::Note {
+        HumanItemsCommand::Note {
+            id,
+            text,
+            provenance,
+        } => HumanItemAction::Note {
             id,
             text,
             actor: "sample-operator".into(),
             on_behalf_of: None,
+            provenance,
         },
     };
     let before = sample.clone();
@@ -1812,8 +2027,14 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                 0
             });
         }
-        HumanItemsCommand::AnswerBatch { input } => {
-            return batch_answered(store.apply_batch(batch_file(&input)?, actor));
+        HumanItemsCommand::AnswerBatch { input, provenance } => {
+            return batch_answered(store.apply_batch(
+                batch_file(&input)?,
+                Actor {
+                    provenance,
+                    ..actor
+                },
+            ));
         }
         HumanItemsCommand::Raise { input, .. } => {
             let input = input.ok_or_else(|| Error::Invalid("raise names --input".into()))?;
@@ -1823,34 +2044,52 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                 serde_json::from_slice(&bytes).map_err(|e| Error::Invalid(e.to_string()))?,
             )
         }
-        HumanItemsCommand::Answer { id, choice, text } => HumanItemAction::Answer {
+        HumanItemsCommand::Answer {
+            id,
+            choice,
+            text,
+            provenance,
+        } => HumanItemAction::Answer {
             id,
             choice,
             text,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance,
         },
-        HumanItemsCommand::Complete { id } => HumanItemAction::Complete {
+        HumanItemsCommand::Complete { id, provenance } => HumanItemAction::Complete {
             id,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance,
         },
-        HumanItemsCommand::Dismiss { id, reason } => HumanItemAction::Dismiss {
+        HumanItemsCommand::Dismiss {
+            id,
+            reason,
+            provenance,
+        } => HumanItemAction::Dismiss {
             id,
             reason,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance,
         },
-        HumanItemsCommand::Reopen { id } => HumanItemAction::Reopen {
+        HumanItemsCommand::Reopen { id, provenance } => HumanItemAction::Reopen {
             id,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance,
         },
-        HumanItemsCommand::Note { id, text } => HumanItemAction::Note {
+        HumanItemsCommand::Note {
+            id,
+            text,
+            provenance,
+        } => HumanItemAction::Note {
             id,
             text,
             actor: actor.actor,
             on_behalf_of: actor.on_behalf_of,
+            provenance,
         },
     };
     let receipt = store.apply(action).map_err(|e| refused(&e))?;
@@ -2190,7 +2429,7 @@ pub fn derive_legacy(
 impl HumanItemEventPayload {
     fn validate(&self) -> Result<(), String> {
         self.item.validate()?;
-        if self.schema_version != 1
+        if !matches!(self.schema_version, 1 | EVENT_SCHEMA_VERSION)
             || self.item_id != self.item.id
             || self.owner != self.item.owner
             || self.resolution != self.item.resolution
