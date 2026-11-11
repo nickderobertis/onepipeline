@@ -9464,16 +9464,16 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         let _ = (handle == handle.clone(), format!("{handle:?}"));
         let _: std::collections::HashSet<onepipeline::journal::RecordHandle> = [handle].into();
     };
-    let _ = |error: onepipeline::Error| match error {
-        onepipeline::Error::RecordMoved {
+    let _ = |error: onepipeline::Error| {
+        if let onepipeline::Error::RecordMoved {
             path,
             offset,
             stream,
             seq,
-        } => {
+        } = error
+        {
             let _: (std::path::PathBuf, u64, String, u64) = (path, offset, stream, seq);
         }
-        _ => {}
     };
     let _: fn(&Path) -> Host = verbs::host;
     let _: fn(&Host) -> String = verbs::render_host;

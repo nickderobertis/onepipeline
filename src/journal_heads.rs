@@ -583,7 +583,8 @@ mod tests {
                 .collect()
         };
         let none = |_: &crate::views::RunHeads| -> Vec<RecordHandle> { Vec::new() };
-        let answers: [(&str, &dyn Fn(&crate::views::RunHeads) -> Vec<RecordHandle>); 3] =
+        type Fetched<'a> = &'a dyn Fn(&crate::views::RunHeads) -> Vec<RecordHandle>;
+        let answers: [(&str, Fetched<'_>); 3] =
             [("none", &none), ("a few", &chosen), ("every", &all)];
         for (what, fetched) in answers {
             whole_parses::start();
