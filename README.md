@@ -287,13 +287,12 @@ the running loop.
 
 `--dag-graph REF` attaches an agent graph as an **observer** — the shipped one is
 a `monitor` member that watches the stream and raises what does not line up, plus
-a resettable-cron `check-in` member that surfaces a status when nobody has
-reported one for a while. It never drives the engine. Reading a surface with
-`next` restarts that `resettable` clock through the engine's automatic reset,
-which is deprecated and will be removed: `reset_on` replaces it, declared on the
-schedule against the run's own journal, which every observer graph follows. A
-graph that still declares `resettable` keeps working and prints one warning at
-`start` and `adopt`. Attached, `start` returns
+a cron `check-in` member that surfaces a status when nobody has reported one for
+a while. It never drives the engine. Reading a surface with `next` journals
+`planner-surfaced`, and every observer graph follows the run's own journal, so a
+clock restarts on a reading exactly when its graph declares `reset_on` matching
+that record — the shipped `check-in` does. The engine signals no member and
+restarts no clock itself. Attached, `start` returns
 when the run settles; exit `3` means nothing is driving the run, and
 `onepipeline adopt RUN` attaches a fresh driver to the intact ledger, and takes
 the same `--attach`/`--detach` pair `start` does: detached, it prints the launch

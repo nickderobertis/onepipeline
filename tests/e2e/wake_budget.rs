@@ -1558,7 +1558,7 @@ fn the_verdict_is_the_same_whatever_observes_the_run() {
     let world = World::new("wake-observers");
     world.write_graphs();
     world.script("observer.wait", "");
-    let graph = world.write_observer_graph_with_clocks(&[("zebra-herder", false), ("q7", true)]);
+    let graph = world.write_observer_graph_with_clocks(&["zebra-herder", "q7"]);
     let bare = world.as_session("observed-bare");
     let observed = world.as_session("observed-graph");
     let args = ["--wake-budget", BUDGET];

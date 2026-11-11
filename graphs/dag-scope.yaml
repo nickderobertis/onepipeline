@@ -16,8 +16,10 @@
 # that carries none of its own. Each member's job is stated in its persona
 # instead — a graph replacing this one says it there, or in a member `task`
 # composed from `{task}`, which needs the schema version `oneagentgraph`
-# documents as `config::FIRST_TASK_TOKEN_VERSION`. This one needs neither.
-version: 1
+# documents as `config::FIRST_TASK_TOKEN_VERSION`. This one needs neither; its
+# version is `config::FIRST_SCHEDULED_NOTE_VERSION`, the first in which a
+# schedule may declare `reset_on`, and no member here reads differently under it.
+version: 11
 name: dag-scope
 members:
   monitor:
@@ -44,7 +46,12 @@ members:
     kind: oneharness
     oneharness_config: ./oneharness.orchestrator.toml
     persona: ../personas/check-in.yaml
-    # Resettable: every planner-visible surface restarts this clock, so a run
-    # that is already reporting does not also get a pacemaker surface. That
-    # automatic reset is deprecated and will be removed; `reset_on` replaces it.
-    schedule: {every: 1800, resettable: true}
+    # Every surface a planner reads restarts this clock, so a run that is
+    # already reporting does not also get a pacemaker surface: `next` journals
+    # `planner-surfaced`, and the graph follows the run's journal. The first
+    # turn is at launch, as it was before the schema this needs; the engine
+    # signals no member, so this filter is the only reset this clock has.
+    schedule:
+      every: 1800
+      start_after: 0
+      reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}

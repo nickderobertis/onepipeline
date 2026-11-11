@@ -872,11 +872,7 @@ resolver = "2"
 # `tests/e2e/observer_follow.rs` holds it. It also keeps 0.9.3's replacing a
 # graph run's record whole, written to a sibling and renamed into place, so a
 # reader never opens it empty or half-written, and on Windows a read never meets
-# the record in the middle of that replace. Below 0.9.3 the real sibling's
-# `reset-timer` could read a run's state mid-write and refuse with `EOF while
-# parsing a value`. `tests/e2e/dispatch.rs`'s
-# `consuming_a_surface_restarts_the_real_pacemakers_clock` drives that read
-# through the sibling binary this lock builds. It requires nothing this lock did
+# the record in the middle of that replace. It requires nothing this lock did
 # not already resolve.
 #
 # `oneagentgraph` 0.11.4 is the floor because it keeps a reset clock's next
@@ -894,6 +890,16 @@ resolver = "2"
 # the bus without validators (see that pin). It requires `onejudge ^0.23.1`,
 # `onemessagebus ^0.11.1` and `onevcs ^0.65.0` as a dev-dependency, so the four
 # move as one or the lock resolves the bus twice.
+#
+# `oneagentgraph` 0.13.0 is the floor because it removes `resettable`,
+# `run::Signal::Reset` and the `reset-timer` verb (oneagentgraph #280), and this
+# engine calls none of them: `next` restarts no clock, and an observer graph
+# restarts one only through `reset_on` over the journal it follows. A
+# requirement, because `^0.12` admits no 0.13.x, and this crate re-exports the
+# sibling's types (`note`, `config::ConfigRef`, `event::*`), so the move is a
+# breaking one for a consumer. `tests/e2e/observer_follow.rs` holds it over all
+# three launch paths, and `graphs/dag-scope.yaml` declares the `reset_on` its
+# `check-in` used to get from the engine.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -915,7 +921,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.12.0"
+oneagentgraph = "0.13.0"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
@@ -1427,14 +1433,17 @@ onevcs-testing = "0.21.2"
 # a repeat copy creates nothing and a document copied right after its project resolves every link
 # to it while Linear's filtered and searched reads lag its writes: the lagging-listings journey in
 # `tests/e2e/linear_launch.rs` fails on 0.14.7. 0.14.8 was tagged but never published its crates.
-onetaskgraph-core = "=0.14.9"
-onetaskgraph-plugin-api = "=0.14.9"
-onetaskgraph-local-md = "=0.14.9"
+# **0.14.12 writes an expandable block in each destination's own form on copy**
+# (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
+# as its collapsible section as well as GitHub as the HTML element.
+onetaskgraph-core = "=0.14.12"
+onetaskgraph-plugin-api = "=0.14.12"
+onetaskgraph-local-md = "=0.14.12"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.9"
+onetaskgraph-linear = "=0.14.12"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
@@ -1452,7 +1461,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.107.0"
+version = "0.108.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

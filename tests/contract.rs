@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("155.")["bundle_versions"]["events"],
+        divergence_block("156.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1246,7 +1246,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("155.")["bundle_versions"]["planner_channel"],
+        divergence_block("156.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -6233,17 +6233,6 @@ fn the_contract_declares_an_open_surface_kind_vocabulary() {
     assert_eq!(host_kind.as_str(), "host-defined");
     assert!(CONTRACT.contains("--kind KIND"));
     assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
-    assert!(
-        CONTRACT.contains(
-            "restarts the check-in clock of **every member the run's recorded observer graph \
-             declares `resettable` in its `schedule`**"
-        ),
-        "consuming a surface restarts the resettable clocks"
-    );
-    assert!(
-        !CONTRACT.contains("reset-timer RUN check-in"),
-        "the contract names a member of one host's observer graph"
-    );
     // The one kind the engine raises of its own, stated with its source and its
     // message.
     assert!(CONTRACT.contains("`edit-applied`, queued non-blocking"));
@@ -7483,13 +7472,49 @@ fn a_command_outside_the_surface_is_refused() {
         .expect_err("the surface is exactly what the contract names");
 }
 
+/// Entry 155 is accepted with the contract left verbatim, so it is where the
+/// approved text describing the removed reset is named as superseded: the
+/// channel contract's `reset-timer` paragraph and the driver contract's
+/// resettable-cron `check-in`, each at the line the entry points at.
 #[test]
-fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
-    assert!(CONTRACT.contains(
-        "the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a \
-         resettable-cron `check-in` member; a host copies it or brings its own, and the \
-         engine names no member of it"
-    ));
+fn the_removed_reset_names_every_approved_passage_it_supersedes() {
+    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
+        .expect("the divergence record ships");
+    let entry = record
+        .split("\n## ")
+        .find(|entry| entry.starts_with("155."))
+        .expect("the divergence record carries entry 155");
+    assert!(entry
+        .lines()
+        .next()
+        .is_some_and(|heading| heading.ends_with("— ACCEPTED")));
+    let lines: Vec<&str> = CONTRACT.lines().collect();
+    for (line, superseded) in [
+        (532, "`oneagentgraph reset-timer RUN MEMBER` for each"),
+        (532, "That is the whole check-in reset contract."),
+        (296, "beside a resettable-cron `check-in` member"),
+    ] {
+        assert!(
+            lines[line - 1].contains(superseded),
+            "docs/contract.md:{line} no longer carries `{superseded}`"
+        );
+        assert!(
+            entry.contains(&format!("`docs/contract.md:{line}`")),
+            "entry 155 does not name docs/contract.md:{line}, which says `{superseded}`"
+        );
+    }
+}
+
+#[test]
+fn the_dag_scope_graph_is_a_monitor_plus_a_check_in() {
+    // The contract's word for the `check-in` member's clock is not held here: the
+    // shipped graph restarts it through `reset_on`, because the linked
+    // `oneagentgraph` has no other reset (`docs/contract-divergences.md` entry
+    // 155). The rest of the sentence holds.
+    assert!(CONTRACT
+        .contains("the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a"));
+    assert!(CONTRACT
+        .contains("a host copies it or brings its own, and the engine names no member of it"));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -7524,9 +7549,21 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
         panic!("the pacemaker is a single-sided member");
     };
     let schedule = check_in.schedule.clone().expect("it is a cron member");
+    let reset_on = serde_json::to_value(
+        schedule
+            .reset_on
+            .clone()
+            .expect("a planner's reading restarts the check-in"),
+    )
+    .expect("the filter serialises");
     assert!(
-        schedule.resettable,
-        "the contract makes the check-in resettable"
+        reset_on["include"]
+            .as_array()
+            .is_some_and(|matchers| matchers
+                .iter()
+                .any(|matcher| matcher["source"] == "pipeline"
+                    && matcher["kind"] == "planner-surfaced")),
+        "the check-in does not restart on a planner's reading: {reset_on}"
     );
     assert_eq!(
         schedule.every, 1_800,
@@ -8044,6 +8081,38 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
                 section.contains("Superseded by entry"),
                 "divergence `{heading}` is marked superseded and its prose does not say so"
             );
+            continue;
+        }
+        // Or accepted with the contract left verbatim: the planner ruled the
+        // proposal in and directed that `docs/contract.md` stay unedited, so the
+        // entry is where the superseded approved text is named. It records the
+        // ruling and points at each passage by line, and every line it points at
+        // is one the contract has, so a pointer cannot outlive the text it names.
+        if heading.ends_with("— ACCEPTED") {
+            assert!(
+                section.contains("**Ruling:"),
+                "divergence `{heading}` is marked accepted but records no ruling"
+            );
+            let lines: Vec<usize> = section
+                .split("`docs/contract.md:")
+                .skip(1)
+                .map(|rest| {
+                    rest.split('`')
+                        .next()
+                        .and_then(|number| number.parse().ok())
+                        .unwrap_or_else(|| panic!("`{heading}` names a contract line oddly"))
+                })
+                .collect();
+            assert!(
+                !lines.is_empty(),
+                "divergence `{heading}` is accepted and names no contract passage it supersedes"
+            );
+            for line in lines {
+                assert!(
+                    (1..=CONTRACT.lines().count()).contains(&line),
+                    "`{heading}` names docs/contract.md:{line}, which the contract does not have"
+                );
+            }
             continue;
         }
         assert!(

@@ -78,7 +78,10 @@ fn homed(name: &str) -> Homed {
             world,
             launch,
             plan,
-            onetaskgraph_core::CopyScope::Projects { tasks: true },
+            onetaskgraph_core::CopyScope::Projects {
+                tasks: true,
+                documents: false,
+            },
         )
     })
 }
@@ -286,7 +289,10 @@ fn a_budget_table_of_reference_links_lands_on_each_tasks_heading_at_a_private_li
             &world,
             &launch,
             &format!("{STORE_SOURCE}:{project}"),
-            onetaskgraph_core::CopyScope::Projects { tasks: true },
+            onetaskgraph_core::CopyScope::Projects {
+                tasks: true,
+                documents: false,
+            },
         );
         let document = copied(
             &world,
@@ -435,7 +441,10 @@ fn a_plan_copied_again_while_linears_listings_lag_creates_nothing_and_its_docume
             &world,
             &launch,
             &format!("{STORE_SOURCE}:{project}"),
-            onetaskgraph_core::CopyScope::Projects { tasks: true },
+            onetaskgraph_core::CopyScope::Projects {
+                tasks: true,
+                documents: false,
+            },
         );
         let document = copied(
             &world,
@@ -471,6 +480,13 @@ fn a_plan_copied_again_while_linears_listings_lag_creates_nothing_and_its_docume
         "the document's links resolve to each task's copy, as Linear stores it:\n{held}"
     );
 
+    // The repeat finds each counterpart through its create's own answer: a create sent under
+    // the id its key derives, which a record the first copy wrote already holds, is refused as
+    // a conflict, and the store then reads what holds it (`onetaskgraph-linear` 0.14.12). So the
+    // repeat may send creates, but never one Linear can take: each names a held id.
+    let mut held_ids: Vec<String> = linear.issues().into_iter().map(|(id, _, _)| id).collect();
+    held_ids.extend(linear.documents().into_iter().map(|(id, _)| id));
+    held_ids.push(linear.project_id());
     let first = linear.log().len();
     assert_eq!(
         copy(),
@@ -483,13 +499,15 @@ fn a_plan_copied_again_while_linears_listings_lag_creates_nothing_and_its_docume
             matches!(
                 request.operation,
                 Operation::ProjectCreate | Operation::IssueCreate | Operation::DocumentCreate
-            )
+            ) && !request.variables["input"]["id"]
+                .as_str()
+                .is_some_and(|id| held_ids.iter().any(|held| held == id))
         })
         .cloned()
         .collect();
     assert!(
         created.is_empty(),
-        "the repeat created a record the first copy wrote: {created:#?}"
+        "the repeat sent a create under an id no record the first copy wrote holds: {created:#?}"
     );
     assert_eq!(linear.issues().len(), 2, "{:#?}", linear.issues());
     assert_eq!(linear.documents().len(), 1, "{:#?}", linear.documents());
@@ -800,7 +818,10 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
 #[test]
 fn a_plan_whose_project_create_lost_its_answer_is_copied_again_into_one_project() {
     let homed = homed_by("linear-launch-retried", |world, linear, launch, plan| {
-        let scope = || onetaskgraph_core::CopyScope::Projects { tasks: true };
+        let scope = || onetaskgraph_core::CopyScope::Projects {
+            tasks: true,
+            documents: false,
+        };
         // The connection closes with no answer after the loopback applied the create.
         linear.fail_next(Operation::ProjectCreate, Fault::Drop);
         // The copy that lost the answer reads the id it sent the create under, finds the
@@ -846,10 +867,14 @@ fn a_plan_whose_project_create_lost_its_answer_is_copied_again_into_one_project(
 fn a_plan_copied_again_after_its_undo_took_its_project_back_lands_in_one_new_project() {
     let mut taken_back = String::new();
     let homed = homed_by("linear-launch-undone", |world, linear, launch, plan| {
-        let scope = || onetaskgraph_core::CopyScope::Projects { tasks: true };
-        // Every id the first task's create could be tried under is refused, so the copy fails
-        // after creating its project, and its undo deletes that project.
-        for _ in 0..onetaskgraph_linear::CREATE_ID_GENERATIONS {
+        let scope = || onetaskgraph_core::CopyScope::Projects {
+            tasks: true,
+            documents: false,
+        };
+        // The batched document carrying every task's create is refused, and then every id the
+        // first task's create could be tried under alone, so the copy fails after creating its
+        // project, and its undo deletes that project.
+        for _ in 0..=onetaskgraph_linear::CREATE_ID_GENERATIONS {
             linear.fail_next(Operation::IssueCreate, Fault::Refuse);
         }
         let refused = copy_report(world, launch, plan, scope());
@@ -940,7 +965,10 @@ fn an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write() {
             &world,
             &launch,
             &plan,
-            onetaskgraph_core::CopyScope::Projects { tasks: true },
+            onetaskgraph_core::CopyScope::Projects {
+                tasks: true,
+                documents: false,
+            },
         );
         let document = copied(
             &world,

@@ -11,6 +11,9 @@ owns the contract**, and `docs/contract.md` was amended to carry each ruling. Th
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
+Entry **155** is **accepted** by that planner with `docs/contract.md` left unedited: it
+records the ruling and names, by line, each approved passage it supersedes.
+
 Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–127 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
@@ -13266,6 +13269,8 @@ graph declaring none prints nothing.
 `tests/e2e/observer_follow.rs` holds both halves over all three launch paths, an observer
 restart and an adoption.
 
+Entry 155 removes the reset this entry deprecated, and the warning with it.
+
 ## 151. `start --heartbeat-interval` is removed, and a new launch records no interval — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, whose driver invocation still
@@ -13423,7 +13428,51 @@ one of them was `on`. Entry 153's ruling supersedes that: such a run refuses **e
 offer to its channel, in the words entry 153 quotes, and `tests/e2e/older_launch_record.rs`
 holds it.
 
-## 155. Ruling provenance, attribution and `decline-ruling` — OPEN
+## 155. The engine's built-in clock reset on `next` is removed, and the shipped `check-in` declares `reset_on` — ACCEPTED
+
+**Ruled accepted by the planner who owns `docs/contract.md`, which stays unedited.** The
+ruling leaves the approved text verbatim, so it records the passages this entry
+supersedes rather than amending them, and each of them is superseded by this entry
+wherever it still describes the built-in reset:
+
+- `docs/contract.md:532`, the channel contract's closing sentences from *Surface
+  consumption restarts the check-in clock of every member the run's recorded observer
+  graph declares `resettable`* through *That is the whole check-in reset contract.*,
+  including its `oneagentgraph reset-timer RUN MEMBER` invocation; and
+- `docs/contract.md:296`, the driver contract's description of the shipped
+  `graphs/dag-scope.yaml` as an observer member beside a *resettable-cron* `check-in`
+  member.
+
+Entry 150 deprecated that reset. `oneagentgraph` 0.13.0 removes
+`config::Schedule::resettable`, `run::Signal::Reset` and the `reset-timer` verb, and this
+build links it, so the reset is gone rather than deprecated:
+
+- **`next` restarts no clock and signals nothing to the observer graph.** It journals
+  `planner-surfaced` as before, and a graph whose clock a reading should restart declares
+  `reset_on` matching that record over the journal it follows — the only reset mechanism
+  there is. A run with no observer graph is unaffected.
+- **`start` and adoption print no deprecation line**, since there is nothing left to
+  deprecate.
+- **`graphs/dag-scope.yaml` moves from schema 1 to 11**, the first in which a schedule may
+  declare `reset_on`, and its `check-in` schedule declares
+  `reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}` and `start_after: 0`,
+  so it restarts on the same reading it used to and still takes its first turn at launch.
+  A `resettable` key is refused by the linked library's schema, so a host graph that still
+  declares it is refused at launch in that library's own words.
+- The library's public surface re-exports `oneagentgraph` types (`note`,
+  `config::ConfigRef`, `event::*`) across this pre-1.0 minor, so the release is a breaking
+  one.
+
+`tests/e2e/observer_follow.rs` holds the journal reset through the real binary over all
+three launch paths, with no `reset-timer` run and no reset signal left in the graph run, and
+no deprecation line at `start` or either form of adoption; `tests/e2e/shipped.rs` and
+`tests/contract.rs` hold the shipped graph's filter.
+
+**Ruling:** the planner ruled this entry accepted, and directed that `docs/contract.md`
+is left unedited and that this entry name every approved passage it supersedes, which
+the list above does.
+
+## 156. Ruling provenance, attribution and `decline-ruling` — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, recording what this build decided
 beyond the contract node `op-ruling-provenance` was given.** The contract's paragraph on

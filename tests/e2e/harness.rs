@@ -1451,7 +1451,10 @@ impl World {
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
-                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: false,
+                        documents: false,
+                    },
                     destination,
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
                     target_task: None,
@@ -2429,63 +2432,18 @@ impl World {
         dir
     }
 
-    /// The same configs, with the shipped dag-scope graph's **pacemaker** on the
-    /// driver: the member a planner-visible surface restarts the clock of.
-    ///
-    /// Its own member, because that is the one a reset addresses, and a graph
-    /// without it answers with "no such member" no matter which run id it was
-    /// addressed by.
-    ///
-    /// Its name and its schedule are read out of `graphs/dag-scope.yaml` rather
-    /// than restated, so the two have one source. A stand-in carrying its own
-    /// copy would keep passing against a shipped graph that had renamed the
-    /// member or made its clock unresettable — the two facts these journeys
-    /// exist to reset. Only the harness config is this world's own: the shipped
-    /// one names an operator file no scratch graph directory has. The interval
-    /// comes over with the rest, and it is long enough that nothing fires
-    /// inside a test — what a journey observes is the *reset*.
-    pub fn write_graphs_with_pacemaker(&self) {
-        let _fixture = profile::span(profile::Category::Fixture);
-        use oneagentgraph::config::Member;
-
-        let shipped = repo_file("graphs/dag-scope.yaml");
-        let config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
-            &profile::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
-        )
-        .expect("the shipped dag-scope graph is a valid oneagentgraph config");
-        let (member, schedule) = config
-            .members
-            .iter()
-            .find_map(|(name, member)| match member {
-                Member::Oneharness(member) => {
-                    member.schedule.clone().map(|schedule| (name, schedule))
-                }
-                _ => None,
-            })
-            .expect("the shipped dag-scope graph declares a pacemaker");
-        let pacemaker = format!(
-            "  {member}:\n    kind: oneharness\n    oneharness_config: {}\n    \
-             schedule: {{every: {}, resettable: {}}}\n",
-            self.harness_config(member),
-            schedule.every,
-            schedule.resettable
-        );
-        self.write_graphs_with(Some(&pacemaker), CONSUMER_GRAPH_SCHEMA);
-    }
-
     /// A dag-scope graph of this world's own whose members are named by nothing
     /// built in: `watcher`, the observer, carrying [`MONITOR_TASK`] as the
     /// dag-scope member of [`write_graphs`](World::write_graphs) does, and one
-    /// single-sided member on a clock for each of `scheduled` — `(member,
-    /// resettable)` — every one on an interval no journey outlasts and no first
-    /// turn inside it, so what a journey observes of a clock is the *reset* and
-    /// never a firing.
+    /// single-sided member on a fixed clock for each of `scheduled`, every one on
+    /// an interval no journey outlasts and no first turn inside it, so no clock
+    /// fires while a journey reads the run.
     ///
     /// Written beside the graphs [`write_graphs`](World::write_graphs) writes,
     /// which a journey still needs for its node dispatches; the path is what
     /// `--dag-graph` takes. The schema is the consumer's, so a schedule naming
     /// no `start_after` waits its whole interval first.
-    pub fn write_observer_graph_with_clocks(&self, scheduled: &[(&str, bool)]) -> String {
+    pub fn write_observer_graph_with_clocks(&self, scheduled: &[&str]) -> String {
         let _fixture = profile::span(profile::Category::Fixture);
         let dir = self.graphs();
         profile::fs::create_dir_all(&dir).expect("a directory for the graph configs");
@@ -2494,10 +2452,10 @@ impl World {
             self.harness_config("watcher"),
             yaml_scalar(MONITOR_TASK)
         );
-        for (member, resettable) in scheduled {
+        for member in scheduled {
             members.push_str(&format!(
                 "  {member}:\n    kind: oneharness\n    oneharness_config: {}\n    \
-                 schedule: {{every: 3600, resettable: {resettable}}}\n",
+                 schedule: {{every: 3600}}\n",
                 self.harness_config(member)
             ));
         }

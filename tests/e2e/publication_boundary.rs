@@ -3564,7 +3564,10 @@ fn a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_link
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
-                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    scope: onetaskgraph_core::CopyScope::Projects {
+                        tasks: true,
+                        documents: false,
+                    },
                     destination: onetaskgraph_plugin_api::SourceName::new("plans")
                         .expect("a source name"),
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
