@@ -13352,7 +13352,14 @@ statements of the release name 0.11.1 where they named 0.10.0. The published 0.1
 the configuration, hooks, ask, queue and schema modules, `validate.rs` removed and
 `when.rs` added. The clause naming "the command validators that judge what is offered to
 a queue" among the core's is dropped from the same paragraph, since the core no longer has
-them. Nothing else in the contract changes.
+them. The contract's paragraph on the repository publication boundary (its entry 115)
+called `onepipeline boundary validate-envelope` "a `command` validator under the message
+bus's own protocol", which this same link makes stale; under the same ruling (manager,
+correlation `c-5b64fd6e1aecb9d759baa655de4f54cf`) it now says what is true on 0.11.1: the
+verb and its exit statuses are unchanged, and a bus runs it as a hook through a wrapper
+that keeps the message on a pass. `tests/e2e/publication_boundary.rs`'s two bussed
+journeys run it so, through the `bus-hook` fake's `judge` verb. Nothing else in the
+contract changes.
 
 This build links
 `onemessagebus` 0.11.1, which removed validators in favour of the hooks this crate
