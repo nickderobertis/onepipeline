@@ -264,6 +264,7 @@ pub struct Surface {
     /// of a declined ruling from here and never from [`message`](Self::message),
     /// whose text is for people.
     // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this as an optional field of the surface record, beside an open `kind` word other producers fill, so "present exactly on `declined-ruling`" cannot be a closed variant without changing what every other surface is on the wire; `verbs::decline_ruling` is the one writer and sets the kind, the workstream and the record together, and `tests/e2e/rulings.rs` holds every other surface free of it.
+    // llmlint: ignore[boundary_inputs_validated] the record is validated as a `DeclinedRuling` wherever it is read; its agreement with the open `kind`, the `workstream` and `blocking` beside it is not checked on read because the host's own hooks may rewrite those fields of a surface, and refusing the rewritten record would make the whole surfaces queue unreadable. A reader keys on this record, never on the kind, as `docs/contract.md` says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_ruling: Option<DeclinedRuling>,
 }

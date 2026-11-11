@@ -6322,3 +6322,62 @@ fn the_plan_edit_hook_is_shown_the_boundary_section_the_consumers_dispatch_is_to
         "the hook was shown a task other than the one the consumer was dispatched with"
     );
 }
+
+/// A declined ruling is text addressed to the manager, which a public node may
+/// yet be shown, so `decline-ruling` meets the boundary as `surface` does: a
+/// reason carrying a private term is refused, naming no node, with nothing
+/// queued, and the same decline in clean words is queued.
+#[test]
+fn a_decline_carrying_a_private_term_is_refused_before_anything_is_queued() {
+    let (world, _) = held_mixed_run("declined", &["zephyrine"]);
+    let replied = world.run_with_stdin(
+        &["reply", "declined"],
+        &json!({"version": 4, "commands": [{"op": "amend", "id": "examples",
+            "text": "Keep the examples short."}]})
+        .to_string(),
+    );
+    assert!(
+        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
+        "{}",
+        replied.stderr
+    );
+    let id = replied.json()["reply"].as_u64().expect("the envelope's id");
+    world.until("the amendment to be committed", |world| {
+        world
+            .events_of("declined", "edit-committed")
+            .iter()
+            .any(|event| event["payload"]["envelope"] == json!(id))
+    });
+    let reference = format!("c{id}.0");
+    let refused = world.run_with_stdin(
+        &["decline-ruling", "declined", "--ruling", &reference],
+        "the zephyrine layout needs the long form",
+    );
+    refused.exited(REFUSED);
+    assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
+    names_no_node(&world, "declined", &refused.stderr);
+    assert!(
+        world
+            .events_of("declined", "planner-surface-queued")
+            .iter()
+            .all(|event| event["payload"]["kind"] != "declined-ruling"),
+        "a refused decline was queued"
+    );
+    world
+        .run_with_stdin(
+            &["decline-ruling", "declined", "--ruling", &reference],
+            "the plain layout needs the long form",
+        )
+        .exited(0)
+        .out_has("\"queued\"");
+    assert_eq!(
+        world
+            .events_of("declined", "planner-surface-queued")
+            .iter()
+            .filter(|event| event["payload"]["kind"] == "declined-ruling")
+            .count(),
+        1,
+        "the clean decline was not queued"
+    );
+    world.release("generalize.go");
+}

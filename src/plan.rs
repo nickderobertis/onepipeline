@@ -735,12 +735,17 @@ pub fn arrival_note(arrived: &[CrossRepoReference]) -> String {
 fn amended(task: &str, amendment: &str) -> String {
     // The attribution the amendment was recorded under, where it was: whose
     // ruling it is opens the block, and the precedence sentence names that party.
-    let (attribution, _) = crate::ruling::split_attribution(amendment);
-    let precedence = match attribution.map(crate::ruling::provenance_of) {
+    let (origin, _) = crate::ruling::split_attribution(amendment);
+    let precedence = match origin.map(|origin| origin.provenance) {
         Some(crate::provenance::Provenance::User) => USER_AMENDMENT_PRECEDENCE,
         _ => AMENDMENT_PRECEDENCE,
     };
-    let opening = attribution.map_or_else(String::new, |line| format!("{line}\n"));
+    let opening = origin.map_or_else(String::new, |origin| {
+        format!(
+            "{}\n",
+            crate::ruling::attribution(origin.provenance, origin.reference.as_ref())
+        )
+    });
     let block = format!(
         "{AMENDMENT_HEADING}\n{opening}{precedence}\n\n{}",
         amendment_clauses(amendment)
