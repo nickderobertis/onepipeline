@@ -1,15 +1,18 @@
 //! A command hook, as an `onemessagebus` configuration's `hooks` block names one.
 //!
-//! **Not a double for anything in this stack**, for the reason `bus-validator` is
-//! not: the promise is that a command the *host* names decides what is offered to
-//! a queue, so what stands here is a real hook. It reads the message off its stdin
-//! the way the bus hands it one and answers on stdout, by the argv its configuration
-//! names:
+//! **Not a double for anything in this stack**: the promise is that a command
+//! the *host* names decides what is offered to a queue, so what stands here is a
+//! real hook. It reads the message off its stdin the way the bus hands it one and
+//! answers on stdout, by the argv its configuration names:
 //!
 //!   `keep`                    print the message back
 //!   `drop`                    print nothing
 //!   `refuse <reason>`         exit 1 with `<reason>` on stderr
 //!   `unjudged`                exit 3
+//!   `scripted`                refuse with the text of `bus-hook.refuse` in the
+//!                             script directory while that file stands, and
+//!                             keep the message once it is gone — a refusal a
+//!                             journey can lift without relaunching its run
 //!   `set-message <text>`      rewrite `message`, on a surface or a framed reply
 //!   `set-blocking`            mark a surface `blocking: true`
 //!   `keep-first-command`      leave only the first of the envelope's commands
@@ -23,11 +26,17 @@
 //!                             there
 //!   `reroute-as-verdict`      rewrite to a bare verdict, and reroute to `replies`
 //!   `reroute-as-surface`      rewrite to a surface, and reroute to `surfaces`
+//!   `judge <argv...>`         hand the message to `<argv...>` on its stdin, and
+//!                             keep it when that exits 0; any other exit is
+//!                             answered as it is, its stderr passed through — so a
+//!                             command that only passes or refuses, as
+//!                             `onepipeline boundary validate-envelope` does,
+//!                             judges a queue as a hook
 //!
 //! Every invocation is recorded to `bus-hook.jsonl`, with the queue and the
 //! message as they arrived.
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use onepipeline_testfakes as fake;
 use serde_json::{json, Value};
@@ -65,6 +74,13 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         }
         "unjudged" => return std::process::ExitCode::from(3),
+        "scripted" => {
+            if let Ok(reason) = std::fs::read_to_string(dir.join("bus-hook.refuse")) {
+                eprint!("{}", reason.trim());
+                return std::process::ExitCode::from(1);
+            }
+            print!("{offered}");
+        }
         "set-message" => {
             let target = if message.get("reply").is_some() {
                 &mut message["reply"]
@@ -155,9 +171,41 @@ fn main() -> std::process::ExitCode {
                        "source": "proposal", "blocking": false, "queued_at": 1})
             );
         }
+        "judge" => return judged(&args[1..], &offered),
         other => fake::fail(&format!("bus-hook does not know `{other}`")),
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Run `argv` over `offered`: a keep when it exits 0, and its own exit otherwise,
+/// its stderr having gone straight through as the refusal's reason.
+fn judged(argv: &[String], offered: &str) -> std::process::ExitCode {
+    let Some((program, rest)) = argv.split_first() else {
+        fake::fail("judge names no command to run");
+    };
+    let mut child = match std::process::Command::new(program)
+        .args(rest)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => fake::fail(&format!("cannot run {program}: {error}")),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(offered.as_bytes()) {
+            fake::fail(&format!("cannot hand {program} the message: {error}"));
+        }
+    }
+    match child.wait().map(|status| status.code()) {
+        Ok(Some(0)) => {
+            print!("{offered}");
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Some(code)) => std::process::ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)),
+        Ok(None) => fake::fail(&format!("{program} was ended by a signal")),
+        Err(error) => fake::fail(&format!("cannot wait for {program}: {error}")),
+    }
 }
 
 fn commands_of<'a>(message: &'a mut Value, offered: &str) -> &'a mut Vec<Value> {

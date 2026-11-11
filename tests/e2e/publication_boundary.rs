@@ -21,7 +21,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{double, lifecycle, plan_of, Repository, World, REFUSED};
 use crate::mixed_world_support::declare_replacement;
 pub(crate) use crate::mixed_world_support::{declare_visibility, mixed_world};
 
@@ -2247,17 +2247,19 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
 }
 
 /// Start `run` over the mixed plan with a `held` node beside it, under a bus whose
-/// reply queue runs the compiled validator and keeps its passes in a cache keyed by the
+/// reply queue is judged by a hook running the compiled validator — kept when it passes,
+/// refused in its words when it refuses — which keeps its passes in a cache keyed by the
 /// validator's own fingerprint; answer that cache's directory once `held` is in flight.
 fn bussed_run(world: &World, run: &str) -> std::path::PathBuf {
     let validator = crate::harness::binary().to_string_lossy().into_owned();
+    let hook = double("bus-hook").to_string_lossy().into_owned();
     let cache = world.root.join("validator-passes");
     let config = world.root.join("onemessagebus.yaml");
     std::fs::write(
         &config,
         format!(
-            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - on: replies\n    command: \
-             [{validator:?}, boundary, validate-envelope, --run, \
+            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - on: replies\n    \
+             command: [{hook:?}, judge, {validator:?}, boundary, validate-envelope, --run, \
              {run}]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
              boundary, validate-envelope, --run, {run}, --fingerprint]\n"
         ),
@@ -2314,8 +2316,8 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
     let (world, private, _) = mixed_world("boundary-revalidated");
     declare_terms(&world, &private, &["zephyrine"]);
     world.script("generalize.wait", "hold");
-    // The bus this run launched under runs the compiled validator on its reply queue,
-    // keeping passes in a cache keyed by the validator's own fingerprint.
+    // The bus this run launched under runs the compiled validator as a hook on its reply
+    // queue, keeping passes in a cache keyed by the validator's own fingerprint.
     let cache = bussed_run(&world, "bussed");
 
     let payload =

@@ -568,8 +568,8 @@ pub struct StartArgs {
     /// The `onemessagebus` configuration this run's channel is kept under.
     ///
     /// Read at the launch and retained in the launch record: its `authors` block
-    /// declares who may issue which operations, and its `hooks` decide what is
-    /// offered to the channel's queues. Codec and schema-link settings belong
+    /// declares who may issue which operations, and its `hooks` decide what
+    /// is offered to the channel's queues. Codec and schema-link settings belong
     /// to the host's bus server and are retained without being acted on. Its transport is the run
     /// root's own, so a `transport` other than `local`, a `transport.dir`, a
     /// `profile` other than `planner-channel`, and a `queues` block are refused,

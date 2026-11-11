@@ -221,8 +221,14 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     const now = capture(current, [...new Set([...cached, ...extra])]);
     assertRecordedRelease(current, [...new Set([...cached, ...extra])]);
     // Manager ruling 229: the retired shortcut and its test are deliberately
-    // deleted; every other historical input still belongs in the union.
-    const retired = new Set(["scripts/release-pr-shortcut.mjs", "tests/ci_jobs/release-pr-shortcut.test.mjs"]);
+    // deleted; every other historical input still belongs in the union. The
+    // `bus-validator` fake went with the bus's validators, which this engine no
+    // longer runs.
+    const retired = new Set([
+      "scripts/release-pr-shortcut.mjs",
+      "tests/ci_jobs/release-pr-shortcut.test.mjs",
+      "crates/testfakes/src/bin/bus-validator.rs",
+    ]);
     for (const file of retired) assert.ok(!existsSync(join(current, file)), `${file} must remain retired`);
     for (const id of cached) {
       const union = new Set([...now[id].sourceFiles, ...now[id].runtimeFiles]);
