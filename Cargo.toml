@@ -1447,10 +1447,9 @@ onevcs-testing = "0.21.4"
 # **0.14.12 writes an expandable block in each destination's own form on copy**
 # (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
 # as its collapsible section as well as GitHub as the HTML element.
-# **0.14.14 is the relink onto the release carrying `otg-assignees`** (and with it
-# `otg-relations`, `otg-batched-store`, `otg-follow-up-surface`, `otg-plan-records` and
-# `otg-copy`), so the engine ai-orchestrator adopts links the store its CLI pins are reconciled
-# to. 0.14.13 carried every one of those but assignees.
+# **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
+# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes, and it is
+# the store release ai-orchestrator's own store CLI pin is held to, so it must be the one linked.
 onetaskgraph-core = "=0.14.14"
 onetaskgraph-plugin-api = "=0.14.14"
 onetaskgraph-local-md = "=0.14.14"

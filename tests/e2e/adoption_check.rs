@@ -16,7 +16,9 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, end_driver, lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{
+    agent, end_driver, lifecycle, plan_of, posix_script, shell_path, Repository, World, REFUSED,
+};
 
 /// `plan check`'s status for a plan something refused.
 const HAS_REFUSALS: i32 = 1;
@@ -24,10 +26,15 @@ const HAS_REFUSALS: i32 = 1;
 /// The host's release-targets document: `engine` releases `crate`, and names it as its
 /// default target only where `default_target` says so.
 fn releases(script: &str, default_target: bool) -> String {
+    releasing(script, "crate", default_target)
+}
+
+/// The same document with `engine` releasing `target` instead.
+fn releasing(script: &str, target: &str, default_target: bool) -> String {
     let default = if default_target {
-        "\x20   default_target: crate\n"
+        format!("\x20   default_target: {target}\n")
     } else {
-        ""
+        String::new()
     };
     format!(
         "version: 1\n\
@@ -35,7 +42,7 @@ fn releases(script: &str, default_target: bool) -> String {
          \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
          {default}\
          \x20   targets:\n\
-         \x20   - name: crate\n\
+         \x20   - name: {target}\n\
          \x20     style: automated\n\
          \x20     probe: {{script: {script}, timeout_seconds: 30}}\n\
          default:\n\x20 adoption: fast\n"
@@ -188,7 +195,6 @@ fn a_plan_onevcs_says_can_never_complete_is_refused_at_load_and_loads_once_repai
         repaired,
     } in cases
     {
-        // Each case is named for the one rule it breaks.
         let case = rule;
         let (world, _, _) = world(&format!("adoption-check-load-{case}"), default_target);
         let reason = one_rule(&world, flags, rule);
@@ -240,6 +246,85 @@ fn a_plan_onevcs_says_can_never_complete_is_refused_at_load_and_loads_once_repai
             !world.events_of(&fixed, "node-dispatched").is_empty()
         });
     }
+}
+
+/// A plan breaking several of onevcs's rules is refused once per rule, each in the
+/// loader's place: every refusal is reported, and a check registered beside them is
+/// reported as not run and is never spawned, since no plan loaded to hand it.
+#[test]
+fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
+    let (world, _, _) = world("adoption-check-several", false);
+    let published = one_rule(&world, &["--adoption", "published"], "published-no-target");
+    let undeclared = one_rule(
+        &world,
+        &["--consumes", "wheel"],
+        "consumes-undeclared-target",
+    );
+    let project = world.plan(
+        "several",
+        &plan_of(
+            "several",
+            vec![
+                engine(),
+                consumer("held", json!({"adoption": "published"})),
+                consumer("misnamed", json!({"consumes": {"engine": "wheel"}})),
+            ],
+        ),
+    );
+    let ran = world.root.join("check-ran");
+    let check = posix_script(
+        &world.root,
+        "never-asked",
+        &format!(
+            "touch '{}'\nprintf '{{\"refusals\": []}}'",
+            shell_path(&ran)
+        ),
+    );
+    let check = check.to_string_lossy().into_owned();
+
+    let checked = world.run(&["plan", "check", &project, "--check", &check, "--json"]);
+    checked.exited(HAS_REFUSALS);
+    let answer: Value = serde_json::from_str(checked.stdout.trim()).expect("one object");
+    assert_eq!(
+        answer["refusals"],
+        json!([
+            {
+                "source": "onevcs",
+                "node": "held",
+                "field": "adoption",
+                "reason": format!("dependency 'engine': published-no-target: {published}"),
+            },
+            {
+                "source": "onevcs",
+                "node": "misnamed",
+                "field": "consumes",
+                "reason": format!("dependency 'engine': consumes-undeclared-target: {undeclared}"),
+            },
+        ]),
+        "{answer}"
+    );
+    let unrunnable = answer["unrunnable"].as_array().expect("a list");
+    assert_eq!(unrunnable.len(), 1, "{answer}");
+    assert_eq!(unrunnable[0]["check"], json!(check), "{answer}");
+    assert_eq!(unrunnable[0]["exit_code"], Value::Null, "{answer}");
+    assert!(
+        unrunnable[0]["stderr"]
+            .as_str()
+            .is_some_and(|said| said.contains("did not run")),
+        "{answer}"
+    );
+    assert!(!ran.exists(), "a check ran with no loaded plan to hand it");
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(REFUSED)
+        .err_has(&line("held", "adoption", "published-no-target", &published))
+        .err_has(&line(
+            "misnamed",
+            "consumes",
+            "consumes-undeclared-target",
+            &undeclared,
+        ));
 }
 
 /// An adoption onevcs cannot answer about refuses nothing, and says why it went
@@ -312,9 +397,13 @@ fn an_adoption_onevcs_cannot_answer_is_a_notice_and_the_plan_launches() {
 /// `add`, `retry`, `requeue` and `reparent` — is refused whole where onevcs says the
 /// result can never complete, naming the node, the dependency, the rule and onevcs's
 /// reason, and applying nothing; the same edit repaired is applied.
+///
+/// Each edit is asked about the node it changes alone: once the host stops declaring
+/// what a running node consumes, an edit to an unrelated node is still applied, and
+/// only an edit to that node is refused.
 #[test]
 fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_repaired() {
-    let (world, _, _) = world("adoption-check-edits", false);
+    let (world, script, _) = world("adoption-check-edits", false);
     let mut parked = lifecycle("requeued", &["engine"]);
     parked["parked"] = json!(true);
     parked["consumes"] = json!({"engine": "crate"});
@@ -407,15 +496,55 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
             committed(world) == before + 1
         });
     }
+
+    // The host's declaration moves under the run: `engine` now releases `wheel`, so the
+    // `added` node consuming `crate` can no longer complete.
+    world.releases(&releasing(&script, "wheel", false));
+    let stranded = one_rule(
+        &world,
+        &["--consumes", "crate"],
+        "consumes-undeclared-target",
+    );
+    let before = committed(&world);
+    reply(json!({"op": "add", "node": agent("unrelated", &[])}))
+        .exited(0)
+        .err_lacks("onevcs:");
+    world.until("the unrelated add to commit", |world| {
+        committed(world) == before + 1
+    });
+    let status = world.run(&["status", run, "--json"]).json();
+    reply(json!({"op": "reparent", "id": "added", "deps": ["engine"]}))
+        .exited(REFUSED)
+        .err_has(&line(
+            "added",
+            "consumes",
+            "consumes-undeclared-target",
+            &stranded,
+        ));
+    assert_eq!(
+        committed(&world),
+        before + 1,
+        "a refused reparent committed"
+    );
+    assert_eq!(
+        world.run(&["status", run, "--json"]).json()["nodes"],
+        status["nodes"],
+        "a refused reparent changed the run"
+    );
 }
 
 /// `adopt` refuses nothing: a run whose host configuration moved after launch, so a
 /// waiting node's adoption can no longer complete, is adopted and driven on, and one
-/// non-blocking surface names the node, the dependency and onevcs's rule and reason.
+/// non-blocking surface names the node, the dependency and onevcs's rule and reason. A
+/// node the run has finished with — here one skipped behind a failed dependency, whose
+/// adoption the same move breaks — is not surfaced.
 #[test]
 fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_the_rule() {
     let (world, script, _) = world("adoption-check-adopt", true);
     world.script("engine.wait", "hold");
+    world.script("flaky.fail", "1");
+    let mut skipped = consumer("skipped", json!({"adoption": "published"}));
+    skipped["deps"] = json!(["engine", "flaky"]);
     world.script("engine.work", "engine did its work once adopted\n");
     let run = "adopted";
     let path = world.plan(
@@ -425,6 +554,8 @@ fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_t
             vec![
                 engine(),
                 consumer("consumer", json!({"adoption": "published"})),
+                agent("flaky", &[]),
+                skipped,
             ],
         ),
     );
@@ -433,8 +564,26 @@ fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_t
         .exited(0)
         .err_lacks("onevcs");
     world.until("the producer to be dispatched", |world| {
-        !world.events_of(run, "node-dispatched").is_empty()
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "engine")
     });
+    world.until("the skipped node's dependency to fail", |world| {
+        world.events_of(run, "node-settled").iter().any(|event| {
+            event["labels"]["node"] == "flaky" && event["payload"]["status"] == "failed"
+        })
+    });
+    let status = world.run(&["status", run, "--json"]).json();
+    let skipped_status = status["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["id"] == "skipped"))
+        .map(|node| node["status"].clone());
+    assert_eq!(
+        skipped_status,
+        Some(json!("skipped")),
+        "the node behind a failed dependency is not finished with: {status}"
+    );
     end_driver(&world, run);
 
     // The host's override moves: `engine` no longer names a default target, so the
@@ -444,13 +593,19 @@ fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_t
     world.run(&["adopt", run, "--detach"]).exited(0);
 
     world.until("the adopted run to re-dispatch its producer", |world| {
-        world.events_of(run, "node-dispatched").len() >= 2
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "engine")
+            .count()
+            >= 2
     });
     let surfaced: Vec<Value> = world
         .events_of(run, "planner-surface-queued")
         .into_iter()
         .filter(|event| event["payload"]["kind"] == "adoption-never-completes")
         .collect();
+    // One: the unfinished consumer, and not the skipped node the same move breaks.
     assert_eq!(surfaced.len(), 1, "{surfaced:?}");
     let surface = &surfaced[0]["payload"];
     assert_eq!(surface["blocking"], false, "{surface}");
