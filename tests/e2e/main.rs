@@ -25,6 +25,7 @@ mod github_world_support;
 mod mixed_world_support;
 
 mod adoption;
+mod adoption_check;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two journeys, a few
 // minutes together, and what they exercise is the environment every dispatch the
 // engine starts is composed with — `executor`, `driver`, `lifecycle` and `agents`
