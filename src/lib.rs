@@ -73,6 +73,7 @@ pub mod vocabulary;
 // seam, the rules grammar, the views, and the report retention path, and a
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
+mod adoptable;
 mod agentgraph;
 mod appendstamp;
 mod ask;

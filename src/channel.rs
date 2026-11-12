@@ -1031,6 +1031,11 @@ impl SurfaceKind {
     /// A session whose `post-checkout` provisioning failed, raised non-blocking
     /// once per failed session.
     pub const PROVISIONING_FAILED: &'static str = "provisioning-failed";
+    /// A node of a run `adopt` took over whose release adoption the linked onevcs says
+    /// can never complete, raised non-blocking once per rule at adoption: the run is
+    /// driven on, and the node, the dependency and onevcs's rule and reason say what to
+    /// change.
+    pub const ADOPTION_NEVER_COMPLETES: &'static str = "adoption-never-completes";
     /// The engine's check-in kind.
     pub fn check_in() -> Self {
         Self(Self::CHECK_IN.into())

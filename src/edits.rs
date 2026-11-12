@@ -837,6 +837,21 @@ pub fn compile(
             return Err(Error::Refused(error.to_string()));
         }
         boundary()?;
+        // And whether the release adoption of the node the edit adds or changes can ever
+        // complete, as the linked onevcs answers it — asked of that node alone, so a
+        // host whose configuration moved since launch refuses no edit to anything else.
+        if frontier.graph_validation.is_some() {
+            if let Some(changed) = adoption_changed_by(command) {
+                let asked = crate::adoptable::ask(&plan, |node| node.id == changed);
+                asked.report_unanswered();
+                if let Some(lines) = asked.refusal() {
+                    return Err(Error::Refused(format!(
+                        "onevcs says the release adoption of node '{changed}' can never \
+                         complete:\n{lines}"
+                    )));
+                }
+            }
+        }
     }
     if let Some(context) = &frontier.graph_validation {
         let run_sets = match command {
@@ -886,6 +901,27 @@ pub fn compile(
     }
     *graph = candidate;
     Ok(operations)
+}
+
+/// The node whose release adoption one command adds or changes: the node an `add`
+/// or a `retry` states, the node a `reparent` rewires, and the node a `requeue`
+/// amends where its amendment states its repository, its rung, its `consumes` or its
+/// publication policy — every fact onevcs's answer reads off the node.
+fn adoption_changed_by(command: &Command) -> Option<&str> {
+    match command {
+        Command::Add { node } | Command::Retry { node, .. } => Some(node.id.as_str()),
+        Command::Reparent { id, .. } => Some(id.as_str()),
+        Command::Requeue {
+            id,
+            amend: Some(amend),
+        } if ["repo", "adoption", "consumes", "merge_policy"]
+            .iter()
+            .any(|key| amend.contains_key(*key)) =>
+        {
+            Some(id.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn graph_setting_requires_validation(command: &Command) -> bool {

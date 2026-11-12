@@ -11,7 +11,9 @@
 //! second implementation of that loader.
 //!
 //! The two kinds of refusal stay apart in the answer: the engine's carry
-//! `source: "engine"` and come first, and each registered check's follow in the
+//! `source: "engine"` and come first — beside them, carrying `source: "onevcs"`, each
+//! release adoption the linked `onevcs` says can never complete
+//! ([`crate::adoptable`]) — and each registered check's follow in the
 //! order its `--check` flags were given, carrying the path as it was given. A
 //! check that could not be **run** is reported separately again, because reading
 //! it as an accept is the one answer that stops anybody looking.
@@ -68,6 +70,8 @@ pub const ENGINE: &str = "engine";
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Engine,
+    /// A loader refusal whose rule and reason are the linked onevcs's.
+    Onevcs,
     Check(String),
 }
 
@@ -78,6 +82,7 @@ impl Serialize for Source {
     ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             Self::Engine => serializer.serialize_str(ENGINE),
+            Self::Onevcs => serializer.serialize_str(crate::adoptable::SOURCE),
             Self::Check(path) => serializer.serialize_str(path),
         }
     }
@@ -87,6 +92,7 @@ impl std::fmt::Display for Source {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Engine => formatter.write_str(ENGINE),
+            Self::Onevcs => formatter.write_str(crate::adoptable::SOURCE),
             Self::Check(path) => formatter.write_str(path),
         }
     }
@@ -280,6 +286,27 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
             {
                 Err(refusal) => refusal,
                 Ok(()) => {
+                    // Last of the loader's refusals, as `start` makes it: whether each
+                    // release adoption can ever complete, which is onevcs's to say. Every
+                    // `never-completes` rule is its own refusal; an unanswered one is a
+                    // notice on stderr and refuses nothing.
+                    let adoptions = crate::adoptable::ask(&read.plan, |_| true);
+                    adoptions.report_unanswered();
+                    if !adoptions.refused.is_empty() {
+                        return Ok(Answered::LoaderRefused {
+                            refusals: adoptions
+                                .refused
+                                .iter()
+                                .map(|refused| Reported {
+                                    source: Source::Onevcs,
+                                    node: Some(refused.node.clone()),
+                                    field: Some(refused.field().to_owned()),
+                                    reason: Reason(refused.detail()),
+                                })
+                                .collect(),
+                            stopped: stopped(args),
+                        });
+                    }
                     let mut refusals = Vec::new();
                     let mut unrunnable = Vec::new();
                     // A document this build cannot write is one no check can be
@@ -318,13 +345,17 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
         }
     };
     Ok(Answered::LoaderRefused {
-        refusal: engine_refusal(refusal),
-        stopped: args
-            .checks
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
+        refusals: vec![engine_refusal(refusal)],
+        stopped: stopped(args),
     })
+}
+
+/// Every registered check, in flag order, by the path it was given as.
+fn stopped(args: &PlanCheckArgs) -> Vec<String> {
+    args.checks
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect()
 }
 
 /// What this verb has to say about one project.
@@ -340,11 +371,12 @@ enum Answered {
     /// The project could not be read at all, so nothing was loaded, nothing was
     /// checked, and nothing accepted it.
     Unreadable,
-    /// The loader refused, which is where it stops: one refusal, and no loaded
-    /// plan to hand a check.
+    /// The loader refused, which is where it stops: the loader's refusals, and no
+    /// loaded plan to hand a check.
     LoaderRefused {
-        /// The loader's own, which is the only refusal this case can hold.
-        refusal: Reported,
+        /// The loader's own — one engine refusal, or every adoption onevcs says can
+        /// never complete — which are the only refusals this case can hold.
+        refusals: Vec<Reported>,
         /// Every registered check, in flag order, by the path it was given as.
         /// None of them ran, and none of them can carry an exit status.
         stopped: Vec<String>,
@@ -374,7 +406,7 @@ impl Answered {
     fn refusals(&self) -> &[Reported] {
         match self {
             Self::Unreadable => &[],
-            Self::LoaderRefused { refusal, .. } => std::slice::from_ref(refusal),
+            Self::LoaderRefused { refusals, .. } => refusals,
             Self::Checked { refusals, .. } => refusals,
         }
     }
