@@ -77,9 +77,8 @@ fn consumer(id: &str, fields: Value) -> Value {
     node
 }
 
-/// What onevcs's own executable says about one consumer of `engine`: its rule ids and
-/// reasons, in order.
-fn onevcs_says(world: &World, flags: &[&str]) -> Vec<(String, String)> {
+/// The verdict onevcs's own executable prints about one consumer of `engine`.
+fn onevcs_verdict(world: &World, flags: &[&str]) -> Value {
     let output = std::process::Command::new(crate::harness::onevcs_binary())
         .args([
             "release",
@@ -95,13 +94,18 @@ fn onevcs_says(world: &World, flags: &[&str]) -> Vec<(String, String)> {
         .stdin(std::process::Stdio::null())
         .output()
         .expect("the onevcs binary runs");
-    let verdict: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "`onevcs release check-adoption` printed no verdict ({error}): {}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         )
-    });
+    })
+}
+
+/// Its rule ids and reasons, in order.
+fn onevcs_says(world: &World, flags: &[&str]) -> Vec<(String, String)> {
+    let verdict = onevcs_verdict(world, flags);
     verdict["refusals"]
         .as_array()
         .unwrap_or_else(|| panic!("a verdict carries refusals: {verdict}"))
@@ -326,6 +330,46 @@ fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
         ));
 }
 
+/// A producer that declares no release targets is no release wait: onevcs answers a
+/// `consumes` naming a target of it `never-completes` with `releasing: false`, and the
+/// engine, whose release watch never waits on such a producer, sets that verdict aside,
+/// so the plan loads and launches as it did before onevcs was asked.
+#[test]
+fn a_never_completes_verdict_about_a_producer_releasing_nothing_is_set_aside() {
+    let world = World::new("adoption-check-not-releasing");
+    world.write_graphs();
+    world.repository("change-auto", &[]);
+    world.extra_repository("engine");
+    world.releases("version: 1\ndefault:\n\x20 adoption: fast\n");
+    let verdict = onevcs_verdict(&world, &["--consumes", "wheel"]);
+    assert_eq!(verdict["state"], "never-completes", "{verdict}");
+    assert_eq!(verdict["releasing"], false, "{verdict}");
+
+    let run = "not-releasing";
+    let project = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                engine(),
+                consumer("consumer", json!({"consumes": {"engine": "wheel"}})),
+            ],
+        ),
+    );
+    world
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .out_lacks("onevcs")
+        .err_lacks("onevcs");
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(0)
+        .err_lacks("onevcs");
+    world.until("the run to dispatch its producer", |world| {
+        !world.events_of(run, "node-dispatched").is_empty()
+    });
+}
+
 /// An adoption onevcs cannot answer about refuses nothing, and says why it went
 /// unchecked.
 ///
@@ -459,6 +503,15 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
     rewired["adoption"] = json!("published");
     let mut rewired_fast = lifecycle("rewired-fast", &[]);
     rewired_fast["parked"] = json!(true);
+    // In the producer's own repository, which is no release wait until a `requeue`
+    // moves it.
+    let mut moved = lifecycle("moved", &["engine"]);
+    moved["parked"] = json!(true);
+    moved["repo"] = json!("engine");
+    moved["adoption"] = json!("published");
+    let mut drifting = lifecycle("drifting", &["engine"]);
+    drifting["parked"] = json!(true);
+    drifting["consumes"] = json!({"engine": "crate"});
     world.script("flaky.fail", "1");
     world.script("engine.wait", "hold");
     let run = "edited";
@@ -466,7 +519,15 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
         run,
         &plan_of(
             run,
-            vec![engine(), agent("flaky", &[]), parked, rewired, rewired_fast],
+            vec![
+                engine(),
+                agent("flaky", &[]),
+                parked,
+                rewired,
+                rewired_fast,
+                moved,
+                drifting,
+            ],
         ),
     );
     world.run(&["start", &path, "--detach"]).exited(0);
@@ -521,6 +582,12 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
             json!({"op": "requeue", "id": "requeued", "amend": {"adoption": "published"}}),
         ),
         (
+            json!({"op": "requeue", "id": "moved", "amend": {"repo": "service"}}),
+            line("moved", "adoption", "published-no-target", &published),
+            json!({"op": "requeue", "id": "moved",
+                "amend": {"repo": "service", "consumes": {"engine": "crate"}}}),
+        ),
+        (
             json!({"op": "reparent", "id": "rewired", "deps": ["engine"]}),
             line("rewired", "adoption", "published-no-target", &published),
             json!({"op": "reparent", "id": "rewired-fast", "deps": ["engine"]}),
@@ -566,15 +633,21 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
             "consumes-undeclared-target",
             &stranded,
         ));
-    assert_eq!(
-        committed(&world),
-        before + 1,
-        "a refused reparent committed"
-    );
+    // A requeue stating only the publication policy is asked about too, and the
+    // drifted `consumes` it carries refuses it.
+    reply(json!({"op": "requeue", "id": "drifting", "amend": {"merge_policy": "change-auto"}}))
+        .exited(REFUSED)
+        .err_has(&line(
+            "drifting",
+            "consumes",
+            "consumes-undeclared-target",
+            &stranded,
+        ));
+    assert_eq!(committed(&world), before + 1, "a refused edit committed");
     assert_eq!(
         world.run(&["status", run, "--json"]).json()["nodes"],
         status["nodes"],
-        "a refused reparent changed the run"
+        "a refused edit changed the run"
     );
 }
 
