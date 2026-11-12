@@ -23,8 +23,8 @@ use serde_json::{Map, Value};
 use crate::checkpoint::Coverage;
 use crate::event::{Envelope, EventKind, Labels, Phase, Source};
 use crate::journal_selected::{
-    finished_lines, in_order, line_runs, merged_in, number_of, on_threads, opening_of, parsed_line,
-    skimmed_opening, string_of, whole_file, whole_record, workers, Numbered, Skim,
+    covered, finished_lines, in_order, line_runs, merged_in, number_of, on_threads, opening_of,
+    parsed_line, skimmed_opening, string_of, whole_file, whole_record, workers, Numbered, Skim,
 };
 
 /// Where one record's line sits in a run's journal, and which record it is: enough for
@@ -103,6 +103,9 @@ struct Mark {
     place: Option<usize>,
     /// Where its line sits.
     handle: RecordHandle,
+    /// Its record's `ts` as [`millis_of`](crate::projection::millis_of) reads it, read by
+    /// the worker that built the record rather than by the fold, which cannot be shared.
+    at: Option<u64>,
 }
 
 /// A record's head, made of its folded record's own fields rather than a copy of them.
@@ -270,7 +273,7 @@ const PIPELINED: usize = 2048;
 /// complete read follows. Each line is read once, by [`taken`], and the journal is never
 /// read through a second time. Each record's strings are built once, and `fold` reads
 /// them before they are moved into its head.
-pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Heads {
+pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope, Option<u64>)) -> Heads {
     let Some(bytes) = whole_file(journal) else {
         return Heads::default();
     };
@@ -325,6 +328,7 @@ pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Hea
     }
     drop(run_numbers);
     let (queues, order) = merged_in(&lines, Some(Numbered { of, names }));
+    let coverage = covered(&lines, &queues);
     // Each line's stream, shared by every handle of it, and whether it repeats the
     // `(stream, seq)` before it in its stream.
     let mut stream_of: Vec<Option<Arc<str>>> = vec![None; lines.len()];
@@ -384,10 +388,11 @@ pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Hea
             evidence: skim.evidence,
             place: placed.place,
             handle,
+            at: crate::projection::millis_of(&record.ts),
         };
         (record, mark)
     };
-    let (heads, coverage) = pipelined(placed, order.len(), built, &mut fold);
+    let heads = pipelined(placed, order.len(), built, &mut fold);
     drop(lines);
     // Nothing reads the journal's bytes once its heads are made, and handing a buffer the
     // journal's size back to the host is a wait of its own, so it is let go of on a thread
@@ -407,20 +412,18 @@ pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Hea
 type Built = (Vec<Envelope>, Vec<Mark>);
 
 /// `runs` built by `build` on the read's workers, handed to `fold` in their order, and
-/// then absorbed into a coverage and moved into heads on a thread of its own: the fold is
-/// the one step that cannot be shared, so the others are done around it, a run at a time,
-/// rather than before and after it.
+/// then moved into heads on a thread of its own: the fold is the one step that cannot be
+/// shared, so the others are done around it, a run at a time, rather than before and
+/// after it.
 fn pipelined(
     runs: Vec<Vec<Placed>>,
     len: usize,
     build: impl Fn(Placed) -> (Envelope, Mark) + Sync,
-    fold: &mut impl FnMut(&Envelope),
-) -> (Vec<RecordHead>, Coverage) {
+    fold: &mut impl FnMut(&Envelope, Option<u64>),
+) -> Vec<RecordHead> {
     let made = |runs: &mut dyn Iterator<Item = Built>| {
         let mut heads = Vec::with_capacity(len);
-        let mut coverage = Coverage::default();
         for (records, marks) in runs {
-            coverage.absorb_all(&records);
             heads.extend(
                 records
                     .into_iter()
@@ -428,12 +431,14 @@ fn pipelined(
                     .map(|(record, mark)| head_of(record, mark)),
             );
         }
-        (heads, coverage)
+        heads
     };
     if runs.len() < 2 {
         let mut folded = runs.into_iter().map(|run| {
             let (records, marks): Built = run.into_iter().map(&build).unzip();
-            records.iter().for_each(&mut *fold);
+            for (record, mark) in records.iter().zip(&marks) {
+                fold(record, mark.at);
+            }
             (records, marks)
         });
         return made(&mut folded);
@@ -474,7 +479,9 @@ fn pipelined(
         for (index, built) in built_rx {
             waiting[index] = Some(built);
             while let Some(built) = waiting.get_mut(due).and_then(Option::take) {
-                built.0.iter().for_each(&mut *fold);
+                for (record, mark) in built.0.iter().zip(&built.1) {
+                    fold(record, mark.at);
+                }
                 if folded_tx.send(built).is_err() {
                     break;
                 }

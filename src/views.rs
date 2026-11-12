@@ -2082,8 +2082,8 @@ impl RunView {
             });
         }
         let mut state = crate::projection::unfolded();
-        let read = crate::journal_heads::read_heads(&paths.journal(), |event| {
-            crate::projection::fold_one(&mut state, event);
+        let read = crate::journal_heads::read_heads(&paths.journal(), |event, at| {
+            crate::projection::fold_one_at(&mut state, event, at);
         });
         let view = Self::of_fold(paths, state, read.coverage)?;
         Ok(RunHeads {

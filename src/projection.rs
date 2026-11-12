@@ -1293,13 +1293,20 @@ pub(crate) fn fold_each<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> R
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    fold_one_at(state, event, millis_of(&event.ts));
+}
+
+/// [`fold_one`], where the reader has already read `at`, [`millis_of`] the record's
+/// `ts`, on a thread of its own.
+pub(crate) fn fold_one_at(state: &mut RunState, event: &Envelope, at: Option<u64>) {
     let marked = crate::hooks::Marked::before(state, event);
-    fold_record(state, event);
+    fold_record(state, event, at);
     marked.after(state, event);
 }
 
 /// [`fold_one`], short of the run-end hook's marker it keeps beside the fold.
-fn fold_record(state: &mut RunState, event: &Envelope) {
+/// `at` is [`millis_of`] the record's `ts`.
+fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
     #[cfg(test)]
     crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
@@ -1313,8 +1320,6 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
         state.recalled.push(event.clone());
         return;
     }
-    // Read once here, and handed to the activity the record also times.
-    let at = millis_of(&event.ts);
     state.last_write_at = Some(at.unwrap_or(0).max(state.last_write_at.unwrap_or(0)));
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a

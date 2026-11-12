@@ -623,6 +623,40 @@ pub(crate) fn merged_in(
     (queues, order)
 }
 
+/// What every record of `lines` covers, as absorbing each in turn would leave a
+/// [`Coverage`](crate::checkpoint::Coverage) with no bytes: how many there are, the
+/// furthest of them by `(ts, stream)`, and each stream's greatest `seq`.
+///
+/// Read off [`merged`]'s `queues`, each a stream's lines in `seq` order, so no record is
+/// hashed for it, and where two lines' `ts` are both in the writers' form they are
+/// compared as the numbers [`instant_of`] reads, which order as their text does.
+pub(crate) fn covered(lines: &[Skim<'_>], queues: &[Vec<usize>]) -> crate::checkpoint::Coverage {
+    let placed_order = |left: &Skim<'_>, right: &Skim<'_>| match (left.instant, right.instant) {
+        (Some(left), Some(right)) if left != right => left.cmp(&right),
+        _ => (left.ts.as_ref(), left.stream.as_ref())
+            .cmp(&(right.ts.as_ref(), right.stream.as_ref())),
+    };
+    let mut coverage = crate::checkpoint::Coverage {
+        records: lines.len() as u64,
+        ..crate::checkpoint::Coverage::default()
+    };
+    coverage.at = lines
+        .iter()
+        .max_by(|left, right| placed_order(left, right))
+        .map(|line| crate::checkpoint::Placed {
+            ts: line.ts.to_string(),
+            stream: line.stream.to_string(),
+        });
+    for queue in queues {
+        if let (Some(first), Some(last)) = (queue.first(), queue.last()) {
+            coverage
+                .streams
+                .insert(lines[*first].stream.to_string(), lines[*last].seq);
+        }
+    }
+    coverage
+}
+
 /// A selection over the lines of a journal, or `None` where a kept line in the
 /// skimmed form turned out to be no record.
 fn select(
