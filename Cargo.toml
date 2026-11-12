@@ -940,7 +940,12 @@ oneagentgraph = "0.13.0"
 # CI tries in five on `cannot lock ref`. It requires `onemessagebus ^0.11`, which
 # moves the bus, `oneagentgraph` and `onejudge` with it; onevcs-testing 0.21.2
 # pins it exactly.
-onevcs = "0.65.1"
+# 0.65.2 is the floor because its host-wide recovery read answers a warm
+# `$ONEVCS_HOME` without re-deriving branches that did not change
+# (onevcs-host-reads-warm, onevcs #667): on a copy of this host's home that took
+# the read `src/unpublished.rs` delegates from about 20 s to 0.63 s.
+# onevcs-testing 0.21.3 pins it exactly.
+onevcs = "0.65.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1229,7 +1234,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.2"
+onevcs-testing = "0.21.3"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
