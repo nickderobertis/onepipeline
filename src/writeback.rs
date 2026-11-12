@@ -661,6 +661,14 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::RepeatedPage { .. } => decided("repeated-page"),
         EngineError::IfVersionOneTask => decided("if-version-one-task"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back: the
+        // first refuses `task relations --complete`, which it never reads, and the other two
+        // refuse writing an assignee, which none of its copies or targeted updates carries;
+        // `writeback::tests` holds each word.
+        EngineError::RelationsIncomplete { .. } => decided("relations-incomplete"),
+        EngineError::NoAssignees { .. } => decided("no-assignees"),
+        EngineError::SeveralAssignees { .. } => decided("several-assignees"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         // A plan member that failed after others landed is the failure it wraps, as the store
         // classes it.
         EngineError::PlanMember { error, .. } => cause_of(error),
@@ -5369,9 +5377,10 @@ pub enum UpdatedField {
     DependsOn,
 }
 
-/// A store field the record has no key for is handed back as the error: `repositories`, which
-/// the store reports only for an update that sets it, and no targeted update the engine builds
-/// does — an existing item's repositories are not modelled (see this module's head).
+/// A store field the record has no key for is handed back as the error: `repositories` and
+/// `assignees`, which the store reports only for an update that sets them, and no targeted
+/// update the engine builds does — an existing item's repositories and assignees are not
+/// modelled (see this module's head).
 impl TryFrom<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
     type Error = onetaskgraph_plugin_api::UpdatedField;
 
@@ -5385,7 +5394,7 @@ impl TryFrom<onetaskgraph_plugin_api::UpdatedField> for UpdatedField {
             Store::Metadata => Self::Metadata,
             Store::Delivers => Self::Delivers,
             Store::DependsOn => Self::DependsOn,
-            Store::Repositories => return Err(field),
+            Store::Repositories | Store::Assignees => return Err(field),
         })
     }
 }
@@ -6846,6 +6855,16 @@ mod tests {
             },
             EngineError::RepeatedPage { token: words() },
             EngineError::IfVersionOneTask,
+            EngineError::RelationsIncomplete { items: words() },
+            EngineError::NoAssignees {
+                name: "plans".into(),
+                kind: "local-md".into(),
+                task: "plans:a".into(),
+            },
+            EngineError::SeveralAssignees {
+                item: "plans:a".into(),
+                count: 2,
+            },
             EngineError::PlanMember {
                 member: "a".into(),
                 landed: vec!["plans:board".into()],
