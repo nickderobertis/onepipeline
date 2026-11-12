@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::{
     a_parked_run_is_read_as_driven, a_watch_armed_active_outlasts_the_run_turning_parked, agent,
-    counts, human, lifecycle, plan_of, project_id, reporting, rows, until_parked, Counts,
-    Repository, World, LOOP_STATS_ENV, REFUSED,
+    counts, end_driver, human, lifecycle, plan_of, project_id, reporting, rows, until_parked,
+    Counts, Repository, World, LOOP_STATS_ENV, REFUSED,
 };
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 use oneagentgraph::event::{session_label, SESSION_LABEL};
@@ -939,20 +939,42 @@ fn a_plan_consuming_a_dependency_it_does_not_have_is_refused_by_name() {
 /// A `published` node whose repository declares release targets but **not the one
 /// it consumes** holds indefinitely, and says so: an unanswerable question is not
 /// an answer that the release has happened.
+///
+/// A plan stating that at load is refused by onevcs's `consumes-undeclared-target`
+/// (`adoption_check.rs`), so the run here launches while the host still declares the
+/// target, and the host's declaration drops it before the run is adopted — the way a
+/// live run comes to wait on a target nobody declares. `adopt` raises onevcs's rule
+/// beside the wait and refuses nothing, so the wait below is what the node meets.
 #[test]
 fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
     let world = watching("adoption-unanswerable");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&automated(&script));
+    world.releases(&document(
+        &script,
+        &format!(
+            "\x20   - name: wheel\n\x20     style: automated\n\x20     \
+             probe: {{script: {script}, timeout_seconds: 30}}"
+        ),
+    ));
     // A release is out and past the baseline, so nothing about the *release* is
     // what holds this node.
     releases_at(&answer, "9.9.9");
 
+    world.script("engine.wait", "hold");
     let mut node = consumer(Some("published"));
     consumes_publishing_a_change(&mut node, json!({"engine": "wheel"}));
     let run = start(&world, "adoption-unanswerable", vec![engine(), node]);
+    world.until("the producer to be dispatched", |world| {
+        dispatched(world, &run, ENGINE)
+    });
+    // The host stops declaring `wheel`, and the run is adopted by a driver that reads
+    // the declaration as it now stands.
+    end_driver(&world, &run);
+    world.releases(&automated(&script));
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.release("engine.go");
     // Waited for on the **record**, which is what this reads, rather than on the
     // surface beside it. `release::Waits::report` raises the surface first and
     // emits the record second — deliberately, so a reader holding the record

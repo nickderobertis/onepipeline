@@ -3,8 +3,7 @@
 //!
 //! A lifecycle node waiting on a dependency in another repository waits on that
 //! repository's release, and some of those waits never end: a `published` node behind
-//! a producer that names no target to wait for is held for ever, and a `fast` node
-//! whose publication opens no change request fails at its last step. Which ones is
+//! a producer that names no target to wait for is held for ever. Which ones is
 //! **onevcs's** to say — every fact the rules read is that library's configuration —
 //! so this module states none of them. It asks [`onevcs::adoption_check`] once per
 //! lifecycle node and out-of-repository dependency, and carries the verdict's rule id
@@ -45,14 +44,12 @@ pub(crate) struct Refused {
 }
 
 impl Refused {
-    /// The plan field a planner changes to answer it: the rung for the two rules about
-    /// the rung, and `consumes` for the two about a named target.
+    /// The plan field a planner changes to answer it: the rung for the rule about the
+    /// rung, and `consumes` for the one about a named target.
     pub(crate) fn field(&self) -> &'static str {
         match self.rule {
-            AdoptionRule::PublishedNoTarget | AdoptionRule::FastNoChangeRequest => "adoption",
-            AdoptionRule::ConsumesWithoutChangeRequest | AdoptionRule::ConsumesUndeclaredTarget => {
-                "consumes"
-            }
+            AdoptionRule::PublishedNoTarget => "adoption",
+            AdoptionRule::ConsumesUndeclaredTarget => "consumes",
         }
     }
 
@@ -130,7 +127,8 @@ impl Asked {
 ///
 /// A dependency that is not one of this plan's nodes — a cross-DAG reference, whose
 /// repository is another run's to say — lands in no repository, lands in the node's
-/// own, or reaches it over an export edge is not a release wait, and is not asked about.
+/// own, or reaches it over an export edge is not a release wait, and is not asked about;
+/// nor is one onevcs answers is not `releasing`, whose verdict is set aside.
 pub(crate) fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
     let by_id: BTreeMap<&str, &Node> = plan
         .tasks
@@ -180,10 +178,11 @@ pub(crate) fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
                     continue;
                 }
             };
-            // The same repository under two spellings: its work reaches the node
-            // through that repository's branches, and there is no release to wait on.
-            if verdict.state != AdoptionState::Unanswered && verdict.consumer == verdict.producer
-            {
+            // No release to wait on, by onevcs's own `releasing`: the same repository
+            // under two spellings, whose work reaches the node through its branches, or a
+            // producer that declares no release targets, which the release watch never
+            // waits on (`release::outside`). Neither is a release adoption.
+            if verdict.state != AdoptionState::Unanswered && !verdict.releasing {
                 continue;
             }
             match verdict.state {
