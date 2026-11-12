@@ -1049,6 +1049,7 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
     let mut counted = 0u64;
     let mut released = 0usize;
     let mut since_release = 0u32;
+    let mut done = 0usize;
     let mut settled = false;
     while std::time::Instant::now() < deadline {
         let listing = Listing::of(&world.runs);
@@ -1076,7 +1077,7 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
         since_release += 1;
         // The next dispatch goes once this reader has read beside the last one
         // and seen it settle, so the run cannot settle ahead of the reads.
-        let done = row.node_counts.get("done").copied().unwrap_or(0) as usize;
+        done = row.node_counts.get("done").copied().unwrap_or(0) as usize;
         if released < ids.len() && done >= released && since_release >= READS_PER_RELEASE {
             world.release(&format!("{}.go", ids[released]));
             released += 1;
@@ -1086,8 +1087,19 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
             settled = true;
             break;
         }
+        // Unpaced, this reader made 1,498,919 reads in the two minutes a loaded macOS leg
+        // gave it, competing for a processor with the detached driver it is waiting on to
+        // dispatch and settle each node. Yielding between reads lets that driver, or
+        // anything else ready to run, go first, and costs nothing when nothing is: a
+        // sleep, however short, is rounded up to the host's timer and cut the reads
+        // beside each dispatch by a factor of ten.
+        std::thread::yield_now();
     }
-    assert!(settled, "the run never settled; {reads} reads made");
+    assert!(
+        settled,
+        "the run never settled; {reads} reads made, {released} of {NODES} dispatches \
+         released, {done} read as done, {counted} records last read"
+    );
     assert!(
         reads > 20,
         "only {reads} reads ran against the writer, which is not a race"
