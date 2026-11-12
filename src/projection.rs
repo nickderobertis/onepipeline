@@ -1308,18 +1308,16 @@ fn fold_record(state: &mut RunState, event: &Envelope) {
         state.recalled.push(event.clone());
         return;
     }
-    state.last_write_at = Some(
-        millis_of(&event.ts)
-            .unwrap_or(0)
-            .max(state.last_write_at.unwrap_or(0)),
-    );
+    // Read once here, and handed to the activity the record also times.
+    let at = millis_of(&event.ts);
+    state.last_write_at = Some(at.unwrap_or(0).max(state.last_write_at.unwrap_or(0)));
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a
         // sibling library does not settle a node — but it is the only evidence
         // of what the node it belongs to is doing while it runs, the only
         // evidence of which identity refused when it stops running, and the only
         // evidence of where it is doing it.
-        fold_activity(state, event);
+        fold_activity(state, event, at);
         fold_addresses(state, event);
         fold_refusal(state, event);
         fold_invocation(state, event);
@@ -2892,7 +2890,9 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
 /// publication steps follow, and the line names whichever came last. The session
 /// *opening* is the one `onevcs` record that is not a step — a dispatch that has
 /// opened one and named no tool has started and done nothing.
-fn fold_activity(state: &mut RunState, event: &Envelope) {
+///
+/// `at` is [`millis_of`] of the record's `ts`, which the caller has already read.
+fn fold_activity(state: &mut RunState, event: &Envelope, at: Option<u64>) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
@@ -2905,7 +2905,6 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .activity
         .get_mut(node)
         .expect("a node's activity was just made where it had none");
-    let at = millis_of(&event.ts);
     if !evidences_progress(event) {
         activity.last_heartbeat_at = at.or(activity.last_heartbeat_at);
         return;
@@ -3134,32 +3133,29 @@ pub fn millis_of(ts: &str) -> Option<u64> {
     // every other position a digit. Without the separator check a string that
     // merely *starts* like a timestamp parses, and `str::parse` would take a
     // signed field like `+12` as well — either way a stranger's malformed clock
-    // becomes this run's timing evidence.
-    if bytes.len() != 24 {
+    // becomes this run's timing evidence. Every position is read in one pass against
+    // the form: a digit where it has a `0`, and otherwise exactly its separator.
+    const FORM: &[u8; 24] = b"0000-00-00T00:00:00.000Z";
+    if bytes.len() != FORM.len() {
         return None;
     }
-    for (at, separator) in [
-        (4, b'-'),
-        (7, b'-'),
-        (10, b'T'),
-        (13, b':'),
-        (16, b':'),
-        (19, b'.'),
-        (23, b'Z'),
-    ] {
-        if bytes[at] != separator {
+    let mut digits = [0_i64; 24];
+    for ((byte, form), digit) in bytes.iter().zip(FORM).zip(&mut digits) {
+        if *form == b'0' {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            *digit = i64::from(byte - b'0');
+        } else if byte != form {
             return None;
         }
     }
     let field = |from: usize, to: usize| -> Option<i64> {
-        let text = bytes.get(from..to)?;
-        if !text.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        // At most four digits, each checked above, so this is what parsing them reads.
         Some(
-            text.iter()
-                .fold(0, |number, digit| number * 10 + i64::from(digit - b'0')),
+            digits
+                .get(from..to)?
+                .iter()
+                .fold(0, |number, digit| number * 10 + digit),
         )
     };
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);

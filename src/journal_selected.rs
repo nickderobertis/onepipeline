@@ -160,22 +160,46 @@ pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     Some((number, &line[digits..]))
 }
 
+/// The keys a labels object has named so far, held inline for as many as a writer's
+/// labels carry, so walking one allocates nothing.
+#[derive(Default)]
+struct Keys<'a> {
+    inline: [&'a [u8]; 12],
+    held: usize,
+    beyond: Vec<&'a [u8]>,
+}
+
+impl<'a> Keys<'a> {
+    /// Whether `key` is new, holding it if it is.
+    fn first_time(&mut self, key: &'a [u8]) -> bool {
+        if self.inline[..self.held].contains(&key) || self.beyond.contains(&key) {
+            return false;
+        }
+        if self.held < self.inline.len() {
+            self.inline[self.held] = key;
+            self.held += 1;
+        } else {
+            self.beyond.push(key);
+        }
+        true
+    }
+}
+
 /// The `node` label off a labels object in the form: its values are strings, or a
 /// number for `round`, and anything else is read by the parse. Also what follows
 /// the object.
 fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     let mut node = None;
-    let mut seen: Vec<&[u8]> = Vec::new();
+    let mut seen = Keys::default();
     if let Some(after) = rest.strip_prefix(b"}") {
         return Some((None, after));
     }
     loop {
         // Only `node`'s value is text anything reads, so no other is decoded.
         let (key, after) = bytes_of(rest.strip_prefix(b"\"")?)?;
-        if seen.contains(&key) {
+        if !seen.first_time(key) {
             return None;
         }
-        seen.push(key);
         let after = after.strip_prefix(b":")?;
         rest = if let Some(value) = after.strip_prefix(b"\"") {
             if key == b"round" {
@@ -250,6 +274,21 @@ pub(crate) fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
 /// since that array is an envelope's last field and an artifact holds no array.
 const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 
+/// An envelope's opening, which a line holds past its start only where a fragment was
+/// glued to a later append.
+const OPENING: &[u8] = b"{\"v\":";
+
+/// The searchers for [`OPENING`] and [`ARTIFACTS`], built once rather than for each line.
+static SEARCHERS: std::sync::LazyLock<(
+    memchr::memmem::Finder<'static>,
+    memchr::memmem::FinderRev<'static>,
+)> = std::sync::LazyLock::new(|| {
+    (
+        memchr::memmem::Finder::new(OPENING),
+        memchr::memmem::FinderRev::new(ARTIFACTS),
+    )
+});
+
 /// A line in the one form the writers leave, its merge fields read off its opening and
 /// whether it carries evidence off its end, with nothing between parsed; `None` for any
 /// other line, which then goes to [`parsed_line`].
@@ -281,10 +320,11 @@ pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
 pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
-    if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
+    let (opens, artifacts) = &*SEARCHERS;
+    if opens.find(&line[1..]).is_some() {
         return None;
     }
-    let artifacts = memchr::memmem::rfind(body, ARTIFACTS)?;
+    let artifacts = artifacts.rfind(body)?;
     let skim = Skim {
         line,
         ts: Cow::Borrowed(opening.ts),

@@ -91,6 +91,9 @@ pub(crate) struct Heads {
     pub(crate) store_len: usize,
     /// The highest `seq` in the whole journal.
     pub(crate) last_seq: u64,
+    /// The journal's bytes, which nothing reads once its records are built: handed out
+    /// so the reader can let go of them where that costs it no wait.
+    pub(crate) bytes: Vec<u8>,
 }
 
 /// What a record's head carries that its folded record does not.
@@ -331,10 +334,10 @@ pub(crate) fn read_heads(journal: &Path) -> Heads {
         }
         placed.push(this);
     }
-    let lines = &lines;
+    let skims = &lines;
     let start = bytes.as_ptr() as usize;
     let built = |placed: Placed| {
-        let skim = &lines[placed.index];
+        let skim = &skims[placed.index];
         let handle = RecordHandle {
             offset: (skim.line.as_ptr() as usize - start) as u64,
             len: skim.line.len() as u64,
@@ -368,11 +371,15 @@ pub(crate) fn read_heads(journal: &Path) -> Heads {
     })
     .into_iter()
     .unzip();
+    drop(openings);
+    drop(stream_of);
+    drop(lines);
     Heads {
         folded,
         marks,
         store_len,
         last_seq,
+        bytes,
     }
 }
 
