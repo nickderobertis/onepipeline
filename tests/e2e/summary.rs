@@ -1087,12 +1087,8 @@ fn a_listing_beside_a_live_writer_never_reads_a_half_written_summary() {
             settled = true;
             break;
         }
-        // Unpaced, this reader made 1,498,919 reads in the two minutes a loaded macOS leg
-        // gave it, competing for a processor with the detached driver it is waiting on to
-        // dispatch and settle each node. Yielding between reads lets that driver, or
-        // anything else ready to run, go first, and costs nothing when nothing is: a
-        // sleep, however short, is rounded up to the host's timer and cut the reads
-        // beside each dispatch by a factor of ten.
+        // Let the detached driver this waits on run first on a loaded host, rather than
+        // spinning against it; a sleep would be rounded up to the timer and thin the reads.
         std::thread::yield_now();
     }
     assert!(
