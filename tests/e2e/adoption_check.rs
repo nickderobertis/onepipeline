@@ -633,6 +633,17 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
     world.until("the unrelated add to commit", |world| {
         committed(world) == before + 1
     });
+    // The added node runs to `done` on its own; snapshot the run only once it has, so
+    // the comparison below sees what the refused edits did and not the driver's progress.
+    world.until("the unrelated node to finish", |world| {
+        world.run(&["status", run, "--json"]).json()["nodes"]
+            .as_array()
+            .is_some_and(|nodes| {
+                nodes
+                    .iter()
+                    .any(|node| node["id"] == "unrelated" && node["status"] == "done")
+            })
+    });
     let status = world.run(&["status", run, "--json"]).json();
     reply(json!({"op": "reparent", "id": "added", "deps": ["engine"]}))
         .exited(REFUSED)
