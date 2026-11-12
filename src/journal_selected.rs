@@ -548,6 +548,22 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 /// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
 /// streams, which orders them as their text does; otherwise as the text itself.
 pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
+    merged_in(lines, None)
+}
+
+/// Each line's stream as a number: `of[line]` names the stream `names` holds at that
+/// number. Every number is some line's, and no two name the same stream.
+pub(crate) struct Numbered<'n> {
+    pub(crate) of: Vec<usize>,
+    pub(crate) names: Vec<&'n str>,
+}
+
+/// [`merged`], with each line's stream already numbered where the reader did that on its
+/// own workers, so the merge hashes no line's stream itself.
+pub(crate) fn merged_in(
+    lines: &[Skim<'_>],
+    numbered: Option<Numbered<'_>>,
+) -> (Vec<Vec<usize>>, Vec<usize>) {
     let Some(instants) = lines
         .iter()
         .map(|line| line.instant)
@@ -561,14 +577,26 @@ pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
         let order = crate::journal::merge_queues(queues.clone(), key);
         return (queues.into_iter().map(|(_, queue)| queue).collect(), order);
     };
-    let mut streams: HashMap<&str, usize> = HashMap::new();
-    let mut queues: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
-            queues.push((line.stream.as_ref(), Vec::new()));
-            queues.len() - 1
-        });
-        queues[at].1.push(index);
+    let mut queues: Vec<(&str, Vec<usize>)>;
+    if let Some(numbered) = numbered {
+        queues = numbered
+            .names
+            .into_iter()
+            .map(|name| (name, Vec::new()))
+            .collect();
+        for (index, at) in numbered.of.into_iter().enumerate() {
+            queues[at].1.push(index);
+        }
+    } else {
+        queues = Vec::new();
+        let mut streams: HashMap<&str, usize> = HashMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
+                queues.push((line.stream.as_ref(), Vec::new()));
+                queues.len() - 1
+            });
+            queues[at].1.push(index);
+        }
     }
     // By stream, so a queue's position is its stream's rank.
     queues.sort_unstable_by(|left, right| left.0.cmp(right.0));

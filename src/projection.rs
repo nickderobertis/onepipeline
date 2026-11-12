@@ -855,20 +855,20 @@ pub enum MemberLabel {
 /// string of this crate's: the kind is the sibling's vocabulary, and a literal
 /// here would be a second copy of a contract it owns — one that keeps matching
 /// after the producer renames the kind, and silently stops attributing anything.
-/// A kind this build has no reading of simply is not one.
+/// A kind this build has no reading of simply is not one. Compared with the enum's
+/// own spelling of the kind, which is the one its wire form parses back from, rather
+/// than by parsing every record's kind: the fold asks this of each one it reads.
 fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
-    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
-        .is_ok_and(|known| known == oneagentgraph::event::EventKind::FallbackAdvanced)
+    kind.0 == oneagentgraph::event::EventKind::FallbackAdvanced.as_str()
 }
 
 /// Whether one relayed kind is `oneagentgraph`'s `oneharness-session`.
 ///
 /// Read the same way [`is_fallback_advanced`] is, and for the same reason: the
-/// kind is that library's own, so it is recognised by parsing the wire string
-/// back into that library's set rather than by a spelling of it kept here.
+/// kind is that library's own, so it is recognised by that library's spelling of
+/// it rather than by one kept here.
 fn is_oneharness_session(kind: &crate::event::EventKind) -> bool {
-    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
-        .is_ok_and(|known| known == oneagentgraph::event::EventKind::OneharnessSession)
+    kind.0 == oneagentgraph::event::EventKind::OneharnessSession.as_str()
 }
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
@@ -2103,24 +2103,21 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
         return;
     };
     if event.source == Source::Agentgraph {
-        // An address the node already holds is not built again: the fold meets one on
-        // nearly every record a dispatch relays.
-        let held = |run: &str, member: &str| {
-            state
-                .last_turns
-                .get(node)
-                .is_some_and(|held| held.run() == run.trim() && held.member() == member.trim())
-        };
+        // The fold meets an address on nearly every record a dispatch relays, so the one
+        // a node already holds is moved in place rather than built again.
         let named = event
             .labels
             .run_id
             .as_deref()
-            .zip(event.labels.member.as_deref())
-            .filter(|(run, member)| !held(run, member));
-        if let Some(address) =
-            named.and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member))
-        {
-            state.last_turns.insert(node.clone(), address);
+            .zip(event.labels.member.as_deref());
+        if let Some((run, member)) = named {
+            if let Some(held) = state.last_turns.get_mut(node) {
+                if held.run() != run.trim() || held.member() != member.trim() {
+                    held.set(run, member);
+                }
+            } else if let Some(address) = crate::agentgraph::TurnAddress::of(run, member) {
+                state.last_turns.insert(node.clone(), address);
+            }
         }
     }
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
@@ -4745,6 +4742,65 @@ mod tests {
                 "a checkpoint read {other} as what a dispatch was doing"
             );
         }
+    }
+
+    /// Where a note to a node is carried: the turn its latest relayed record addresses.
+    /// A dispatch that moves to another graph run or member moves it, and a record
+    /// naming no address this crate can carry leaves the last one standing.
+    #[test]
+    fn a_node_s_last_turn_follows_its_relayed_records_and_stays_where_none_is_read() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let start = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let addressed = |seq: u64, run: &str, member: &str| {
+            let mut event = pipeline(
+                journal::PipelineKind::NodeDispatched,
+                seq,
+                Some("build"),
+                &[],
+            );
+            event.source = Source::Agentgraph;
+            event.kind = crate::event::EventKind(TURN_ACTIVITY.into());
+            event.labels.run_id = Some(run.into());
+            event.labels.member = Some(member.into());
+            event
+        };
+        let last_turn = |events: &[Envelope]| {
+            fold(events)
+                .last_turns
+                .get("build")
+                .map(|turn| (turn.run().to_owned(), turn.member().to_owned()))
+        };
+        let first = || ("graph-a".to_owned(), "worker".to_owned());
+
+        assert_eq!(
+            last_turn(&[start.clone(), addressed(1, "graph-a", "worker")]),
+            Some(first())
+        );
+        assert_eq!(
+            last_turn(&[
+                start.clone(),
+                addressed(1, "graph-a", "worker"),
+                addressed(2, " graph-b ", "reviewer"),
+                addressed(3, "graph-b", "reviewer"),
+            ]),
+            Some(("graph-b".to_owned(), "reviewer".to_owned())),
+            "the turn did not move with the dispatch"
+        );
+        assert_eq!(
+            last_turn(&[
+                start,
+                addressed(1, "graph-a", "worker"),
+                addressed(2, "graph-b", "not a member"),
+                addressed(3, "  ", "reviewer"),
+            ]),
+            Some(first()),
+            "a record naming no address moved the turn"
+        );
     }
 
     /// The readout an operator decides between cancel, retry, and wait on. A

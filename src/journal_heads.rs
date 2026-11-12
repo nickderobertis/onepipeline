@@ -12,6 +12,8 @@
 //! discards: its middle is never parsed unless it is fetched, and [`fetch`] then
 //! answers [`RecordMoved`](crate::Error::RecordMoved) for it rather than a record.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -21,8 +23,8 @@ use serde_json::{Map, Value};
 use crate::checkpoint::Coverage;
 use crate::event::{Envelope, EventKind, Labels, Phase, Source};
 use crate::journal_selected::{
-    finished_lines, in_order, joined, line_runs, merged, number_of, on_threads, opening_of,
-    parsed_line, skimmed_opening, string_of, whole_file, whole_record, workers, Skim,
+    finished_lines, in_order, line_runs, merged_in, number_of, on_threads, opening_of, parsed_line,
+    skimmed_opening, string_of, whole_file, whole_record, workers, Numbered, Skim,
 };
 
 /// Where one record's line sits in a run's journal, and which record it is: enough for
@@ -273,13 +275,56 @@ pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Hea
         return Heads::default();
     };
     crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
-    // Each worker finds its own run's lines.
+    // Each worker finds its own run's lines, and numbers their streams.
     let runs = on_threads(line_runs(&bytes), |run| {
-        finished_lines(run).filter_map(taken).collect::<Vec<_>>()
+        let mut numbers: HashMap<Cow<'_, str>, usize> = HashMap::new();
+        let mut skims = Vec::new();
+        let mut of = Vec::new();
+        for skim in finished_lines(run).filter_map(taken) {
+            let number = match numbers.get(skim.stream.as_ref()) {
+                Some(number) => *number,
+                None => {
+                    let number = numbers.len();
+                    numbers.insert(skim.stream.clone(), number);
+                    number
+                }
+            };
+            of.push(number);
+            skims.push(skim);
+        }
+        let mut names = vec![Cow::Borrowed(""); numbers.len()];
+        for (name, number) in numbers {
+            names[number] = name;
+        }
+        (skims, of, names)
     });
-    let len = runs.iter().map(Vec::len).sum();
-    let mut lines = joined(runs, len);
-    let (queues, order) = merged(&lines);
+    let len = runs.iter().map(|(skims, _, _)| skims.len()).sum();
+    let mut lines = Vec::with_capacity(len);
+    let mut run_numbers = Vec::with_capacity(runs.len());
+    let mut run_names = Vec::with_capacity(runs.len());
+    for (skims, of, names) in runs {
+        lines.extend(skims);
+        run_numbers.push(of);
+        run_names.push(names);
+    }
+    // One number for each stream across the runs, each name hashed once a run.
+    let mut numbers: HashMap<&str, usize> = HashMap::new();
+    let mut names: Vec<&str> = Vec::new();
+    let mut of = Vec::with_capacity(len);
+    for (run_of, run_names) in run_numbers.iter().zip(&run_names) {
+        let renumbered: Vec<usize> = run_names
+            .iter()
+            .map(|name| {
+                *numbers.entry(name.as_ref()).or_insert_with(|| {
+                    names.push(name.as_ref());
+                    names.len() - 1
+                })
+            })
+            .collect();
+        of.extend(run_of.iter().map(|number| renumbered[*number]));
+    }
+    drop(run_numbers);
+    let (queues, order) = merged_in(&lines, Some(Numbered { of, names }));
     // Each line's stream, shared by every handle of it, and whether it repeats the
     // `(stream, seq)` before it in its stream.
     let mut stream_of: Vec<Option<Arc<str>>> = vec![None; lines.len()];
@@ -343,6 +388,13 @@ pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope)) -> Hea
         (record, mark)
     };
     let (heads, coverage) = pipelined(placed, order.len(), built, &mut fold);
+    drop(lines);
+    // Nothing reads the journal's bytes once its heads are made, and handing a buffer the
+    // journal's size back to the host is a wait of its own, so it is let go of on a thread
+    // that outlives this read rather than before the read answers. Where the host refuses
+    // that thread, they are let go of here, as they were.
+    let spent = (bytes, stream_of, order, repeated);
+    let _ = std::thread::Builder::new().spawn(move || drop(spent));
     Heads {
         heads,
         coverage,
