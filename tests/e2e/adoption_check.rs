@@ -153,15 +153,12 @@ fn runs(world: &World) -> Vec<String> {
 struct LoadCase {
     /// The rule it breaks, which also names the case.
     rule: &'static str,
-    /// Whether `engine` names a default target.
     default_target: bool,
-    /// The consumer's fields as refused.
     refused: Value,
     /// The flags that put the same pair to onevcs's own executable.
     flags: &'static [&'static str],
     /// The plan field the refusal names.
     field: &'static str,
-    /// The consumer's fields once repaired.
     repaired: Value,
 }
 
