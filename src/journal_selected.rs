@@ -1022,4 +1022,54 @@ mod tests {
         assert!(skimmed_line(evidence.as_bytes()).is_some_and(|skim| skim.evidence));
         assert!(skimmed_line(whole.as_bytes()).is_some_and(|skim| !skim.evidence));
     }
+
+    /// A labels object holding more keys than the skim keeps inline is skimmed, and a
+    /// key repeated past them is refused as one repeated among them is.
+    #[test]
+    fn a_labels_object_past_the_keys_held_inline_is_skimmed_and_a_repeat_there_is_not() {
+        let line = |keys: &[String]| {
+            let labels = keys
+                .iter()
+                .map(|key| format!(r#""{key}":"x""#))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"v":2,"ts":"2026-11-06T10:00:00.000Z","stream":"s","seq":1,"source":"pipeline","kind":"node-started","labels":{{"node":"n",{labels}}},"payload":{{}},"artifacts":[]}}"#
+            )
+        };
+        let keys: Vec<String> = (0..20).map(|key| format!("k{key}")).collect();
+        assert!(skimmed_line(line(&keys).as_bytes())
+            .is_some_and(|skim| skim.node.as_deref() == Some("n")));
+        for (at, repeated) in [(15, "k14"), (16, "k3"), (17, "node")] {
+            let mut keys = keys.clone();
+            keys[at] = repeated.to_owned();
+            assert!(
+                skimmed_line(line(&keys).as_bytes()).is_none(),
+                "{repeated} repeated at {at} was skimmed"
+            );
+        }
+    }
+
+    /// The runs a journal is cut into for its workers hold its finished lines, each run
+    /// ending where a line does, in their order, and never the unfinished one after them.
+    #[test]
+    fn the_runs_a_journal_is_cut_into_hold_its_finished_lines_in_order() {
+        let mut bytes = Vec::new();
+        let mut at = 0_usize;
+        while bytes.len() < 3 * SKIMMED_ALONE {
+            // Lines of many lengths, so no cut falls at the same place in each.
+            bytes.extend(format!("line {at} {}\n", "x".repeat(at % 977)).into_bytes());
+            at += 1;
+        }
+        bytes.extend(b"an unfinished line");
+        let runs = line_runs(&bytes);
+        assert_eq!(runs.len() > 1, workers() > 1, "{} runs", runs.len());
+        assert!(runs.iter().all(|run| run.ends_with(b"\n")));
+        let cut: Vec<&[u8]> = runs.iter().flat_map(|run| finished_lines(run)).collect();
+        let whole: Vec<&[u8]> = finished_lines(&bytes).collect();
+        assert_eq!(cut.len(), at);
+        assert!(cut == whole, "the runs' lines are not the journal's");
+        assert_eq!(line_runs(b"one\ntwo\nthree"), vec![&b"one\ntwo\n"[..]]);
+        assert_eq!(line_runs(b"unfinished"), vec![&b""[..]]);
+    }
 }
