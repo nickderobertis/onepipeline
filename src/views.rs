@@ -2082,19 +2082,22 @@ impl RunView {
             });
         }
         let read = crate::journal_heads::read_heads(&paths.journal());
-        let view = Self::folded_over(paths, &read.folded)?;
+        let view = Self::folded_over(paths, read.folded.iter().flatten())?;
         Ok(RunHeads {
             view,
-            heads: read.heads,
             store_len: read.store_len,
             last_seq: read.last_seq,
+            heads: read.into_heads(),
         })
     }
 
     /// A view folded from `events`, a reading of the run's journal in merged order, and
     /// holding none of them: what [`over_selected`](Self::over_selected) and
     /// [`heads`](Self::heads) build on.
-    fn folded_over(paths: &RunPaths, events: &[Envelope]) -> crate::Result<Self> {
+    fn folded_over<'a>(
+        paths: &RunPaths,
+        events: impl IntoIterator<Item = &'a Envelope> + Clone,
+    ) -> crate::Result<Self> {
         if !paths.exists() {
             return Err(crate::Error::NoSuchRun {
                 run: paths.run.clone(),
@@ -2108,7 +2111,7 @@ impl RunView {
             .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
-        let mut state = crate::projection::fold(events);
+        let mut state = crate::projection::fold_each(events.clone());
         landings_the_run_re_read(&mut state, paths);
         crate::heartbeat::apply(paths, &mut state);
         let root = paths
@@ -2117,9 +2120,7 @@ impl RunView {
             .map_or_else(ledger::runs_root, Path::to_path_buf);
         state.cross_dag = crate::crossdag::resolve_open(&root, &state);
         let mut coverage = crate::checkpoint::Coverage::default();
-        for event in events {
-            coverage.absorb(Some(event), 0);
-        }
+        coverage.absorb_all(events);
         coverage.bytes = stamp.as_ref().map_or(0, |stamp| {
             crate::journal_selected::covered_bytes(&journal, stamp.len, &coverage.streams)
         });

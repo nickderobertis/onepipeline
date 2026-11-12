@@ -417,27 +417,80 @@ pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + S
     if items.len() < WORKED_ALONE {
         return items.iter().map(work).collect();
     }
+    let parts: Vec<&[T]> = items.chunks(run_size(items.len())).collect();
+    let done = on_threads(parts, |items| items.iter().map(&work).collect::<Vec<_>>());
+    joined(done, items.len())
+}
+
+/// How many of `len` items one worker takes: all of them where they are few.
+pub(crate) fn run_size(len: usize) -> usize {
+    if len < WORKED_ALONE {
+        len.max(1)
+    } else {
+        len.div_ceil(workers())
+    }
+}
+
+/// The runs of `parts`, one after another.
+pub(crate) fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
+    let mut done = Vec::with_capacity(len);
+    for part in parts {
+        done.extend(part);
+    }
+    done
+}
+
+/// `work` over each of `parts`, each on a thread of its own where there are several,
+/// the answers in `parts`' order: what every parallel step of these reads is made of.
+pub(crate) fn on_threads<P: Send, R: Send>(parts: Vec<P>, work: impl Fn(P) -> R + Sync) -> Vec<R> {
+    if parts.len() < 2 {
+        return parts.into_iter().map(work).collect();
+    }
     let work = &work;
     #[cfg(test)]
     let counted = whole_parses::current();
     std::thread::scope(|scope| {
-        let workers: Vec<_> = items
-            .chunks(items.len().div_ceil(workers()))
-            .map(|items| {
+        let workers: Vec<_> = parts
+            .into_iter()
+            .map(|part| {
                 #[cfg(test)]
                 let counted = counted.clone();
                 scope.spawn(move || {
                     #[cfg(test)]
                     whole_parses::join(counted);
-                    items.iter().map(work).collect::<Vec<_>>()
+                    work(part)
                 })
             })
             .collect();
         workers
             .into_iter()
-            .flat_map(|worker| worker.join().expect("reading a line does not panic"))
+            .map(|worker| worker.join().expect("reading a line does not panic"))
             .collect()
     })
+}
+
+/// A journal this short is skimmed on one thread.
+const SKIMMED_ALONE: usize = 1 << 20;
+
+/// The finished lines of `bytes`, cut in their order into a run for each thread a read
+/// works across, each run ending where a line does: what [`finished_lines`] yields of
+/// each run, one run after another, is what it yields of `bytes`, and no thread waits on
+/// another to find where its lines start.
+pub(crate) fn line_runs(bytes: &[u8]) -> Vec<&[u8]> {
+    let finished = &bytes[..memchr::memrchr(b'\n', bytes).map_or(0, |end| end + 1)];
+    if finished.len() < SKIMMED_ALONE {
+        return vec![finished];
+    }
+    let size = finished.len().div_ceil(workers());
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < finished.len() {
+        let at = (start + size).min(finished.len() - 1);
+        let end = memchr::memchr(b'\n', &finished[at..]).map_or(finished.len(), |end| at + end + 1);
+        runs.push(&finished[start..end]);
+        start = end;
+    }
+    runs
 }
 
 /// `lines` parsed in their order, `None` for one that does not parse.

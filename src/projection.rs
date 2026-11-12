@@ -1272,6 +1272,11 @@ fn remember_derived(
 
 /// Fold a run's whole journal.
 pub fn fold(events: &[Envelope]) -> RunState {
+    fold_each(events)
+}
+
+/// [`fold`], over records held in any order of runs a reader keeps them in.
+pub(crate) fn fold_each<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> RunState {
     let mut state = RunState {
         strict: true,
         ..RunState::default()
@@ -2095,13 +2100,23 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
         return;
     };
     if event.source == Source::Agentgraph {
-        let address = event
+        // An address the node already holds is not built again: the fold meets one on
+        // nearly every record a dispatch relays.
+        let held = |run: &str, member: &str| {
+            state
+                .last_turns
+                .get(node)
+                .is_some_and(|held| held.run() == run.trim() && held.member() == member.trim())
+        };
+        let named = event
             .labels
             .run_id
             .as_deref()
             .zip(event.labels.member.as_deref())
-            .and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member));
-        if let Some(address) = address {
+            .filter(|(run, member)| !held(run, member));
+        if let Some(address) =
+            named.and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member))
+        {
             state.last_turns.insert(node.clone(), address);
         }
     }
@@ -2881,7 +2896,15 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    let activity = state.activity.entry(node.to_string()).or_default();
+    if !state.activity.contains_key(node) {
+        state
+            .activity
+            .insert(node.to_owned(), NodeActivity::default());
+    }
+    let activity = state
+        .activity
+        .get_mut(node)
+        .expect("a node's activity was just made where it had none");
     let at = millis_of(&event.ts);
     if !evidences_progress(event) {
         activity.last_heartbeat_at = at.or(activity.last_heartbeat_at);
@@ -3129,11 +3152,15 @@ pub fn millis_of(ts: &str) -> Option<u64> {
         }
     }
     let field = |from: usize, to: usize| -> Option<i64> {
-        let text = ts.get(from..to)?;
-        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let text = bytes.get(from..to)?;
+        if !text.iter().all(u8::is_ascii_digit) {
             return None;
         }
-        text.parse().ok()
+        // At most four digits, each checked above, so this is what parsing them reads.
+        Some(
+            text.iter()
+                .fold(0, |number, digit| number * 10 + i64::from(digit - b'0')),
+        )
     };
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
     let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);

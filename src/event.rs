@@ -528,10 +528,21 @@ impl PipelineKind {
     /// `None` for anything else, which is every kind a sibling produced: the
     /// merged store holds all three vocabularies and only this one is closed.
     pub fn from_wire(kind: &EventKind) -> Option<Self> {
-        PIPELINE_KINDS
-            .iter()
+        // Looked up rather than scanned for: the fold asks this of every record, and a
+        // sibling's kind, the most numerous by far, is none of them.
+        static BY_WIRE: OnceLock<std::collections::HashMap<&'static str, PipelineKind>> =
+            OnceLock::new();
+        BY_WIRE
+            .get_or_init(|| {
+                // Reversed, so where two kinds were spelled alike the first would win.
+                PIPELINE_KINDS
+                    .iter()
+                    .rev()
+                    .map(|candidate| (candidate.as_str(), *candidate))
+                    .collect()
+            })
+            .get(kind.0.as_str())
             .copied()
-            .find(|candidate| candidate.as_str() == kind.0)
     }
 }
 

@@ -394,13 +394,56 @@ impl Coverage {
         let Some(event) = event else {
             return;
         };
-        let placed = placed(event);
-        if self.at.as_ref().is_none_or(|at| *at < placed) {
-            self.at = Some(placed);
+        // Compared before it is copied, so a record short of the furthest copies nothing.
+        if self.at.as_ref().is_none_or(|at| at.precedes(event)) {
+            self.at = Some(placed(event));
         }
-        let reached = self.streams.entry(event.stream.clone()).or_default();
-        *reached = (*reached).max(event.seq);
+        if let Some(reached) = self.streams.get_mut(&event.stream) {
+            *reached = (*reached).max(event.seq);
+        } else {
+            self.streams.insert(event.stream.clone(), event.seq);
+        }
     }
+
+    /// [`absorb`](Self::absorb) of each of `events` in turn, with no bytes, copying the
+    /// `ts` and stream of the furthest record alone and each stream's name once: what a
+    /// read of a whole journal's records costs its coverage.
+    pub(crate) fn absorb_all<'a>(&mut self, events: impl IntoIterator<Item = &'a Envelope>) {
+        let mut furthest: Option<&Envelope> = None;
+        let mut reached: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for event in events {
+            self.records += 1;
+            if furthest.is_none_or(|at| placed_before(at, event)) {
+                furthest = Some(event);
+            }
+            let seq = reached.entry(event.stream.as_str()).or_insert(event.seq);
+            *seq = (*seq).max(event.seq);
+        }
+        if let Some(event) = furthest {
+            if self.at.as_ref().is_none_or(|at| at.precedes(event)) {
+                self.at = Some(placed(event));
+            }
+        }
+        for (stream, seq) in reached {
+            if let Some(held) = self.streams.get_mut(stream) {
+                *held = (*held).max(seq);
+            } else {
+                self.streams.insert(stream.to_owned(), seq);
+            }
+        }
+    }
+}
+
+impl Placed {
+    /// Whether this sorts before where `event` is placed, compared without copying it.
+    fn precedes(&self, event: &Envelope) -> bool {
+        (self.ts.as_str(), self.stream.as_str()) < (event.ts.as_str(), event.stream.as_str())
+    }
+}
+
+/// Whether `earlier` is placed before `later`, as their [`Placed`] compare.
+fn placed_before(earlier: &Envelope, later: &Envelope) -> bool {
+    (earlier.ts.as_str(), earlier.stream.as_str()) < (later.ts.as_str(), later.stream.as_str())
 }
 
 /// One run's fold, and the marker saying how much of its journal it accounts
