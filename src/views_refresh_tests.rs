@@ -1576,47 +1576,73 @@ fn a_selective_view_reads_again_when_an_edit_opens_an_edge_it_never_resolved() {
     same_answers(&view, &run.open());
 }
 
-/// A heads read's view covers the furthest record it read: a record appended after the
-/// read that the merge puts in front of one it holds, though behind its earliest, is no
-/// suffix of what it folded, so its refresh reads the store whole and answers as a
-/// fresh open does.
+/// A view over the records a read chose covers the furthest of them: a record appended
+/// after the read that the merge puts in front of one it holds, though behind its
+/// earliest, is no suffix of what it folded, so its refresh reads the store whole and
+/// answers as a fresh open does. Held for both such views, a heads read's and a first
+/// screen's.
 #[test]
-fn a_heads_views_refresh_reads_whole_where_an_append_sorts_before_what_it_holds() {
-    let mut plan = super::tests::plan();
-    plan.tasks = vec![node("running", &[])];
-    let mut run = Run::new("heads-behind", plan);
-    run.writer
-        .emit(
-            PipelineKind::NodeDispatched,
-            journal::labels("demo", Some("running")),
-            journal::payload(&[]),
-        )
-        .expect("started");
-    for (seq, kind, at) in [(0, "turn-activity", 1_000), (1, "member-heartbeat", 50_000)] {
+fn a_chosen_views_refresh_reads_whole_where_an_append_sorts_before_what_it_holds() {
+    type Opened = fn(&RunPaths) -> RunView;
+    let views: [(&str, Opened); 2] = [
+        ("heads", |paths| {
+            RunView::heads(paths).expect("the heads read").view
+        }),
+        ("first-screen", over_first_screen),
+    ];
+    for (what, opened) in views {
+        let mut plan = super::tests::plan();
+        plan.tasks = vec![node("running", &[])];
+        let mut run = Run::new(&format!("behind-{what}"), plan);
         run.writer
-            .relay(&relayed("sibling-a", seq, kind, Some("running"), at))
-            .expect("relay");
-    }
-    ledger::write_json(&run.paths.result(), &json!({"outcome": "unfinished"})).expect("a result");
-    let mut view = RunView::heads(&run.paths).expect("the heads read").view;
-    assert_eq!(view.refresh().expect("refresh"), Refreshed::Unchanged);
+            .emit(
+                PipelineKind::NodeDispatched,
+                journal::labels("demo", Some("running")),
+                journal::payload(&[]),
+            )
+            .expect("started");
+        for (seq, kind, at) in [(0, "turn-activity", 1_000), (1, "member-heartbeat", 50_000)] {
+            run.writer
+                .relay(&relayed("sibling-a", seq, kind, Some("running"), at))
+                .expect("relay");
+        }
+        ledger::write_json(&run.paths.result(), &json!({"outcome": "unfinished"}))
+            .expect("a result");
+        let mut view = opened(&run.paths);
+        assert_eq!(
+            view.refresh().expect("refresh"),
+            Refreshed::Unchanged,
+            "{what}"
+        );
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    // Behind the dispatch, stamped now, and in front of the first relayed record.
-    run.writer
-        .relay(&relayed(
-            "sibling-b",
-            0,
-            "turn-activity",
-            Some("running"),
-            30_000,
-        ))
-        .expect("relay");
-    assert_eq!(view.refresh().expect("refresh"), Refreshed::Reread);
-    let fresh = run.open();
-    assert_eq!(view.events, fresh.events, "read whole");
-    assert_eq!(view.state.statuses(), fresh.state.statuses(), "statuses");
-    assert_eq!(view.refresh.coverage, fresh.refresh.coverage, "coverage");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Behind the dispatch, stamped now, and in front of the first relayed record.
+        run.writer
+            .relay(&relayed(
+                "sibling-b",
+                0,
+                "turn-activity",
+                Some("running"),
+                30_000,
+            ))
+            .expect("relay");
+        assert_eq!(
+            view.refresh().expect("refresh"),
+            Refreshed::Reread,
+            "{what}"
+        );
+        let fresh = run.open();
+        assert_eq!(view.events, fresh.events, "{what}: read whole");
+        assert_eq!(
+            view.state.statuses(),
+            fresh.state.statuses(),
+            "{what}: statuses"
+        );
+        assert_eq!(
+            view.refresh.coverage, fresh.refresh.coverage,
+            "{what}: coverage"
+        );
+    }
 }
 
 /// A heads read's view answers as a complete open does, over a journal its writers left
