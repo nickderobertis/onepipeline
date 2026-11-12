@@ -1825,6 +1825,19 @@ pub struct RunView {
     refresh: RefreshCursor,
 }
 
+/// What [`RunView::heads`] reads of a run: its state, and every record's head.
+#[derive(Debug)]
+pub struct RunHeads {
+    /// The run's state, folded as `RunView::open` folds it. `view.events` is empty.
+    pub view: RunView,
+    /// Every record of the journal, in merged order, a repeated `(stream, seq)` included.
+    pub heads: Vec<crate::journal::RecordHead>,
+    /// The merged store's length.
+    pub store_len: usize,
+    /// The highest `seq` in the whole journal.
+    pub last_seq: u64,
+}
+
 /// What changed when a long-lived [`RunView`] refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refreshed {
@@ -2025,6 +2038,63 @@ impl RunView {
     /// [`NoSuchRun`](crate::Error::NoSuchRun) where the run is not there, or an error
     /// where its launch record cannot be read.
     pub fn over_selected(paths: &RunPaths, events: Vec<Envelope>) -> crate::Result<Self> {
+        let mut view = Self::folded_over(paths, &events)?;
+        view.events = events;
+        Ok(view)
+    }
+
+    /// Every record's head and the run's state, from one read of its journal that
+    /// parses no payload of five kinds: `member-heartbeat`, `turn-activity`,
+    /// `turn-message`, `turn-started` and `turn-completed`.
+    ///
+    /// Those five are the kinds the fold reads by their heads alone; a record of any
+    /// other kind, and any line not in the writers' field order or holding an escaped
+    /// string, is parsed whole to fold it. The state equals [`open`](Self::open)'s for
+    /// every node's status, reason, awaits and result, the run's summary, `last_seq`
+    /// and each node's event tally, which counts every record. What only those five
+    /// kinds' payloads say, the line a running node is drawn as doing above all, is
+    /// what the other records say. `view.events` is empty; a reader parses the records
+    /// it draws with [`fetch`](crate::journal::fetch), by the heads' handles.
+    ///
+    /// A line in the writers' form whose middle a complete reader refuses, the case
+    /// [`read_selected`](crate::journal::read_selected) rules on for a line it
+    /// discards, is one whose middle this read never parses unless its kind is folded
+    /// whole, since knowing the complete reader refuses it would mean parsing the payload
+    /// this read exists not to parse: where it is one of the five it is headed and folded
+    /// by its opening, so
+    /// its head and the places after it can differ from the complete read's, and
+    /// `fetch` answers [`RecordMoved`](crate::Error::RecordMoved) for its handle.
+    ///
+    /// [`refresh`](Self::refresh) folds what was appended after this read, appending
+    /// those records whole to `view.events`, and reads the store whole as `open`
+    /// does where it does for any view. Cross-run edges are resolved as
+    /// [`over_selected`](Self::over_selected) resolves them.
+    ///
+    /// # Errors
+    ///
+    /// [`NoSuchRun`](crate::Error::NoSuchRun) where the run is not there, or an error
+    /// where its launch record cannot be read.
+    pub fn heads(paths: &RunPaths) -> crate::Result<RunHeads> {
+        if !paths.exists() {
+            return Err(crate::Error::NoSuchRun {
+                run: paths.run.clone(),
+                root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            });
+        }
+        let read = crate::journal_heads::read_heads(&paths.journal());
+        let view = Self::folded_over(paths, &read.folded)?;
+        Ok(RunHeads {
+            view,
+            heads: read.heads,
+            store_len: read.store_len,
+            last_seq: read.last_seq,
+        })
+    }
+
+    /// A view folded from `events`, a reading of the run's journal in merged order, and
+    /// holding none of them: what [`over_selected`](Self::over_selected) and
+    /// [`heads`](Self::heads) build on.
+    fn folded_over(paths: &RunPaths, events: &[Envelope]) -> crate::Result<Self> {
         if !paths.exists() {
             return Err(crate::Error::NoSuchRun {
                 run: paths.run.clone(),
@@ -2038,7 +2108,7 @@ impl RunView {
             .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
-        let mut state = crate::projection::fold(&events);
+        let mut state = crate::projection::fold(events);
         landings_the_run_re_read(&mut state, paths);
         crate::heartbeat::apply(paths, &mut state);
         let root = paths
@@ -2047,7 +2117,7 @@ impl RunView {
             .map_or_else(ledger::runs_root, Path::to_path_buf);
         state.cross_dag = crate::crossdag::resolve_open(&root, &state);
         let mut coverage = crate::checkpoint::Coverage::default();
-        for event in &events {
+        for event in events {
             coverage.absorb(Some(event), 0);
         }
         coverage.bytes = stamp.as_ref().map_or(0, |stamp| {
@@ -2072,7 +2142,7 @@ impl RunView {
         Ok(Self {
             paths: paths.clone(),
             launch,
-            events,
+            events: Vec::new(),
             state,
             refresh,
         })
