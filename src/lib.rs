@@ -104,6 +104,7 @@ mod home;
 mod hooks;
 mod hostphases;
 mod hostview;
+mod journal_heads;
 mod journal_selected;
 mod labels;
 mod land;

@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("156.")["bundle_versions"]["events"],
+        divergence_block("157.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1246,7 +1246,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("156.")["bundle_versions"]["planner_channel"],
+        divergence_block("157.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -7977,6 +7977,9 @@ const RULINGS: &[(&str, &str)] = &[
     // The 0.11.1 link: validators are gone from the bus, so the marked copy is
     // re-decided against it and the core no longer names them.
     ("153.", "decided against `onemessagebus` 0.11.1"),
+    // The heads read heads a writers'-form line of an unparsed kind by its opening, even
+    // where the complete reader refuses its middle.
+    ("156.", "which is headed by its opening"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -9490,6 +9493,61 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         Vec<onepipeline::event::Envelope>,
     ) -> onepipeline::Result<onepipeline::views::RunView> =
         onepipeline::views::RunView::over_selected;
+    // The heads read and the fetch beside it, at their signatures, and every field each
+    // answer carries at its type: a head's fields are `Envelope`'s of the same names.
+    let _: fn(&onepipeline::views::RunPaths) -> onepipeline::Result<onepipeline::views::RunHeads> =
+        onepipeline::views::RunView::heads;
+    let _: fn(
+        &std::path::Path,
+        &[onepipeline::journal::RecordHandle],
+    ) -> onepipeline::Result<Vec<onepipeline::event::Envelope>> = onepipeline::journal::fetch;
+    let _ = |heads: onepipeline::views::RunHeads| {
+        let onepipeline::views::RunHeads {
+            view,
+            heads,
+            store_len,
+            last_seq,
+        } = heads;
+        let _: (onepipeline::views::RunView, usize, u64) = (view, store_len, last_seq);
+        let _: Vec<onepipeline::journal::RecordHead> = heads;
+    };
+    let _ = |head: onepipeline::journal::RecordHead, record: onepipeline::event::Envelope| {
+        let onepipeline::journal::RecordHead {
+            ts,
+            stream,
+            seq,
+            source,
+            kind,
+            phase,
+            labels,
+            evidence,
+            place,
+            handle,
+        } = head;
+        let mut record = record;
+        (record.ts, record.stream, record.seq) = (ts, stream, seq);
+        (
+            record.source,
+            record.kind,
+            record.dimensions.phase,
+            record.labels,
+        ) = (source, kind, phase, labels);
+        let _: (bool, Option<usize>) = (evidence, place);
+        let _: onepipeline::journal::RecordHandle = handle.clone();
+        let _ = (handle == handle.clone(), format!("{handle:?}"));
+        let _: std::collections::HashSet<onepipeline::journal::RecordHandle> = [handle].into();
+    };
+    let _ = |error: onepipeline::Error| {
+        if let onepipeline::Error::RecordMoved {
+            path,
+            offset,
+            stream,
+            seq,
+        } = error
+        {
+            let _: (std::path::PathBuf, u64, String, u64) = (path, offset, stream, seq);
+        }
+    };
     let _: fn(&Path) -> Host = verbs::host;
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;

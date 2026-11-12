@@ -1366,6 +1366,68 @@ fn assert_spaced(passes: &[u64], answers: &[u64], expected: &[u64]) {
     }
 }
 
+/// Each re-read after the first in `passes` held to the read the driver's schedule chose after
+/// the one before it, as `schedules` sampled it from `source-schedule.json` while the run went
+/// on: that schedule chose the wait `expected` names, counted it from no sooner than the
+/// source's last answer to that pass, one of `answers`, and the pass came no sooner than that
+/// read and no later than the loop's own latency beyond it.
+///
+/// [`assert_spaced`]'s bound with what the host spends between the source answering and the
+/// driver taking up its answer taken out of it: the store's own teardown of the read, and the
+/// loop's pickup. The schedule counts its wait from that pickup, which is never before the
+/// answer, so the lower bound is the same; what a busy host stretches is the pickup, which a
+/// gap measured from the answer charged to the loop's latency. Driven where a Windows runner
+/// took ~18 s to take up one answer with nothing else of the run under way.
+fn assert_scheduled(passes: &[u64], answers: &[u64], schedules: &[Value], expected: &[u64]) {
+    assert!(
+        passes.len() > expected.len(),
+        "{} re-reads, where {} waits were due between them: {passes:?}",
+        passes.len(),
+        expected.len()
+    );
+    for (pair, wait) in passes.windows(2).zip(expected) {
+        let answered = answers
+            .iter()
+            .copied()
+            .filter(|at| (pair[0]..pair[1]).contains(at))
+            .max()
+            .unwrap_or_else(|| panic!("the source was asked nothing in the pass at {}", pair[0]));
+        // The read the driver scheduled after this pass: the last it recorded before the next.
+        let chosen = schedules
+            .iter()
+            .rfind(|schedule| {
+                schedule["next_read_ms"]
+                    .as_u64()
+                    .is_some_and(|at| (answered..=pair[1]).contains(&at))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no read was scheduled between the answer at {answered} and the re-read at \
+                     {}, where {wait} intervals were due: {schedules:?}",
+                    pair[1]
+                )
+            });
+        let at = chosen["next_read_ms"].as_u64().expect("a next read");
+        assert_eq!(
+            chosen["wait_seconds"],
+            json!(wait),
+            "the schedule chose {chosen} after the answer at {answered}, where {wait} intervals \
+             were due"
+        );
+        assert!(
+            at >= answered + wait * 1_000,
+            "the schedule chose a read at {at}, sooner than {wait} intervals after the answer at \
+             {answered}"
+        );
+        assert!(
+            (at..at + 3_000).contains(&pair[1]),
+            "the re-read at {} was not the read scheduled at {at}, where {wait} intervals were \
+             due: {passes:?}",
+            pair[1]
+        );
+    }
+}
+
 /// A source that answers rate limited naming no reset is read again on a backoff: one
 /// interval after the driver takes the hold up, then re-reads 1, 2, 4, 8 and 16 intervals
 /// apart, then 30 and 30 — the cap — and never more often; each pass asks it once however
@@ -1721,11 +1783,19 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         );
     }
     let hour_end = launched_at + 60_000;
-    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset.
+    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. What the
+    // driver records of the source's next read is sampled meanwhile, each change once.
+    let mut schedules: Vec<Value> = Vec::new();
     world.until_within(
         Duration::from_secs(90),
         "the first re-read after the hour",
-        |world| passes_over(world, name, "vault").len() >= 6,
+        |world| {
+            let schedule = source_schedule(world, name, "vault");
+            if !schedule.is_null() && schedules.last() != Some(&schedule) {
+                schedules.push(schedule);
+            }
+            passes_over(world, name, "vault").len() >= 6
+        },
     );
     let passes = passes_over(&world, name, "vault");
     let inside: Vec<u64> = passes
@@ -1750,11 +1820,12 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         passes[0]
     );
     // The waits the schedule chose after each pass: the backoff from one interval after the
-    // reset's own re-read, which `assert_spaced` holds each gap to.
+    // reset's own re-read, which `assert_scheduled` holds each gap to.
     let waits = [1, 2, 4, 8, 16];
-    assert_spaced(
+    assert_scheduled(
         &passes[..=inside.len()],
         &item_reads(&world, "vault"),
+        &schedules,
         &waits[..inside.len()],
     );
     let operations: Vec<Value> = rereads_of(&world, name, "vault")
