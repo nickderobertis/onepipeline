@@ -46,11 +46,11 @@ pub const DOCUMENT_PATH: &str = "schemas/planner-channel.json";
 /// The version the published document declares — what a link's pin is held
 /// against. Raised with any change to what the document says: its major where
 /// a channel directory one version writes is one the other cannot read.
-pub const DOCUMENT_VERSION: &str = "2.0.0";
+pub const DOCUMENT_VERSION: &str = "3.0.0";
 
 /// The reply envelope family, whose every version this build reads the bundle
 /// carries.
-const REPLY_ENVELOPE_SCHEMA: SchemaId = SchemaId::literal("agent", "reply-envelope", 3);
+const REPLY_ENVELOPE_SCHEMA: SchemaId = SchemaId::literal("agent", "reply-envelope", 4);
 
 /// Where an envelope sits in a record offered to [`REPLIES`]: at the top level
 /// for a bare envelope, under `reply` for a framed one.
@@ -224,7 +224,7 @@ pub fn prepare() -> BTreeMap<onemessagebus::QueueName, Vec<PrepareStep>> {
             Route {
                 queue: name(COMMANDS),
                 on: members(&["commands"]),
-                take: members(&["author", "commands"]),
+                take: members(&["author", "commands", "provenance"]),
                 under: None,
                 stamp: Vec::new(),
             },
@@ -234,6 +234,7 @@ pub fn prepare() -> BTreeMap<onemessagebus::QueueName, Vec<PrepareStep>> {
                 take: members(&[
                     "version",
                     "author",
+                    "provenance",
                     "completion",
                     "message",
                     "reason",

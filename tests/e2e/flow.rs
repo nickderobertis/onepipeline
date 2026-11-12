@@ -660,9 +660,37 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
     assert_eq!(read.json()["surface"]["kind"], json!("planner-question"));
     let watch = watching(&world, "deploy", &["--timeout", "600"]);
     watch.returned().ended_on(SURFACE_WAITING, "surface");
+    // Whose words a flow's answer is is said as a run's is: an envelope stating the
+    // manager's sent `--as user` is refused, the question still standing, and the
+    // user's answer reaches the asker saying so.
     world
         .run_with_stdin(
-            &["reply", "--flow", "deploy", "--correlation", correlation],
+            &[
+                "reply",
+                "--flow",
+                "deploy",
+                "--correlation",
+                correlation,
+                "--as",
+                "user",
+            ],
+            &json!({"version": 4, "provenance": "manager", "completion": false,
+                "message": "promote it"})
+            .to_string(),
+        )
+        .exited(REFUSED)
+        .err_has("--as");
+    world
+        .run_with_stdin(
+            &[
+                "reply",
+                "--flow",
+                "deploy",
+                "--correlation",
+                correlation,
+                "--as",
+                "user",
+            ],
             &json!({"version": 2, "completion": false, "message": "promote it"}).to_string(),
         )
         .exited(EXIT_SUCCESS);
@@ -675,6 +703,11 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
     .expect("one answer object");
     assert_eq!(answer["answer"], json!("reply"), "{answer}");
     assert_eq!(answer["reply"]["reply"]["message"], json!("promote it"));
+    assert_eq!(
+        answer["reply"]["reply"]["provenance"],
+        json!("user"),
+        "{answer}"
+    );
 
     // A flow has no graph: a reply carrying commands is refused, nothing queued.
     world

@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "The planner-channel layout onepipeline publishes for a host's onemessagebus to link.",
   "schemas": [
     {
@@ -67,6 +67,17 @@
               }
             ],
             "description": "The correlation a reply echoes to answer it, when it was raised as a\nquestion through the bus's `ask`. Omitted while absent, so a surface\nraised any other way is written byte for byte as 0.28.2 wrote it."
+          },
+          "declined_ruling": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DeclinedRuling"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What a dispatch declined, as typed fields: present on every surface of\nkind `declined-ruling` and on no other, and omitted from the wire while\nabsent, so every other surface — and every one written before the field\nexisted — serializes exactly as it always did. A reader takes the facts\nof a declined ruling from here and never from [`message`](Self::message),\nwhose text is for people. Every write of a surface holds it to that, after\nthe channel's hooks as well as before."
           }
         },
         "required": [
@@ -89,6 +100,87 @@
             "type": "string",
             "description": "Which question a reply answers: the token the bus minted when it was asked.",
             "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "DeclinedRuling": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "node": {
+                "type": "string",
+                "description": "The node the ruling was addressed to."
+              },
+              "ruling": {
+                "type": "string",
+                "description": "The ruling reference `onepipeline decline-ruling` was given: an opaque\ntoken the engine minted, stable for the run's life."
+              },
+              "provenance": {
+                "$ref": "#/$defs/Provenance",
+                "description": "Whose ruling it was: always `manager`, since a user's ruling binds and\ncannot be declined."
+              },
+              "kind": {
+                "$ref": "#/$defs/RulingKind",
+                "description": "What kind of ruling it was."
+              },
+              "reply": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "The id of the reply envelope that carried it: the id `onepipeline reply`\nanswered it with — the command envelope's for a note or an amendment, the\nverdict's for an answered question."
+              },
+              "text": {
+                "type": "string",
+                "description": "The ruling's text: the note's, the amendment's clauses, or the answer's\nmessage."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the dispatch declined it, as it said."
+              }
+            },
+            "required": [
+              "node",
+              "ruling",
+              "provenance",
+              "kind",
+              "reply",
+              "text",
+              "reason"
+            ],
+            "description": "The record a `declined-ruling` surface carries: the ruling a dispatch\ndeclined through `onepipeline decline-ruling`, and why.\n\nEvery fact is a field of its own, so a reader — the manager, a browser — takes\nit from here rather than parsing the surface's message.\n\nRead through its validation: a record whose party is not the manager's, or\nwhose node, reference or reason is blank, is refused, since no decline can\nproduce one."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
+          },
+          "RulingKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "note",
+                "description": "A manager note delivered into, or carried to, the node's dispatch."
+              },
+              {
+                "type": "string",
+                "const": "amendment",
+                "description": "An amendment to the node's bar."
+              },
+              {
+                "type": "string",
+                "const": "answer",
+                "description": "The answer to a question the dispatch asked through `onepipeline ask`."
+              }
+            ],
+            "description": "What kind of ruling a dispatch declined."
           }
         }
       }
@@ -146,11 +238,15 @@
                 ],
                 "format": "uint32",
                 "minimum": 0,
-                "description": "The version it was written against, read at [`REPLY_ENVELOPE_VERSION`]."
+                "description": "The version it was written against: kept as declared, and read at\n[`REPLY_ENVELOPE_VERSION`] where a bare envelope is routed."
               },
               "author": {
                 "$ref": "#/$defs/Author",
                 "description": "Who wrote it. Omitted, the planner."
+              },
+              "provenance": {
+                "$ref": "#/$defs/Provenance",
+                "description": "Whose words it carries: `manager`, the manager's own ruling, or `user`,\nthe user's words relayed. Omitted, `manager`, and omitted from the wire\nwhile it is that."
               },
               "completion": {
                 "type": [
@@ -188,6 +284,21 @@
             "type": "string",
             "description": "Who wrote a record: an open word."
           },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
+          },
           "Correlation": {
             "type": "string",
             "description": "Which question a reply answers: the token the bus minted when it was asked.",
@@ -212,6 +323,10 @@
             "description": "Who submitted it.",
             "default": "planner"
           },
+          "provenance": {
+            "$ref": "#/$defs/Provenance",
+            "description": "Whose words the commands are, as the envelope carrying them said.\nOmitted, `manager`, and omitted from the wire while it is that, so a\nrecord of the manager's is the bytes it always was."
+          },
           "commands": {
             "type": "array",
             "items": {
@@ -232,6 +347,21 @@
           "Author": {
             "type": "string",
             "description": "Who wrote a record: an open word."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
           }
         }
       }
@@ -498,11 +628,15 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "The version it was written against, read at [`REPLY_ENVELOPE_VERSION`]."
+            "description": "The version it was written against: kept as declared, and read at\n[`REPLY_ENVELOPE_VERSION`] where a bare envelope is routed."
           },
           "author": {
             "$ref": "#/$defs/Author",
             "description": "Who wrote it. Omitted, the planner."
+          },
+          "provenance": {
+            "$ref": "#/$defs/Provenance",
+            "description": "Whose words it carries: `manager`, the manager's own ruling, or `user`,\nthe user's words relayed. Omitted, `manager`, and omitted from the wire\nwhile it is that."
           },
           "completion": {
             "type": [
@@ -541,6 +675,21 @@
           "Author": {
             "type": "string",
             "description": "Who wrote a record: an open word."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
           }
         }
       }
@@ -616,6 +765,73 @@
           "author": {
             "description": "Who wrote the reply. Omitted, the planner.",
             "type": "string"
+          },
+          "completion": {
+            "description": "The verdict: whether the author considers the run complete.",
+            "type": "boolean"
+          },
+          "message": {
+            "description": "The verdict's message to the orchestrator.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the author reached that verdict.",
+            "type": "string"
+          },
+          "commands": {
+            "description": "The graph edits, reconciled in order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Command"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "$defs": {
+          "Command": {
+            "description": "One graph edit, discriminated by op. Its other fields are the op's own; a settle may name the landing it was decided from.",
+            "type": "object",
+            "properties": {
+              "op": {
+                "description": "Which edit this is.",
+                "type": "string"
+              },
+              "landing": {
+                "description": "Where a settled node's work landed: a change request URL or a commit id.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.reply-envelope@4",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "ReplyEnvelope",
+        "description": "A reply on the planner channel at version 4: version 3 plus one optional top-level field, provenance, saying whose words the envelope carries. Absent, the manager's, so an envelope written against 2 or 3 is a complete envelope at 4.",
+        "type": "object",
+        "properties": {
+          "version": {
+            "description": "The reply envelope version this document was written against.",
+            "type": "integer",
+            "const": 4
+          },
+          "author": {
+            "description": "Who wrote the reply. Omitted, the planner.",
+            "type": "string"
+          },
+          "provenance": {
+            "description": "Whose words the reply carries: manager, the manager's own ruling, which a dispatch may decline with its reason, or user, the user's words relayed, which bind. Omitted, manager. Not author, which names who sent it.",
+            "type": "string",
+            "enum": [
+              "manager",
+              "user"
+            ]
           },
           "completion": {
             "description": "The verdict: whether the author considers the run complete.",
@@ -857,7 +1073,7 @@
           {
             "version": {
               "at": "reply.version",
-              "value": 3,
+              "value": 4,
               "required_when": {
                 "all": [
                   {
@@ -867,6 +1083,10 @@
                   {
                     "not": {
                       "any": [
+                        {
+                          "field": "reply.version",
+                          "equals": 3
+                        },
                         {
                           "field": "reply.version",
                           "equals": 2
@@ -955,8 +1175,9 @@
           {
             "version": {
               "at": "version",
-              "value": 3,
+              "value": 4,
               "reads": [
+                3,
                 2
               ],
               "required_when": {
@@ -1000,7 +1221,8 @@
                   ],
                   "take": [
                     "author",
-                    "commands"
+                    "commands",
+                    "provenance"
                   ]
                 },
                 {
@@ -1013,6 +1235,7 @@
                   "take": [
                     "version",
                     "author",
+                    "provenance",
                     "completion",
                     "message",
                     "reason",

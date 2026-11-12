@@ -203,6 +203,9 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
     Surface(SurfaceArgs),
+    /// Decline a manager's ruling with a reason, which reaches the manager as a
+    /// `declined-ruling` surface.
+    DeclineRuling(DeclineRulingArgs),
     /// Complete a ready, waiting human action.
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
@@ -1683,6 +1686,11 @@ pub struct ReplyArgs {
     /// `docs/contract.md`'s channel paragraph.
     #[arg(long, value_name = "C")]
     pub correlation: Option<onemessagebus::Correlation>,
+    /// Whose words the envelope carries: `manager`, the manager's own ruling, or
+    /// `user`, the user's words relayed. Omitted, the envelope's own
+    /// `provenance`, or `manager`; an envelope stating the other is refused.
+    #[arg(long = "as", value_name = "PARTY", value_enum)]
+    pub provenance: Option<crate::provenance::Provenance>,
 }
 
 /// `onepipeline surface`.
@@ -1711,6 +1719,22 @@ pub struct SurfaceArgs {
     /// is written here is read by a shell first.
     #[arg(long, value_name = "TEXT")]
     pub message: Option<String>,
+}
+
+/// `onepipeline decline-ruling`.
+///
+/// The reason arrives as [`SurfaceArgs`]'s message does — from a file, or from
+/// stdin when none is named — so a dispatch's prose never passes through a
+/// shell.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct DeclineRulingArgs {
+    /// The run id.
+    pub run: String,
+    /// The ruling reference the declined ruling was rendered beside.
+    #[arg(long, value_name = "REF")]
+    pub ruling: String,
+    /// The file the reason is read from. Omitted, it is read from stdin.
+    pub file: Option<PathBuf>,
 }
 
 /// `onepipeline attest`.

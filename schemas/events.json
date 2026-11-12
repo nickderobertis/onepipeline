@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1666,6 +1666,10 @@
             "$ref": "#/$defs/AuthorWord",
             "description": "Who submitted it."
           },
+          "provenance": {
+            "$ref": "#/$defs/Provenance",
+            "description": "Whose words it carried: the manager's own ruling, or the user's relayed.\nAbsent from a record written before the field existed, which reads as\nthe manager's."
+          },
           "command": {
             "type": "object",
             "additionalProperties": true,
@@ -1709,6 +1713,21 @@
           "AuthorWord": {
             "type": "string",
             "description": "Who submitted a command or a reply."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
           }
         }
       }
@@ -1721,6 +1740,10 @@
           "author": {
             "$ref": "#/$defs/AuthorWord",
             "description": "Who submitted it."
+          },
+          "provenance": {
+            "$ref": "#/$defs/Provenance",
+            "description": "Whose words it carried: the manager's own ruling, or the user's relayed.\nAbsent from a record written before the field existed, which reads as\nthe manager's."
           },
           "command": {
             "type": "object",
@@ -1765,6 +1788,21 @@
           "AuthorWord": {
             "type": "string",
             "description": "Who submitted a command or a reply."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
           }
         }
       }
@@ -2138,6 +2176,10 @@
             "$ref": "#/$defs/AuthorWord",
             "description": "Who replied."
           },
+          "provenance": {
+            "$ref": "#/$defs/Provenance",
+            "description": "Whose words it carried: the manager's own ruling, or the user's relayed.\nAbsent from a record written before the field existed, which reads as\nthe manager's."
+          },
           "completion": {
             "type": [
               "boolean",
@@ -2165,6 +2207,21 @@
           "AuthorWord": {
             "type": "string",
             "description": "Who submitted a command or a reply."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
           }
         }
       }

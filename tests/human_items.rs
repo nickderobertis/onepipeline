@@ -312,6 +312,7 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
                 reason: reason.map(str::to_owned),
                 actor: "manager".into(),
                 on_behalf_of: Some("operator".into()),
+                provenance: onepipeline::provenance::Provenance::Manager,
             })
             .unwrap();
         assert_eq!(receipt.item.item.state, HumanItemState::Dismissed);
@@ -341,7 +342,8 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
                 .apply(HumanItemAction::Complete {
                     id: "item-1".into(),
                     actor: "user".into(),
-                    on_behalf_of: None
+                    on_behalf_of: None,
+                    provenance: onepipeline::provenance::Provenance::Manager,
                 })
                 .is_err(),
             "invalid constructed {field}"
@@ -355,7 +357,8 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
         .apply(HumanItemAction::Complete {
             id: "item-1".into(),
             actor: "user".into(),
-            on_behalf_of: None
+            on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .is_err());
     let fixture: Value = serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
@@ -403,6 +406,7 @@ fn sample_api_preserves_attribution_and_normalizes_every_absent_reason() {
             id: "item-3".into(),
             actor: "manager".into(),
             on_behalf_of: Some("operator".into()),
+            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap();
     assert_eq!(
@@ -1290,12 +1294,14 @@ fn a_sample_reopen_or_note_names_its_actor() {
             id: "item-1".into(),
             actor: " ".into(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         },
         HumanItemAction::Note {
             id: "item-1".into(),
             text: "said".into(),
             actor: String::new(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         },
     ] {
         assert_eq!(
@@ -1325,6 +1331,7 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
             answers: answers.clone(),
             actor: "user".into(),
             on_behalf_of: None,
+            provenance: onepipeline::provenance::Provenance::Manager,
         }),
         Err(HumanItemRefusal::Conflict {
             reason: "an answer-batch answers a batch receipt, so it is applied through apply_batch"
@@ -1337,6 +1344,7 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
             Actor {
                 actor: " ".into(),
                 on_behalf_of: None,
+                provenance: onepipeline::provenance::Provenance::Manager,
             },
         ),
         Err(HumanItemRefusal::Conflict {
@@ -1344,4 +1352,120 @@ fn a_sample_answer_batch_goes_through_apply_batch() {
         })
     );
     assert_eq!(sample, before);
+}
+
+/// The sample adapter keeps each item's history as the live store does: every
+/// action appends one entry, oldest first, naming who took it and whose words
+/// it was — `--as user` the user's, no `--as` the manager's — and the raise of
+/// a new item is its asker's own.
+#[test]
+fn sample_actions_append_history_entries_with_the_provenance_each_was_given() {
+    let world = World::new();
+    let history = |id: &str| -> Vec<(String, String)> {
+        world.json(&["show", id, "--json"], "HumanItemDetail")["history"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry["action"].as_str().unwrap().to_owned(),
+                            entry["provenance"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let pair = |action: &str, whose: &str| (action.to_owned(), whose.to_owned());
+    // A fixture item written before histories existed holds none, and each
+    // action from then on is listed.
+    assert_eq!(history("item-3"), []);
+    world.json(&["complete", "item-3", "--as", "user"], "HumanItemReceipt");
+    world.json(
+        &["note", "item-3", "--text", "Read it.", "--as", "user"],
+        "HumanItemReceipt",
+    );
+    world.json(&["reopen", "item-3"], "HumanItemReceipt");
+    assert_eq!(
+        history("item-3"),
+        [
+            pair("human-item-completed", "user"),
+            pair("human-item-noted", "user"),
+            pair("human-item-reopened", "manager"),
+        ]
+    );
+    world.json(&["dismiss", "item-1", "--as", "user"], "HumanItemReceipt");
+    assert_eq!(history("item-1"), [pair("human-item-dismissed", "user")]);
+    assert_eq!(
+        world.state()["items"][0]["item"]["resolution"]["provenance"],
+        "user"
+    );
+    world.json(&["answer", "item-4", "--text", "Yes"], "HumanItemReceipt");
+    assert_eq!(history("item-4"), [pair("human-item-answered", "manager")]);
+    assert!(world.state()["items"][3]["item"]["resolution"]
+        .get("provenance")
+        .is_none());
+    let batch = world.0.join("batch.json");
+    std::fs::write(
+        &batch,
+        json!({"answers": [{"id": "item-2", "choice": "gradual"}]}).to_string(),
+    )
+    .unwrap();
+    world.ok(&[
+        "answer-batch",
+        "--input",
+        batch.to_str().unwrap(),
+        "--as",
+        "user",
+    ]);
+    assert_eq!(history("item-2"), [pair("human-item-answered", "user")]);
+
+    // A raised item's history opens with its raise, its asker's own.
+    let input = world.0.join("raise.json");
+    let mut raised = world.state()["items"][3]["item"].clone();
+    for field in [
+        "id",
+        "state",
+        "resolution",
+        "tracker",
+        "created_at",
+        "updated_at",
+    ] {
+        raised.as_object_mut().unwrap().remove(field);
+    }
+    raised["dedup_key"] = json!("sample-raised");
+    std::fs::write(&input, raised.to_string()).unwrap();
+    let receipt = world.json(
+        &["raise", "--input", input.to_str().unwrap()],
+        "HumanItemReceipt",
+    );
+    let id = receipt["item"]["item"]["id"].as_str().unwrap().to_owned();
+    let shown = world.json(&["show", &id, "--json"], "HumanItemDetail");
+    assert_eq!(shown["history"][0]["action"], "human-item-raised");
+    assert_eq!(shown["history"][0]["actor"], "session:manager");
+    assert_eq!(shown["history"][0]["provenance"], "manager");
+}
+
+/// A history entry is read only with a time and an actor that say something: a
+/// sample bundle whose entry names a blank actor is refused before any query.
+#[test]
+fn a_sample_history_entry_with_a_blank_actor_is_refused() {
+    let world = World::new();
+    let mut bundle = world.state();
+    bundle["items"][0]["history"] = json!([{
+        "action": "human-item-raised", "at": "sample", "actor": "  ",
+        "on_behalf_of": null, "provenance": "manager"
+    }]);
+    world.write(&bundle);
+    let before = std::fs::read(world.sample()).unwrap();
+    refuse(
+        world.run(&["show", "item-1", "--json"]),
+        "must not be blank",
+    );
+    bundle["items"][0]["history"][0]["actor"] = json!("session:manager");
+    world.write(&bundle);
+    let shown = world.json(&["show", "item-1", "--json"], "HumanItemDetail");
+    assert_eq!(shown["history"][0]["actor"], "session:manager");
+    assert_ne!(std::fs::read(world.sample()).unwrap(), before);
 }

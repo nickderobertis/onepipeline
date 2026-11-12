@@ -2807,11 +2807,16 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 node,
                 text,
                 reached: crate::note::Reached::Carried { .. },
+                envelope,
+                index,
+                provenance,
                 ..
             } => {
+                // Under its attribution, as the node's own context carries it.
                 let carried = crate::note::with_carried(
                     state.pending_context.get(node).map(String::as_str),
-                    text.as_str(),
+                    &crate::ruling::Origin::of_record(*provenance, *envelope, *index)
+                        .stored(text.as_str()),
                 );
                 state.pending_context.insert(node.clone(), carried);
             }
@@ -3805,6 +3810,7 @@ mod tests {
                         reached,
                         envelope: None,
                         index: None,
+                        provenance: crate::provenance::Provenance::Manager,
                     }]),
                 )],
             )
@@ -3867,6 +3873,7 @@ mod tests {
                         reached: crate::note::Reached::Carried { reason: None },
                         envelope: Some(seq),
                         index: Some(0),
+                        provenance: crate::provenance::Provenance::Manager,
                     }]),
                 )],
             )
@@ -3902,6 +3909,20 @@ mod tests {
             carried(2, "keep the loader"),
         ];
         let owed = fold(&both);
+        // Each carried entry under its attribution, naming the envelope it came in.
+        let entry = |envelope: u64, text: &str| {
+            crate::ruling::Origin::of_record(
+                crate::provenance::Provenance::Manager,
+                Some(envelope),
+                Some(0),
+            )
+            .stored(text)
+        };
+        let both_entries = format!(
+            "{}\n\n{}",
+            entry(1, "the fixture moved"),
+            entry(2, "keep the loader")
+        );
         // A live note of the same text, withdrawn, was carried onto nothing, so
         // both carried notes stay owed to the node's next dispatch.
         let mut beside_live = both.to_vec();
@@ -3911,21 +3932,15 @@ mod tests {
             crate::note::WithdrawnFrom::Live,
         ));
         let kept = fold(&beside_live);
-        assert_eq!(
-            kept.pending_context["build"],
-            "the fixture moved\n\nkeep the loader"
-        );
+        assert_eq!(kept.pending_context["build"], both_entries);
         assert_eq!(
             kept.graph.get("build").expect("build").context.as_deref(),
-            Some("the fixture moved\n\nkeep the loader")
+            Some(both_entries.as_str())
         );
-        assert_eq!(
-            owed.pending_context["build"],
-            "the fixture moved\n\nkeep the loader"
-        );
+        assert_eq!(owed.pending_context["build"], both_entries);
         for (envelope, gone, left) in [
-            (1, "the fixture moved", "keep the loader"),
-            (2, "keep the loader", "the fixture moved"),
+            (1, "the fixture moved", entry(2, "keep the loader")),
+            (2, "keep the loader", entry(1, "the fixture moved")),
         ] {
             let mut journal = both.to_vec();
             journal.push(withdrawn(envelope, gone));
@@ -3938,7 +3953,7 @@ mod tests {
                     .expect("build")
                     .context
                     .as_deref(),
-                Some(left),
+                Some(left.as_str()),
                 "replay did not leave the other carried note in the planner context"
             );
         }

@@ -32,6 +32,7 @@ report(
   recording.warm_max_elapsed_s,
   `host ${recording.host}; ${recording.warm.length} warm samples, max ` +
     `${recording.warm_max_elapsed_s.toFixed(4)} s (${slowest.phase}: ${phases(slowest)}); ` +
+    `slowest form ${slowest.phase}; the shown item's history holds ${w.shown_history} events; ` +
     `workload ${w.runs} runs x ${w.events_per_run} events, ${w.open_items} open items, ` +
     `${w.plans} plans, ${w.steps} steps; disclosed recoveries — ${recoveries}`,
 );

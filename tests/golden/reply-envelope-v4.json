@@ -1,0 +1,38 @@
+{
+  "version": 4,
+  "provenance": "user",
+  "commands": [
+    {
+      "op": "settle",
+      "id": "publish",
+      "outcome": "done",
+      "evidence": "the change merged while the dispatch was dying; the run recorded the death and never the merge",
+      "landing": "https://github.com/owner/engine/pull/12"
+    },
+    {
+      "op": "settle",
+      "id": "release",
+      "outcome": "done",
+      "evidence": "the operator read the merge on the base branch",
+      "landing": "3f9a1c2e5b7d9081f2a3b4c5d6e7f8091a2b3c4d",
+      "release": {
+        "target": "crate",
+        "version": "0.2.31"
+      }
+    },
+    {
+      "op": "settle",
+      "id": "announce",
+      "outcome": "failed",
+      "evidence": "the wait it was on can never clear, and nothing published"
+    },
+    {
+      "op": "add",
+      "node": {
+        "id": "drawn",
+        "task": "![flow](./diagram.png)",
+        "assets_from": "plans:authoring/task"
+      }
+    }
+  ]
+}

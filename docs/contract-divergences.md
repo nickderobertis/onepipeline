@@ -13435,11 +13435,11 @@ ruling leaves the approved text verbatim, so it records the passages this entry
 supersedes rather than amending them, and each of them is superseded by this entry
 wherever it still describes the built-in reset:
 
-- `docs/contract.md:528`, the channel contract's closing sentences from *Surface
+- `docs/contract.md:532`, the channel contract's closing sentences from *Surface
   consumption restarts the check-in clock of every member the run's recorded observer
   graph declares `resettable`* through *That is the whole check-in reset contract.*,
   including its `oneagentgraph reset-timer RUN MEMBER` invocation; and
-- `docs/contract.md:292`, the driver contract's description of the shipped
+- `docs/contract.md:296`, the driver contract's description of the shipped
   `graphs/dag-scope.yaml` as an observer member beside a *resettable-cron* `check-in`
   member.
 
@@ -13510,3 +13510,82 @@ other kinds.
 **Ruling:** keep the line headed by its opening, and state the departure with its cost
 reason in `RunView::heads`'s rustdoc and in `docs/contract.md`, which now say "headed by
 its opening".
+
+## 157. Ruling provenance, attribution and `decline-ruling` — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the contract node `op-ruling-provenance` was given.** The contract's paragraph on
+rulings states the type, the envelope field, the flags, the attribution, the verb and the
+typed record; these are the decisions that contract left to the node, and the rulings its
+manager made while it was built.
+
+- **A framed reply keeps the version it declares.** `channel::layout::ReplyEnvelope` used to
+  read a declared version this build reads *as* the version it writes, so a recorded version
+  3 reply re-written through the typed layout came out at 4 and the recorded channel
+  histories (`tests/channel_layout.rs`) no longer re-applied byte for byte. The type now keeps
+  the declared version, and the read at `REPLY_ENVELOPE_VERSION` is made where a **bare**
+  envelope is routed — which is what the layout's bus document already declared: a framed
+  record is checked and kept whole. `channel::Reply`, the engine's own envelope, still reads
+  a version it reads at 4.
+- **`provenance` is written only for `user`.** On the envelope, the command queue's record,
+  `edit-committed`, `command-accepted`, `planner-replied`, the `note-delivered` and
+  `task-amended` operations, recorded notes, `HumanItemResolution`, `HumanItemEventBy` and
+  every `HumanItemAction`, the key is omitted while it is `manager` and read as `manager`
+  where it is absent, so a record of the manager's is byte for byte the record a build before
+  the field wrote. A `HumanItemHistoryEntry` states it always. Both the command queue's record
+  (`channel::QueuedCommands` and `channel::layout::QueuedCommands`) and the bus document's
+  routes carry it, since a commands-only envelope reaches the reconciler through that record
+  alone.
+- **The ruling reference is `c<envelope>.<index>` or `a<reply>`**, opaque to every reader and
+  resolved by the engine off the run's own channel: a note's or an amendment's command in the
+  command queue, answered applied, queued or delivered; or a reply bound to the question it
+  answered. Where nothing drives a run, `reply` delivers a live note before it records its
+  envelope, so it names the reference by the id the command queue gives its next envelope; it
+  holds the run's ownership lock, so that is exact unless a second `reply` reaches the queue
+  in the same instant, in which case the reference names no ruling and is refused as unknown.
+- **An attribution is stored with the node.** A carried note's entry and an amendment are kept
+  under their attribution as their first line, which a later dispatch renders and a withdrawal
+  and the criteria reader look past. A record that names no envelope and no user — every one
+  written before this change — is stored as it was, so its dispatch reads it as it did.
+  `plan::AMENDMENT_PRECEDENCE` keeps its words for the manager's amendment, and
+  `plan::USER_AMENDMENT_PRECEDENCE` is added for the user's, beside the attribution line that
+  names the party in both.
+- **A question about no node is about the asker's.** Every agent dispatch now carries
+  `ONEPIPELINE_NODE_ID`, as a command step and the dispatch-env hook already did, and
+  `onepipeline ask` defaults `--about` to it, so an answered question names the node a decline
+  is addressed to. Such a question holds only the asking node's dependents, which wait on that
+  node anyway.
+- **The record goes with its kind on every write, after the hooks too.** The channel's one
+  surface write, `ChannelState::push_checked`, refuses — with nothing appended — a
+  `declined-ruling` surface carrying no readable record, made blocking, or about another node
+  than its record names, and a surface of any other kind carrying the record. It asks this of
+  the surface offered and again of what the channel's hooks leave of it, so a hook that strips,
+  renames or blocks a decline is refused at `decline-ruling`, and `surface --kind
+  declined-ruling`, which carries no record, is refused too. A surface the engine raises that a
+  hook breaks this way is journalled as `planner-surface-dropped` with the reason as `refused`,
+  as any surface a hook refuses is. A hook rewriting a decline's message alone is kept.
+- **`RulingKind` is `note`, `amendment` or `answer`.** An answered question's text is the
+  reply's `message`, or its `reason` where it carries no message.
+- **`human_items::Actor` gains `provenance`**, because `HumanItems::apply_batch` takes an
+  `Actor` rather than an action; `Actor::from_environment` is the manager's. The read index
+  moves to its own version 2, holding each item's history, so an older index is rebuilt.
+  `HumanItemDetail.history` is omitted where it is empty, which only a sample bundle written
+  before the field existed is.
+- **Manager rulings made while this was built**, each bound into the node's criteria: an item's
+  history is held over the engine's real sequence — raised, completed `--as user`, noted
+  `--as user`, reopened with no `--as`, completed `--as user`, five entries — because only a
+  completed or dismissed item takes a note or a reopen; `onepipeline next` always prints JSON,
+  so where a criterion named `next --json` the plain `next` answers it and no flag is added;
+  and in the `human-items-read-seconds` workload the 10 live gates keep the one raise their run
+  recorded, since resolving one releases its run's steps.
+
+The planner-channel document moves to a new major, since a channel directory this build
+writes holds records — a version 4 envelope, a declined-ruling surface — the previous one
+refuses; the events bundle moves to a new minor for the optional `provenance` on three
+pipeline payloads.
+
+```json
+{
+  "bundle_versions": {"events": "2.2.0", "planner_channel": "3.0.0"}
+}
+```

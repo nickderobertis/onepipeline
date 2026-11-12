@@ -4754,6 +4754,23 @@ fn task_document(
         .as_object()
         .cloned()
         .ok_or_else(|| "node did not serialize as a mapping".to_owned())?;
+    // The rulings' own words, never the attribution this run renders them under:
+    // whose ruling one is, and the reference that declines it, are this run's, and
+    // a run launched from the board later is a different run.
+    for (key, unattributed) in [
+        (
+            "context",
+            crate::note::without_attributions as fn(&str) -> String,
+        ),
+        ("amendment", |text: &str| {
+            crate::ruling::split_attribution(text).1.to_owned()
+        }),
+    ] {
+        if let Some(Value::String(text)) = wire.get(key) {
+            let text = unattributed(text);
+            wire.insert(key.to_owned(), Value::String(text));
+        }
+    }
     let title = wire
         .remove("title")
         .and_then(|v| v.as_str().map(str::to_owned))

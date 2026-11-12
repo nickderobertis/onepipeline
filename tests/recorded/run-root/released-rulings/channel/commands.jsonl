@@ -1,0 +1,2 @@
+{"id":0,"author":"planner","commands":[{"op":"amend","id":"later","text":"Leave the four comment lines as they are."}]}
+{"id":1,"author":"planner","commands":[{"op":"note","id":"later","addressee":"worker","text":"The fixture moved to fixtures/v2.","deliver":"next"}]}

@@ -511,6 +511,7 @@ fn wait_surface(node: &str, hold: &WorkspaceHold, unusable: Option<&str>) -> Sur
         asker: None,
         workstream: Some(node.to_owned()),
         correlation: None,
+        declined_ruling: None,
     }
 }
 

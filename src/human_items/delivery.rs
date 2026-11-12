@@ -279,6 +279,7 @@ fn push_owed(root: &Path, owed: &OwedSurface) -> crate::error::Result<()> {
         abandoned: false,
         asker: None,
         correlation: None,
+        declined_ruling: None,
     };
     let mut journal = crate::journal::Journal::open(&paths);
     crate::engine::raise(&paths, &mut journal, surface)

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "epoch": "1441986-1794416293947034298",
+  "stamp": {
+    "len": 3614,
+    "modified": {
+      "secs_since_epoch": 1794416294,
+      "nanos_since_epoch": 438667185
+    },
+    "created": {
+      "secs_since_epoch": 1794416293,
+      "nanos_since_epoch": 945862685
+    },
+    "identity": [
+      64769,
+      559306,
+      1794416294,
+      438667185
+    ]
+  }
+}
