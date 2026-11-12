@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.110.0](https://github.com/nickderobertis/onepipeline/compare/v0.109.1...v0.110.0) - 2026-11-12
+
+### Added
+
+- *(channel)* [**breaking**] record whether a ruling is the user's or the manager's and let a dispatch decline a manager's ([#1529](https://github.com/nickderobertis/onepipeline/pull/1529))
+
 ## [0.109.1](https://github.com/nickderobertis/onepipeline/compare/v0.109.0...v0.109.1) - 2026-11-12
 
 ### Added
