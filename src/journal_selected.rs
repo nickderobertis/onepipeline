@@ -47,7 +47,7 @@ const MOST_WORKERS: usize = 8;
 
 /// The threads a read of many items works across: the host's parallelism, up to
 /// [`MOST_WORKERS`], and the four spike-first-screen measured at where it cannot say.
-fn workers() -> usize {
+pub(crate) fn workers() -> usize {
     std::thread::available_parallelism().map_or(4, |cores| cores.get().min(MOST_WORKERS))
 }
 

@@ -2081,27 +2081,50 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
-        let mut read = crate::journal_heads::read_heads(&paths.journal());
-        let bytes = std::mem::take(&mut read.bytes);
-        let view = std::thread::scope(|scope| {
-            // The journal's bytes are let go of beside the fold, which never reads them.
-            scope.spawn(move || drop(bytes));
-            Self::folded_over(paths, read.folded.iter().flatten())
-        })?;
+        let mut state = crate::projection::unfolded();
+        let read = crate::journal_heads::read_heads(&paths.journal(), |event| {
+            crate::projection::fold_one(&mut state, event);
+        });
+        let view = Self::of_fold(paths, state, read.coverage)?;
         Ok(RunHeads {
             view,
+            heads: read.heads,
             store_len: read.store_len,
             last_seq: read.last_seq,
-            heads: read.into_heads(),
         })
     }
 
     /// A view folded from `events`, a reading of the run's journal in merged order, and
-    /// holding none of them: what [`over_selected`](Self::over_selected) and
-    /// [`heads`](Self::heads) build on.
+    /// holding none of them: what [`over_selected`](Self::over_selected) builds on.
     fn folded_over<'a>(
         paths: &RunPaths,
         events: impl IntoIterator<Item = &'a Envelope> + Clone + Send,
+    ) -> crate::Result<Self> {
+        // What the records cover is read beside the fold rather than after it: neither
+        // reads what the other makes.
+        let (state, coverage) = std::thread::scope(|scope| {
+            let covered = events.clone();
+            let coverage = scope.spawn(move || {
+                let mut coverage = crate::checkpoint::Coverage::default();
+                coverage.absorb_all(covered);
+                coverage
+            });
+            let state = crate::projection::fold_each(events);
+            (
+                state,
+                coverage.join().expect("reading coverage does not panic"),
+            )
+        });
+        Self::of_fold(paths, state, coverage)
+    }
+
+    /// A view of the run whose journal, read in merged order, folded to `state` and
+    /// covers `coverage`, holding none of its records: what
+    /// [`folded_over`](Self::folded_over) and [`heads`](Self::heads) build on.
+    fn of_fold(
+        paths: &RunPaths,
+        mut state: RunState,
+        mut coverage: crate::checkpoint::Coverage,
     ) -> crate::Result<Self> {
         if !paths.exists() {
             return Err(crate::Error::NoSuchRun {
@@ -2116,21 +2139,6 @@ impl RunView {
             .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
-        // What the records cover is read beside the fold rather than after it: neither
-        // reads what the other makes.
-        let (mut state, mut coverage) = std::thread::scope(|scope| {
-            let covered = events.clone();
-            let coverage = scope.spawn(move || {
-                let mut coverage = crate::checkpoint::Coverage::default();
-                coverage.absorb_all(covered);
-                coverage
-            });
-            let state = crate::projection::fold_each(events);
-            (
-                state,
-                coverage.join().expect("reading coverage does not panic"),
-            )
-        });
         landings_the_run_re_read(&mut state, paths);
         crate::heartbeat::apply(paths, &mut state);
         let root = paths

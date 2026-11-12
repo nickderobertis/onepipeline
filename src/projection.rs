@@ -1275,12 +1275,17 @@ pub fn fold(events: &[Envelope]) -> RunState {
     fold_each(events)
 }
 
-/// [`fold`], over records held in any order of runs a reader keeps them in.
-pub(crate) fn fold_each<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> RunState {
-    let mut state = RunState {
+/// The state a fold starts from, before [`fold_one`] takes its first record.
+pub(crate) fn unfolded() -> RunState {
+    RunState {
         strict: true,
         ..RunState::default()
-    };
+    }
+}
+
+/// [`fold`], over records held in any order of runs a reader keeps them in.
+pub(crate) fn fold_each<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> RunState {
+    let mut state = unfolded();
     for event in events {
         fold_one(&mut state, event);
     }
