@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.109.1](https://github.com/nickderobertis/onepipeline/compare/v0.109.0...v0.109.1) - 2026-11-12
+
+### Added
+
+- read a run's record heads and fetch whole records by handle ([#1526](https://github.com/nickderobertis/onepipeline/pull/1526))
+
+### Fixed
+
+- *(deps)* link the onevcs whose warm host-wide read re-derives no unchanged branch ([#1531](https://github.com/nickderobertis/onepipeline/pull/1531))
+
 ## [0.109.0](https://github.com/nickderobertis/onepipeline/compare/v0.108.0...v0.109.0) - 2026-11-11
 
 ### Added

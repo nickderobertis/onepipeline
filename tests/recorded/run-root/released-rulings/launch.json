@@ -1,0 +1,18 @@
+{
+  "run_id": "released-rulings",
+  "project": "plans:released-rulings-board",
+  "dir": "@REPO@",
+  "node_graph": "@REPO@/graphs/node-scope.yaml",
+  "launcher": "e2e",
+  "session": "session-released-rulings",
+  "pid": 1441999,
+  "host": "e2e-box",
+  "started": "linux-proc-stat:19096947",
+  "started_at": "2026-11-11T16:58:13.945Z",
+  "heartbeat_interval": 1800,
+  "writeback_item_budget": 12,
+  "adoptions": 0,
+  "branch_template": "{% if task.key %}{{ task.key }}{% else %}{{ plan.name }}{% endif %}/{{ node.id }}",
+  "oneharness_sessions": "@WORLD@/runs/released-rulings/oneharness-sessions.jsonl",
+  "public_id": "released-rulings"
+}

@@ -648,6 +648,7 @@ fn title_unverified_surface(title: &UnverifiedTitle) -> Surface {
         asker: None,
         workstream: Some(node.clone()),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -810,6 +811,7 @@ fn supersede(
             asker: None,
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         },
     )?;
     Ok(())
@@ -4373,17 +4375,10 @@ fn reconcile_claimed(
         // judged and answered exactly as any other envelope.
         let cancelled = cancelled_in(&envelope.commands);
         if !cancelled.is_empty()
-            && validate_envelope(
-                paths,
-                state,
-                envelope.author.clone(),
-                &envelope.commands,
-                launch,
-                in_flight,
-            )
-            .0
-            .iter()
-            .all(std::result::Result::is_ok)
+            && validate_envelope(paths, state, &envelope, launch, in_flight)
+                .0
+                .iter()
+                .all(std::result::Result::is_ok)
         {
             deliveries.preempt(paths, journal, state, in_flight, &cancelled, envelope.id)?;
         }
@@ -4671,6 +4666,7 @@ fn answer_recovered(
                         journal,
                         state,
                         envelope.author.clone(),
+                        envelope.provenance,
                         command,
                         operations,
                         &BTreeMap::new(),
@@ -4967,8 +4963,7 @@ fn reconcile_envelope(
     let author = envelope.author.clone();
     let commands = &envelope.commands;
 
-    let (evaluated, staged_state) =
-        validate_envelope(paths, state, author.clone(), commands, launch, in_flight);
+    let (evaluated, staged_state) = validate_envelope(paths, state, &envelope, launch, in_flight);
     let staged = match all_or_each_ruling(seated(
         paths,
         envelope.id,
@@ -5274,7 +5269,12 @@ fn hand_envelope(
             .map(|(index, ruling)| match ruling {
                 // A withdrawn note's record is its withdrawal's.
                 Some(Ok(Delivery::Withdrawn)) => None,
-                Some(Ok(delivery)) => Some(from_envelope(delivery.committed(), id, index)),
+                Some(Ok(delivery)) => Some(from_envelope(
+                    delivery.committed(),
+                    id,
+                    index,
+                    envelope.provenance,
+                )),
                 _ => None,
             })
             .collect(),
@@ -5301,6 +5301,7 @@ fn hand_envelope(
             journal,
             state,
             envelope.author.clone(),
+            envelope.provenance,
             command,
             operations,
             in_flight,
@@ -5434,6 +5435,7 @@ fn refused_keeping_withdrawals(
                 journal,
                 state,
                 author.clone(),
+                envelope.provenance,
                 command,
                 operations,
                 in_flight,
@@ -5497,7 +5499,14 @@ fn record_delivered(
         operations: delivered
             .iter()
             .enumerate()
-            .map(|(index, delivery)| Some(from_envelope(delivery.committed(), envelope.id, index)))
+            .map(|(index, delivery)| {
+                Some(from_envelope(
+                    delivery.committed(),
+                    envelope.id,
+                    index,
+                    envelope.provenance,
+                ))
+            })
             .collect(),
     };
     if commands.len() > 1 {
@@ -5516,6 +5525,7 @@ fn record_delivered(
             journal,
             state,
             author.clone(),
+            envelope.provenance,
             command,
             operations,
             in_flight,
@@ -5752,6 +5762,7 @@ fn unrecovered(
             asker: None,
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         },
     )
 }
@@ -5949,19 +5960,30 @@ pub(crate) fn from_envelope(
     operations: &[edits::Operation],
     envelope: u64,
     index: usize,
+    provenance: crate::provenance::Provenance,
 ) -> Vec<edits::Operation> {
     operations
         .iter()
         .cloned()
         .map(|mut operation| {
-            if let edits::Operation::NoteDelivered {
-                envelope: from,
-                index: at,
-                ..
-            } = &mut operation
-            {
-                *from = Some(envelope);
-                *at = u32::try_from(index).ok();
+            match &mut operation {
+                edits::Operation::NoteDelivered {
+                    envelope: from,
+                    index: at,
+                    provenance: whose,
+                    ..
+                }
+                | edits::Operation::TaskAmended {
+                    envelope: from,
+                    index: at,
+                    provenance: whose,
+                    ..
+                } => {
+                    *from = Some(envelope);
+                    *at = u32::try_from(index).ok();
+                    *whose = provenance;
+                }
+                _ => {}
             }
             operation
         })
@@ -6450,16 +6472,17 @@ pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
 fn validate_envelope(
     paths: &RunPaths,
     state: &Projected,
-    author: crate::channel::Author,
-    commands: &[Command],
+    envelope: &crate::channel::QueuedCommands,
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> (Vec<std::result::Result<Staged, Error>>, RunState) {
+    let author = envelope.author.clone();
+    let commands = &envelope.commands;
     let mut staged_state: RunState = (**state).clone();
     let mut evaluated = Vec::with_capacity(commands.len());
     // The run's own grants, as its launch narrowed them.
     let channel = ChannelState::of_run(paths, launch);
-    for command in commands {
+    for (index, command) in commands.iter().enumerate() {
         let ruling = channel
             .declares(&author)
             .and_then(|()| channel.allows_completion(author.clone(), None))
@@ -6474,15 +6497,19 @@ fn validate_envelope(
                     paths,
                     &staged_state,
                     author.clone(),
+                    crate::ruling::Origin::of_command(envelope.provenance, envelope.id, index),
                     command,
                     launch,
                     in_flight,
                 )
             });
         if let Ok(step) = &ruling {
+            // Stamped with the envelope it came in, as its commit will be, so the
+            // state the plan-edit hook is shown composes each ruling under the
+            // attribution the node's dispatch then reads.
             crate::projection::fold_operations(
                 &mut staged_state,
-                &step.staged(),
+                &from_envelope(&step.staged(), envelope.id, index, envelope.provenance),
                 Some(sys::now_millis()),
             );
         }
@@ -7540,12 +7567,14 @@ fn settle_lane(
         };
         let answered = match ruling {
             Ok(Delivery::Committed(operations) | Delivery::TakenBack(operations)) => {
-                let operations = from_envelope(&operations, id, index);
+                let operations =
+                    from_envelope(&operations, id, index, outstanding.envelope.provenance);
                 commit_command(
                     paths,
                     journal,
                     state,
                     author.clone(),
+                    outstanding.envelope.provenance,
                     command,
                     &operations,
                     in_flight,
@@ -7668,6 +7697,7 @@ fn validate_command(
     paths: &RunPaths,
     state: &RunState,
     author: crate::channel::Author,
+    origin: crate::ruling::Origin,
     command: &Command,
     launch: &LaunchRecord,
     in_flight: &BTreeMap<String, Dispatch>,
@@ -7731,6 +7761,7 @@ fn validate_command(
     // The note's own record is the delivery's, so the structural compile above
     // contributed none: it established that the ask is one this run can act on.
     validate_manager_note(&Offered {
+        origin,
         id,
         addressee: *addressee,
         text,
@@ -7763,6 +7794,7 @@ fn commit_command(
     journal: &mut Journal,
     state: &mut Projected,
     author: crate::channel::Author,
+    provenance: crate::provenance::Provenance,
     command: &Command,
     operations: &[edits::Operation],
     in_flight: &BTreeMap<String, Dispatch>,
@@ -7779,13 +7811,16 @@ fn commit_command(
     journal.emit(
         journalled_as(operations),
         journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("author", json!(author)),
-            ("command", json!(command)),
-            ("operations", json!(operations)),
-            ("operation_kinds", json!(operation_kinds(operations))),
-            ("envelope", json!(envelope)),
-        ]),
+        with_provenance(
+            journal::payload(&[
+                ("author", json!(author)),
+                ("command", json!(command)),
+                ("operations", json!(operations)),
+                ("operation_kinds", json!(operation_kinds(operations))),
+                ("envelope", json!(envelope)),
+            ]),
+            provenance,
+        ),
     )?;
     record_operation_facts(paths, journal, author.clone(), operations)?;
     // A note withdrawn after its own envelope was answered is that envelope's to
@@ -7873,6 +7908,19 @@ fn watch_presentations(
 struct Presented {
     offered_at: u64,
     envelope: u64,
+}
+
+/// `payload` with whose words its command carried, where they are the user's:
+/// a record of the manager's own carries no key, so it is the record a build
+/// before the field wrote, and reads back as the manager's.
+pub(crate) fn with_provenance(
+    mut payload: serde_json::Map<String, Value>,
+    provenance: crate::provenance::Provenance,
+) -> serde_json::Map<String, Value> {
+    if !provenance.is_manager() {
+        payload.insert("provenance".into(), json!(provenance));
+    }
+    payload
 }
 
 /// Which kind one accepted command is journalled under.
@@ -7964,6 +8012,7 @@ pub(crate) fn record_rejection(
             asker: None,
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         },
     )
 }
@@ -8007,6 +8056,7 @@ fn refuse_undecodable(
             asker: None,
             workstream: None,
             correlation: None,
+            declined_ruling: None,
         },
     )?;
     channel.answer_commands(&CommandOutcome {
@@ -8041,6 +8091,9 @@ fn refused_undecodable(record: &Undecodable, command: &Value) -> serde_json::Map
 /// them decides is declared, and [`crate::note::Reach`], which is the pair they
 /// make once the envelope has refused the combination that lands nowhere.
 pub(crate) struct Offered<'a> {
+    /// Whose words the note is, and the reference it is declined by: what the
+    /// attribution the conversation is handed it under says.
+    pub origin: crate::ruling::Origin,
     pub id: &'a str,
     pub addressee: crate::note::Addressee,
     pub text: &'a crate::note::NoteText,
@@ -8154,6 +8207,7 @@ impl ValidatedNote {
 /// leaves it nowhere to go whatever a conversation would have said.
 pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
     let Offered {
+        origin,
         id,
         addressee,
         text,
@@ -8166,8 +8220,16 @@ pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
     let delivery = reach
         .live()
         .map_or_else(crate::note::Delivery::default, |live| live.delivery);
-    let composed = crate::note::of(addressee, text, *criterion, delivery)
-        .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
+    // The conversation is handed the note under its attribution, as its first
+    // line: what the worker and the supervisor read is whose ruling it is and
+    // what authority that gives it. The run's record keeps the note's own text.
+    let composed = crate::note::of(
+        addressee,
+        &origin.attributed(text.as_str()),
+        *criterion,
+        delivery,
+    )
+    .map_err(|refused| Error::Refused(format!("note: node '{id}': {refused}")))?;
     // A live attempt takes both a reach that asks for one and a conversation to
     // make it to. Where either is missing there is nothing to offer anybody, so
     // the note is the carried one by construction and whether it can be carried
@@ -8230,6 +8292,7 @@ fn note_record(
         reached,
         envelope: None,
         index: None,
+        provenance: crate::provenance::Provenance::Manager,
     }]
 }
 
@@ -10540,6 +10603,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
             crate::findings::FindingKind::SessionConflict,
             conflict.node.as_str(),
         ),
+        declined_ruling: None,
     }
 }
 
@@ -10818,6 +10882,7 @@ fn cancelling_surface(step: &Cancelling) -> Surface {
         asker: None,
         workstream: Some(step.node.clone()),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -11400,6 +11465,7 @@ pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
         asker: None,
         workstream: stopped.node.clone(),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12245,6 +12311,7 @@ pub(crate) fn non_planner_edit(
         asker: None,
         workstream: crate::channel::target_of(command),
         correlation: None,
+        declined_ruling: None,
     })
 }
 
@@ -12276,6 +12343,7 @@ pub(crate) fn finding_surface(
         asker: None,
         workstream: node,
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12341,6 +12409,7 @@ fn criterion_finding(checked: &CriterionChecked, holds: &str) -> Surface {
         asker: None,
         workstream: Some(checked.node.as_str().to_owned()),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12432,6 +12501,7 @@ fn home_surface(record: &crate::payload::HomeStatus) -> Surface {
         asker: None,
         workstream: None,
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12464,6 +12534,7 @@ fn closure_surface(record: &crate::payload::LandingClosures) -> Surface {
         asker: None,
         workstream: record.node.clone(),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12517,6 +12588,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
         asker: None,
         workstream: None,
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -12592,7 +12664,7 @@ pub(crate) fn offer_surface(
     use crate::channel::SurfaceOffer;
     use crate::payload::SurfaceDropCause;
     let cause = match channel.push(surface.clone())? {
-        SurfaceOffer::Queued(queued) => return Ok(Some(queued)),
+        SurfaceOffer::Queued(queued) => return Ok(Some(*queued)),
         SurfaceOffer::Elsewhere => return Ok(None),
         SurfaceOffer::Dropped { hook, .. } => SurfaceDropCause::Dropped { hook },
         SurfaceOffer::Refused(refused) => SurfaceDropCause::Refused { refused },
@@ -12692,6 +12764,7 @@ fn watch_for_quiet(
                 asker: None,
                 workstream: Some(node.clone()),
                 correlation: None,
+                declined_ruling: None,
             },
         )?;
     }
@@ -15278,6 +15351,7 @@ mod tests {
                 reached,
                 envelope: None,
                 index: None,
+                provenance: crate::provenance::Provenance::Manager,
             };
         let commit = |journal: &mut Journal, operations: &[edits::Operation]| {
             journal
@@ -15474,6 +15548,9 @@ mod tests {
             edits::Operation::TaskAmended {
                 node: node(),
                 text: "the corrected criterion".into(),
+                envelope: None,
+                index: None,
+                provenance: crate::provenance::Provenance::Manager,
             },
             edits::Operation::ContextAdded {
                 node: node(),
@@ -15490,6 +15567,7 @@ mod tests {
                 routed_to: Vec::new(),
                 envelope: None,
                 index: None,
+                provenance: crate::provenance::Provenance::Manager,
             },
             edits::Operation::NoteWithdrawn {
                 node: node(),
@@ -16125,6 +16203,7 @@ mod tests {
             reached,
             envelope: None,
             index: None,
+            provenance: crate::provenance::Provenance::Manager,
         }];
         let opened = |node: &str, at: u64, turn: u64| Envelope {
             v: 1,
@@ -16207,6 +16286,8 @@ mod tests {
                 text: "stop editing src/old.rs".parse().expect("a usable note"),
                 criterion: None,
                 reached: crate::note::Reached::Worker { turn: None },
+                provenance: crate::provenance::Provenance::Manager,
+                ruling: None,
             }],
             composed_at: 1_000,
         };
@@ -16454,6 +16535,7 @@ mod tests {
         let envelope = crate::channel::QueuedCommands {
             id: 1,
             author: crate::channel::Author::planner(),
+            provenance: crate::provenance::Provenance::Manager,
             commands: vec![
                 serde_json::from_value(json!({
                     "op": "withdraw-note", "envelope": "0", "index": 1, "reason": "moved back",
@@ -16516,6 +16598,7 @@ mod tests {
             envelope: crate::channel::QueuedCommands {
                 id,
                 author: crate::channel::Author::planner(),
+                provenance: crate::provenance::Provenance::Manager,
                 commands: vec![note_to(node)],
             },
             offered_at: 0,

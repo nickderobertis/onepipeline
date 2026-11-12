@@ -1,4 +1,5 @@
-//! The human-items read budget: the complete host-wide `human-items list`, timed
+//! The human-items read budget: the complete host-wide `human-items list`, and the
+//! detail of the item with the longest history, timed
 //! as a subprocess of the release-built binary over the workload
 //! [`generate`] launches, with every phase of what it cost recorded beside it.
 //!
@@ -13,8 +14,9 @@
 //! - **cold**: the first read with no index and no run checkpoints, then after
 //!   the index is deleted and after it is corrupted — each a full replay of every
 //!   one of the fixture's million run records, disclosed, never the budget;
-//! - **warm**: ten unchanged reads of each of `list --json`, `list` and `report`,
-//!   each asserted to replay nothing — the budget's operation of record;
+//! - **warm**: ten unchanged reads of each of `list --json`, `list`, `report`
+//!   and `show --json` of the item with the longest history, each asserted to
+//!   replay nothing — the budget's operation of record;
 //! - **tail**: ten item events appended behind a saved index, consumed by exactly
 //!   one of the readers that follow.
 
@@ -233,6 +235,27 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
         steps - 10,
         "every step but the gates waits behind them"
     );
+    // Every manager-raised open item carries a history of 2 to 5 events, one
+    // carries the longest, and each live gate the one raise its run recorded.
+    let mut longest = None;
+    for view in views {
+        let id = view["item"]["id"].as_str().unwrap();
+        let key = view["item"]["dedup_key"].as_str().unwrap();
+        let shown = sample(&world, &["show", id, "--json"], &telemetry);
+        let history = serde_json::from_str::<Value>(&shown.stdout).unwrap()["history"]
+            .as_array()
+            .unwrap()
+            .len();
+        if key == generate::LONGEST_KEY {
+            assert_eq!(history, generate::LONGEST_HISTORY, "{key}");
+            longest = Some(id.to_owned());
+        } else if key.ends_with("#gate") {
+            assert_eq!(history, 1, "{key}");
+        } else {
+            assert!((2..=5).contains(&history), "{key} carries {history} events");
+        }
+    }
+    let longest = longest.expect("the item with the longest history is open");
     let mut phases = vec![record("cold", &cold)];
     std::fs::remove_file(&index).unwrap();
     let deleted = sample(&world, &["list", "--json"], &telemetry);
@@ -254,12 +277,15 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
         assert_eq!(p["runs_rederived"], generate::RUNS, "{p}");
     }
 
-    // Warm: ten unchanged reads of each printed form; none replays anything.
+    // Warm: ten unchanged reads of each printed form, the detail of the item
+    // with the longest history among them; none replays anything.
     let mut warm = Vec::new();
+    let mut shown_history = 0;
     for (form, args) in [
         ("list-json", vec!["list", "--json"]),
         ("list", vec!["list"]),
         ("report", vec!["report"]),
+        ("show-json", vec!["show", longest.as_str(), "--json"]),
     ] {
         for _ in 0..10 {
             let s = sample(&world, &args, &telemetry);
@@ -273,6 +299,13 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
                     serde_json::from_str::<Value>(&s.stdout).unwrap(),
                     authoritative
                 );
+            }
+            if form == "show-json" {
+                shown_history = serde_json::from_str::<Value>(&s.stdout).unwrap()["history"]
+                    .as_array()
+                    .unwrap()
+                    .len();
+                assert_eq!(shown_history, generate::LONGEST_HISTORY);
             }
             warm.push(r);
         }
@@ -329,6 +362,7 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
             "steps": steps,
             "open_items": views.len(),
             "generate_s": generate_s,
+            "shown_history": shown_history,
         },
         "warm_max_elapsed_s": warm_max,
         "warm": warm,

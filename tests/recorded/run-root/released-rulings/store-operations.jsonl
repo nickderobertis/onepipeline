@@ -1,0 +1,14 @@
+{"at_ms":1794416293935,"operation":"project","phase":"launch"}
+{"at_ms":1794416293936,"operation":"tasks","phase":"launch"}
+{"at_ms":1794416293936,"operation":"task-dependencies","phase":"launch"}
+{"at_ms":1794416293937,"operation":"task-dependencies","phase":"launch"}
+{"at_ms":1794416293965,"operation":"task-update","phase":"write-back","projection_at":"2026-11-11T16:58:13.965Z","item":"later"}
+{"at_ms":1794416293967,"operation":"task-update","phase":"write-back","projection_at":"2026-11-11T16:58:13.965Z","item":"slow"}
+{"at_ms":1794416293970,"operation":"project-metadata-set","phase":"write-back","projection_at":"2026-11-11T16:58:13.965Z"}
+{"at_ms":1794416293971,"operation":"end-command","phase":"write-back","projection_at":"2026-11-11T16:58:13.965Z"}
+{"at_ms":1794416293977,"operation":"task-update","phase":"write-back","projection_at":"2026-11-11T16:58:13.976Z","item":"slow"}
+{"at_ms":1794416293980,"operation":"end-command","phase":"write-back","projection_at":"2026-11-11T16:58:13.976Z"}
+{"at_ms":1794416294197,"operation":"task-update","phase":"write-back","projection_at":"2026-11-11T16:58:14.197Z","item":"later"}
+{"at_ms":1794416294203,"operation":"end-command","phase":"write-back","projection_at":"2026-11-11T16:58:14.197Z"}
+{"at_ms":1794416294402,"operation":"task-update","phase":"write-back","projection_at":"2026-11-11T16:58:14.402Z","item":"later"}
+{"at_ms":1794416294404,"operation":"end-command","phase":"write-back","projection_at":"2026-11-11T16:58:14.402Z"}

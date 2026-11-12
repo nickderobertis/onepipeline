@@ -1910,6 +1910,7 @@ mod tests {
                 abandoned: false,
                 asker: None,
                 correlation: None,
+                declined_ruling: None,
             })
             .expect("the surface is queued");
         moved("a surface being queued", true);

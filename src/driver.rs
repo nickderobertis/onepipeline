@@ -358,11 +358,42 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let (target, file) =
                 target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
             let text = reply_text(file.as_ref())?;
-            let receipt = match target {
-                Target::Run(paths) => verbs::reply(&paths, args.correlation.as_ref(), &text)?,
-                Target::Flow(flow) => crate::flow::reply(&flow, args.correlation.as_ref(), &text)?,
+            let receipt = match (target, args.provenance) {
+                (Target::Run(paths), None) => {
+                    verbs::reply(&paths, args.correlation.as_ref(), &text)?
+                }
+                (Target::Run(paths), Some(provenance)) => {
+                    verbs::reply_as(&paths, args.correlation.as_ref(), &text, provenance)?
+                }
+                (Target::Flow(flow), provenance) => {
+                    let text = match provenance {
+                        Some(provenance) => verbs::stated_as(&text, provenance)?,
+                        None => text,
+                    };
+                    crate::flow::reply(&flow, args.correlation.as_ref(), &text)?
+                }
             };
             said(&receipt)
+        }
+        Verb::DeclineRuling(args) => {
+            let reason = match &args.file {
+                Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
+                    path: path.clone(),
+                    source: e,
+                })?,
+                None => {
+                    let mut buffer = String::new();
+                    std::io::stdin()
+                        .read_to_string_compat(&mut buffer)
+                        .map_err(|e| {
+                            Error::Refused(format!("cannot read the reason from stdin: {e}"))
+                        })?;
+                    buffer
+                }
+            };
+            let surfaced = verbs::decline_ruling(&resolve(&args.run)?, &args.ruling, &reason)?;
+            println!("{}", verbs::render_surfaced(&surfaced));
+            Ok(EXIT_SUCCESS)
         }
         Verb::Surface(args) => {
             let (target, file) =
@@ -750,7 +781,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 (None, None) => return Err(crate::ask::no_run()),
             };
             let asker = crate::ask::asker()?;
-            let about = crate::ask::about(&args)?;
+            let about = crate::ask::about(
+                &args,
+                std::env::var(crate::dispatchenv::NODE_ID_ENV)
+                    .ok()
+                    .as_deref(),
+            )?;
             let raised = crate::ask::Question::raise_on(
                 &on,
                 crate::ask::Request {
@@ -770,6 +806,12 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 eprintln!("waiting up to {} seconds for the reply", window.as_secs());
             }
             let asked = raised.answer();
+            // A run's answer is a ruling, so it says whose, as every ruling a
+            // dispatch reads does; a flow's names no run to decline it on.
+            let asked = match &on {
+                crate::ask::On::Run(_) => asked.attributed(),
+                crate::ask::On::Flow(_) => asked,
+            };
             // llmlint: ignore-block[cli_output_contract] the bus's one-line answer is the
             // whole of standard output, by contract, and the advice beside it goes on standard
             // error where it changes nothing an asker parses.
@@ -3639,6 +3681,7 @@ fn raise_adoptions_that_never_complete(
                 asker: None,
                 workstream: Some(refused.node.clone()),
                 correlation: None,
+                declined_ruling: None,
             },
         )?;
     }
@@ -4447,7 +4490,7 @@ fn journal_verdict(
     journal.emit(
         journal::PipelineKind::PlannerReplied,
         journal::labels(&paths.run, None),
-        journal::payload(&replied),
+        engine::with_provenance(journal::payload(&replied), envelope.provenance),
     )?;
     if let (Some(reason), None) = (&envelope.reason, correlation) {
         if envelope.completion == Some(true) {
@@ -4792,13 +4835,18 @@ pub(crate) fn submit_offered(
             // The run as the envelope would leave it, for the plan-edit hook below: each
             // validated command folded on as the reconciler's own validation folds it.
             let mut staged_state = view.state.clone();
-            for command in &envelope.commands {
+            // The id this envelope is recorded under once it has applied: this
+            // process holds the run, so it is the next the command queue gives.
+            // What its rulings are declined by, named before they are delivered.
+            let recorded_as = channel.next_command_id();
+            for (index, command) in envelope.commands.iter().enumerate() {
                 let step = match validate_here(
                     paths,
                     &mut graph,
                     &frontier,
                     &view.state,
                     envelope.author.clone(),
+                    crate::ruling::Origin::of_command(envelope.provenance, recorded_as, index),
                     command,
                 ) {
                     Ok(step) => step,
@@ -4817,9 +4865,11 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
+                // Stamped as its commit will be, so the plan-edit hook is shown each
+                // ruling under the attribution the node's dispatch then reads.
                 crate::projection::fold_operations(
                     &mut staged_state,
-                    &step.staged(),
+                    &engine::from_envelope(&step.staged(), recorded_as, index, envelope.provenance),
                     Some(sys::now_millis()),
                 );
                 staged.push(step);
@@ -4896,7 +4946,9 @@ pub(crate) fn submit_offered(
             let pending: Vec<Vec<edits::Operation>> = pending
                 .iter()
                 .enumerate()
-                .map(|(index, operations)| engine::from_envelope(operations, reply, index))
+                .map(|(index, operations)| {
+                    engine::from_envelope(operations, reply, index, envelope.provenance)
+                })
                 .collect();
             // Answered as a reconciler answers an envelope it applied, and at once:
             // every command of it has validated and delivered, so it is applied
@@ -4921,15 +4973,18 @@ pub(crate) fn submit_offered(
                 journal.emit(
                     engine::journalled_as(operations),
                     journal::labels(&paths.run, None),
-                    journal::payload(&[
-                        ("author", json!(envelope.author.clone())),
-                        ("command", json!(command)),
-                        ("operations", json!(operations)),
-                        (
-                            "operation_kinds",
-                            json!(engine::operation_kinds(operations)),
-                        ),
-                    ]),
+                    engine::with_provenance(
+                        journal::payload(&[
+                            ("author", json!(envelope.author.clone())),
+                            ("command", json!(command)),
+                            ("operations", json!(operations)),
+                            (
+                                "operation_kinds",
+                                json!(engine::operation_kinds(operations)),
+                            ),
+                        ]),
+                        envelope.provenance,
+                    ),
                 )?;
                 engine::record_operation_facts(
                     paths,
@@ -5231,6 +5286,7 @@ fn validate_here(
     frontier: &Frontier,
     state: &crate::projection::RunState,
     author: Author,
+    origin: crate::ruling::Origin,
     command: &Command,
 ) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
@@ -5276,6 +5332,7 @@ fn validate_here(
         return Ok(engine::Staged::Compiled(operations));
     };
     engine::validate_manager_note(&engine::Offered {
+        origin,
         id,
         addressee: *addressee,
         text,

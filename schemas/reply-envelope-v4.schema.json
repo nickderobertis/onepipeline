@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReplyEnvelope",
+  "description": "A reply on the planner channel at version 4: version 3 plus one optional top-level field, provenance, saying whose words the envelope carries. Absent, the manager's, so an envelope written against 2 or 3 is a complete envelope at 4.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "description": "The reply envelope version this document was written against.",
+      "type": "integer",
+      "const": 4
+    },
+    "author": {
+      "description": "Who wrote the reply. Omitted, the planner.",
+      "type": "string"
+    },
+    "provenance": {
+      "description": "Whose words the reply carries: manager, the manager's own ruling, which a dispatch may decline with its reason, or user, the user's words relayed, which bind. Omitted, manager. Not author, which names who sent it.",
+      "type": "string",
+      "enum": ["manager", "user"]
+    },
+    "completion": {
+      "description": "The verdict: whether the author considers the run complete.",
+      "type": "boolean"
+    },
+    "message": {
+      "description": "The verdict's message to the orchestrator.",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Why the author reached that verdict.",
+      "type": "string"
+    },
+    "commands": {
+      "description": "The graph edits, reconciled in order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/Command" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Command": {
+      "description": "One graph edit, discriminated by op. Its other fields are the op's own; a settle may name the landing it was decided from.",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Which edit this is.",
+          "type": "string"
+        },
+        "landing": {
+          "description": "Where a settled node's work landed: a change request URL or a commit id.",
+          "type": "string"
+        }
+      },
+      "required": ["op"]
+    }
+  }
+}

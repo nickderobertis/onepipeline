@@ -1167,7 +1167,11 @@ impl World {
             .env_remove(onepipeline::agents::HISTORY_ENV)
             .env_remove(onepipeline::agents::HISTORY_DIR_ENV)
             .env_remove(onepipeline::agents::POINTER_FILE_ENV)
-            .env_remove(onepipeline::agents::LABELS_ENV);
+            .env_remove(onepipeline::agents::LABELS_ENV)
+            // And the node *this* suite's own dispatch is of: `onepipeline ask`
+            // reads it as the node a question is about when none is named, and a
+            // journey asking outside any dispatch names its node itself.
+            .env_remove("ONEPIPELINE_NODE_ID");
         // And nothing of the operator's own `onetaskgraph` environment layer: a
         // `ONETASKGRAPH_SOURCES__…` in the shell that ran the suite would add the
         // operator's sources to this world's store — or, half-declared, refuse its

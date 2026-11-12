@@ -1,0 +1,2 @@
+{"schema_version":1,"kind":"onemessagebus-carry-store"}
+{"ts":"2026-11-11T16:58:14.399Z","schema":"agent.note@1","message":{"addressee":"worker","text":"The fixture moved to fixtures/v2."}}

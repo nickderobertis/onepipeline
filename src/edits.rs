@@ -218,6 +218,22 @@ pub enum Operation {
         node: String,
         /// The binding text, which **replaces** whatever the node carried.
         text: String,
+        /// Whose words the amendment is. Absent from a record written before the
+        /// field existed, which reads as the manager's.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::provenance::Provenance::is_manager"
+        )]
+        provenance: crate::provenance::Provenance,
+        /// The command envelope it came in, which with [`index`](Self::TaskAmended::index)
+        /// is the ruling reference a dispatch declines it by. Absent from a record
+        /// written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        envelope: Option<u64>,
+        /// Its 0-based position among that envelope's commands. Present exactly
+        /// where `envelope` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<u32>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A planner note reached a node, as the removed `context` op recorded it.
@@ -305,6 +321,13 @@ pub enum Operation {
         /// and absent from a record written before the field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<u32>,
+        /// Whose words the note is. Absent from a record written before the
+        /// field existed, which reads as the manager's.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::provenance::Provenance::is_manager"
+        )]
+        provenance: crate::provenance::Provenance,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A note no turn had read, taken back by a `withdraw-note`: it is composed
@@ -2763,6 +2786,9 @@ fn compile_amend(
     Ok(vec![Operation::TaskAmended {
         node: id.to_string(),
         text: text.to_string(),
+        envelope: None,
+        index: None,
+        provenance: crate::provenance::Provenance::Manager,
     }])
 }
 
@@ -3275,9 +3301,20 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         }
         // Replace, exactly as the reconciler replaced: the last one recorded is
         // the node's amendment, so replaying them in order lands on it.
-        Operation::TaskAmended { node, text } => {
+        // Kept with its attribution as the amendment's first line, so every later
+        // dispatch of the node — after a checkpoint, after an adoption — renders
+        // whose ruling it is from the node alone.
+        Operation::TaskAmended {
+            node,
+            text,
+            provenance,
+            envelope,
+            index,
+        } => {
             if let Some(node) = graph.get_mut(node) {
-                node.amendment = Some(text.clone());
+                node.amendment = Some(
+                    crate::ruling::Origin::of_record(*provenance, *envelope, *index).stored(text),
+                );
             }
         }
         // A live delivery went into a turn rather than onto the graph, so
@@ -3314,16 +3351,23 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         // The one disposition that moved the graph: no turn took the note, so it
         // is owed to the node's next dispatch and replay has to put it back
         // where the reconciler did.
+        // Carried with its attribution as the entry's first line, so the node's
+        // next dispatch — after a checkpoint, after an adoption — reads whose
+        // ruling it is from the node alone.
         Operation::NoteDelivered {
             node,
             text,
             reached: crate::note::Reached::Carried { .. },
+            envelope,
+            index,
+            provenance,
             ..
         } => {
             if let Some(node) = graph.get_mut(node) {
                 node.context = Some(crate::note::with_carried(
                     node.context.as_deref(),
-                    text.as_str(),
+                    &crate::ruling::Origin::of_record(*provenance, *envelope, *index)
+                        .stored(text.as_str()),
                 ));
             }
         }
@@ -5059,6 +5103,7 @@ mod tests {
             routed_to: Vec::new(),
             envelope: None,
             index: None,
+            provenance: crate::provenance::Provenance::Manager,
         };
         let mut graph = graph_of(vec![agent("build", &[])]);
         apply(&mut graph, &carried);
@@ -5081,6 +5126,7 @@ mod tests {
                 .to_vec(),
             envelope: None,
             index: None,
+            provenance: crate::provenance::Provenance::Manager,
         };
         let mut untouched = graph_of(vec![agent("build", &[])]);
         apply(&mut untouched, &taken);
@@ -5140,7 +5186,7 @@ mod tests {
             "the amendment is not part of the effective task"
         );
         assert!(
-            matches!(&first[0], Operation::TaskAmended { node, text }
+            matches!(&first[0], Operation::TaskAmended { node, text, .. }
                 if node == "build" && text == "leave the comments"),
             "{first:?}"
         );
@@ -5899,6 +5945,9 @@ mod tests {
             Operation::TaskAmended {
                 node: "gone".into(),
                 text: "the ruling".into(),
+                envelope: None,
+                index: None,
+                provenance: crate::provenance::Provenance::Manager,
             },
             Operation::NodeRequeued {
                 node: "gone".into(),

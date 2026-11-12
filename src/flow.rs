@@ -1444,6 +1444,7 @@ pub(crate) fn surface(
         asker: None,
         workstream: None,
         correlation: None,
+        declined_ruling: None,
     })?;
     crate::verbs::surfaced_of(offer)
 }

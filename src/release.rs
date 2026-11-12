@@ -1608,6 +1608,7 @@ impl Watch {
             asker: None,
             workstream: Some(node.to_owned()),
             correlation: None,
+            declined_ruling: None,
         }
     }
 
@@ -4314,6 +4315,7 @@ mod tests {
             asker: None,
             workstream: Some(node.to_owned()),
             correlation: None,
+            declined_ruling: None,
         }
     }
 

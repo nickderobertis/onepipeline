@@ -2592,6 +2592,7 @@ fn not_this_draft_surface(node: &str, change: &str, reason: &str) -> crate::chan
         asker: None,
         workstream: Some(node.to_owned()),
         correlation: None,
+        declined_ruling: None,
     }
 }
 
@@ -4421,6 +4422,7 @@ mod tests {
                         reached,
                         envelope: None,
                         index: None,
+                        provenance: crate::provenance::Provenance::Manager,
                     }]),
                 )]),
             )
