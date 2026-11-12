@@ -1272,7 +1272,11 @@ fn remember_derived(
 
 /// Fold a run's whole journal.
 pub fn fold(events: &[Envelope]) -> RunState {
-    fold_each(events)
+    let mut state = unfolded();
+    for event in events {
+        fold_one(&mut state, event);
+    }
+    state
 }
 
 /// The state a fold starts from, before [`fold_one`] takes its first record.
@@ -1281,15 +1285,6 @@ pub(crate) fn unfolded() -> RunState {
         strict: true,
         ..RunState::default()
     }
-}
-
-/// [`fold`], over records held in any order of runs a reader keeps them in.
-pub(crate) fn fold_each<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> RunState {
-    let mut state = unfolded();
-    for event in events {
-        fold_one(&mut state, event);
-    }
-    state
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {

@@ -2096,25 +2096,12 @@ impl RunView {
 
     /// A view folded from `events`, a reading of the run's journal in merged order, and
     /// holding none of them: what [`over_selected`](Self::over_selected) builds on.
-    fn folded_over<'a>(
-        paths: &RunPaths,
-        events: impl IntoIterator<Item = &'a Envelope> + Clone + Send,
-    ) -> crate::Result<Self> {
-        // What the records cover is read beside the fold rather than after it: neither
-        // reads what the other makes.
-        let (state, coverage) = std::thread::scope(|scope| {
-            let covered = events.clone();
-            let coverage = scope.spawn(move || {
-                let mut coverage = crate::checkpoint::Coverage::default();
-                coverage.absorb_all(covered);
-                coverage
-            });
-            let state = crate::projection::fold_each(events);
-            (
-                state,
-                coverage.join().expect("reading coverage does not panic"),
-            )
-        });
+    fn folded_over(paths: &RunPaths, events: &[Envelope]) -> crate::Result<Self> {
+        let state = crate::projection::fold(events);
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in events {
+            coverage.absorb(Some(event), 0);
+        }
         Self::of_fold(paths, state, coverage)
     }
 
