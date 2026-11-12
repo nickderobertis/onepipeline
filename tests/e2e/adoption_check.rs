@@ -509,6 +509,8 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
     moved["parked"] = json!(true);
     moved["repo"] = json!("engine");
     moved["adoption"] = json!("published");
+    let mut promoted = lifecycle("promoted", &["engine"]);
+    promoted["parked"] = json!(true);
     let mut drifting = lifecycle("drifting", &["engine"]);
     drifting["parked"] = json!(true);
     drifting["consumes"] = json!({"engine": "crate"});
@@ -526,6 +528,7 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
                 rewired,
                 rewired_fast,
                 moved,
+                promoted,
                 drifting,
             ],
         ),
@@ -580,6 +583,12 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
                 &undeclared,
             ),
             json!({"op": "requeue", "id": "requeued", "amend": {"adoption": "published"}}),
+        ),
+        (
+            json!({"op": "requeue", "id": "promoted", "amend": {"adoption": "published"}}),
+            line("promoted", "adoption", "published-no-target", &published),
+            json!({"op": "requeue", "id": "promoted",
+                "amend": {"adoption": "published", "consumes": {"engine": "crate"}}}),
         ),
         (
             json!({"op": "requeue", "id": "moved", "amend": {"repo": "service"}}),
