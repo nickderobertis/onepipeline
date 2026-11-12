@@ -77,7 +77,7 @@
                 "type": "null"
               }
             ],
-            "description": "What a dispatch declined, as typed fields: present on every surface of\nkind `declined-ruling` and on no other, and omitted from the wire while\nabsent, so every other surface — and every one written before the field\nexisted — serializes exactly as it always did. A reader takes the facts\nof a declined ruling from here and never from [`message`](Self::message),\nwhose text is for people. Every write of a surface holds it to that, after\nthe channel's hooks as well as before: [`declined_ruling_holds`]."
+            "description": "What a dispatch declined, as typed fields: present on every surface of\nkind `declined-ruling` and on no other, and omitted from the wire while\nabsent, so every other surface — and every one written before the field\nexisted — serializes exactly as it always did. A reader takes the facts\nof a declined ruling from here and never from [`message`](Self::message),\nwhose text is for people. Every write of a surface holds it to that, after\nthe channel's hooks as well as before."
           }
         },
         "required": [
