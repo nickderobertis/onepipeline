@@ -863,8 +863,14 @@ fn seeded_with_the_released_run(world: &World) {
     let from =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded/run-root/released-rulings");
     let into = world.runs.join(RELEASED);
-    let repo = env!("CARGO_MANIFEST_DIR");
-    let world_root = world.root.to_string_lossy().to_string();
+    // Every file a placeholder sits in is JSON, so each path is filled in as
+    // the inside of a JSON string: a Windows path's backslashes escaped.
+    let in_json = |path: &str| {
+        let quoted = serde_json::to_string(path).expect("a path serializes");
+        quoted[1..quoted.len() - 1].to_string()
+    };
+    let repo = in_json(env!("CARGO_MANIFEST_DIR"));
+    let world_root = in_json(&world.root.to_string_lossy());
     fn walk(from: &Path, into: &Path, fill: &dyn Fn(&str) -> String) {
         std::fs::create_dir_all(into).expect("a directory to seed");
         for entry in std::fs::read_dir(from).expect("a recorded directory") {
@@ -879,7 +885,7 @@ fn seeded_with_the_released_run(world: &World) {
         }
     }
     walk(&from, &into, &|text| {
-        text.replace("@REPO@", repo)
+        text.replace("@REPO@", &repo)
             .replace("@WORLD@", &world_root)
             .replace("\"pid\": 1441999,", "\"pid\": 2147483647,")
     });

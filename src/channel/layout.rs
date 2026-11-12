@@ -263,7 +263,7 @@ pub struct Surface {
     /// existed — serializes exactly as it always did. A reader takes the facts
     /// of a declined ruling from here and never from [`message`](Self::message),
     /// whose text is for people. Every write of a surface holds it to that, after
-    /// the channel's hooks as well as before: [`declined_ruling_holds`].
+    /// the channel's hooks as well as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_ruling: Option<DeclinedRuling>,
 }
