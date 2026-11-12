@@ -6,12 +6,12 @@
     "records": 8,
     "at": {
       "ts": "2026-11-11T16:58:14.397Z",
-      "stream": "lima-hp-1441999"
+      "stream": "e2e-box-1441999"
     },
     "streams": {
       "fake-oneagentgraph-1794416293984-1442014": 1,
-      "lima-hp-1441986": 0,
-      "lima-hp-1441999": 4
+      "e2e-box-1441986": 0,
+      "e2e-box-1441999": 4
     },
     "digest": "1c17bdc31b94c49f80c89eedb09136bc"
   },

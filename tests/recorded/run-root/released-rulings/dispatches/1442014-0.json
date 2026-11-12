@@ -1,7 +1,7 @@
 {
   "node": "slow",
   "pid": 1442014,
-  "host": "lima-hp",
+  "host": "e2e-box",
   "dispatched_at": "2026-11-11T16:58:13.976Z",
   "started": "linux-proc-stat:19096950"
 }

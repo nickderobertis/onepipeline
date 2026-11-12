@@ -6,7 +6,7 @@
   "launcher": "e2e",
   "session": "session-released-rulings",
   "pid": 1441999,
-  "host": "lima-hp",
+  "host": "e2e-box",
   "started": "linux-proc-stat:19096947",
   "started_at": "2026-11-11T16:58:13.945Z",
   "heartbeat_interval": 1800,

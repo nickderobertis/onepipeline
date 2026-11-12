@@ -900,7 +900,7 @@ fn seeded_with_the_released_run(world: &World) {
 fn a_run_the_released_engine_wrote_reads_and_adopts_with_every_ruling_the_managers() {
     // As the host and the session that launched it: `adopt` takes over a run
     // only for the session that owns it.
-    let launched = World::new("rulings-released").with_env("HOSTNAME", "lima-hp");
+    let launched = World::new("rulings-released").with_env("HOSTNAME", "e2e-box");
     let world = launched.as_session("session-released-rulings");
     seeded_with_the_released_run(&world);
     world.script("slow.turn-open", "");

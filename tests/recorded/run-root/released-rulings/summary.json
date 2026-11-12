@@ -22,7 +22,7 @@
   "session": "session-released-rulings",
   "started_at": "2026-11-11T16:58:13.945Z",
   "pid": 1441999,
-  "host": "lima-hp",
+  "host": "e2e-box",
   "started": "linux-proc-stat:19096947",
   "owed_until_closed": true,
   "reopened_at": 1794416294397,

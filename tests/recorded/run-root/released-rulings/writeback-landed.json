@@ -5,7 +5,7 @@
     "onepipeline.concurrency": 4,
     "onepipeline.driver": {
       "run": "released-rulings",
-      "host": "lima-hp",
+      "host": "e2e-box",
       "session": "session-released-rulings",
       "pid": 1441999,
       "claimed_at": "2026-11-11T16:58:13.960Z",
