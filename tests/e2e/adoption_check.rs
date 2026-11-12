@@ -133,7 +133,6 @@ fn line(node: &str, field: &str, rule: &str, reason: &str) -> String {
     format!("onevcs: node '{node}': `{field}`: dependency 'engine': {rule}: {reason}")
 }
 
-/// The run directories that exist.
 fn runs(world: &World) -> Vec<String> {
     let root = world.run_file("", "");
     let mut found: Vec<String> = std::fs::read_dir(&root)
@@ -333,17 +332,19 @@ fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
 /// A producer registered nowhere is one such: `plan check` accepts its plan with the
 /// notice. (`start` refuses that plan before this check matters, as it always has,
 /// because the session-holder interlock cannot read an unregistered repository.) A
-/// registered producer whose own `release-targets.toml` does not read is another, and
-/// that plan launches with the notice.
+/// registered producer whose own `release-targets.toml` does not read is another: that
+/// plan launches with the notice, a live edit adding another such consumer is applied
+/// with it, and adopting the run raises no surface and drives it on.
 #[test]
 fn an_adoption_onevcs_cannot_answer_is_a_notice_and_the_plan_launches() {
     let (world, _, engine_repo) = world("adoption-check-unanswered", true);
-    let notice = |dependency: &str| {
+    let notice_of = |node: &str, dependency: &str| {
         format!(
-            "onepipeline: node 'consumer': dependency '{dependency}': onevcs could not say \
+            "onepipeline: node '{node}': dependency '{dependency}': onevcs could not say \
              whether this release adoption can complete, so it was not checked: the producer"
         )
     };
+    let notice = |dependency: &str| notice_of("consumer", dependency);
 
     let mut producer = lifecycle("elsewhere", &[]);
     producer["repo"] = json!("https://github.com/owner/unregistered.git");
@@ -383,13 +384,59 @@ fn an_adoption_onevcs_cannot_answer_is_a_notice_and_the_plan_launches() {
         .exited(0)
         .err_has(&notice("engine"))
         .out_lacks("onevcs:");
+    let run = "unreadable";
+    world.script("engine.wait", "hold");
     world
         .run(&["start", &project, "--detach"])
         .exited(0)
         .err_has(&notice("engine"));
     world.until(
         "the run whose adoption went unchecked to dispatch",
-        |world| !world.events_of("unreadable", "node-dispatched").is_empty(),
+        |world| !world.events_of(run, "node-dispatched").is_empty(),
+    );
+
+    // The driver judges a live edit, so its notice is in the driver's log.
+    let committed = |world: &World| world.events_of(run, "edit-committed").len();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "add",
+                "node": consumer("added", json!({"consumes": {"engine": "wheel"}}))}]})
+            .to_string(),
+        )
+        .exited(0)
+        .err_lacks("onevcs:");
+    world.until("the unchecked add to commit", |world| committed(world) == 1);
+    world.until_run_file_holds(run, "driver.log", &notice_of("added", "engine"));
+
+    // Adopting asks of every unsettled node: `consumer`, whose notice so far went only to
+    // `start`'s stderr, is now noticed too.
+    end_driver(&world, run);
+    let adopted = world.run(&["adopt", run, "--detach"]);
+    adopted.exited(0);
+    let adopt_notice = notice("engine");
+    world.until(
+        "the adopted run to notice its unchecked consumer",
+        |world| {
+            adopted.stderr.contains(&adopt_notice)
+                || std::fs::read_to_string(world.run_file(run, "driver.log"))
+                    .is_ok_and(|log| log.contains(&adopt_notice))
+        },
+    );
+    world.until("the adopted run to re-dispatch its producer", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter(|event| event["labels"]["node"] == "engine")
+            .count()
+            >= 2
+    });
+    assert!(
+        world
+            .events_of(run, "planner-surface-queued")
+            .iter()
+            .all(|event| event["payload"]["kind"] != "adoption-never-completes"),
+        "an adoption onevcs could not answer was surfaced as one that can never complete"
     );
 }
 
@@ -483,8 +530,6 @@ fn every_live_edit_onevcs_says_can_never_complete_is_refused_whole_and_applied_r
         let before = committed(&world);
         let status = world.run(&["status", run, "--json"]).json();
         reply(refused.clone()).exited(REFUSED).err_has(&said);
-        // Nothing of the refused reply was applied: no edit committed, and every node
-        // reads exactly as it did.
         assert_eq!(committed(&world), before, "a refused {refused} committed");
         assert_eq!(
             world.run(&["status", run, "--json"]).json()["nodes"],

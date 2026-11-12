@@ -37,7 +37,6 @@ pub(crate) struct Refused {
     pub(crate) node: String,
     /// The dependency it waits on the release of.
     pub(crate) dependency: String,
-    /// onevcs's rule.
     pub(crate) rule: AdoptionRule,
     /// onevcs's reason, verbatim.
     pub(crate) reason: String,
@@ -92,7 +91,8 @@ impl Unanswered {
     }
 }
 
-/// Everything one ask found.
+/// What one ask found, its refusals kept apart from its unanswered questions because
+/// only a refusal refuses anything.
 #[derive(Debug, Default)]
 pub(crate) struct Asked {
     pub(crate) refused: Vec<Refused>,
@@ -100,7 +100,8 @@ pub(crate) struct Asked {
 }
 
 impl Asked {
-    /// Say every unanswered adoption on stderr.
+    /// One notice per unanswered adoption, on stderr: stdout is `plan check --json`'s
+    /// single object, which a consumer parses without asking which case it met.
     pub(crate) fn report_unanswered(&self) {
         for unanswered in &self.unanswered {
             eprintln!("{}", unanswered.notice());

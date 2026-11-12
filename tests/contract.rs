@@ -7980,7 +7980,8 @@ const RULINGS: &[(&str, &str)] = &[
     // The heads read heads a writers'-form line of an unparsed kind by its opening, even
     // where the complete reader refuses its middle.
     ("156.", "which is headed by its opening"),
-    // op-link-libraries: a release adoption onevcs says can never complete refuses the plan.
+    // The loader gains a third refusal source, carrying onevcs's verdict rather than a rule
+    // of the engine's own.
     (
         "158.",
         "Release adoptions onevcs says can never complete are refused at load",
