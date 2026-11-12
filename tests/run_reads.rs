@@ -884,6 +884,35 @@ fn every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_op
     heads_agree(&run, "a recorded run");
 }
 
+/// A journal large enough that the heads read cuts its bytes into a run for each of its
+/// workers (past 1 MiB) and builds its heads a run of 2,048 records at a time on them,
+/// so every stream is numbered in several runs, in a different order in each, and its
+/// numbers are joined across them: the read must still head every record as the
+/// complete read gives it, in the merged order, and fold the state `open` folds.
+#[test]
+fn a_journal_cut_into_runs_across_the_workers_is_headed_as_the_complete_reader_reads_it() {
+    // Under 6,000 records, so the settlements' late stamp keeps a two-digit minute.
+    let journal = run_journal(44, 2_000, 5_900);
+    assert!(
+        journal.len() > 1 << 20,
+        "the journal is cut into runs only past 1 MiB, and this one is {} bytes",
+        journal.len()
+    );
+    assert!(
+        journal.lines().count() > 2 * 2_048,
+        "heads are built in runs of 2,048 records, and this journal holds fewer than two"
+    );
+    // Every `ts` in the writers' form, so the merge orders the streams by the numbers
+    // the runs gave them rather than by their text.
+    for line in journal.lines() {
+        let record: Value = serde_json::from_str(line).expect("a record");
+        let ts = record["ts"].as_str().expect("a ts");
+        assert_eq!(ts.len(), "2026-11-06T10:00:00.000Z".len(), "{ts}");
+    }
+    let run = resulted("heads-cut-into-runs", &journal);
+    heads_agree(&run, "a journal cut into runs");
+}
+
 #[test]
 fn torn_glued_and_unreadable_lines_are_headed_as_the_complete_reader_reads_them() {
     for (what, journal) in torn_cases(&run_journal(51, 6, 300)) {
