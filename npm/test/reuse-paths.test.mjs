@@ -1021,3 +1021,215 @@ test("demonstration c writes the split and refreshes the lock for its new member
     /measure-archive\.mjs coverage/,
   );
 });
+
+test("each platform is weighed by its newest saved profile run, a run timing nothing weighs no module, and a rest tier with no records weighs whole", async () => {
+  const { weigh } = await import(pathToFileURL(script("observed.mjs")).href);
+  const golden = JSON.parse(
+    readFileSync(join(root, "tests", "golden", "test-profile-record-v2.json"), "utf8"),
+  );
+  const dir = join(scratch, "profiles");
+  const record = (run, job, i, binary, name, wall = golden.wall_s) =>
+    write(dir, {
+      [`${run}/${job}/${i}.json`]: JSON.stringify({
+        ...golden,
+        binary,
+        test: name,
+        ...(wall === 0 ? zeroed(golden) : {}),
+      }),
+    });
+  const zeroed = (g) => ({
+    wall_s: 0,
+    unattributed_s: 0,
+    categories: Object.fromEntries(
+      Object.entries(g.categories).map(([k, v]) => [
+        k,
+        Object.fromEntries(Object.keys(v).map((f) => [f, 0])),
+      ]),
+    ),
+  });
+  // Linux: an older run times alpha alone; the newer one alpha once and beta three times.
+  record("100", "test-linux", 0, "e2e", "alpha::one");
+  record("200", "test-linux", 0, "e2e", "alpha::one");
+  for (const i of [1, 2, 3]) record("200", "test-linux", i, "e2e", `beta::t${i}`);
+  // macOS: one run whose records time nothing.
+  record("200", "test-macos", 0, "e2e", "alpha::one", 0);
+  const rows = (job, task, minutes) => ({
+    jobs: [{ job, ran: [{ task, minutes, cause: "one input" }], replayed: [] }],
+  });
+  const weights = weigh(
+    [
+      rows("test-linux", "onepipeline-e2e:test", 8),
+      rows("test-linux", "onepipeline:test-rest", 4),
+      rows("test-macos", "onepipeline-e2e:test-quick", 6),
+      rows("test-macos", "onepipeline:test-quick", 3),
+    ],
+    dir,
+    new Set(["e2e"]),
+  );
+  assert.equal(weights.sources.linux.run, "200");
+  assert.equal(weights.modules.alpha.linux.minutes, 2);
+  assert.equal(weights.modules.beta.linux.minutes, 6);
+  assert.equal(weights.sources.darwin.testSeconds, 0);
+  assert.ok(!weights.modules.alpha.darwin, "a run timing nothing shares nothing out");
+  // Neither platform's records hold a rest-tier test, so each rest tier weighs whole.
+  assert.deepEqual(weights.modules["rest:onepipeline:test-rest"].linux, {
+    minutes: 4,
+    unsplit: true,
+  });
+});
+
+test("the report prices a typical pull request, charging a split's build delta on it", () => {
+  const spike = join(scratch, "typical-spike");
+  const platforms = (perSuite, delta, builds) =>
+    Object.fromEntries(
+      ["linux", "darwin", "win32"].map((p) => [
+        p,
+        {
+          minutesPerFullRun: 10,
+          suiteMinutesSkipped: 0,
+          archiveBuildsSkipped: 0,
+          buildDeltaCharged: delta * builds,
+          netMinutesSaved: 0,
+          netMinutesPerChange: 0,
+          perSuite,
+        },
+      ]),
+    );
+  const replay = (perChange, perSuite, delta = 0) => ({
+    summary: {
+      changes: perChange.length,
+      suites: Object.keys(perSuite).length,
+      skippedSuiteRuns: 1,
+      platforms: platforms(perSuite, delta, perChange.length),
+    },
+    suites: Object.fromEntries(Object.keys(perSuite).map((s) => [s, {}])),
+    perChange,
+  });
+  const changes = [
+    { commit: "#1", affected: ["e2e"] },
+    { commit: "#2", affected: ["e2e", "docs"] },
+  ];
+  write(spike, {
+    "observed.json": JSON.stringify({
+      prs: [
+        {
+          pr: 1,
+          title: "typical",
+          release: false,
+          changed: ["src/a.rs", "tests/e2e/a.rs"],
+          moved: [],
+          jobs: [],
+        },
+        { pr: 2, title: "docs", release: false, changed: ["docs/a.md"], moved: [], jobs: [] },
+      ],
+      weights: { tasks: {}, modules: {} },
+      totals: {
+        alone: { nonRelease: {}, release: {} },
+        several: { nonRelease: {}, release: {} },
+        unforced: { nonRelease: {}, release: {} },
+        replayed: { nonRelease: {}, release: {} },
+      },
+    }),
+    "today.json": JSON.stringify(replay(changes, { e2e: 30, docs: 2 })),
+    // (b) skips the typical pull request's docs suite (2 min) and charges 0.5 a build.
+    "b.json": JSON.stringify(replay(changes, { e2e: 30, docs: 2 }, 0.5)),
+    "d-install-documented.json": JSON.stringify(
+      Object.fromEntries(
+        ["linux", "darwin", "win32"].map((p) => [p, { runs: 2, replays: 1, minutesPerChange: 3 }]),
+      ),
+    ),
+  });
+  const evidence = join(scratch, "typical-evidence");
+  mkdirSync(evidence, { recursive: true });
+  const run = spawnSync(
+    process.execPath,
+    [
+      script("report-tables.mjs"),
+      "--spike",
+      spike,
+      "--evidence",
+      evidence,
+      "--out",
+      join(spike, "t.md"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const md = readFileSync(join(spike, "t.md"), "utf8");
+  // One typical pull request: today's keys skip its docs suite, 2 min a platform.
+  assert.match(
+    md,
+    /^\| today's tiers \(keys allow\) \| 1 of 4 \| 0\.0 \/ 0\.0 \/ 0\.0 \| 2\.0 \/ 2\.0 \/ 2\.0 \| - \|$/m,
+  );
+  // (b) the same, less its 0.5 build delta.
+  assert.match(
+    md,
+    /^\| \(b\) e2e split into suites \| 1 of 4 \| 0\.0 \/ 0\.0 \/ 0\.0 \| 1\.5 \/ 1\.5 \/ 1\.5 \| 0\.0 \/ 0\.0 \/ 0\.0 \|$/m,
+  );
+  assert.match(
+    md,
+    /^\| \(d2\) .* \| 1 \/ 1 \/ 1 of 2 runs \| 3\.0 \/ 3\.0 \/ 3\.0 \| as all 30 \| - \|$/m,
+  );
+});
+
+test("an artifact that is not a zip is refused rather than recorded as holding no record", () => {
+  const dir = join(scratch, "fetch-corrupt");
+  mkdirSync(dir, { recursive: true });
+  write(dir, {
+    "list.json": JSON.stringify({ artifacts: [artifact(40, "nx-cache-entries-test-linux", 1)] }),
+    "not-a-zip": "this is not a zip archive",
+    "log.txt": "a log\n",
+  });
+  const bin = ghDouble(dir, {
+    merged: [{ number: 4, title: "feat: four", mergedAt: at(1) }],
+    rollups: {
+      4: rollup("d".repeat(40), [suite(41, 0, "CI", [checkRun("test-linux", 4101, 0, 10)])]),
+    },
+    routes: {
+      "actions/runs/41/artifacts": join(dir, "list.json"),
+      "actions/jobs/4101/logs": join(dir, "log.txt"),
+      "actions/artifacts/40/zip": join(dir, "not-a-zip"),
+    },
+  });
+  const out = join(dir, "out");
+  const run = spawnSync(
+    process.execPath,
+    [script("fetch-evidence.mjs"), "--out", out, "--prs", "1"],
+    {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    },
+  );
+  assert.equal(run.status, 1);
+  assert.match(
+    run.stderr,
+    /job 4101's nx-cache-entries artifact did not unpack \(unzip exit \d+\)/,
+  );
+  assert.match(run.stderr, /^next: re-run; the artifact is downloaded again$/m);
+  assert.ok(!existsSync(join(out, "executions", "4101.json")));
+});
+
+test("a merge whose commit the clone lacks is refused with what to fetch, not read as a conflict", () => {
+  const repo = join(scratch, "ws");
+  const evidence = join(scratch, "missing-commit-evidence");
+  const head = "e".repeat(40);
+  write(evidence, {
+    "population.json": JSON.stringify({
+      window_from: at(0),
+      non_release: [{ number: 51, title: "feat", mergedAt: at(1) }],
+      release: [],
+    }),
+    "rollup/51.json": JSON.stringify(
+      rollup(head, [suite(510, 0, "CI", [checkRun("test-linux", 5101, 0, 10)])]),
+    ),
+    "logs/5101.log": `${at(0)} HEAD is now at 1234567 Merge ${head} into ${git(repo, ["rev-parse", "main"])}\n`,
+  });
+  const run = spawnSync(
+    process.execPath,
+    [replay, "--observed", evidence, "--clone", repo, "--out", join(scratch, "m.json")],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /git merge-tree \S+ e{40} failed in /);
+  assert.match(run.stderr, /^next: fetch the pull requests' heads into the clone/m);
+});

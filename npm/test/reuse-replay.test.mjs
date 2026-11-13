@@ -283,7 +283,17 @@ test("the cache inventory pages the listing read-only and counts entries by fami
   });
   write(dir, {
     "executions/1.json": JSON.stringify({
-      tasks: [{ task: "onepipeline-e2e:test", hash: "1234567890123007" }],
+      tasks: [
+        {
+          task: "onepipeline-e2e:test",
+          hash: "1234567890123007",
+          cacheable: true,
+          result: "executed",
+          remote_read: "miss",
+          started_at: "2026-11-01T00:00:00Z",
+          finished_at: "2026-11-01T00:01:00Z",
+        },
+      ],
     }),
   });
   const run = spawnSync(process.execPath, [cacheScript, "--evidence", dir], {
@@ -912,6 +922,8 @@ test("the reuse spike's one command replays today's tiers and every option over 
       join(out, "tables2.md"),
       "--clone",
       repo,
+      "--caching-change",
+      commits.src,
     ],
     { encoding: "utf8" },
   );
@@ -923,7 +935,26 @@ test("the reuse spike's one command replays today's tiers and every option over 
     withCache,
     /^1 task runs missed a key an earlier run in the evidence stored; 1 of them read it before its main-scope copy was created, and 0 are no longer in the listing\.$/m,
   );
+  // #11's base is the seed, which does not hold the commit standing for #1493.
   assert.match(withCache, /^\| #11 \| before #1493 \| /m);
+  // A clone that cannot answer, because it lacks the commit, is refused, not guessed.
+  const unanswered = spawnSync(
+    process.execPath,
+    [
+      join(root, "scripts", "crate-split", "report-tables.mjs"),
+      "--spike",
+      out,
+      "--evidence",
+      evidence,
+      "--out",
+      join(out, "tables3.md"),
+      "--clone",
+      repo,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(unanswered.status, 1);
+  assert.match(unanswered.stderr, /git cannot say whether #11's base holds #1493/);
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
   const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
   const proposed = JSON.parse(

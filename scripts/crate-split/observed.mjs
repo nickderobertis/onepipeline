@@ -17,7 +17,7 @@
 // not cacheable, a remote read that missed a key another run in the evidence stored
 // (evicted, or held where this run could not read it), a miss on a key no run in the
 // evidence stored (absent), or no remote read at all.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { globToRegExp } from "../crate-split-replay.mjs";
@@ -133,12 +133,19 @@ function git(clone, args, env = {}) {
 
 /** The merge commit of `head` into `base`, made in the clone, or null on a conflict. */
 export function mergeCommit(clone, base, head) {
-  let tree;
-  try {
-    tree = git(clone, ["merge-tree", "--write-tree", base, head]).split("\n")[0].trim();
-  } catch {
-    return null;
+  // merge-tree exits 1 on a conflict, and with another status when it cannot merge at all.
+  const merged = spawnSync("git", ["-C", clone, "merge-tree", "--write-tree", base, head], {
+    encoding: "utf8",
+  });
+  // It exits 1 too, printing no tree, when a commit is not there to merge.
+  if (merged.status === 1 && /^[0-9a-f]{40}$/m.test(merged.stdout)) return null;
+  if (merged.status !== 0) {
+    throw new Refusal(
+      `git merge-tree ${base} ${head} failed in ${clone}: ${String(merged.stderr).trim().split("\n")[0]}`,
+      "fetch the pull requests' heads into the clone (git -C CLONE fetch https://github.com/OWNER/NAME.git '+refs/pull/N/head:refs/spike/pr/N')",
+    );
   }
+  const tree = merged.stdout.split("\n")[0].trim();
   const fixed = {
     GIT_AUTHOR_NAME: "replay",
     GIT_AUTHOR_EMAIL: "replay@example.invalid",
@@ -485,12 +492,12 @@ export function observe(dir, clone, { nodeModules, restExcluded }) {
 
 // The platform a job's minutes weigh on; lint's tasks are none of the test platforms'.
 const PLATFORM_OF = { ...JOB_PLATFORM, lint: "lint" };
-const REST_TASK = {
+export const REST_TASK = {
   linux: "onepipeline:test-rest",
   darwin: "onepipeline:test-quick",
   win32: "onepipeline:test-quick",
 };
-const E2E_TASK = {
+export const E2E_TASK = {
   linux: "onepipeline-e2e:test",
   darwin: "onepipeline-e2e:test-quick",
   win32: "onepipeline-e2e:test-quick",
@@ -546,8 +553,15 @@ export function weigh(perPr, profilesDir, restExcluded = new Set()) {
   );
   const modules = {};
   const sources = {};
+  // Each job's newest saved run (run ids rise with time) is the one that weighs it.
+  const newest = new Map();
   for (const run of existsSync(profilesDir) ? readdirSync(profilesDir) : []) {
     for (const job of readdirSync(join(profilesDir, run))) {
+      if (!newest.has(job) || BigInt(run) > BigInt(newest.get(job))) newest.set(job, run);
+    }
+  }
+  for (const [job, run] of newest) {
+    {
       const platform = PLATFORM_OF[job];
       const e2e = tasks[E2E_TASK[platform]]?.[platform]?.minutes;
       if (!e2e) continue;
@@ -560,6 +574,11 @@ export function weigh(perPr, profilesDir, restExcluded = new Set()) {
         seconds.set(name, (seconds.get(name) ?? 0) + (record.wall_s ?? 0));
       }
       const total = [...seconds.values()].reduce((a, b) => a + b, 0);
+      // Records that time nothing cannot share the tier out; its modules weigh nothing.
+      if (total <= 0) {
+        sources[platform] = { run, job, records: records.length, testSeconds: 0, e2eMinutes: e2e };
+        continue;
+      }
       for (const [name, s] of seconds) {
         modules[name] ??= {};
         modules[name][platform] = { minutes: (e2e * s) / total, testSeconds: s };

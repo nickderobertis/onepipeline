@@ -2,14 +2,22 @@
 // repository owns elsewhere is held equal to that owner here, so the restatement fails
 // a test the day the owner changes rather than going quietly stale.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { MEASURE_WORKFLOW } from "../../scripts/crate-split/demo-commit.mjs";
-import { JOB_PLATFORM, NX_JOBS, restTierExclusions } from "../../scripts/crate-split/observed.mjs";
+import {
+  E2E_TASK,
+  JOB_PLATFORM,
+  NX_JOBS,
+  REST_TASK,
+  restTierExclusions,
+} from "../../scripts/crate-split/observed.mjs";
+import { executions } from "../../scripts/crate-split/validate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ci = parse(readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8"));
@@ -144,4 +152,135 @@ test("the rest tier's exclusions are read from the justfile's own filter", () =>
   }
   assert.ok(!excluded.has("onepipeline"));
   assert.throws(() => restTierExclusions("all()"), /names no binary/);
+});
+
+test("the tier tasks the weights name are the ones each platform's job runs", () => {
+  const script = readFileSync(join(root, "scripts", "ci-job.sh"), "utf8");
+  // Each arm of ci-job.sh's `case "$job" in`: its job labels and the targets they run.
+  const arms = [...script.matchAll(/^\s+([\w| -]+)\) targets="([^"]+)"/gm)].map((m) => ({
+    jobs: m[1].split("|").map((j) => j.trim()),
+    targets: m[2].split(","),
+  }));
+  const targets = (job) => arms.find((arm) => arm.jobs.includes(job)).targets;
+  const show = (project) =>
+    JSON.parse(
+      execFileSync("npx", ["nx", "show", "project", project, "--json"], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, NX_DAEMON: "false" },
+      }),
+    );
+  const jobOf = { linux: "test-linux", darwin: "test-macos", win32: "test-windows" };
+  for (const [platform, job] of Object.entries(jobOf)) {
+    for (const task of [E2E_TASK[platform], REST_TASK[platform]]) {
+      const [project, target] = task.split(":");
+      assert.ok(show(project).targets[target], `${task} is no Nx target`);
+      // The job runs the target, or a target of the crate that depends on it.
+      const runs =
+        targets(job).includes(target) ||
+        (show("onepipeline").targets.test.dependsOn ?? []).includes(target);
+      assert.ok(runs, `${job} runs no ${task}`);
+    }
+  }
+});
+
+test("option (d1)'s install proofs are keyed on every script install-proof.sh and the recipes it calls read", () => {
+  const mapping = JSON.parse(
+    readFileSync(join(root, "scripts", "crate-split", "option-d-install-proofs.json"), "utf8"),
+  );
+  const proof = readFileSync(join(root, "scripts", "install-proof.sh"), "utf8");
+  const scripts = new Set(proof.match(/scripts\/[\w./-]+\.(?:sh|mjs|py)/g));
+  for (const recipe of proof.matchAll(/\bjust ([\w-]+)/g)) {
+    if (recipe[1] === "lint") continue; // named in a message, not run
+    const body = execFileSync("just", ["--show", recipe[1]], { cwd: root, encoding: "utf8" });
+    for (const s of body.match(/scripts\/[\w./-]+\.(?:sh|mjs|py)/g) ?? []) scripts.add(s);
+  }
+  scripts.delete("scripts/ci-job.sh"); // named in a message, not run
+  for (const task of ["onepipeline:install-smoke", "onepipeline:wheel-smoke"]) {
+    const keyed = new Set([...mapping.suites[task].paths, ...mapping.shared]);
+    assert.ok(keyed.has("justfile"), `${task} is not keyed on the justfile whose recipes it runs`);
+    for (const s of scripts) {
+      // The wheel's build script is the wheel proof's own.
+      if (task === "onepipeline:install-smoke" && s === "scripts/build-linux-wheel.sh") continue;
+      if (task === "onepipeline:wheel-smoke" && s === "scripts/host-view-measure.mjs") continue;
+      assert.ok(keyed.has(s), `${task} is not keyed on ${s}`);
+    }
+  }
+});
+
+test("the executions reader reads what nx-remote-cache.mjs's report itself writes", () => {
+  const temp = mkdtempSync(join(tmpdir(), "reuse-executions-"));
+  const state = join(temp, "nx-cache-recording", "test-linux");
+  const at = (s) => new Date(Date.parse("2026-11-01T00:00:00Z") + s * 1000).toISOString();
+  mkdirSync(state, { recursive: true });
+  writeFileSync(
+    join(state, "started.jsonl"),
+    `${JSON.stringify({ id: "inv", argv: ["nx", "run-many"] })}\n`,
+  );
+  writeFileSync(
+    join(state, "invocations.jsonl"),
+    `${JSON.stringify({
+      id: "inv",
+      started_at: at(0),
+      finished_at: at(60),
+      tasks: [
+        {
+          task: "onepipeline-e2e:test",
+          hash: "123",
+          cacheable: true,
+          status: "success",
+          code: 0,
+          started_at: at(1),
+          finished_at: at(50),
+        },
+        {
+          task: "onepipeline:bootstrap",
+          hash: "456",
+          cacheable: false,
+          status: "success",
+          code: 0,
+          started_at: at(1),
+          finished_at: at(2),
+        },
+      ],
+    })}\n`,
+  );
+  const sha = "a".repeat(40);
+  writeFileSync(
+    join(temp, "event.json"),
+    JSON.stringify({ pull_request: { number: 9, head: { sha } } }),
+  );
+  const out = join(temp, "out");
+  const run = spawnSync(
+    process.execPath,
+    [join(root, "scripts", "nx-remote-cache.mjs"), "report", "--job", "test-linux", "--out", out],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        RUNNER_TEMP: temp,
+        GITHUB_JOB: "test-linux",
+        GITHUB_EVENT_PATH: join(temp, "event.json"),
+        GITHUB_REPOSITORY: "o/n",
+        GITHUB_REF: "refs/pull/9/merge",
+        GITHUB_RUN_ID: "77",
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_SHA: sha,
+        NX_BASE: "b".repeat(40),
+        NX_HEAD: sha,
+        GITHUB_STEP_SUMMARY: "",
+      },
+    },
+  );
+  assert.ok(existsSync(join(out, "executions.json")), run.stderr);
+  const doc = JSON.parse(readFileSync(join(out, "executions.json"), "utf8"));
+  assert.equal(executions(doc, "the producer's record"), doc);
+  assert.deepEqual(
+    doc.tasks.map((t) => [t.task, t.result, t.remote_read]),
+    [
+      ["onepipeline-e2e:test", "executed", "not_attempted"],
+      ["onepipeline:bootstrap", "executed", "not_attempted"],
+    ],
+  );
+  rmSync(temp, { recursive: true, force: true });
 });

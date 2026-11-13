@@ -30,7 +30,7 @@
 // Exit 0: everything is fetched; one line says how many reads it made. 2: a floor
 // stopped it; what is unread and the `next:` action are on stderr, and a re-run resumes.
 // 1: an argument, a read or an answer was refused, with its `next:` action on stderr.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { NX_JOBS } from "./observed.mjs";
@@ -251,6 +251,7 @@ function main(argv) {
         run.run,
       );
       for (const job of run.jobs.filter((j) => NX_JOBS.includes(j.name))) {
+        check.finishedJob(job, pr.number);
         const logPath = join(out, "logs", `${job.id}.log`);
         if (!existsSync(logPath)) {
           guard();
@@ -276,19 +277,33 @@ function main(argv) {
         guard();
         const zip = join(out, "executions", `${job.id}.zip`);
         write(zip, gh(["api", `repos/${options.repo}/actions/artifacts/${artifact.id}/zip`], true));
+        // unzip exits 11 when the archive holds no such file; anything else is a
+        // corrupt download or no unzip at all, which is refused rather than recorded.
+        const unzip = spawnSync("unzip", ["-p", zip, "executions.json"], { encoding: "utf8" });
         let body;
-        try {
-          body = execFileSync("unzip", ["-p", zip, "executions.json"], {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"],
-          });
+        if (unzip.error) {
+          throw new check.Refusal(
+            `unzip could not run: ${unzip.error.message}`,
+            "install unzip and re-run; what was fetched is kept",
+          );
+        } else if (unzip.status === 11) {
+          body = `${JSON.stringify({ absent: "no executions.json in the artifact" })}\n`;
+        } else if (unzip.status !== 0) {
+          rmSync(zip);
+          throw new check.Refusal(
+            `job ${job.id}'s nx-cache-entries artifact did not unpack (unzip exit ${unzip.status}): ${String(unzip.stderr).trim().split("\n")[0]}`,
+            "re-run; the artifact is downloaded again",
+          );
+        } else {
+          body = unzip.stdout;
           check.executions(
-            json(body, `job ${job.id}'s executions.json`, "remove the zip and re-run"),
+            json(
+              body,
+              `job ${job.id}'s executions.json`,
+              "re-run; the artifact is downloaded again",
+            ),
             `job ${job.id}'s executions.json`,
           );
-        } catch (error) {
-          if (error instanceof check.Refusal) throw error;
-          body = `${JSON.stringify({ absent: "no executions.json in the artifact" })}\n`;
         }
         rmSync(zip);
         write(execPath, body);

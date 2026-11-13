@@ -4,7 +4,8 @@
 //   node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --out FILE [--clone DIR]
 //
 // With --clone, a pull request is "before #1493" when its run's base does not hold
-// #1493's merge (the change that made the Linux tiers cacheable); without it, none is.
+// #1493's merge (the change that made the Linux tiers cacheable; --caching-change names
+// another commit to stand for it); without it, none is.
 //
 // Writes Markdown to FILE: the population with each pull request's CI run and changed-file
 // class; each platform job's Nx tasks replayed and run, the ran ones grouped by the key
@@ -16,13 +17,14 @@
 //
 // Exit 0: FILE is written; one line names it and its sections. 1: an argument or a file
 // was refused, with a `next:` action on stderr.
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { JOB_PLATFORM, NX_JOBS } from "./observed.mjs";
 import * as check from "./validate.mjs";
 
 const USAGE =
-  "node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --out FILE [--clone DIR]";
+  "node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --out FILE [--clone DIR [--caching-change REF]]";
 
 function readJson(path, next) {
   try {
@@ -32,8 +34,9 @@ function readJson(path, next) {
   }
 }
 
-const PLATFORM = { "test-linux": "linux", "test-macos": "darwin", "test-windows": "win32" };
-const JOBS = ["lint", "test-linux", "test-macos", "test-windows"];
+// The harness's one table of CI's Nx jobs and their platforms.
+const PLATFORM = Object.fromEntries(Object.entries(JOB_PLATFORM).filter(([job]) => job !== "lint"));
+const JOBS = NX_JOBS;
 // #1493's squash merge, "ci: cache each test tier's coverage run": a run whose base
 // holds it ran the Linux tiers cacheable; one whose base does not, uncacheable.
 const CACHING_CHANGE = "9f7e895194c30b5c1177150f00908465e0e2a746";
@@ -69,20 +72,51 @@ function load(spike, name) {
   const path = join(spike, `${name}.json`);
   const doc = readJson(path, "run scripts/crate-split/reuse-spike.mjs into --spike first");
   if (name === "observed") return check.observedResult(doc, path);
+  const platforms = ["linux", "darwin", "win32"];
+  const again = "run scripts/crate-split/reuse-spike.mjs into --spike again";
   if (name === "d-install-documented") {
     check.need(
-      ["linux", "darwin", "win32"].every(
-        (p) => Number.isSafeInteger(doc?.[p]?.runs) && Number.isSafeInteger(doc[p].replays),
-      ),
+      platforms.every((p) => {
+        const d = doc?.[p];
+        return (
+          Number.isSafeInteger(d?.runs) &&
+          Number.isSafeInteger(d.replays) &&
+          d.replays >= 0 &&
+          d.replays <= d.runs &&
+          (d.minutesPerChange === null ||
+            (Number.isFinite(d.minutesPerChange) && d.minutesPerChange >= 0))
+        );
+      }),
       `${path} is not a same-base replay's JSON`,
-      "run scripts/crate-split/reuse-spike.mjs into --spike again",
+      again,
     );
     return doc;
   }
+  const finite = (v) => Number.isFinite(v);
   check.need(
-    doc?.summary?.platforms && Array.isArray(doc.perChange) && doc.suites,
+    doc?.summary &&
+      platforms.every((p) => {
+        const x = doc.summary.platforms?.[p];
+        return (
+          x &&
+          [
+            "minutesPerFullRun",
+            "suiteMinutesSkipped",
+            "buildDeltaCharged",
+            "netMinutesSaved",
+          ].every((k) => finite(x[k])) &&
+          Number.isSafeInteger(x.archiveBuildsSkipped) &&
+          (x.netMinutesPerChange === null || finite(x.netMinutesPerChange)) &&
+          Object.values(x.perSuite ?? {}).every(finite)
+        );
+      }) &&
+      Array.isArray(doc.perChange) &&
+      doc.perChange.every((c) => typeof c.commit === "string" && Array.isArray(c.affected)) &&
+      doc.suites &&
+      typeof doc.suites === "object" &&
+      Number.isSafeInteger(doc.summary.changes),
     `${path} is not a weighed replay's JSON`,
-    "run scripts/crate-split/reuse-spike.mjs into --spike again",
+    again,
   );
   return doc;
 }
@@ -356,16 +390,21 @@ function caches(evidence, observed) {
     join(dir, "inventory.json"),
     "run scripts/crate-split/cache-inventory.mjs --evidence DIR again",
   );
+  const count = (v) => Number.isSafeInteger(v) && v >= 0;
   check.need(
-    Number.isSafeInteger(inv?.entries) &&
+    count(inv?.entries) &&
       Number.isFinite(inv.bytes) &&
+      inv.bytes >= 0 &&
       inv.families &&
       Object.values(inv.families).every(
         (t) =>
-          Number.isSafeInteger(t.entries) &&
+          count(t.entries) &&
           Number.isFinite(t.bytes) &&
+          t.bytes >= 0 &&
           typeof t.oldest === "string" &&
-          t.targets,
+          typeof t.newest === "string" &&
+          t.targets &&
+          Object.values(t.targets).every((x) => count(x.entries) && Number.isFinite(x.bytes)),
       ),
     `${join(dir, "inventory.json")} is not a cache inventory`,
     "run scripts/crate-split/cache-inventory.mjs --evidence DIR again",
@@ -449,25 +488,35 @@ function caches(evidence, observed) {
 }
 
 function main(argv) {
-  const options_ = check.parseOptions(argv, ["spike", "evidence", "out", "clone"], {
-    usage: USAGE,
-  });
+  const options_ = check.parseOptions(
+    argv,
+    ["spike", "evidence", "out", "clone", "caching-change"],
+    {
+      usage: USAGE,
+    },
+  );
+  const caching = options_["caching-change"] ?? CACHING_CHANGE;
   for (const k of ["spike", "evidence", "out"])
     check.need(options_[k], `--${k} is required`, USAGE);
   const observed = load(options_.spike, "observed");
   if (options_.clone) {
     afterCaching = (pr) => {
       if (!pr.base) return false;
-      try {
-        execFileSync(
-          "git",
-          ["-C", options_.clone, "merge-base", "--is-ancestor", CACHING_CHANGE, pr.base],
-          { stdio: "ignore" },
-        );
-        return true;
-      } catch {
-        return false;
-      }
+      // --is-ancestor exits 0 for yes and 1 for no; anything else is no answer.
+      const asked = spawnSync(
+        "git",
+        ["-C", options_.clone, "merge-base", "--is-ancestor", caching, pr.base],
+        { encoding: "utf8" },
+      );
+      if (asked.status === 0 || asked.status === 1) return asked.status === 0;
+      throw new check.Refusal(
+        `git cannot say whether #${pr.pr}'s base holds #1493: ${
+          String(asked.stderr ?? asked.error?.message)
+            .trim()
+            .split("\n")[0]
+        }`,
+        "give --clone a clone holding main's history and the pull requests' bases",
+      );
     };
   }
   const a = agreement(options_.spike, observed);
