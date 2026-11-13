@@ -1,6 +1,7 @@
 // The reuse spike's trust boundary: every argument its commands take and every document
 // they read (GitHub's answers, the evidence they saved, each other's results) is checked
 // here before anything is computed from it, and refused with what to do next.
+import { createRequire } from "node:module";
 import { Refusal } from "../test-profile-report.mjs";
 
 /**
@@ -292,7 +293,8 @@ export function plan(doc, where) {
         Array.isArray(p.plan) &&
         p.plan.every(isText) &&
         typeof p.config === "string" &&
-        (p.inputs === null || (Array.isArray(p.inputs) && p.inputs.every(namedInput))) &&
+        (p.inputs === null ||
+          (Array.isArray(p.inputs) && p.inputs.every((input) => satisfies(NX_INPUT, input)))) &&
         (p.cache === null || typeof p.cache === "boolean") &&
         (p.command === null || p.command === undefined || typeof p.command === "string") &&
         typeof p.root === "string",
@@ -311,33 +313,43 @@ export function plan(doc, where) {
 }
 
 /**
- * One Nx input: a glob or named input's name, or an object of the kinds Nx reads
- * (`runtime`, `env`, `externalDependencies`, `fileset`, `input`, `dependentTasksOutputFiles`).
+ * The input schema of the Nx this repository installs: `nx.json`'s `namedInputs` are
+ * held to Nx's own definition of an input, so a kind Nx adds or drops moves this
+ * check with the lock, and no list of kinds is kept here.
  */
-function namedInput(input) {
-  if (isText(input)) return true;
-  if (!isObject(input) || Object.keys(input).length === 0) return false;
-  const strings = (v) => Array.isArray(v) && v.every(isText);
-  // Each kind Nx reads, with the value it takes.
-  const kinds = {
-    runtime: isText,
-    env: isText,
-    fileset: isText,
-    input: isText,
-    externalDependencies: strings,
-    projects: (v) => isText(v) || strings(v),
-    dependentTasksOutputFiles: isText,
-    dependencies: (v) => typeof v === "boolean",
-    transitive: (v) => typeof v === "boolean",
-  };
-  return Object.entries(input).every(([k, v]) => Object.hasOwn(kinds, k) && kinds[k](v));
+const NX_INPUT = createRequire(import.meta.url)("nx/schemas/nx-schema.json").definitions.inputs
+  .items;
+
+/** Whether `value` satisfies `schema`: the JSON Schema keywords Nx's input schema uses. */
+function satisfies(schema, value) {
+  const type = { string: isText, boolean: (v) => typeof v === "boolean", object: isObject };
+  if (schema.type === "array") {
+    if (!Array.isArray(value)) return false;
+    if (schema.items && !value.every((v) => satisfies(schema.items, v))) return false;
+  } else if (schema.type) {
+    if (!type[schema.type]?.(value)) return false;
+  }
+  if (schema.required?.some((k) => !Object.hasOwn(value, k))) return false;
+  if (schema.properties) {
+    for (const [k, v] of Object.entries(value)) {
+      if (Object.hasOwn(schema.properties, k)) {
+        if (!satisfies(schema.properties[k], v)) return false;
+      } else if (schema.additionalProperties === false) return false;
+    }
+  }
+  if (schema.oneOf && schema.oneOf.filter((s) => satisfies(s, value)).length !== 1) return false;
+  if (schema.anyOf && !schema.anyOf.some((s) => satisfies(s, value))) return false;
+  if (schema.not && satisfies(schema.not, value)) return false;
+  return true;
 }
 
 /** `nx.json`'s namedInputs: names to lists of inputs. */
 export function namedInputs(doc, where) {
   need(
     isObject(doc) &&
-      Object.values(doc).every((list) => Array.isArray(list) && list.every(namedInput)),
+      Object.values(doc).every(
+        (list) => Array.isArray(list) && list.every((input) => satisfies(NX_INPUT, input)),
+      ),
     `${where}'s namedInputs is not an object of input lists`,
     "replay a commit whose nx.json Nx itself reads",
   );

@@ -24,6 +24,7 @@ import {
   jobsListing,
   mergedList,
   NX_CACHE_KEY,
+  namedInputs,
   rateLimit,
   rollup,
 } from "../../scripts/crate-split/validate.mjs";
@@ -315,4 +316,47 @@ test("the GitHub response checks pass GitHub's own answers, as this harness capt
   assert.equal(artifacts(fixture("artifacts-43308636421.json"), 43308636421).length, 3);
   assert.equal(cachePage(fixture("caches-page.json"), 1).length, 3);
   assert.equal(jobsListing(fixture("jobs-43403322259.json"), 43403322259).length, 1);
+});
+
+test("a named input is held to the installed Nx's own input schema, every kind it defines and nothing else", () => {
+  const schema = JSON.parse(
+    readFileSync(join(root, "node_modules", "nx", "schemas", "nx-schema.json"), "utf8"),
+  );
+  // One example of every object kind the installed Nx defines, built from its own
+  // schema: each property its schema requires, with a value of the type it declares.
+  const sample = (type) =>
+    ({ string: "{projectRoot}/x", boolean: true, array: ["x"] })[type] ?? "{projectRoot}/x";
+  const kinds = schema.definitions.inputs.items.oneOf.filter((v) => v.type === "object");
+  assert.ok(kinds.length >= 7, "the installed Nx defines its input kinds");
+  for (const kind of kinds) {
+    const first = Object.keys(kind.properties).find(
+      (k) => kind.required?.includes(k) || !kind.required,
+    );
+    const required = kind.required ?? (kind.oneOf ? ["input"] : [first]);
+    const input = Object.fromEntries(
+      required.map((k) => [k, sample(kind.properties[k].type ?? "string")]),
+    );
+    assert.doesNotThrow(
+      () => namedInputs({ n: [input] }, "nx.json"),
+      `Nx's ${JSON.stringify(input)} input`,
+    );
+  }
+  // A kind Nx 23 added after the hand-kept list this replaced: a JSON file's fields.
+  namedInputs({ n: [{ json: "{projectRoot}/package.json", fields: ["version"] }] }, "nx.json");
+  namedInputs({ n: ["{projectRoot}/**/*", { input: "rustBuild", projects: ["a", "b"] }] }, "x");
+  for (const bad of [
+    { runtme: "node -v" },
+    { runtime: 7 },
+    { fileset: "x", input: "y" },
+    { dependentTasksOutputFiles: "x", dependencies: true },
+    { input: "x", projects: "a", dependencies: true },
+    {},
+    7,
+  ]) {
+    assert.throws(
+      () => namedInputs({ n: [bad] }, "nx.json"),
+      /namedInputs is not an object of input lists/,
+      JSON.stringify(bad),
+    );
+  }
 });
