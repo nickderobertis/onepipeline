@@ -440,7 +440,18 @@ fn published_under_the_rules_default(
     ]));
     assert_eq!(registered, 0, "onevcs refused to register the checkout");
 
-    let host = MemoryHost::seeded(HostState::default());
+    // One required check that passed on the change request this host opens first, so
+    // the host's own merge has something vouching for it: a `change-auto` change with
+    // no required check is never green, and the watch would hold it queued until the
+    // checks bound elapsed rather than settling.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(
+            onevcs::ChangeId("1".to_owned()),
+            vec![check("lint", "success", "ready")],
+        )]
+        .into(),
+        ..HostState::default()
+    });
     let providers = Providers {
         vcs: &onevcs::Git,
         hosting: &host,
