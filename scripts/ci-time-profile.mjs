@@ -47,7 +47,8 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CATEGORIES, recordProblem } from "./test-profile-report.mjs";
 
 class Refusal extends Error {
@@ -68,6 +69,10 @@ const check = (ok, what) => {
     );
 };
 const finite = (...values) => values.every((v) => Number.isFinite(v));
+// What the measurement could not read and went on without, each with what to do about it:
+// reported in the report and counted on the printed line, never dropped silently.
+const NOTES = [];
+const note = (what, next) => NOTES.push(`${what} (next: ${next})`);
 
 const FLAGS = {
   job: ["run", "job", "out", "repo", "cache", "json", "min-remaining"],
@@ -312,12 +317,14 @@ function nextestRuns(lines) {
       runs.push({ ...o, end: t, s: Number(done[1]) });
     }
     const test =
-      /^\s*(PASS|FAIL|FLAKY|TIMEOUT|LEAK|SIGKILL|SIGSEGV)\s*\[\s*([\d.]+)s\]\s*(?:\(\s*\d+\/\d+\))?\s+([\w-]+)::([\w-]+)\s/.exec(
+      /^\s*(PASS|FAIL|FLAKY|TIMEOUT|LEAK|SIGKILL|SIGSEGV)\s*\[\s*([\d.]+)s\]\s*(?:\(\s*\d+\/\d+\))?\s+([\w-]+)(?:::([\w-]+))?\s/.exec(
         text,
       );
     if (test) {
-      binaries[test[4]] ??= { tests: 0, s: 0 };
-      const b = binaries[test[4]];
+      // `<crate>::<binary> <test>` for an integration binary, `<crate> <test>` for its lib.
+      const binary = test[4] ?? test[3];
+      binaries[binary] ??= { tests: 0, s: 0 };
+      const b = binaries[binary];
       b.tests++;
       b.s += Number(test[2]);
     }
@@ -351,12 +358,12 @@ function sampleLine(line) {
   if (parts[1] === "cpu") {
     // /proc/stat's first line: user nice system idle iowait ...
     const v = parts.slice(2).map(Number);
-    if (v.length < 4 || !finite(...v)) return null;
+    if (v.length < 4 || !finite(...v) || v.some((x) => x < 0)) return null;
     cpu = { idle: v[3] + (v[4] || 0), total: v.reduce((a, b) => a + b, 0) };
   } else {
     // iostat: us sy id
     const [us, sy, id] = parts.slice(1, 4).map(Number);
-    if (!finite(us, sy, id)) return null;
+    if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0 || x > 100)) return null;
     cpu = { busy: (us + sy) / 100 };
   }
   return { t, rx, tx, cpu, load: load.trim() };
@@ -451,8 +458,9 @@ function readMeasure(dir) {
       const [label, start, end, status] = line.trim().split(/\s+/);
       const ok =
         ["instrumented", "plain-build", "plain"].includes(label) &&
-        finite(Number(start), Number(end), Number(status)) &&
-        Number(end) >= Number(start);
+        finite(Number(start), Number(end)) &&
+        Number(end) >= Number(start) &&
+        /^\d+$/.test(status ?? "");
       return ok ? { label, s: Number(end) - Number(start), status: Number(status) } : null;
     }))
       out.overhead.runs[run.label] = { s: run.s, status: run.status };
@@ -498,9 +506,13 @@ function workspaceNames(rustc) {
       for (const p of Array.isArray(meta?.packages) ? meta.packages : [])
         for (const t of Array.isArray(p?.targets) ? p.targets : [])
           if (typeof t?.name === "string") workspaceCrates.add(t.name.replace(/-/g, "_"));
-    } catch {
-      // No cargo, or a checkout cargo cannot read offline: the instrumented crates alone name
-      // the workspace, and a crate only ever built plain counts as a dependency.
+    } catch (error) {
+      // The instrumented crates alone then name the workspace, and a crate only ever built
+      // plain counts as a dependency.
+      note(
+        `cargo metadata could not list the workspace's crates (${String(error.message).split("\n")[0]}), so "of which dependencies" counts every crate never built instrumented`,
+        "run from a checkout of the repository with cargo on PATH",
+      );
     }
   }
   const names = new Set(workspaceCrates);
@@ -513,12 +525,20 @@ function readRecords(files) {
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
     let record;
+    let problem;
     try {
       record = JSON.parse(readFileSync(file, "utf8"));
-    } catch {
+      problem = recordProblem(record);
+    } catch (error) {
+      problem = `it is not JSON (${error.message})`;
+    }
+    if (problem) {
+      note(
+        `the test record ${file} was left out: ${problem}`,
+        "that test's time counts as its task's; the recorder wrote it, so re-download the artifact (delete its directory under --cache) and check the recorder's schema",
+      );
       continue;
     }
-    if (recordProblem(record)) continue;
     records.push(record);
   }
   // A CI artifact holds one record file per test, and each tier is a nextest run of its own,
@@ -577,6 +597,18 @@ function sidecarFile(dir, name, valid) {
   return doc;
 }
 
+/**
+ * The artifacts a test job uploads that this reads: ci.yml's `test-profile-<job>` and
+ * `nx-cache-entries-<job>`, and `scripts/ci-time-workflow.mjs`'s `measure-<job>`.
+ */
+export function artifactNames(job) {
+  return {
+    records: `test-profile-${job}`,
+    sidecar: `nx-cache-entries-${job}`,
+    measure: `measure-${job}`,
+  };
+}
+
 function analyzeJob(opts) {
   const gh = new Gh(opts.cache, opts["min-remaining"]);
   const { repo } = opts;
@@ -603,8 +635,14 @@ function analyzeJob(opts) {
     Number.isInteger(job.id) &&
       !Number.isNaN(ms(job.started_at)) &&
       !Number.isNaN(ms(job.completed_at)) &&
+      ms(job.completed_at) >= ms(job.started_at) &&
       Array.isArray(job.steps) &&
-      job.steps.every((st) => typeof st?.name === "string"),
+      job.steps.every(
+        (st) =>
+          typeof st?.name === "string" &&
+          !Number.isNaN(ms(st.started_at)) &&
+          ms(st.completed_at) >= ms(st.started_at),
+      ),
     `job ${opts.job} of run ${opts.run}`,
   );
   const lines = parseLog(gh.fetch(`repos/${repo}/actions/jobs/${job.id}/logs`));
@@ -622,9 +660,10 @@ function analyzeJob(opts) {
     const a = artifacts.find((x) => x.name === name && !x.expired);
     return a ? unzipArtifact(gh, repo, a, join(dir, name)) : null;
   };
-  const profileDir = get(`test-profile-${opts.job}`);
-  const nxDir = get(`nx-cache-entries-${opts.job}`);
-  const measureDir = get(`measure-${opts.job}`);
+  const names = artifactNames(opts.job);
+  const profileDir = get(names.records);
+  const nxDir = get(names.sidecar);
+  const measureDir = get(names.measure);
   const executions = sidecarFile(nxDir, "executions.json", (doc) => {
     const tasksOk =
       Array.isArray(doc.tasks) &&
@@ -642,12 +681,21 @@ function analyzeJob(opts) {
             typeof a?.status === "string" &&
             (a.http_status === null || Number.isInteger(a.http_status)),
         ));
-    return tasksOk && attemptsOk;
+    const cancelledOk =
+      doc.cancelled_invocations === undefined ||
+      (Array.isArray(doc.cancelled_invocations) &&
+        doc.cancelled_invocations.every((c) => typeof c?.id === "string"));
+    // This job's own report, not another job's or run's: a sidecar document names both.
+    const identityOk =
+      [1, 2].includes(doc.schema) && doc.job === opts.job && doc.run_id === Number(opts.run);
+    return identityOk && tasksOk && attemptsOk && cancelledOk;
   });
   const manifest = sidecarFile(
     nxDir,
     "manifest.json",
     (doc) =>
+      doc.schema === 1 &&
+      doc.job === opts.job &&
       Array.isArray(doc.entries) &&
       doc.entries.every((e) => ["stored", "replayed"].includes(e?.source)) &&
       Number.isInteger(doc.stored_bytes) &&
@@ -1351,6 +1399,7 @@ function printJob(r) {
         )}; tests in both ${o.tests_in_both}; test-seconds instrumented ${o.instrumented_test_seconds.toFixed(0)}, plain ${o.plain_test_seconds.toFixed(0)}, ratio ${o.ratio?.toFixed(3) ?? "-"}`,
     );
   }
+  if (NOTES.length) out.push("", "## Notes", "", ...NOTES.map((n) => `- ${n}`));
   out.push(
     "",
     `GitHub requests this invocation: ${r.requests} (rate checks, which the allowance does not count: ${r.rate_checks}; read from cache: ${r.cached_reads})`,
@@ -1372,6 +1421,18 @@ function history(opts) {
     const r = gh.json(
       `repos/${opts.repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=${page}&created=${since.slice(0, 19)}..${until.slice(0, 19)}`,
     );
+    check(
+      Array.isArray(r?.workflow_runs) &&
+        r.workflow_runs.every(
+          (run) =>
+            Number.isInteger(run?.id) &&
+            Number.isInteger(run.run_attempt) &&
+            !Number.isNaN(ms(run.created_at)) &&
+            /^[0-9a-f]{40}$/.test(run.head_sha ?? "") &&
+            (run.conclusion === null || typeof run.conclusion === "string"),
+        ),
+      `ci.yml's run listing, page ${page}`,
+    );
     runs.push(...r.workflow_runs);
     if (r.workflow_runs.length < 100) break;
   }
@@ -1382,6 +1443,15 @@ function history(opts) {
     if (run.conclusion === "cancelled" || run.conclusion === "skipped") continue;
     const jobs = gh.json(
       `repos/${opts.repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+    );
+    check(
+      Array.isArray(jobs?.jobs) &&
+        jobs.jobs.every(
+          (j) =>
+            typeof j?.name === "string" &&
+            (j.conclusion !== "success" || ms(j.completed_at) >= ms(j.started_at)),
+        ),
+      `run ${run.id}'s jobs`,
     );
     for (const j of jobs.jobs) {
       if (!opts.jobs.includes(j.name) || j.conclusion !== "success") continue;
@@ -1401,19 +1471,21 @@ function history(opts) {
   // (no API request) and diffed against its merge base with --base-ref.
   const baseRef = opts["base-ref"] ?? "origin/main";
   const classes = new Map();
-  const git = (...a) => execFileSync("git", a, { encoding: "utf8" }).trim();
+  // Quiet: a missing commit is fetched, and git's own complaint about it is not the answer.
+  const git = (...a) =>
+    execFileSync("git", a, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const why = (error) =>
+    String(error.stderr || error.message)
+      .trim()
+      .split("\n")[0];
   for (const sha of new Set(rows.map((r) => r.head_sha))) {
-    let cls = "unknown (head not in the clone)";
+    let cls;
     try {
-      git("cat-file", "-e", `${sha}^{commit}`);
-    } catch {
       try {
-        execFileSync("git", ["fetch", "-q", "origin", sha], { stdio: "ignore" });
+        git("cat-file", "-e", `${sha}^{commit}`);
       } catch {
-        /* left unknown */
+        git("fetch", "-q", "origin", sha);
       }
-    }
-    try {
       const files = git("diff", "--name-only", git("merge-base", sha, baseRef), sha)
         .split("\n")
         .filter(Boolean);
@@ -1425,8 +1497,12 @@ function history(opts) {
             : files.some((f) => /^(Cargo\.(toml|lock)|crates\/)/.test(f))
               ? "edits crates/ or Cargo files, not src/"
               : "other";
-    } catch {
-      /* left unknown */
+    } catch (error) {
+      cls = "unknown";
+      note(
+        `head ${sha} could not be classed: ${why(error)}`,
+        `run from a clone of ${opts.repo} that can fetch it, with ${baseRef} fetched`,
+      );
     }
     classes.set(sha, cls);
   }
@@ -1440,10 +1516,28 @@ function history(opts) {
       if (!listed.has(r.run))
         listed.set(
           r.run,
-          gh.json(`repos/${opts.repo}/actions/runs/${r.run}/artifacts?per_page=100`).artifacts,
+          gh.json(`repos/${opts.repo}/actions/runs/${r.run}/artifacts?per_page=100`)?.artifacts,
         );
+      check(
+        Array.isArray(listed.get(r.run)) &&
+          listed
+            .get(r.run)
+            .every(
+              (x) =>
+                Number.isInteger(x?.id) &&
+                typeof x.name === "string" &&
+                typeof x.expired === "boolean",
+            ),
+        `run ${r.run}'s artifact list`,
+      );
       const a = listed.get(r.run).find((x) => x.name === `test-profile-${r.job}` && !x.expired);
-      if (!a) continue;
+      if (!a) {
+        note(
+          `run ${r.run} has no unexpired test-profile-${r.job} artifact, so its e2e figures are blank`,
+          "artifacts expire after 30 days; read history inside that window",
+        );
+        continue;
+      }
       const dir = unzipArtifact(
         gh,
         opts.repo,
@@ -1539,6 +1633,7 @@ function printHistory(h, opts) {
       ]),
     ),
   );
+  if (NOTES.length) out.push("", "## Notes", "", ...NOTES.map((n) => `- ${n}`));
   out.push(
     "",
     `GitHub requests this invocation: ${h.requests} (rate checks, which the allowance does not count: ${h.rate_checks}; read from cache: ${h.cached_reads})`,
@@ -1546,15 +1641,27 @@ function printHistory(h, opts) {
   return out.join("\n");
 }
 
-try {
+function write(file, text) {
+  try {
+    writeFileSync(file, text);
+  } catch (error) {
+    refuse(
+      `cannot write ${file}: ${error.message}`,
+      "name a file in a directory that exists and that you can write",
+    );
+  }
+}
+
+function main() {
   const opts = parse(process.argv.slice(2));
   const result = opts.command === "job" ? analyzeJob(opts) : history(opts);
-  if (opts.json) writeFileSync(opts.json, `${JSON.stringify(result, null, 2)}\n`);
-  writeFileSync(
-    opts.out,
-    `${opts.command === "job" ? printJob(result) : printHistory(result, opts)}\n`,
-  );
+  result.notes = NOTES;
+  if (opts.json) write(opts.json, `${JSON.stringify(result, null, 2)}\n`);
+  write(opts.out, `${opts.command === "job" ? printJob(result) : printHistory(result, opts)}\n`);
   const reads = `GitHub requests ${result.requests}, rate checks ${result.rate_checks}, read from cache ${result.cached_reads}`;
+  const noted = NOTES.length
+    ? `; ${NOTES.length} note(s) on what could not be read, in the report`
+    : "";
   if (opts.command === "job") {
     const unattributed =
       result.between_steps_s +
@@ -1562,20 +1669,26 @@ try {
         .filter(([k]) => /unattributed/.test(k))
         .reduce((a, [, v]) => a + v, 0);
     process.stdout.write(
-      `ci-time-profile: run ${result.run} ${result.job}: wall ${min(result.wall_s)} min, gate ${min(result.gate_s)} min, unattributed ${pct(unattributed, result.wall_s)}; report in ${opts.out} (${reads})\n`,
+      `ci-time-profile: run ${result.run} ${result.job}: wall ${min(result.wall_s)} min, gate ${min(result.gate_s)} min, unattributed ${pct(unattributed, result.wall_s)}; report in ${opts.out} (${reads})${noted}\n`,
     );
   } else {
     process.stdout.write(
-      `ci-time-profile history: ${result.runs} runs listed, ${result.rows.length} successful jobs counted; report in ${opts.out} (${reads})\n`,
+      `ci-time-profile history: ${result.runs} runs listed, ${result.rows.length} successful jobs counted; report in ${opts.out} (${reads})${noted}\n`,
     );
   }
-} catch (error) {
-  if (error instanceof Refusal) {
-    process.stderr.write(`ci-time-profile: ${error.message}\nnext: ${error.next}\n`);
-  } else {
-    process.stderr.write(
-      `ci-time-profile: ${error.message}\nnext: a file or answer this does not expect; run the same command again, and if it recurs, delete that run's directory under --cache and measure it afresh\n`,
-    );
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    if (error instanceof Refusal) {
+      process.stderr.write(`ci-time-profile: ${error.message}\nnext: ${error.next}\n`);
+    } else {
+      process.stderr.write(
+        `ci-time-profile: ${error.message}\nnext: this is a defect in the harness, not in the run; run the same command again with the run id, and report the message if it recurs\n`,
+      );
+    }
+    process.exit(1);
   }
-  process.exit(1);
 }

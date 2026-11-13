@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { artifactNames } from "../../scripts/ci-time-profile.mjs";
 import { SAMPLER, TIMER } from "../../scripts/ci-time-workflow.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -74,6 +75,11 @@ test("the workflow edits turn every cache write off, add the observers, and are 
     // The graph step plans exactly the targets ci-job.sh runs for the job.
     assert.ok(block.includes(`-t "${targets(job)}" --graph=stdout`), job);
   }
+  // The generated graph and overhead steps are held as text here, not run: they plan Nx over
+  // the whole project graph and run the instrumented e2e tier, which only the CI job's
+  // toolchain and build can do. The hosted demonstration runs executed them; their
+  // measure artifacts (runs 43397555755, 43397566595, 43400483794) hold the graph, the Nx
+  // trace and the overhead times the analysis read back.
   assert.equal(edited.match(/one e2e partition instrumented, then plain/g).length, 1);
   // The rust-cache key is computed before the wrapper is set: the timer step comes after it.
   const linux = edited.slice(edited.indexOf("\n  test-linux:\n"));
@@ -255,10 +261,75 @@ const TASKS = [
   ["demo-version:smoke", 682, 688],
 ];
 
+// The Nx sidecar's report on this job, written by the sidecar itself
+// (`scripts/nx-remote-cache.mjs report`) from the telemetry its Nx hooks and proxy record:
+// one invocation running TASKS, and one store attempt the read-only cache refused. With
+// `cancelled`, a second invocation began and never reported, as a failed gate's does.
+function sidecarReport(dir, into, { cancelled = false } = {}) {
+  const temp = join(dir, "runner-temp");
+  const state = join(temp, "nx-cache-recording", "test-linux");
+  mkdirSync(state, { recursive: true });
+  const line = (v) => `${JSON.stringify(v)}\n`;
+  writeFileSync(
+    join(state, "started.jsonl"),
+    line({ id: "inv-1", argv: ["nx"] }) + (cancelled ? line({ id: "inv-2", argv: ["nx"] }) : ""),
+  );
+  writeFileSync(
+    join(state, "invocations.jsonl"),
+    line({
+      id: "inv-1",
+      started_at: iso(91),
+      finished_at: iso(689),
+      tasks: TASKS.map(([task, a, b], i) => ({
+        task,
+        hash: `ab${i}`,
+        cacheable: true,
+        status: "success",
+        code: 0,
+        started_at: iso(a),
+        finished_at: iso(b),
+      })),
+    }),
+  );
+  writeFileSync(
+    join(state, "requests.jsonl"),
+    line({ id: "put-1", hash: "ab0", method: "PUT", attempted_at: iso(451), http_status: 403 }),
+  );
+  const event = join(dir, "event.json");
+  writeFileSync(
+    event,
+    JSON.stringify({ pull_request: { number: 7, head: { sha: "a".repeat(40) } } }),
+  );
+  execFileSync(
+    process.execPath,
+    [join(root, "scripts", "nx-remote-cache.mjs"), "report", "--job", "test-linux", "--out", into],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        RUNNER_TEMP: temp,
+        GITHUB_JOB: "test-linux",
+        GITHUB_EVENT_PATH: event,
+        GITHUB_REPOSITORY: REPO,
+        GITHUB_REF: "refs/pull/7/merge",
+        GITHUB_RUN_ID: String(RUN),
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_SHA: "d".repeat(40),
+        NX_BASE: "c".repeat(40),
+        NX_HEAD: "a".repeat(40),
+      },
+      stdio: "ignore",
+    },
+  );
+  assert.ok(existsSync(join(into, "executions.json")), "the sidecar wrote its report");
+}
+
 // What GitHub serves for one finished test-linux job: 60 s of setup, a 30 s rust-cache
-// restore, a 600 s gate holding a build task and the e2e tier, and a 10 s upload. Each
-// answer is keyed as the harness keys its cache, so it seeds a cache or a stand-in `gh`.
-function oneRun(dir, { status = "completed" } = {}) {
+// restore, a 600 s gate holding a build task and the e2e tier, and a 10 s upload, with the
+// Nx sidecar's start step running in the background beside them. Each answer is keyed as
+// the harness keys its cache, so it seeds a cache or a stand-in `gh`. `sidecarOnly` leaves
+// out Nx's trace and the sidecar's manifest and gives the sidecar a cancelled invocation.
+function oneRun(dir, { status = "completed", sidecarOnly = false, log = null } = {}) {
   const answers = {};
   const put = (endpoint, body) => {
     answers[key(endpoint)] = typeof body === "string" ? body : JSON.stringify(body);
@@ -271,6 +342,7 @@ function oneRun(dir, { status = "completed" } = {}) {
   });
   const steps = [
     ["Set up job", 0, 60],
+    ["Run op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33", 60, 695],
     ["Run Swatinem/rust-cache@v2.9.2", 60, 90],
     [
       "Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)",
@@ -302,15 +374,16 @@ function oneRun(dir, { status = "completed" } = {}) {
   });
   put(
     `repos/${REPO}/actions/jobs/9/logs`,
-    [
-      `${iso(5)} [command]/usr/bin/git log -1 --format=%H`,
-      `${iso(5)} ${"b".repeat(40)}`,
-      `${iso(70)} Restored from cache key "v0-rust-test-linux" full match: true.`,
-      `${iso(91)} ci-job: test-linux runs 3 task(s): demo:build demo-e2e:test demo-version:smoke`,
-      `${iso(400)} Starting 2 tests across 1 binary`,
-      `${iso(600)} \u001b[32mSummary\u001b[0m [ 200.000s] 2 tests run: 2 passed, 0 skipped`,
-      `${iso(689)}   Critical path:     8m 0s (2 tasks)`,
-    ].join("\n"),
+    log ??
+      [
+        `${iso(5)} [command]/usr/bin/git log -1 --format=%H`,
+        `${iso(5)} ${"b".repeat(40)}`,
+        `${iso(70)} Restored from cache key "v0-rust-test-linux" full match: true.`,
+        `${iso(91)} ci-job: test-linux runs 3 task(s): demo:build demo-e2e:test demo-version:smoke`,
+        `${iso(400)} Starting 2 tests across 1 binary`,
+        `${iso(600)} \u001b[32mSummary\u001b[0m [ 200.000s] 2 tests run: 2 passed, 0 skipped`,
+        `${iso(689)}   Critical path:     8m 0s (2 tasks)`,
+      ].join("\n"),
   );
   const names = ["test-profile-test-linux", "nx-cache-entries-test-linux", "measure-test-linux"];
   put(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`, {
@@ -334,39 +407,83 @@ function oneRun(dir, { status = "completed" } = {}) {
     JSON.stringify(record("b", 400, 100, { spawn: 40, wait: 60 })),
   );
   writeFileSync(join(records, "late.json"), JSON.stringify(record("late", 683, 3, { spawn: 3 })));
-  writeFileSync(
-    join(artifact(names[1]), "executions.json"),
-    JSON.stringify({
-      tasks: TASKS.map(([task, a, b]) => ({
-        task,
-        result: "executed",
-        started_at: iso(a),
-        finished_at: iso(b),
-      })),
-      store_attempts: [{ status: "failed", http_status: 403 }],
-    }),
-  );
-  writeFileSync(
-    join(files, names[1], "manifest.json"),
-    JSON.stringify({ entries: [], stored_bytes: 0 }),
-  );
+  // A record cut short: left out, and said so.
+  writeFileSync(join(records, "broken.json"), "{");
+  const sidecar = artifact(names[1]);
+  sidecarReport(dir, sidecar, { cancelled: sidecarOnly });
+  if (sidecarOnly) rmSync(join(sidecar, "manifest.json"));
   const measure = artifact(names[2]);
-  nxTrace(join(measure, "nx-profile.json"), TASKS);
-  const rustcRow = (a, b, dirName) =>
+  if (!sidecarOnly) nxTrace(join(measure, "nx-profile.json"), TASKS);
+  const toolchain = "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc";
+  const rustcRow = (a, b, crate, dirName, compiler = toolchain) =>
     [
       (T0 + a * 1000) / 1000,
       (T0 + b * 1000) / 1000,
-      "onepipeline",
+      crate,
       "lib",
       dirName.includes("llvm-cov") ? 1 : 0,
-      `/home/runner/work/onepipeline/onepipeline/target/${dirName}/deps`,
+      dirName.startsWith("/")
+        ? dirName
+        : `/home/runner/work/onepipeline/onepipeline/target/${dirName}/deps`,
       0,
-      "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc",
+      compiler,
     ].join("\t");
-  // The last line is cut short, as a job ending mid-write leaves it.
+  // The gate's two compiles, then one compile of every other tree during setup, where no Nx
+  // task runs. The last line is cut short, as a job ending mid-write leaves it.
   writeFileSync(
     join(measure, "rustc.tsv"),
-    `${rustcRow(100, 250, "debug")}\n${rustcRow(300, 380, "llvm-cov-target/debug")}\n17944\t`,
+    [
+      rustcRow(100, 250, "onepipeline", "debug"),
+      rustcRow(300, 380, "onepipeline", "llvm-cov-target/debug"),
+      rustcRow(
+        10,
+        20,
+        "onepipeline",
+        "debug",
+        "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/clippy-driver",
+      ),
+      rustcRow(
+        10,
+        22,
+        "serde",
+        "msrv/debug",
+        "/home/runner/.rustup/toolchains/1.97-x86_64-unknown-linux-gnu/bin/rustc",
+      ),
+      rustcRow(20, 50, "onepipeline", "release"),
+      rustcRow(20, 24, "git2", "/tmp/cargo-installXyz/release/deps"),
+      "17944\t",
+    ].join("\n"),
+  );
+  // Nx's graph: the version task waits on the e2e tier, which waits on nothing.
+  writeFileSync(
+    join(measure, "graph.json"),
+    `Nx planned 3 tasks\n${JSON.stringify({ tasks: { dependencies: { "demo-version:smoke": ["demo-e2e:test"], "demo-e2e:test": [], "demo:build": [] } } })}`,
+  );
+  // Three samples, 2 s apart, while both tasks run: 60% of the CPU busy, 1 MB in a second.
+  writeFileSync(
+    join(measure, "samples.txt"),
+    [0, 1, 2]
+      .map(
+        (i) =>
+          `${(T0 + (400 + 2 * i) * 1000) / 1000} cpu ${600 * i} 0 0 ${400 * i} 0 0 0 | 3/200 | ${2_000_000 * i} 0`,
+      )
+      .join("\n"),
+  );
+  // One e2e test, run plain then instrumented after the gate.
+  const overhead = join(measure, "overhead");
+  for (const [label, wall] of [
+    ["instrumented-records", 10],
+    ["plain-records", 8],
+  ]) {
+    mkdirSync(join(overhead, label, "e2e"), { recursive: true });
+    writeFileSync(
+      join(overhead, label, "e2e", "x.json"),
+      JSON.stringify(record("x", 1000, wall, { spawn: wall / 2 })),
+    );
+  }
+  writeFileSync(
+    join(overhead, "times.txt"),
+    "instrumented 1000 1060 0\nplain-build 1060 1061 0\nplain 1061 1121 0\n",
   );
   return { answers, files, names };
 }
@@ -448,7 +565,7 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    /^ci-time-profile: run 42 test-linux: wall 11\.7 min, gate 10\.0 min, unattributed 1\.0%; report in .*report\.md \(GitHub requests 0, rate checks 0, read from cache 4\)\n$/,
+    /^ci-time-profile: run 42 test-linux: wall 11\.7 min, gate 10\.0 min, unattributed 1\.0%; report in .*report\.md \(GitHub requests 0, rate checks 0, read from cache 4\); 1 note\(s\) on what could not be read, in the report\n$/,
   );
   const report = readFileSync(out, "utf8");
   assert.match(report, /wall clock 11\.7 min/);
@@ -457,12 +574,57 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
   assert.match(report, /Nx task times from: NX_PROFILE trace/);
   assert.match(report, /Critical path 8m 0s \(2 tasks\)/);
   assert.match(report, /Restored from cache key "v0-rust-test-linux" full match: true/);
-  assert.match(report, /Nx store attempts by status\/http: \{"failed\/403":1\}/);
+  // The sidecar's own report: the PUT it was refused, and the two tasks it never tried to store.
+  assert.match(report, /Nx store attempts by status\/http: \{"failed\/403":1,"failed\/null":2\}/);
+  assert.match(report, /## Notes\n\n- the test record .*broken\.json was left out: it is not JSON/);
 
   const r = JSON.parse(readFileSync(json, "utf8"));
   assert.equal(r.wall_s, 700);
   assert.equal(r.step_classes["gate (Nx tasks)"], 600);
   assert.equal(r.step_classes["cache restore"], 30);
+  // The sidecar's background step overlaps the rest and is not summed: the steps are the job.
+  assert.ok(r.steps.find((st) => st.class === "Nx cache sidecar").background);
+  assert.equal(
+    Object.values(r.step_classes).reduce((a, b) => a + b, 0) + r.between_steps_s,
+    r.wall_s,
+  );
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(r.compile).map(([tree, c]) => [tree, [c.rustc_s, c.dependency_s]]),
+    ),
+    {
+      "plain (target/debug)": [150, 0],
+      "instrumented (llvm-cov-target)": [80, 0],
+      clippy: [10, 0],
+      "msrv toolchain": [12, 12],
+      "release (target/release)": [30, 0],
+      "outside the checkout (cargo install)": [4, 4],
+    },
+  );
+  assert.deepEqual(
+    r.critical_path.map((c) => [c.task, c.after, c.after_dependencies_s]),
+    [
+      ["demo-e2e:test", "(gate start)", 210],
+      ["demo-version:smoke", "demo-e2e:test", 2],
+    ],
+  );
+  assert.equal(r.samples.cpu_busy_fraction, 0.6);
+  assert.equal(r.samples.network_bytes, 4_000_000);
+  assert.equal(r.samples.network_active_s, 4);
+  assert.deepEqual(r.samples.network_by_place, {
+    "gate: demo-e2e:test + demo:build": { bytes: 4_000_000, active_s: 4 },
+  });
+  assert.deepEqual(r.samples.cpu_busy_by_concurrency, { 2: { s: 4, busy_fraction: 0.6 } });
+  assert.deepEqual(
+    [
+      r.overhead.tests_in_both,
+      r.overhead.instrumented_test_seconds,
+      r.overhead.plain_test_seconds,
+      r.overhead.ratio,
+    ],
+    [1, 10, 8, 1.25],
+  );
+  assert.equal(r.overhead.runs.instrumented.s, 60);
   const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
   assert.ok(Math.abs(gate - 600) < 1e-6, `gate categories sum to ${gate}`);
   const near = (category, seconds) =>
@@ -622,91 +784,245 @@ test("a run without the named job, or arguments the command does not take, are r
     assert.equal(run(profileScript, args).status, 2, args.join(" "));
 });
 
-test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
+test("a failed gate's run falls back to the sidecar's telemetry, and says that its tasks are incomplete", (t) => {
   const dir = scratch(t);
-  // A repository whose main has one commit, and two pull-request heads off it: one editing
-  // engine source, one editing documentation.
-  const repo = join(dir, "repo");
-  const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
-  mkdirSync(repo);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir, { sidecarOnly: true }));
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.match(r.task_source, /^sidecar telemetry without the gate's invocation/);
+  assert.deepEqual(
+    r.tasks.map((x) => x.task),
+    TASKS.map(([task]) => task),
+  );
+  const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(gate - 600) < 1e-6);
+  assert.match(readFileSync(join(dir, "r.md"), "utf8"), /Nx sidecar manifest: not uploaded/);
+});
+
+test("nextest's own output, from the pinned cargo-nextest, is read into runs and per-binary seconds", (t) => {
+  const dir = scratch(t);
+  // A crate with one lib unit test and one integration test, run by the real nextest with a
+  // line per test, as the cross-platform `ci` profile prints.
+  const crate = join(dir, "probe");
+  mkdirSync(join(crate, "src"), { recursive: true });
+  mkdirSync(join(crate, "tests"));
+  writeFileSync(
+    join(crate, "Cargo.toml"),
+    '[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
+  );
+  writeFileSync(
+    join(crate, "src", "lib.rs"),
+    "#[cfg(test)]\nmod tests {\n    #[test]\n    fn unit() {}\n}\n",
+  );
+  writeFileSync(join(crate, "tests", "it.rs"), "#[test]\nfn integration() {}\n");
+  const env = { ...process.env, CARGO_TARGET_DIR: join(dir, "target") };
+  delete env.RUSTC_WRAPPER;
+  delete env.NEXTEST_PROFILE;
+  const nextest = spawnSync(
+    "cargo",
+    ["nextest", "run", "--status-level", "pass", "--no-fail-fast", "--color", "never"],
+    {
+      cwd: crate,
+      env,
+      encoding: "utf8",
+    },
+  );
+  assert.equal(nextest.status, 0, nextest.stderr);
+  const output = `${nextest.stdout}${nextest.stderr}`.split("\n").filter((l) => /\S/.test(l));
+  const log = output.map((line, i) => `${iso(400 + i / 1000)} ${line}`).join("\n");
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir, { log }));
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  const summary = Number(/Summary \[\s*([\d.]+)s\] 2 tests run/.exec(output.join("\n"))[1]);
+  assert.deepEqual(
+    r.nextest_runs.map((n) => [n.tests, n.binaries, n.s]),
+    [[2, 2, summary]],
+  );
+  assert.deepEqual(Object.keys(r.log_binaries).sort(), ["it", "probe"]);
+  assert.deepEqual(
+    Object.values(r.log_binaries).map((b) => b.tests),
+    [1, 1],
+  );
+});
+
+test("a GitHub read that fails, or a report that cannot be written, refuses with what to do", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  delete served.answers[key(`repos/${REPO}/actions/jobs/9/logs`)];
+  const gh = standInGh(dir, served);
+  const failed = run(profileScript, job(join(dir, "cache"), join(dir, "r.md")), {
+    env: gh.env(4000),
+  });
+  assert.equal(failed.status, 1);
+  assert.match(
+    failed.stderr,
+    /gh api --allow-escape-sequences repos\/example\/onepipeline\/actions\/jobs\/9\/logs failed: gh: Not Found \(HTTP 404\)\nnext: check `gh auth status`/,
+  );
+
+  const cache = join(dir, "seeded");
+  seedCache(cache, oneRun(join(dir, "second")));
+  const unwritable = run(profileScript, job(cache, join(dir, "no", "such", "dir", "r.md")));
+  assert.equal(unwritable.status, 1);
+  assert.match(
+    unwritable.stderr,
+    /cannot write .*r\.md: .*\nnext: name a file in a directory that exists/,
+  );
+});
+
+test("the workflow edits refuse a workflow that cannot be read or rewritten", (t) => {
+  const dir = scratch(t);
+  const absent = run(workflowScript, [join(checkout(dir), "..", "missing.yml")]);
+  assert.equal(absent.status, 1);
+  assert.match(absent.stderr, /cannot read .*missing\.yml: .*\nACTION: /);
+  const file = checkout(join(dir, "read-only"));
+  chmodSync(file, 0o444);
+  const readOnly = run(workflowScript, [file]);
+  assert.equal(readOnly.status, 1);
+  assert.match(
+    readOnly.stderr,
+    /cannot write .*ci\.yml: .*\nACTION: make the workflow file writable/,
+  );
+});
+
+test("the artifacts the analysis reads are the ones ci.yml and the measurement edits upload", (t) => {
+  const file = checkout(scratch(t));
+  assert.equal(run(workflowScript, [file]).status, 0);
+  const edited = readFileSync(file, "utf8");
+  for (const job of ["test-linux", "test-macos"]) {
+    // The job's own block: from its key to the next job's.
+    const start = edited.indexOf(`\n  ${job}:\n`);
+    const next = edited.slice(start + 1).search(/\n {2}[a-z][\w-]*:\n/);
+    const block = edited.slice(start, next < 0 ? undefined : start + 1 + next);
+    const uploads = [...block.matchAll(/\n {10}name: (.+)\n/g)].map((m) =>
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a GitHub Actions expression matched literally, not a JS template
+      m[1].replace("${{ github.job }}", job),
+    );
+    for (const name of Object.values(artifactNames(job)))
+      assert.ok(uploads.includes(name), `${job} uploads ${name}: ${uploads.join(", ")}`);
+  }
+});
+
+function gitRepo(dir) {
+  const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+  mkdirSync(dir);
   git("init", "-q", "-b", "main");
   git("config", "user.email", "spike@example.invalid");
   git("config", "user.name", "spike");
-  writeFileSync(join(repo, "README.md"), "x\n");
+  writeFileSync(join(dir, "README.md"), "x\n");
   git("add", "-A");
   git("commit", "-qm", "base");
-  git("checkout", "-qb", "src");
-  mkdirSync(join(repo, "src"));
-  writeFileSync(join(repo, "src", "lib.rs"), "\n");
-  git("add", "-A");
-  git("commit", "-qm", "src");
-  const srcHead = git("rev-parse", "HEAD");
-  git("checkout", "-qb", "docs", "main");
-  mkdirSync(join(repo, "docs"));
-  writeFileSync(join(repo, "docs", "a.md"), "\n");
-  git("add", "-A");
-  git("commit", "-qm", "docs");
-  const docsHead = git("rev-parse", "HEAD");
+  // One pull-request head off main per kind of change.
+  const head = (branch, files) => {
+    git("checkout", "-qb", branch, "main");
+    for (const [path, body] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), body);
+    }
+    git("add", "-A");
+    git("commit", "-qm", branch);
+    return git("rev-parse", "HEAD");
+  };
+  return {
+    src: head("src", { "src/lib.rs": "\n" }),
+    docs: head("docs", { "docs/a.md": "\n" }),
+    crates: head("crates", { "crates/x/lib.rs": "\n" }),
+    release: head("release", { "Cargo.toml": "\n", "CHANGELOG.md": "\n" }),
+  };
+}
 
+test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
+  const dir = scratch(t);
+  const repo = join(dir, "repo");
+  const heads = gitRepo(repo);
+  const unknownHead = "e".repeat(40);
   const answers = {};
-  const runs = [
-    [1, srcHead, "2026-11-08T10:00:00Z", 100],
-    [2, srcHead, "2026-11-11T10:00:00Z", 120],
-    [3, docsHead, "2026-11-11T11:00:00Z", 30],
-    [4, srcHead, "2026-11-12T10:00:00Z", 130],
+  const real = [
+    // [run, head, created, test-linux minutes, conclusion]
+    [1, heads.src, "2026-11-08T10:00:00Z", 100],
+    [2, heads.src, "2026-11-11T10:00:00Z", 120],
+    [3, heads.docs, "2026-11-11T11:00:00Z", 30],
+    [4, heads.src, "2026-11-12T10:00:00Z", 130],
+    [6, heads.crates, "2026-11-12T11:00:00Z", 50],
+    [7, heads.release, "2026-11-12T12:00:00Z", 40],
+    [8, unknownHead, "2026-11-12T13:00:00Z", 60],
   ];
-  answers[
-    key(
-      `repos/${REPO}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=1&created=2026-11-04T00:00:00..2026-11-13T00:00:00`,
-    )
-  ] = JSON.stringify({
-    workflow_runs: [
-      ...runs.map(([id, head, created]) => ({
-        id,
-        run_attempt: 1,
-        head_sha: head,
-        created_at: created,
-        conclusion: "success",
-      })),
-      {
-        id: 5,
-        run_attempt: 1,
-        head_sha: srcHead,
-        created_at: "2026-11-12T11:00:00Z",
-        conclusion: "cancelled",
-      },
-    ],
+  const listed = (id, head, created, conclusion = "success") => ({
+    id,
+    run_attempt: 1,
+    head_sha: head,
+    created_at: created,
+    conclusion,
   });
-  for (const [id, , created, minutes] of runs) {
+  // A full first page: 98 runs from before --compare-since, which are listed and not read,
+  // then two of the counted runs; the second page holds the rest.
+  const page1 = [
+    ...Array.from({ length: 98 }, (_, i) =>
+      listed(
+        1000 + i,
+        heads.src,
+        new Date(Date.parse("2026-11-04T01:00:00Z") + i * 60000).toISOString(),
+      ),
+    ),
+    ...real.slice(0, 2).map(([id, head, created]) => listed(id, head, created)),
+  ];
+  const page2 = [
+    ...real.slice(2).map(([id, head, created]) => listed(id, head, created)),
+    listed(5, heads.src, "2026-11-12T11:30:00Z", "cancelled"),
+    listed(9, heads.src, "2026-11-12T11:40:00Z", "skipped"),
+  ];
+  const listing = (page) =>
+    key(
+      `repos/${REPO}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=${page}&created=2026-11-04T00:00:00..2026-11-13T00:00:00`,
+    );
+  answers[listing(1)] = JSON.stringify({ workflow_runs: page1 });
+  answers[listing(2)] = JSON.stringify({ workflow_runs: page2 });
+  for (const [id, , created, minutes] of real) {
     const start = Date.parse(created);
+    const end = (m) => new Date(start + m * 60000).toISOString();
     answers[key(`repos/${REPO}/actions/runs/${id}/attempts/1/jobs?per_page=100`)] = JSON.stringify({
       jobs: [
         {
           name: "test-linux",
           conclusion: "success",
           started_at: created,
-          completed_at: new Date(start + minutes * 60000).toISOString(),
+          completed_at: end(minutes),
         },
-        { name: "lint", conclusion: "success", started_at: created, completed_at: created },
+        // A failed job is not a duration of record.
+        {
+          name: "test-linux-extra",
+          conclusion: "failure",
+          started_at: created,
+          completed_at: end(1),
+        },
+        { name: "test-macos", conclusion: "failure", started_at: created, completed_at: end(5) },
       ],
     });
   }
-  // The src/ runs' e2e records: run 1 spends 2 s a spawn, run 2 and run 4 1 s.
+  // The src/ runs' e2e records: run 1 spends 2 s a spawn and run 2 1 s; run 4's has expired.
   const artifactFiles = join(dir, "artifact-files");
   const names = [];
-  for (const [id, , , , spawnS] of runs
-    .filter((r) => r[1] === srcHead)
-    .map((r, i) => [...r, i === 0 ? 2 : 1])) {
+  for (const [id, spawnS] of [
+    [1, 2],
+    [2, 1],
+  ]) {
     const name = `test-profile-test-linux-${id}`;
     const d = join(artifactFiles, name, "e2e");
     mkdirSync(d, { recursive: true });
-    const r = record("t", 0, 10, { spawn: 4 * spawnS });
-    writeFileSync(join(d, "t.json"), JSON.stringify(r));
+    writeFileSync(join(d, "t.json"), JSON.stringify(record("t", 0, 10, { spawn: 4 * spawnS })));
     names.push(name);
     answers[key(`repos/${REPO}/actions/runs/${id}/artifacts?per_page=100`)] = JSON.stringify({
       artifacts: [{ id: names.length - 1, name: "test-profile-test-linux", expired: false }],
     });
   }
+  answers[key(`repos/${REPO}/actions/runs/4/artifacts?per_page=100`)] = JSON.stringify({
+    artifacts: [{ id: 99, name: "test-profile-test-linux", expired: true }],
+  });
   const gh = standInGh(join(dir, "gh"), { answers, files: artifactFiles, names });
   const out = join(dir, "history.md");
   const json = join(dir, "history.json");
@@ -716,6 +1032,8 @@ test("the history counts each finished job by what its pull request changed, bef
       "history",
       "--since",
       "2026-11-04T00:00:00Z",
+      "--compare-since",
+      "2026-11-05T00:00:00Z",
       "--split",
       "2026-11-10T00:00:00Z",
       "--until",
@@ -738,9 +1056,10 @@ test("the history counts each finished job by what its pull request changed, bef
     { cwd: repo, env: gh.env(4000) },
   );
   assert.equal(result.status, 0, result.stderr);
+  // Two listing pages, seven job lists, three artifact lists, two artifacts.
   assert.match(
     result.stdout,
-    /^ci-time-profile history: 5 runs listed, 4 successful jobs counted; report in /,
+    /^ci-time-profile history: 107 runs listed, 7 successful jobs counted; report in .* \(GitHub requests 14, rate checks 14, read from cache 0\); 2 note\(s\)/,
   );
   const h = JSON.parse(readFileSync(json, "utf8"));
   const summary = (cls, side) => h.summary[`test-linux\t${cls}\t${side}`];
@@ -757,17 +1076,25 @@ test("the history counts each finished job by what its pull request changed, bef
     max_min: 130,
   });
   assert.equal(summary("other", "after").median_min, 30);
-  assert.equal(summary("all", "after").n, 3);
+  assert.equal(summary("edits crates/ or Cargo files, not src/", "after").median_min, 50);
+  assert.equal(summary("release", "after").median_min, 40);
+  assert.equal(summary("unknown", "after").median_min, 60);
+  assert.equal(summary("all", "after").n, 6);
   assert.deepEqual(
     h.rows
       .filter((r) => r.class === "edits src/")
-      .map((r) => [r.run, r.e2e_tests, r.onepipeline_spawn_s]),
+      .map((r) => [r.run, r.e2e_tests ?? null, r.onepipeline_spawn_s ?? null]),
     [
       [1, 1, 2],
       [2, 1, 1],
-      [4, 1, 1],
+      [4, null, null],
     ],
   );
+  assert.match(
+    h.notes[0],
+    new RegExp(`head ${unknownHead} could not be classed: .*\\(next: run from a clone`),
+  );
+  assert.match(h.notes[1], /run 4 has no unexpired test-profile-test-linux artifact/);
   assert.match(
     readFileSync(out, "utf8"),
     /\| test-linux \| edits src\/ \| after \| 2 \| 125\.0 \|/,

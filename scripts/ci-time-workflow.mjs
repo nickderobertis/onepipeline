@@ -136,7 +136,7 @@ if ($name ne '' && $ENV{ONEPIPELINE_RUSTC_TIMINGS}) {
   } else {
     # The compile itself is unaffected; only its timing is lost, and the analysis would
     # undercount compile without saying so.
-    print STDERR "rustc-timer: cannot append to $ENV{ONEPIPELINE_RUSTC_TIMINGS}: $! (this compile is not timed)\\n";
+    print STDERR "rustc-timer: cannot append to $ENV{ONEPIPELINE_RUSTC_TIMINGS}: $! (this compile is not timed); ACTION: create its directory or point ONEPIPELINE_RUSTC_TIMINGS at a writable file before the build\\n";
   }
 }
 exit $code;
@@ -173,7 +173,7 @@ function graphStep(targets) {
     'm="$RUNNER_TEMP/measure"; mkdir -p "$m"\n' +
     'if [ -f target/ci-time-nx-profile.json ]; then cp target/ci-time-nx-profile.json "$m/nx-profile.json"; fi\n' +
     `if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "${targets}" --graph=stdout > "$m/graph.json" 2> "$m/graph.err"; then\n` +
-    '  echo "::warning::measurement: Nx could not write the task graph, so this run has no critical path; graph.err in the measure artifact says why"\n' +
+    `  echo "::warning::measurement: Nx could not write the task graph, so this run has no critical path; graph.err in the measure artifact says why. ACTION: fix what it reports, then reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t ${targets} --graph=stdout"\n` +
     "fi\n" +
     'date -u +%s > "$m/ended.txt"\n';
   return `      - name: 'Measure: the Nx task graph this job ran (${MARK})'\n        if: always()\n        shell: bash\n        working-directory: \${{ github.workspace }}\n        run: |\n${indent(run, 10)}`;
@@ -189,7 +189,10 @@ function overheadStep(partition) {
     '  start="$(date +%s)"; status=0\n' +
     '  "$@" > "$m/$label.log" 2>&1 || status=$?\n' +
     '  echo "$label $start $(date +%s) $status" >> "$m/times.txt"\n' +
-    '  if [ "$status" -ne 0 ]; then echo "::warning::measurement: $label exited $status; $label.log in the measure artifact holds its output, and the overhead figure leaves out what it did not run"; fi\n' +
+    '  if [ "$status" -ne 0 ]; then\n' +
+    '    echo "::warning::measurement: $label exited $status, so the overhead figure leaves out what it did not run. Its last lines follow; $label.log in the measure artifact holds the rest. ACTION: fix what they report, or rerun the step, before reading the overhead"\n' +
+    '    tail -20 "$m/$label.log"\n' +
+    "  fi\n" +
     '  if [ -d target/test-profile ]; then mv target/test-profile "$m/$label-records"; fi\n' +
     "}\n" +
     "# The gate's records were uploaded by the step before; set them aside so each run\n" +
@@ -291,7 +294,7 @@ function main(argv) {
     const flag = args.shift();
     const value = args.shift();
     if (flag !== "--overhead-sample") usage(`unknown argument ${flag}`);
-    const m = /^hash:(\d+)\/(\d+)$/.exec(value ?? "");
+    const m = /^hash:(\d{1,6})\/(\d{1,6})$/.exec(value ?? "");
     if (!m || Number(m[1]) < 1 || Number(m[1]) > Number(m[2]))
       usage("--overhead-sample takes hash:K/N with 1 <= K <= N");
     overhead = value;
@@ -307,7 +310,21 @@ function main(argv) {
       "run this on .github/workflows/ci.yml inside a checkout of the repository",
     );
   }
-  writeFileSync(file, edit(readFileSync(file, "utf8"), ciJob, overhead));
+  let original;
+  try {
+    original = readFileSync(file, "utf8");
+  } catch (error) {
+    fail(`cannot read ${file}: ${error.message}`, "name the checkout's .github/workflows/ci.yml");
+  }
+  const edited = edit(original, ciJob, overhead);
+  try {
+    writeFileSync(file, edited);
+  } catch (error) {
+    fail(
+      `cannot write ${file}: ${error.message}`,
+      "make the workflow file writable; it is rewritten in place",
+    );
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
