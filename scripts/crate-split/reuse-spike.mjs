@@ -43,6 +43,12 @@ const steps = [];
 
 function step(args) {
   const run = spawnSync(process.execPath, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (run.error) {
+    throw new check.Refusal(
+      `${args[0].replace(root, ".")} could not start: ${run.error.message}`,
+      "check the node on PATH and that the step's script exists",
+    );
+  }
   steps.push(...run.stdout.trim().split("\n").filter(Boolean));
   if (run.status !== 0) {
     process.stderr.write(run.stderr);

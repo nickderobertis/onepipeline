@@ -117,7 +117,12 @@ function load(spike, name) {
         );
       }) &&
       Array.isArray(doc.perChange) &&
-      doc.perChange.every((c) => typeof c.commit === "string" && Array.isArray(c.affected)) &&
+      doc.perChange.every(
+        (c) =>
+          typeof c.commit === "string" &&
+          Array.isArray(c.affected) &&
+          c.affected.every((s) => typeof s === "string" && Object.hasOwn(doc.suites ?? {}, s)),
+      ) &&
       doc.suites &&
       typeof doc.suites === "object" &&
       Number.isSafeInteger(doc.summary.changes) &&

@@ -355,6 +355,9 @@ export function observedResult(doc, where) {
   const forcedRow = (r) =>
     isText(r.task) &&
     isText(r.cause) &&
+    (r.evictedFrom === undefined ||
+      r.evictedFrom === null ||
+      (isObject(r.evictedFrom) && isCount(r.evictedFrom.run) && isCount(r.evictedFrom.pr))) &&
     (!["one input", "several inputs"].includes(r.cause) ||
       (Array.isArray(r.inputs) && r.inputs.every(isText)));
   for (const pr of doc.prs) {
@@ -386,7 +389,10 @@ export function observedResult(doc, where) {
           Array.isArray(job.ran) &&
           Array.isArray(job.replayed) &&
           job.ran.every(forcedRow) &&
-          job.replayed.every((r) => isText(r.task)),
+          job.replayed.every(
+            (r) =>
+              isText(r.task) && (r.diffMatched === undefined || typeof r.diffMatched === "boolean"),
+          ),
         `${where}: #${pr.pr} has a job whose tasks are not rows of a task, a cause and the inputs that forced it`,
         again,
       );

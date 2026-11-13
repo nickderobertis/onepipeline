@@ -286,7 +286,9 @@ export function movedInputs(basePlan, mergePlan) {
   ])) {
     const a = mergePlan.runtime[entry];
     const b = basePlan.runtime[entry];
-    if (a && b && (a.out !== b.out || !a.ok || !b.ok)) moved.add(entry);
+    // A runtime input one plan holds and the other does not moved as surely as one that
+    // prints differently.
+    if (!a || !b || a.out !== b.out || !a.ok || !b.ok) moved.add(entry);
   }
   for (const [task, at] of Object.entries(mergePlan.plans)) {
     const before = basePlan.plans[task];

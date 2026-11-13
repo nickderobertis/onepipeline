@@ -9,8 +9,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -436,7 +438,12 @@ function workspace(dir) {
   const heads = {
     base,
     deleted: branch("deleted", () => rmSync(join(dir, "src", "b.rs"))),
-    probe: branch("probe", () => write(dir, { "scripts/probe.cjs": "process.exit(3)\n" })),
+    probe: branch("probe", () => write(dir, { "scripts/probe.cjs": "process.stderr.write('probe broke');process.exit(3)\n" })),
+    runtimeAdded: branch("runtime-added", () => {
+      const p = JSON.parse(readFileSync(join(dir, "project.json"), "utf8"));
+      p.targets.lint.inputs.push({ runtime: "node scripts/extra.cjs" });
+      write(dir, { "project.json": JSON.stringify(p), "scripts/extra.cjs": "console.log('extra')\n" });
+    }),
     newTask: branch("new-task", () =>
       write(dir, {
         "project.json": project({
@@ -494,6 +501,7 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
   const prs = [
     pr(21, h.deleted, [["test-linux", 2101]], 210),
     pr(22, h.probe, [["test-linux", 2201]], 220),
+    pr(25, h.runtimeAdded, [["test-linux", 2501]], 250),
     pr(23, h.newTask, [["test-linux", 2301]], 230),
     pr(24, h.conflicting, [["test-linux", 2401]], 240),
     pr(
@@ -521,6 +529,8 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
       tasks: [task("p:test"), task("p:lint", { result: "remote_hit", remote_read: "hit" })],
       store_attempts: [],
     }),
+    "logs/2501.log": lines(h.runtimeAdded, h.base, ["> nx run p:lint"]),
+    "executions/2501.json": JSON.stringify({ tasks: [task("p:lint")], store_attempts: [] }),
     "logs/2301.log": lines(h.newTask, h.base, ["> nx run p:newtask", "> nx run p:lint"]),
     "executions/2301.json": JSON.stringify({
       tasks: [task("p:newtask"), task("p:lint")],
@@ -585,6 +595,14 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
   // A runtime input that fails moved, whatever it printed before.
   assert.deepEqual(row(22, "test-linux", "p:test").inputs, ["runtime:node scripts/probe.cjs"]);
   assert.deepEqual(prOf(22).moved, ["runtime:node scripts/probe.cjs"]);
+  // The failure is kept in the plan as it happened: its exit status and what it said.
+  const probePlan = readdirSync(join(evidence, "plans"))
+    .map((f) => JSON.parse(readFileSync(join(evidence, "plans", f), "utf8")))
+    .find((p) => p.runtime["runtime:node scripts/probe.cjs"]?.ok === false);
+  assert.deepEqual(probePlan.runtime["runtime:node scripts/probe.cjs"], { ok: false, out: "exit 3: probe broke" });
+  // A runtime input only the tested tree's plan holds moved too, with the configuration.
+  assert.ok(prOf(25).moved.includes("runtime:node scripts/extra.cjs"), JSON.stringify(prOf(25).moved));
+  assert.ok(row(25, "test-linux", "p:lint").inputs.includes("runtime:node scripts/extra.cjs"));
   // A task the base had no plan of is new; the others' configuration moved.
   assert.deepEqual(row(23, "test-linux", "p:newtask").inputs, ["task new at this pull request"]);
   assert.deepEqual(row(23, "test-linux", "p:lint").inputs, ["project configuration"]);
@@ -1645,5 +1663,46 @@ test("a demonstration whose archive nextest refused still shows cargo's build ti
   assert.match(
     readFileSync(join(dir, "t.md"), "utf8"),
     /\| coverage \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
+  );
+});
+
+test("a fetch a floor stopped resumes, keeping what it held and reading only what it lacked", () => {
+  const dir = join(scratch, "fetch-resume");
+  mkdirSync(dir, { recursive: true });
+  write(dir, {
+    "list.json": JSON.stringify({ artifacts: [] }),
+    "log.txt": "a log\n",
+  });
+  const state = {
+    merged: [{ number: 7, title: "feat: seven", mergedAt: at(1) }],
+    rollups: { 7: rollup("7".repeat(40), [suite(71, 0, "CI", [checkRun("test-linux", 7101, 0, 10), checkRun("test-macos", 7102, 0, 10)])]) },
+    routes: {
+      "actions/runs/71/artifacts": join(dir, "list.json"),
+      "actions/jobs/7101/logs": join(dir, "log.txt"),
+      "actions/jobs/7102/logs": join(dir, "log.txt"),
+    },
+  };
+  const out = join(dir, "out");
+  const fetch = () =>
+    spawnSync(process.execPath, [script("fetch-evidence.mjs"), "--out", out, "--prs", "1"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    });
+  // The listing and the first log are read; the floor stops the second.
+  let bin = ghDouble(dir, { ...state, core: [4000, 4000, 100] });
+  let run = fetch();
+  assert.equal(run.status, 2, run.stderr);
+  assert.ok(existsSync(join(out, "logs", "7101.log")));
+  assert.ok(!existsSync(join(out, "logs", "7102.log")));
+  const held = statSync(join(out, "logs", "7101.log")).mtimeMs;
+  bin = ghDouble(dir, { ...state, core: [4000] });
+  run = fetch();
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /1 core and 0 GraphQL reads$/m);
+  assert.equal(statSync(join(out, "logs", "7101.log")).mtimeMs, held, "a held log is not read again");
+  const calls = readFileSync(join(dir, "calls.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(
+    calls.filter((args) => args[1] !== "rate_limit").map((args) => args.at(-1)),
+    ["repos/nickderobertis/onepipeline/actions/jobs/7102/logs"],
   );
 });

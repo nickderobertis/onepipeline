@@ -34,7 +34,9 @@
         "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
         "{workspaceRoot}/.github/workflows/ci.yml",
         "{workspaceRoot}/justfile",
-        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/project.json",
+        "{workspaceRoot}/npm/project.json",
+        "{workspaceRoot}/tests/e2e/project.json",
         "{workspaceRoot}/biome.jsonc",
         "sharedGlobals",
         {
