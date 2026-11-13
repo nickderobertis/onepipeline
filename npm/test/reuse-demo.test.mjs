@@ -3,7 +3,7 @@
 // demonstration commit written into a checkout, read for the cache writes a run of it
 // must not make.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -28,11 +28,19 @@ function write(dir, files) {
   }
 }
 
-function crate(name, lib) {
+// The repository's own two archive recipes, as the timer reads them, so a fixture crate
+// builds its archive by the very command the tiers do.
+const recipes = ["_crate-test-archive", "_crate-test-quick-archive"]
+  .map((name) => execFileSync("just", ["--show", name], { cwd: root, encoding: "utf8" }))
+  .join("\n");
+
+function crate(name, lib, { deps = "", extra = {} } = {}) {
   const dir = join(scratch, name);
   write(dir, {
-    "Cargo.toml": `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n`,
+    "Cargo.toml": `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n\n[dependencies]\n${deps}`,
+    justfile: recipes,
     "src/lib.rs": lib,
+    ...extra,
     "tests/it.rs": `#[test]\nfn adds() { assert_eq!(${name.replace(/-/g, "_")}::add(1, 2), 3); }\n`,
   });
   // A lock, so the archive's `--locked` build has the one it requires.
@@ -54,17 +62,44 @@ const run = (dir, mode, env = {}) =>
   });
 
 test("the archive timer builds the plain archive and reports its wall and unit seconds, workspace apart", () => {
-  const dir = crate("timed-crate", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
+  // A path dependency outside the workspace is a dependency, not one of its crates.
+  write(scratch, {
+    "helper/Cargo.toml":
+      '[package]\nname = "helper"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
+    "helper/src/lib.rs": "pub fn one() -> i32 { 1 }\n",
+  });
+  const dir = crate(
+    "timed-crate",
+    "pub fn add(a: i32, b: i32) -> i32 { a + b + helper::one() - 1 }\n",
+    {
+      deps: 'helper = { path = "../helper" }\n',
+    },
+  );
+  // A report an earlier build left is not this build's.
+  write(dir, {
+    "target/cargo-timings/cargo-timing-20000101T000000Z-0.html":
+      'const UNIT_DATA = [{"name":"stale","target":"","duration":99}];',
+  });
   const result = run(dir, "quick");
   assert.equal(result.status, 0, result.stderr);
-  const line = result.stdout.split("\n").find((l) => l.startsWith("measure-archive: mode="));
+  const lines = result.stdout.split("\n").filter((l) => l.startsWith("measure-archive: "));
+  // One result line, and the units beside it.
+  assert.equal(lines.length, 1, result.stdout);
   assert.match(
-    line,
-    /^measure-archive: mode=quick wall_s=\d+\.\d units=\d+ unit_s=\d+\.\d workspace_units=(\d+) workspace_unit_s=\d+\.\d dependency_unit_s=\d+\.\d workspace=timed-crate$/,
+    lines[0],
+    /^measure-archive: mode=quick wall_s=\d+\.\d units=\d+ unit_s=\d+\.\d workspace_units=(\d+) workspace_unit_s=\d+\.\d dependency_unit_s=\d+\.\d workspace=timed-crate units_in=\S+measure-archive\.json$/,
   );
-  // The lib and the integration test are the workspace's units.
-  assert.ok(Number(line.match(/workspace_units=(\d+)/)[1]) >= 2, line);
-  assert.match(result.stdout, /^measure-archive: unit timed-crate /m);
+  const detail = JSON.parse(readFileSync(lines[0].match(/units_in=(\S+)$/)[1], "utf8"));
+  assert.ok(
+    detail.units.some((u) => u.name === "helper"),
+    "the dependency is among the units",
+  );
+  assert.ok(
+    !detail.units.some((u) => u.name === "stale"),
+    "the earlier build's report is not read",
+  );
+  // The lib and the integration test are the workspace's units; helper is not one.
+  assert.ok(Number(lines[0].match(/workspace_units=(\d+)/)[1]) >= 2, lines[0]);
   assert.ok(existsSync(join(dir, "tests.tar.zst")));
 });
 
@@ -74,7 +109,7 @@ test("the coverage archive is cargo-llvm-cov's instrumented build, under -D warn
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    /^measure-archive: mode=coverage wall_s=\d+\.\d .* workspace=covered-crate$/m,
+    /^measure-archive: mode=coverage wall_s=\d+\.\d .* workspace=covered-crate units_in=\S+$/m,
   );
   assert.ok(existsSync(join(dir, "tests.tar.zst")));
   // -D warnings is the timer's, as test-linux's: an unused item fails the build.

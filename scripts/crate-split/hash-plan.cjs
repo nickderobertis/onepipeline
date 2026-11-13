@@ -10,8 +10,13 @@
 // `inputs` from the project graph so a file can be traced to the named input that put it
 // there. Each distinct runtime command is run here and its output kept, so two
 // checkouts' values can be compared. A task the checkout's graph does not have is
-// listed under `missing`. It is `crate-split-replay.mjs --observed`'s reader, and reads
-// nothing outside the checkout.
+// listed under `missing`; a runtime command that fails is kept as `ok: false` with its
+// exit status and the last line it wrote to stderr, so two checkouts' failures compare
+// equal only when they failed alike. It is `crate-split-replay.mjs --observed`'s
+// reader, and reads nothing outside the checkout.
+//
+// Exit 0: OUT is written. 1: an argument was refused, or Nx could not read the
+// checkout's graph; the reason and a `next:` action are on stderr.
 "use strict";
 const { execSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
@@ -22,6 +27,18 @@ const root = process.cwd();
 const nx = (path) => require(join(root, "node_modules", "nx", "dist", "src", path));
 
 async function main([out, ...tasks]) {
+  if (!out || tasks.length === 0) {
+    throw Object.assign(new Error("name the file to write and at least one project:target"), {
+      next: "node scripts/crate-split/hash-plan.cjs OUT PROJECT:TARGET...",
+    });
+  }
+  for (const id of tasks) {
+    if (!/^[^:\s]+:[^:\s]+$/.test(id)) {
+      throw Object.assign(new Error(`${JSON.stringify(id)} is not a project:target task id`), {
+        next: "name each task as Nx does, e.g. onepipeline-e2e:test",
+      });
+    }
+  }
   const { createProjectGraphAsync } = nx("project-graph/project-graph.js");
   const { HashPlanInspector } = nx("hasher/hash-plan-inspector.js");
   const graph = await createProjectGraphAsync({ exitOnError: true });
@@ -53,10 +70,11 @@ async function main([out, ...tasks]) {
         try {
           runtime[entry] = {
             ok: true,
-            out: execSync(command, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }),
+            out: execSync(command, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
           };
         } catch (error) {
-          runtime[entry] = { ok: false, out: String(error.status) };
+          const said = String(error.stderr ?? "").trim().split("\n").at(-1) ?? "";
+          runtime[entry] = { ok: false, out: `exit ${error.status}: ${said}` };
         }
       }
     }
@@ -68,6 +86,9 @@ async function main([out, ...tasks]) {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-  console.error(`hash-plan: ${error.message}`);
+  console.error(`hash-plan: ${error.message.split("\n")[0]}`);
+  console.error(
+    `next: ${error.next ?? "run it from a checkout whose node_modules holds Nx, and fix the Nx error above"}`,
+  );
   process.exitCode = 1;
 });
