@@ -473,7 +473,11 @@ function readMeasure(dir) {
         graph,
       );
       out.graph = parsed;
-    }
+    } else
+      note(
+        `${graph} holds no graph, so the report has no critical path through Nx's dependencies`,
+        "graph.err beside it says why the graph step failed; the concurrency profile still stands",
+      );
   }
   const times = find("overhead/times.txt");
   if (times) {
@@ -576,8 +580,12 @@ function readRecords(files) {
   for (const r of records) {
     const key = `${r.binary}::${r.test}`;
     const prev = kept.get(key);
-    if (!prev || (r.attempt ?? 0) > (prev.attempt ?? 0) || r.started_at > prev.started_at)
-      kept.set(key, r);
+    // The higher attempt; between two of one attempt, the later run.
+    const later =
+      !prev ||
+      (r.attempt ?? 0) > (prev.attempt ?? 0) ||
+      ((r.attempt ?? 0) === (prev.attempt ?? 0) && r.started_at > prev.started_at);
+    if (later) kept.set(key, r);
   }
   return [...kept.values()].map((r) => ({
     ...r,
@@ -1121,8 +1129,13 @@ function summarizeSamples(samples, steps, tasks) {
     if (dt <= 0) continue;
     // Counters only grow; one that falls was reset (an interface or counter restarted), so
     // that interval says nothing about its traffic or CPU, and is noted rather than counted.
-    const reset =
-      b.rx < a.rx || b.tx < a.tx || (a.cpu?.total !== undefined && b.cpu?.total < a.cpu.total);
+    // /proc/stat's idle can only grow, and by no more than the total does.
+    const cpuReset =
+      a.cpu?.total !== undefined &&
+      (b.cpu?.total < a.cpu.total ||
+        b.cpu.idle < a.cpu.idle ||
+        b.cpu.idle - a.cpu.idle > b.cpu.total - a.cpu.total);
+    const reset = b.rx < a.rx || b.tx < a.tx || cpuReset;
     if (reset) {
       resets++;
       continue;

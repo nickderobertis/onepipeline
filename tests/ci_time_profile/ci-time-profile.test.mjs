@@ -257,6 +257,25 @@ test("the generated sampler writes timestamped CPU, load and network lines", (t)
   const lines = readFileSync(join(dir, "samples.txt"), "utf8").trim().split("\n");
   assert.ok(lines.length >= 2, lines.join("\n"));
   for (const line of lines) assert.match(line, /^\d{10} \S.* \| \S.* \| \d+ \d+$/);
+  // The analysis reads what the sampler wrote: its lines become a run's samples.
+  const cacheDir = join(dir, "cache");
+  seedCache(cacheDir, oneRun(join(dir, "run")));
+  const shifted = lines.map((line, i) =>
+    line.replace(/^\d+/, String((T0 + (30 + 2 * i) * 1000) / 1000)),
+  );
+  writeFileSync(
+    join(cacheDir, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+    `${shifted.join("\n")}\n`,
+  );
+  const json = join(dir, "out.json");
+  const read = run(profileScript, job(cacheDir, join(dir, "r.md"), ["--json", json]));
+  assert.equal(read.status, 0, read.stderr);
+  const sampled = JSON.parse(readFileSync(json, "utf8")).samples;
+  assert.ok(sampled.sampled_s >= 2, JSON.stringify(sampled));
+  assert.ok(
+    sampled.cpu_busy_fraction === null ||
+      (sampled.cpu_busy_fraction >= 0 && sampled.cpu_busy_fraction <= 1),
+  );
   // The macOS branch runs only on macOS, which this target does not: its commands are held
   // here, and the lines it wrote on a hosted macOS runner are the fixture's macOS samples.
   const mac = SAMPLER.slice(SAMPLER.indexOf("else"));
@@ -827,6 +846,12 @@ test("a test retried in another record directory counts once, at its later attem
   const again = record("b", 400, 100, { spawn: 100 });
   again.attempt = 2;
   writeFileSync(join(retry, "b.json"), JSON.stringify(again));
+  // A first attempt of b written after its second, even later in the run, does not displace it.
+  mkdirSync(join(retry, "..", "older", "e2e"), { recursive: true });
+  writeFileSync(
+    join(retry, "..", "older", "e2e", "b.json"),
+    JSON.stringify(record("b", 410, 100, { spawn: 1 })),
+  );
   // And test a written again by a later run of the same attempt: the later one counts.
   writeFileSync(join(retry, "a.json"), JSON.stringify(record("a", 405, 200, { spawn: 150 })));
   const json = join(dir, "out.json");
@@ -1479,6 +1504,48 @@ test("samples taken twice at one moment, a counter reset, an idle CPU, quiet net
     "gate: demo-version:smoke": { bytes: 0, active_s: 0 },
     "between steps": { bytes: 400, active_s: 0 },
   });
+});
+
+test("a graph step that wrote no graph leaves no critical path, and the report says why", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  writeFileSync(
+    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "graph.json"),
+    "NX   Could not plan\n",
+  );
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.deepEqual(r.critical_path, []);
+  assert.ok(
+    r.notes.some((n) => /graph\.json holds no graph, so the report has no critical path/.test(n)),
+  );
+});
+
+test("a CPU counter whose idle falls, or grows past the total, is a reset", (t) => {
+  for (const [what, second] of [
+    ["idle falls", "cpu 300 0 0 50 0 0 0"],
+    ["idle outgrows the total", "cpu 50 0 0 300 0 0 0"],
+  ]) {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    seedCache(cache, oneRun(dir));
+    const at = (s) => (T0 + s * 1000) / 1000;
+    writeFileSync(
+      join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+      `${at(30)} cpu 100 0 0 100 0 0 0 | 1/1 | 0 0\n${at(32)} ${second} | 1/1 | 0 0\n`,
+    );
+    const json = join(dir, "out.json");
+    assert.equal(
+      run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status,
+      0,
+      what,
+    );
+    const s = JSON.parse(readFileSync(json, "utf8")).samples;
+    assert.equal(s.counter_resets, 1, what);
+    assert.equal(s.cpu_busy_fraction, null, what);
+  }
 });
 
 test("the graph Nx itself writes for a task is read as the dependency map", (t) => {
