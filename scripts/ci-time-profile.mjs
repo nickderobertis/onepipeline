@@ -5,7 +5,7 @@
 //   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE] [--min-remaining N]
 //   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE
-//        [--compare-since DATE] [--base-ref REF] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
+//        [--compare-since DATE] [--base-ref REF] [--profiles CLASS] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE]
 //        [--min-remaining N]
 //
@@ -26,7 +26,9 @@
 // each job's successful durations and medians before and after `split`, counting only runs
 // created at or after --compare-since (default: since), overall and by what each run's pull
 // request changed: its head, fetched over git (no API request), diffed against its merge
-// base with --base-ref (default origin/main; fetch it first).
+// base with --base-ref (default origin/main; fetch it first). --profiles CLASS also reads each
+// job of that class's test-profile artifact (e2e tests, e2e test-seconds, seconds per spawn
+// of `onepipeline`).
 //
 // Every GitHub response is kept under --cache (default target/ci-time-profile), so a
 // second run of the same measurement makes no request; the command refuses to make one
@@ -1140,6 +1142,37 @@ function history(opts) {
     classes.set(sha, cls);
   }
   for (const r of rows) r.class = classes.get(r.head_sha);
+  // With --profiles CLASS, each counted job of that class also reads its test-profile
+  // artifact: the e2e tier's size and cost, and what one spawn of `onepipeline` took, which
+  // tells two runner machines behind one label apart.
+  if (opts.profiles) {
+    const listed = new Map();
+    for (const r of rows.filter((x) => x.class === opts.profiles)) {
+      if (!listed.has(r.run))
+        listed.set(
+          r.run,
+          gh.json(`repos/${opts.repo}/actions/runs/${r.run}/artifacts?per_page=100`).artifacts,
+        );
+      const a = listed.get(r.run).find((x) => x.name === `test-profile-${r.job}` && !x.expired);
+      if (!a) continue;
+      const dir = unzipArtifact(
+        gh,
+        opts.repo,
+        a,
+        join(opts.cache, "runs", String(r.run), `attempt-${r.attempt}`, r.job, a.name),
+      );
+      const e2e = readRecords(walk(dir)).filter((x) => x.binary === "e2e");
+      let count = 0;
+      let seconds = 0;
+      for (const x of e2e) {
+        count += x.programs?.onepipeline?.count ?? 0;
+        seconds += x.programs?.onepipeline?.s ?? 0;
+      }
+      r.e2e_tests = e2e.length;
+      r.e2e_test_seconds = e2e.reduce((t, x) => t + x.wall_s, 0);
+      r.onepipeline_spawn_s = count ? seconds / count : null;
+    }
+  }
   const summary = {};
   for (const job of opts.jobs)
     for (const cls of ["all", ...new Set(rows.map((r) => r.class))])
@@ -1182,7 +1215,19 @@ function printHistory(h, opts) {
   out.push(
     "",
     table(
-      ["run", "attempt", "head", "created", "pull request changed", "job", "min", "side"],
+      [
+        "run",
+        "attempt",
+        "head",
+        "created",
+        "pull request changed",
+        "job",
+        "min",
+        "side",
+        "e2e tests",
+        "e2e test-s",
+        "s per onepipeline spawn",
+      ],
       h.rows.map((r) => [
         r.run,
         r.attempt,
@@ -1192,6 +1237,9 @@ function printHistory(h, opts) {
         r.job,
         r.minutes.toFixed(1),
         r.side,
+        r.e2e_tests ?? "-",
+        r.e2e_test_seconds?.toFixed(0) ?? "-",
+        r.onepipeline_spawn_s?.toFixed(3) ?? "-",
       ]),
     ),
   );
