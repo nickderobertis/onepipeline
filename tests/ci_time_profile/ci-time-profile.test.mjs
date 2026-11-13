@@ -97,6 +97,12 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   assert.match(overhead, /mv target\/test-profile "\$m\/\$label-records"/);
   assert.match(overhead, /echo "\$label \$start \$\(date \+%s\) \$status" >> "\$m\/times\.txt"/);
   assert.match(overhead, /::warning::measurement: \$label exited \$status.*ACTION: /);
+  // The sampler's errors go to sampler.err, which the graph step reports with an ACTION.
+  assert.match(linux, /nohup bash "\$m\/sampler\.sh" "\$m" > \/dev\/null 2> "\$m\/sampler\.err" &/);
+  assert.match(
+    linux,
+    /if \[ -s "\$m\/sampler\.err" \]; then\n\s+echo "::warning::measurement: the CPU and network sampler reported errors.*ACTION: [^\n]+"\n\s+head -5 "\$m\/sampler\.err"\n\s+fi/,
+  );
 
   const plain = checkout(join(scratch(t), "plain"));
   assert.equal(run(workflowScript, [plain]).status, 0);
@@ -366,7 +372,13 @@ function sidecarReport(dir, into, { cancelled = false } = {}) {
 // out Nx's trace and the sidecar's manifest and gives the sidecar a cancelled invocation.
 function oneRun(
   dir,
-  { status = "completed", sidecarOnly = false, log = null, macSamples = false } = {},
+  {
+    status = "completed",
+    sidecarOnly = false,
+    noTrace = false,
+    log = null,
+    macSamples = false,
+  } = {},
 ) {
   const answers = {};
   const put = (endpoint, body) => {
@@ -450,7 +462,8 @@ function oneRun(
   sidecarReport(dir, sidecar, { cancelled: sidecarOnly });
   if (sidecarOnly) rmSync(join(sidecar, "manifest.json"));
   const measure = artifact(names[2]);
-  if (!sidecarOnly) nxTrace(join(measure, "nx-profile.json"), TASKS);
+  if (!sidecarOnly && !noTrace) nxTrace(join(measure, "nx-profile.json"), TASKS);
+  writeFileSync(join(measure, "host.txt"), "Linux runner 6.8.0 x86_64 GNU/Linux\n4\n1794560000\n");
   const toolchain = "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc";
   const rustcRow = (a, b, crate, dirName, compiler = toolchain) =>
     [
@@ -667,6 +680,13 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
     [1, 10, 8, 1.25],
   );
   assert.equal(r.overhead.runs.instrumented.s, 60);
+  assert.deepEqual(r.measure_host, ["Linux runner 6.8.0 x86_64 GNU/Linux", "4", "1794560000"]);
+  assert.match(
+    report,
+    /## Network and CPU \(sampler\)\n\nsampled 0\.1 min; non-loopback bytes 4 MB; seconds at >= 256 KiB\/s: 4; CPU busy 60%\nCPU busy in the gate by number of Nx tasks running: k=2 60% over 0\.1 min\n/,
+  );
+  assert.match(report, /\| gate: demo-e2e:test \+ demo:build \| 4\.0 \| 4 \|/);
+  assert.match(report, /tests in both 1; test-seconds instrumented 10, plain 8, ratio 1\.250/);
   const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
   assert.ok(Math.abs(gate - 600) < 1e-6, `gate categories sum to ${gate}`);
   const near = (category, seconds) =>
@@ -930,6 +950,22 @@ test("a run without the named job, or arguments the command does not take, are r
     ["nonsense"],
   ])
     assert.equal(run(profileScript, args).status, 2, args.join(" "));
+});
+
+test("a run with no Nx trace takes its task times from the sidecar's telemetry", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir, { noTrace: true }));
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.equal(r.task_source, "sidecar telemetry");
+  assert.deepEqual(
+    r.tasks.map((x) => [x.task, x.result, x.s]),
+    TASKS.map(([task, a, b]) => [task, "executed", b - a]),
+  );
+  const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(gate - 600) < 1e-6);
 });
 
 test("a failed gate's run falls back to the sidecar's telemetry, and says that its tasks are incomplete", (t) => {
