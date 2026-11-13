@@ -321,16 +321,42 @@ function readMeasure(dir) {
 // A rustc invocation's tree: what kind of build it is part of.
 function tree(r) {
   if (/clippy-driver/.test(r.compiler)) return "clippy";
-  if (/llvm-cov-target/.test(r.outDir) || r.instrumented) return "instrumented";
-  if (
-    /\/toolchains\/1\.\d+/.test(r.compiler) &&
-    !/\/toolchains\/(stable|nightly)/.test(r.compiler)
-  ) {
-    // The MSRV check runs its own pinned toolchain; the workspace's is rust-toolchain.toml's.
-    if (/msrv|\/target\/msrv/.test(r.outDir)) return "msrv";
+  // rust-toolchain.toml pins a patch release (1.97.1); the MSRV check's toolchain is the
+  // bare minor (1.97) Cargo.toml's rust-version names.
+  if (/\/toolchains\/\d+\.\d+-/.test(r.compiler)) return "msrv toolchain";
+  if (r.instrumented || /\/target\/llvm-cov-target\//.test(r.outDir))
+    return "instrumented (llvm-cov-target)";
+  const inCheckout = /\/work\/[^/]+\/[^/]+\/target\/([^/]+)/.exec(r.outDir);
+  if (!inCheckout) return "outside the checkout (cargo install)";
+  if (inCheckout[1] === "debug") return "plain (target/debug)";
+  if (inCheckout[1] === "release") return "release (target/release)";
+  return `target/${inCheckout[1]}`;
+}
+
+// The workspace's own crates and targets, from the local clone's manifest, plus every crate
+// this run instrumented (cargo-llvm-cov instruments the workspace's crates only). The rest
+// of what rustc compiled is dependencies, which a warm cache would have held.
+let workspaceCrates = null;
+function workspaceNames(rustc) {
+  if (!workspaceCrates) {
+    workspaceCrates = new Set();
+    try {
+      const meta = JSON.parse(
+        execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1", "--offline"], {
+          encoding: "utf8",
+          maxBuffer: 1 << 28,
+          stdio: ["ignore", "pipe", "ignore"],
+        }),
+      );
+      for (const p of meta.packages)
+        for (const t of p.targets) workspaceCrates.add(t.name.replace(/-/g, "_"));
+    } catch {
+      /* the instrumented set alone */
+    }
   }
-  if (/\/release\//.test(r.outDir)) return "release (install proofs, wheel)";
-  return "plain";
+  const names = new Set(workspaceCrates);
+  for (const r of rustc) if (r.instrumented) names.add(r.crate);
+  return names;
 }
 
 // ---------------------------------------------------------------- records
@@ -629,11 +655,13 @@ function analyzeJob(opts) {
 
   // Compile: every rustc invocation, by tree.
   const compile = {};
+  const ours = workspaceNames(rustc);
   for (const r of rustc) {
     const k = tree(r);
-    compile[k] ??= { invocations: 0, cpu_s: 0, wall_s: 0, crates: {} };
+    compile[k] ??= { invocations: 0, cpu_s: 0, wall_s: 0, dependency_s: 0, crates: {} };
     compile[k].invocations++;
     compile[k].cpu_s += (r.end - r.start) / 1000;
+    if (!ours.has(r.crate)) compile[k].dependency_s += (r.end - r.start) / 1000;
     compile[k].crates[r.crate] = (compile[k].crates[r.crate] ?? 0) + (r.end - r.start) / 1000;
   }
   for (const k of Object.keys(compile))
@@ -957,6 +985,7 @@ function printJob(r) {
           "tree",
           "invocations",
           "rustc seconds (summed)",
+          "of which dependencies (s)",
           "wall with one running (min)",
           "top crates (s)",
         ],
@@ -964,6 +993,7 @@ function printJob(r) {
           k,
           c.invocations,
           c.cpu_s.toFixed(0),
+          c.dependency_s.toFixed(0),
           min(c.wall_s),
           Object.entries(c.crates)
             .sort((a, b) => b[1] - a[1])
