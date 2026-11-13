@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Read a compile-cost demonstration's run from its saved jobs listing and job logs.
 //
-//   node scripts/crate-split/demo-runs.mjs --dir DIR RUN_ID...
+//   node scripts/crate-split/demo-runs.mjs --dir DIR --out FILE RUN_ID...
 //
 // DIR holds `<run>.jobs.json` (the run's jobs, read once) and `<job id>.log` (each
 // job's log, read once). For each job it prints the run's `GITHUB_SHA`, the pull
@@ -9,9 +9,13 @@
 // cache restore (the key it matched, exactly or by restore key, or none; its size; the
 // step's seconds), whether any line of the log saves a cache, and what
 // `measure-archive.mjs` measured. The measurement workflow runs no Nx task, so the Nx
-// selection is none. It reads only DIR.
-import { existsSync, readFileSync } from "node:fs";
+// selection is none. It reads only DIR, and writes the table to FILE.
+//
+// Exit 0: FILE is written; one line counts the jobs read and the cache-save lines seen.
+// 1: an argument or a saved listing was refused, with a `next:` action on stderr.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import * as check from "./validate.mjs";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: an Actions log's colour codes are ESC sequences.
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -75,34 +79,65 @@ export function readJob(job, log) {
   };
 }
 
+const USAGE = "node scripts/crate-split/demo-runs.mjs --dir DIR --out FILE RUN_ID...";
+
 function main(argv) {
-  const at = argv.indexOf("--dir");
-  if (at < 0 || !argv[at + 1])
-    throw new Error("--dir names the directory the run's jobs and logs were saved in");
-  const dir = argv[at + 1];
-  const runs = argv.filter((_, i) => i !== at && i !== at + 1);
-  console.log(
+  const dirAt = argv.indexOf("--dir");
+  const outAt = argv.indexOf("--out");
+  check.need(
+    dirAt >= 0 && argv[dirAt + 1] && !argv[dirAt + 1].startsWith("--"),
+    "--dir names the directory the run's jobs and logs were saved in",
+    USAGE,
+  );
+  check.need(
+    outAt >= 0 && argv[outAt + 1] && !argv[outAt + 1].startsWith("--"),
+    "--out names the file the table is written to",
+    USAGE,
+  );
+  const dir = argv[dirAt + 1];
+  const out = argv[outAt + 1];
+  const runs = argv.filter((_, i) => ![dirAt, dirAt + 1, outAt, outAt + 1].includes(i));
+  check.need(runs.length > 0, "name at least one run", USAGE);
+  for (const run of runs) check.runId(run);
+  const lines = [
     "| run | job | job id | GITHUB_SHA | head | workflow blob | Rust cache restore | MB | restore s | cache saves | archive | cargo build s | wall s | unit s (workspace / deps) |",
-  );
-  console.log(
     "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |",
-  );
+  ];
+  let read = 0;
+  let unread = 0;
+  let saves = 0;
   for (const run of runs) {
-    const { jobs } = JSON.parse(readFileSync(join(dir, `${run}.jobs.json`), "utf8"));
-    for (const job of jobs.sort((a, b) => a.name.localeCompare(b.name))) {
+    const listing = join(dir, `${run}.jobs.json`);
+    let doc;
+    try {
+      doc = JSON.parse(readFileSync(listing, "utf8"));
+    } catch (error) {
+      throw new check.Refusal(
+        `${listing} cannot be read as JSON: ${error.message}`,
+        `save the run's jobs: gh api repos/OWNER/NAME/actions/runs/${run}/jobs > ${listing}`,
+      );
+    }
+    for (const job of check.jobsListing(doc, run).sort((a, b) => a.name.localeCompare(b.name))) {
       const path = join(dir, `${job.id}.log`);
       if (!existsSync(path)) {
-        console.log(
+        unread++;
+        lines.push(
           `| ${run} | ${job.name} | ${job.id} | not read: ${job.status} when the jobs were listed | | | | | | | | | | |`,
         );
         continue;
       }
+      read++;
       const r = readJob(job, readFileSync(path, "utf8"));
-      console.log(
+      saves += r.saves;
+      lines.push(
         `| ${run} | ${r.job} | ${r.id} | \`${r.sha?.slice(0, 12)}\` | \`${r.head?.slice(0, 12)}\` | \`${r.workflowBlob?.slice(0, 12)}\` | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${r.mode ?? "failed after the build"} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
       );
     }
   }
+  writeFileSync(out, `${lines.join("\n")}\n`);
+  console.log(
+    `demo-runs: wrote ${out}: ${read} jobs read and ${unread} not, of ${runs.length} runs; ${saves} cache-save lines`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -110,6 +145,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     main(process.argv.slice(2));
   } catch (error) {
     console.error(`demo-runs: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
   }
 }

@@ -793,8 +793,15 @@ test("the reuse spike's one command replays today's tiers and every option over 
     { encoding: "utf8" },
   );
   assert.equal(run.status, 0, run.stderr);
-  const lines = run.stdout.trim().split("\n");
-  assert.match(lines[0], /--observed|observed\.json: 3 of 4 pull requests read/);
+  // One result line, and each step's own line in steps.txt.
+  assert.equal(run.stdout.trim().split("\n").length, 1, run.stdout);
+  assert.match(
+    run.stdout.trim(),
+    /^reuse-spike: wrote \S+ \(each step's line in steps\.txt\): 3 of 4 pull requests read, 7 task runs ran and 5 of them the diff forced; net min per PR over today's tiers \(linux\/macOS\/Windows\): a-all -?\d+\.\d\/-?\d+\.\d\/-?\d+\.\d, b \S+, c \S+; d1 \S+; d2 -\/-\/- \(estimate\)$/,
+  );
+  const stepsText = readFileSync(join(out, "steps.txt"), "utf8");
+  const lines = stepsText.trim().split("\n");
+  assert.match(lines[0], /observed\.json: 3 of 4 pull requests read/);
   for (const name of [
     "today",
     "today-release",
@@ -808,12 +815,12 @@ test("the reuse spike's one command replays today's tiers and every option over 
   ]) {
     assert.ok(
       lines.some((line) => line.includes(`${join(out, `${name}.md`)}:`)),
-      `${name} was not replayed:\n${run.stdout}`,
+      `${name} was not replayed:\n${stepsText}`,
     );
   }
   // (d2) is said to be an estimate, and replays nothing no run here made.
   assert.match(
-    run.stdout,
+    stepsText,
     /^reuse-spike: d-install-documented \(estimate, keyed on the run's base\): linux 0 of 0 runs replay, - min per change/m,
   );
   // The report's tables render from what the one command wrote.
@@ -825,10 +832,14 @@ test("the reuse spike's one command replays today's tiers and every option over 
       out,
       "--evidence",
       evidence,
+      "--out",
+      join(out, "tables.md"),
     ],
     { encoding: "utf8" },
   );
   assert.equal(tables.status, 0, tables.stderr);
+  assert.match(tables.stdout, /^report-tables: wrote \S+tables\.md: Population; /);
+  const tablesText = readFileSync(join(out, "tables.md"), "utf8");
   for (const section of [
     "Population",
     "Totals per input",
@@ -836,16 +847,16 @@ test("the reuse spike's one command replays today's tiers and every option over 
     "Options replayed",
     "Eviction",
   ]) {
-    assert.match(tables.stdout, new RegExp(`^### ${section}$`, "m"));
+    assert.match(tablesText, new RegExp(`^### ${section}$`, "m"));
   }
   // #11 changed engine source only: its class, its run and its jobs' replays. Without
   // --clone nothing is told apart as run before the caching change.
   assert.match(
-    tables.stdout,
+    tablesText,
     /^\| #11 \| non-release \| engine source, no tests \| 1 \| \[110\]\(https:\/\/github\.com\/nickderobertis\/onepipeline\/actions\/runs\/110\) \| - \| 1101 \(0 of 5 replayed\) \| - \| - \|$/m,
   );
   assert.match(
-    tables.stdout,
+    tablesText,
     /^- test-linux \(job 1101\): replayed 0: none\. Ran 5: \[rustBuild\] :test, :lint, e2e:test, :test-rest; \[not cacheable\] :smoke\.$/m,
   );
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.

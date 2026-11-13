@@ -1,21 +1,36 @@
 #!/usr/bin/env node
 // The reuse spike report's tables, from what `reuse-spike.mjs` wrote and the evidence.
 //
-//   node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR [--clone DIR]
+//   node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --out FILE [--clone DIR]
 //
 // With --clone, a pull request is "before #1493" when its run's base does not hold
 // #1493's merge (the change that made the Linux tiers cacheable); without it, none is.
 //
-// Prints Markdown: the population with each pull request's CI run and changed-file
+// Writes Markdown to FILE: the population with each pull request's CI run and changed-file
 // class; each platform job's Nx tasks replayed and run, the ran ones grouped by the key
 // inputs their diff matched (or the cause their run's record shows); the totals per
 // input; the e2e tier's runs by cause; every option's replay over the population and
 // over its typical pull requests; how far today's tier mapping agrees with Nx's own
 // per-commit hash plans; and the cache inventory with the test of whether a missed key
-// was evicted. It reads only local files.
+// was evicted. It reads only local files, each checked before it is read from.
+//
+// Exit 0: FILE is written; one line names it and its sections. 1: an argument or a file
+// was refused, with a `next:` action on stderr.
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import * as check from "./validate.mjs";
+
+const USAGE =
+  "node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --out FILE [--clone DIR]";
+
+function readJson(path, next) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new check.Refusal(`${path} cannot be read as JSON: ${error.message}`, next);
+  }
+}
 
 const PLATFORM = { "test-linux": "linux", "test-macos": "darwin", "test-windows": "win32" };
 const JOBS = ["lint", "test-linux", "test-macos", "test-windows"];
@@ -51,7 +66,25 @@ const esc = (s) => String(s).replace(/\|/g, "\\|");
 const min = (x) => (x === null || x === undefined ? "-" : x.toFixed(1));
 
 function load(spike, name) {
-  return JSON.parse(readFileSync(join(spike, `${name}.json`), "utf8"));
+  const path = join(spike, `${name}.json`);
+  const doc = readJson(path, "run scripts/crate-split/reuse-spike.mjs into --spike first");
+  if (name === "observed") return check.observedResult(doc, path);
+  if (name === "d-install-documented") {
+    check.need(
+      ["linux", "darwin", "win32"].every(
+        (p) => Number.isSafeInteger(doc?.[p]?.runs) && Number.isSafeInteger(doc[p].replays),
+      ),
+      `${path} is not a same-base replay's JSON`,
+      "run scripts/crate-split/reuse-spike.mjs into --spike again",
+    );
+    return doc;
+  }
+  check.need(
+    doc?.summary?.platforms && Array.isArray(doc.perChange) && doc.suites,
+    `${path} is not a weighed replay's JSON`,
+    "run scripts/crate-split/reuse-spike.mjs into --spike again",
+  );
+  return doc;
 }
 
 function population(observed) {
@@ -319,7 +352,24 @@ function caches(evidence, observed) {
   const dir = join(evidence, "caches");
   if (!existsSync(join(dir, "inventory.json")))
     return { table: "(no inventory read)", eviction: "" };
-  const inv = JSON.parse(readFileSync(join(dir, "inventory.json"), "utf8"));
+  const inv = readJson(
+    join(dir, "inventory.json"),
+    "run scripts/crate-split/cache-inventory.mjs --evidence DIR again",
+  );
+  check.need(
+    Number.isSafeInteger(inv?.entries) &&
+      Number.isFinite(inv.bytes) &&
+      inv.families &&
+      Object.values(inv.families).every(
+        (t) =>
+          Number.isSafeInteger(t.entries) &&
+          Number.isFinite(t.bytes) &&
+          typeof t.oldest === "string" &&
+          t.targets,
+      ),
+    `${join(dir, "inventory.json")} is not a cache inventory`,
+    "run scripts/crate-split/cache-inventory.mjs --evidence DIR again",
+  );
   const out = [
     `${inv.entries} entries, ${(inv.bytes / 1e9).toFixed(2)} GB.`,
     "",
@@ -362,7 +412,11 @@ function caches(evidence, observed) {
   // Was a key a run missed one an earlier run stored, and is it still held?
   const held = new Map();
   for (const f of readdirSync(dir).filter((f) => /^page-\d+\.json$/.test(f))) {
-    for (const e of JSON.parse(readFileSync(join(dir, f), "utf8")).actions_caches) {
+    const page = Number(f.match(/\d+/)[0]);
+    for (const e of check.cachePage(
+      readJson(join(dir, f), `remove ${f} and re-run cache-inventory.mjs`),
+      page,
+    )) {
       if (!held.has(e.key)) held.set(e.key, []);
       held.get(e.key).push(e);
     }
@@ -374,7 +428,11 @@ function caches(evidence, observed) {
     for (const j of pr.jobs ?? []) {
       for (const r of j.ran.filter((x) => x.evictedFrom)) {
         missed++;
-        const exec = JSON.parse(readFileSync(join(evidence, "executions", `${j.id}.json`), "utf8"));
+        const where = join(evidence, "executions", `${j.id}.json`);
+        const exec = check.executions(
+          readJson(where, "remove it and re-run fetch-evidence.mjs"),
+          where,
+        );
         const t = exec.tasks.find((x) => x.task === r.task);
         const main = (held.get(`nx-cache-${t.hash}`) ?? []).find(
           (e) => e.ref === "refs/heads/main",
@@ -391,9 +449,11 @@ function caches(evidence, observed) {
 }
 
 function main(argv) {
-  const options_ = {};
-  for (let i = 0; i < argv.length; i += 2) options_[argv[i].replace(/^--/, "")] = argv[i + 1];
-  for (const k of ["spike", "evidence"]) if (!options_[k]) throw new Error(`--${k} is required`);
+  const options_ = check.parseOptions(argv, ["spike", "evidence", "out", "clone"], {
+    usage: USAGE,
+  });
+  for (const k of ["spike", "evidence", "out"])
+    check.need(options_[k], `--${k} is required`, USAGE);
   const observed = load(options_.spike, "observed");
   if (options_.clone) {
     afterCaching = (pr) => {
@@ -402,9 +462,7 @@ function main(argv) {
         execFileSync(
           "git",
           ["-C", options_.clone, "merge-base", "--is-ancestor", CACHING_CHANGE, pr.base],
-          {
-            stdio: "ignore",
-          },
+          { stdio: "ignore" },
         );
         return true;
       } catch {
@@ -431,7 +489,13 @@ function main(argv) {
     ],
     ["Tasks replayed and run, per pull request and job", perJob(observed)],
   ];
-  for (const [title, body] of sections) console.log(`### ${title}\n\n${body}\n`);
+  writeFileSync(
+    options_.out,
+    sections.map(([title, body]) => `### ${title}\n\n${body}\n`).join("\n"),
+  );
+  console.log(
+    `report-tables: wrote ${options_.out}: ${sections.map(([title]) => title).join("; ")}`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -439,6 +503,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     main(process.argv.slice(2));
   } catch (error) {
     console.error(`report-tables: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
   }
 }

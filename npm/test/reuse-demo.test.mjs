@@ -257,6 +257,7 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
         {
           name: "measure-linux (1)",
           id: 1,
+          status: "completed",
           conclusion: "success",
           steps: [
             step("Run Swatinem/rust-cache@v2.9.2", "2026-11-13T07:42:34Z", "2026-11-13T07:43:00Z"),
@@ -265,6 +266,7 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
         {
           name: "measure-linux (2)",
           id: 2,
+          status: "completed",
           conclusion: "success",
           steps: [
             step("Run Swatinem/rust-cache@v2.9.2", "2026-11-13T07:42:34Z", "2026-11-13T07:42:40Z"),
@@ -278,8 +280,16 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
       "No cache found.",
     ),
   });
-  const run = spawnSync(process.execPath, [runsScript, "--dir", dir, "9"], { encoding: "utf8" });
+  const table = join(dir, "runs.md");
+  const run = spawnSync(process.execPath, [runsScript, "--dir", dir, "--out", table, "9"], {
+    encoding: "utf8",
+  });
   assert.equal(run.status, 0, run.stderr);
+  assert.equal(
+    run.stdout,
+    `demo-runs: wrote ${table}: 2 jobs read and 0 not, of 1 runs; 1 cache-save lines\n`,
+  );
+  run.stdout = readFileSync(table, "utf8");
   assert.match(
     run.stdout,
     /^\| 9 \| measure-linux \(1\) \| 1 \| `4fc389b6aa` \| `2cac816a6a` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 26 \| 0 \| coverage \| 117\.5 \| 118\.9 \| 363\.1 \/ 0 \|$/m,
@@ -295,8 +305,11 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
     }),
     "3.log": `2026-11-13T07:42:34.0000000Z ##[group]Run Swatinem/rust-cache@v2.9.2\n${log([])}\n2026-11-13T07:43:10.0000000Z ##[group]Run actions/setup-node@v4`,
   });
-  const listed = spawnSync(process.execPath, [runsScript, "--dir", dir, "8"], { encoding: "utf8" });
+  const listed = spawnSync(process.execPath, [runsScript, "--dir", dir, "--out", table, "8"], {
+    encoding: "utf8",
+  });
   assert.equal(listed.status, 0, listed.stderr);
+  listed.stdout = readFileSync(table, "utf8");
   assert.match(
     listed.stdout,
     /^\| 8 \| measure-macos \(1\) \| 3 \| .* \| 1869 \| 36 \| 0 \| coverage \|/m,
