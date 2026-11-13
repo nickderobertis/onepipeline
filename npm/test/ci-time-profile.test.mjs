@@ -184,11 +184,22 @@ function cacheOneRun(cache) {
     JSON.stringify(record("b", 400, 100, { spawn: 40, git: 0, wait: 60 })),
   );
   writeFileSync(
+    join(records, "late.json"),
+    JSON.stringify(record("late", 683, 3, { spawn: 3, git: 0, wait: 0 })),
+  );
+  writeFileSync(
     join(artifact("nx-cache-entries-test-linux"), "executions.json"),
     JSON.stringify({
       tasks: [
         { task: "demo:build", result: "executed", started_at: iso(100), finished_at: iso(450) },
         { task: "demo-e2e:test", result: "executed", started_at: iso(300), finished_at: iso(680) },
+        // Another task runs one more test of the e2e binary after the tier has ended.
+        {
+          task: "demo-version:smoke",
+          result: "executed",
+          started_at: iso(682),
+          finished_at: iso(688),
+        },
       ],
       store_attempts: [{ status: "failed", http_status: 403 }],
     }),
@@ -261,28 +272,40 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
   assert.ok(
     Math.abs(
       r.gate_categories["task: before its first test, no rustc running (cargo, nextest, archive)"] -
-        10,
+        // e2e's 380-400 s at half, and the version task's 682-683 s.
+        11,
     ) < 1e-6,
   );
   // The tests: 400-450 s both tests in half the second (a quarter each), 450-500 s both in the
   // whole (a half each), 500-600 s test a alone. So a has 137.5 s, split 120/20/50/10 of its
   // 200 s record, and b 37.5 s, split 40/0/60/0 of its 100 s.
   const spawn = r.gate_categories["test: spawn: onepipeline"];
-  assert.ok(Math.abs(spawn - (137.5 * 120) / 200 - (37.5 * 40) / 100) < 1e-6, `spawn ${spawn}`);
+  // Plus the version task's late test: 3 s of spawn, alone, 683-686 s.
+  assert.ok(Math.abs(spawn - (137.5 * 120) / 200 - (37.5 * 40) / 100 - 3) < 1e-6, `spawn ${spawn}`);
   assert.ok(
     Math.abs(r.gate_categories["task: after its last test (profdata merge, LCOV export)"] - 80) <
       1e-6,
   );
+  assert.ok(Math.abs(r.gate_categories["task: after its last test"] - 2) < 1e-6);
   assert.deepEqual(
     r.binaries.map((b) => [b.binary, b.tests, b.task]),
-    [["e2e", 2, "demo-e2e:test"]],
+    [["e2e", 3, "demo-e2e:test"]],
+  );
+  // The later test is the other task's: the tier's last test, and so its export, stay put.
+  assert.deepEqual(
+    r.tasks.map((x) => [x.task, x.tests]),
+    [
+      ["demo:build", 0],
+      ["demo-e2e:test", 2],
+      ["demo-version:smoke", 1],
+    ],
   );
   assert.equal(r.slowest[0].test, "e2e::a");
   assert.deepEqual(
     r.nextest_runs.map((n) => [n.tests, n.s, n.tasks]),
     [[2, 200, ["demo:build", "demo-e2e:test"]]],
   );
-  assert.deepEqual(r.concurrency_profile, { 0: 20, 1: 430, 2: 150 });
+  assert.deepEqual(r.concurrency_profile, { 0: 14, 1: 436, 2: 150 });
 });
 
 test("a run without the named job is refused without guessing", (t) => {

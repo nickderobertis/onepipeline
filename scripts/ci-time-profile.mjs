@@ -583,8 +583,24 @@ function analyzeJob(opts) {
     )[0];
     if (best) binaryTask.set(b, best[0]);
   }
+  // Each record belongs to the task whose window holds it: its binary's main task when that
+  // one does, else the shortest test task that does (a binary another task also runs, as the
+  // version tasks run single e2e tests after the tier).
+  const holds = (t, r) => r.start >= t.start - 2000 && r.end <= t.end + 2000;
+  const owner = new Map();
+  for (const r of records) {
+    const main = binaryTask.get(r.binary);
+    owner.set(
+      r,
+      main && holds(main, r)
+        ? main
+        : testTasks
+            .filter((t) => holds(t, r))
+            .sort((a, b2) => a.end - a.start - (b2.end - b2.start))[0],
+    );
+  }
   for (const t of tasks) {
-    t.records = records.filter((r) => binaryTask.get(r.binary) === t);
+    t.records = records.filter((r) => owner.get(r) === t);
     t.testStart = t.records.length ? Math.min(...t.records.map((r) => r.start)) : null;
     t.testEnd = t.records.length ? Math.max(...t.records.map((r) => r.end)) : null;
     t.coverage = /:test$/.test(t.task) && opts.job === "test-linux";
