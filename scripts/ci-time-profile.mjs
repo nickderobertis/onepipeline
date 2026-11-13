@@ -229,6 +229,36 @@ function logFacts(lines) {
   return facts;
 }
 
+// Every nextest invocation the log shows: `Starting N tests across B binaries` paired with
+// the next `Summary [ S s] N tests run`, and, where the profile prints a line per test (the
+// cross-platform `ci` profile), each binary's summed test seconds. Records only cover the
+// e2e harness's binary; this covers every tier.
+function nextestRuns(lines) {
+  const open = [];
+  const runs = [];
+  const binaries = {};
+  for (const { t, text } of lines) {
+    const start = /Starting (\d+) tests? across (\d+) binar(?:y|ies)/.exec(text);
+    if (start) open.push({ t, tests: Number(start[1]), binaries: Number(start[2]) });
+    const done = /Summary \[\s*([\d.]+)s\] (\d+) tests? run/.exec(text);
+    if (done) {
+      const i = open.findIndex((o) => o.tests === Number(done[2]));
+      const o = i >= 0 ? open.splice(i, 1)[0] : { t: null, tests: Number(done[2]), binaries: null };
+      runs.push({ ...o, end: t, s: Number(done[1]) });
+    }
+    const test =
+      /^\s*(PASS|FAIL|FLAKY|TIMEOUT|LEAK|SIGKILL|SIGSEGV)\s*\[\s*([\d.]+)s\]\s*(?:\(\s*\d+\/\d+\))?\s+([\w-]+)::([\w-]+)\s/.exec(
+        text,
+      );
+    if (test) {
+      const b = (binaries[test[4]] ??= { tests: 0, s: 0 });
+      b.tests++;
+      b.s += Number(test[2]);
+    }
+  }
+  return { runs, binaries };
+}
+
 // ---------------------------------------------------------------- measurement artifact
 
 function readMeasure(dir) {
@@ -650,6 +680,15 @@ function analyzeJob(opts) {
       test_seconds: t.records.reduce((a, r) => a + r.wall_s, 0),
     };
   });
+  const nextest = nextestRuns(lines);
+  result.nextest_runs = nextest.runs.map((n) => ({
+    tests: n.tests,
+    binaries: n.binaries,
+    s: n.s,
+    started_at: n.t ? new Date(n.t).toISOString() : null,
+    tasks: n.t ? tasks.filter((x) => x.start <= n.t && n.t <= x.end).map((x) => x.task) : [],
+  }));
+  result.log_binaries = nextest.binaries;
   result.critical_path = criticalPath(tasks, measure?.graph, gate?.start ?? 0);
   result.concurrency_profile = concurrencyProfile(tasks, gate);
 
@@ -1061,6 +1100,26 @@ function printJob(r) {
       ]),
     ),
   );
+  out.push("", "### Every nextest run in the log (all tiers, records or not)", "");
+  out.push(
+    table(
+      ["Nx task running at its start", "tests", "binaries", "nextest elapsed s"],
+      r.nextest_runs
+        .filter((n) => n.s >= 1)
+        .map((n) => [n.tasks.join(" + ") || "-", n.tests, n.binaries ?? "-", n.s.toFixed(0)]),
+    ),
+  );
+  if (Object.keys(r.log_binaries).length) {
+    out.push("", "### Test binaries from the log's per-test lines (summed test seconds)", "");
+    out.push(
+      table(
+        ["binary", "tests", "test-seconds"],
+        Object.entries(r.log_binaries)
+          .sort((a, b) => b[1].s - a[1].s)
+          .map(([b, v]) => [b, v.tests, v.s.toFixed(0)]),
+      ),
+    );
+  }
   out.push("", "### The 20 slowest tests", "");
   out.push(
     table(
