@@ -991,6 +991,17 @@ test("the reuse spike's one command replays today's tiers and every option over 
   );
   assert.equal(unanswered.status, 1);
   assert.match(unanswered.stderr, /git cannot say whether #11's base holds #1493/);
+  // A proposal suite named like an object's own property is refused, not dropped.
+  for (const name of ["__proto__", "constructor"]) {
+    writeFileSync(join(out, "bad-proposal.json"), `{"suites": {"${name}": {"paths": ["tests/e2e/x.rs"], "modules": ["x"]}}}`);
+    const refused = spawnSync(
+      process.execPath,
+      [join(root, "scripts", "crate-split", "tier-mapping.mjs"), "--clone", repo, "--changes", join(out, "observed.json"), "--out", join(out, "bad.json"), "--commit", commits.base, "--split-e2e", join(out, "bad-proposal.json")],
+      { encoding: "utf8" },
+    );
+    assert.equal(refused.status, 1, name);
+    assert.match(refused.stderr, new RegExp(`"${name}" is not a suite name`), name);
+  }
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
   const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
   const proposed = JSON.parse(

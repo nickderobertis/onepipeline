@@ -233,7 +233,11 @@ export function optionB(base, proposed) {
     next,
   );
   for (const [name, suite] of Object.entries(proposed.suites)) {
-    check.need(/^[A-Za-z0-9._-]+$/.test(name), `${JSON.stringify(name)} is not a suite name`, next);
+    check.need(
+      /^[A-Za-z0-9._-]+$/.test(name) && !(name in Object.prototype),
+      `${JSON.stringify(name)} is not a suite name`,
+      next,
+    );
     const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string" && x !== "");
     check.need(
       strings(suite?.paths) && strings(suite?.modules),
