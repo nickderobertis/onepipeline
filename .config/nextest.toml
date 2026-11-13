@@ -40,6 +40,10 @@ e2e = { max-threads = 4 }
 # llmlint: ignore-end[comments_earn_their_place]
 
 [profile.default]
+# Measurement only (spike-onepipeline-test-cost): every tier runs whole, so one failure cannot cut a variant's figures short.
+fail-fast = false
+# Measurement only (spike-onepipeline-test-cost): these two read the workflow the measurement edits.
+default-filter = 'not (test(=every_required_context_is_reported_on_every_pull_request) or test(=the_windows_leg_runs_whole_in_one_job))'
 # llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
 # elapsed time below are not history: they are the measurement that sets both bounds
 # on the line beneath them. `period` has to sit above what a test here costs and

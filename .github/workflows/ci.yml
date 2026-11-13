@@ -47,7 +47,8 @@ jobs:
   # syntax check, the dependency audit, the judged lint, the engine-currency
   # check, the PR title, the suppressions comment and the visual docs.
   lint:
-    if: github.event_name == 'pull_request'
+    # Measurement only (spike-onepipeline-test-cost): not run.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
@@ -94,6 +95,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           node scripts/nx-remote-cache.mjs trust
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+          printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -152,6 +155,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # Whether the lock still resolves the sibling engines the manifest permits
@@ -275,6 +280,11 @@ jobs:
 
   test-linux:
     if: github.event_name == 'pull_request'
+    # Spike (spike-onepipeline-test-cost): the baseline and each prototype, one commit.
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, idle, runtime, pyramid, depsopt]
     runs-on: ubuntu-24.04
     # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
     # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
@@ -293,12 +303,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: "Spike: apply the measured variant"
+        shell: bash
+        run: bash spikes/test-cost/variants/apply.sh "${{ matrix.variant }}"
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           node scripts/nx-remote-cache.mjs trust
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+          printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -366,6 +381,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
@@ -394,6 +411,10 @@ jobs:
       # stays what it was: `onepipeline-real-smoke`'s own uncached `smoke` target,
       # reached by no `check`, its credential required above, selected by the same
       # affected answer as the rest of this job.
+      # Measurement only (spike-onepipeline-test-cost): every side selects every project.
+      - name: Select every project (measurement only)
+        shell: bash
+        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
       - name: Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
         id: gate
         env:
@@ -409,7 +430,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-test-linux
+          name: test-profile-test-linux-${{ matrix.variant }}
           path: target/test-profile/
           if-no-files-found: warn
           retention-days: 30
@@ -419,7 +440,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: budget-check-results-test-linux
+          name: budget-check-results-test-linux-${{ matrix.variant }}
           path: target/budget-results/
           if-no-files-found: warn
       - name: Does each failed test fail again on this build
@@ -446,13 +467,18 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
         with:
-          name: nx-cache-entries-${{ github.job }}
+          name: nx-cache-entries-${{ github.job }}-${{ matrix.variant }}
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
 
   test-windows:
     if: github.event_name == 'pull_request'
+    # Spike (spike-onepipeline-test-cost): the baseline and each prototype, one commit.
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, idle, runtime, pyramid, depsopt]
     runs-on: windows-latest
     # From the two Windows shards' summed hosted durations (9,366-10,069 s) plus the
     # Windows install proof (897-1,275 s) and a cold build, with about a quarter's
@@ -472,12 +498,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: "Spike: apply the measured variant"
+        shell: bash
+        run: bash spikes/test-cost/variants/apply.sh "${{ matrix.variant }}"
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           node scripts/nx-remote-cache.mjs trust
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+          printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -539,6 +570,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: What the bootstrap tools are built from
         id: pins
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -557,6 +590,10 @@ jobs:
       # documented install it runs reaches the remote default branch, because
       # README's one-liner names no ref: that is the install a user runs, so it is
       # proven on every pull request this job's affected answer selects.
+      # Measurement only (spike-onepipeline-test-cost): every side selects every project.
+      - name: Select every project (measurement only)
+        shell: bash
+        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -573,7 +610,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-test-windows
+          name: test-profile-test-windows-${{ matrix.variant }}
           path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/test-profile/
           if-no-files-found: warn
           retention-days: 30
@@ -593,13 +630,18 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
         with:
-          name: nx-cache-entries-${{ github.job }}
+          name: nx-cache-entries-${{ github.job }}-${{ matrix.variant }}
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
 
   test-macos:
     if: github.event_name == 'pull_request'
+    # Spike (spike-onepipeline-test-cost): the baseline and each prototype, one commit.
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, idle, runtime, pyramid, depsopt]
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
     # a cold build, with about a quarter's headroom.
@@ -618,12 +660,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: "Spike: apply the measured variant"
+        shell: bash
+        run: bash spikes/test-cost/variants/apply.sh "${{ matrix.variant }}"
       - name: Decide cache trust and configure the sidecar
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           node scripts/nx-remote-cache.mjs trust
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+          printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -665,6 +712,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: What the bootstrap tools are built from
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
@@ -681,6 +730,10 @@ jobs:
       # documented install it runs reaches the remote default branch, because
       # README's one-liner names no ref: that is the install a user runs, so it is
       # proven on every pull request this job's affected answer selects.
+      # Measurement only (spike-onepipeline-test-cost): every side selects every project.
+      - name: Select every project (measurement only)
+        shell: bash
+        run: echo "ONEPIPELINE_NX_BASE_SHA=$(git rev-list --max-parents=0 HEAD | head -n1)" >> "$GITHUB_ENV"
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
@@ -693,7 +746,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-test-macos
+          name: test-profile-test-macos-${{ matrix.variant }}
           path: target/test-profile/
           if-no-files-found: warn
           retention-days: 30
@@ -710,7 +763,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
         with:
-          name: nx-cache-entries-${{ github.job }}
+          name: nx-cache-entries-${{ github.job }}-${{ matrix.variant }}
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
@@ -723,7 +776,8 @@ jobs:
   # and the group serializes comment writers.
   budgets:
     needs: [lint, test-linux, test-windows, test-macos]
-    if: always()
+    # Measurement only (spike-onepipeline-test-cost): not run.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

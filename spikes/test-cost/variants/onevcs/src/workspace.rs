@@ -1,0 +1,4582 @@
+//! Sessions: the isolated tree a change is made in, and what outlives it.
+//!
+//! Every session cuts a **private clone** from an execution checkout and hands out
+//! one **worktree** from that clone. Git's worktree registry, ref store, and
+//! internal locks all belong to one clone, so sessions that shared a clone would
+//! share the machinery that adds and removes worktrees — and one session's cleanup
+//! could then reach a live sibling's tree. A clone per session removes the sharing
+//! rather than the mutual exclusion.
+//!
+//! The clone is `--shared --no-checkout`: it borrows the lender's object store
+//! through `objects/info/alternates` and populates no working tree of its own, so
+//! it costs little more than its refs. Because a live session reads its history out
+//! of the lender, every execution checkout borrowed from has automatic gc disabled
+//! and unreachable objects pinned — nothing the lender does on its own can drop an
+//! object a borrower needs.
+//!
+//! What it borrows is objects and not *refs*: cloning from a local path maps the
+//! lender's local branches into the clone's `refs/remotes/origin/*`, so origin's own
+//! refs — which are what a session is cut at or continued from, and what every diff
+//! of it afterwards is addressed from — are copied over separately, by
+//! [`git::carry_remote_refs`]. That is also where the clone's *own* copy of the base
+//! is brought forward onto the origin ref beside it: the clone took that local branch
+//! from the lender at clone time, so without it the bare name a worker types in the
+//! worktree is a commit from whenever the clone was made rather than the one every
+//! command here addresses.
+//!
+//! A clone is disposable, so anything that must outlive it — a preserved branch, a
+//! pushed branch, a recovery attestation — is copied back into the execution
+//! checkout, which stays the durable record every later session reads.
+
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+
+use crate::error::{self, Error, Result};
+use crate::event::EventKind;
+use crate::registry::Registry;
+use crate::remainder::Remainder;
+use crate::rules::BaseMerge as RulesBaseMerge;
+use crate::session::{
+    Lifecycle, Liveness, OpenConflict, Session, SessionHolder, SessionRequest, SessionToken,
+};
+use crate::store::{self, Resolution};
+use crate::stream::Stream;
+use crate::workspaces::Sourced;
+use crate::{branches, git, guidance, home, ids, label, lock, pool, processes, workspaces};
+
+/// How many dead run roots still holding unpublished work are retained.
+///
+/// A bounded failure history: the branch somebody reaches for is one a session just
+/// lost, and keeping every one of them forever turns a scratch root into an archive
+/// nobody prunes.
+pub const RETAINED_DEAD_RUNS: usize = 3;
+
+/// The version of the session record this build writes and reads.
+///
+/// A record outlives the command that wrote it and is read by the next one, so it
+/// is a stored contract like the registry document — and like that document, an
+/// unreadable version is refused by name rather than guessed at. There is no
+/// migration and deliberately so: a record names a clone, a worktree, and a lease
+/// that belong to a live process, and a build that guessed at one it does not
+/// understand would act on somebody else's tree.
+pub const RECORD_VERSION: u32 = 3;
+
+/// One OS process instance's creation identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessStart(NonZeroU64);
+
+/// A session token that has been checked before it names a file.
+///
+/// The check is in the conversion, so a record carrying an unusable token cannot
+/// be deserialized at all — an invalid one is unrepresentable rather than
+/// representable-and-rejected-later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Token(String);
+
+impl TryFrom<String> for Token {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if ids::is_safe_name(&value) {
+            Ok(Token(value))
+        } else {
+            Err(format!("{value:?} is not a session token"))
+        }
+    }
+}
+
+impl From<Token> for String {
+    fn from(token: Token) -> Self {
+        token.0
+    }
+}
+
+impl std::ops::Deref for Token {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A branch name git's own parser has accepted.
+///
+/// Every one of these is handed to git afterwards, so the parser that decides is
+/// git's rather than this crate's idea of one.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Ref(String);
+
+/// The name itself, quoted — never the wrapper. Half the refusals this crate
+/// writes name a branch with `{:?}`, and a derived `Debug` would spell every one of
+/// them `Ref("main")` at the operator rather than the branch they are about.
+impl std::fmt::Debug for Ref {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl TryFrom<String> for Ref {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if git::is_valid_branch_name(&value) {
+            Ok(Ref(value))
+        } else {
+            Err(format!("{value:?} is a name git would not accept"))
+        }
+    }
+}
+
+impl Ref {
+    /// A name git itself produced, and so one git's parser has already accepted.
+    ///
+    /// The names that reach this came out of git's own ref listing — a current
+    /// branch, a remote's default — rather than off a command line, so re-deciding
+    /// validity here would only invent a failure that cannot happen.
+    pub fn from_git(name: impl Into<String>) -> Self {
+        Ref(name.into())
+    }
+}
+
+impl From<Ref> for String {
+    fn from(name: Ref) -> Self {
+        name.0
+    }
+}
+
+impl std::ops::Deref for Ref {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Ref {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// What one session records about itself, so a later command can pick it up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Record {
+    /// The schema version this record was written at.
+    pub version: u32,
+    /// The token this session is addressed by.
+    pub token: Token,
+    /// The identity key the session belongs to.
+    pub identity: String,
+    /// The registered alias the repository argument selected.
+    pub alias: String,
+    /// The branch the worktree has checked out.
+    pub branch: Ref,
+    /// The branch this session's work is merged with and published into, which for
+    /// a branch cut fresh is also the one it was cut from.
+    pub base: Ref,
+    /// The base publication decided this session publishes onto, where that is not
+    /// [`base`](Self::base): the root a stacked change was replayed onto once the root
+    /// carried the change below. Absent until a publication moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_base: Option<Ref>,
+    /// The commit `base` was at when this session's branch was cut from it, recorded
+    /// only when that base is not the identity's root — which is what makes the
+    /// session a stacked one.
+    ///
+    /// A name cannot stand in for it. The branch below a stack is deleted when its
+    /// own change merges, every fetch here prunes, and the tip is then unresolvable
+    /// from anything but this: a publication that has to know which of its commits
+    /// belong to the change below has to have written that down when it still could.
+    /// Absent — every session cut from the root, which is every ordinary one — and no
+    /// publication of it can be a stacked publication.
+    // llmlint: ignore[invalid_states_unrepresentable] git's own printed SHA, spelled the
+    // way `git::tip` answers one; the crate's `Sha` wraps an unvalidated `String` at the
+    // public surface and would make no state here unrepresentable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_tip: Option<String>,
+    /// The worktree the change is made in.
+    pub worktree: PathBuf,
+    /// The per-session clone the worktree was cut from.
+    pub clone: PathBuf,
+    /// The run root holding both: a disposable directory under the identity's `runs/`,
+    /// or — where [`slot`](Self::slot) is set — the pool slot the session was placed on.
+    pub run_root: PathBuf,
+    /// The pool slot this session was placed on, when it was placed on one rather than
+    /// cut a run root of its own. The slot directory is then [`run_root`](Self::run_root)
+    /// and outlives the session: a close *returns* it rather than removing it.
+    ///
+    /// Absent on every session cut under `runs/`, which is every session of a host that
+    /// configures no pool — and on every record written before there were slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u32>,
+    /// The checkout the clone borrows from.
+    pub execution_checkout: PathBuf,
+    /// The checkout publication fast-forwards, never worked in.
+    pub publication_checkout: PathBuf,
+    /// Where the session is in its life.
+    pub state: Lifecycle,
+    /// The process that opened it, for a diagnostic naming who to look for.
+    pub owner_pid: u32,
+    /// The OS creation identity of `owner_pid`, distinguishing this process from a
+    /// later process that reuses its numeric pid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_started: Option<ProcessStart>,
+    /// The session that continued this one's branch, once one has.
+    ///
+    /// A branch a run left behind is picked up by the next session over the same
+    /// name, and this is the only link between the two. Without it, two run clones
+    /// of one branch are two copies with nothing to say which of them the work went
+    /// on in — and the copy that was superseded answers about the branch as readily
+    /// as the copy that landed, which is how a change that had merged came to report
+    /// that it had not.
+    ///
+    /// Absent on every session nothing has superseded, which is most of them, and
+    /// written onto the *older* record when the newer one opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retried_by: Option<Token>,
+    /// What the caller that opened this session said about who opened it — the
+    /// run, the node, the launching process — as `--label KEY=VALUE` pairs, checked
+    /// by `label::validate` where they arrive. Omitted when there are none, so a
+    /// record written before there was a field to write reads as an empty map and
+    /// one written without labels is byte for byte what it was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Whatever the document on disk carried beyond this shape, kept so a write
+    /// from this build does not destroy what a newer one recorded.
+    #[serde(skip)]
+    pub carried: Remainder,
+}
+
+/// Where a chain of retries ends: the session nothing has superseded.
+///
+/// The answer is a `Result` because the alternative is not "there is no newer
+/// session" — that is a chain of one, and it answers with the record it was given.
+/// It is a chain this host cannot follow, which is the one case nothing may be
+/// concluded from: what the caller wanted was *which* session's evidence answers
+/// for this branch, and a chain with a hop missing, an edge across identities, or a
+/// cycle in it does not say.
+pub type Chain = std::result::Result<Record, String>;
+
+/// The newest record of the chain this one starts, or why it cannot be followed.
+///
+/// Every hop is loaded through [`load`], so each is a record that passed the same
+/// checks a read by name gets. Three ways a chain is refused and each is *stopped*
+/// rather than worked around: a token naming no record on this host, an edge into
+/// another identity, and a cycle. Answering with the last record that did read
+/// would be answering from a session that something superseded, which is the exact
+/// shape of the wrong answer this link exists to prevent.
+///
+/// It terminates because every hop either revisits a token — which is the cycle —
+/// or reaches one it has not seen, and there are finitely many records on a host.
+pub fn newest(from: &Record) -> Chain {
+    let mut seen = vec![from.token.to_string()];
+    let mut record = from.clone();
+    while let Some(next) = record.retried_by.clone() {
+        if seen.iter().any(|token| *token == *next) {
+            return Err(format!(
+                "the session {first} was retried by {next}, and following that reaches {first} \
+                 again; a chain of retries that closes on itself names no newest session",
+                first = from.token,
+            ));
+        }
+        let followed = load(&next).map_err(|failure| {
+            format!(
+                "the session {token} was retried by {next}, and there is no such session on this \
+                 host: {failure}",
+                token = record.token,
+            )
+        })?;
+        if followed.identity != record.identity {
+            return Err(format!(
+                "the session {token} in {here:?} was retried by {next} in {there:?}; a session \
+                 continues a branch of its own repository, so nothing here answers for the other",
+                token = record.token,
+                here = record.identity,
+                there = followed.identity,
+            ));
+        }
+        seen.push(next.to_string());
+        record = followed;
+    }
+    Ok(record)
+}
+
+/// Record that one session's branch was continued by another.
+///
+/// Written onto the *older* record, because that is the one a later reader will
+/// otherwise take as the branch's answer. It goes through [`update`], so nothing
+/// another process wrote on that record meanwhile is lost, and through [`save`],
+/// which is where a link nothing could follow is refused.
+pub fn record_retry(older: &Token, newer: &Token) -> Result<()> {
+    update(older, |record| record.retried_by = Some(newer.clone())).map(drop)
+}
+
+impl From<Record> for SessionHolder {
+    fn from(record: Record) -> Self {
+        let liveness = record.liveness();
+        Self {
+            token: SessionToken(record.token.to_string()),
+            identity: record.identity,
+            branch: record.branch.to_string(),
+            worktree: record.worktree,
+            owner_pid: record.owner_pid,
+            state: record.state,
+            liveness,
+            labels: record.labels,
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn process_started(pid: u32) -> Option<ProcessStart> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: this requests a query-only handle for the numeric pid; no borrowed
+    // pointer crosses the call.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut exit_code = 0;
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: `handle` is open above and every out-pointer names initialized,
+    // writable storage that lives through these calls.
+    let running = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
+        && exit_code == STILL_ACTIVE as u32
+        && unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
+            != 0;
+    // SAFETY: this is the same non-null owned handle and is closed exactly once.
+    unsafe { CloseHandle(handle) };
+    running
+        .then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+        .and_then(NonZeroU64::new)
+        .map(ProcessStart)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_started(pid: u32) -> Option<ProcessStart> {
+    if pid == 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesized and may itself contain spaces or `)`, so
+    // fields after it are counted from the final closing parenthesis.
+    let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    let state = *fields.first()?;
+    if matches!(state, "Z" | "X") {
+        return None;
+    }
+    fields
+        .get(19)?
+        .parse()
+        .ok()
+        .and_then(NonZeroU64::new)
+        .map(ProcessStart)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn process_started(pid: u32) -> Option<ProcessStart> {
+    use std::ffi::{c_int, c_void};
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcBsdInfo {
+        flags: u32,
+        status: u32,
+        xstatus: u32,
+        pid: u32,
+        ppid: u32,
+        uid: u32,
+        gid: u32,
+        ruid: u32,
+        rgid: u32,
+        svuid: u32,
+        svgid: u32,
+        rfu_1: u32,
+        comm: [u8; 16],
+        name: [u8; 32],
+        nfiles: u32,
+        pgid: u32,
+        pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        nice: i32,
+        start_tvsec: u64,
+        start_tvusec: u64,
+    }
+    extern "C" {
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            size: c_int,
+        ) -> c_int;
+    }
+    const PROC_PIDTBSDINFO: c_int = 3;
+    const SZOMB: u32 = 5;
+    let pid = c_int::try_from(pid).ok().filter(|pid| *pid > 0)?;
+    let mut info = ProcBsdInfo::default();
+    let size = c_int::try_from(std::mem::size_of::<ProcBsdInfo>()).ok()?;
+    // SAFETY: `info` is writable for exactly `size` bytes, and `proc_pidinfo`
+    // borrows that storage only for the duration of this call.
+    let read = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdInfo).cast(),
+            size,
+        )
+    };
+    if read != size || info.status == SZOMB {
+        return None;
+    }
+    NonZeroU64::new(
+        info.start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.start_tvusec),
+    )
+    .map(ProcessStart)
+}
+
+impl Record {
+    /// Whether the process that opened this session is that same process, still
+    /// running.
+    ///
+    /// The pid alone cannot answer it — the OS reuses pids, so a later process
+    /// wearing a dead session's number would read as its owner — so the recorded
+    /// creation identity has to be the one that process wears now.
+    ///
+    /// One answer, asked by both of the questions that turn on it: whether this
+    /// session's hold on its branch is a live one ([`liveness`], which asks the
+    /// lifecycle as well), and whether there is anybody left to answer for the
+    /// record at all ([`spent`], which does not).
+    ///
+    /// [`liveness`]: Record::liveness
+    pub fn owner_is_running(&self) -> bool {
+        self.owner_started
+            .is_some_and(|started| process_started(self.owner_pid) == Some(started))
+    }
+
+    /// Whether the process that opened this session is that same process, still
+    /// running — which is what [`Liveness`] reports and what makes a session's hold
+    /// on its branch a live one.
+    pub fn liveness(&self) -> Liveness {
+        match self.state == Lifecycle::Open && self.owner_is_running() {
+            true => Liveness::Live,
+            false => Liveness::Stale,
+        }
+    }
+
+    /// The session as the contract's [`Session`] type spells it.
+    pub fn session(&self) -> Session {
+        Session {
+            token: SessionToken(self.token.to_string()),
+            worktree: self.worktree.clone(),
+            branch: self.branch.to_string(),
+            base: self.base.to_string(),
+            conflict: None,
+        }
+    }
+
+    /// The occupancy lease identity for this session's run root.
+    pub fn lease(&self) -> String {
+        occupancy_identity(&self.run_root)
+    }
+
+    /// Whether the tree under this record's run root is still this session's to act on.
+    ///
+    /// Always, for a session cut under `runs/`: nothing else is ever placed there. For
+    /// a session placed on a slot it is true while the record is open — an open record
+    /// is what holds a slot — and afterwards only until the slot is *returned* or
+    /// taken: a publication closes the record and leaves the return to `session close`,
+    /// so between the two the tree is still this session's, but a record that closed
+    /// on a slot a later session has since opened on describes a tree that session
+    /// owns. `spent`, `holds_unpublished_work`, `adopt` and `close` all ask this before
+    /// they read or touch the worktree, so none of them acts on a slot's tree as a
+    /// closed session's.
+    ///
+    /// The other records are what say whether the slot was taken, so a listing that
+    /// cannot be read is an answer nobody got rather than "nobody": it is refused to
+    /// the caller, never read as the tree being this session's.
+    ///
+    /// **The one-record form**, which reads that listing itself and only where the
+    /// record cannot answer without one — `adopt` and `close` ask about the single
+    /// record they were handed, and a non-slot session answers from its own fields.
+    /// A scan over many records asks [`Record::tree_is_its_own_of`] instead, over one
+    /// [`OpenRoots`] read before it starts.
+    pub fn tree_is_its_own(&self) -> Result<bool> {
+        if self.tree_is_always_its_own() {
+            return Ok(true);
+        }
+        Ok(self.tree_is_its_own_of(&OpenRoots::read()?))
+    }
+
+    /// The same question, decided from a snapshot of the open run roots.
+    ///
+    /// Pure with respect to the session records: what it asks of them is entirely in
+    /// `open`, so one listing answers it for every record on the host. That is the
+    /// whole of why the snapshot exists — the one-record form above reads the listing
+    /// per call, and a `holders` or sweep scan asking it of N records did N listings
+    /// of the session directory and N loads of every record in it, so a host whose
+    /// closed pooled sessions accumulate paid for them again on every scan.
+    pub(crate) fn tree_is_its_own_of(&self, open: &OpenRoots) -> bool {
+        if self.tree_is_always_its_own() {
+            return true;
+        }
+        !open.taken_from(&self.token, &self.run_root)
+            && self.worktree.is_dir()
+            && git::current_branch(&self.worktree).is_ok_and(|current| current == *self.branch)
+    }
+
+    /// Whether this record's tree is its own whatever any other record says: nothing
+    /// else is ever placed under `runs/`, and an open record is what holds a slot.
+    fn tree_is_always_its_own(&self) -> bool {
+        self.slot.is_none() || self.state == Lifecycle::Open
+    }
+}
+
+/// Which session holds each run root that a session still open is placed on.
+///
+/// The whole of what deciding one record's ownership needs from the *other* records,
+/// read once and asked of every record in a scan. A `(token, run root)` pair rather
+/// than the run roots alone, because the record being asked about is one of the
+/// records in the listing: its own open record holding its own run root says nothing
+/// about whether somebody else took the slot.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenRoots(Vec<(Token, PathBuf)>);
+
+impl OpenRoots {
+    /// What a listing already in hand says.
+    pub(crate) fn of(records: &[Record]) -> Self {
+        Self(
+            records
+                .iter()
+                .filter(|record| record.state == Lifecycle::Open)
+                .map(|record| (record.token.clone(), record.run_root.clone()))
+                .collect(),
+        )
+    }
+
+    /// What this host's records say, read now — and refused rather than answered
+    /// empty where they cannot be read, for [`all`]'s reason.
+    pub(crate) fn read() -> Result<Self> {
+        Ok(Self::of(&all()?))
+    }
+
+    /// Whether a session other than `token` holds `run_root` open.
+    fn taken_from(&self, token: &Token, run_root: &Path) -> bool {
+        self.0
+            .iter()
+            .any(|(held, root)| root == run_root && held != token)
+    }
+}
+
+/// The occupancy lease identity for a run root.
+///
+/// One function for every run root there is, whichever verb cut it: a session's,
+/// under the identity's own `runs`, and a landing's, under `publications` or
+/// `recoveries`. `onevcs sweep` asks this same question of the second kind, so a
+/// second spelling of it would be a sweep reaping directories somebody is inside.
+pub fn occupancy_identity(run_root: &Path) -> String {
+    format!("run:{}", run_root.display())
+}
+
+/// Where one session's record is written.
+// llmlint: ignore[invalid_states_unrepresentable] a `Token` is what a *readable*
+// record proves, and this is how the record is found: [`load`] resolves the path for a
+// name `ids::is_safe_name` has just accepted and nothing has parsed yet, so a `&Token`
+// parameter would be a type only reachable through the file it is used to open.
+pub(crate) fn record_path(token: &str) -> Result<PathBuf> {
+    Ok(home::sessions_dir()?.join(format!("{token}.json")))
+}
+
+/// Read one session record.
+///
+/// A record that is **not there** is no session; a record that is there and will not
+/// be read is a record naming itself and what stopped it. A listing may pass over
+/// a record removed after enumeration; a read by token still names that session.
+pub fn load(token: &str) -> Result<Record> {
+    existing(token)?.ok_or_else(|| Error::Invalid {
+        reason: format!("no session {token:?} is open; `onevcs session open` prints a token"),
+    })
+}
+
+/// A listing may lose a record to a concurrent sweep. Only absence is skipped;
+/// unreadable or invalid records remain errors, even outside a read's selection.
+pub(crate) fn existing(token: &str) -> Result<Option<Record>> {
+    if !ids::is_safe_name(token) {
+        return Err(error::invalid(format!(
+            "{token:?} is not a session token; `onevcs session open` prints one"
+        )));
+    }
+    let path = record_path(token)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(failure) => return Err(error::at("read the session record at", &path)(failure)),
+    };
+    let document: Value =
+        serde_json::from_str(&raw).map_err(error::at("read the session record at", &path))?;
+    let mut record: Record = serde_json::from_value(document.clone())
+        .map_err(error::at("read the session record at", &path))?;
+    // What this build had no opinion on, kept so that writing the record back — a
+    // retry link, a close, an adoption — does not destroy what a newer `onevcs`
+    // sharing this state root recorded about the same session.
+    record.carried = Remainder::between(
+        &document,
+        &serde_json::to_value(&record).map_err(error::at("read the session record at", &path))?,
+    );
+    usable(&path, token, &record)?;
+    Ok(Some(record))
+}
+
+/// Reject a session record that disagrees with itself or with what it is for.
+///
+/// Serde proves the shape and nothing else, and every field here is handed
+/// straight to git or to the filesystem afterwards. A record naming a different
+/// token than the file it was read from, or a branch git would not accept, is one
+/// nothing should act on.
+fn usable(path: &Path, token: &str, record: &Record) -> Result<()> {
+    if record.version != RECORD_VERSION {
+        return Err(error::invalid(format!(
+            "the session record at {} declares version {}; this build reads version \
+             {RECORD_VERSION}",
+            path.display(),
+            record.version
+        )));
+    }
+    if *record.token != *token {
+        return Err(error::invalid(format!(
+            "the session record at {} is for {:?}, not for {token:?}",
+            path.display(),
+            record.token.to_string()
+        )));
+    }
+    for (what, value) in [
+        ("worktree", &record.worktree),
+        ("clone", &record.clone),
+        ("run root", &record.run_root),
+        ("execution checkout", &record.execution_checkout),
+        ("publication checkout", &record.publication_checkout),
+    ] {
+        if !value.is_absolute() {
+            return Err(error::invalid(format!(
+                "the session record at {} names a {what} at {}, which is not an absolute path",
+                path.display(),
+                value.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Take the lock every write of one session's record takes turns on.
+///
+/// Named after the token, in a directory of its own: an operator reading a timed-out
+/// wait can see whose record it was, and these are not mistaken for the occupancy
+/// leases beside them, which are named after a digest.
+fn record_lock(token: &str) -> Result<lock::Guard> {
+    let directory = home::locks_dir()?.join("sessions");
+    home::ensure_dir(&directory)?;
+    lock::exclusive_at(&directory.join(format!("{token}.lock")))
+}
+
+/// Change one session's record: under its own lock, re-read, change, save.
+///
+/// The one way a lifecycle step writes a record that already exists. Several
+/// processes write the same record — an opening superseding it, a close, a
+/// publication, a retirement — and each of them read it long before it writes: a
+/// copy saved whole from that read erases whatever another wrote in between, which
+/// is how a retirement's close came to delete the `retried_by` link a retry had just
+/// recorded. So the read the change is applied to is taken *under* the lock, and
+/// `change` sets only the fields its writer owns; every other field, and every key
+/// [`Record::carried`] keeps, is whatever the newest write left there.
+///
+/// Answers the record as it was saved. `change` must not write this record itself:
+/// the lock is a file lock, and a second take of it from this process waits on the
+/// first.
+pub(crate) fn update(token: &str, change: impl FnOnce(&mut Record)) -> Result<Record> {
+    let _guard = record_lock(token)?;
+    let mut record = load(token)?;
+    change(&mut record);
+    save(&record)?;
+    Ok(record)
+}
+
+/// Write a session's first record, under the same lock [`update`] takes.
+///
+/// A token names one session, so a record already there is refused rather than
+/// replaced: replacing it would be exactly the whole-document overwrite [`update`]
+/// exists to rule out.
+fn create(record: &Record) -> Result<()> {
+    let _guard = record_lock(&record.token)?;
+    let path = record_path(&record.token)?;
+    if path.exists() {
+        return Err(error::invalid(format!(
+            "a session record for {} already exists at {}; a token names one session",
+            record.token,
+            path.display()
+        )));
+    }
+    save(record)
+}
+
+/// Write one session record, whole, as [`update`] and [`create`] do under its lock.
+///
+/// The retry link is checked *here* rather than where it is composed, because this
+/// is the boundary every write crosses: a link is a claim about this host's own
+/// state, and one nothing can follow is worse than no link at all — it is a chain
+/// that stops a reader answering about the branch, silently, long after whoever
+/// wrote it has gone.
+fn save(record: &Record) -> Result<()> {
+    followable(record)?;
+    let path = record_path(&record.token)?;
+    let mut document = serde_json::to_value(record).map_err(error::at("serialize", &path))?;
+    record.carried.restore(&mut document);
+    let json = serde_json::to_string_pretty(&document).map_err(error::at("serialize", &path))?;
+    home::atomic_write(&path, &format!("{json}\n"))
+}
+
+/// Refuse a retry link that names no session, another repository's, or its own
+/// chain.
+///
+/// The cycle question is [`newest`]'s, asked of *this* record: a link that closes a
+/// chain of any length — including one straight back to itself — is a chain from
+/// here that never ends, which is precisely what that function answers.
+fn followable(record: &Record) -> Result<()> {
+    let Some(next) = &record.retried_by else {
+        return Ok(());
+    };
+    let refuse = |what: String| {
+        Err(error::invalid(format!(
+            "the session {token} cannot record that {next} continued its branch: {what}",
+            token = record.token,
+        )))
+    };
+    match load(next) {
+        Err(failure) => return refuse(format!("{failure}")),
+        Ok(followed) if followed.identity != record.identity => {
+            return refuse(format!(
+                "that session belongs to {there:?} and this one to {here:?}, and a session \
+                 continues a branch of its own repository",
+                there = followed.identity,
+                here = record.identity,
+            ))
+        }
+        Ok(_) => {}
+    }
+    match newest(record) {
+        Ok(_) => Ok(()),
+        Err(broken) => refuse(broken),
+    }
+}
+
+/// Every session record on this host.
+///
+/// **State this host cannot read is not state this host does not have.** A
+/// directory that is there and will not list, and a record that is there and will
+/// not load, are each refused to the caller naming what could not be read — because
+/// every decision downstream of this listing is a decision about *absence*: whether
+/// a slot is free, whether a run root is anybody's, whether a record is litter. An
+/// empty list read out of a failure is what tells a sweep it may reap a workspace
+/// holding live work, and nothing anywhere says the state was unreadable.
+///
+/// A sessions directory that is **not there** is the one negative answer that is a
+/// fact rather than a failure: a host that has never opened a session has no such
+/// directory, and it holds no records. That is an empty list, as it always was.
+///
+/// The temporary file [`home::atomic_write`] writes beside a record is not one of
+/// these: it is named `.<token>.json.<unique>`, so it never wears the suffix this
+/// reads, and a record being rewritten under a reader is skipped rather than
+/// refused.
+pub fn all() -> Result<Vec<Record>> {
+    let directory = home::sessions_dir()?;
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(refused) => {
+            return Err(error::at("list the session records in", &directory)(
+                refused,
+            ))
+        }
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(error::at("list the session records in", &directory))?;
+        // By the token the file is named for, so every record collected here has
+        // been through the same check one read by name gets.
+        let Some(token) = entry
+            .file_name()
+            .to_string_lossy()
+            .strip_suffix(".json")
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if let Some(record) = existing(&token)? {
+            records.push(record);
+        }
+    }
+    records.sort_by(|a, b| a.token.cmp(&b.token));
+    Ok(records)
+}
+
+/// Every session recorded for one repository, in token order.
+///
+/// The repository is spelled the way every other command spells one — an identity
+/// key, a registered alias, an origin URL, or a path — and one that resolves to no
+/// registered identity is refused rather than answered with an empty list, because
+/// "nobody is in this repository" and "this is not a repository I know" are
+/// different answers to act on.
+///
+/// **A record nothing answers for and nothing is behind is left out of the answer
+/// and not removed** — see [`spent`]. Nobody holds a repository through it, so it is
+/// not a holder; but this is a read, and a caller asking who is here is not asking
+/// for anything to be destroyed. Removing it is `onevcs sweep`, over the candidates
+/// [`spent_among`] names. A record whose owner is still running is always reported,
+/// closed or open, live or stale; so is one a dispatch is still working in, and so
+/// is one whose branch still carries work nobody has published.
+pub fn holders(repo: &str) -> Result<Vec<SessionHolder>> {
+    let registry = store::load()?;
+    let resolution = store::resolve(&registry, repo)?;
+    let _reads = crate::checkout_reads::identity(&resolution.key)?;
+    // One listing for the whole scan, and the ownership snapshot taken from it: the
+    // records are what say whether a closed session's slot was taken, and asking that
+    // per record re-read every record on the host once per record on the host.
+    let records = all()?;
+    let open = OpenRoots::of(&records);
+    let work = RecordWork::read(&records)?;
+    let proofs = RecordProofs::of(&work);
+    let mut holders = Vec::new();
+    for record in &records {
+        if record.identity == resolution.key && !spent(record, &open, &proofs)? {
+            holders.push(SessionHolder::from(record.clone()));
+        }
+    }
+    Ok(holders)
+}
+
+/// Every session record on this host that nothing answers for and nothing is behind.
+///
+/// The candidates for removal, and nothing is removed here: [`holders`] used to
+/// forget one as it read, which made a caller asking who holds a repository the one
+/// performing the deletion — and one of the records that deletion took was a
+/// preserved branch's only route back. So the litter is *named* here and reaped by
+/// `onevcs sweep`, the verb an operator runs to reap litter, past the age floor it
+/// keeps everything else inside.
+///
+/// Host-wide rather than per identity, because that is the question the verb that
+/// asks it is about: the sweep answers for this host's state root rather than for
+/// one repository.
+///
+/// Asked of a listing the caller made, for [`holders`]'s reason: one listing for the
+/// whole scan — and the sweep goes on to read the same records for the finished
+/// branches, so it lists the directory once for both.
+pub(crate) fn spent_among(listed: &[Record]) -> Result<Vec<Record>> {
+    let open = OpenRoots::of(listed);
+    let work = RecordWork::read(listed)?;
+    let proofs = RecordProofs::of(&work);
+    let mut records = Vec::new();
+    // The proof is recovery's, so it reuses recovery's immutable answers: a repeat
+    // sweep over unchanged branches asks git no ancestry or history question again.
+    // One memo for the whole pass, since nothing in it writes: every record of an
+    // identity reads the same base and the same places.
+    crate::recovery_cache::scope(|| {
+        git::memoized(|| -> Result<()> {
+            for record in listed {
+                if spent(record, &open, &proofs)? {
+                    records.push(record.clone());
+                }
+            }
+            Ok(())
+        })
+    })?;
+    Ok(records)
+}
+
+/// Whether a record has nobody left to answer for it **and nothing left behind it**,
+/// which is what makes one litter.
+///
+/// Three questions, and all three have to say nobody. **Has the process that opened
+/// this session gone** — not the *lifecycle* beside it, since a session an embedding
+/// process opened and closed is a closed session that process can still be asked
+/// about. And, only then, **is anything working inside its run root**, which is the
+/// same [`processes::holding`] answer [`close`] refuses on: a live process's own
+/// working directory. And, only then, **does its branch still carry work nobody has
+/// published** — [`holds_unpublished_work`].
+///
+/// The second is what makes the first safe to act on. `onevcs session open` prints
+/// a token and exits, so a session opened from the command line has no owner
+/// process from that instant while an agent works in its worktree for hours —
+/// forgetting the record on the owner alone would take that run root's protection
+/// with it, because [`reclaim`] keeps one only while an *open* record names it, and
+/// the next `session open` would then reap a directory somebody is inside. That is
+/// the destruction this crate has already done once, reached by a different verb.
+///
+/// The third is what the first two cannot ask. Both of them ask whether anybody is
+/// *answering* for the session; neither asks whether it left anything behind. A node
+/// that settles failed with its branch preserved is precisely a session whose run
+/// settled, whose owner is gone, and whose run root nobody is inside — while its
+/// branch holds finished commits nobody has published. Forgetting that record takes
+/// its clone off the list [`checkouts_of`] hands every verb that looks for a branch
+/// by name, so the continuation onto that branch finds nothing carrying it, cuts a
+/// fresh one under the same name, and the publication of it refuses for having no
+/// commit that describes a change. The work is still on disk and nothing can reach
+/// it. So a branch with work behind it vetoes, whatever the other two say.
+///
+/// So what is forgotten is a record with nobody to answer for it, nobody in it, and
+/// nothing behind it — which is the litter the report is about: seven of those above
+/// a launch made a real refusal arrive in the same shape as seven ignorable ones,
+/// and nothing had ever removed one.
+///
+/// Asked in that order deliberately: the owner is two file reads, the occupancy
+/// question walks every process on the host, and the branch question runs git in the
+/// clone — so the cheapest answer that retains is the one that runs on every record,
+/// and the dearest runs only on the records the other two have already given up on.
+fn spent(record: &Record, open: &OpenRoots, proofs: &RecordProofs<'_>) -> Result<bool> {
+    Ok(!record.owner_is_running()
+        && (!record.tree_is_its_own_of(open) || processes::holding(&record.run_root).is_empty())
+        && !holds_unpublished_work(record, open, proofs)?)
+}
+
+/// Inputs shared with recovery's semantic retirement proof, read once for a pass.
+struct RecordWork<'a> {
+    registry: Registry,
+    records: &'a [Record],
+    streams: Vec<crate::status::Recorded>,
+    trailers: crate::provenance::Trailers,
+}
+
+impl<'a> RecordWork<'a> {
+    fn read(records: &'a [Record]) -> Result<Self> {
+        let registry = store::load()?;
+        let (rules, _) = crate::policy::load(&registry)?;
+        Ok(Self {
+            registry,
+            records,
+            streams: crate::status::recorded_streams(&mut Vec::new())?,
+            trailers: crate::provenance::from_rules(&rules),
+        })
+    }
+}
+
+/// One offline census per identity for a pass, read the first time a record of that
+/// identity reaches the branch question and shared by every record after it: the
+/// base, the origin and the places a copy can be are the identity's, not the
+/// record's. A census that could not be read is remembered as unreadable, which
+/// retains every record that asks it.
+struct RecordProofs<'w> {
+    work: &'w RecordWork<'w>,
+    censuses: std::cell::RefCell<BTreeMap<String, Option<crate::retire::Census<'w>>>>,
+}
+
+impl<'w> RecordProofs<'w> {
+    fn of(work: &'w RecordWork<'w>) -> Self {
+        Self {
+            work,
+            censuses: std::cell::RefCell::default(),
+        }
+    }
+
+    /// Whether the semantic proof leaves work behind this record; anything short of
+    /// a confident *none* is work.
+    fn has_work(&self, record: &Record) -> bool {
+        let mut censuses = self.censuses.borrow_mut();
+        let census = censuses.entry(record.identity.clone()).or_insert_with(|| {
+            crate::retire::offline_census(
+                &self.work.registry,
+                &record.identity,
+                self.work.records,
+                &self.work.streams,
+                &self.work.trailers,
+            )
+            .ok()
+        });
+        census
+            .as_ref()
+            .is_none_or(|census| crate::retire::record_has_work(census, record).unwrap_or(true))
+    }
+}
+
+/// Keep the record until the semantic proof recovery uses confidently says no
+/// work remains. Pushing a preserved tip to origin does not prove it landed.
+/// Missing disposable clones are allowed; unreadable evidence always retains.
+/// Dirtiness is checked only in a worktree still owned by this record.
+fn holds_unpublished_work(
+    record: &Record,
+    open: &OpenRoots,
+    proofs: &RecordProofs<'_>,
+) -> Result<bool> {
+    let carried = proofs.has_work(record);
+    // The worktree only while it is this session's: a record that closed on a slot a
+    // later session works in would otherwise read that session's uncommitted work as
+    // its own, and retain itself over a tree it has no claim to.
+    Ok(carried
+        || (record.tree_is_its_own_of(open)
+            && record.worktree.is_dir()
+            && git::is_dirty(&record.worktree).unwrap_or(true)))
+}
+
+/// Drop one spent record, answering the reason it is still there rather than failing
+/// the sweep it happened in.
+///
+/// The path rather than the token, because the caller has already resolved one to
+/// read the record's age and to name it in its report: two resolutions of one path
+/// are two paths that could differ.
+///
+/// A record already gone is a removal that got what it wanted. Anything else is
+/// answered to the caller rather than printed here: the one caller is `onevcs sweep`,
+/// whose whole output is what it reaped and what it kept and why, and a warning
+/// beside that report would be the same fact said twice in two shapes.
+pub(crate) fn forget(record: &Path) -> std::result::Result<(), String> {
+    match std::fs::remove_file(record) {
+        Ok(()) => Ok(()),
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(kept) => Err(format!("{kept}")),
+    }
+}
+
+/// Every repository one identity's branches can be read out of, in search order:
+/// the publication checkout, then every other registered checkout, then the clone
+/// of every session this host has opened for it.
+///
+/// The run clones are on that list because a branch reaches nothing else until a
+/// session hands it back: work a run stopped in the middle of exists *only* there,
+/// and a search that ended at the registered checkouts would answer that nobody
+/// has it. One list, so the verbs that look for a branch by name and the ones that
+/// refuse to reuse a name cannot come to disagree about where this identity keeps
+/// its work.
+pub fn checkouts_of(registry: &Registry, resolution: &Resolution) -> Result<Vec<PathBuf>> {
+    Ok(checkouts_among(registry, resolution, &all()?))
+}
+
+/// [`checkouts_of`], with every run clone on it held against reclamation for as long
+/// as the answer is kept.
+///
+/// A closed session's run root under `runs/` stays on the list — its clone may hold
+/// the only copy of a branch — and another session's open may reclaim it at any
+/// moment, once its branches are on origin. A read made in a clone while it is being
+/// removed fails: here, because the directory is gone; on Windows, because a file
+/// whose deletion is pending cannot be opened, so even the clone's `.git/config` is
+/// `Permission denied`. So each such run root's shared occupancy lease is taken
+/// first — which a reclamation's exclusive take is refused by, and which waits out
+/// one already removing it — and a clone reclaimed before its lease came is left to
+/// the reader's own test that it is a repository.
+///
+/// Only a closed session's lease is waited for. An open record keeps its run root
+/// out of every reclamation, and an exclusive holder of one is a command working in
+/// that session — a resumption, say — which may take as long as it takes; its lease is
+/// taken only where it is free, for the record that closes while this search reads.
+/// A pool slot is not held: nothing that reclaims a run root removes a slot, and a
+/// shared lease on one would keep the placement that may want it off it.
+pub(crate) fn checkouts_held(registry: &Registry, resolution: &Resolution) -> Result<Searched> {
+    let _reads = crate::checkout_reads::identity(&resolution.key)?;
+    let sessions = all()?;
+    let mut held = Vec::new();
+    for record in &sessions {
+        if record.identity != resolution.key || record.slot.is_some() || !record.run_root.is_dir() {
+            continue;
+        }
+        let lease = occupancy_identity(&record.run_root);
+        let guard = match record.state {
+            Lifecycle::Open => lock::try_shared(&lease)?,
+            Lifecycle::Closed => Some(lock::shared(&lease)?),
+        };
+        held.extend(guard);
+    }
+    Ok(Searched {
+        checkouts: checkouts_among(registry, resolution, &sessions),
+        _held: held,
+    })
+}
+
+/// What [`checkouts_held`] answers: the search, and the leases that keep it readable.
+pub(crate) struct Searched {
+    /// [`checkouts_of`]'s list, in its search order.
+    pub checkouts: Vec<PathBuf>,
+    /// Kept for as long as any of `checkouts` is read: once they go, a sibling's open may
+    /// reclaim a clone the caller is still comparing.
+    _held: Vec<lock::Guard>,
+}
+
+/// The same search order over records a caller already validated and read.
+pub(crate) fn checkouts_among(
+    registry: &Registry,
+    resolution: &Resolution,
+    sessions: &[Record],
+) -> Vec<PathBuf> {
+    let mut searched: Vec<PathBuf> = vec![resolution.publication.clone()];
+    for checkout in registry.checkouts.values() {
+        if checkout.identity == resolution.key && !searched.contains(&checkout.path) {
+            searched.push(checkout.path.clone());
+        }
+    }
+    for record in sessions {
+        if record.identity == resolution.key
+            && !searched.contains(&record.clone)
+            && !matches!(crate::checkout_reads::available(&record.clone), Ok(false))
+        {
+            searched.push(record.clone.clone());
+        }
+    }
+    searched
+}
+
+/// The directory one identity's run roots and pool slots live under.
+pub(crate) fn identity_dir(identity: &str) -> Result<PathBuf> {
+    let flattened: String = identity
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    Ok(home::workspaces_dir()?.join(format!("{flattened}-{}", ids::short_digest(identity))))
+}
+
+/// Open a session over a clone and an isolated worktree: a warm pool slot where the
+/// host keeps one for the identity, else a run root cut for this session alone.
+///
+/// Answers the conflicted merge the session opened with beside its record, where a
+/// continued branch conflicted with its base and the request did not refuse that.
+pub fn open(
+    registry: &Registry,
+    request: &SessionRequest,
+) -> Result<(Record, Stream, Option<OpenConflict>)> {
+    open_with(registry, request, BaseMerge::Merge)
+        .map(|opening| (opening.record, opening.stream, opening.conflict))
+}
+
+/// What a continued branch's open does about the base it is merged with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseMerge {
+    /// Merge it in, as every session's open does.
+    Merge,
+    /// Leave the branch exactly as it was found, for the one caller that writes that
+    /// merge itself: a stack base, every merge commit of which carries a trailer
+    /// naming what it merged, so a merge written here without one would be the one
+    /// commit of the branch nothing recognises.
+    Leave,
+}
+
+/// One opened session, and whether it was cut for this request.
+pub(crate) struct Opening {
+    /// The record the session was opened under.
+    pub record: Record,
+    /// Its own event stream, labelled with its identity.
+    pub stream: Stream,
+    /// The conflicted merge it opened with, as [`open`] answers it.
+    pub conflict: Option<OpenConflict>,
+    /// Whether the branch was cut fresh rather than continued or resumed: a name
+    /// nothing on this host or its origin carried.
+    pub cut: bool,
+}
+
+/// [`open`], with what a continued branch's open does about its base chosen by the
+/// caller.
+pub(crate) fn open_with(
+    registry: &Registry,
+    request: &SessionRequest,
+    base_merge: BaseMerge,
+) -> Result<Opening> {
+    let resolution = store::resolve(registry, &request.repo)?;
+    let execution =
+        execution_checkout(registry, &resolution, request.execution_checkout.as_deref())?;
+    // Held for the whole open, before the first read of the checkout's configuration —
+    // the check that it is a checkout at all is one, and before the lease it could meet
+    // another open's retention write.
+    let _lent = lend(&execution)?;
+    if !git::is_repo(&execution) {
+        return Err(Error::Invalid {
+            reason: format!("{} is not a git checkout", execution.display()),
+        });
+    }
+    // Before anything is resumed or cut, for the reason the branch names are: a label
+    // a command line could not spell back is the request being wrong, not the host.
+    label::validate(&request.labels)?;
+
+    // Two answers to one question, so a request giving both has not said which it
+    // wants — and guessing would either continue a branch the caller asked to have
+    // cut, or cut one it asked to continue.
+    if let (Some(pinned), Some(proposed)) = (&request.branch, &request.branch_name) {
+        return Err(both_named(pinned, proposed));
+    }
+    // Resolved and checked here, above every layer of the host's file, so an
+    // unusable prefix is answered before a token is minted for a session that
+    // cannot be given a name.
+    let prefix = branches::resolve_for(request.branch_prefix.as_deref())?;
+    // Sanitized here for the same reason: a proposal nothing usable is left of is
+    // the request being wrong, and it is refused naming what was proposed rather
+    // than quietly cut at the derived default instead.
+    let proposed = request
+        .branch_name
+        .as_deref()
+        .map(|name| stem(name, &prefix.value))
+        .transpose()?;
+
+    // Both names go through the one conversion git's own parser decides, so an
+    // unusable one is refused here rather than by whichever git command met it first.
+    let named = |value: String| -> Result<Ref> {
+        Ref::try_from(value).map_err(|reason| Error::Invalid {
+            reason: format!("{reason}: it is not a valid branch name"),
+        })
+    };
+    // Asked once, and leniently when the session named its own base: a root nobody
+    // can name is a session with no stack recorded rather than a session refused.
+    let root = match request.base.as_deref() {
+        Some(_) => git::default_branch(&execution, "origin").ok(),
+        None => Some(git::default_branch(&execution, "origin")?),
+    };
+    let base = named(match request.base.as_deref() {
+        Some(base) => base.to_owned(),
+        None => root.clone().unwrap_or_default(),
+    })?;
+    let pinned = request
+        .branch
+        .as_deref()
+        .map(|branch| named(branch.to_owned()))
+        .transpose()?;
+    // Before anything is resumed or cut, because it is the request that is wrong
+    // rather than anything about this host: the base is what a session's work is
+    // merged with and published into, and a session whose base is its own branch has
+    // nowhere to publish to. It was the only way to say "continue this branch" before
+    // continuing one was what pinning it means, so the refusal names that spelling.
+    if pinned.as_ref() == Some(&base) {
+        return Err(same_branch_and_base(&base));
+    }
+
+    // A pin naming a branch a session of this identity already holds is that
+    // session, resumed — before a token is minted, so nothing of a second one is
+    // cut. Never for a generated name: that one is this token's own. Declining only
+    // falls through to the ordinary open below, which continues the branch instead.
+    if let Some((held, lease)) = resumable(&resolution, pinned.as_ref(), &base, &execution)? {
+        let (record, stream, conflict) =
+            resume(registry, &resolution, &held, lease, &execution, request)?;
+        return Ok(Opening {
+            record,
+            stream,
+            conflict,
+            cut: false,
+        });
+    }
+
+    let token = ids::session_token();
+    let mut stream = Stream::open(&token)?;
+    stream.label("identity", &resolution.key);
+    refresh(&execution, &mut stream)?;
+
+    // Only a branch this open **cuts** is prefixed, and only a caller's proposal is
+    // given a suffix: a pin is continued or cut at exactly the name it spells, and
+    // the derived default is this token's own, so nothing already carries it.
+    let branch = match (pinned, &proposed) {
+        (Some(branch), _) => branch,
+        (None, Some(composed)) => first_free(
+            registry,
+            &resolution,
+            &execution,
+            request.branch_name.as_deref().unwrap_or(composed),
+            composed,
+        )?,
+        (None, None) => named(format!("{}onevcs/{token}", prefix.value))?,
+    };
+
+    // Before the continuation's search, never while it is held: the search keeps a
+    // shared lease on every closed run root it read, and `flock` refuses an exclusive
+    // take of one to this process as it would to another, so a reclamation after it
+    // passed over every run root a pinned open could reach.
+    let identity_root = identity_dir(&resolution.key)?;
+    let runs = identity_root.join("runs");
+    home::ensure_dir(&runs)?;
+    reclaim(&resolution.key, &runs)?;
+
+    // Only for a pin: a generated name is this token's own and can stand for nothing
+    // that already exists, and asking the question anyway would put a search of every
+    // checkout and run clone of the identity in front of every session anybody opens.
+    // The copy a continuation found is held until this open has brought it into its
+    // own clone: a sibling's open may otherwise reclaim the run clone it is read from.
+    let continued = match request.branch.is_some() {
+        true => continuation(registry, &resolution, &execution, &branch, &base)?,
+        false => None,
+    };
+
+    // Where this session goes: a warm slot of the identity's pool, a slot cut for it,
+    // a disposable run root under `runs/`, or nowhere. A host that configures no pool
+    // and has never had one takes the run-root path with nothing else asked, so it
+    // opens exactly as it always did.
+    let policy = workspaces::resolve_for(
+        &resolution,
+        workspaces::Overrides {
+            pool: request.pool,
+            overflow: request.overflow,
+        },
+    )?;
+    let placement = match policy.configured || pool::pool_dir(&identity_root).is_dir() {
+        true => pool::place(&pool::Ask {
+            resolution: &resolution,
+            execution: &execution,
+            resolved: &policy,
+            pinned: request.branch.is_some().then_some(&branch),
+            identity_root: &identity_root,
+        })?,
+        false => pool::Placement::RunRoot { _serial: None },
+    };
+    let (run_root, slot, cut) = match &placement {
+        pool::Placement::Slot {
+            number, dir, cut, ..
+        } => (dir.clone(), Some(*number), *cut),
+        pool::Placement::RunRoot { .. } => (runs.join(&token), None, pool::Cut::Fresh),
+    };
+    let created = cut.created();
+    let clone = run_root.join("clone");
+    let worktree = run_root.join("worktree");
+
+    // A run root is held shared for the length of the open, which keeps reclamation
+    // off it until its record exists — and from *before* it exists, so no instant
+    // passes at which another open's walk over `runs/` meets it unleased and
+    // unrecorded. A slot is already held exclusively by the placement above, which
+    // keeps every other placement, prune and shed off it for the same span — and an
+    // exclusive take and a shared one on one file cannot be held together, so a slot
+    // takes no second lease here.
+    let lease = match placement {
+        pool::Placement::RunRoot { .. } => Some(
+            lock::try_shared(&occupancy_identity(&run_root))?.ok_or_else(|| Error::Invalid {
+                reason: format!("the run root {} is already occupied", run_root.display()),
+            })?,
+        ),
+        pool::Placement::Slot { .. } => None,
+    };
+    home::ensure_dir(&run_root)?;
+
+    let origin = git::remote_url(&execution, "origin")
+        .unwrap_or_else(|_| execution.to_string_lossy().into_owned());
+    let (carried, placed) = match cut {
+        pool::Cut::Fresh => (
+            git::clone_sharing(&execution, &clone, &origin, &base)?,
+            Placed::NewWorktree,
+        ),
+        // A broken slot whose clone survived keeps that clone and every ref it
+        // retains: its view of origin is brought up to the lender's and the worktree
+        // alone is cut again from it.
+        pool::Cut::KeptClone => (
+            git::carry_remote_refs(&execution, &clone, &base)?,
+            Placed::NewWorktree,
+        ),
+        // A warm slot keeps its clone and its worktree: the clone's view of origin is
+        // brought up to the lender's, and whatever its last session left unreturned
+        // is returned first, so the swap below starts from a clean tree on the base.
+        pool::Cut::Warm => {
+            let carried = git::carry_remote_refs(&execution, &clone, &base)?;
+            settle_slot(&run_root, &policy.delete)?;
+            (carried, Placed::InPlace)
+        }
+    };
+    // A refusal here is a refusal to open at all. A run root or a slot cut for this
+    // session goes with it — the branch itself is untouched wherever it was found, and
+    // a clone and a worktree left behind under a token no record names is litter
+    // nothing would come back for. A warm slot is put back as it was found: detached
+    // on the base, clean, and idle.
+    let Placing {
+        stack_tip,
+        conflict,
+        base_merge: base_decision,
+        provision,
+    } = match cut_or_continue(&Cut {
+        clone: &clone,
+        worktree: &worktree,
+        branch: &branch,
+        base: &base,
+        root: root.as_deref(),
+        continued: continued.as_ref(),
+        publication: &resolution.publication,
+        placed,
+        on_conflict: OnMerge::asked_by(request),
+        brought_in: crate::base_merge::BaseBroughtIn::asked_by(request),
+        base_merge,
+        resolution: &resolution,
+        registry,
+    }) {
+        Ok(placing) => placing,
+        Err(error) => {
+            drop(lease);
+            match cut {
+                pool::Cut::Fresh => {
+                    let _ = std::fs::remove_dir_all(&run_root);
+                }
+                // The clone and what it retains stay; the worktree that could not be
+                // cut goes, and the slot reads broken again until the next take.
+                pool::Cut::KeptClone => {
+                    let _ = std::fs::remove_dir_all(&worktree);
+                    let _ = git::worktree_prune(&clone);
+                }
+                pool::Cut::Warm => restore_returned(&clone, &worktree, &branch, &base, &execution),
+            }
+            drop(placement);
+            return Err(error);
+        }
+    };
+
+    let record = Record {
+        version: RECORD_VERSION,
+        token: Token::try_from(token.clone()).map_err(error::invalid)?,
+        identity: resolution.key.clone(),
+        alias: resolution.alias.clone(),
+        branch,
+        base,
+        change_base: None,
+        stack_tip,
+        worktree,
+        clone,
+        run_root,
+        slot,
+        execution_checkout: execution,
+        publication_checkout: resolution.publication.clone(),
+        state: Lifecycle::Open,
+        owner_pid: std::process::id(),
+        owner_started: process_started(std::process::id()),
+        retried_by: None,
+        labels: request.labels.clone(),
+        carried: Remainder::default(),
+    };
+    create(&record)?;
+    // The record is what holds a slot from here on, so the placement's exclusive
+    // take has done its work.
+    drop(placement);
+    let reuse = match continued {
+        Some(_) => Reuse::Continued,
+        None => Reuse::Cut,
+    };
+    // Only a session that *continued* a branch supersedes anything: a name this
+    // token generated stands for nothing that came before it. Written after the new
+    // record is saved, because the link names it and a link to a session no record
+    // names is the one thing the write boundary refuses.
+    if continued.is_some() {
+        supersede(&record)?;
+    }
+    note_base(
+        &carried,
+        &record.base,
+        &record.worktree,
+        &record.execution_checkout,
+    );
+    // Reported only where it decided this session's name: a pin is prefixed by
+    // nothing, and a host that configures no prefix writes the event it always did.
+    let applied = match request.branch.is_none() && !prefix.value.is_empty() {
+        true => Some(&prefix),
+        false => None,
+    };
+    if let Some(conflict) = &conflict {
+        say_conflict(&record, conflict);
+    }
+    let mut payload = opened(&record, reuse, created, applied, conflict.as_ref());
+    // Written only for a continuation whose base this open decided about, so a session
+    // cut fresh writes the payload it always wrote.
+    if let Some(decision) = &base_decision {
+        payload.insert("base_merge".to_owned(), Value::Object(decision.payload()));
+    }
+    stream.emit(EventKind::SessionOpened, payload);
+    if let Some(ran) = &provision {
+        emit_provision(&mut stream, ran);
+    }
+    drop(lease);
+    Ok(Opening {
+        record,
+        stream,
+        conflict,
+        cut: reuse == Reuse::Cut,
+    })
+}
+
+/// The one line a session opened over a conflicted merge says on stderr, beside the
+/// `conflict` its JSON carries: a person reading the terminal is told what the worker
+/// is told.
+fn say_conflict(record: &Record, conflict: &OpenConflict) {
+    eprintln!(
+        "onevcs: session {token} opened with a merge in progress: {base} conflicts with branch \
+         {branch:?} in {paths}. Conclude it in {worktree} — resolve, stage and commit the merge \
+         — before publishing; publication refuses the session until then",
+        token = record.token,
+        base = conflict.base_commit,
+        branch = record.branch,
+        paths = guidance::listed(&conflict.paths),
+        worktree = record.worktree.display(),
+    );
+}
+
+/// Put a warm slot's tree back as a return leaves it, before a session takes it.
+///
+/// A slot is idle the moment no open record names it, and a publication closes the
+/// record while leaving the return to `session close` — so a slot can be idle with its
+/// last session's branch still checked out and its tree still that session's. The
+/// return is performed here on that session's behalf, through the same steps its own
+/// close would take: its uncommitted work preserved onto its branch, the branch handed
+/// back, stray work refused over, and the tree reset. A refusal is that session's
+/// refusal, naming it and the close that resolves it, and the open does not proceed
+/// over it. A tree no record of this slot names is reset without preserving anything,
+/// which is the same answer reclamation gives a run root no record names.
+fn settle_slot(slot: &Path, delete: &[PathBuf]) -> Result<()> {
+    let worktree = slot.join("worktree");
+    if pool::returned(&worktree) {
+        return Ok(());
+    }
+    let current = git::current_branch(&worktree)?;
+    let previous = all()?
+        .into_iter()
+        .filter(|record| record.run_root == slot)
+        .max_by_key(|record| {
+            (
+                *record.branch == *current,
+                record_path(&record.token)
+                    .ok()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .and_then(|meta| meta.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH),
+            )
+        });
+    match previous {
+        Some(record) => {
+            let mut stream = Stream::open(&record.token)?;
+            let handed = preserve_and_hand_back(&record, &mut stream)?;
+            let stray = stray_work(&record)?;
+            if !stray.is_empty() {
+                return Err(stranding(&record, &stray));
+            }
+            return_tree(&record, delete, handed.copied)
+        }
+        None => {
+            let clone = slot.join("clone");
+            let base = git::default_branch(&clone, "origin")
+                .map(Ref::from_git)
+                .unwrap_or_else(|_| Ref::from_git("HEAD"));
+            reset_onto_base(&worktree, &integrated_base(&clone, &base), delete)
+        }
+    }
+}
+
+/// Put a warm slot back as it was found after a swap that refused, so the slot is idle
+/// again rather than left half way into a session nothing recorded.
+fn restore_returned(clone: &Path, worktree: &Path, branch: &Ref, base: &Ref, lender: &Path) {
+    let _ = reset_onto_base(worktree, &integrated_base(clone, base), &[]);
+    // The branch the swap created or brought in, and nothing else: one the lender
+    // already reaches loses nothing by going, and one it does not is left where a
+    // locating verb can still find it.
+    if let Some(tip) = git::tip(clone, &format!("refs/heads/{branch}")) {
+        if git::refs_reach(lender, &tip) {
+            git::delete_ref(clone, &format!("refs/heads/{branch}"));
+        }
+    }
+}
+
+/// Say what a session found when it could not bring its base up to origin's.
+///
+/// A clone's local base is the lender's copy of it, taken at clone time, and
+/// [`git::carry_remote_refs`] brings it forward onto `origin/<base>` so the bare name
+/// a worker types in the worktree is the commit everything else addresses. One base
+/// it cannot bring forward: one carrying a commit origin has never seen, which is
+/// unpushed work whose only other copy is the lender's. That branch is left exactly
+/// where it was found — and a session that moved nothing and said nothing would leave
+/// a worker comparing against a commit they have no way to learn about, which is the
+/// staleness this exists to end, wearing a different hat.
+///
+/// Nothing is said about a base that needed nothing or was brought forward: a session
+/// opening on the base every one of its own commands already uses is the ordinary
+/// case, and a line per session about it is a line nobody reads.
+fn note_base(carried: &git::BaseCarried, base: &Ref, worktree: &Path, execution: &Path) {
+    let git::BaseCarried::Kept { local, origin } = carried else {
+        return;
+    };
+    let at = execution.to_string_lossy();
+    eprintln!(
+        "onevcs: warning: this session's base {base:?} stands at {local}, which origin/{base} at \
+         {origin} does not carry, so it was left where it was rather than moved off work nothing \
+         else holds. A `{base}` typed in {tree} names that commit; what onevcs computes is \
+         addressed from origin/{base} either way. The copy came from {at}, so publish it from \
+         there with `{push}` — or reconcile it against origin — and open this session again",
+        tree = worktree.display(),
+        push = guidance::command(["git", "-C", &at, "push", "origin", base]),
+    );
+}
+
+/// Record, on every session this one continued the branch of, that it did.
+///
+/// The *tails* of the chains this branch already has, which is every record nothing
+/// has superseded yet — a session already superseded is answered for by whatever
+/// superseded it, and pointing a second edge at this token would fork a chain that
+/// has one end by construction.
+///
+/// Best effort in the same way the stream beside it is: the session is open and its
+/// worktree is cut by the time this runs, so a record that could not be written back
+/// is a warning rather than a session refused. What it costs is exactly what the
+/// link buys — a later reader that cannot tell the two copies of the branch apart —
+/// and refusing the session would cost the work.
+fn supersede(record: &Record) -> Result<()> {
+    for older in all()? {
+        if older.identity != record.identity
+            || older.branch != record.branch
+            || *older.token == *record.token
+            || older.retried_by.is_some()
+        {
+            continue;
+        }
+        if let Err(failure) = record_retry(&older.token, &record.token) {
+            eprintln!(
+                "onevcs: warning: the session {older} is not recorded as continued by {newer}, so \
+                 a report about {branch:?} cannot tell the two apart: {failure}",
+                older = older.token,
+                newer = record.token,
+                branch = record.branch,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether a session was cut for this request, continued a branch that already
+/// existed, or was a session it resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reuse {
+    Cut,
+    Continued,
+    Resumed,
+}
+
+/// The payload a session's opening event carries.
+///
+/// `reused` and `continued` are written only when the session was one or the other,
+/// and deliberately: a fresh cut is the only thing an implementation of this seam
+/// that keeps no run roots can do, so an event that says neither is one such an
+/// implementation still emits unchanged. A reader tells them apart by the field
+/// being there.
+///
+/// `branch_prefix` is written the same way and for the same reason: only where one
+/// was put in front of the branch this session cut, so a host that configures none
+/// writes the payload it always wrote. It carries the prefix and the layer that
+/// decided it, because an operator meeting an unexpected namespace on a branch has
+/// to be able to find which of the three set it.
+///
+/// `conflict` is written the same way again: only where the session opened over a
+/// merge left in progress, as the same object [`Session::conflict`] carries, so a
+/// session that opened clean writes the payload it always wrote.
+fn opened(
+    record: &Record,
+    reuse: Reuse,
+    created: bool,
+    prefix: Option<&Sourced<String>>,
+    conflict: Option<&OpenConflict>,
+) -> Map<String, Value> {
+    // Where the session was placed, always: a slot it took or was cut, or a run root
+    // of its own. A resumed session reports the slot it already held, taken warm.
+    let placement = match record.slot {
+        Some(number) => json!({"kind": "slot", "slot": number, "created": created}),
+        None => json!({"kind": "run-root"}),
+    };
+    let mut payload = object(json!({
+        "token": record.token,
+        "identity": record.identity,
+        "branch": record.branch,
+        "base": record.base,
+        "worktree": record.worktree.display().to_string(),
+        "clone": record.clone.display().to_string(),
+        "execution_checkout": record.execution_checkout.display().to_string(),
+        "publication_checkout": record.publication_checkout.display().to_string(),
+        "placement": placement,
+    }));
+    match reuse {
+        Reuse::Cut => {}
+        Reuse::Continued => {
+            payload.insert("continued".to_owned(), Value::Bool(true));
+        }
+        Reuse::Resumed => {
+            payload.insert("reused".to_owned(), Value::Bool(true));
+        }
+    }
+    // Written only where a prefix was put in front of this branch, and carrying the
+    // layer that decided it: an operator reading an unexpected namespace off a
+    // branch has to be able to find which of the three set it.
+    if let Some(prefix) = prefix {
+        payload.insert(
+            "branch_prefix".to_owned(),
+            json!({"prefix": prefix.value, "from": prefix.from}),
+        );
+    }
+    if let Some(conflict) = conflict {
+        payload.insert("conflict".to_owned(), json!(conflict));
+    }
+    payload
+}
+
+/// Bring the execution checkout up to date. Its objects are kept for borrowers by the
+/// [`lend`] the open holds.
+///
+/// The fetch is deliberately outside every exclusive section: one slow origin must
+/// not hold another session out of the lock it is waiting for.
+fn refresh(execution: &Path, stream: &mut Stream) -> Result<()> {
+    if git::has_remote(execution, "origin") {
+        git::fetch(execution, "origin")?;
+        stream.emit(
+            EventKind::Fetch,
+            object(json!({"remote": "origin", "checkout": execution.display().to_string()})),
+        );
+    }
+    Ok(())
+}
+
+/// The lease every session operation over a lender holds while it reads the lender.
+fn lender_lease(checkout: &Path) -> String {
+    format!("lender:{}", checkout.display())
+}
+
+/// Hold a checkout as a lender for one session operation, setting its retention keys
+/// first where they are not set yet.
+///
+/// `register` sets them before any session of a checkout exists, but a checkout an
+/// earlier release registered has none, and the first sessions to open over it after
+/// an upgrade arrive together. The write appends to the configuration rather than
+/// replacing it (`git::append_in_place`), so no reader of it can fail; the lease is
+/// what lets each session operation read the keys once and act on that answer for as
+/// long as it runs, so every open and close holds it shared and the one write waits
+/// for an exclusive take of it.
+pub(crate) fn lend(checkout: &Path) -> Result<lock::Guard> {
+    let lease = lender_lease(checkout);
+    let held = lock::shared(&lease)?;
+    if !git::is_repo(checkout) || git::retains_objects_for_borrowers(checkout)? {
+        return Ok(held);
+    }
+    drop(held);
+    retain_alone(checkout)?;
+    lock::shared(&lease)
+}
+
+/// Set a lender's retention keys while no session operation of it is reading it, unless
+/// they are set already. For a caller holding no [`lend`] of the same checkout: its
+/// shared take would keep this one's exclusive take waiting on itself.
+pub(crate) fn retain_alone(checkout: &Path) -> Result<()> {
+    let lease = lender_lease(checkout);
+    {
+        // Asked under the shared take, so this read cannot meet another's write.
+        let _reading = lock::shared(&lease)?;
+        if git::retains_objects_for_borrowers(checkout)? {
+            return Ok(());
+        }
+    }
+    let _alone = lock::exclusive(&lease)?;
+    git::retain_objects_for_borrowers(checkout)
+}
+
+/// The session a pinned branch is already held by, when exactly one is and nothing
+/// holds its run root against being taken up.
+///
+/// A retry of the same node arrives as the same pin, and cutting it a second run
+/// root leaves the first one behind holding the same branch at an older tip: a clone
+/// per attempt, a worktree nobody removes, and two directories that both answer to
+/// the branch somebody is watching. So a pin that names a session this host already
+/// has is that session.
+///
+/// Declining is never a refusal — it is a fall through to opening a session the
+/// ordinary way, which then answers for itself and *continues* the branch: a run
+/// root that has been reclaimed, an ambiguity nothing here can resolve, and somebody
+/// already inside it all answer `None`. So does a request that names a different base
+/// or a different execution checkout than the session was cut with, since resuming
+/// into one of those would answer an explicit argument with a session that does not
+/// honour it.
+///
+/// The base is the one [`open`] resolved, so an unnamed one is the identity's root
+/// *now* rather than whatever a record was cut from when its root may have been
+/// another branch.
+///
+/// What comes back is the session *and its lease*, held from here until the
+/// adoption has taken its own: a shared lease is compatible with the one [`adopt`]
+/// takes, so holding it costs nothing and closes the window in which the run root
+/// could be reclaimed between being asked about and being taken up.
+pub(crate) fn resumable(
+    resolution: &Resolution,
+    branch: Option<&Ref>,
+    base: &Ref,
+    execution: &Path,
+) -> Result<Option<(Record, lock::Guard)>> {
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+    let Some(candidate) = resumable_record(&resolution.key, branch, base, execution)? else {
+        return Ok(None);
+    };
+    // The same question `adopt` asks a moment later, and it has the same answer: an
+    // exclusive holder — a reclamation probing this run root, or anything else that
+    // has taken it against the world — is what it answers `None` for. Shared holders
+    // are compatible with each other by design, because several commands legitimately
+    // work in one run root at once.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the journey is
+    // `a_pinned_branch_whose_session_is_occupied_opens_a_fresh_one_rather_than_refusing`,
+    // which holds the run root's lock itself, and says there why a lease no command
+    // outlives leaves nothing else to hold it with.
+    Ok(lock::try_shared(&candidate.lease())?.map(|lease| (candidate, lease)))
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// The one open session a pin would resume, judged from the records alone: what
+/// [`resumable`] asks before it takes the lease.
+fn resumable_record(
+    identity: &str,
+    branch: &Ref,
+    base: &Ref,
+    execution: &Path,
+) -> Result<Option<Record>> {
+    let mut held = all()?.into_iter().filter(|record| {
+        record.identity == identity
+            && record.branch == *branch
+            && record.base == *base
+            // Closing a session is the statement that it is finished: it hands the
+            // branch back to the execution checkout and lets its worktree go. A name
+            // taken again after that is a new session under a spent name, which is a
+            // different thing from a run that stopped in the middle of one.
+            && record.state == Lifecycle::Open
+            && record.execution_checkout == execution
+            // The run root a record names outlives neither reclamation nor an
+            // operator with a broom, and what is being reused is the directory
+            // rather than the record of it.
+            && record.run_root.is_dir()
+            && record.clone.is_dir()
+    });
+    Ok(match (held.next(), held.next()) {
+        (Some(candidate), None) => Some(candidate),
+        _ => None,
+    })
+}
+
+/// Take up a session that already exists, as the request that pinned its branch.
+///
+/// The re-attachment is [`adopt`] and deliberately nothing beside it: a second path
+/// that preserved an interrupted worktree would be a second shape of marker for a
+/// recovery to read.
+fn resume(
+    registry: &Registry,
+    resolution: &Resolution,
+    held: &Record,
+    lease: lock::Guard,
+    execution: &Path,
+    request: &SessionRequest,
+) -> Result<(Record, Stream, Option<OpenConflict>)> {
+    let labels = &request.labels;
+    // A session resumed part way through the merge it opened with is handed back over
+    // that merge, exactly as its first opening handed it over — never committed on the
+    // way, which is what an adoption does with any other tree it finds dirty. A
+    // request refusing conflicts is refused instead, and nothing is touched.
+    let (mut record, mut stream, _preserved) = adopt_with(&held.token, OnMerge::asked_by(request))?;
+    // Held until the adoption has taken a lease of its own, and no longer.
+    drop(lease);
+    let conflict = match git::merge_in_progress(&record.worktree)? {
+        Some(merging) if !merging.unmerged.is_empty() => Some(OpenConflict {
+            paths: merging.unmerged,
+            base_commit: merging.merging,
+            branch_tip: git::head_sha(&record.worktree)?,
+        }),
+        _ => None,
+    };
+    // The request that resumed this session is the newest thing said about who is
+    // running it, so each key it names replaces that key; a key it does not name is
+    // kept, because a caller that says nothing has not said "forget it".
+    if !labels.is_empty() {
+        record = update(&record.token, |stored| {
+            stored
+                .labels
+                .extend(labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+        })?;
+    }
+    // The same label the session's first opening carried, so a reader filtering one
+    // identity's events does not lose the run it resumed.
+    stream.label("identity", &record.identity);
+    refresh(execution, &mut stream)?;
+    // The clone's view of origin is as old as the session, which for a resumed one
+    // is as old as the work in it. The lender has just been fetched, so this is
+    // where that becomes the session's view too — the base the session's own worktree
+    // names included.
+    let carried = git::carry_remote_refs(execution, &record.clone, &record.base)?;
+    note_base(&carried, &record.base, &record.worktree, execution);
+    // A session handed back over the merge it opened with has decided already; the
+    // conflict it carries is what its opening says.
+    let (conflict, base_decision) = match conflict {
+        Some(conflict) => (Some(conflict), None),
+        None => {
+            let (conflict, decision) = merge_resumed_base(registry, resolution, &record, request)?;
+            (conflict, Some(decision))
+        }
+    };
+    if let Some(conflict) = &conflict {
+        say_conflict(&record, conflict);
+    }
+    let mut payload = opened(&record, Reuse::Resumed, false, None, conflict.as_ref());
+    if let Some(decision) = &base_decision {
+        payload.insert("base_merge".to_owned(), Value::Object(decision.payload()));
+    }
+    stream.emit(EventKind::SessionOpened, payload);
+    Ok((record, stream, conflict))
+}
+
+/// Bring a resumed session's moved base into its branch by the identity's
+/// `base_merge`, and answer what was decided so its `session-opened` says so.
+///
+/// Under `on-conflict` a resumption is decided exactly as a continued branch is: the
+/// base is merged — left in progress for the session, or refused for a request that
+/// refuses conflicts — on a conflict or where the host requires an up-to-date branch,
+/// and otherwise the branch stays at its tip. Under `always` a resumption is what it
+/// always was: nothing is merged at open, and the moved base is merged by the
+/// publication's sync, which is what the decision records as `deferred`.
+///
+/// A stacked branch is deferred under either setting, and so is one whose base the
+/// clone cannot name: whether its change below landed — and so whether it is replayed
+/// rather than merged — is the publication's to decide, as it always was.
+fn merge_resumed_base(
+    registry: &Registry,
+    resolution: &Resolution,
+    record: &Record,
+    request: &SessionRequest,
+) -> Result<(Option<OpenConflict>, crate::base_merge::Decision)> {
+    let integrated = integrated_base(&record.clone, &record.base);
+    if record.stack_tip.is_some() || git::tip(&record.clone, &integrated).is_none() {
+        return Ok((
+            None,
+            crate::base_merge::Decision::defer(format!(
+                "{} is a stacked base or one this session's clone does not name, so the \
+                 publication's sync decides whether the branch is merged or replayed",
+                record.base
+            )),
+        ));
+    }
+    let setting = base_merge_for(registry, resolution)?;
+    let decision = decide_base_merge(
+        setting,
+        resolution,
+        &record.worktree,
+        &integrated,
+        &record.base,
+        &record.branch,
+        crate::base_merge::BaseBroughtIn::asked_by(request),
+    )?;
+    // `decide` answers `merged` under `always` only for a base that moved; one the
+    // branch already carries is a `skipped` that says so under either setting.
+    if setting == RulesBaseMerge::Always && decision.merges() {
+        return Ok((
+            None,
+            crate::base_merge::Decision::defer(format!(
+                "base_merge is always and a resumed session is not merged at open, so \
+                 {integrated} is merged by the publication's sync"
+            )),
+        ));
+    }
+    let conflict = match decision.merges() {
+        true => integrate(
+            &record.worktree,
+            &integrated,
+            &record.branch,
+            &Carried {
+                checkout: Some(record.worktree.clone()),
+                tip: git::head_sha(&record.worktree)?,
+            },
+            &record.publication_checkout,
+            OnMerge::asked_by(request),
+        )?,
+        false => None,
+    };
+    Ok((conflict, decision))
+}
+
+/// The commit one copy of a continued branch stands at, and where that copy is.
+#[derive(Debug, Clone)]
+struct Carried {
+    /// The repository holding it, or `None` for origin's own copy — which a session
+    /// clone is given by [`git::carry_remote_refs`] rather than fetched from.
+    checkout: Option<PathBuf>,
+    /// The commit the branch stands at there.
+    // llmlint: ignore[invalid_states_unrepresentable,boundary_inputs_validated] git's own
+    // printed SHA, spelled the way `git::tip` answers one and the way `git::merge_base`
+    // and `branch::Held` beside it carry one: git's answer to a command this crate just
+    // ran is not a caller's input, and the crate's `Sha` wraps an unvalidated `String` at
+    // the public surface — so it would make no state here unrepresentable either.
+    tip: String,
+}
+
+impl Carried {
+    /// Where the copy is, as a refusal names it.
+    fn at(&self) -> String {
+        match &self.checkout {
+            Some(checkout) => checkout.display().to_string(),
+            None => "origin".to_owned(),
+        }
+    }
+
+    /// Bring this copy's objects into the session's clone, so both copies can be
+    /// compared there and the branch can be written at either.
+    ///
+    /// Origin's copy is already there and nothing is fetched for it. The commit is
+    /// the one read where the copy lives, so what this brings is the objects and not
+    /// the answer: a fetch that raced a deletion leaves `update-ref` below to refuse
+    /// a commit the clone does not have.
+    fn bring_into(&self, clone: &Path, branch: &Ref) -> Result<()> {
+        let Some(checkout) = &self.checkout else {
+            return Ok(());
+        };
+        git::fetch_into_ref(clone, &checkout.to_string_lossy(), branch, CONTINUED_REF)?;
+        Ok(())
+    }
+}
+
+/// Where a pinned branch already is, which is what a session continuing it opens at.
+///
+/// One of these three and never "nowhere": a name nothing carries is not a
+/// continuation at all, and [`continuation`] answers `None` for it.
+enum Continued {
+    /// A checkout of this identity holds the branch and origin does not.
+    Held {
+        copy: Carried,
+        _guard: crate::branch::Located,
+    },
+    /// Origin holds it and no checkout of this identity does — a branch pushed from
+    /// another host, or from a run root this one has since reclaimed.
+    Pushed(Carried),
+    /// Both hold it, and which of them the session opens at is decided in the clone,
+    /// where both commits can be reached at once.
+    Both {
+        /// The checkout's copy.
+        held: Carried,
+        /// Holds the checkout copy against reclamation.
+        _guard: crate::branch::Located,
+        /// Origin's.
+        pushed: Carried,
+    },
+}
+
+/// The scratch ref a continued branch's checkout copy is fetched into.
+///
+/// Not a branch: what the clone ends up with is `refs/heads/<branch>` at the copy
+/// that carries the rest, and a second name for the losing copy would be a branch
+/// the clone answers to that nothing published.
+const CONTINUED_REF: &str = "refs/onevcs/continued";
+
+/// What an operator does about copies of a continued branch that have diverged.
+const RECONCILE_THEN: &str = "open this session again, which continues the copy that is left";
+
+/// Whether a pinned branch already exists, and where.
+///
+/// A pin that names a branch something already carries is a request to **continue**
+/// it: the session's worktree is opened at that branch's tip and its base becomes
+/// what the branch is merged with and published into, rather than the point it was
+/// cut from. A pin naming a name nothing carries is cut fresh from the base, exactly
+/// as it always was.
+///
+/// Two places a name can already mean something, and both are searched: every
+/// repository the identity keeps branches in — [`checkouts_of`], the run clones
+/// included — and origin's own copy, read from the execution checkout's
+/// remote-tracking refs, which the fetch above has just brought up to date. Which of
+/// the checkouts answers is [`crate::branch::locate`], the one comparison the
+/// publishing verbs read a branch by, so a session and a landing cannot come to
+/// disagree about which copy of a name is the work — and whose answer comes back
+/// beside the continuation, still holding the run clones it read.
+fn continuation(
+    registry: &Registry,
+    resolution: &Resolution,
+    execution: &Path,
+    branch: &Ref,
+    base: &Ref,
+) -> Result<Option<Continued>> {
+    let _reads = crate::checkout_reads::identity(&resolution.key)?;
+    let anywhere = checkouts_of(registry, resolution)?
+        .into_iter()
+        .any(|repo| git::is_repo(&repo) && git::branch_exists(&repo, branch));
+    let located = match anywhere {
+        true => Some(crate::branch::locate(
+            registry,
+            resolution,
+            branch,
+            base,
+            RECONCILE_THEN,
+        )?),
+        false => None,
+    };
+    let held = located.and_then(|located| {
+        git::tip(&located.checkout, &format!("refs/heads/{branch}")).map(|tip| {
+            let copy = Carried {
+                checkout: Some(located.checkout.clone()),
+                tip,
+            };
+            (copy, located)
+        })
+    });
+    let pushed = git::tip(execution, &format!("refs/remotes/origin/{branch}")).map(|tip| Carried {
+        checkout: None,
+        tip,
+    });
+    let continued = match (held, pushed) {
+        (Some((held, guard)), Some(pushed)) => Some(Continued::Both {
+            held,
+            _guard: guard,
+            pushed,
+        }),
+        (Some((copy, guard)), None) => Some(Continued::Held {
+            copy,
+            _guard: guard,
+        }),
+        (None, Some(pushed)) => Some(Continued::Pushed(pushed)),
+        (None, None) => None,
+    };
+    Ok(continued)
+}
+
+/// The copy a continued session opens at: the one that carries every other.
+///
+/// A checkout's copy and origin's can be at different commits for honest reasons —
+/// work preserved locally that was never pushed, or a push from another host this
+/// one has not worked on since — and one of them then carries the other. Neither
+/// carrying the other is a divergence, and taking either would open a session that
+/// silently drops the commits of the one it passed over, which is the thing this
+/// whole path exists to stop.
+///
+/// Except where the checkout's copy holds nothing beyond origin's but clean merges of
+/// base commits ([`crate::branch::only_clean_base_merges`]): that is a continuation
+/// that merged the base and stopped while the work went on, and the base it merged is
+/// merged into origin's copy anyway. The session opens at origin's copy, and the
+/// checkout's tip is kept in the publication checkout first and left where it was.
+fn opened_at(
+    clone: &Path,
+    branch: &Ref,
+    base: &Ref,
+    publication: &Path,
+    continued: &Continued,
+) -> Result<Carried> {
+    match continued {
+        Continued::Held { copy: only, .. } | Continued::Pushed(only) => {
+            only.bring_into(clone, branch)?;
+            Ok(only.clone())
+        }
+        Continued::Both { held, pushed, .. } => {
+            held.bring_into(clone, branch)?;
+            pushed.bring_into(clone, branch)?;
+            if git::is_ancestor(clone, &pushed.tip, &held.tip)? {
+                return Ok(held.clone());
+            }
+            if git::is_ancestor(clone, &held.tip, &pushed.tip)? {
+                return Ok(pushed.clone());
+            }
+            let integrated = integrated_base(clone, base);
+            if let Some(checkout) = &held.checkout {
+                if crate::branch::only_clean_base_merges(
+                    clone,
+                    &held.tip,
+                    &pushed.tip,
+                    &[&integrated],
+                )? {
+                    let kept =
+                        crate::branch::keep_passed_over(publication, checkout, branch, &held.tip)?;
+                    eprintln!(
+                        "onevcs: the copy of branch {branch:?} in {at} at {here} holds nothing \
+                         beyond origin's at {there} but clean merges of base commits, so the \
+                         session opens at origin's copy; the passed-over tip is kept at {kept} \
+                         in {publication}",
+                        at = held.at(),
+                        here = held.tip,
+                        there = pushed.tip,
+                        publication = publication.display(),
+                    );
+                    return Ok(pushed.clone());
+                }
+            }
+            Err(diverged(branch, held, pushed))
+        }
+    }
+}
+
+/// Why a checkout's copy of a continued branch and origin's are refused when neither
+/// carries the other, and what reconciles them.
+fn diverged(branch: &Ref, held: &Carried, pushed: &Carried) -> Error {
+    let at = held.at();
+    Error::Invalid {
+        reason: format!(
+            "branch {branch:?} stands at {here} in {at} and at {there} on {theirs}, and neither \
+             copy carries the other, so a session continuing it would have to leave one of them \
+             behind. Reconcile them where the branch is — `{fetch}` brings origin's copy in as \
+             FETCH_HEAD, to merge or rebase onto the one that is there — and then {RECONCILE_THEN}",
+            here = held.tip,
+            there = pushed.tip,
+            theirs = pushed.at(),
+            fetch = guidance::command(["git", "-C", &at, "fetch", "origin", branch]),
+        ),
+    }
+}
+
+/// Whether the session's worktree is cut for it or already there.
+///
+/// A run root, and a slot cut for this session, get a **new worktree** added from
+/// the clone. A warm slot has one, standing detached and clean on the base, and the
+/// branch is swapped into it **in place** — a checkout rather than a worktree add —
+/// so an incremental build in it sees a branch diff rather than an empty tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    NewWorktree,
+    InPlace,
+}
+
+/// The base as a clone can name it: its remote-tracking copy where there is one, and
+/// a local branch of that name otherwise.
+pub(crate) fn integrated_base(clone: &Path, base: &Ref) -> String {
+    let remote = format!("origin/{base}");
+    match git::ref_exists(clone, &format!("refs/remotes/{remote}")) {
+        true => remote,
+        false => base.to_string(),
+    }
+}
+
+/// Everything putting a branch into a worktree needs to know, in one value rather
+/// than eight arguments: two of them transposed would cut a session that reads
+/// perfectly and works in the wrong tree.
+struct Cut<'a> {
+    /// The session's clone, whose refs the worktree shares.
+    clone: &'a Path,
+    /// The worktree the branch goes into.
+    worktree: &'a Path,
+    /// The branch.
+    branch: &'a Ref,
+    /// What it is cut from or merged with.
+    base: &'a Ref,
+    /// The identity's root, where the session named its own base.
+    root: Option<&'a str>,
+    /// Where the branch already is, for a continuation.
+    continued: Option<&'a Continued>,
+    /// The publication checkout, which a refusal names.
+    publication: &'a Path,
+    /// Whether the worktree is cut for this session or already there.
+    placed: Placed,
+    /// What a continuation whose base conflicts with it does with the merge.
+    on_conflict: OnMerge,
+    /// Whether a continuation is merged with its base at all.
+    base_merge: BaseMerge,
+    /// Who brings a base that merges cleanly in, and so whether the host is asked
+    /// whether it requires an up-to-date branch.
+    brought_in: crate::base_merge::BaseBroughtIn,
+    /// The identity, whose rules decide when a moved base is merged and whose host is
+    /// asked whether it requires an up-to-date branch.
+    resolution: &'a Resolution,
+    /// The rules this host's state root points at, read only for a continuation.
+    registry: &'a Registry,
+}
+
+/// What putting a branch in a session's worktree answers: the stack its record has
+/// to write down, and the merge it left for the session to conclude.
+struct Placing {
+    /// Where the branch's own work begins, for a session that named its own base.
+    // llmlint: ignore[invalid_states_unrepresentable] the value `Record::stack_tip`
+    // is written from, unchanged: git's own printed SHA, under that field's own reason —
+    // the crate's `Sha` wraps an unvalidated `String` and would make no state here
+    // unrepresentable.
+    stack_tip: Option<String>,
+    /// The conflicted merge left in progress, for a continuation whose base
+    /// conflicts with it.
+    conflict: Option<OpenConflict>,
+    /// What was decided about merging the base into a continuation, and why — `None`
+    /// for a branch cut fresh, or one whose caller writes that merge itself.
+    base_merge: Option<crate::base_merge::Decision>,
+    /// git's run of the repository's `post-checkout` at that checkout, where it ran one.
+    provision: Option<git::PostCheckout>,
+}
+
+fn emit_provision(stream: &mut Stream, ran: &git::PostCheckout) {
+    let (output, output_truncated) = last_bytes(
+        crate::stream::redact(&ran.output),
+        crate::event::PROVISION_OUTPUT_BYTES,
+    );
+    let (exit_status, signal) = match ran.ended {
+        git::Ended::Code(code) => (Some(code), None),
+        git::Ended::Signal(signal) => (None, Some(signal)),
+        _ => (None, None),
+    };
+    let provision = crate::event::WorktreeProvision {
+        hook: "post-checkout".to_owned(),
+        trigger: match ran.trigger {
+            git::CheckoutTrigger::WorktreeAdd => crate::event::ProvisionTrigger::WorktreeAdd,
+            git::CheckoutTrigger::SlotCheckout => crate::event::ProvisionTrigger::SlotCheckout,
+        },
+        worktree: ran.worktree.display().to_string(),
+        exit_status,
+        signal,
+        timed_out: matches!(ran.ended, git::Ended::Elapsed { .. }),
+        duration_ms: u64::try_from(ran.duration.as_millis()).unwrap_or(u64::MAX),
+        output,
+        output_truncated,
+        rerun: ran.rerun(),
+    };
+    let kind = match ran.passed() {
+        true => EventKind::WorktreeProvisioned,
+        false => EventKind::WorktreeProvisionFailed,
+    };
+    // Plain strings, integers and booleans under string keys, so neither arm can fail.
+    if let Ok(Value::Object(payload)) = serde_json::to_value(provision) {
+        stream.emit(kind, payload);
+    }
+}
+
+/// At most the last `limit` bytes of `text`, starting on a character boundary, and
+/// whether anything was cut.
+fn last_bytes(text: String, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let start = (text.len() - limit..=text.len())
+        .find(|start| text.is_char_boundary(*start))
+        .unwrap_or(text.len());
+    (text[start..].to_owned(), true)
+}
+
+/// Put the session's branch in its worktree, and answer the stack its record has to
+/// write down.
+///
+/// Two shapes. A name nothing carries is **cut** from the base — `worktree add -b`
+/// for a worktree that does not exist yet, `checkout -b` in one that does — which is
+/// every session that generates its own name and every pin that is new. A name
+/// something already carries is **continued**: the worktree is opened at that
+/// branch's tip and the base is merged into it, so the session starts from the work
+/// rather than from an empty branch wearing its name.
+fn cut_or_continue(cut: &Cut<'_>) -> Result<Placing> {
+    let Cut {
+        clone,
+        worktree,
+        branch,
+        base,
+        root,
+        continued,
+        publication,
+        placed,
+        on_conflict,
+        base_merge,
+        brought_in,
+        resolution,
+        registry,
+    } = *cut;
+    let integrated = integrated_base(clone, base);
+    let Some(continued) = continued else {
+        let provision = match placed {
+            Placed::NewWorktree => git::worktree_add(clone, worktree, branch, &integrated)?,
+            Placed::InPlace => git::checkout_new(worktree, branch, &integrated)?,
+        };
+        // Read off the worktree that was just cut, which is where the commit it was
+        // cut at is by construction — asking the name it was cut from again could
+        // answer something else, or nothing.
+        let stack_tip = match root {
+            Some(root) if *root != **base => Some(git::head_sha(worktree)?),
+            _ => None,
+        };
+        return Ok(Placing {
+            stack_tip,
+            conflict: None,
+            base_merge: None,
+            provision,
+        });
+    };
+
+    let opened = opened_at(clone, branch, base, publication, continued)?;
+    git::update_ref(clone, &format!("refs/heads/{branch}"), &opened.tip)?;
+    git::delete_ref(clone, CONTINUED_REF);
+    git::detach_head(clone)?;
+    let provision = match placed {
+        Placed::NewWorktree => git::worktree_add_continued(clone, worktree, branch)?,
+        Placed::InPlace => git::checkout_existing(worktree, branch)?,
+    };
+
+    // Where this branch's own work begins, read *before* the base is merged in:
+    // afterwards the two have the base's tip in common and the fork point is gone.
+    // A continued branch was cut from its base by something this session did not
+    // watch, so unlike a fresh cut there is nothing to read off HEAD.
+    let stack_tip = match root {
+        Some(root) if *root != **base => git::merge_base(clone, &integrated, branch)?,
+        _ => None,
+    };
+    // Unguarded, unlike the sync a publication runs: that one tolerates a base no ref
+    // names because a branch-keyed verb can be handed one, and here the base is the
+    // argument this session was opened with. A session opened against a base nothing
+    // has would publish against nothing, so git's own refusal of the name is
+    // the answer.
+    let decision = match base_merge {
+        BaseMerge::Merge => Some(decide_base_merge(
+            base_merge_for(registry, resolution)?,
+            resolution,
+            worktree,
+            &integrated,
+            base,
+            branch,
+            brought_in,
+        )?),
+        BaseMerge::Leave => None,
+    };
+    let conflict = match &decision {
+        Some(decision) if decision.merges() => integrate(
+            worktree,
+            &integrated,
+            branch,
+            &opened,
+            publication,
+            on_conflict,
+        )?,
+        _ => None,
+    };
+    Ok(Placing {
+        stack_tip,
+        conflict,
+        base_merge: decision,
+        provision,
+    })
+}
+
+/// Whether a continued branch is merged with its moved base as it opens, by the
+/// identity's `base_merge` — the same decision a publication's sync makes, through the
+/// same function, so a session and its publication cannot come to disagree about it.
+///
+/// The host is the real one: a session is opened through the repository side alone,
+/// and the only thing asked of the host is whether it requires an up-to-date branch —
+/// a refusal of which merges, as every open before the setting did. A request whose
+/// caller merges the base itself is not asked even that.
+fn decide_base_merge(
+    setting: RulesBaseMerge,
+    resolution: &Resolution,
+    worktree: &Path,
+    integrated: &str,
+    base: &Ref,
+    branch: &Ref,
+    brought_in: crate::base_merge::BaseBroughtIn,
+) -> Result<crate::base_merge::Decision> {
+    crate::base_merge::decide(
+        setting,
+        &crate::base_merge::Merging {
+            repo: worktree,
+            integrated,
+            base,
+            branch,
+            identity: &resolution.key,
+            hosting: crate::Providers::real().hosting,
+            brought_in,
+        },
+    )
+}
+
+/// The identity's resolved `base_merge`.
+fn base_merge_for(registry: &Registry, resolution: &Resolution) -> Result<RulesBaseMerge> {
+    let (file, source) = crate::policy::load(registry)?;
+    Ok(crate::policy::resolve_for(&file, &source, resolution)
+        .base_merge
+        .value)
+}
+
+/// Merge the integration target into the branch this session continues.
+///
+/// A continued branch was cut from a base that has since moved, and a session that
+/// opened on it without the base would commit and publish against a tree
+/// nobody has seen. The merge is the one [`crate::publish::reconcile`] runs, the one
+/// this crate uses everywhere a branch is brought level with what it lands on, so a
+/// session and a publication cannot come to disagree about what a sync does.
+///
+/// A conflict is **left in the worktree** and answered as the session's
+/// [`OpenConflict`]: the worker holding the session knows what its branch meant, and
+/// its own checks and judge are what should review the resolution — refusing here
+/// instead stopped the whole run on a merge only a person could then make. Nothing is
+/// committed: `MERGE_HEAD`, the unmerged paths and git's markers are what the session
+/// opens with, publication refuses the session until the merge is concluded, and every
+/// teardown aborts it.
+///
+/// A request that [refuses conflicts](crate::SessionRequest::refuse_conflicts) is
+/// answered as every open was before: the merge is aborted where it was attempted, the
+/// branch is untouched — the copy this session read is where it always was — and the
+/// refusal names that copy and the command that lands the branch as it stands.
+fn integrate(
+    worktree: &Path,
+    integrated: &str,
+    branch: &Ref,
+    opened: &Carried,
+    publication: &Path,
+    on_conflict: OnMerge,
+) -> Result<Option<OpenConflict>> {
+    if on_conflict == OnMerge::Keep {
+        let message = crate::publish::merge_message(integrated, branch);
+        let git::Integrated::Conflicted(conflict) =
+            git::merge_leaving_conflict(worktree, integrated, &message)?
+        else {
+            return Ok(None);
+        };
+        // Read off the merge git is standing in rather than off the name it was
+        // given: `MERGE_HEAD` is the commit that was merged, whatever the name
+        // resolves to by the time anybody asks.
+        let base_commit = git::tip(worktree, "MERGE_HEAD").ok_or_else(|| {
+            error::invalid(format!(
+                "the merge of {integrated} into {branch:?} in {} stopped on a conflict but \
+                 names no MERGE_HEAD",
+                worktree.display()
+            ))
+        })?;
+        return Ok(Some(OpenConflict {
+            paths: conflict.paths().to_vec(),
+            base_commit,
+            branch_tip: opened.tip.clone(),
+        }));
+    }
+    let crate::publish::Reconciled::Conflicted(_, conflict) =
+        crate::publish::reconcile(worktree, integrated, branch, None)?
+    else {
+        return Ok(None);
+    };
+    Err(Error::SyncConflict {
+        reason: format!(
+            "{integrated} conflicts with branch {branch:?} in {conflicting} at {tip}, which is the copy in {at} \
+             this session would continue, so opening it would leave a conflict in a worktree \
+             nobody asked to resolve. The branch is untouched. Resolve the conflict on it — check \
+             it out in {publication} and merge {integrated} into it — and open this session \
+             again, or land it as it stands with `{land}`",
+            conflicting = crate::guidance::listed(conflict.paths()),
+            tip = opened.tip,
+            at = opened.at(),
+            publication = publication.display(),
+            land = guidance::command([
+                "onevcs",
+                "publish-branch",
+                branch,
+                "--repo",
+                &publication.to_string_lossy(),
+            ]),
+        ),
+    })
+}
+
+/// Why a session whose branch is its own base is refused, and what to write instead.
+///
+/// The base is what a session's work is merged with and published into, so a session
+/// whose base is its own branch is compared against itself: whatever it commits is
+/// already in its base, and publishing it answers that there is nothing to publish
+/// however much work it holds. Naming both was the only way to say "continue this
+/// branch" before a pin that names an existing branch meant exactly that, so the
+/// refusal names the spelling that replaced it.
+fn same_branch_and_base(base: &Ref) -> Error {
+    Error::Invalid {
+        reason: format!(
+            "branch {base:?} is also this session's base, so it would be published into itself \
+             and every publication of it would answer that there is nothing to publish. Pass \
+             `--branch {base}` on its own — a branch that already exists is continued from its \
+             own tip — and pass `--base` only to name the branch this work is merged with and \
+             published into"
+        ),
+    }
+}
+
+/// How far the search for a free name goes before it gives up.
+///
+/// A bound rather than none, because the search asks git nothing per candidate — the
+/// names taken are listed once — but a caller in a loop proposing one name for every
+/// session it opens would otherwise walk further every time. A thousand branches of
+/// one name on one identity is a caller repeating itself, and that is what the
+/// refusal says.
+const SUFFIXES: u32 = 1_000;
+
+/// Why a request naming both a branch to continue and a name to cut is refused.
+fn both_named(pinned: &str, proposed: &str) -> Error {
+    Error::Invalid {
+        reason: format!(
+            "this request names both a branch to continue ({pinned:?}) and a name to cut \
+             ({proposed:?}), which are two answers to one question. Pass `--branch {pinned}` \
+             to continue that branch — one that already exists is opened at its own tip — or \
+             `--branch-name {proposed}` to have a fresh branch cut from that name, never both"
+        ),
+    }
+}
+
+/// The name a proposal becomes before a suffix is looked for: sanitized, then
+/// prefixed, then validated whole.
+///
+/// The order is the whole of it. Sanitizing first means the prefix is put in front of
+/// a name git already accepts; validating the composition afterwards means a prefix
+/// and a name that are each usable alone cannot compose into one that is not.
+fn stem(proposed: &str, prefix: &str) -> Result<String> {
+    let Some(sanitized) = branches::sanitize(proposed) else {
+        return Err(Error::Invalid {
+            reason: format!(
+                "the branch name {proposed:?} has nothing in it a branch name can be made \
+                 of: every character git would refuse is replaced, and what is left is \
+                 empty. Propose a name carrying at least one letter, digit or underscore"
+            ),
+        });
+    };
+    let composed = format!("{prefix}{sanitized}");
+    if !git::is_valid_branch_name(&composed) {
+        return Err(Error::Invalid {
+            reason: format!(
+                "the branch name {proposed:?} becomes {composed:?} once it is sanitized and \
+                 prefixed, and git would not accept that as a branch name"
+            ),
+        });
+    }
+    Ok(composed)
+}
+
+/// The first of `<stem>`, `<stem>-2`, `<stem>-3`, … that nothing carries.
+///
+/// Searched against both the identity's local branches — every checkout and run clone
+/// [`checkouts_of`] names — and its origin's, because a name taken on either is a
+/// name this session cannot have: cutting over the first would produce a second,
+/// empty branch of that name, and pushing the second would be refused or would
+/// overwrite work nobody asked about. The whole listing is taken once rather than
+/// asked per candidate, so a proposal that has to walk is no more subprocesses than
+/// one that does not.
+fn first_free(
+    registry: &Registry,
+    resolution: &Resolution,
+    execution: &Path,
+    proposed: &str,
+    stem: &str,
+) -> Result<Ref> {
+    let taken = taken_names(registry, resolution, execution)?;
+    for nth in 1..=SUFFIXES {
+        let candidate = match nth {
+            1 => stem.to_owned(),
+            nth => format!("{stem}-{nth}"),
+        };
+        if taken.contains(&candidate) {
+            continue;
+        }
+        return Ref::try_from(candidate).map_err(|reason| Error::Invalid {
+            reason: format!("{reason}: it is not a valid branch name"),
+        });
+    }
+    Err(Error::Invalid {
+        reason: format!(
+            "the branch name {proposed:?} is taken, and so is every name from {stem}-2 to \
+             {stem}-{SUFFIXES}: {identity} has a thousand branches of that name already. \
+             Propose a name that says which piece of work this is",
+            identity = resolution.key,
+        ),
+    })
+}
+
+/// Every branch name this identity already carries, locally or on its origin.
+///
+/// A checkout git will not list contributes nothing, which is the answer
+/// [`continuation`] takes from the same search: a torn run clone of a dead session
+/// must not stop a session being opened, and the copy that matters — the execution
+/// checkout and origin's own refs — is asked separately from it.
+fn taken_names(
+    registry: &Registry,
+    resolution: &Resolution,
+    execution: &Path,
+) -> Result<std::collections::BTreeSet<String>> {
+    let mut taken = std::collections::BTreeSet::new();
+    let _reads = crate::checkout_reads::identity(&resolution.key)?;
+    for repo in checkouts_of(registry, resolution)? {
+        if git::is_repo(&repo) {
+            taken.extend(git::branches(&repo).unwrap_or_default());
+        }
+    }
+    taken.extend(git::remote_branches(execution, "origin")?);
+    Ok(taken)
+}
+
+pub(crate) fn execution_checkout(
+    registry: &Registry,
+    resolution: &Resolution,
+    alias: Option<&str>,
+) -> Result<PathBuf> {
+    let Some(alias) = alias else {
+        return Ok(resolution.publication.clone());
+    };
+    let checkout = registry
+        .checkouts
+        .get(alias)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!("{alias:?} is not a registered checkout"),
+        })?;
+    if checkout.identity != resolution.key {
+        return Err(Error::Invalid {
+            reason: format!(
+                "execution checkout {alias:?} belongs to identity {:?}, not to {:?}",
+                checkout.identity, resolution.key
+            ),
+        });
+    }
+    Ok(checkout.path.clone())
+}
+
+/// Re-attach to a session that already exists, claiming its free lease.
+///
+/// A worktree the session left dirty is committed behind an incomplete-step marker
+/// before anything else happens, so the work is durable and the branch says plainly
+/// that a step did not finish — which is what makes it require the merge path
+/// before it may be published.
+///
+/// A worktree holding an unfinished merge is refused as a sync conflict instead,
+/// with nothing committed: the commit an adoption writes would conclude that merge
+/// with git's markers in it.
+pub fn adopt(token: &str) -> Result<(Record, Stream, Option<String>)> {
+    adopt_with(token, OnMerge::Refuse)
+}
+
+/// What a session does with a merge that conflicted: the one its open stopped in, or
+/// the one an adoption finds still in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnMerge {
+    /// Refuse, committing nothing and leaving the branch as it was: what `session
+    /// adopt` does, and what an open does for a request that refuses conflicts.
+    Refuse,
+    /// Leave the merge standing for the session to conclude: what an open and a
+    /// resume do by default.
+    Keep,
+}
+
+impl OnMerge {
+    /// What a session request asks for.
+    fn asked_by(request: &SessionRequest) -> Self {
+        match request.refuse_conflicts {
+            true => Self::Refuse,
+            false => Self::Keep,
+        }
+    }
+}
+
+fn adopt_with(token: &str, on_merge: OnMerge) -> Result<(Record, Stream, Option<String>)> {
+    let record = load(token)?;
+    // A closed session that returned its slot, or whose slot a later session has
+    // taken, has no tree to re-attach to: what is in the slot is somebody else's, and
+    // committing it onto this session's branch is the one thing an adoption must
+    // never do. Its branch is where the return put it.
+    let ours = record.tree_is_its_own()?;
+    if let Some(number) = record.slot.filter(|_| !ours) {
+        return Err(error::invalid(format!(
+            "session {token:?} closed and returned slot {number} of {identity}, so there is no \
+             tree of its own to re-attach to; its branch {branch:?} was handed to {checkout}. \
+             Open a session pinned to that branch to continue it: `{open}`",
+            identity = record.identity,
+            branch = record.branch,
+            checkout = record.execution_checkout.display(),
+            open = guidance::command([
+                "onevcs",
+                "session",
+                "open",
+                &record.alias,
+                "--branch",
+                &record.branch
+            ]),
+        )));
+    }
+    let mut stream = Stream::open(token)?;
+    let lease = lock::try_shared(&record.lease())?.ok_or_else(|| Error::Invalid {
+        reason: format!(
+            "session {token:?} is occupied by another process (opened by pid {}); \
+             wait for it or close the session",
+            record.owner_pid
+        ),
+    })?;
+
+    if !record.clone.is_dir() {
+        return Err(error::invalid(format!(
+            "session {token:?} has been reclaimed: only the newest {RETAINED_DEAD_RUNS} \
+             abandoned sessions holding unpublished work are kept. Its branch {:?} was handed \
+             to {} before it went.",
+            record.branch,
+            record.execution_checkout.display()
+        )));
+    }
+    if !record.worktree.is_dir() {
+        git::worktree_prune(&record.clone)?;
+        git::worktree_add_existing(&record.clone, &record.worktree, &record.branch)?;
+    }
+
+    // Whatever a stopped session left uncommitted is committed behind an
+    // incomplete-step marker before anything else happens, so the work is durable
+    // and the branch says plainly that a step did not finish. One place writes that
+    // commit, so the marker a recovery later reads cannot have two shapes.
+    let mut preserved = None;
+    let merging = git::merge_in_progress(&record.worktree)?.is_some();
+    if merging && on_merge == OnMerge::Refuse {
+        crate::vcs::refuse_unfinished_merge(
+            &record.worktree,
+            &record.branch,
+            &format!(
+                "adopt it again with `{}`",
+                guidance::command(["onevcs", "session", "adopt", token])
+            ),
+        )?;
+    }
+    if !merging && git::is_dirty(&record.worktree)? {
+        let branch = crate::vcs::preserve_into(
+            &record,
+            &mut stream,
+            crate::session::Provenance::IncompleteStep,
+        )?;
+        preserved = Some(branch.branch);
+    }
+
+    let record = update(token, |stored| {
+        stored.state = Lifecycle::Open;
+        stored.owner_pid = std::process::id();
+        stored.owner_started = process_started(std::process::id());
+    })?;
+    drop(lease);
+    Ok((record, stream, preserved))
+}
+
+/// What `git rev-parse --abbrev-ref HEAD` answers in a worktree that is on no branch.
+pub(crate) const DETACHED_HEAD: &str = "HEAD";
+
+/// How much of a commit a minted branch name carries, which is enough for an
+/// operator to recognise it in `git log` and short enough to read.
+const NAMED_SHA: usize = 12;
+
+/// Work a session's clone holds that its own branch does not carry.
+struct Stray {
+    /// The local branch it is reachable from — minted here where a detached head
+    /// had no name of its own.
+    branch: Ref,
+    /// How many commits neither the session's branch nor any `origin` ref has.
+    commits: u64,
+    /// Whether the execution checkout took the copy offered to it.
+    // llmlint: ignore[invalid_states_unrepresentable] the question is total and binary —
+    // the checkout took the copy or it did not — so a `bool` has no third state for a
+    // type to rule out, and an enum here would spell the same two answers twice. What a
+    // domain type does earn is the field above, whose valid values are git's rather than
+    // the language's.
+    preserved: bool,
+}
+
+/// Release a session's worktree and its lease, keeping the branch.
+///
+/// **Nothing is released while something is working in the session.** The lease
+/// this takes is shared, so taking it proves only that no exclusive holder has it
+/// — every other shared holder succeeds beside it — and it is per command anyway:
+/// a dispatch working in a worktree for hours holds none. So occupancy is asked of
+/// the host instead, as [`processes::holding`] answers it for the sweep: a live
+/// process whose own working directory is inside the run root. A close that met one
+/// **refuses**, because a `retry` hands the replacement dispatch the predecessor's
+/// token and the predecessor is stopped 300s later — so its close arrives after the
+/// replacement is established, and removing the worktree deletes the directory that
+/// dispatch is working in.
+///
+/// Tearing the worktree down copies the branch into the execution checkout first:
+/// the clone is disposable, and the branch is the only record of what was done.
+/// **Uncommitted work is committed before that copy**, behind the same
+/// incomplete-step marker [`adopt`] writes, because `git worktree remove` forces
+/// past an unclean tree and what it forces past is gone.
+///
+/// What that branch is not, is the only record of what was *committed*. A worker
+/// that cut a branch of its own inside the worktree — `git checkout -b fix/…` is
+/// one line — or that committed onto a detached head leaves commits the session's
+/// branch does not carry, and removing the worktree and reclaiming the run root
+/// afterwards is what makes them unreachable. So they are looked for before
+/// anything is torn down, copied where the execution checkout will take them, and
+/// then **refused over**: a close that reported nothing while work it was about to
+/// delete existed is a report an operator has no way to disbelieve.
+pub fn close(token: &str) -> Result<Record> {
+    let record = load(token)?;
+    let closing = if record.tree_is_its_own()? {
+        Some(crate::checkout_reads::closing(&record.clone)?)
+    } else {
+        None
+    };
+    let _reads = crate::checkout_reads::teardown(&record.identity)?;
+    // The marker must drop while the identity is still exclusive: a reader
+    // admitted after this turn must see the completed checkout, not a busy marker.
+    let mut _closing = closing;
+    let record = load(token)?;
+    // The hand-back below writes into the lender and reads it, so a close is one of the
+    // session operations the lender's one-time configuration waits for.
+    let _lent = lend(&record.execution_checkout)?;
+    let lease = lock::try_shared(&record.lease())?.ok_or_else(|| Error::Invalid {
+        reason: format!("session {token:?} is occupied by another process"),
+    })?;
+    // Whether the tree under the run root is still this session's. It always is for
+    // a run root; a slot session's stops being so once the slot has been returned or
+    // a later session has taken it, and from then on the tree is nobody's to read on
+    // this record's behalf — the census below would count that later session's
+    // worker, and the return would reset its work.
+    let ours = record.tree_is_its_own()?;
+    // Before anything is read out of the tree, let alone removed: a session
+    // something is working in is not this command's to release, and the answer is a
+    // process's own working directory rather than the lease above.
+    if ours {
+        let occupants = occupants(&record);
+        if !occupants.is_empty() {
+            return Err(occupied(&record, &occupants));
+        }
+    }
+    if ours && _closing.is_none() {
+        _closing = Some(
+            crate::checkout_reads::try_closing(&record.clone)?.ok_or_else(|| {
+                error::invalid(format!(
+                    "session {token:?} is occupied by another read or teardown"
+                ))
+            })?,
+        );
+    }
+    let mut stream = Stream::open(token)?;
+    let mut closed = json!({"token": record.token, "branch": record.branch});
+    if ours && record.clone.is_dir() {
+        // The tree is released the ordinary way, and a failure of that is where the
+        // close stops — except for the one state where stopping loses nothing and
+        // costs an operator a repair by hand. See [`released_from_the_record`].
+        if let Err(failure) = release_the_tree(&record, &mut stream, &mut closed) {
+            let Some(landing) = released_from_the_record(&record) else {
+                return Err(failure);
+            };
+            closed["landed"] = json!(landing.commit);
+            closed["retained"] = json!(record.clone.to_string_lossy());
+            closed["unreadable_clone"] = json!(landing.said);
+            eprintln!(
+                "onevcs: warning: the run clone of session {token} at {clone} could not be read \
+                 by git ({said}), and this session's work is recorded as landed at {commit} — so \
+                 the session is closed from that record and the clone is left exactly as it is \
+                 for whoever repairs or removes it",
+                token = record.token,
+                clone = record.clone.display(),
+                said = landing.said,
+                commit = landing.commit,
+            );
+        }
+    }
+    // Publish the terminator before making `Closed` observable. An event follower
+    // queries state before its final drain; reversing these writes lets it observe
+    // closure and drain the stream before the closing event exists.
+    stream.emit(EventKind::SessionClosed, object(closed));
+    let record = update(token, |stored| stored.state = Lifecycle::Closed)?;
+    drop(lease);
+    Ok(record)
+}
+
+/// Hand the session's branch back and release its tree, which is the ordinary close.
+///
+/// One function so that the whole of it has one failure, which is what
+/// [`released_from_the_record`] beside it answers.
+fn release_the_tree(record: &Record, stream: &mut Stream, closed: &mut Value) -> Result<()> {
+    let handed = preserve_and_hand_back(record, stream)?;
+    if let Some(preserved) = &handed.preserved {
+        closed["preserved"] = json!(preserved);
+    }
+    if !handed.copied {
+        closed["retained"] = json!(record.clone.to_string_lossy());
+    }
+    let stray = stray_work(record)?;
+    if !stray.is_empty() {
+        return Err(stranding(record, &stray));
+    }
+    match record.slot {
+        // The slot outlives the session: its tree is put back on the base, clean
+        // of everything but what the repository itself calls build output, for the
+        // next session to take warm.
+        Some(number) => {
+            return_tree(record, &delete_paths_for(record)?, handed.copied)?;
+            closed["returned"] = json!({"slot": number});
+        }
+        None => {
+            if record.worktree.is_dir() {
+                git::worktree_remove(&record.clone, &record.worktree)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A landing the record already holds, for a session whose clone git will not read.
+struct FromTheRecord {
+    /// The commit this session's work reached its base at.
+    commit: String,
+    /// What git said when asked to read the clone.
+    said: String,
+}
+
+/// Whether this session may be closed from its landing record rather than from its
+/// tree, and the record that says so.
+///
+/// **Two conditions, and both are needed.** The clone has to be one git will not
+/// read — asked here rather than inferred from the failure that got us here, because
+/// a refusal this crate makes on purpose (work in the tree that nothing outside it
+/// carries) is not a torn clone and must go on refusing. And the session's work has to be
+/// *recorded as landed*, because that is what says there is nothing in the tree the
+/// base does not already carry: the clone is a run's disposable copy, and a close
+/// that leaves it is leaving a copy of work that is on the base.
+///
+/// A session with no such record still refuses, with git's own words. What this
+/// removes is the state that cost a person an hour: a landed session whose torn
+/// clone blocked its own close, and therefore blocked every automated adoption and
+/// cleanup behind it, until somebody found the clone and repaired it by hand.
+fn released_from_the_record(record: &Record) -> Option<FromTheRecord> {
+    let said = unreadable_objects(&record.clone)?;
+    let mut notes = Vec::new();
+    let streams = crate::status::recorded_streams(&mut notes).ok()?;
+    let commit = crate::status::recorded_for(
+        &streams,
+        &record.identity,
+        &record.branch,
+        Some(&record.token),
+    )
+    .landing?;
+    Some(FromTheRecord {
+        commit: commit.commit.as_str().to_owned(),
+        said,
+    })
+}
+
+/// What git says when it cannot read this clone's own objects, or `None` where it
+/// reads them.
+///
+/// One question, asked only once a close has already failed, so nothing is added to
+/// the cost of an ordinary one. It is asked of **every ref** rather than of `HEAD`,
+/// and it lists objects rather than resolving names: a run clone borrows everything
+/// older than itself through its alternates, so the objects a run tore are the ones
+/// its own branch tip names — which a question about `HEAD` alone, sitting on a base
+/// commit the alternate still holds, answers without ever reading.
+fn unreadable_objects(clone: &Path) -> Option<String> {
+    match git::run(
+        &["rev-list", "--objects", "--no-walk", "--all"],
+        Some(clone),
+    ) {
+        Ok(output) if output.ok() => None,
+        Ok(output) => Some(output.diagnostic()),
+        Err(failure) => Some(failure.to_string()),
+    }
+}
+
+/// Every live process this host can show is working inside the session.
+///
+/// The run root, which is the whole of the session: the worktree a close removes is
+/// cut inside it, and so is the clone a command may be reading and the scratch tree
+/// a publication builds in. Asking the worktree alone would answer *no* for a
+/// dispatch that had stepped into any of the rest.
+fn occupants(record: &Record) -> Vec<processes::Holder> {
+    processes::holding(&record.run_root)
+}
+
+/// What became of a session's own branch as its tree was released.
+struct HandedBack {
+    /// The branch its uncommitted work was committed onto, where there was any.
+    preserved: Option<String>,
+    /// Whether the execution checkout took the branch.
+    // llmlint: ignore[invalid_states_unrepresentable] total and binary, as `Stray::preserved`
+    // is: the checkout took the copy or it did not, and the two readers of it — the
+    // `retained` line of the close and the ref deletion of a return — each want exactly
+    // that answer.
+    copied: bool,
+}
+
+/// Commit whatever the worktree still holds and hand the branch back, which is the
+/// first half of every release of a tree — a run root's removal and a slot's return
+/// alike — and is done before anything is torn down.
+///
+/// `git worktree remove` forces past an unclean tree and a reset discards one, so
+/// what is not committed here is gone a few lines later without ever having been
+/// reported — which is how about fifteen minutes of finished work went.
+///
+/// A merge the session left in progress — the one it opened over, concluded by
+/// nobody — is aborted before anything is read: committing it would conclude it with
+/// git's markers in the files, and what the abort discards is a resolution nobody
+/// committed. Every commit the branch carries stays.
+fn preserve_and_hand_back(record: &Record, stream: &mut Stream) -> Result<HandedBack> {
+    let mut preserved = None;
+    git::abort_merge(&record.worktree);
+    if record.worktree.is_dir() && git::is_dirty(&record.worktree)? {
+        let branch =
+            crate::vcs::preserve_into(record, stream, crate::session::Provenance::IncompleteStep)?;
+        preserved = Some(branch.branch);
+    }
+    Ok(HandedBack {
+        preserved,
+        copied: hand_back(record),
+    })
+}
+
+/// Put a slot's worktree back on the base for the next session, once everything the
+/// session made is reachable outside it.
+///
+/// Detached onto the base — the same integrated ref a fresh cut starts from — reset
+/// hard, and cleaned of untracked files and directories **without** touching ignored
+/// ones: `.gitignore` is the repository's own declaration of what is build output, and
+/// keeping it is the whole reason a slot exists. Then every configured `delete` path,
+/// for state the ignore file keeps that should not leak between sessions. Then the
+/// session's own branch ref, **only** where the hand-back copied it: a branch the
+/// checkout would not take stays in the slot's clone, where `checkouts_of` keeps it
+/// on every locating verb's list, and the record that names it is retained by
+/// `holds_unpublished_work` for as long as it is there.
+fn return_tree(record: &Record, delete: &[PathBuf], copied: bool) -> Result<()> {
+    let integrated = integrated_base(&record.clone, &record.base);
+    reset_onto_base(&record.worktree, &integrated, delete)?;
+    if copied {
+        git::delete_ref(&record.clone, &format!("refs/heads/{}", record.branch));
+    }
+    Ok(())
+}
+
+/// Detach a worktree onto a ref, reset it there, clean it of untracked files, and
+/// delete the configured paths.
+///
+/// `base` is spelled as the clone names it — `origin/main`, or a bare `main` where the
+/// clone has no remote-tracking copy — and a name that resolves to nothing is git's
+/// refusal rather than a tree left half reset.
+pub(crate) fn reset_onto_base(worktree: &Path, base: &str, delete: &[PathBuf]) -> Result<()> {
+    if !git::is_repo(worktree) {
+        return Err(error::invalid(format!(
+            "the slot worktree at {} is not a repository, so it cannot be returned; the next \
+             session to take the slot recreates it",
+            worktree.display()
+        )));
+    }
+    // Before the checkout, which git refuses over an unmerged index — and so that a
+    // merge a session left standing is never carried into the next one to take the
+    // slot.
+    git::abort_merge(worktree);
+    git::checkout_detached(worktree)?;
+    git::reset_hard(worktree, base)?;
+    git::clean_untracked(worktree)?;
+    for path in delete {
+        let target = worktree.join(path);
+        // The document was held to a relative path with no `..` when it was read, and
+        // the filesystem is held to it here: a link on the way to the entry could
+        // carry the removal anywhere, so an entry reached through one is refused by
+        // name rather than followed. The entry itself may be a link, and is then
+        // unlinked — never followed.
+        if let Some(link) = symlink_on_the_way(worktree, path) {
+            return Err(error::invalid(format!(
+                "the delete entry {path:?} of the workspaces file passes through {}, which is a \
+                 symbolic link, so deleting it could reach outside the slot worktree at {}; it \
+                 was not deleted. Name the path the link points at, inside the worktree, or \
+                 remove the entry",
+                link.display(),
+                worktree.display()
+            )));
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&target) else {
+            continue;
+        };
+        let removed = match meta.is_dir() {
+            true => std::fs::remove_dir_all(&target),
+            false => std::fs::remove_file(&target),
+        };
+        removed.map_err(error::at("delete", &target))?;
+    }
+    Ok(())
+}
+
+/// The first symbolic link among the directories a worktree-relative path passes
+/// through — every component but the last — or `None` where there is none.
+fn symlink_on_the_way(worktree: &Path, path: &Path) -> Option<PathBuf> {
+    let mut walked = worktree.to_path_buf();
+    let components: Vec<_> = path.components().collect();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        walked.push(component);
+        let is_link = std::fs::symlink_metadata(&walked)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_link {
+            return Some(walked);
+        }
+    }
+    None
+}
+
+/// The paths the workspaces file says to delete when a session of this identity
+/// returns its slot.
+///
+/// The file as it stands at the return rather than as it stood at the open, because
+/// the list is about what the *next* session must not inherit. An identity the
+/// registry no longer resolves deletes nothing beyond what git cleans.
+fn delete_paths_for(record: &Record) -> Result<Vec<PathBuf>> {
+    let registry = store::load()?;
+    let Ok(resolution) = store::resolve(&registry, &record.identity) else {
+        return Ok(Vec::new());
+    };
+    Ok(workspaces::resolve_for(&resolution, workspaces::Overrides::default())?.delete)
+}
+
+/// Why a close refused a session something is still working in, and what to do.
+///
+/// **A refusal rather than a silent skip**, because the caller asked for the
+/// worktree to go and it did not: a close that answered success while a dispatch
+/// went on writing in the tree would leave that dispatch's own directory
+/// unprotected — [`reclaim`] keeps a run root only while an *open* record names it —
+/// and the next `session open` on the host would reap it. That is the same
+/// destruction the record check there was written for, reached one verb along.
+///
+/// It names every holder, because the caller's move is about *those* processes: a
+/// `retry` hands a replacement the predecessor's token, and the predecessor's close
+/// then arrives while the replacement is working in the tree. Which of the two the
+/// operator wants is a question this crate cannot answer, so it names both ways
+/// forward and takes neither.
+///
+/// **And it says enough about each holder to tell them apart**, which is
+/// [`processes::Holder`]'s own rendering: its parent, its state, and how long it has
+/// been running, beside the pid and the directory. A refusal carrying the last two
+/// alone named a copy process orphaned to init and spinning for twelve minutes in the
+/// words it names a live dispatch in, so the operator read the process table by hand
+/// and the session stayed open until they killed it. Choosing between the two moves is
+/// still theirs — this names neither and stops nothing.
+fn occupied(record: &Record, holders: &[processes::Holder]) -> Error {
+    let inside: Vec<String> = holders.iter().map(ToString::to_string).collect();
+    let inside: Vec<&str> = inside.iter().map(String::as_str).collect();
+    error::invalid(format!(
+        "session {token:?} was not closed: {count} still working inside its run root {root} — \
+         {inside} — and removing its worktree {worktree} would take the directory out from \
+         under {them}. Let the dispatch that holds it finish, or stop it, and then re-run \
+         `{close}`",
+        token = &*record.token,
+        count = counted_processes(holders.len()),
+        root = record.run_root.display(),
+        worktree = record.worktree.display(),
+        inside = guidance::listed(&inside),
+        them = match holders.len() {
+            1 => "it",
+            _ => "them",
+        },
+        close = guidance::command(["onevcs", "session", "close", &record.token]),
+    ))
+}
+
+/// A count and the noun it counts, so the refusal above reads as English at one as
+/// well as at three.
+fn counted_processes(holders: usize) -> String {
+    match holders {
+        1 => "one process is".to_owned(),
+        many => format!("{many} processes are"),
+    }
+}
+
+/// Hand the session's own branch back to the execution checkout, saying whether it
+/// went.
+///
+/// Reported rather than refused over, which is the one thing the `let _ =` this
+/// replaced got right. A fetch the checkout turns down means it already holds that
+/// name, and the branch is then the diverged pair `branch::locate` refuses by naming
+/// both copies rather than choosing between one — a state an operator reaches
+/// deliberately, by resolving the divergence in their own checkout. Failing the
+/// close over it would leave that operator with a session they cannot release.
+///
+/// What makes reporting enough here, and not enough for [`stray_work`], is that this
+/// branch is the one a caller reads to find out what the session did. It is named in
+/// the record, listed by `onevcs recoverable` — [`checkouts_of`] puts every run clone
+/// of the identity on the list that report and every locating verb read — and its run
+/// root is one [`reclaim`] retains while it holds unpublished work. So the answer to
+/// "what became of this session" still names it. Work on any *other* ref is in none
+/// of that, which is why a close refuses over that instead of reporting it.
+fn hand_back(record: &Record) -> bool {
+    copy_back(record, &record.execution_checkout, &record.branch).unwrap_or(false)
+}
+
+/// Copy one branch of a session's clone into `destination` ([`git::copy_branch`]),
+/// and, where the session's own stream records putting that branch on origin, write
+/// the destination's `origin/<branch>` to the commit it pushed.
+///
+/// The copy moves `refs/heads/<branch>` alone, so without the second write the
+/// destination holds a published branch with no remote-tracking ref beside it — and
+/// `onevcs recoverable`, which measures a branch against that ref, lists finished work
+/// as work nobody published until somebody fetches there. The remote-tracking ref is
+/// written whether or not the destination took the branch: what origin carries is a
+/// fact about origin, and [`git::record_on_origin`] writes only a commit the
+/// destination holds and never moves the ref back.
+pub(crate) fn copy_back(record: &Record, destination: &Path, branch: &str) -> Result<bool> {
+    let copied = git::copy_branch(&record.clone, destination, branch);
+    if let Some(head) =
+        crate::status::pushed_on(&record.token.to_string(), &record.identity, branch)
+    {
+        git::record_on_origin(destination, branch, &head);
+    }
+    copied
+}
+
+/// Everything in a session's clone that removing its worktree would strand.
+///
+/// Two places a worker's commits end up that are not the session's branch: a branch
+/// it cut itself, whose name nothing outside the run root ever reads, and a
+/// detached head, whose commits belong to no name at all. Both are looked for, and
+/// each is copied into the execution checkout before any of it is reported —
+/// preserving the work where it can be preserved is worth more than refusing to
+/// touch it, and the copy is what gives the refusal a way forward.
+fn stray_work(record: &Record) -> Result<Vec<Stray>> {
+    let mut found: Vec<(Ref, u64)> = Vec::new();
+    // The detached head first, because it is the case with no name: one is minted
+    // for it here, so a copy has something to fetch and `onevcs recoverable` has
+    // something to offer a verb for.
+    if record.worktree.is_dir() && git::current_branch(&record.worktree)? == DETACHED_HEAD {
+        let head = git::head_sha(&record.worktree)?;
+        if let Some(commits) = stranded(record, &head)? {
+            let branch = detached_name(&record.branch, &head);
+            // Named after the write rather than before it: this is the one name here
+            // git did not produce, and a ref git has just written is a name git took.
+            git::update_ref(&record.clone, &format!("refs/heads/{branch}"), &head)?;
+            found.push((Ref::from_git(branch), commits));
+        }
+    }
+    // On a slot the clone outlives the session, and a branch an earlier session's
+    // hand-back could not copy is retained there deliberately — answered for by that
+    // session's own record, listed by `onevcs recoverable`, and not this session's to
+    // be refused over. Every other branch in a slot's clone is this session's own.
+    let retained_by_others: Vec<String> = match record.slot {
+        Some(_) => all()?
+            .into_iter()
+            .filter(|other| {
+                other.identity == record.identity
+                    && *other.token != *record.token
+                    && other.state == Lifecycle::Closed
+            })
+            .map(|other| other.branch.to_string())
+            .collect(),
+        None => Vec::new(),
+    };
+    for branch in git::branches(&record.clone)? {
+        let branch = Ref::from_git(branch);
+        if *branch == *record.branch
+            || found.iter().any(|(held, _)| **held == *branch)
+            || retained_by_others.iter().any(|held| **held == *branch)
+        {
+            continue;
+        }
+        if let Some(commits) = stranded(record, &branch)? {
+            found.push((branch, commits));
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(branch, commits)| Stray {
+            preserved: copy_back(record, &record.execution_checkout, &branch).unwrap_or(false),
+            branch,
+            commits,
+        })
+        .collect())
+}
+
+/// How many commits a ref in the session's clone would take with the worktree, or
+/// `None` where letting the clone go costs nothing.
+// llmlint: ignore[invalid_states_unrepresentable] a branch and a detached head are one
+// question here — what this revision holds — and git answers it for either, so an enum
+// would name a distinction neither this function nor `git rev-list` makes.
+fn stranded(record: &Record, reference: &str) -> Result<Option<u64>> {
+    let commits = git::unpublished_ahead(&record.clone, reference, &[&*record.branch])?;
+    if commits == 0 {
+        return Ok(None);
+    }
+    // Work the execution checkout already reaches is not stranded, whatever this
+    // clone calls it. Two things follow, and both are the point. An execution
+    // checkout whose own base is ahead of origin — every clone carries a copy of
+    // that base — is not reported as stray work. And a close refused once has a way
+    // forward that is not a dead end: the copy `stray_work` makes is exactly what
+    // turns this answer into `None`, so running `onevcs session close` again
+    // releases the worktree rather than refusing a second time.
+    let held = git::tip(&record.clone, reference)
+        .is_some_and(|tip| git::refs_reach(&record.execution_checkout, &tip));
+    Ok((!held).then_some(commits))
+}
+
+/// The name a detached head is written under before it is copied out.
+///
+/// Derived from the session's own branch and the commit, so it says which session
+/// left it and two detached heads of one session cannot collide. A suffix rather
+/// than a path segment: git refuses a branch `a/b` beside a branch `a`, so
+/// `onevcs/s-…/detached` is a name that could not be created at all.
+// llmlint: ignore[invalid_states_unrepresentable] `git::head_sha` produced this and the
+// name is text either way; the crate's `Sha` is the contract's wrapper and validates
+// nothing, so spelling it here would make no state unrepresentable.
+fn detached_name(branch: &Ref, head: &str) -> String {
+    let short: String = head.chars().take(NAMED_SHA).collect();
+    format!("{branch}-detached-{short}")
+}
+
+/// Why a close that would have stranded work refused, and what to run instead.
+///
+/// Every branch named here has just been offered to the execution checkout, so the
+/// message says which of them it took: an operator reading it needs to know whether
+/// the work is already somewhere durable before deciding what to do with it.
+fn stranding(record: &Record, stray: &[Stray]) -> Error {
+    let names: Vec<&str> = stray.iter().map(|found| &*found.branch).collect();
+    let refused: Vec<&str> = stray
+        .iter()
+        .filter(|found| !found.preserved)
+        .map(|found| &*found.branch)
+        .collect();
+    let total = stray.iter().map(|found| found.commits).sum();
+    let checkout = record.execution_checkout.display();
+    let mut reason = format!(
+        "session {:?} was not closed: its worktree {} holds work its branch {:?} does not \
+         carry — {} on {} — and removing the worktree is what would have made it unreachable.",
+        &*record.token,
+        record.worktree.display(),
+        record.branch,
+        counted(total),
+        guidance::listed(&names),
+    );
+    if refused.is_empty() {
+        reason.push_str(&format!(" All of it has been copied into {checkout}."));
+    } else {
+        reason.push_str(&format!(
+            " {checkout} would not take {}, which is still only in {}; put it there under a \
+             name that checkout will accept with `{}`.",
+            guidance::listed(&refused),
+            record.clone.display(),
+            import_command(record, refused[0]),
+        ));
+    }
+    reason.push_str(&format!(
+        " See what is preserved and the verb that lands each branch with `{}`, then re-run \
+         `{}`, which releases the worktree once the work is reachable outside it",
+        guidance::command(["onevcs", "recoverable"]),
+        guidance::command(["onevcs", "session", "close", &record.token]),
+    ));
+    error::invalid(reason)
+}
+
+/// The invocation that puts one of this session's branches into its execution
+/// checkout, which is the verb that owns ref plumbing over an identity's checkouts.
+///
+/// `onevcs import` rather than raw `git fetch`, and `--from` names the clone rather
+/// than being left off: this is only ever offered for a branch the execution checkout
+/// has already refused, so the name has two copies on this host and a search over
+/// every place the identity keeps work would meet the diverged pair rather than the
+/// one copy the operator is being told to rescue.
+fn import_command(record: &Record, branch: &str) -> String {
+    guidance::command([
+        "onevcs",
+        "import",
+        branch,
+        "--repo",
+        &record.execution_checkout.to_string_lossy(),
+        "--from",
+        &record.clone.to_string_lossy(),
+    ])
+}
+
+/// A count and the noun it counts, so a refusal reads as English at one as well as
+/// at three.
+fn counted(commits: u64) -> String {
+    match commits {
+        1 => "1 commit".to_owned(),
+        many => format!("{many} commits"),
+    }
+}
+
+/// Every run root on this host that a session still open is working in.
+///
+/// The record's *lifecycle* alone, deliberately, and not the pair of tests
+/// [`crate::vcs::held_by`] composes to report a **branch** as held. That one asks
+/// [`Record::liveness`] as well — is the process that opened this session that same
+/// process, still running — because a branch's holder is a process that can be
+/// waited for. A run root's occupant is not: a session opened from the command line
+/// is owned by the `onevcs` that printed its token and then exited, so its record
+/// answers stale from that instant while an operator works in the worktree for
+/// hours. Reading stale as *nobody is in here* is what deleted three live dispatches
+/// inside ninety seconds of their launch, and it is why the two questions have
+/// different answers rather than one shared one.
+///
+/// What still ends a run root's protection is the session ending: [`close`] writes
+/// [`Lifecycle::Closed`] onto the record, and from there the run root falls through
+/// to the lease and the retention bound exactly as it always did. A run root **no**
+/// record names is not protected here at all — see [`reclaim`].
+///
+/// A session directory that cannot be read is **refused** rather than answered with
+/// none. It used to answer none, on the argument that reclamation is housekeeping in
+/// front of an open and a host whose records are unreadable would otherwise be a host
+/// where nobody can open a session at all — but what that argument traded away is the
+/// protection itself: every open record on the host disappears at once, and the very
+/// next `session open` reaps the run root a live dispatch is working in. The
+/// occupancy lease asked afterwards does not bound it, because a dispatch holds no
+/// lease between commands. An open that refuses naming the unreadable directory is
+/// the smaller loss, and it is the one thing that tells an operator what to repair.
+fn run_roots_of_open_sessions() -> Result<Vec<PathBuf>> {
+    Ok(all()?
+        .into_iter()
+        .filter(|record| record.state == Lifecycle::Open)
+        .map(|record| record.run_root)
+        .collect())
+}
+
+/// Reap abandoned run roots, keeping the newest few that still hold work.
+///
+/// Four things have to hold before a directory is removed: no session still open
+/// names it, nobody occupies it, its clone has no commit that never reached origin,
+/// and — for the ones that do hold such a commit — it is not among the newest
+/// [`RETAINED_DEAD_RUNS`].
+///
+/// The first of those is a bar the other three never reach past, and that ordering
+/// is the point rather than an optimisation. Each of the three answers a question
+/// about the *directory* — is a command in it now, has anything been committed in
+/// it yet — and a session that opened a minute ago and has committed nothing
+/// answers no to all of them while somebody is working in it. The record is the one
+/// thing that says a session exists at all.
+fn reclaim(identity: &str, runs: &Path) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(runs) else {
+        return Ok(());
+    };
+    // Read once, before the walk, and only to pass over the run roots it names
+    // without contending for their leases: the answer is a fact about this host's
+    // session records rather than about any one directory, and asking it per entry
+    // would re-read every record on the host once per run root. It is **not** what
+    // permits a removal. It is stale by the time the walk reaches an entry — another
+    // open may have written its record and dropped its lease since — so whatever is
+    // removed is decided again by [`abandoned`], under a lease held through the
+    // removal itself.
+    let open = run_roots_of_open_sessions()?;
+    #[cfg(test)]
+    reclaim_race::after_snapshot();
+    let _reads = crate::checkout_reads::teardown(identity)?;
+    // Newest first, by when the directory was last written: a session token is a
+    // digest and sorts arbitrarily, so ordering by name would retain an arbitrary
+    // three rather than the three somebody is most likely to reach for. Each is kept
+    // with its exclusive lease, held until it is removed or the walk is done with it,
+    // so what [`abandoned`] decided is still true when the retention bound acts on it.
+    let mut holding_work: Vec<(
+        std::time::SystemTime,
+        PathBuf,
+        lock::Guard,
+        crate::checkout_reads::Closing,
+    )> = Vec::new();
+    for entry in entries.flatten() {
+        let run_root = entry.path();
+        if !run_root.is_dir() {
+            continue;
+        }
+        // The durable half of the proof, and the half that outlives a command. The
+        // occupancy lease below is taken per command and outlives none of them —
+        // `open` drops it as it returns — so an agent working in its worktree holds
+        // no lease from the moment it is handed one, and an exclusive take on a
+        // three-hour-old live run root succeeds on the first attempt exactly as it
+        // does on one created a second ago. Reading that as "nothing is working in
+        // here" deleted three live dispatches inside ninety seconds of their launch.
+        // The record is written while `open` still holds the lease, so between the
+        // two there is no instant at which a run root somebody is inside answers to
+        // neither.
+        //
+        // A run root **no** record names falls through to the lease, and is
+        // therefore reclaimable: it is a directory `open` cut and then abandoned
+        // when something refused, or one whose record an operator removed, and
+        // protecting it instead would make every such leak permanent. The only ones
+        // that reach here with a command still inside them are the ones the lease
+        // itself skips.
+        if open.iter().any(|held| held == &run_root) {
+            continue;
+        }
+        // Only a probe until the run root is found abandoned: a session opened since
+        // the snapshot above must read on rather than be told it is torn down.
+        let Some(closing) = crate::checkout_reads::try_probing(&run_root.join("clone"))? else {
+            continue;
+        };
+        let Some(exclusive) = abandoned(&run_root)? else {
+            continue;
+        };
+        let clone = run_root.join("clone");
+        let unpublished = if git::is_repo(&clone) {
+            git::unpublished_branches(&clone).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if unpublished.is_empty() {
+            // Marked a teardown now that it is one. The probe's lease is what keeps
+            // readers out; the mark tells a waiting one to stop waiting.
+            let _removing = crate::checkout_reads::try_closing(&clone).ok();
+            let _ = std::fs::remove_dir_all(&run_root);
+            drop(exclusive);
+        } else {
+            let written = std::fs::metadata(&run_root)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            holding_work.push((written, run_root, exclusive, closing));
+        }
+    }
+    holding_work.sort_by_key(|(written, _, _, _)| std::cmp::Reverse(*written));
+    for (_, reclaimed, exclusive, _closing) in holding_work.into_iter().skip(RETAINED_DEAD_RUNS) {
+        let _removing = crate::checkout_reads::try_closing(&reclaimed.join("clone")).ok();
+        let _ = std::fs::remove_dir_all(&reclaimed);
+        drop(exclusive);
+    }
+    Ok(())
+}
+
+/// The exclusive occupancy lease on a run root no open session names, held for the
+/// caller to remove it under; `None` while anybody occupies it or a record names it.
+///
+/// The order is what makes the answer hold until the removal, across threads and
+/// processes alike. An exclusive take succeeds only while no shared occupancy lease
+/// is held, which says no command is working in here *now* — and every open takes its
+/// shared lease before its run root exists and writes its record before releasing
+/// it. So once the exclusive one is held, any open that ever reached this run root
+/// has either finished, and its record is on disk, or cannot take the lease until the
+/// caller drops this one. The records are therefore read *after* the take: read
+/// before it, they can predate a record written in between, and that stale read is
+/// what let one open reap the live run root of another opening beside it.
+fn abandoned(run_root: &Path) -> Result<Option<lock::Guard>> {
+    let Some(exclusive) = lock::try_exclusive(&occupancy_identity(run_root))? else {
+        return Ok(None);
+    };
+    match run_roots_of_open_sessions()?
+        .iter()
+        .any(|held| held == run_root)
+    {
+        true => Ok(None),
+        false => Ok(Some(exclusive)),
+    }
+}
+
+/// A `serde_json` object literal, as a payload map.
+pub fn object(value: Value) -> Map<String, Value> {
+    value.as_object().cloned().unwrap_or_default()
+}
+
+/// Two sessions opening at once, with the one interleaving that let an open reap the
+/// other's live run root forced rather than waited for.
+///
+/// One of this crate's `#[cfg(test)]` modules, for the reason the others exist: the
+/// window is between two reads inside [`reclaim`] — which sessions are open, and then
+/// the walk over `runs/` — and no interface this crate exposes can hold one open
+/// there while another runs to completion. [`after_snapshot`] is that hold, and it is
+/// the only thing here that is not the real open path: a state root of its own, a bare
+/// origin, a registered `local-direct` checkout, and two sessions opened through the
+/// library on two threads. The state root is the process's, which is why the suite
+/// runs one test per process, as `cargo nextest` does.
+#[cfg(test)]
+mod reclaim_race {
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::mpsc;
+
+    use crate::ops::register_checkout;
+    use crate::{Providers, SessionRequest};
+
+    thread_local! {
+        /// What [`after_snapshot`] runs, once, on the thread that set it.
+        static HOLD: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    /// Called by [`super::reclaim`] once it has read which sessions are open and
+    /// before it walks `runs/`: runs the hold this thread set, if it set one.
+    pub(super) fn after_snapshot() {
+        if let Some(hold) = HOLD.with(|hold| hold.borrow_mut().take()) {
+            hold();
+        }
+    }
+
+    pub(super) fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {} failed in {}: {}",
+            args.join(" "),
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A session on a generated branch, which stands exactly at its base: published,
+    /// so nothing but its record and its lease says anybody is working in it.
+    pub(super) fn opened() -> crate::Session {
+        Providers::real()
+            .vcs
+            .open_session(SessionRequest {
+                repo: "project".to_owned(),
+                branch: None,
+                branch_name: None,
+                branch_prefix: None,
+                base: None,
+                execution_checkout: None,
+                pool: None,
+                overflow: None,
+                labels: Default::default(),
+                refuse_conflicts: false,
+                caller_merges_base: false,
+            })
+            .expect("a session opens")
+    }
+
+    /// A host with one registered checkout of a bare origin, and nothing opened yet.
+    pub(super) fn host() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("a scratch host");
+        let at = root.path().canonicalize().expect("a canonical root");
+        // On Windows `canonicalize` is the verbatim `\\?\` spelling, and Git for Windows
+        // cannot read a global configuration named that way.
+        #[cfg(windows)]
+        let at = dunce::simplified(&at).to_path_buf();
+        let config = at.join(".gitconfig");
+        std::fs::write(
+            &config,
+            "[user]\n\tname = Unit\n\temail = unit@example.invalid\n[init]\n\t\
+             defaultBranch = main\n[commit]\n\tgpgsign = false\n[maintenance]\n\t\
+             auto = false\n",
+        )
+        .expect("a git configuration");
+        std::env::set_var("HOME", &at);
+        std::env::set_var("GIT_CONFIG_GLOBAL", &config);
+        std::env::set_var(crate::home::HOME_ENV, at.join(".onevcs"));
+        let seed = at.join("seed");
+        std::fs::create_dir_all(&seed).expect("a seed");
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("README.md"), "seed\n").expect("a file to commit");
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "feat: seed"]);
+        let origin = at.join("project.git");
+        git(&at, &["init", "-q", "--bare", &origin.to_string_lossy()]);
+        git(&seed, &["push", "-q", &origin.to_string_lossy(), "main"]);
+        let checkout = at.join("project");
+        git(
+            &at,
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &checkout.to_string_lossy(),
+            ],
+        );
+        register_checkout(&checkout, None).expect("the checkout registers");
+        std::fs::write(
+            at.join(".onevcs/rules.yml"),
+            "version: 1\nrules: []\ndefault: {publication: local-direct, approvals: none}\n",
+        )
+        .expect("a rules file");
+        root
+    }
+
+    #[test]
+    fn public_recovery_closes_native_handles_before_releasing_its_checkout_turns() {
+        use crate::Vcs;
+        let _host = host();
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+        {
+            std::env::remove_var(key);
+        }
+        let session = opened();
+        std::fs::write(session.worktree.join("work.txt"), "work\n").unwrap();
+        git(&session.worktree, &["add", "work.txt"]);
+        git(
+            &session.worktree,
+            &["commit", "-q", "-m", "feat: native recovery work"],
+        );
+        let record = super::load(&session.token.0).unwrap();
+        let (entered, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        crate::native_refs::clear_race::arm(record.clone.clone(), entered.clone(), released);
+        let read = std::thread::spawn(move || {
+            let answer = crate::Git.recoverable(crate::Scope::Repo("project".to_owned()));
+            entered.send(false).unwrap();
+            answer
+        });
+        if !ready.recv().unwrap() {
+            panic!(
+                "the public recovery must keep a native read turn on the clone: {:?}",
+                read.join().unwrap()
+            );
+        }
+        let excluded = crate::checkout_reads::try_closing(&record.clone)
+            .unwrap()
+            .is_none();
+        let token = session.token.clone();
+        let close = std::thread::spawn(move || crate::Git.close_session(&token));
+        release.send(()).unwrap();
+        let recovered = read.join().unwrap().unwrap();
+        let closed = close.join().unwrap().unwrap();
+        assert!(
+            excluded,
+            "the kernel keeps teardown out until the native handles close"
+        );
+        assert!(recovered
+            .iter()
+            .any(|row| row.branch.branch == session.branch));
+        assert_eq!(closed.token, session.token);
+        assert!(
+            !session.worktree.exists(),
+            "the real close can remove the checkout after native handles close"
+        );
+    }
+
+    /// B reads which sessions are open before A's record exists, and walks `runs/`
+    /// only after A has written that record and dropped its lease — the order a
+    /// Windows host's slow spawns made common. A's run root is then one B's stale
+    /// read does not name, B can take exclusively, and whose branch is published,
+    /// and reclaiming it took the worktree A had just been handed.
+    #[test]
+    fn an_open_never_reclaims_the_run_root_of_a_session_that_opened_beside_it() {
+        let _host = host();
+        let (read, snapshot_taken) = mpsc::channel::<()>();
+        let (release, a_opened) = mpsc::channel::<()>();
+        let b = std::thread::spawn(move || {
+            HOLD.with(|hold| {
+                *hold.borrow_mut() = Some(Box::new(move || {
+                    read.send(()).expect("the test is waiting for the read");
+                    a_opened.recv().expect("the test releases the walk");
+                }));
+            });
+            opened()
+        });
+        snapshot_taken
+            .recv()
+            .expect("B reads which sessions are open, then holds");
+
+        let a = opened();
+        let handed = a.worktree.join("H.md");
+        std::fs::write(&handed, "the work A was handed\n").expect("A works in its tree");
+
+        release.send(()).expect("B is holding");
+        let b = b.join().expect("B's open does not panic");
+
+        assert_ne!(a.token, b.token);
+        assert!(
+            handed.is_file(),
+            "B's open reclaimed the run root of A, a session open beside it: {} is gone",
+            handed.display()
+        );
+        assert!(b.worktree.is_dir(), "B opened into its own worktree");
+    }
+}
+
+/// A session read meeting a holder of its checkout's closing lease, through the public
+/// read the engine makes (`crate::session`) and the lease API the holders take.
+///
+/// A probe is held the way retirement, a slot's return and reclamation hold it — by
+/// [`crate::checkout_reads::try_probing`] on a sibling thread, which is the engine's
+/// shape (several sessions of one repository driven from one process), or by a
+/// separate open of the lease file, which `flock` treats as another process's. A
+/// teardown is a real close, or [`crate::checkout_reads::try_closing`], which every
+/// remover takes. No verb can be held mid-probe, so this is the layer that can arrange
+/// one.
+#[cfg(test)]
+mod probe_reads {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::reclaim_race::{host, opened};
+    use crate::checkout_reads::{self, Closing};
+    use crate::session::Lifecycle;
+    use crate::{Providers, Vcs};
+
+    /// How long a probe is held before it is let go, which a waiting read must outlast.
+    const HELD: Duration = Duration::from_millis(400);
+
+    fn bounded() {
+        std::env::set_var(crate::lock::TIMEOUT_ENV, "30");
+    }
+
+    /// A closing lease taken on its own thread by `take`, released on the word.
+    fn held_on_a_thread(
+        clone: std::path::PathBuf,
+        take: fn(&std::path::Path) -> crate::error::Result<Option<Closing>>,
+    ) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (entered, entering) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let held = take(&clone)
+                .unwrap()
+                .expect("nothing else holds the checkout");
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            drop(held);
+        });
+        entering.recv().unwrap();
+        (release, holder)
+    }
+
+    #[test]
+    fn a_session_read_waits_out_a_sibling_threads_probe_and_answers_the_open_session() {
+        let _host = host();
+        bounded();
+        let session = opened();
+        let clone = super::load(&session.token.0).unwrap().clone;
+        let (release, holder) = held_on_a_thread(clone, checkout_reads::try_probing);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(HELD);
+            release.send(()).unwrap();
+        });
+        let asked = Instant::now();
+        let read = crate::session(&Providers::real(), &session.token);
+        let waited = asked.elapsed();
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        let read = read.unwrap_or_else(|refused| {
+            panic!("a probe of the checkout refused a read of the open session: {refused}")
+        });
+        assert_eq!(read.lifecycle, Lifecycle::Open);
+        assert_eq!(read.session.token, session.token);
+        assert!(
+            waited >= HELD / 2,
+            "the read was admitted while the probe held the checkout ({waited:?})"
+        );
+    }
+
+    #[test]
+    fn a_session_read_waits_out_another_processs_probe() {
+        let _host = host();
+        bounded();
+        let session = opened();
+        let clone = super::load(&session.token.0).unwrap().clone;
+        let lease = checkout_reads::closing_path(&clone).unwrap().unwrap();
+        // Another process probing: its own open of the lease file, holding it
+        // exclusively and leaving the removal marker alone.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease)
+            .unwrap();
+        fs4::fs_std::FileExt::lock_exclusive(&file).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(HELD);
+            fs4::fs_std::FileExt::unlock(&file).unwrap();
+        });
+        let read = crate::session(&Providers::real(), &session.token);
+        releaser.join().unwrap();
+        let read = read.unwrap_or_else(|refused| {
+            panic!("another process's probe refused a read of the open session: {refused}")
+        });
+        assert_eq!(read.lifecycle, Lifecycle::Open);
+    }
+
+    #[test]
+    fn a_session_read_meeting_a_teardown_answers_that_it_is_being_torn_down_without_waiting() {
+        let _host = host();
+        bounded();
+        let session = opened();
+        let clone = super::load(&session.token.0).unwrap().clone;
+        let (release, holder) = held_on_a_thread(clone.clone(), checkout_reads::try_closing);
+        let asked = Instant::now();
+        let read = crate::session(&Providers::real(), &session.token);
+        let answered = asked.elapsed();
+        // A probe a remover then turns into a removal is a teardown from that moment.
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let refused = read.expect_err("a read was admitted to a checkout being torn down");
+        assert!(
+            refused
+                .to_string()
+                .contains("its checkout is being torn down")
+                && refused.to_string().contains(&session.token.0),
+            "{refused}"
+        );
+        assert!(
+            answered < Duration::from_secs(5),
+            "a teardown is answered, not waited out ({answered:?})"
+        );
+
+        let (escalated, escalating) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _probe = checkout_reads::try_probing(&clone).unwrap().unwrap();
+            let _removal = checkout_reads::try_closing(&clone).unwrap().unwrap();
+            escalated.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        escalating.recv().unwrap();
+        let read = crate::session(&Providers::real(), &session.token);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(read
+            .expect_err("a probe turned removal still admitted a read")
+            .to_string()
+            .contains("its checkout is being torn down"));
+    }
+
+    /// A read waiting out another process's probe lets go of its identity turn, so a
+    /// probe that needs that identity's exclusive turn to finish — as retirement and a
+    /// slot's return take it — is not held up by the very read waiting on it. Threads
+    /// of one process share a turn, so the probe is another process's: its own opens
+    /// of the two lease files, as `a_session_read_waits_out_another_processs_probe`
+    /// takes them.
+    #[test]
+    fn a_read_waiting_on_a_probe_yields_the_identity_turn_the_probe_needs() {
+        let _host = host();
+        std::env::set_var(crate::lock::TIMEOUT_ENV, "5");
+        let session = opened();
+        let record = super::load(&session.token.0).unwrap();
+        let open = |path: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .unwrap()
+        };
+        let probe = open(
+            &checkout_reads::closing_path(&record.clone)
+                .unwrap()
+                .unwrap(),
+        );
+        let turn = open(
+            &super::identity_dir(&record.identity)
+                .unwrap()
+                .join("onevcs-reads.lock"),
+        );
+        fs4::fs_std::FileExt::lock_exclusive(&probe).unwrap();
+        let prober = std::thread::spawn(move || {
+            std::thread::sleep(HELD);
+            // The probe's own work, which waits on every other process's read turn.
+            fs4::fs_std::FileExt::lock_exclusive(&turn).unwrap();
+            fs4::fs_std::FileExt::unlock(&turn).unwrap();
+            fs4::fs_std::FileExt::unlock(&probe).unwrap();
+        });
+        let read = crate::session(&Providers::real(), &session.token);
+        prober.join().unwrap();
+        let read = read.unwrap_or_else(|refused| {
+            panic!("a read held the turn the probe it waited on needed: {refused}")
+        });
+        assert_eq!(read.lifecycle, Lifecycle::Open);
+    }
+
+    /// A probe that turns into a removal while a read is already waiting on it refuses
+    /// that read as soon as it marks the removal, not once it lets the lease go.
+    #[test]
+    fn a_read_already_waiting_on_a_probe_is_refused_once_the_probe_turns_removal() {
+        let _host = host();
+        bounded();
+        let session = opened();
+        let clone = super::load(&session.token.0).unwrap().clone;
+        let (entered, entering) = mpsc::channel();
+        let (escalate, escalating) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let prober = std::thread::spawn(move || {
+            let _probe = checkout_reads::try_probing(&clone).unwrap().unwrap();
+            entered.send(()).unwrap();
+            escalating.recv().unwrap();
+            let _removal = checkout_reads::try_closing(&clone).unwrap().unwrap();
+            released.recv().unwrap();
+        });
+        entering.recv().unwrap();
+        let (answered, answer) = mpsc::channel();
+        let token = session.token.clone();
+        let reader = std::thread::spawn(move || {
+            let read = crate::session(&Providers::real(), &token)
+                .map(|read| read.lifecycle)
+                .map_err(|refused| refused.to_string());
+            answered.send(read).unwrap();
+        });
+        // Long enough that the read is waiting, rather than meeting the marker first.
+        std::thread::sleep(HELD);
+        escalate.send(()).unwrap();
+        let read = answer.recv_timeout(Duration::from_secs(10));
+        release.send(()).unwrap();
+        prober.join().unwrap();
+        reader.join().unwrap();
+        let refused = read
+            .expect("a waiting read outlasted the removal it should have been refused by")
+            .expect_err("a read was admitted to a checkout being removed");
+        assert!(
+            refused.contains("its checkout is being torn down"),
+            "{refused}"
+        );
+    }
+
+    /// The other readers of a session's checkout: a repository read run in it, and a
+    /// pin taken under a teardown turn, whose lease is not one the turn keeps.
+    #[test]
+    fn a_repository_read_and_a_pin_wait_out_a_probe_and_refuse_a_teardown() {
+        let _host = host();
+        bounded();
+        let session = opened();
+        let record = super::load(&session.token.0).unwrap();
+        let read = || crate::git::run(&["rev-parse", "HEAD"], Some(&record.worktree));
+
+        let (release, holder) = held_on_a_thread(record.clone.clone(), checkout_reads::try_probing);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(HELD);
+            release.send(()).unwrap();
+        });
+        let asked = Instant::now();
+        let answer = read();
+        let waited = asked.elapsed();
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        assert_eq!(
+            answer
+                .expect("a probed checkout is read once the probe ends")
+                .status,
+            0
+        );
+        assert!(waited >= HELD / 2, "read inside a probe ({waited:?})");
+
+        let (release, holder) = held_on_a_thread(record.clone.clone(), checkout_reads::try_closing);
+        let refused = read().expect_err("a repository read entered a checkout being torn down");
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(refused.to_string().contains("being torn down"), "{refused}");
+
+        let turn = checkout_reads::teardown(&record.identity).unwrap();
+        let (release, holder) = held_on_a_thread(record.clone.clone(), checkout_reads::try_probing);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(HELD);
+            release.send(()).unwrap();
+        });
+        let asked = Instant::now();
+        let pinned = checkout_reads::pin(&record.clone);
+        let waited = asked.elapsed();
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        let pinned = pinned.unwrap_or_else(|refused| panic!("a probe refused a pin: {refused}"));
+        assert!(waited >= HELD / 2, "pinned inside a probe ({waited:?})");
+        // The pin keeps the checkout from a teardown after the turn is gone.
+        drop(turn);
+        assert!(checkout_reads::try_closing(&record.clone)
+            .unwrap()
+            .is_none());
+        drop(pinned);
+
+        let turn = checkout_reads::teardown(&record.identity).unwrap();
+        let (release, holder) = held_on_a_thread(record.clone.clone(), checkout_reads::try_closing);
+        let refused = checkout_reads::pin(&record.clone).err();
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        drop(turn);
+        assert!(
+            refused.is_some_and(|refused| refused.to_string().contains("being torn down")),
+            "a pin entered a checkout being torn down"
+        );
+    }
+
+    /// A probe that outlasts the lock bound fails the read naming the bound, rather
+    /// than waiting for ever or answering that the session is torn down; the next read
+    /// after it ends is answered.
+    #[test]
+    fn a_read_outlasted_by_a_probe_fails_at_the_lock_bound_and_the_next_one_is_answered() {
+        let _host = host();
+        let session = opened();
+        let clone = super::load(&session.token.0).unwrap().clone;
+        std::env::set_var(crate::lock::TIMEOUT_ENV, "1");
+        let (release, holder) = held_on_a_thread(clone, checkout_reads::try_probing);
+        let refused = crate::session(&Providers::real(), &session.token)
+            .expect_err("a read outwaited the lock bound");
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let said = refused.to_string();
+        assert!(
+            said.contains("timed out after 1s waiting for a probe")
+                && said.contains(crate::lock::TIMEOUT_ENV)
+                && !said.contains("being torn down"),
+            "{said}"
+        );
+        let read = crate::session(&Providers::real(), &session.token).unwrap();
+        assert_eq!(read.lifecycle, Lifecycle::Open);
+    }
+
+    fn taken_on(clone: &std::path::Path) -> Vec<checkout_reads::Holder> {
+        let lease = checkout_reads::closing_path(clone).unwrap().unwrap();
+        checkout_reads::TAKEN
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| *path == lease)
+            .map(|(_, holder)| *holder)
+            .collect()
+    }
+
+    fn forget_taken() {
+        checkout_reads::TAKEN.lock().unwrap().clear();
+    }
+
+    fn open_on(branch: Option<&str>, pool: u32) -> crate::Session {
+        crate::Git
+            .open_session(crate::SessionRequest {
+                repo: "project".to_owned(),
+                branch: branch.map(str::to_owned),
+                branch_name: None,
+                branch_prefix: None,
+                base: None,
+                execution_checkout: None,
+                pool: Some(pool),
+                overflow: None,
+                labels: Default::default(),
+                refuse_conflicts: false,
+                caller_merges_base: false,
+            })
+            .expect("a session opens")
+    }
+
+    fn cli(args: &[&str]) -> u8 {
+        use clap::Parser;
+        let cli =
+            crate::cli::Cli::try_parse_from(std::iter::once("onevcs").chain(args.iter().copied()))
+                .expect("the arguments parse");
+        crate::run_with(&cli, Providers::real())
+    }
+
+    /// A retirement deleting a landed branch's copy out of a slot's clone, and
+    /// returning that slot, probes it; neither tears it down.
+    #[test]
+    fn retirement_probes_the_slot_it_deletes_a_copy_from_and_returns() {
+        let host = host();
+        bounded();
+        let checkout = host.path().canonicalize().unwrap().join("project");
+        let session = open_on(Some("feature/done"), 1);
+        std::fs::write(session.worktree.join("done.txt"), "done\n").unwrap();
+        super::reclaim_race::git(&session.worktree, &["add", "done.txt"]);
+        super::reclaim_race::git(&session.worktree, &["commit", "-q", "-m", "feat: done"]);
+        let slot_clone = super::load(&session.token.0).unwrap().clone;
+        crate::Git.close_session(&session.token).unwrap();
+        assert_eq!(
+            cli(&[
+                "publish-branch",
+                "feature/done",
+                "--repo",
+                &checkout.to_string_lossy()
+            ]),
+            0
+        );
+        // A copy in the slot's clone that no session record names, the way a forgotten
+        // record leaves one (as `tests/e2e/retire.rs` arranges it). Git for Windows reads
+        // a verbatim `\\?\` path argument as a host name, so it is handed the plain one.
+        #[cfg(windows)]
+        let checkout = dunce::simplified(&checkout).to_path_buf();
+        super::reclaim_race::git(
+            &slot_clone,
+            &[
+                "fetch",
+                "-q",
+                &checkout.to_string_lossy(),
+                "feature/done:feature/done",
+            ],
+        );
+        forget_taken();
+        assert_eq!(cli(&["retire", "feature/done", "--repo", "project"]), 0);
+        assert!(
+            !crate::git::branch_exists(&slot_clone, "feature/done"),
+            "the premise: the slot's copy was deleted"
+        );
+        let taken = taken_on(&slot_clone);
+        assert!(!taken.is_empty(), "the slot's clone was not leased at all");
+        assert!(
+            taken
+                .iter()
+                .all(|holder| *holder == checkout_reads::Holder::Probe),
+            "retirement tore down a slot it only deletes a copy from and returns: {taken:?}"
+        );
+    }
+
+    /// Reclamation probes a run root it has not yet found abandoned, and marks the
+    /// teardown only once it removes it.
+    #[test]
+    fn reclamation_probes_a_run_root_and_tears_it_down_only_to_remove_it() {
+        let _host = host();
+        bounded();
+        let left = open_on(None, 0);
+        let record = super::load(&left.token.0).unwrap();
+        crate::Git.close_session(&left.token).unwrap();
+        assert!(
+            record.run_root.is_dir(),
+            "the premise: a closed session's run root"
+        );
+        forget_taken();
+        // The next open reclaims what the last one left.
+        let _next = open_on(None, 0);
+        assert!(
+            !record.run_root.exists(),
+            "the premise: the run root was reclaimed"
+        );
+        assert_eq!(
+            taken_on(&record.clone),
+            [
+                checkout_reads::Holder::Probe,
+                checkout_reads::Holder::Teardown
+            ]
+        );
+    }
+
+    /// A broken slot is probed while it is examined, and torn down only where part of
+    /// it is removed.
+    #[test]
+    fn a_broken_slot_is_probed_and_torn_down_only_where_part_of_it_is_removed() {
+        let _host = host();
+        bounded();
+        // The host's own pool, so the slot is kept and rebuilt rather than shed.
+        std::fs::write(
+            crate::home::root().unwrap().join("workspaces.yml"),
+            "version: 1\ndefault: {pool: 1}\n",
+        )
+        .unwrap();
+        let first = open_on(None, 1);
+        let clone = super::load(&first.token.0).unwrap().clone;
+        let slot = clone.parent().unwrap().to_path_buf();
+        crate::Git.close_session(&first.token).unwrap();
+
+        // An unreadable record: rewritten beside the clone and worktree, both kept.
+        std::fs::write(slot.join("slot.json"), "not a record").unwrap();
+        forget_taken();
+        let second = open_on(None, 1);
+        assert_eq!(super::load(&second.token.0).unwrap().run_root, slot);
+        assert_eq!(taken_on(&clone), [checkout_reads::Holder::Probe]);
+        crate::Git.close_session(&second.token).unwrap();
+
+        // A worktree that is not a repository: removed and cut again.
+        std::fs::remove_file(slot.join("worktree").join(".git")).unwrap();
+        forget_taken();
+        let third = open_on(None, 1);
+        assert_eq!(super::load(&third.token.0).unwrap().run_root, slot);
+        assert_eq!(
+            taken_on(&clone),
+            [
+                checkout_reads::Holder::Probe,
+                checkout_reads::Holder::Teardown
+            ]
+        );
+        crate::Git.close_session(&third.token).unwrap();
+
+        // A clone that is not a repository: the whole slot is removed and cut fresh.
+        std::fs::remove_dir_all(&clone).unwrap();
+        std::fs::create_dir(&clone).unwrap();
+        forget_taken();
+        let fourth = open_on(None, 1);
+        assert_eq!(super::load(&fourth.token.0).unwrap().run_root, slot);
+        assert!(
+            crate::git::is_repo(&clone),
+            "the premise: the clone was cut again"
+        );
+        assert_eq!(
+            taken_on(&clone),
+            [
+                checkout_reads::Holder::Probe,
+                checkout_reads::Holder::Teardown
+            ]
+        );
+    }
+
+    /// Run roots holding work no origin has are probed and kept up to the retention
+    /// bound; the one past it is torn down to be removed, and only that one.
+    #[test]
+    fn reclamation_tears_down_only_the_run_root_retention_removes() {
+        let _host = host();
+        bounded();
+        let mut left = Vec::new();
+        for n in 0..=super::RETAINED_DEAD_RUNS {
+            let session = open_on(None, 0);
+            let file = format!("work-{n}.txt");
+            std::fs::write(session.worktree.join(&file), "work\n").unwrap();
+            super::reclaim_race::git(&session.worktree, &["add", &file]);
+            super::reclaim_race::git(&session.worktree, &["commit", "-q", "-m", "feat: work"]);
+            let record = super::load(&session.token.0).unwrap();
+            crate::Git.close_session(&session.token).unwrap();
+            left.push(record);
+            // Ordered by when each run root was last written.
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        forget_taken();
+        let _next = open_on(None, 0);
+        let removed: Vec<_> = left
+            .iter()
+            .filter(|record| !record.run_root.exists())
+            .collect();
+        assert_eq!(removed.len(), 1, "the premise: one run root past the bound");
+        assert_eq!(
+            removed[0].token, left[0].token,
+            "the oldest is the one removed"
+        );
+        for record in &left {
+            let expected: &[checkout_reads::Holder] = match record.run_root.exists() {
+                true => &[checkout_reads::Holder::Probe],
+                false => &[
+                    checkout_reads::Holder::Probe,
+                    checkout_reads::Holder::Teardown,
+                ],
+            };
+            assert_eq!(
+                taken_on(&record.clone),
+                expected,
+                "{}",
+                record.run_root.display()
+            );
+        }
+    }
+
+    /// A probe holds the checkout while a reader and a real close both queue behind
+    /// it. Whichever the probe's end lets in first, the reader never holds a record
+    /// while the close is removing the checkout: either it is admitted and the close
+    /// waits for it, with the clone and worktree whole for as long as it reads, or the
+    /// close goes first and the read answers that the session is being torn down, or
+    /// it reads the record the close left.
+    #[test]
+    fn a_reader_released_by_a_probe_never_overlaps_a_real_close() {
+        let _host = host();
+        bounded();
+        for close_first in [true, false] {
+            let session = opened();
+            let token = session.token.clone();
+            let clone = super::load(&token.0).unwrap().clone;
+            let (release_probe, prober) =
+                held_on_a_thread(clone.clone(), checkout_reads::try_probing);
+
+            let (closed, closing) = mpsc::channel();
+            let mut start_close = Some({
+                let token = token.clone();
+                move || {
+                    std::thread::spawn(move || {
+                        let answer = crate::Git.close_session(&token);
+                        closed.send(answer.map(|_| ())).unwrap();
+                    })
+                }
+            });
+            let mut start_close = move || start_close.take().expect("one close per session")();
+            let (admitted, admitting) = mpsc::channel();
+            let (finish_read, finished) = mpsc::channel::<()>();
+            let reader = {
+                let token = token.clone();
+                std::thread::spawn(move || {
+                    let answer = checkout_reads::session(&token.0);
+                    let seen = answer
+                        .as_ref()
+                        .map(|(_, record)| {
+                            (
+                                record.state,
+                                record.clone.is_dir(),
+                                record.worktree.is_dir(),
+                            )
+                        })
+                        .map_err(ToString::to_string);
+                    admitted.send(seen).unwrap();
+                    finished.recv().unwrap();
+                    drop(answer);
+                })
+            };
+            let closer = if close_first {
+                let closer = start_close();
+                // The close queues on the probe's lease; the reader polls beside it.
+                std::thread::sleep(HELD);
+                release_probe.send(()).unwrap();
+                Some(closer)
+            } else {
+                std::thread::sleep(HELD);
+                release_probe.send(()).unwrap();
+                None
+            };
+            prober.join().unwrap();
+            let seen = admitting
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the read answered");
+            let closer = closer.unwrap_or_else(&mut start_close);
+            match &seen {
+                Ok((Lifecycle::Open, clone_whole, worktree_whole)) => {
+                    assert!(
+                        *clone_whole && *worktree_whole,
+                        "an open session was read with its checkout gone"
+                    );
+                    std::thread::sleep(HELD);
+                    assert!(
+                        closing.try_recv().is_err(),
+                        "the close finished while an admitted reader still held the checkout"
+                    );
+                    assert!(clone.is_dir(), "the checkout was removed under its reader");
+                }
+                Ok((Lifecycle::Closed, _, _)) => {}
+                Err(refused) => assert!(
+                    refused.contains("its checkout is being torn down"),
+                    "{refused}"
+                ),
+            }
+            finish_read.send(()).unwrap();
+            reader.join().unwrap();
+            closer.join().unwrap();
+            closing
+                .recv()
+                .unwrap()
+                .expect("the close completes once the probe and reader are done");
+            if !close_first {
+                assert!(
+                    matches!(seen, Ok((Lifecycle::Open, true, true))),
+                    "a read released by the probe before any close reads the open session: \
+                     {seen:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::{process_started, ProcessStart, Record, Ref, Token, RECORD_VERSION};
+    use crate::session::{Lifecycle, Liveness, SessionHolder};
+    use std::num::NonZeroU64;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn holder_for(owner_started: Option<ProcessStart>) -> SessionHolder {
+        SessionHolder::from(Record {
+            version: RECORD_VERSION,
+            token: Token::try_from("s-process-test".to_owned()).expect("a token"),
+            identity: "identity".to_owned(),
+            alias: "alias".to_owned(),
+            branch: Ref::from_git("main"),
+            base: Ref::from_git("main"),
+            change_base: None,
+            stack_tip: None,
+            worktree: PathBuf::from("worktree"),
+            clone: PathBuf::from("clone"),
+            run_root: PathBuf::from("run"),
+            slot: None,
+            execution_checkout: PathBuf::from("execution"),
+            publication_checkout: PathBuf::from("publication"),
+            state: Lifecycle::Open,
+            owner_pid: std::process::id(),
+            owner_started,
+            retried_by: None,
+            labels: Default::default(),
+            carried: crate::remainder::Remainder::default(),
+        })
+    }
+
+    #[test]
+    fn process_identity_is_live_then_stale_after_the_child_is_reaped() {
+        let mut child = if cfg!(windows) {
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+                .spawn()
+        } else {
+            Command::new("sh").args(["-c", "sleep 30"]).spawn()
+        }
+        .expect("spawn a child that remains alive");
+        let pid = child.id();
+        let started = process_started(pid).expect("the running child has an identity");
+        assert_eq!(process_started(pid), Some(started));
+        child.kill().expect("terminate the child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_started(pid).is_some() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            process_started(pid),
+            None,
+            "an exited child is stale before its handle is reaped"
+        );
+        child.wait().expect("reap the child");
+        assert_eq!(process_started(pid), None);
+        assert_eq!(process_started(0), None);
+    }
+
+    #[test]
+    fn holder_requires_the_same_live_process_instance_not_only_the_same_pid() {
+        let started = process_started(std::process::id()).expect("this process is live");
+        assert!(matches!(holder_for(Some(started)).liveness, Liveness::Live));
+
+        let different_value = started.0.get().checked_add(1).unwrap_or(1);
+        let different = NonZeroU64::new(different_value)
+            .map(ProcessStart)
+            .expect("a nonzero different creation identity");
+        assert!(matches!(
+            holder_for(Some(different)).liveness,
+            Liveness::Stale
+        ));
+        assert!(matches!(holder_for(None).liveness, Liveness::Stale));
+    }
+}

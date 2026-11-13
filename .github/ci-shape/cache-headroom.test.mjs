@@ -160,7 +160,8 @@ describe("a fork's run writes to no cache, under GitHub's recorded payloads", ()
       const sidecar = job.steps.find((step) => step.id === "nx-cache");
       const decide = (name) => evaluate(sidecar.env.CACHE_READ_ONLY, { ...context(name), steps: { "nx-cache-trust": { outputs: trustOutputs(name) } } });
       assert.equal(decide("fork.json"), "1");
-      assert.equal(decide("same-repository.json"), "");
+      // Measurement only (spike-onepipeline-test-cost): every run, the same repository's included, is read-only.
+      assert.equal(decide("same-repository.json"), "1");
     });
   }
 });

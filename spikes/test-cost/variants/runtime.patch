@@ -1,0 +1,48 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 519b95df..389b421f 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -43,7 +43,8 @@ e2e = { max-threads = 4 }
+ # Measurement only (spike-onepipeline-test-cost): every tier runs whole, so one failure cannot cut a variant's figures short.
+ fail-fast = false
+ # Measurement only (spike-onepipeline-test-cost): these two read the workflow the measurement edits.
+-default-filter = 'not (test(=every_required_context_is_reported_on_every_pull_request) or test(=the_windows_leg_runs_whole_in_one_job))'
++# Prototype (spike-onepipeline-test-cost): and the two guards on [patch] revisions, which a vendored path cannot satisfy.
++default-filter = 'not (test(=every_required_context_is_reported_on_every_pull_request) or test(=the_windows_leg_runs_whole_in_one_job) or test(=the_audit_permits_exactly_the_revisions_the_manifest_patches) or test(=every_patched_member_of_one_repository_comes_from_one_revision))'
+ # llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
+ # elapsed time below are not history: they are the measurement that sets both bounds
+ # on the line beneath them. `period` has to sit above what a test here costs and
+diff --git a/Cargo.lock b/Cargo.lock
+index a8a68244..b02d7b94 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1876,8 +1876,6 @@ dependencies = [
+ [[package]]
+ name = "onevcs"
+ version = "0.66.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a1943c2a719f0d6632075b0d99237becdd3fd17c39ab5c999ec1d3d5b81d1c05"
+ dependencies = [
+  "clap",
+  "dunce",
+diff --git a/Cargo.toml b/Cargo.toml
+index 7ac8ac7b..2413efa5 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -5,6 +5,8 @@
+ # than by changing what `--workspace` means.
+ # llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions`, `boundary` and `integrate` are verbs of the existing `onepipeline` CLI, not new binaries.
+ members = [".", "crates/testfakes"]
++# Prototype (spike-onepipeline-test-cost): a vendored onevcs, linked through the patch below.
++exclude = ["spikes/test-cost/variants/onevcs"]
+ resolver = "2"
+ 
+ # The siblings this crate composes, pinned once for the whole workspace so both
+@@ -1833,3 +1835,7 @@ schemars = { opt-level = 2 }
+ [[test]]
+ name = "codex_server"
+ path = "tests/codex_server/main.rs"
++
++# Prototype (spike-onepipeline-test-cost): onevcs 0.66.0 answering ref reads in-process.
++[patch.crates-io]
++onevcs = { path = "spikes/test-cost/variants/onevcs" }

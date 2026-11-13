@@ -1,0 +1,863 @@
+//! Reading, migrating, and writing the registry document.
+//!
+//! The registry is the durable answer to "which repositories does this host know,
+//! and what is each one's publication policy". It is replaced atomically under a
+//! process-shared lock, and reloaded-then-merged inside that lock so two
+//! concurrent registrations are both retained rather than one overwriting the
+//! other.
+//!
+//! A document older than version 7 is migrated **lazily**, on the first read that
+//! needs it: an operator never runs a migration command, and an interrupted one
+//! cannot leave half a document behind.
+//!
+//! A document *newer* than version 7 is read rather than refused. This build takes
+//! the fields it understands, keeps the rest as a [`Remainder`] it writes back
+//! untouched, and never lowers the version it found — so a newer `onevcs` sharing
+//! this state root is degraded by an older one touching its registry, not undone by
+//! it.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use crate::error::{self, Error, Result};
+use crate::registry::{Checkout, Identity, Registry};
+use crate::remainder::Remainder;
+use crate::rules::MergePolicy;
+use crate::{git, home, lock};
+
+/// The version this build writes.
+///
+/// `7` is version 6 with an identity's recorded visibility beside it — `visibility`,
+/// `observation` and `observed_at`, each optional and omitted while it says nothing —
+/// so a version 6 document *is* a version 7 one that has recorded nothing. It is read
+/// as this shape and left exactly as it is, and the first *write* stamps it 7: a read
+/// never rewrites shared host state for a version that changed no key it carries. The
+/// number moved because the shape did — a reader that sees 7 knows an identity may
+/// carry those keys — and every build since version 6 reads a later version as its own
+/// shape and keeps the keys it does not know, so the bump stops none of them.
+///
+/// `6` is an identity without the `workflow` and `repo_type` that versions 2 through
+/// 5 wrote beside it. Both were inferred at registration from whether the origin
+/// had a host, settable by nothing afterwards, and consulted where the resolved
+/// publication policy should have been — so a document that carries them is a
+/// document whose routing is wrong, and the version moved so that the next write
+/// *removes* them rather than handing them back as keys this build merely has no
+/// opinion on. They are spent, not unknown: [`migrate`] strips exactly those two
+/// from each identity of a document below `6` before the remainder is computed, so
+/// everything else the document carried beyond this shape still comes back. The
+/// cost is the one every bump here pays — a build that still requires the two fields
+/// stops reading a registry this one has migrated — and it is paid deliberately,
+/// because leaving the inference in place is leaving the defect in place on every
+/// host that already has it.
+///
+/// It did **not** move for the release-targets work, and neither did the shape: the
+/// releases document is found at its conventional path under the state root, so
+/// nothing about release targets is reachable from here. That is a decision rather
+/// than an oversight. The registry is *shared host state* — every `onevcs` on this
+/// machine reads the one document, and `load` rewrites it in place the moment it
+/// migrates — so a version, or a key, that an already-released build cannot read
+/// does not degrade that build: it stops it, for every verb, on a host whose
+/// operator opted into nothing. Those builds declare `deny_unknown_fields` and
+/// always will, which is why the key was withdrawn rather than made optional.
+pub const VERSION: u32 = 7;
+
+/// The oldest version whose document is already this build's shape, read as it is.
+pub const SHAPE_SINCE: u32 = 6;
+
+/// The oldest document this build still migrates.
+pub const OLDEST_VERSION: u32 = 2;
+/// What an identity's gate is recorded as when nothing could be detected.
+pub const NOOP_GATE: &str = "<no-op>";
+
+/// The three parts a hosted origin has, which it has together or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hosted {
+    /// The host, e.g. `github.com`.
+    pub host: String,
+    /// The owner.
+    pub owner: String,
+    /// The repository name.
+    pub name: String,
+}
+
+/// The parts of an identity a rule matches on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Normalized {
+    /// The identity key: `github.com/owner/name`, or the origin path for a local
+    /// repository.
+    pub key: String,
+    /// Where it is hosted, when it is hosted anywhere.
+    pub hosted: Option<Hosted>,
+}
+
+/// Whether `identity` is one a registry key could be: a path or the normalized
+/// spelling of an origin, with no surrounding whitespace and no control character.
+/// What a document this crate wrote and later reads back is held to.
+#[cfg(unix)]
+pub(crate) fn is_identity(identity: &str) -> bool {
+    !identity.is_empty()
+        && identity.trim() == identity
+        && !identity.chars().any(char::is_control)
+        && (Path::new(identity).is_absolute() || normalize(identity).key == identity)
+}
+
+/// Normalize an origin URL or a local path into the identity every spelling of it
+/// resolves to.
+///
+/// SSH, HTTPS, and `.git`-suffixed spellings of one GitHub repository are one
+/// identity, which is what lets a canonical clone, a safety clone, and a linked
+/// worktree share a publication policy.
+pub fn normalize(origin: &str) -> Normalized {
+    let trimmed = origin.trim();
+    if let Some(parts) = hosted(trimmed) {
+        return parts;
+    }
+    let path = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+    let path = PathBuf::from(path);
+    let key = std::fs::canonicalize(&path).unwrap_or(path);
+    Normalized {
+        key: key.to_string_lossy().trim_end_matches(".git").to_owned(),
+        hosted: None,
+    }
+}
+
+fn hosted(origin: &str) -> Option<Normalized> {
+    // An identity key is itself a spelling of the origin it was derived from, and
+    // resolving one has to give the same answer as resolving the URL did — a rule
+    // matching on `host`/`owner`/`name` reads whatever the identity resolves to.
+    if !origin.contains("://") && !origin.contains(':') && !origin.starts_with('/') {
+        let segments: Vec<&str> = origin.split('/').collect();
+        if let [host, owner, name] = segments[..] {
+            if host.contains('.') && !owner.is_empty() && !name.is_empty() {
+                return Some(Normalized {
+                    key: origin.to_owned(),
+                    hosted: Some(Hosted {
+                        host: host.to_owned(),
+                        owner: owner.to_owned(),
+                        name: name.to_owned(),
+                    }),
+                });
+            }
+        }
+        return None;
+    }
+    let rest = if let Some(rest) = origin.strip_prefix("https://") {
+        rest.to_owned()
+    } else if let Some(rest) = origin.strip_prefix("http://") {
+        rest.to_owned()
+    } else if let Some(rest) = origin.strip_prefix("ssh://") {
+        rest.to_owned()
+    } else if let Some((before, after)) = origin.split_once(':') {
+        // The `git@host:owner/name` spelling, which is not a URL at all.
+        if before.contains('/') || after.starts_with("//") || after.starts_with('/') {
+            return None;
+        }
+        format!("{before}/{after}")
+    } else {
+        return None;
+    };
+    let rest = rest
+        .split_once('@')
+        .map_or(rest.as_str(), |(_, after)| after);
+    let mut segments = rest.trim_end_matches('/').split('/');
+    let host = segments.next()?.split(':').next()?.to_owned();
+    let owner = segments.next()?.to_owned();
+    let name = segments.next()?.trim_end_matches(".git").to_owned();
+    if host.is_empty() || owner.is_empty() || name.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    Some(Normalized {
+        key: format!("{host}/{owner}/{name}"),
+        hosted: Some(Hosted { host, owner, name }),
+    })
+}
+
+/// A registry document that is not JSON at all, named by where it is.
+fn not_json(path: &Path) -> impl FnOnce(serde_json::Error) -> Error + '_ {
+    move |error| {
+        error::invalid(format!(
+            "the registry at {} is not JSON: {error}",
+            path.display()
+        ))
+    }
+}
+
+/// The lock every mutation of the registry document takes.
+fn registry_identity() -> String {
+    "registry".to_owned()
+}
+
+/// Read the registry, migrating an older document in place on the way.
+pub fn load() -> Result<Registry> {
+    let path = home::registry_path()?;
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(empty());
+    };
+    let value: Value = serde_json::from_str(&raw).map_err(not_json(&path))?;
+    let read = migrate(&path, value)?;
+    if read.migrated {
+        let _guard = lock::exclusive(&registry_identity())?;
+        home::atomic_write(&path, &serialize(&read.registry, &read.carried)?)?;
+    }
+    Ok(read.registry)
+}
+
+/// Apply `change` to the registry under its lock, then replace the document.
+///
+/// The document is re-read inside the lock, so a concurrent registration that
+/// landed between this caller's last read and its write is retained.
+pub fn update<T>(change: impl FnOnce(&mut Registry) -> Result<T>) -> Result<T> {
+    let _guard = lock::exclusive(&registry_identity())?;
+    let path = home::registry_path()?;
+    let mut read = match std::fs::read_to_string(&path) {
+        Ok(raw) => migrate(&path, serde_json::from_str(&raw).map_err(not_json(&path))?)?,
+        Err(_) => Read {
+            registry: empty(),
+            migrated: false,
+            carried: Remainder::default(),
+        },
+    };
+    let outcome = change(&mut read.registry)?;
+    // A write is what stamps a version 6 document with this build's version; a newer
+    // one keeps the number it arrived under.
+    read.registry.version = read.registry.version.max(VERSION);
+    home::atomic_write(&path, &serialize(&read.registry, &read.carried)?)?;
+    Ok(outcome)
+}
+
+fn empty() -> Registry {
+    Registry {
+        version: VERSION,
+        identities: BTreeMap::new(),
+        checkouts: BTreeMap::new(),
+        rules: None,
+    }
+}
+
+/// The document to write: this build's shape, with whatever the one on disk
+/// carried beyond it put back.
+fn serialize(registry: &Registry, carried: &Remainder) -> Result<String> {
+    let named = PathBuf::from("the registry");
+    let mut document = serde_json::to_value(registry).map_err(error::at("serialize", &named))?;
+    carried.restore(&mut document);
+    let mut json =
+        serde_json::to_string_pretty(&document).map_err(error::at("serialize", &named))?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// A registry document as it was read: the shape this build acts on, whether it had
+/// to be migrated to get there, and everything it carried beyond that shape.
+struct Read {
+    registry: Registry,
+    migrated: bool,
+    carried: Remainder,
+}
+
+/// Read a document of any readable version, reporting whether it had to move.
+fn migrate(path: &Path, value: Value) -> Result<Read> {
+    let object = value.as_object().ok_or_else(|| Error::Invalid {
+        reason: format!("the registry at {} must be a JSON object", path.display()),
+    })?;
+    let version = object
+        .get("version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "the registry at {} declares no version; version {OLDEST_VERSION} and \
+                 newer are readable",
+                path.display()
+            ),
+        })?;
+    match version {
+        // Version 6, this version and every later one: 6 is this shape with nothing
+        // recorded about visibility, and is left as it is until something writes. A
+        // newer document is read as this shape
+        // rather than refused: refusing it would stop every verb on a host a newer
+        // `onevcs` had touched, where reading it costs only the keys this build has
+        // no opinion on — which are kept, not dropped.
+        current if current >= u64::from(SHAPE_SINCE) => {
+            let registry: Registry = serde_json::from_value(value.clone())
+                .map_err(error::at("read the registry at", path))?;
+            coherent(path, &registry)?;
+            let carried = Remainder::between(
+                &value,
+                &serde_json::to_value(&registry)
+                    .map_err(error::at("read the registry at", path))?,
+            );
+            Ok(Read {
+                registry,
+                migrated: false,
+                carried,
+            })
+        }
+        // Version 5 is this shape plus the two inferred fields, so it is read as
+        // this shape; the versions before it are read by `legacy`. Either way the
+        // inference is stripped before the remainder is taken, so the rewrite drops
+        // it and keeps everything else the document carried.
+        2..=5 => {
+            let mut registry = if version == 5 {
+                serde_json::from_value(value.clone())
+                    .map_err(error::at("read the registry at", path))?
+            } else {
+                legacy(path, object, version as u32)?
+            };
+            registry.version = VERSION;
+            coherent(path, &registry)?;
+            let carried = Remainder::between(
+                &without_inference(&value),
+                &serde_json::to_value(&registry)
+                    .map_err(error::at("read the registry at", path))?,
+            );
+            Ok(Read {
+                registry,
+                migrated: true,
+                carried,
+            })
+        }
+        other => Err(Error::Invalid {
+            reason: format!(
+                "the registry at {} declares version {other}; this build reads version \
+                 {OLDEST_VERSION} and newer",
+                path.display()
+            ),
+        }),
+    }
+}
+
+/// The keys versions 2 through 5 inferred beside each identity, which the migration
+/// to 6 removes rather than carries.
+const INFERRED_KEYS: [&str; 2] = ["workflow", "repo_type"];
+
+/// A pre-6 document with the inferred identity fields taken out, so that what the
+/// remainder keeps is what the document carried beyond this shape *and* beyond the
+/// shape it was written at: an unknown key beside an identity survives the migration,
+/// and a spent one does not.
+fn without_inference(value: &Value) -> Value {
+    let mut stripped = value.clone();
+    if let Some(identities) = stripped
+        .get_mut("identities")
+        .and_then(Value::as_object_mut)
+    {
+        for identity in identities.values_mut() {
+            if let Some(fields) = identity.as_object_mut() {
+                for key in INFERRED_KEYS {
+                    fields.remove(key);
+                }
+            }
+        }
+    }
+    stripped
+}
+
+/// Reject a document whose records disagree with each other.
+///
+/// Serde proves the *shape*, and stops there: a checkout naming an identity the
+/// document does not hold is well-formed JSON and not a repository this can act on.
+/// Checked on every read, whatever version it arrived as.
+///
+/// Nothing here asserts over an identity on its own any more. The one such check —
+/// a `repo_type` of `team` beside a `workflow` of `local` — refused a pair of stored
+/// inferences this build no longer stores, and the contradiction it guarded against
+/// (review required, no change request to review) is the rules file's to refuse,
+/// which `policy::validate` does where `approvals: required` meets a publication that
+/// merges without one.
+fn coherent(path: &Path, registry: &Registry) -> Result<()> {
+    for (alias, checkout) in &registry.checkouts {
+        if !registry.identities.contains_key(&checkout.identity) {
+            return Err(error::invalid(format!(
+                "the registry at {} has checkout {alias:?} referencing unknown identity {:?}",
+                path.display(),
+                checkout.identity
+            )));
+        }
+        if !checkout.path.is_absolute() {
+            return Err(error::invalid(format!(
+                "the registry at {} has checkout {alias:?} at {}, which is not an absolute path",
+                path.display(),
+                checkout.path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Read a version 2, 3, or 4 document into this build's shape.
+///
+/// One field is filled in, and its answer is evidence rather than a guess:
+/// **`gate`** (absent before 4) becomes `<no-op>`, which is what an identity that
+/// cannot name its own complete bar has always recorded.
+///
+/// The `workflow` every one of these versions wrote, and the `repo_type` version 3
+/// added, are read past rather than validated: they were inferences from whether the
+/// origin had a host, and what they decided is the resolved publication policy's
+/// decision now. A document that spelled either one wrongly is not refused for it —
+/// there is nothing here the value could be wrong *for* — and [`migrate`] drops both
+/// on the way through, so the rewritten document carries neither.
+fn legacy(path: &Path, object: &Map<String, Value>, version: u32) -> Result<Registry> {
+    let mut identities = BTreeMap::new();
+    for (key, value) in object
+        .get("identities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "the version {version} registry at {} must contain identities",
+                path.display()
+            ),
+        })?
+    {
+        let origin = field(path, value, "origin")?;
+        let gate = if version >= 4 {
+            field(path, value, "gate")?
+        } else {
+            NOOP_GATE.to_owned()
+        };
+        identities.insert(key.clone(), Identity::new(origin, gate));
+    }
+
+    let mut checkouts = BTreeMap::new();
+    for (alias, value) in object
+        .get("checkouts")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "the version {version} registry at {} must contain checkouts",
+                path.display()
+            ),
+        })?
+    {
+        let identity = field(path, value, "identity")?;
+        if !identities.contains_key(&identity) {
+            return Err(Error::Invalid {
+                reason: format!(
+                    "registry checkout {alias:?} references unknown identity {identity:?}"
+                ),
+            });
+        }
+        checkouts.insert(
+            alias.clone(),
+            Checkout {
+                path: PathBuf::from(field(path, value, "path")?),
+                identity,
+            },
+        );
+    }
+
+    Ok(Registry {
+        version: VERSION,
+        identities,
+        checkouts,
+        rules: None,
+    })
+}
+
+fn field(path: &Path, value: &Value, name: &str) -> Result<String> {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "the registry at {} has a record missing its {name}",
+                path.display()
+            ),
+        })
+}
+
+/// Everything a resolved repository argument answers.
+#[derive(Debug, Clone)]
+pub struct Resolution {
+    /// The identity key.
+    pub key: String,
+    /// The identity's recorded metadata.
+    pub identity: Identity,
+    /// The alias of the checkout the argument selected.
+    pub alias: String,
+    /// The publication checkout: never worked in, only ever fast-forwarded.
+    pub publication: PathBuf,
+}
+
+/// The registered repository the current directory belongs to.
+///
+/// The three verbs that answer for "here" — the merge train, the fast-forward, and
+/// an unscoped `recoverable` — resolve it through this one walk, so what "here"
+/// means cannot come to differ between them.
+pub fn resolve_here(registry: &Registry) -> Result<Resolution> {
+    let here = std::env::current_dir()
+        .map_err(|e| error::invalid(format!("cannot read the current directory: {e}")))?;
+    let canonical = std::fs::canonicalize(&here).unwrap_or(here);
+    let mut candidate: Option<&Path> = Some(canonical.as_path());
+    while let Some(path) = candidate {
+        for (alias, checkout) in &registry.checkouts {
+            if checkout.path == path {
+                return resolve(registry, alias);
+            }
+        }
+        candidate = path.parent();
+    }
+    Err(Error::Invalid {
+        reason: format!(
+            "{} is not inside a registered checkout; register it with `onevcs register PATH`",
+            canonical.display()
+        ),
+    })
+}
+
+/// Resolve a repository argument — an identity key, a registered alias, an origin
+/// URL, or a path — to the identity and checkout it selects.
+pub fn resolve(registry: &Registry, repo: &str) -> Result<Resolution> {
+    if let Some(resolution) = already_resolved(registry, repo) {
+        return Ok(resolution);
+    }
+    let resolution = resolve_anew(registry, repo)?;
+    remember(registry, repo, &resolution);
+    Ok(resolution)
+}
+
+fn resolve_anew(registry: &Registry, repo: &str) -> Result<Resolution> {
+    if let Some(checkout) = registry.checkouts.get(repo) {
+        diagnose(Spelled::Alias);
+        return build(registry, repo, checkout);
+    }
+    // A path, which is how a command that takes `--repo` is usually spelled. The
+    // canonical form, so a symlinked or relative spelling of a registered checkout
+    // is the same checkout rather than an unknown repository.
+    if let Ok(canonical) = std::fs::canonicalize(repo) {
+        if let Some((alias, checkout)) = registry
+            .checkouts
+            .iter()
+            .find(|(_, checkout)| checkout.path == canonical)
+        {
+            diagnose(Spelled::Path);
+            return build(registry, alias, checkout);
+        }
+    }
+    let (key, form) = if registry.identities.contains_key(repo) {
+        (repo.to_owned(), Spelled::IdentityKey)
+    } else {
+        (normalize(repo).key, Spelled::Origin)
+    };
+    if let Some((alias, checkout)) = registry
+        .checkouts
+        .iter()
+        .find(|(_, checkout)| checkout.identity == key)
+    {
+        diagnose(form);
+        return build(registry, alias, checkout);
+    }
+    diagnose(Spelled::Unregistered);
+    if registry.identities.contains_key(&key) {
+        return Err(Error::Invalid {
+            reason: format!("identity {key:?} has no registered checkout"),
+        });
+    }
+    let known: Vec<&str> = registry.checkouts.keys().map(String::as_str).collect();
+    Err(Error::Invalid {
+        reason: format!(
+            "{repo:?} is not a registered repository; register it with `onevcs register PATH`. \
+             Known checkouts: {}",
+            if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            }
+        ),
+    })
+}
+
+/// The variable naming the file each repository resolution is recorded in.
+const RESOLUTION_DIAGNOSTICS_ENV: &str = "ONEVCS_RESOLUTION_DIAGNOSTICS";
+
+/// The form of the spelling a resolution was made by, as its diagnostics line names it.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Spelled {
+    Alias,
+    Path,
+    IdentityKey,
+    /// An origin URL, normalized to the identity it names.
+    Origin,
+    /// A spelling that names no registered checkout.
+    Unregistered,
+}
+
+/// Append one line saying a repository was resolved anew, and by which spelling, where
+/// [`RESOLUTION_DIAGNOSTICS_ENV`] names a file.
+///
+/// An alias is answered out of the registry already loaded and walks nothing, so no
+/// filesystem a caller watches can see one resolved; this is what counts it, beside the
+/// path, the identity key and the origin URL, and a spelling nothing registered. A
+/// resolution [`resolving_once`] answered from its first is not one made, and writes
+/// nothing. The line carries the form alone — never the spelling, the identity or a
+/// path. A file that cannot be written says so on stderr and changes nothing about
+/// the resolution.
+fn diagnose(form: Spelled) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os(RESOLUTION_DIAGNOSTICS_ENV).filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{}", serde_json::json!({ "resolution": form })));
+    if let Err(error) = written {
+        eprintln!(
+            "onevcs: warning: the resolution diagnostics could not be written to {}: {error}",
+            Path::new(&path).display()
+        );
+    }
+}
+
+/// Run `read` resolving each spelling at most once.
+///
+/// Inside, a [`resolve`] of a spelling already resolved is answered with what the
+/// first one answered rather than walked again; a refusal is not kept, so the next
+/// asks again. A spelling only ever answers for itself: the checkout a repository's
+/// alias or path selects is not necessarily the one its identity key selects — a
+/// second registered checkout of the identity, or a key that is itself the path of a
+/// registered checkout — and only resolving the key says which. So a read about
+/// several pieces of work of one repository resolves the spelling it was handed once
+/// and the identity once, however often each piece's own resolution asks for it, and
+/// resolves once in all where the spelling is the identity key. Every [`resolve`]
+/// inside must be of `registry`.
+pub(crate) fn resolving_once<T>(registry: &Registry, read: impl FnOnce() -> T) -> T {
+    struct Leave(Option<(usize, BTreeMap<String, Resolution>)>);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            RESOLVED.with(|resolved| *resolved.borrow_mut() = self.0.take());
+        }
+    }
+    let entered = (std::ptr::from_ref(registry) as usize, BTreeMap::new());
+    let _leave = Leave(RESOLVED.with(|resolved| resolved.borrow_mut().replace(entered)));
+    read()
+}
+
+thread_local! {
+    /// The resolutions made inside [`resolving_once`], by spelling, beside the
+    /// registry they were made of.
+    static RESOLVED: std::cell::RefCell<Option<(usize, BTreeMap<String, Resolution>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What [`resolving_once`] already answered for `repo` of `registry`.
+fn already_resolved(registry: &Registry, repo: &str) -> Option<Resolution> {
+    RESOLVED.with(|resolved| {
+        resolved
+            .borrow()
+            .as_ref()
+            .filter(|(of, _)| *of == std::ptr::from_ref(registry) as usize)
+            .and_then(|(_, answered)| answered.get(repo).cloned())
+    })
+}
+
+/// Keep `resolution` as [`resolving_once`]'s answer for `repo`.
+fn remember(registry: &Registry, repo: &str, resolution: &Resolution) {
+    RESOLVED.with(|resolved| {
+        if let Some((of, answered)) = resolved.borrow_mut().as_mut() {
+            if *of == std::ptr::from_ref(registry) as usize {
+                answered.insert(repo.to_owned(), resolution.clone());
+            }
+        }
+    });
+}
+
+/// Resolve a `--repo PATH` argument to the identity and checkout it selects.
+///
+/// The path is read as text first, and one this build cannot read is refused here
+/// rather than resolved through a lossy rendering of itself: the replacement
+/// characters name a checkout nobody registered, and the refusal would then be
+/// about the wrong thing entirely. Every verb that takes `--repo` comes through
+/// this, so a path none of them can read is refused the same way by all of them.
+pub fn resolve_path(registry: &Registry, repo: &Path) -> Result<Resolution> {
+    let named = repo.to_str().ok_or_else(|| Error::Invalid {
+        reason: format!(
+            "the repository path {} is not valid UTF-8, so it can name no registered checkout; \
+             `onevcs repos` lists them as they are recorded",
+            repo.display()
+        ),
+    })?;
+    resolve(registry, named)
+}
+
+fn build(registry: &Registry, alias: &str, checkout: &Checkout) -> Result<Resolution> {
+    let identity = registry
+        .identities
+        .get(&checkout.identity)
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "registered checkout {alias:?} names identity {:?}, which the registry does \
+                 not hold",
+                checkout.identity
+            ),
+        })?;
+    Ok(Resolution {
+        key: checkout.identity.clone(),
+        identity: identity.clone(),
+        alias: alias.to_owned(),
+        publication: checkout.path.clone(),
+    })
+}
+
+/// Register a checkout, resolving its origin to an identity.
+///
+/// A checkout whose origin normalizes to an identity the registry already holds
+/// joins it rather than creating a second one, so a safety clone inherits the
+/// canonical checkout's publication policy instead of quietly disagreeing with it.
+pub fn register(path: &Path, origin_override: Option<&str>) -> Result<Resolution> {
+    let checkout = std::fs::canonicalize(path).map_err(error::at("register", path))?;
+    if !git::is_repo(&checkout) {
+        return Err(Error::Invalid {
+            reason: format!("{} is not a git checkout", checkout.display()),
+        });
+    }
+    let origin = match origin_override {
+        Some(value) => value.to_owned(),
+        None => git::remote_url(&checkout, "origin")?,
+    };
+    // Set here, where no session of this checkout can exist yet, rather than first at
+    // a session's open: then the first sessions after registration never wait for an
+    // exclusive take of the lender lease, and every open finds the keys set and writes
+    // nothing to a file all of them read.
+    crate::workspace::retain_alone(&checkout)?;
+    let normalized = normalize(&origin);
+    let gate = detect_gate(&checkout);
+    let alias = alias_for(&checkout);
+
+    update(|registry| {
+        registry
+            .identities
+            .entry(normalized.key.clone())
+            // Nothing about how this identity publishes is recorded: that is the
+            // rules file's answer, resolved every time it is asked, so a decision
+            // an operator changes there is changed everywhere at once rather than
+            // frozen into the document at registration.
+            .or_insert_with(|| Identity::new(normalized.key.clone(), gate.clone()));
+        if let Some(identity) = registry.identities.get_mut(&normalized.key) {
+            if identity.gate == NOOP_GATE && gate != NOOP_GATE {
+                identity.gate = gate.clone();
+            }
+        }
+        registry.checkouts.insert(
+            alias.clone(),
+            Checkout {
+                path: checkout.clone(),
+                identity: normalized.key.clone(),
+            },
+        );
+        Ok(())
+    })?;
+    let registry = load()?;
+    resolve(&registry, &alias)
+}
+
+/// The alias a checkout is registered under: its directory name, and the whole
+/// path when two checkouts would otherwise collide.
+fn alias_for(checkout: &Path) -> String {
+    checkout
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| checkout.to_string_lossy().into_owned())
+}
+
+/// Rank a checkout's own gate command from what it actually carries.
+///
+/// The stored gate describes the repository's complete bar; the merge path is what
+/// enforces it. A checkout that carries no recognizable one records `<no-op>` and
+/// is reported as unproven rather than being given a command that does not exist.
+fn detect_gate(checkout: &Path) -> String {
+    for (marker, command) in [
+        ("justfile", "just gate"),
+        ("Justfile", "just gate"),
+        ("Makefile", "make check"),
+        ("package.json", "npm test"),
+        ("Cargo.toml", "cargo test"),
+        ("pyproject.toml", "pytest"),
+    ] {
+        if checkout.join(marker).is_file() {
+            return command.to_owned();
+        }
+    }
+    NOOP_GATE.to_owned()
+}
+
+/// Whether an identity's merge path is covered by something that runs a gate.
+///
+/// Which evidence counts depends on the resolved publication policy, which is the
+/// one place how an identity publishes is decided. Under **`local-direct`** a
+/// publication pushes straight to its base and never opens a change request, so the
+/// host's required checks have nothing to rule on and only an executable `pre-push`
+/// hook can cover it. Under any of the three change-request policies it is covered
+/// by either: the hook gates the branch push that feeds the change request, and the
+/// host's required checks gate the merge.
+///
+/// This is a safety verdict, and it is answered from the policy rather than from a
+/// stored classification because the classification was inferred once, from whether
+/// the origin had a host, and could not be changed afterwards — so an identity whose
+/// rules had it publishing through a change request could still be reported as
+/// covered by nothing, or the reverse, depending on how it was registered. The one
+/// thing the origin still decides is whether there is a host at all: an identity
+/// with no host has no required checks whatever its policy says, and reporting the
+/// host's checks as its cover would be the unverified merge that looks verified.
+pub fn merge_path_coverage(
+    resolution: &Resolution,
+    checkout: &Path,
+    publication: MergePolicy,
+) -> Coverage {
+    if let Some(hook) = pre_push_hook(checkout) {
+        return Coverage::PrePushHook(hook);
+    }
+    let through_a_change_request = publication != MergePolicy::LocalDirect;
+    let hosted = normalize(&resolution.identity.origin).hosted.is_some();
+    if through_a_change_request && hosted {
+        Coverage::RequiredChecks
+    } else {
+        Coverage::None
+    }
+}
+
+/// What runs a gate on an identity's merge path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coverage {
+    /// An executable `pre-push` hook, at this path.
+    PrePushHook(PathBuf),
+    /// The host's own required checks on the change request.
+    RequiredChecks,
+    /// Nothing: this identity's merge path runs no gate at all.
+    None,
+}
+
+impl Coverage {
+    /// How the audit reports this coverage.
+    pub fn describe(&self) -> String {
+        match self {
+            Coverage::PrePushHook(path) => format!("pre-push hook at {}", path.display()),
+            Coverage::RequiredChecks => "the host's required checks".to_owned(),
+            Coverage::None => "nothing".to_owned(),
+        }
+    }
+}
+
+/// The executable `pre-push` hook git would actually run for a checkout, honouring
+/// `core.hooksPath`.
+pub fn pre_push_hook(checkout: &Path) -> Option<PathBuf> {
+    let hooks = git::hooks_dir(checkout).ok()?;
+    let hook = hooks.join("pre-push");
+    is_executable(&hook).then_some(hook)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}

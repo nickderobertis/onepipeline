@@ -357,9 +357,17 @@ impl Drop for Span {
                     snapshot.polls += 1;
                 }
                 if let Some(program) = frame.program {
-                    let entry = snapshot.programs.entry(program).or_default();
-                    entry.0 += u64::from(counted);
-                    entry.1 += elapsed;
+                    // Measurement only (spike-onepipeline-test-cost): an engine
+                    // run is also counted under `onepipeline:<verb>`.
+                    let (base, verb) = match program.split_once('\u{1f}') {
+                        Some((base, verb)) => (base.to_owned(), Some(format!("{base}:{verb}"))),
+                        None => (program, None),
+                    };
+                    for key in std::iter::once(base).chain(verb) {
+                        let entry = snapshot.programs.entry(key).or_default();
+                        entry.0 += u64::from(counted);
+                        entry.1 += elapsed;
+                    }
                 }
             } else {
                 if counted {
@@ -654,7 +662,20 @@ pub mod process {
 
         fn program(&self) -> (Category, String) {
             let program = program_name(self.inner.get_program());
-            (Category::of_program(&program), program)
+            let category = Category::of_program(&program);
+            // Measurement only (spike-onepipeline-test-cost): the engine's verb
+            // rides with its name, split back out when the frame is tallied.
+            if program == "onepipeline" {
+                if let Some(verb) = self
+                    .inner
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .find(|arg| !arg.starts_with('-'))
+                {
+                    return (category, format!("{program}\u{1f}{verb}"));
+                }
+            }
+            (category, program)
         }
 
         /// [`std::process::Command::spawn`]: one process, and the time it took

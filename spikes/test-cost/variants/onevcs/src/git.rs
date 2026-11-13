@@ -1,0 +1,7877 @@
+//! Real git, and the bound every call to it carries.
+//!
+//! Mutations and unsupported reads use the `git` binary. Recovery can read ordinary
+//! refs in process and reuse immutable reads under complete context guards. Two things are
+//! non-negotiable here and are the reason this is one module rather than a call at
+//! each site:
+//!
+//! * **Every command is bounded.** An unbounded git turns a wedged hook or an
+//!   unanswering remote into a run that looks exactly like one still working.
+//! * **A fired bound takes the whole process group.** A hook's own children inherit
+//!   git's pipes and outlive the shell that started them, so reading those pipes
+//!   after killing git alone blocks on precisely the processes the bound stopped
+//!   waiting for — and leaves them running afterwards.
+//!
+//! There are two bounds because the populations differ by orders of magnitude: a
+//! `push` whose pre-push hook runs a repository's complete gate *is* the work, and
+//! bounding it at what an ordinary fetch needs would abort every publication.
+
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Read;
+use std::num::NonZeroI32;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::error::{self, Error, Result};
+use crate::host::Sha;
+use crate::{ids, lock};
+
+mod lfs;
+
+/// Resolve Git once, preserving the first executable on PATH (including caller
+/// shims). On failure keep the original command so `unstarted` reports the same
+/// missing-Git error as before.
+pub(crate) fn git_program() -> &'static std::ffi::OsStr {
+    static PROGRAM: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+    PROGRAM
+        .get_or_init(|| {
+            std::env::var_os("PATH")
+                .and_then(|paths| {
+                    std::env::split_paths(&paths)
+                        .flat_map(|directory| {
+                            #[cfg(windows)]
+                            let names = ["git.exe", "git.cmd", "git.bat", "git"];
+                            #[cfg(not(windows))]
+                            let names = ["git"];
+                            names.into_iter().map(move |name| directory.join(name))
+                        })
+                        .find(|path| executable(path))
+                        .and_then(|path| std::path::absolute(path).ok())
+                })
+                .map_or_else(|| "git".into(), PathBuf::into_os_string)
+        })
+        .as_os_str()
+}
+
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Bound, in seconds, on a command that runs no repository hook.
+pub const TIMEOUT_ENV: &str = "ONEVCS_GIT_TIMEOUT";
+/// Bound, in seconds, on a command that runs the repository's own hooks.
+pub const HOOK_TIMEOUT_ENV: &str = "ONEVCS_GIT_HOOK_TIMEOUT";
+/// The default ordinary bound. Two orders of magnitude above the largest ordinary
+/// operation performed against a repository of the size this tool is used on.
+pub const DEFAULT_TIMEOUT_SECONDS: f64 = 600.0;
+/// The default hook-running bound. A repository's complete gate is minutes to
+/// tens of minutes, and this leaves room for one slowed by everything else on the
+/// host without letting a genuinely hung push sit forever.
+pub const DEFAULT_HOOK_TIMEOUT_SECONDS: f64 = 5400.0;
+/// The longest anything here sleeps before looking again.
+///
+/// It is a ceiling rather than an interval, and the difference is what an ordinary
+/// command costs. Both waits under it wake on the thing they are waiting for — a
+/// reader on its pipe becoming readable, the run on a reader reaching end of
+/// stream, which a child's exit brings about by closing the write ends it owns — so
+/// this is reached only where neither can arrive: a pipe an unrelated process holds
+/// open, and a child that closed its streams and kept running. There is no portable
+/// wait on a child that takes a deadline, so a ceiling has to exist; large enough
+/// that a hook running out its whole bound is not asked a million times.
+const EXIT_POLL: Duration = Duration::from_millis(10);
+/// How much of a pipe one read takes at a time.
+///
+/// Most of what a command writes is smaller than this and arrives in a single
+/// read; what the size decides is how many reads a larger answer is recovered
+/// across, and therefore how many chances there are to stop before the end of one.
+/// `tests/e2e/inherited_pipes.rs` reads this number out of this file, so the
+/// journey that drives an answer wider than one read stays wider than one however
+/// this changes.
+const READ_BUFFER: usize = 8192;
+
+/// What a run whose bound elapses answers.
+///
+/// A refusal for every caller but one: the checkout a session's worktree is put on its
+/// branch by, whose repository's `post-checkout` hook may be what outlived the bound
+/// after the checkout itself had completed — and whose caller then has a checkout to
+/// go on with and the run's output to record.
+#[derive(Debug, Clone, Copy)]
+enum Elapse {
+    Refuse,
+    Answer,
+}
+
+/// Every `origin` remote-tracking tip by branch name, asked of git where the checkout's
+/// refs cannot be read in process.
+pub(crate) fn origin_tips_listed(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    let listed = checked(
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3)%00%(objectname)",
+            "refs/remotes/origin",
+        ],
+        Some(cwd),
+    )?;
+    if !listed.read_failures.is_empty() {
+        return Err(error::invalid(format!(
+            "the remote-tracking refs of {} could not be read whole",
+            cwd.display()
+        )));
+    }
+    Ok(listed
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .filter(|(name, _)| *name != "HEAD")
+        .map(|(name, tip)| (name.to_owned(), tip.to_owned()))
+        .collect())
+}
+
+/// The most revisions an argument vector names before the list goes over standard
+/// input, whatever the checkout holds. Past it the read gives up its proof and
+/// in-process answer, which only ever reach git's own `--count` for a handful of
+/// names, in exchange for not depending on Linux's argument limit.
+const ARGV_LIST_LIMIT: usize = 64;
+
+/// How many `--no-merged` tips one `for-each-ref` names; see [`unpublished_heads`].
+const NO_MERGED_BATCH: usize = 128;
+
+/// What may end one bounded run early, and what it answers when its bound does.
+#[derive(Clone, Copy)]
+struct Ending<'a> {
+    stop: Option<&'a dyn Fn() -> bool>,
+    elapse: Elapse,
+    /// What the command reads on its standard input, for a list no argument vector
+    /// could carry; `None` closes it.
+    input: Option<&'a [u8]>,
+}
+
+/// Which of the two bounds one command runs under — `Hooks` where it runs the
+/// repository's own, `Ordinary` where it runs none.
+///
+/// Two named cases rather than a flag: the populations differ by orders of
+/// magnitude, and a call site that had to remember which way round the boolean
+/// went would be one `!` away from bounding a repository's whole gate at what an
+/// ordinary fetch needs.
+#[derive(Debug, Clone, Copy)]
+enum Bound {
+    Ordinary,
+    Hooks,
+}
+
+impl Bound {
+    /// The knob that sets this bound, and what it is without one.
+    fn knob(self) -> (&'static str, f64) {
+        match self {
+            Bound::Ordinary => (TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS),
+            Bound::Hooks => (HOOK_TIMEOUT_ENV, DEFAULT_HOOK_TIMEOUT_SECONDS),
+        }
+    }
+}
+
+/// The one source for which git operations run a repository's hooks, as leading
+/// argv words. Classifying inside [`run`] rather than at each call site is what
+/// stops a new hook-running operation from silently inheriting the ordinary bound
+/// and aborting a gate mid-run.
+const HOOK_RUNNING: &[&[&str]] = &[
+    &["clone"],
+    &["checkout"],
+    &["commit"],
+    &["merge"],
+    &["push"],
+    &["rebase"],
+    &["worktree", "add"],
+];
+
+/// What one git command wrote and how it ended.
+#[derive(Debug, Clone)]
+pub struct Output {
+    /// git's exit status.
+    pub status: i32,
+    /// How it ended, which [`status`](Output::status) cannot hold whole: a
+    /// signalled command has no exit code, and the 128 recorded above for it says
+    /// nothing about which signal.
+    pub ended: Ended,
+    /// git's standard output.
+    pub stdout: String,
+    /// git's standard error.
+    pub stderr: String,
+    /// Why a read of one of its pipes stopped short, where one did — so that an
+    /// empty answer can be reported as unread rather than as unwritten.
+    pub read_failures: Vec<String>,
+}
+
+impl Output {
+    /// Whether git reported success.
+    pub fn ok(&self) -> bool {
+        self.status == 0
+    }
+
+    /// Standard output with surrounding whitespace removed.
+    pub fn trimmed(&self) -> String {
+        self.stdout.trim().to_owned()
+    }
+
+    /// Everything the command wrote, porcelain first then diagnostics.
+    ///
+    /// A pre-push hook runs the repository's whole gate, so this is where a
+    /// publication's real verification evidence arrives. Interleaving is not
+    /// recoverable from two captured pipes; what matters is that the whole run
+    /// survives.
+    pub fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+
+    /// The most specific line git wrote, for a message a human reads.
+    pub fn diagnostic(&self) -> String {
+        let stderr = self.stderr.trim();
+        let stdout = self.stdout.trim();
+        match (stderr.is_empty(), stdout.is_empty()) {
+            (false, _) => stderr.to_owned(),
+            (true, false) => stdout.to_owned(),
+            (true, true) => "<no output>".to_owned(),
+        }
+    }
+}
+
+/// Run one git command, bounded, and return what it wrote whatever its status.
+pub fn run(args: &[&str], cwd: Option<&Path>) -> Result<Output> {
+    run_with_env(args, cwd, &[])
+}
+
+/// Run one git command with extra environment, bounded.
+///
+/// The environment is how the comparison identity reaches a repository's own
+/// `pre-push` hook: the gate a publishing push runs must judge the same base the
+/// worker's gate already cleared.
+pub fn run_with_env(args: &[&str], cwd: Option<&Path>, env: &[(String, String)]) -> Result<Output> {
+    run_unless(args, cwd, env, None, Elapse::Refuse)
+}
+
+/// Run one git command as [`run_with_env`] does, stopping it — and every process it
+/// started — the first time `stop` says so.
+///
+/// A command it stopped is answered as having [`Ended::Stopped`] — or
+/// [`Ended::StoppedUnconfirmed`] where its tree could not be confirmed ended — and what it wrote
+/// is then only everything up to that moment.
+fn run_unless(
+    args: &[&str],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    stop: Option<&dyn Fn() -> bool>,
+    elapse: Elapse,
+) -> Result<Output> {
+    run_fed(args, cwd, env, None, stop, elapse)
+}
+
+/// One git command given `input` on its standard input, for a list with no size limit
+/// that no argument vector could carry. Neither remembered nor proved: both are keyed
+/// by the arguments, which here say nothing about the list.
+pub(crate) fn run_given<'a>(
+    asked: impl Into<Asked<'a>>,
+    args: &[&str],
+    input: &[u8],
+) -> Result<Output> {
+    let asked = asked.into();
+    run_fed(
+        args,
+        Some(asked.at),
+        &asked.env(),
+        Some(input),
+        None,
+        Elapse::Refuse,
+    )
+}
+
+fn run_fed(
+    args: &[&str],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    input: Option<&[u8]>,
+    stop: Option<&dyn Fn() -> bool>,
+    elapse: Elapse,
+) -> Result<Output> {
+    // Prototype (spike-onepipeline-test-cost): the ref and object-presence reads an
+    // engine run repeats most, answered in-process by libgit2 from a repository
+    // opened fresh for this one call, so nothing is remembered between calls.
+    if input.is_none() && !env.iter().any(|(key, _)| spike_relocates_repository(key)) {
+        if let Some(answered) = cwd.and_then(|cwd| spike_in_process(args, cwd)) {
+            return Ok(answered);
+        }
+    }
+    // Before the memo and the proofs, so both are keyed by commits rather than names.
+    let pinned = crate::native_refs::pinned(args, cwd, env);
+    let spelled: Vec<&str>;
+    let args = match &pinned {
+        Some(pinned) => {
+            spelled = pinned.iter().map(String::as_str).collect();
+            spelled.as_slice()
+        }
+        None => args,
+    };
+    let reading = input.is_some()
+        || reads::remembered(args)
+        || matches!(
+            args,
+            ["worktree", "list", ..]
+                | ["status", ..]
+                | ["remote"]
+                | ["ls-remote", ..]
+                | ["show", ..]
+        )
+        || matches!(args, ["config", "--get", ..])
+        || matches!(args, ["tag", option] if option.starts_with("--contains="))
+        // Landing comparisons write synthetic objects only into their scratch
+        // store. They still read this checkout and must keep its turn throughout.
+        || (args.first() == Some(&"merge-tree")
+            && env.iter().any(|(key, _)| key == "GIT_OBJECT_DIRECTORY"));
+    let _checkout = if reading {
+        cwd.map(crate::checkout_reads::checkout)
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if let Some(recalled) = input
+        .is_none()
+        .then(|| reads::recall(args, cwd, env))
+        .flatten()
+    {
+        return Ok(recalled);
+    }
+    // Native answers need no process or disk proof. Their immutable bytes may be
+    // retained in memory after checking this call's context and named objects;
+    // answers that would read too much still go to the proofs below. Like any
+    // read, the result is remembered for the rest of this read.
+    if let Some(output) = input
+        .is_none()
+        .then(|| crate::recovery_cache::native(args, cwd, env))
+        .flatten()
+    {
+        reads::remember(args, cwd, env, &output);
+        return Ok(output);
+    }
+    let reusable = input
+        .is_none()
+        .then(|| crate::recovery_cache::query(args, cwd, env))
+        .flatten();
+    if let Some(output) = reusable
+        .as_ref()
+        .and_then(crate::recovery_cache::Query::read)
+    {
+        reads::remember(args, cwd, env, &output);
+        return Ok(output);
+    }
+    let hooked = runs_repository_hooks(args);
+    // A command that runs the repository's hooks reaches them through shims that
+    // hand each hook the environment of the tree it starts in — see [`HookShims`].
+    // Without a directory there is no repository whose hooks it runs: that is a
+    // `clone`, whose new repository has none yet.
+    let shims = match cwd {
+        Some(cwd) if hooked => HookShims::cut(cwd)?,
+        _ => None,
+    };
+    let outside = from_outside(args, cwd);
+    let mut command = Command::new(git_program());
+    match &outside {
+        Some((git_dir, _)) => {
+            command.arg("--git-dir").arg(git_dir).args(args);
+        }
+        None => {
+            command.args(args);
+        }
+    }
+    let execute = || {
+        bounded(
+            command,
+            outside.as_ref().map(|(_, from)| from.as_path()).or(cwd),
+            &shims
+                .as_ref()
+                .map(|shims| [env, &shims.env()].concat())
+                .unwrap_or_else(|| env.to_vec()),
+            if hooked {
+                Bound::Hooks
+            } else {
+                Bound::Ordinary
+            },
+            &format!("git {}", args.join(" ")),
+            |e| unstarted(&e, args, cwd),
+            Ending {
+                stop,
+                elapse,
+                input,
+            },
+        )
+    };
+    let ran = if reading || matches!(args, ["worktree", "remove" | "prune", ..] | ["clean", ..]) {
+        execute()
+    } else {
+        crate::checkout_reads::mutating(execute)
+    };
+    drop(shims);
+    let ran = ran?;
+    let output = Output {
+        status: ran.status,
+        ended: ran.ended,
+        stdout: text(ran.stdout),
+        stderr: text(ran.stderr),
+        read_failures: ran.read_failures,
+    };
+    if output.ended.was_stopped() || matches!(output.ended, Ended::Elapsed { .. }) {
+        // What a stopped command wrote is a fragment, and no later read may be
+        // answered from it.
+        return Ok(output);
+    }
+    if let Some(reusable) = reusable {
+        reusable.write(&output);
+    }
+    if input.is_none() {
+        reads::remember(args, cwd, env, &output);
+    }
+    Ok(output)
+}
+
+/// Where a read of a session's repository is made from when it is not made inside it:
+/// the repository's git directory, and the directory the process starts in.
+///
+/// Every session's search reads the run clones and slots of its siblings — whether
+/// each is a repository, which branches it holds, where they stand — and a process
+/// whose working directory is inside a run root is exactly what `session close` and a
+/// reclamation count as somebody working there (`processes::holding`). So a sibling's
+/// read that happened to be running made a close refuse a session nobody was in. A
+/// read of a repository under the state root's workspaces is therefore addressed by
+/// `--git-dir` from the workspaces directory itself, which is inside no run root; git
+/// takes the directory it starts in as the top of the work tree when none is named,
+/// and none of these reads looks at the work tree's files. Anything else — a command
+/// that writes, reads the work tree, or answers a path relative to where it ran —
+/// runs where it was asked to.
+fn from_outside(args: &[&str], cwd: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    let cwd = cwd?;
+    if !reads_no_work_tree(args) {
+        return None;
+    }
+    // Absolute, both: a relative state root names its workspaces from this process's
+    // own directory, and the git directory is handed to a process started elsewhere.
+    // And spelled alike, both: a record holds a canonical path, which on Windows is the
+    // verbatim form no plain state root starts with.
+    let workspaces = crate::home::workspaces_dir().ok()?;
+    let workspaces = std::path::absolute(git_path(&workspaces)).ok()?;
+    let cwd = std::path::absolute(git_path(cwd)).ok()?;
+    if !cwd.starts_with(&workspaces) || cwd == workspaces {
+        return None;
+    }
+    let git_dir = cwd.join(".git");
+    if !git_dir.exists() {
+        return None;
+    }
+    Some((git_path(&git_dir).to_path_buf(), workspaces))
+}
+
+/// Whether a git command reads refs and objects alone, answering nothing relative to
+/// the directory it ran in — which is what lets it run from anywhere.
+fn reads_no_work_tree(args: &[&str]) -> bool {
+    match args.first().copied() {
+        Some("rev-parse") => !args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "--show-toplevel"
+                    | "--git-dir"
+                    | "--absolute-git-dir"
+                    | "--git-common-dir"
+                    | "--git-path"
+                    | "--show-prefix"
+                    | "--show-cdup"
+                    | "--show-superproject-working-tree"
+                    | "--is-inside-git-dir"
+                    | "--resolve-git-dir"
+            )
+        }),
+        Some("show-ref" | "for-each-ref" | "rev-list" | "merge-base" | "log") => true,
+        Some("cat-file") => args.get(1) == Some(&"-e"),
+        // Two revisions compared, never the work tree or the index.
+        Some("diff") => {
+            args.iter()
+                .skip(1)
+                .take_while(|arg| **arg != "--")
+                .filter(|arg| !arg.starts_with('-'))
+                .count()
+                == 2
+                && !args.contains(&"--cached")
+        }
+        Some("symbolic-ref") => args.iter().skip(1).filter(|a| !a.starts_with('-')).count() == 1,
+        _ => false,
+    }
+}
+
+/// Run `read` with every repeated git read inside it answered once.
+///
+/// A report asks the same question of the same repository many times over — the
+/// branch's own log is read by four provenance readers, the base's tip by every
+/// copy of every branch, a commit's presence by every tier that names it — and each
+/// asking was a process. Inside this scope a read whose arguments, directory and
+/// environment match one already made is answered from that one, and a command that
+/// is not a read empties the memo, so nothing inside the scope reads a fact a write
+/// inside it has moved. The scope is this thread's and ends when `read` returns:
+/// nothing is remembered across invocations, because the repositories a library
+/// caller holds move between them.
+///
+/// Two answers outlive a write inside the scope, because no write this crate makes
+/// can move them: that a repository holds a commit, and whether one commit reaches
+/// another. A commit is never taken out of a store by a ref moving, and ancestry is a
+/// fact about two commits rather than about any ref. So a pass that fetches or
+/// deletes part way asks neither question twice — and a repository that did *not*
+/// hold a commit is asked again after the write, since a fetch is what brings one.
+pub(crate) fn memoized<T>(read: impl FnOnce() -> T) -> T {
+    reads::enter();
+    let answered = read();
+    reads::leave();
+    answered
+}
+
+/// Run `read` asking git itself, past whatever the enclosing scope remembers.
+///
+/// For the reads whose whole point is that they are made *now*: where a branch stands
+/// immediately before it is deleted, and which branch a worktree has checked out. A
+/// scope that answered either from what it read minutes earlier would decide a
+/// deletion on a tip that has since moved. Only reads belong in here — a write made
+/// inside it does not empty the scope's memo.
+pub(crate) fn unremembered<T>(read: impl FnOnce() -> T) -> T {
+    reads::bypass(read)
+}
+
+/// The per-invocation memo of git reads, and what may go in it.
+mod reads {
+    use super::*;
+
+    type Key = (Option<PathBuf>, Vec<String>, Vec<(String, String)>);
+
+    thread_local! {
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+        static MEMO: RefCell<HashMap<Key, Output>> = RefCell::new(HashMap::new());
+        /// The answers no write inside the scope can move, kept past every write.
+        static SETTLED: RefCell<HashMap<Key, Output>> = RefCell::new(HashMap::new());
+        /// The same two questions answered in process rather than by git, under the
+        /// same rule: a commit held and either answer about ancestry are kept past
+        /// every write, and a commit not held is asked again after one.
+        static FACTS: RefCell<HashMap<FactKey, bool>> = RefCell::new(HashMap::new());
+        static BYPASSED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// One of the two questions no write can move, as this process answers it.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub(super) enum Fact {
+        /// Whether the repository holds this commit.
+        Holds(ObjectId),
+        /// Whether the second commit reaches the first.
+        Reaches(ObjectId, ObjectId),
+    }
+
+    type FactKey = (PathBuf, Vec<(String, String)>, Fact);
+
+    /// What this read already answered in process about `fact` in `cwd`, read with
+    /// `env`.
+    pub(super) fn fact(cwd: &Path, env: &[(String, String)], fact: Fact) -> Option<bool> {
+        if !active() {
+            return None;
+        }
+        FACTS.with(|facts| {
+            facts
+                .borrow()
+                .get(&(cwd.to_path_buf(), env.to_vec(), fact))
+                .copied()
+        })
+    }
+
+    /// Remember an in-process answer for the rest of this read.
+    pub(super) fn learn(cwd: &Path, env: &[(String, String)], fact: Fact, answer: bool) {
+        if active() {
+            FACTS.with(|facts| {
+                facts
+                    .borrow_mut()
+                    .insert((cwd.to_path_buf(), env.to_vec(), fact), answer);
+            });
+        }
+    }
+
+    /// Forget what a write can move: a commit a repository did not hold.
+    fn forget_absences() {
+        FACTS.with(|facts| {
+            facts
+                .borrow_mut()
+                .retain(|(_, _, fact), answer| *answer || !matches!(fact, Fact::Holds(_)));
+        });
+    }
+
+    pub(super) fn enter() {
+        DEPTH.with(|depth| depth.set(depth.get() + 1));
+    }
+
+    pub(super) fn leave() {
+        DEPTH.with(|depth| {
+            depth.set(depth.get() - 1);
+            if depth.get() == 0 {
+                MEMO.with(|memo| memo.borrow_mut().clear());
+                crate::native_refs::clear();
+                SETTLED.with(|settled| settled.borrow_mut().clear());
+                FACTS.with(|facts| facts.borrow_mut().clear());
+            }
+        });
+    }
+
+    pub(super) fn bypass<T>(read: impl FnOnce() -> T) -> T {
+        let before = BYPASSED.with(|bypassed| bypassed.replace(true));
+        crate::recovery_cache::clear();
+        let answered = read();
+        BYPASSED.with(|bypassed| bypassed.set(before));
+        answered
+    }
+
+    fn active() -> bool {
+        DEPTH.with(|depth| depth.get() > 0) && !BYPASSED.with(Cell::get)
+    }
+
+    /// Whether an answer is one no write can move: a commit the repository holds, or
+    /// whether one commit reaches another. A commit it does *not* hold is not one of
+    /// them — a fetch is exactly what brings it.
+    fn settled(args: &[&str], output: &Output) -> bool {
+        match (args.first().copied(), args.get(1).copied()) {
+            (Some("cat-file"), Some("-e")) => output.status == 0,
+            (Some("merge-base"), Some("--is-ancestor")) => matches!(output.status, 0 | 1),
+            _ => false,
+        }
+    }
+
+    fn key(args: &[&str], cwd: Option<&Path>, env: &[(String, String)]) -> Key {
+        (
+            cwd.map(Path::to_path_buf),
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env.to_vec(),
+        )
+    }
+
+    /// Which commands are answered from the memo: the reads a report makes, each of
+    /// which answers the same for the same arguments as long as nothing writes. The
+    /// list is closed on purpose — a command not on it is either a read that is not
+    /// worth remembering, or a write, and the second empties the memo.
+    pub(super) fn remembered(args: &[&str]) -> bool {
+        match args.first().copied() {
+            Some("--exec-path") => args.len() == 1,
+            Some("config") => args == ["config", "--null", "--list", "--show-origin"],
+            Some("remote") => args.get(1) == Some(&"get-url"),
+            Some("cat-file") => args.get(1) == Some(&"-e"),
+            Some(
+                "rev-parse" | "show-ref" | "for-each-ref" | "rev-list" | "merge-base" | "log"
+                | "diff" | "check-ref-format",
+            ) => true,
+            // Reads with one ref and no second one: `symbolic-ref NAME REF` writes.
+            Some("symbolic-ref") => {
+                args.iter().skip(1).filter(|a| !a.starts_with('-')).count() == 1
+            }
+            _ => false,
+        }
+    }
+
+    /// Commands that move nothing a remembered read answers about: the remote's own
+    /// listing, and the merge that writes only into the scratch store its caller
+    /// redirected it to.
+    fn harmless(args: &[&str]) -> bool {
+        matches!(args.first().copied(), Some("ls-remote" | "merge-tree"))
+    }
+
+    pub(super) fn recall(
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+    ) -> Option<Output> {
+        if !active() {
+            return None;
+        }
+        let asked = key(args, cwd, env);
+        if let Some(settled) = SETTLED.with(|settled| settled.borrow().get(&asked).cloned()) {
+            return Some(settled);
+        }
+        if remembered(args) {
+            return MEMO.with(|memo| memo.borrow().get(&asked).cloned());
+        }
+        if !harmless(args) {
+            MEMO.with(|memo| memo.borrow_mut().clear());
+            forget_absences();
+            if args.first() != Some(&"status") {
+                crate::recovery_cache::clear();
+            }
+        }
+        None
+    }
+
+    pub(super) fn remember(
+        args: &[&str],
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+        output: &Output,
+    ) {
+        if active() && remembered(args) {
+            if settled(args, output) {
+                SETTLED.with(|settled| {
+                    settled
+                        .borrow_mut()
+                        .insert(key(args, cwd, env), output.clone());
+                });
+            }
+            MEMO.with(|memo| {
+                memo.borrow_mut()
+                    .insert(key(args, cwd, env), output.clone());
+            });
+        }
+    }
+}
+
+/// Run one external program under this module's bound, and return what it wrote
+/// whatever its status.
+///
+/// Every git command and the repository's own `commit-msg` hook arrive here, so
+/// the bound, the process-group teardown a fired bound performs, and the proof
+/// that nothing the command started is still writing have one statement rather
+/// than one per caller. `label` is how the run is named in a refusal, and `class`
+/// picks which of the two bounds it runs under.
+///
+/// `stop` is the caller's own reason to end the run early, asked as often as the
+/// bound is. The first time it says so the command's whole process group is ended
+/// and reaped exactly as a fired bound's is, and the run is answered as
+/// having [`Ended::Stopped`], with whatever it had written by then — an answer rather than a
+/// refusal, because the caller asked for it and may still need to read what the
+/// command did before it went.
+fn bounded(
+    mut command: Command,
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+    class: Bound,
+    label: &str,
+    unspawnable: impl FnOnce(std::io::Error) -> Error,
+    ending: Ending<'_>,
+) -> Result<Ran> {
+    let Ending {
+        stop,
+        elapse,
+        input,
+    } = ending;
+    let bound = bound_for(class)?;
+    let started = Instant::now();
+
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(directory) = cwd {
+        command.current_dir(git_path(directory));
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    detach_process_group(&mut command);
+    // Only a run its caller can stop is contained: that is the run whose descendants
+    // are owed an end it chose, rather than the one a fired bound gives them.
+    if stop.is_some() {
+        Tree::prepare(&mut command);
+    }
+
+    let mut child = command.spawn().map_err(unspawnable)?;
+    let tree = match stop {
+        Some(_) => Some(Tree::contain(&mut child).map_err(|why| {
+            error::invalid(format!(
+                "{label} could not be contained so that stopping it would end every process \
+                 it starts: {why}. It was ended before it ran"
+            ))
+        })?),
+        None => None,
+    };
+
+    // Bytes are handed over as they are read, rather than only at EOF. The child's
+    // exit is the lifetime signal; end of stream only lets a reader retire early —
+    // and tell the wait below, which is how an ordinary command's exit is noticed
+    // when it happens rather than at the next tick.
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        // On a thread of its own, because a list larger than the pipe's buffer stops
+        // this write until git reads it, and git may be writing to the pipes the
+        // readers below drain. A list git stopped reading is its refusal to report.
+        let bytes = bytes.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(&bytes);
+        });
+    }
+    let (ended, endings) = mpsc::channel();
+    let out_reader = PipeCapture::start(
+        child.stdout.take().expect("stdout was piped"),
+        ended.clone(),
+    );
+    let err_reader = PipeCapture::start(child.stderr.take().expect("stderr was piped"), ended);
+
+    let collected = match wait_for_exit(&mut child, started, bound, &endings, stop) {
+        Waited::Exited(collected) => collected,
+        Waited::Stopped => {
+            // `Stopped` is only reached where `stop` was given, and so a tree was held.
+            let ended = match tree.as_ref().map(|tree| end_stopped(&mut child, tree)) {
+                Some(Ok(())) => Ended::Stopped,
+                Some(Err(why)) => Ended::StoppedUnconfirmed(why),
+                None => Ended::StoppedUnconfirmed("no process tree was held".to_owned()),
+            };
+            let out = out_reader.finish();
+            let err = err_reader.finish();
+            return Ok(Ran {
+                status: 128,
+                ended,
+                stdout: out.bytes,
+                stderr: err.bytes,
+                read_failures: Vec::new(),
+            });
+        }
+        Waited::Elapsed => {
+            terminate_group(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            let out = out_reader.finish();
+            let err = err_reader.finish();
+            let (knob, _) = class.knob();
+            let ended = Ended::Elapsed {
+                after: started.elapsed(),
+                bound,
+                knob,
+            };
+            return match elapse {
+                Elapse::Refuse => Err(Error::Invalid {
+                    reason: format!("{label} {ended}"),
+                }),
+                Elapse::Answer => Ok(Ran {
+                    status: 128,
+                    ended,
+                    stdout: out.bytes,
+                    stderr: err.bytes,
+                    read_failures: Vec::new(),
+                }),
+            };
+        }
+    };
+
+    // The child's exit is completion. Each reader is then told so, and stops at the
+    // first read it takes *afterwards* that comes back with nothing — which is every
+    // byte already buffered and not one written later, even when an unrelated
+    // process still owns a duplicate write handle. Joining is a deterministic
+    // hand-off, not a scheduling window and not a wait for EOF.
+    //
+    // Before the status is answered for, not after: a child this process could not
+    // collect is still a child whose readers hold pipes, and leaving them running to
+    // report that is two threads that never end.
+    let out = out_reader.finish();
+    let err = err_reader.finish();
+    let status = collected.map_err(|e| error::invalid(format!("cannot collect {label}: {e}")))?;
+    Ok(Ran {
+        status: status.code().unwrap_or(128),
+        ended: Ended::of(&status),
+        stdout: out.bytes,
+        stderr: err.bytes,
+        read_failures: [(STDOUT, out.failure), (STDERR, err.failure)]
+            .into_iter()
+            .filter_map(|(stream, failure)| {
+                failure.map(|failure| format!("{label}: reading its {stream} failed: {failure}"))
+            })
+            .collect(),
+    })
+}
+
+/// How the two pipes are named where a read of one of them is reported.
+const STDOUT: &str = "standard output";
+/// See [`STDOUT`].
+const STDERR: &str = "standard error";
+
+/// One stream of a bounded command, read as it arrives and handed over once the
+/// command is over.
+///
+/// It owes two things that pull against each other, and it is one type because
+/// neither is safe to answer without the other. **Nothing the command wrote may be
+/// lost**, including what it wrote in the instant before it exited. And **nothing
+/// may wait on end-of-file**, because the write end of a command's pipe is
+/// duplicated the moment anything else takes a handle on it, and end-of-file then
+/// belongs to the holder rather than to the command. So the pipe is read without
+/// blocking for as long as the command runs, and [`PipeCapture::finish`] — which
+/// its caller reaches only once the exit has been collected — is what says the
+/// bytes are all there.
+///
+/// It waits on the pipe rather than around it: an idle reader sleeps until the
+/// pipe has something in it, so what a command costs is what it takes, and a
+/// command that writes more than a pipe holds is not metered out one buffer per
+/// tick.
+pub(crate) struct PipeCapture {
+    stopping: Arc<AtomicBool>,
+    reader: std::thread::JoinHandle<Captured>,
+}
+
+/// What one stream's reader recovered, and why it stopped short where it did.
+///
+/// The failure travels with the bytes rather than beside them, because the two are
+/// one answer: bytes with a failure are *everything up to that failure* and not
+/// everything the command wrote, and a caller that reported the first as the second
+/// would describe a truncated — or empty — answer as the command having been silent.
+pub(crate) struct Captured {
+    /// Every byte this reader took off the pipe.
+    pub(crate) bytes: Vec<u8>,
+    /// Why the read stopped, where it stopped for a reason other than the stream
+    /// ending or the command being over.
+    pub(crate) failure: Option<String>,
+}
+
+impl PipeCapture {
+    /// Start reading `pipe`, and report on `ended` when this stream is over.
+    ///
+    /// The report is a hint for whoever is waiting on the child, and it is sent
+    /// however the reader retires. What it is worth is that a child's exit closes
+    /// the write ends it owns, so in the ordinary case it arrives at the instant
+    /// the child goes.
+    pub(crate) fn start<R: PipeRead + Send + 'static>(
+        mut pipe: R,
+        ended: mpsc::Sender<()>,
+    ) -> Self {
+        pipe.nonblocking();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let requested = Arc::clone(&stopping);
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut failure = None;
+            let mut chunk = [0_u8; READ_BUFFER];
+            loop {
+                // Asked *before* the read it decides, and that order is the whole
+                // of the guarantee. `Ok(0)` is end of stream and answers for
+                // itself, but on a non-blocking pipe `WouldBlock` says only that
+                // nothing is readable at this instant — which is equally what a
+                // gap between two of the command's own writes looks like. Read the
+                // flag afterwards and an empty read taken while the command was
+                // still writing is retired as though the stream had ended, and
+                // everything that arrived in between is dropped. Read it first and
+                // a `true` means the exit had already been collected when the read
+                // began, so the command's every byte was in the pipe before it —
+                // and nothing there is nothing left.
+                let collected = requested.load(Ordering::Acquire);
+                match pipe.read_available(&mut chunk) {
+                    // End of stream, which is final however the command is doing:
+                    // every write end is closed, so nothing can ever arrive again.
+                    Ok(0) => break,
+                    Ok(read) => output.extend_from_slice(&chunk[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if collected {
+                            break;
+                        }
+                        pipe.await_readable(EXIT_POLL);
+                    }
+                    // Nothing is left to do but retire — the read will not start
+                    // working again — so what is owed is the reason. Kept rather
+                    // than dropped: this is the difference between "the command
+                    // wrote nothing" and "this process could not read what it
+                    // wrote", and a refusal built from the bytes alone states the
+                    // first while the second is what happened.
+                    Err(error) => {
+                        failure = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            let _ = ended.send(());
+            Captured {
+                bytes: output,
+                failure,
+            }
+        });
+        Self { stopping, reader }
+    }
+
+    /// Every byte the command wrote, and any failure that cut the read short, once
+    /// its exit has been collected.
+    ///
+    /// Call it only then: the reader retires on a read taken after this store is
+    /// visible to it, and what makes that read's emptiness mean *finished* rather
+    /// than *not yet* is that the command was already gone when the store happened.
+    pub(crate) fn finish(self) -> Captured {
+        self.stopping.store(true, Ordering::Release);
+        self.reader.join().unwrap_or_else(|_| Captured {
+            bytes: Vec::new(),
+            // A reader thread that panicked collected nothing this process can
+            // reach, and saying so is the whole of what is left to say about it.
+            failure: Some("the reader of this stream ended abnormally".to_owned()),
+        })
+    }
+}
+
+#[cfg(unix)]
+pub(crate) trait PipeRead: Read + std::os::fd::AsRawFd {
+    fn nonblocking(&mut self) {
+        let descriptor = self.as_raw_fd();
+        // SAFETY: this is the live descriptor owned by `self`; both calls only
+        // inspect and add the non-blocking status flag to that descriptor.
+        unsafe {
+            let flags = libc::fcntl(descriptor, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+
+    fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.read(buffer)
+    }
+
+    /// Sleep until this pipe has something to read, or `bound`, whichever is
+    /// sooner.
+    ///
+    /// Waiting *on* the pipe rather than for a fixed span is what keeps a captured
+    /// command as quick as an uncaptured one: output is picked up when it is
+    /// written, and a command writing more than a pipe holds is not handed over one
+    /// buffer per tick. The bound is still here because the reader has a second
+    /// thing to notice — that its command is over — which no pipe an unrelated
+    /// process holds open will ever tell it.
+    fn await_readable(&self, bound: Duration) {
+        let mut watched = libc::pollfd {
+            fd: self.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let bound = i32::try_from(bound.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: one descriptor, owned by `self` and live for the call, and a
+        // count that says so. `poll` only waits on it; nothing is read here.
+        unsafe {
+            libc::poll(&raw mut watched, 1, bound);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<T: Read + std::os::fd::AsRawFd> PipeRead for T {}
+
+#[cfg(windows)]
+pub(crate) trait PipeRead: Read + std::os::windows::io::AsRawHandle {
+    fn nonblocking(&mut self) {}
+
+    fn read_available(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+        let mut available = 0_u32;
+        // SAFETY: the handle belongs to `self`; no output buffer is supplied, and
+        // `available` is a valid out pointer for the duration of the call.
+        let succeeded = unsafe {
+            PeekNamedPipe(
+                self.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if succeeded == 0 {
+            // Every write end closed: this platform's end of stream, reached by every
+            // command that finishes, and not a read that could not be made.
+            const ERROR_BROKEN_PIPE: i32 = 109;
+            let failure = std::io::Error::last_os_error();
+            return match failure.raw_os_error() {
+                Some(ERROR_BROKEN_PIPE) => Ok(0),
+                _ => Err(failure),
+            };
+        }
+        if available == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+        }
+        let readable = buffer.len().min(available as usize);
+        self.read(&mut buffer[..readable])
+    }
+
+    /// Sleep for `bound`, because there is nothing here to wait on.
+    ///
+    /// An anonymous pipe's handle is not waitable on this platform — it never
+    /// signals — and the peek above is the only way to ask whether it has anything.
+    /// So this is the one place a fixed span stands in for the wait, and the reader
+    /// is left picking output up at that granularity. End of stream still retires it
+    /// at once, which is what an ordinary command's teardown turns on.
+    fn await_readable(&self, bound: Duration) {
+        std::thread::sleep(bound);
+    }
+}
+
+#[cfg(windows)]
+impl<T: Read + std::os::windows::io::AsRawHandle> PipeRead for T {}
+
+/// How a bounded command ended, as the operating system reports it.
+///
+/// Two endings and not one number, because the number cannot hold both: a process a
+/// signal terminated has **no exit code at all**, and the 128 this module maps that
+/// to is indistinguishable from a command that chose to exit 128. A push whose git
+/// was killed and a push whose hook refused it therefore read the same, and where
+/// the command also wrote nothing — which is what a killed one usually leaves — the
+/// refusal an operator is handed describes nothing whatsoever. That is
+/// `onevcs`'s own issue 161: a publishing push that ran for seventeen minutes and
+/// was reported as `rejected by the merge path: .`
+///
+/// Reported rather than classified on, with one exception: a run its caller
+/// [`Stopped`](Ended::Stopped) is told apart from one that ended on its own, because
+/// what it wrote is then a fragment and whether it did its work is a question for
+/// somewhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    /// It exited of its own accord, with this code.
+    Code(i32),
+    /// This signal terminated it, and it never reached an exit code.
+    #[cfg_attr(
+        not(unix),
+        expect(
+            dead_code,
+            reason = "only Unix reports a terminating signal, so a build for any other \
+                      target has no status to construct this from"
+        )
+    )]
+    Signal(i32),
+    /// Its caller stopped it before it ended, and every process it started was ended
+    /// and reaped with it.
+    Stopped,
+    /// Its bound elapsed, and its process group was ended with it — answered only to
+    /// a caller that asked for the run rather than a refusal ([`Elapse::Answer`]).
+    Elapsed {
+        /// How long it had run when it was ended.
+        after: Duration,
+        /// The bound that elapsed.
+        bound: Duration,
+        /// The variable that sets that bound.
+        knob: &'static str,
+    },
+    /// Its caller stopped it before it ended, and it was ended — but that every process
+    /// it started went with it could not be confirmed, for this reason.
+    StoppedUnconfirmed(String),
+}
+
+impl Ended {
+    /// Whether its caller stopped it, whatever became of what it started.
+    pub fn was_stopped(&self) -> bool {
+        matches!(self, Ended::Stopped | Ended::StoppedUnconfirmed(_))
+    }
+
+    /// How one collected `ExitStatus` ended.
+    ///
+    /// Unix is the only platform that reports a terminating signal, and it reports
+    /// it exactly where the exit code is absent — so the two arms are total on both
+    /// platforms and neither can be mistaken for the other.
+    fn of(status: &ExitStatus) -> Self {
+        if let Some(code) = status.code() {
+            return Ended::Code(code);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Ended::Signal(signal);
+            }
+        }
+        // No code and no signal: nothing was reported about how it ended, so what is
+        // said is the number this module maps that to rather than an invented signal.
+        Ended::Code(128)
+    }
+}
+
+impl std::fmt::Display for Ended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ended::Code(code) => write!(f, "exited with status {code}"),
+            Ended::Signal(signal) => match signal_name(*signal) {
+                Some(name) => write!(f, "was terminated by signal {signal} ({name})"),
+                None => write!(f, "was terminated by signal {signal}"),
+            },
+            Ended::Stopped => write!(f, "was stopped by its caller"),
+            Ended::Elapsed { after, bound, knob } => write!(
+                f,
+                "timed out after {after:.3}s (bound {bound}s; raise it with {knob})",
+                after = after.as_secs_f64(),
+                bound = bound.as_secs_f64()
+            ),
+            Ended::StoppedUnconfirmed(why) => write!(
+                f,
+                "was stopped by its caller, but processes it started may still be running: \
+                 {why}"
+            ),
+        }
+    }
+}
+
+/// The POSIX name of a terminating signal, for the ones a bounded command here
+/// actually meets.
+///
+/// The number is always printed beside it, so a signal with no name here is
+/// reported by its number rather than by a guess: the numbers above the list are
+/// real-time signals and platform extensions whose spelling differs per system.
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return None,
+    })
+}
+
+/// One bounded run's own answer: how it ended, and the bytes it wrote.
+///
+/// Bytes and not text, because the two callers need different answers to "what if
+/// this is not UTF-8". git's answers are machine-readable — a `-z` path listing
+/// among them — and one carrying a byte that is not text is a listing this process
+/// cannot read rather than a listing with a smudge in it. A repository's hook is
+/// writing prose for a person, and losing its refusal to one such byte would
+/// publish a change the repository turned down.
+struct Ran {
+    status: i32,
+    /// How the operating system says it ended: an exit code, or the signal that
+    /// terminated it. A signalled command has no code at all, and `status` above
+    /// carries the 128 this module maps that to — which says nothing about *which*
+    /// signal, and a command with no output is then a failure with no description.
+    ended: Ended,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// Why a read of one of its pipes stopped short, where one did.
+    ///
+    /// A reader that meets an error other than `WouldBlock` has nothing left to do
+    /// but retire, and what it has collected is then everything up to that error
+    /// rather than everything the command wrote. Carried so that a caller reporting
+    /// an empty answer can say the pipe failed rather than that the command was
+    /// silent.
+    read_failures: Vec<String>,
+}
+
+/// git's own answer as text, or nothing at all when it is not text.
+///
+/// The refusal is the caller's: every one of them already treats an answer it
+/// cannot use as one git did not give, and each says what that means where it
+/// asked. Decoding around the byte instead would hand a caller a *plausible*
+/// listing — a path with a replacement character in it names a file nobody has.
+fn text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// A hook's own words, as close to what it wrote as this process can render.
+fn prose(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Why git never started, naming whichever of the two things is actually missing.
+///
+/// `spawn` raises `NotFound` for a missing program *and* for a missing `current_dir`,
+/// and only one of the two can be checked here: a directory that is not there is a fact
+/// about the filesystem, while a `git` this process could not find is indistinguishable
+/// from an absent `PATH` entry. So the directory is asked about first and the binary is
+/// what is left — blaming the binary for both sends a reader after a toolchain that was
+/// never broken.
+fn unstarted(error: &std::io::Error, args: &[&str], cwd: Option<&Path>) -> Error {
+    let missing = cwd.filter(|_| error.kind() == std::io::ErrorKind::NotFound);
+    match missing.filter(|directory| !git_path(directory).is_dir()) {
+        Some(directory) => error::invalid(format!(
+            "cannot run git {} in {}: that directory does not exist, so nothing ran there — the \
+             checkout or worktree it names has been removed",
+            args.join(" "),
+            directory.display()
+        )),
+        None => error::invalid(format!(
+            "cannot run git: {error} (is git installed and on PATH?)"
+        )),
+    }
+}
+
+/// The ordinary Win32 spelling Git expects at its process boundary.
+///
+/// `canonicalize` uses Windows' verbatim namespace, so the standard library can
+/// address long paths. Git for Windows does not accept that spelling consistently
+/// as a working directory or path argument, and may persist it in worktree
+/// metadata. Keep canonical paths in our records, but simplify them where they
+/// leave this process for Git.
+#[cfg(windows)]
+fn git_path(path: &Path) -> &Path {
+    dunce::simplified(path)
+}
+
+#[cfg(not(windows))]
+fn git_path(path: &Path) -> &Path {
+    path
+}
+
+#[cfg(windows)]
+fn git_location(value: &str) -> Cow<'_, str> {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        git_path(path).to_string_lossy()
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+#[cfg(not(windows))]
+fn git_location(value: &str) -> Cow<'_, str> {
+    Cow::Borrowed(value)
+}
+
+/// Run one git command and turn a non-zero status into an error naming it.
+pub fn checked(args: &[&str], cwd: Option<&Path>) -> Result<Output> {
+    checked_with_env(args, cwd, &[])
+}
+
+/// Run one git command with extra environment and require success.
+pub fn checked_with_env(
+    args: &[&str],
+    cwd: Option<&Path>,
+    env: &[(String, String)],
+) -> Result<Output> {
+    let output = run_with_env(args, cwd, env)?;
+    if output.ok() {
+        return Ok(output);
+    }
+    Err(Error::Invalid {
+        reason: format!(
+            "git {} failed (exit {}): {}",
+            args.join(" "),
+            output.status,
+            output.diagnostic()
+        ),
+    })
+}
+
+/// The variable git reads a borrowed object store out of.
+const ALTERNATE_OBJECTS: &str = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+
+/// What git separates the stores in that variable with, which is the platform's own
+/// path-list separator rather than this crate's choice.
+#[cfg(windows)]
+const ALTERNATE_SEPARATOR: &str = ";";
+#[cfg(not(windows))]
+const ALTERNATE_SEPARATOR: &str = ":";
+
+/// A repository as a read is put to it: where it is, and any object store it may
+/// read besides its own.
+///
+/// A checkout answers about the base out of the objects it holds, and one that has
+/// not fetched since before a landing holds none of the commit that landed. Rather
+/// than fetch — a report takes no lease and writes nothing, and the repository it
+/// would write to is somebody's working copy — the reads that decide a landing are
+/// pointed at the object store of the checkout that *has* fetched, through git's own
+/// alternates mechanism. Objects and nothing else: refs, config and the worktree stay
+/// the asked repository's own, so what is borrowed is the ability to *read* a commit
+/// this copy never fetched.
+///
+/// Every read takes one of these rather than a path, and a path converts into one
+/// that borrows nothing — so a call site that has no store to lend says so by saying
+/// nothing, and the only sites that differ are the ones that mean to.
+#[derive(Debug, Clone, Copy)]
+pub struct Asked<'a> {
+    at: &'a Path,
+    borrowing: Option<&'a Path>,
+}
+
+impl<'a> From<&'a Path> for Asked<'a> {
+    fn from(at: &'a Path) -> Self {
+        Asked {
+            at,
+            borrowing: None,
+        }
+    }
+}
+
+impl<'a> From<&'a PathBuf> for Asked<'a> {
+    fn from(at: &'a PathBuf) -> Self {
+        Asked::from(at.as_path())
+    }
+}
+
+impl<'a> Asked<'a> {
+    /// A repository asked while it may also read `objects`, or asked about what it
+    /// holds itself when there is no store to lend it.
+    pub fn borrowing(at: &'a Path, objects: Option<&'a Path>) -> Self {
+        Asked {
+            at,
+            borrowing: objects,
+        }
+    }
+
+    /// Where the command runs, for the reads that name a repository rather than
+    /// asking it anything.
+    pub fn path(self) -> &'a Path {
+        self.at
+    }
+
+    /// The environment one read runs under: the borrowed store, and nothing when
+    /// there is none.
+    fn env(self) -> Vec<(String, String)> {
+        self.reading_also(&[])
+    }
+
+    /// The same, with stores this read supplies itself listed ahead of the borrowed
+    /// one — which is how the one read that redirects git's *primary* object
+    /// directory keeps the repository's own objects readable.
+    ///
+    /// A borrowed store whose path git could not read back out of this variable is
+    /// left out rather than mangled into it: the separator is an ordinary path
+    /// character on Unix, and a value git would read as two directories names
+    /// neither. What that costs is the borrow — never the repository's own stores,
+    /// which are spelled exactly as their caller handed them over — and a repository
+    /// left without the borrow is the state the freshness rule in `landed` answers
+    /// `unknown` for rather than `no`.
+    fn reading_also(self, own: &[PathBuf]) -> Vec<(String, String)> {
+        let mut stores: Vec<String> = own
+            .iter()
+            .map(|store| store.to_string_lossy().into_owned())
+            .collect();
+        let borrowed = self
+            .borrowing
+            .map(|store| store.to_string_lossy().into_owned())
+            .filter(|store| !store.contains(ALTERNATE_SEPARATOR));
+        stores.extend(borrowed);
+        if stores.is_empty() {
+            return Vec::new();
+        }
+        vec![(
+            ALTERNATE_OBJECTS.to_owned(),
+            stores.join(ALTERNATE_SEPARATOR),
+        )]
+    }
+}
+
+/// Run one read against a repository, through whatever it is borrowing.
+fn run_in(asked: Asked<'_>, args: &[&str]) -> Result<Output> {
+    run_with_env(args, Some(asked.at), &asked.env())
+}
+
+/// The same, requiring success.
+fn checked_in(asked: Asked<'_>, args: &[&str]) -> Result<Output> {
+    checked_with_env(args, Some(asked.at), &asked.env())
+}
+
+/// The configured bound for one git command, hook-running or not.
+///
+/// A non-numeric, zero, negative, or infinite value is refused here rather than
+/// silently reverting to unbounded: a misconfigured bound that disables the bound
+/// is the failure this whole module exists to prevent.
+///
+/// It answers as the `Duration` the bound is waited on as, and refuses everything
+/// that is not one — an oversized but finite value among them. Handing a `f64` back
+/// to be converted at the wait would leave a number this function accepted and the
+/// conversion panics on, which is the same misconfiguration arriving as a crash
+/// instead of as the refusal above it.
+///
+/// A `Duration` holding it is not enough either: a bound beyond what an `Instant`
+/// can reach names a moment that never arrives, which is the same unbounded run. By
+/// how much the two spans differ is the platform's, so `Instant` is asked rather
+/// than a constant compared against.
+fn bound_for(bound: Bound) -> Result<Duration> {
+    let (name, default) = bound.knob();
+    let raw = std::env::var_os(name).map(|raw| raw.to_string_lossy().into_owned());
+    let value: f64 = match &raw {
+        None => default,
+        Some(raw) => raw.trim().parse().map_err(|_| Error::Invalid {
+            reason: format!("{name} must be a number of seconds, not {raw:?}"),
+        })?,
+    };
+    // Zero is refused with them rather than by them: a duration can hold it, and a
+    // bound that has already fired is not a bound.
+    match Duration::try_from_secs_f64(value) {
+        Ok(held) if !held.is_zero() && Instant::now().checked_add(held).is_some() => Ok(held),
+        _ => Err(Error::Invalid {
+            reason: format!(
+                "{name} must be a finite number of seconds above zero, and short enough to be \
+                 waited out from now, not {shown:?}",
+                shown = raw.unwrap_or_else(|| value.to_string()),
+            ),
+        }),
+    }
+}
+
+/// Read both bounds, so an unusable one is refused before any command runs.
+pub fn check_bounds() -> Result<()> {
+    bound_for(Bound::Ordinary)?;
+    bound_for(Bound::Hooks)?;
+    Ok(())
+}
+
+/// What this read already answered in process about `fact`, where the checkout is
+/// still admitted to: an answer is only ever given from inside the checkout's turn,
+/// as answering it again would be, so one that could not be admitted now is asked
+/// again — and refused there as it would have been.
+fn recalled_fact(at: &Path, env: &[(String, String)], fact: reads::Fact) -> Option<bool> {
+    let known = reads::fact(at, env, fact)?;
+    crate::checkout_reads::checkout(at).ok()?;
+    Some(known)
+}
+
+/// Whether a repository can reach one commit, through its own object store or the
+/// one a `--shared` clone borrows.
+///
+/// Which is what lets a run clone be asked about a base no ref of its own names:
+/// its remote-tracking refs are frozen at the moment it was cut, but its lender
+/// keeps fetching, and the objects come with the alternates.
+pub fn has_commit<'a>(cwd: impl Into<Asked<'a>>, sha: &Sha) -> bool {
+    let cwd = cwd.into();
+    let env = cwd.env();
+    // Only a whole object id names an immutable commit; anything else is never
+    // answered in process, so it is never remembered either.
+    let fact = ObjectId::parse(&sha.0).map(reads::Fact::Holds);
+    if let Some(answer) = fact
+        .clone()
+        .and_then(|fact| recalled_fact(cwd.path(), &env, fact))
+    {
+        return answer;
+    }
+    if let Some(answer) = crate::native_refs::has_commit(cwd.path(), &env, &sha.0) {
+        if let Some(fact) = fact {
+            reads::learn(cwd.path(), &env, fact, answer);
+        }
+        return answer;
+    }
+    run_in(cwd, &["cat-file", "-e", &format!("{}^{{commit}}", sha.0)])
+        .map(|out| out.ok())
+        .unwrap_or(false)
+}
+
+/// Whether some ref of this repository already reaches `commit`, with the whole
+/// history behind it.
+///
+/// The question [`has_commit`] does not answer: an object can be in a store and be
+/// reachable from nothing, which is an object gc may drop — so a caller deciding
+/// whether a *copy* of some work elsewhere may be let go has to ask this one.
+/// `--not --all` negates every ref at once, so a count of zero says every commit
+/// behind this one is already held down by something here.
+///
+/// A repository git could not be asked answers `false`: the caller acts on this to
+/// decide whether work is safe elsewhere, and "no answer" must never read as "safe".
+// llmlint: ignore[changed_behavior_has_e2e] that answer cannot be staged on its own: a
+// clone borrows its objects from the checkout this asks about, so a checkout git cannot
+// read is a clone it cannot read either, and the close refuses at the count before this
+// is reached — which is the journey `a_close_whose_execution_checkout_is_gone_…` drives.
+// llmlint: ignore[invalid_states_unrepresentable] a revision is whatever git's parser
+// accepts, and this crate's `Sha` validates nothing, so a wrapper would rule out no
+// state — the value comes out of git and goes straight back to it.
+pub fn refs_reach(cwd: &Path, commit: &str) -> bool {
+    run(
+        &["rev-list", "--count", commit, "--not", "--all", "--"],
+        Some(cwd),
+    )
+    .ok()
+    .filter(Output::ok)
+    .is_some_and(|out| out.trimmed() == "0")
+}
+
+/// A ref's commit SHA, or `None` when the repository does not have it.
+pub fn tip(cwd: &Path, reference: &str) -> Option<String> {
+    if let Some(tip) = crate::native_refs::tip(cwd, reference) {
+        return tip;
+    }
+    run(
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        Some(cwd),
+    )
+    .ok()
+    .filter(Output::ok)
+    .map(|out| out.trimmed())
+}
+
+fn runs_repository_hooks(args: &[&str]) -> bool {
+    // A `-c` this crate set on one command says nothing about which command it is.
+    let args = match args {
+        ["-c", _, rest @ ..] => rest,
+        args => args,
+    };
+    HOOK_RUNNING
+        .iter()
+        .any(|command| args.len() >= command.len() && &args[..command.len()] == *command)
+}
+
+/// The child's own exit, collected within the same bound its pipes were read
+/// under, or nothing at all once that bound has passed since `started`.
+///
+/// Output is drained while this waits, but the process's own status is the only
+/// completion signal. A bound that silently stops applying is worse than none,
+/// because the caller who set it believes they are covered.
+///
+/// Between asks it waits on `endings` rather than on the clock. A child's exit
+/// closes the write ends it owns, so an ordinary command's readers reach end of
+/// stream in the same instant it goes and this wakes then — which is the difference
+/// between a captured command costing what it takes and costing what it takes
+/// rounded up to [`EXIT_POLL`]. A reader ending is only ever a prompt to ask again:
+/// a child that closed both streams and kept running has ended them while still
+/// alive, and a pipe an unrelated process holds open never ends at all.
+fn wait_for_exit(
+    child: &mut Child,
+    started: Instant,
+    bound: Duration,
+    endings: &mpsc::Receiver<()>,
+    stop: Option<&dyn Fn() -> bool>,
+) -> Waited {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Waited::Exited(Ok(status)),
+            // A child this process cannot ask about is one it will never collect,
+            // and what an uncollectable run means is said where it was asked for.
+            Err(error) => return Waited::Exited(Err(error)),
+            Ok(None) if started.elapsed() >= bound => return Waited::Elapsed,
+            Ok(None) if stop.is_some_and(|stop| stop()) => return Waited::Stopped,
+            Ok(None) => await_an_ending(endings, EXIT_POLL),
+        }
+    }
+}
+
+/// How the wait on a bounded command ended.
+enum Waited {
+    /// The child exited, or could not be asked about — collected either way.
+    Exited(std::io::Result<ExitStatus>),
+    /// The bound fired first.
+    Elapsed,
+    /// The caller's `stop` said so first.
+    Stopped,
+}
+
+/// Sleep until a reader reports that its stream is over, or `bound`, whichever is
+/// sooner.
+///
+/// `pub(crate)` because a release probe waits on its own readers the same way, and
+/// a second spelling of "a disconnected channel is not a wakeup" would be a second
+/// answer to what a run does once both its readers have already gone.
+pub(crate) fn await_an_ending(endings: &mpsc::Receiver<()>, bound: Duration) {
+    // Both readers having already reported leaves nothing to wait on, and a
+    // disconnected channel answers instantly — so the sleep is still needed, for
+    // exactly the run that has no reader left to hear from.
+    if matches!(
+        endings.recv_timeout(bound),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    ) {
+        std::thread::sleep(bound);
+    }
+}
+
+/// Put a spawned command in a process group of its own.
+///
+/// `pub(crate)` because a release probe is bounded the same way a git command is,
+/// and a second spelling of the group teardown would be a second answer to "what
+/// does a fired bound take down".
+#[cfg(unix)]
+pub(crate) fn detach_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // A group of its own, so the bound has one handle covering every process git
+    // starts however late. Its transport is one git restarts whenever the
+    // connection dies, so a walk of the tree names a set that is already stale.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+pub(crate) fn detach_process_group(_command: &mut Command) {}
+
+/// End every process in a bounded command's own group. See
+/// [`detach_process_group`].
+#[cfg(unix)]
+pub(crate) fn terminate_group(child: &Child) {
+    // SAFETY: `kill` with a negative pid signals the process group. The group is
+    // this child's own, created by `process_group(0)` above, so nothing outside the
+    // command being bounded is reachable from here.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+/// End a command its caller stopped, and every process it started, collected.
+///
+/// What a caller that stopped a command on purpose is owed is either the fact that no
+/// process the command started — a hook's own descendants included — is still running,
+/// waited for rather than assumed, or the reason that could not be confirmed. The
+/// command itself is ended and collected either way. On Unix the tree is the command's
+/// own process group; on Windows it is the job [`Tree::contain`] launched it into.
+fn end_stopped(child: &mut Child, tree: &Tree) -> std::result::Result<(), String> {
+    let terminated = tree.terminate(child);
+    let _ = child.kill();
+    let _ = child.wait();
+    terminated.and_then(|()| tree.await_empty(child.id()))
+}
+
+/// The processes a stoppable command starts, as a handle that can end them all.
+///
+/// On Unix that handle is the process group [`detach_process_group`] gave the command
+/// before it ran, so containment is already atomic and there is nothing more to hold.
+#[cfg(unix)]
+struct Tree;
+
+#[cfg(unix)]
+impl Tree {
+    fn prepare(_command: &mut Command) {}
+
+    fn contain(_child: &mut Child) -> std::result::Result<Self, String> {
+        Ok(Tree)
+    }
+
+    fn terminate(&self, child: &Child) -> std::result::Result<(), String> {
+        terminate_group(child);
+        Ok(())
+    }
+
+    /// Wait until the process group `leader` led has no member left, for at most
+    /// [`REAP_BOUND`].
+    ///
+    /// A descendant reparented to init is reaped there, so a killed group empties on
+    /// its own. The group's id outlives its leader for as long as it has members, and
+    /// no new process is given an id a live group holds.
+    fn await_empty(&self, leader: u32) -> std::result::Result<(), String> {
+        let group = -(leader as libc::pid_t);
+        await_group_empty(leader, REAP_BOUND, || {
+            // SAFETY: signal 0 delivers nothing; it only asks whether the group, which
+            // was the stopped command's own, still has a member.
+            if unsafe { libc::kill(group, 0) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+    }
+}
+
+/// Ask `probe` whether process group `leader` still has a member until it answers
+/// `ESRCH`, the one answer that it has none, for at most `bound`.
+///
+/// Any other answer is asked again, a refusal included. macOS answers `EPERM` rather
+/// than `ESRCH` for a group whose remaining members are killed processes init has not
+/// yet reaped, so a refusal is not the end of the wait; but it may also be a live
+/// member this process may not signal, so a group still refused at the bound is
+/// reported with that refusal rather than taken as empty.
+#[cfg(unix)]
+fn await_group_empty(
+    leader: u32,
+    bound: Duration,
+    mut probe: impl FnMut() -> std::io::Result<()>,
+) -> std::result::Result<(), String> {
+    let deadline = Instant::now() + bound;
+    loop {
+        let answer = probe();
+        if matches!(&answer, Err(refused) if refused.raw_os_error() == Some(libc::ESRCH)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(match answer {
+                Err(refused) => format!(
+                    "asking whether process group {leader} still had a member was still \
+                     refused {}s after it was killed: {refused}",
+                    bound.as_secs()
+                ),
+                Ok(()) => format!(
+                    "process group {leader} still had a running member {}s after it was \
+                     killed",
+                    bound.as_secs()
+                ),
+            });
+        }
+        std::thread::sleep(EXIT_POLL);
+    }
+}
+
+/// The processes a stoppable command starts, as a handle that can end them all.
+///
+/// Windows has no process group to signal, so the command is launched **suspended**,
+/// put in a job object of its own, and only then resumed — so it never executes an
+/// instruction outside the job, and every process it starts (git's hook, and that
+/// hook's descendants) is born inside it. Terminating the job ends all of them.
+///
+/// A command that cannot be contained is ended before it ever runs and refused, rather
+/// than run uncontained: a caller could then stop it only partly, and would be told it
+/// had stopped it whole.
+// llmlint: ignore-block[changed_behavior_has_e2e] Windows-only code no journey can
+// reach: the publication fixture `tests/e2e/world.rs` is Unix-only (POSIX-shell hooks
+// and `gh`), and the manager ruled for onevcs#358 that a Windows publication fixture is
+// follow-up work outside it, drafted as such. The Unix journeys in
+// `publication_watch.rs` hold the same contract through the process group, and this
+// block is type-checked by clippy for `x86_64-pc-windows-msvc`.
+#[cfg(windows)]
+struct Tree(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Tree {
+    fn prepare(command: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+
+    /// Put the suspended `child` in a job of its own and resume it, or end it unrun.
+    fn contain(child: &mut Child) -> std::result::Result<Self, String> {
+        Self::adopt(child).inspect_err(|_| {
+            // Suspended, so it has run nothing and started nothing: ending it here is
+            // the whole of the cleanup.
+            let _ = child.kill();
+            let _ = child.wait();
+        })
+    }
+
+    fn adopt(child: &Child) -> std::result::Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+        // SAFETY: an anonymous job with default security.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(format!(
+                "creating a job object failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // Owned from here, so every early return below closes it.
+        let tree = Tree(job);
+        // SAFETY: the job this value owns, and the handle of a child this process
+        // spawned and still owns.
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0 {
+            return Err(format!(
+                "assigning git to its job object failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        resume_only_thread(child.id())?;
+        Ok(tree)
+    }
+
+    fn terminate(&self, _child: &Child) -> std::result::Result<(), String> {
+        // SAFETY: a job handle this value owns and has not closed.
+        if unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1) } == 0 {
+            return Err(format!(
+                "terminating its job object failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Wait until the job has no live process left, for at most [`REAP_BOUND`].
+    fn await_empty(&self, _leader: u32) -> std::result::Result<(), String> {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        };
+        let deadline = Instant::now() + REAP_BOUND;
+        loop {
+            // SAFETY: zeroed is a valid value of this plain-integer structure.
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a job handle this value owns, and an out structure of exactly the
+            // size the class asks for.
+            let asked = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicAccountingInformation,
+                    (&raw mut info).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if asked == 0 {
+                return Err(format!(
+                    "asking its job object what is still running failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if info.ActiveProcesses == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "{} process(es) of its job object were still running {}s after it was \
+                     terminated",
+                    info.ActiveProcesses,
+                    REAP_BOUND.as_secs()
+                ));
+            }
+            std::thread::sleep(EXIT_POLL);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Tree {
+    fn drop(&mut self) {
+        // SAFETY: the job handle this value owns, closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Resume the one thread of a process created suspended.
+///
+/// The standard library hands back no thread handle, so the thread is found the way
+/// Windows documents for it: a snapshot of the system's threads, filtered by owner. A
+/// process created suspended has exactly one, and any other count is refused rather
+/// than guessed at.
+#[cfg(windows)]
+fn resume_only_thread(pid: u32) -> std::result::Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    let failed = |what: &str| format!("{what} failed: {}", std::io::Error::last_os_error());
+    // SAFETY: a snapshot of every thread on the system; the handle is closed below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(failed("snapshotting threads to resume git"));
+    }
+    let mut threads = Vec::new();
+    // SAFETY: zeroed is a valid value of this plain-integer structure, and `dwSize`
+    // is set to its size as the walk requires.
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+    // SAFETY: the live snapshot, and an entry sized for it.
+    let mut more = unsafe { Thread32First(snapshot, &raw mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            threads.push(entry.th32ThreadID);
+        }
+        // SAFETY: as above.
+        more = unsafe { Thread32Next(snapshot, &raw mut entry) } != 0;
+    }
+    // SAFETY: the snapshot handle opened above, closed once.
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    let [thread] = threads[..] else {
+        return Err(format!(
+            "git was created suspended with {} thread(s) rather than one, so which to resume \
+             is not known",
+            threads.len()
+        ));
+    };
+    // SAFETY: a thread id the snapshot named as the suspended child's own.
+    let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) };
+    if handle.is_null() {
+        return Err(failed("opening git's thread to resume it"));
+    }
+    // SAFETY: the thread handle opened above, closed once after the resume.
+    let resumed = unsafe { ResumeThread(handle) };
+    let error = failed("resuming git");
+    // SAFETY: as above.
+    unsafe {
+        CloseHandle(handle);
+    }
+    if resumed == u32::MAX {
+        return Err(error);
+    }
+    Ok(())
+}
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Neither Unix nor Windows: no tree to hold, so a stopped command is ended alone and
+/// that is said rather than claimed whole.
+#[cfg(not(any(unix, windows)))]
+struct Tree;
+
+#[cfg(not(any(unix, windows)))]
+impl Tree {
+    fn prepare(_command: &mut Command) {}
+
+    fn contain(_child: &mut Child) -> std::result::Result<Self, String> {
+        Ok(Tree)
+    }
+
+    fn terminate(&self, _child: &Child) -> std::result::Result<(), String> {
+        Err("this platform has no way to end the processes it started".to_owned())
+    }
+
+    fn await_empty(&self, _leader: u32) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The longest a stopped command's tree is waited on to empty.
+#[cfg(any(unix, windows))]
+const REAP_BOUND: Duration = Duration::from_secs(5);
+
+#[cfg(not(unix))]
+pub(crate) fn terminate_group(child: &Child) {
+    // No portable group teardown: the bound still fires and the child is killed
+    // below, but a hook's own orphaned children survive it.
+    let _ = child;
+}
+
+/// Whether `path` is inside the working tree of a non-bare repository.
+pub fn is_repo(path: &Path) -> bool {
+    if let Some(found) = crate::native_refs::is_repo(path) {
+        return found;
+    }
+    run(&["rev-parse", "--is-inside-work-tree"], Some(path))
+        .map(|out| out.ok() && out.trimmed() == "true")
+        .unwrap_or(false)
+}
+
+/// The canonical shared git common directory, which every linked worktree of one
+/// checkout resolves to. It is the identity a lock and a merge queue are keyed by.
+pub fn common_dir(cwd: &Path) -> Result<PathBuf> {
+    let value = checked(&["rev-parse", "--git-common-dir"], Some(cwd))?.trimmed();
+    let path = PathBuf::from(&value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(path.canonicalize().unwrap_or(path))
+}
+
+/// The URL configured for a remote.
+pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
+    let value = match crate::native_refs::remote_url(cwd, remote) {
+        Some(value) => value,
+        None => checked(&["remote", "get-url", remote], Some(cwd))?.trimmed(),
+    };
+    if !is_usable_remote(&value) {
+        return Err(Error::Invalid {
+            reason: format!("git remote {remote:?} returned an unusable URL"),
+        });
+    }
+    Ok(value)
+}
+
+/// Whether a value is one a remote's address could be: one line, and not blank.
+///
+/// The rule [`remote_url`] holds git's own answer to, in one place so that it can be
+/// asked from the other end as well — a remote read back out of an event stream is a
+/// file whichever process wrote it, and the value is printed onto a line an operator
+/// reads, where one carrying a newline would forge a second line of that report.
+///
+/// Deliberately no narrower than that. A remote is a URL *or* a path, in any spelling
+/// git accepts, and a build that decided which shapes were allowed would refuse
+/// repositories git is perfectly happy with — this crate's own local-path origins
+/// among them.
+pub fn is_usable_remote(value: &str) -> bool {
+    !value.trim().is_empty() && !value.contains(['\n', '\r'])
+}
+
+/// Whether a remote is configured at all.
+pub fn has_remote(cwd: &Path, remote: &str) -> bool {
+    if crate::native_refs::remote_url(cwd, remote).is_some() {
+        return true;
+    }
+    run(&["remote", "get-url", remote], Some(cwd))
+        .map(|out| out.ok())
+        .unwrap_or(false)
+}
+
+/// Clone `source` into a working-tree-less repository that borrows its objects.
+///
+/// `--shared` records `source` in `objects/info/alternates` instead of copying its
+/// objects and `--no-checkout` skips a working tree the caller never uses, because
+/// every task tree is a linked worktree. The result costs little more than its
+/// refs, so one per run is affordable where one shared clone per repository is not.
+///
+/// What comes back is what became of the clone's own copy of the base — see
+/// [`carry_base`] — which the caller opening a session is the one that can report.
+///
+/// The clone is cut beside `dest` and moved there only once it is whole. A pool slot
+/// cut again in place is still named by the closed records of the sessions it held,
+/// so a sibling's search reads whatever is at `dest`; cut there directly, that search
+/// would meet a repository whose `.git/config` was still being renamed over by the
+/// configuration below, which on Windows it cannot open (see [`append_in_place`]).
+/// Nothing in the clone records its own path, so the move changes nothing in it.
+pub fn clone_sharing(source: &Path, dest: &Path, origin: &str, base: &str) -> Result<BaseCarried> {
+    clone_borrowing(source, source, dest, origin, base)
+}
+
+/// [`clone_sharing`] from `lender`, carrying the hooks `hooks_from` would run.
+///
+/// For a clone whose branch comes from a repository it must not borrow from: a run
+/// clone or a pool slot is read by every sibling session's search, and a slot by the
+/// worker inside it, so a lender's retention keys could only be written into one
+/// while somebody is reading it. Its own objects are borrowed from a registered
+/// checkout anyway, which is the lender asked for here; the branch is fetched out of
+/// `hooks_from` afterwards, and what that repository would verify it with is what it
+/// carries.
+pub fn clone_borrowing(
+    lender: &Path,
+    hooks_from: &Path,
+    dest: &Path,
+    origin: &str,
+    base: &str,
+) -> Result<BaseCarried> {
+    let name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "clone".to_owned());
+    // Its own name in a directory cut for this clone alone — a run root is one
+    // token's, and a slot cut again is emptied first — so nothing else is ever there.
+    let cutting = dest.with_file_name(format!(".{name}.cutting"));
+    match cut_sharing(lender, hooks_from, &cutting, origin, base) {
+        Ok(carried) => {
+            // llmlint: ignore[changed_behavior_has_e2e] a rename between two names in one
+            // directory of the state root, the first of which this process just made and
+            // the second of which nothing else creates, fails only on a filesystem fault;
+            // no interface produces one, and the refusal is what any failed cut answers.
+            std::fs::rename(&cutting, dest).map_err(error::at("move the cut clone to", dest))?;
+            Ok(carried)
+        }
+        Err(refused) => {
+            let _ = std::fs::remove_dir_all(&cutting);
+            Err(refused)
+        }
+    }
+}
+
+/// Every write into a new clone, kept apart from the move into place so that a
+/// sibling's search, which reads whatever is at the destination, only finds it whole.
+fn cut_sharing(
+    source: &Path,
+    hooks_from: &Path,
+    dest: &Path,
+    origin: &str,
+    base: &str,
+) -> Result<BaseCarried> {
+    let source_arg = git_path(source).to_string_lossy();
+    let dest_arg = git_path(dest).to_string_lossy();
+    let origin_arg = git_location(origin);
+    checked(
+        &["clone", "--shared", "--no-checkout", &source_arg, &dest_arg],
+        None,
+    )?;
+    // A lender with no origin of its own is lent as itself, which is the URL the
+    // clone was just given: asked again, git would rewrite the file to say the same.
+    if run(&["remote", "get-url", "origin"], Some(dest))?.trimmed() != origin_arg.as_ref() {
+        checked(
+            &["remote", "set-url", "origin", origin_arg.as_ref()],
+            Some(dest),
+        )?;
+    }
+    let carried = carry_remote_refs(source, dest, base)?;
+    carry_hooks(hooks_from, dest)?;
+    if source != hooks_from {
+        lfs::carry(source, hooks_from, dest)?;
+    }
+    Ok(carried)
+}
+
+/// Give the clone the lender's *remote-tracking* refs rather than its local branches.
+///
+/// Cloning from a local path maps the lender's **local branches** into the clone's
+/// `refs/remotes/origin/*`, and consults the lender's own remote-tracking refs
+/// nowhere: a clone of a checkout whose `main` is behind therefore reads
+/// `origin/main` as a commit origin left long ago, however recently the lender
+/// fetched. Everything a session computes afterwards is addressed from that ref —
+/// where its worktree is cut, every `origin/<base>..HEAD` its work is judged by, the
+/// base the merge-path gate replays against — so the clone is given the lender's
+/// view of origin here, once, before anything reads it.
+///
+/// A ref update and not a second download: the lender has just fetched and the clone
+/// borrows its object store, so every commit these refs name is already reachable
+/// and git transfers nothing.
+pub fn carry_remote_refs(source: &Path, dest: &Path, base: &str) -> Result<BaseCarried> {
+    lfs::carry(source, source, dest)?;
+    if has_remote(source, "origin") {
+        let source_arg = git_path(source).to_string_lossy();
+        // Through the clone's fetch lock, and run again on a lost race, like every
+        // fetch into a checkout: a recovery read may be writing this clone's
+        // remote-tracking refs ([`fetch_tracking`], [`record_on_origin`]) as a reused
+        // slot is taken, and losing to it would refuse the open over nothing.
+        fetch_checked(
+            dest,
+            &[
+                "fetch",
+                "--no-tags",
+                &source_arg,
+                // Forced, because these are remote-tracking refs rather than
+                // history: what origin holds now is the answer even where the
+                // lender's local branch of that name is not an ancestor of it.
+                //
+                // Deliberately not pruned. What the clone already holds is the
+                // lender's *local* branches under these same names, and for a
+                // branch origin has never seen that mapping is the clone's only
+                // route to it — a session stacked on the change below it is cut
+                // from exactly such a branch. Copying over them takes nothing away.
+                "+refs/remotes/origin/*:refs/remotes/origin/*",
+            ],
+        )?;
+    }
+    // After the copy, which overwrites `origin/HEAD` with whatever the lender's own
+    // copy of it resolved to — a plain ref where this needs a symbolic one. Asked
+    // first, because `symbolic-ref` renames a new file over the ref even to write the
+    // value it holds, and a reused slot's clone is read by every sibling's search.
+    let head = format!("refs/remotes/origin/{base}");
+    if run(
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        Some(dest),
+    )?
+    .trimmed()
+        != head
+    {
+        checked(
+            &["symbolic-ref", "refs/remotes/origin/HEAD", &head],
+            Some(dest),
+        )?;
+    }
+    carry_base(dest, base)
+}
+
+/// What became of a clone's own local copy of the base once origin's view of it had
+/// been carried in.
+///
+/// Only [`Kept`](BaseCarried::Kept) is anything an operator has to hear about, and
+/// that is why this is a value rather than a line printed here: the caller that
+/// opened the session is the one that can say which session found it and what to do
+/// about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseCarried {
+    /// Nothing to bring the local branch up to, or nothing to bring it up *by*: it
+    /// stood at origin's commit already, the clone has no local branch of that name —
+    /// where the bare name resolves to the remote-tracking ref anyway — or the clone
+    /// carries no `origin/<base>` at all.
+    Aligned,
+    /// It was behind, and was fast-forwarded onto origin's commit.
+    Advanced,
+    /// It carries a commit `origin/<base>` does not, so it was left exactly where it
+    /// was found.
+    Kept {
+        /// The commit the local branch holds.
+        local: String,
+        /// The one `origin/<base>` holds.
+        origin: String,
+    },
+}
+
+/// Bring the clone's own `refs/heads/<base>` up to the `origin/<base>` beside it.
+///
+/// The clone got that local branch from the lender at clone time and nothing touched
+/// it afterwards, so it carries whatever the lender's own checkout of the base
+/// happened to stand at — which is exactly what [`carry_remote_refs`] has just
+/// corrected for the remote-tracking refs. Every ref this crate computes from goes
+/// through `origin/<base>` and is unaffected; what is not is the bare name, which is
+/// what a person working in the session's worktree types. A `main` that resolves to a
+/// commit origin left days ago judges already-landed work as the session's own.
+///
+/// **Forward only.** A local base holding a commit origin's does not is somebody's
+/// unpushed work, reachable from nothing else once the clone is let go, so it is
+/// neither rewritten nor discarded — the answer comes back and the caller says what
+/// was found.
+fn carry_base(cwd: &Path, base: &str) -> Result<BaseCarried> {
+    let local_ref = format!("refs/heads/{base}");
+    let (Some(local), Some(origin)) = (
+        tip(cwd, &local_ref),
+        tip(cwd, &format!("refs/remotes/origin/{base}")),
+    ) else {
+        return Ok(BaseCarried::Aligned);
+    };
+    if local == origin {
+        return Ok(BaseCarried::Aligned);
+    }
+    if !is_ancestor(cwd, &local, &origin)? {
+        return Ok(BaseCarried::Kept { local, origin });
+    }
+    // Nothing may have the branch checked out while it moves, or that worktree's
+    // index and tree would go on describing a commit it no longer stands at. The
+    // clone's own HEAD is the one thing that can name it — `git clone` leaves HEAD on
+    // the branch it cloned — and the clone is cut `--no-checkout`, so handing the
+    // name back costs it nothing it uses; every populated worktree of a session or a
+    // landing is on the branch being worked or detached, never on the base.
+    if current_branch(cwd)? == base {
+        detach_head(cwd)?;
+    }
+    update_ref(cwd, &local_ref, &origin)?;
+    Ok(BaseCarried::Advanced)
+}
+
+/// Give the clone the hook *configuration* its published content expects.
+///
+/// `git clone` does not copy repository-local config, so without this the
+/// publishing push made from a session's clone would run no `pre-push` hook at
+/// all — and the merge-path gate an identity is covered by would silently not run
+/// on the one push it exists to gate.
+///
+/// A relative `core.hooksPath` belongs to the checkout whose content is being
+/// published: git resolves it from that checkout's top level. Keep it relative so
+/// a branch which changes its own gate is judged by that change in the publication
+/// worktree, and so [`message_policy`] and the later push ask the same repository.
+/// This lets a branch supply the hook that verifies itself, but pointing at the
+/// lender is less safe for `local-direct`: its `pre-push` hook is the whole merge
+/// path, and the sole verifier would otherwise never see changes to itself.
+///
+/// An absolute path is an operator-selected hook installation and retains that
+/// exact meaning. Hooks which depend on installed development tooling remain the
+/// repository's responsibility: publication clones do not install dependencies.
+fn carry_hooks(source: &Path, dest: &Path) -> Result<()> {
+    let Some(hooks) = carried_hooks(source)? else {
+        return Ok(());
+    };
+    checked(
+        &[
+            "config",
+            "core.hooksPath",
+            &git_path(&hooks).to_string_lossy(),
+        ],
+        Some(dest),
+    )
+    .map(|_| ())
+}
+
+/// The `core.hooksPath` a publication clone cut from `source` is given, or none.
+///
+/// One answer for the clone that is cut and for a resumed publication that cuts none
+/// (`verified.rs`), so the two cannot come to disagree about which hooks verified a
+/// branch.
+pub fn carried_hooks(source: &Path) -> Result<Option<PathBuf>> {
+    if let Some(configured) = configured_hooks(source)? {
+        return Ok(Some(configured));
+    }
+    Ok(source
+        .join(".githooks")
+        .is_dir()
+        .then(|| PathBuf::from(".githooks")))
+}
+
+/// The `core.hooksPath` a checkout's git reads, exactly as it is configured.
+pub fn configured_hooks(cwd: &Path) -> Result<Option<PathBuf>> {
+    let configured = run(&["config", "--get", "core.hooksPath"], Some(cwd))?.trimmed();
+    Ok((!configured.is_empty()).then(|| PathBuf::from(configured)))
+}
+
+/// Stop a repository from deleting objects a borrowing clone still needs.
+///
+/// A clone made with `--shared` reads its history out of *this* object store, and
+/// git offers the lender no way to learn that. Disabling automatic gc and refusing
+/// to expire unreachable objects makes the lender safe to borrow from: nothing it
+/// does on its own can drop an object out from under a live session.
+pub fn retain_objects_for_borrowers(cwd: &Path) -> Result<()> {
+    // Concurrent branch publications configure the same lender before taking
+    // their publication turn. Guard both writes with a resource-owned lock so
+    // worktrees and processes using different state roots share the guard too.
+    #[cfg(unix)]
+    let common = crate::native_refs::layout(cwd)
+        .map(|(_, common)| common)
+        .map_or_else(|| common_dir(cwd), Ok)?;
+    #[cfg(not(unix))]
+    let common = common_dir(cwd)?;
+    let _configuration = lock::exclusive_at(&common.join("onevcs-retention.lock"))?;
+    let mut missing = Vec::new();
+    for (key, value) in RETENTION {
+        if local_setting(cwd, key)?.as_deref() != Some(value) {
+            missing.push((key, value));
+        }
+    }
+    append_in_place(&common, &missing)
+}
+
+/// A repository's own value for `key`, or `None` where it sets none.
+///
+/// `git config --get` answers 1 for a key that is not set and something else for a
+/// configuration it could not read; only the first is an absent setting; the second is
+/// refused, so a file git cannot read is never taken for one that lacks the keys and
+/// written to.
+///
+/// Read in process where the file can only answer as git would
+/// ([`native_refs::local_value`](crate::native_refs::local_value)), which declines a
+/// file it cannot parse, so such a file still reaches git and its refusal.
+fn local_setting(cwd: &Path, key: &str) -> Result<Option<String>> {
+    if let Some(answer) = crate::native_refs::local_value(cwd, key) {
+        return Ok(answer);
+    }
+    let held = run(&["config", "--local", "--get", key], Some(cwd))?;
+    match held.status {
+        0 => Ok(Some(held.trimmed())),
+        1 => Ok(None),
+        _ => Err(error::invalid(format!(
+            "git could not read {key} in {}: {}",
+            cwd.display(),
+            held.diagnostic()
+        ))),
+    }
+}
+
+/// What [`retain_objects_for_borrowers`] writes into a lender's own configuration.
+const RETENTION: [(&str, &str); 2] = [("gc.auto", "0"), ("gc.pruneExpire", "never")];
+
+/// Whether a repository's own configuration already holds every retention key, asked
+/// without writing anything — so a caller can decide whether the write it would need
+/// has to wait for the repository's readers first.
+pub fn retains_objects_for_borrowers(cwd: &Path) -> Result<bool> {
+    for (key, value) in RETENTION {
+        if local_setting(cwd, key)?.as_deref() != Some(value) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Add settings to the end of a repository's own configuration without replacing the
+/// file, so no reader of it ever meets a moment it cannot be opened, nor contents it
+/// cannot parse.
+///
+/// `git config` writes a whole new file and renames it over `config`, and on Windows
+/// that rename is a moment a concurrent git command cannot open the file at all: Git
+/// for Windows reads its configuration through `_wfopen`, which does not share
+/// deletion, so a git read beside it fails with `unable to access '.git/config':
+/// Permission denied`. A lender's configuration is read by every session of it and by
+/// whatever else works in the checkout, none of which a lock of this crate's reaches.
+/// Writing into the file that is there opens it for writing alone, which every
+/// reader's sharing admits.
+///
+/// What a reader can see of the write instead is planned by [`addition`]. Git parses a
+/// configuration through stdio, one buffered `read` after another, until one finds the
+/// end — so a reader can hold the file's old end from one `read` and be handed what has
+/// been appended since by the next, and on Linux a write that crosses a page can be
+/// seen in part. NTFS shows a reader no part of a write at the end of a file until the
+/// whole of it is in place ([MS-FSA] 2.1.5.4: the stream's size and valid data length
+/// move only "upon successful completion"), and Linux puts each page's bytes in place
+/// before moving the size, so neither hands a reader zeros. Git's own `config.lock` is
+/// held throughout, so no `git config` can read the file before these writes and
+/// rename its copy over them after.
+fn append_in_place(common: &Path, settings: &[(&str, &str)]) -> Result<()> {
+    if settings.is_empty() {
+        return Ok(());
+    }
+    let config = git_path(common).join("config");
+    let lock = git_path(common).join("config.lock");
+    let _held = ConfigLock::take(&lock)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&config)
+        .map_err(error::at("open the configuration at", &config))?;
+    let mut content = Vec::new();
+    (&file)
+        .read_to_end(&mut content)
+        .map_err(error::at("read the configuration at", &config))?;
+    for step in addition(&content, settings) {
+        put(&file, step.at, &step.bytes)
+            .map_err(error::at("write the configuration at", &config))?;
+    }
+    Ok(())
+}
+
+/// One write [`addition`] makes: these bytes, at this offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Step {
+    at: u64,
+    bytes: Vec<u8>,
+}
+
+/// The writes that add `settings` to a configuration holding `content`, in order.
+///
+/// The settings are appended as one comment, `#[gc] auto = 0#[gc] pruneExpire = never`,
+/// and then each leading `#` becomes a line end in turn, one byte in place, which a reader sees
+/// as either byte. Every part of the appended text a reader can be shown — any prefix
+/// of it, whether behind the file's last line or behind a line end the reader read
+/// before the write began — starts with `#`, so it is comment until a whole setting is
+/// put in force by its own line end. That holds for any file git reads: one ending in
+/// a line end, empty, or ending in a line a backslash continues, where the comment is
+/// the continued value's own. A last line with no end of its own is given one first:
+/// git reads the end of the file as a line end, so a value continued into it ends
+/// there, and a `#` written straight after its backslash would be an escape git
+/// refuses — and, once that `#` is a line end, a continuation taking the next setting
+/// into the value. A write that fails leaves such a state, and the next attempt appends
+/// after it.
+fn addition(content: &[u8], settings: &[(&str, &str)]) -> Vec<Step> {
+    let length = content.len() as u64;
+    let ended = content.last().is_none_or(|last| *last == b'\n');
+    let mut appended = if ended {
+        String::new()
+    } else {
+        "\n".to_owned()
+    };
+    let mut markers = Vec::new();
+    for (key, value) in settings {
+        markers.push(appended.len());
+        let (section, name) = key.split_once('.').unwrap_or(("core", key));
+        appended.push_str(&format!("#[{section}] {name} = {value}"));
+    }
+    let mut steps = vec![Step {
+        at: length,
+        bytes: appended.into_bytes(),
+    }];
+    steps.extend(markers.into_iter().map(|at| Step {
+        at: length + at as u64,
+        bytes: b"\n".to_vec(),
+    }));
+    steps
+}
+
+/// Write `bytes` at `at`, however many writes that takes.
+fn put(file: &std::fs::File, at: u64, bytes: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        #[cfg(unix)]
+        let wrote =
+            std::os::unix::fs::FileExt::write_at(file, &bytes[written..], at + written as u64)?;
+        #[cfg(windows)]
+        let wrote = std::os::windows::fs::FileExt::seek_write(
+            file,
+            &bytes[written..],
+            at + written as u64,
+        )?;
+        if wrote == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        written += wrote;
+    }
+    Ok(())
+}
+
+/// Git's own lock on a repository's configuration, held while it is written and
+/// removed when dropped — the file every `git config` takes before it writes.
+struct ConfigLock(PathBuf);
+
+impl ConfigLock {
+    /// Take it, waiting a little for a `git config` that holds it: git holds it only
+    /// for the length of one write.
+    fn take(path: &Path) -> Result<Self> {
+        let started = Instant::now();
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => return Ok(Self(path.to_path_buf())),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::AlreadyExists
+                        && started.elapsed() < Duration::from_secs(10) =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(error::at("take git's configuration lock at", path)(e)),
+            }
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The object store a checkout keeps its own history in, which is what another
+/// repository is given to read when it is asked about a commit it never fetched.
+pub fn objects_dir(cwd: &Path) -> Result<PathBuf> {
+    if let Some(objects) = crate::native_refs::objects_dir(cwd) {
+        return Ok(objects);
+    }
+    git_owned_path(cwd, "objects")
+}
+
+/// Git's effective hooks directory for a checkout, honouring `core.hooksPath`.
+pub fn hooks_dir(cwd: &Path) -> Result<PathBuf> {
+    // Git resolves this one name against `core.hooksPath` rather than against the
+    // git directory, which is why asking git is the only way to get the answer a
+    // repository configured for itself.
+    git_owned_path(cwd, "hooks")
+}
+
+/// A path git owns for a checkout, resolved by git rather than composed here.
+fn git_owned_path(cwd: &Path, name: &str) -> Result<PathBuf> {
+    let value = checked(&["rev-parse", "--git-path", name], Some(cwd))?.trimmed();
+    let path = PathBuf::from(&value);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
+const COMMIT_MSG_HOOK: &str = "commit-msg";
+
+/// What a repository's own `commit-msg` hook said about a message.
+///
+/// A repository that states no policy is a case of its own rather than an
+/// acceptance: a caller has to be able to tell "nobody was asked" from "the
+/// repository looked and was satisfied", because the first owes an operator no
+/// output at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessagePolicy {
+    /// The repository has no executable `commit-msg` hook, so it states no policy.
+    Unstated,
+    /// The hook ran and accepted the message.
+    Accepted,
+    /// The hook ran and turned the message down, keeping everything it wrote.
+    Rejected {
+        /// What the hook exited with, which a rejection cannot have been nought.
+        status: NonZeroI32,
+        /// Everything the hook wrote, both streams, whole.
+        output: String,
+    },
+}
+
+/// Ask a repository's own `commit-msg` hook about one message, the way git asks.
+///
+/// git hands that hook a single argument — the path to a file holding the message
+/// — and reads its exit status as the verdict, so a hook a repository already runs
+/// at `git commit` answers here unchanged. Where the hook lives is [`hooks_dir`],
+/// which is `core.hooksPath` wherever the repository configures one, and how long
+/// it may take is the hook-running bound every other hook in this module runs
+/// under. The message file is written where git writes `COMMIT_EDITMSG` — inside
+/// the git directory — and removed afterwards.
+///
+/// Two things are deliberately *not* done here. A hook that cannot be run at all
+/// is an `Err` and never a verdict: a repository that could not answer has not said
+/// yes. And a hook that rewrites the message file in place is not taken up — git
+/// commits the rewrite because the commit is git's to compose, whereas the subject
+/// asked about here is already composed, and for a change request's title there is
+/// no commit anywhere for a rewrite to reach.
+pub fn message_policy(cwd: &Path, message: &str) -> Result<MessagePolicy> {
+    let hook = hooks_dir(cwd)?.join(COMMIT_MSG_HOOK);
+    if !is_executable(&hook)? {
+        return Ok(MessagePolicy::Unstated);
+    }
+    let file = git_owned_path(cwd, &format!("onevcs-{COMMIT_MSG_HOOK}-{}", ids::unique()))?;
+    // llmlint: ignore[changed_behavior_has_e2e] the only failure this maps is the
+    // filesystem refusing a write inside the git directory of a clone this run cut
+    // itself, under the state root, moments earlier — there is no point at which a
+    // journey could reach it, and every operation that already wrote to that same
+    // directory (the clone, the worktree, the base merge) would have failed first.
+    std::fs::write(&file, format!("{}\n", message.trim_end())).map_err(error::at(
+        "write the message judged by the commit-msg hook to",
+        &file,
+    ))?;
+    let mut command = Command::new(git_path(&hook));
+    command.arg(git_path(&file));
+    // The hook starts where git would start it with nothing pointing it elsewhere,
+    // so a git command it runs in a fixture acts on that fixture — see
+    // [`local_env_vars`].
+    for name in local_env_vars()? {
+        command.env_remove(name);
+    }
+    let ran = bounded(
+        command,
+        Some(cwd),
+        &[],
+        Bound::Hooks,
+        &format!("the {COMMIT_MSG_HOOK} hook at {}", hook.display()),
+        |e| {
+            error::invalid(format!(
+                "cannot run the {COMMIT_MSG_HOOK} hook at {}: {e}",
+                hook.display()
+            ))
+        },
+        Ending {
+            stop: None,
+            elapse: Elapse::Refuse,
+            input: None,
+        },
+    );
+    let _ = std::fs::remove_file(&file);
+    let ran = ran?;
+    Ok(match NonZeroI32::new(ran.status) {
+        None => MessagePolicy::Accepted,
+        Some(status) => MessagePolicy::Rejected {
+            status,
+            output: format!("{}{}", prose(&ran.stdout), prose(&ran.stderr)),
+        },
+    })
+}
+
+/// Whether git would run this file as a hook.
+///
+/// The executable bit, which is git's own test: a `commit-msg` that is present but
+/// not executable is a hook git skips, and skipping it here is what keeps the two
+/// answering the same.
+///
+/// A hook that is not there is `false`; a hook the filesystem would not answer for
+/// is an error. The two are not the same statement, and reading the second as the
+/// first is how a repository that does state a policy has none applied.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file() && meta.permissions().mode() & 0o111 != 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(unaskable(path, &error)),
+    }
+}
+
+/// Whether git would run this file as a hook.
+///
+/// Windows carries no executable bit, so presence is the test — which is what Git
+/// for Windows does too. A hook it can only run through its bundled shell is
+/// reported as one that cannot be run rather than passed silently.
+// llmlint: ignore[changed_behavior_has_e2e] the fixture every hook journey is driven
+// through is Unix-only by design and says so at its head: a fired bound has to take a
+// process *group*, which has no portable spelling, and the hooks a repository this
+// tool drives carries are POSIX shell. Windows CI builds the crate and runs the
+// contract, boundary, and packaging suites; a journey here would not run there.
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(unaskable(path, &error)),
+    }
+}
+
+/// The refusal that the filesystem would not say whether a hook is one git runs.
+fn unaskable(path: &Path, error: &std::io::Error) -> Error {
+    error::invalid(format!(
+        "cannot tell whether the {COMMIT_MSG_HOOK} hook at {} is one git would run: {error}",
+        path.display()
+    ))
+}
+
+/// The file in a checkout's common directory that fetches into it take turns under.
+pub const FETCH_LOCK: &str = "onevcs-fetch.lock";
+
+/// Update remote-tracking refs. Deliberately performed outside every exclusive
+/// section, so one slow origin cannot hold another session out.
+///
+/// Fetches into one checkout still take turns, under a lock of their own held for
+/// the fetch and nothing else. Two of them update the same `refs/remotes/<remote>/*`,
+/// and git's ref transaction fails the second with `cannot lock ref` even where the
+/// ref already holds the value it wanted: a session opening while a landing
+/// fast-forwards the same registered checkout would fail on a spurious conflict.
+///
+/// The lock is [`FETCH_LOCK`] in the checkout's common directory, so fetches into two
+/// checkouts never wait on each other, and every process fetching into this one takes
+/// turns whichever state root it runs under. It is not the checkout's publication
+/// lock, which is held across whole publications — exactly the section fetches are
+/// kept outside of. And it is dropped on every return: a fetch git failed, or whose
+/// process was killed, leaves the next one free to run.
+///
+/// The lock orders fetches against each other and against [`record_on_origin`], but
+/// not against a push: git moves the pushing checkout's `refs/remotes/<remote>/<branch>`
+/// itself once the remote takes the update, and a push runs the repository's whole
+/// `pre-push` gate, which no fetch may wait behind. A fetch that loses its ref
+/// transaction to such a write is therefore run again — see [`fetch_settled`].
+pub fn fetch(cwd: &Path, remote: &str) -> Result<()> {
+    fetch_checked(cwd, &["fetch", remote, "--prune"]).map(|_| ())
+}
+
+/// [`fetch_settled`], turning a failure that was not a lost race into the error
+/// [`checked`] would have named it with.
+fn fetch_checked(cwd: &Path, args: &[&str]) -> Result<Output> {
+    let output = fetch_settled(cwd, args)?;
+    if output.ok() {
+        return Ok(output);
+    }
+    Err(Error::Invalid {
+        reason: format!(
+            "git {} failed (exit {}): {}",
+            args.join(" "),
+            output.status,
+            output.diagnostic()
+        ),
+    })
+}
+
+/// The pause before a fetch that lost its ref transaction is run again, doubled after
+/// each further loss up to [`FETCH_RERUN_PAUSE_LIMIT`], so a writer mid-way through a
+/// burst of updates is given room to finish rather than raced again at once.
+const FETCH_RERUN_FIRST_PAUSE: Duration = Duration::from_millis(10);
+
+/// The longest pause between two runs of a fetch that keeps losing its transaction.
+const FETCH_RERUN_PAUSE_LIMIT: Duration = Duration::from_millis(500);
+
+/// Run one fetch under the checkout's [`FETCH_LOCK`], running it again for as long as
+/// it fails only because another process moved one of the refs it was updating.
+///
+/// git reads every ref a fetch will update before it transfers anything, and commits
+/// the updates in one transaction afterwards, each leased on the value it read. A
+/// write landing in between — a push from this checkout, or any process writing its
+/// remote-tracking refs outside the lock — fails that transaction with `cannot lock
+/// ref`, though nothing about the fetch was wrong: what origin holds is still exactly
+/// what it was asked for. Run again, the fetch reads the moved ref and answers.
+///
+/// No count of losses ends it, because any count is one a busy host's writers can
+/// exceed: churn that ends is outlasted, however many updates it made. What bounds it
+/// is the wait a fetch already accepts for its turn ([`lock::TIMEOUT_ENV`]) — a ref
+/// rewritten without pause for that long is an error naming the bound, never git's
+/// refusal of one run, which would read as the fetch having been wrong. Every other
+/// failure is returned as git wrote it, on its first run.
+fn fetch_settled(cwd: &Path, args: &[&str]) -> Result<Output> {
+    let seconds = lock::timeout_seconds()?;
+    let bound = Duration::try_from_secs_f64(seconds).map_err(|_| Error::Invalid {
+        reason: format!(
+            "{env} must be a number of seconds a wait can be measured in, not {seconds:e}",
+            env = lock::TIMEOUT_ENV
+        ),
+    })?;
+    fetching(cwd, || {
+        let started = Instant::now();
+        let mut pause = FETCH_RERUN_FIRST_PAUSE;
+        let mut lost = 0_usize;
+        loop {
+            let output = run(args, Some(cwd))?;
+            if output.ok() || !lost_ref_race(&output.stderr) {
+                return Ok(output);
+            }
+            lost += 1;
+            if started.elapsed() + pause > bound {
+                return Err(Error::Invalid {
+                    reason: format!(
+                        "git {command} lost its ref update to another writer on each of its \
+                         {lost} runs over {waited:.1}s, which is as long as a fetch waits for \
+                         its turn ({env}); something is rewriting the remote-tracking refs of \
+                         {checkout} without pause. Each run left every ref either at origin's \
+                         commit or at that writer's. Run it again once that writer stops, or \
+                         raise {env}",
+                        command = args.join(" "),
+                        waited = started.elapsed().as_secs_f64(),
+                        env = lock::TIMEOUT_ENV,
+                        checkout = cwd.display(),
+                    ),
+                });
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(FETCH_RERUN_PAUSE_LIMIT);
+        }
+    })
+}
+
+/// Whether git refused a ref update only because another process wrote, or was
+/// writing, that ref while this command ran.
+///
+/// Two failures, of a lease or a lock a concurrent writer took: the ref is not at the
+/// value read, and another writer held its lock file for longer than git waits for
+/// one. Each has two wordings, because git words a fetch's refusal by version: an
+/// older git (2.43 among them) commits one transaction per ref and refuses with
+/// `cannot lock ref` (`but expected`, `File exists`); a newer one (2.53 among them)
+/// commits them as one batch that lets a single ref fail, and names that ref with
+/// `fetching ref <ref> failed:` and the batch's reason (`incorrect old value
+/// provided`, and `reference already exists` for a held lock). A ref the fetch creates is written with no lease, so another writer
+/// creating it first fails nothing on either. A ref git refuses for a reason of its
+/// own — a name that collides with a directory of refs (`ref name conflict`) among
+/// them — is neither, and is never run again.
+fn lost_ref_race(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        (line.contains("cannot lock ref")
+            && (line.contains("but expected") || line.contains("File exists")))
+            || (line.contains("fetching ref ")
+                && (line
+                    .trim_end()
+                    .ends_with("failed: incorrect old value provided")
+                    || line
+                        .trim_end()
+                        .ends_with("failed: reference already exists")))
+    })
+}
+
+/// Release read turns before queueing for a fetch, and release the fetch lock
+/// before regaining them. A census can need objects while another pass fetches.
+fn fetching<T>(cwd: &Path, fetch: impl FnOnce() -> Result<T>) -> Result<T> {
+    let path = common_dir(cwd)?.join(FETCH_LOCK);
+    crate::checkout_reads::mutating(|| {
+        let _turn = lock::exclusive_at(&path)?;
+        fetch()
+    })
+}
+
+thread_local! {
+    static LOCAL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `read` with [`default_branch`] answering from the checkout's own refs: its
+/// `origin/HEAD`, then `origin/main` or `origin/master`. Nothing in it asks the remote,
+/// which is what a recovery read may never do.
+pub(crate) fn local_only<T>(read: impl FnOnce() -> T) -> T {
+    let before = LOCAL_ONLY.with(|flag| flag.replace(true));
+    let answer = read();
+    LOCAL_ONLY.with(|flag| flag.set(before));
+    answer
+}
+
+/// Why [`default_branch`] reading locally found no base, the row's stated reason.
+pub(crate) const NO_LOCAL_BASE: &str = "this checkout holds no origin/HEAD, origin/main or origin/master, so there is no base to compare the branch with";
+
+/// The remote's default branch, refusing to guess when the answer is ambiguous.
+///
+/// `<remote>/HEAD` is a cache of the answer and not the answer itself: a remote
+/// added by hand never has one, and only git 2.49 and later restore it during a
+/// fetch. Asking the remote what it advertises is what makes this the same answer
+/// on every git rather than one that depends on the operator's version, and a
+/// guess is only reached when the remote itself declines to say.
+pub fn default_branch(cwd: &Path, remote: &str) -> Result<String> {
+    if let Some(branch) = tracked_head(cwd, remote)? {
+        return Ok(branch);
+    }
+    if LOCAL_ONLY.with(std::cell::Cell::get) {
+        return ["main", "master"]
+            .into_iter()
+            .find(|name| ref_exists(cwd, &format!("refs/remotes/{remote}/{name}")))
+            .map(str::to_owned)
+            .ok_or_else(|| error::invalid(NO_LOCAL_BASE));
+    }
+    if let Some(branch) = advertised_head(cwd, remote)? {
+        return Ok(branch);
+    }
+    let mut candidates: Vec<String> = checked(
+        &[
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            &format!("refs/remotes/{remote}"),
+        ],
+        Some(cwd),
+    )?
+    .stdout
+    .lines()
+    .filter(|line| !line.is_empty() && *line != "HEAD")
+    .map(str::to_owned)
+    .collect();
+    candidates.sort();
+    candidates.dedup();
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    if candidates.is_empty() {
+        let current = run(&["symbolic-ref", "--quiet", "--short", "HEAD"], Some(cwd))?.trimmed();
+        if !current.is_empty() {
+            return Ok(current);
+        }
+    }
+    let detail = if candidates.is_empty() {
+        "none".to_owned()
+    } else {
+        candidates.join(", ")
+    };
+    Err(Error::Invalid {
+        reason: format!(
+            "cannot determine the default branch of remote {remote:?}: {remote}/HEAD is missing \
+             or stale, the remote advertises no HEAD of its own, and the plausible remote \
+             branches are {detail}; pass an explicit --base"
+        ),
+    })
+}
+
+/// The branch `<remote>/HEAD` names, when it names one that is still there.
+fn tracked_head(cwd: &Path, remote: &str) -> Result<Option<String>> {
+    let reference = format!("refs/remotes/{remote}/HEAD");
+    if let Some(target) = crate::native_refs::symbolic(cwd, &reference) {
+        return Ok(target
+            .and_then(|target| {
+                target
+                    .strip_prefix(&format!("refs/remotes/{remote}/"))
+                    .map(str::to_owned)
+            })
+            .filter(|branch| ref_exists(cwd, &format!("refs/remotes/{remote}/{branch}"))));
+    }
+    let named = run(
+        &[
+            "symbolic-ref",
+            "--short",
+            &format!("refs/remotes/{remote}/HEAD"),
+        ],
+        Some(cwd),
+    )?
+    .trimmed();
+    let Some(branch) = named.strip_prefix(&format!("{remote}/")) else {
+        return Ok(None);
+    };
+    Ok(ref_exists(cwd, &format!("refs/remotes/{named}")).then(|| branch.to_owned()))
+}
+
+/// The branch the remote itself says its HEAD is.
+///
+/// A remote whose HEAD dangles — the default branch renamed or deleted out from
+/// under it — advertises no symref at all, which is exactly the case that must
+/// fall through to asking for an explicit base rather than picking a branch. An
+/// unreachable remote falls through too: local knowledge is worse than the
+/// remote's own answer but better than failing where a guess would have done.
+fn advertised_head(cwd: &Path, remote: &str) -> Result<Option<String>> {
+    if let Some(branch) = crate::native_refs::advertised_head(cwd, remote) {
+        return Ok(Some(branch));
+    }
+    let listing = run(&["ls-remote", "--symref", remote, "HEAD"], Some(cwd))?;
+    if !listing.ok() {
+        return Ok(None);
+    }
+    Ok(listing.stdout.lines().find_map(|line| {
+        line.strip_prefix("ref: refs/heads/")
+            .and_then(|rest| rest.split('\t').next())
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned)
+    }))
+}
+
+/// Whether a fully spelled ref exists.
+pub fn ref_exists(cwd: &Path, reference: &str) -> bool {
+    if let Some(tip) = crate::native_refs::tip(cwd, reference) {
+        return tip.is_some();
+    }
+    run(&["show-ref", "--verify", "--quiet", reference], Some(cwd))
+        .map(|out| out.ok())
+        .unwrap_or(false)
+}
+
+/// Whether a local branch exists.
+pub fn branch_exists(cwd: &Path, branch: &str) -> bool {
+    ref_exists(cwd, &format!("refs/heads/{branch}"))
+}
+
+/// The current HEAD commit SHA.
+pub fn head_sha(cwd: &Path) -> Result<String> {
+    Ok(checked(&["rev-parse", "HEAD"], Some(cwd))?.trimmed())
+}
+
+/// Point the repository's own HEAD at the commit it already stands on, leaving
+/// every ref and every file where they are.
+///
+/// A per-run clone is cut `--no-checkout` and its own working tree is never
+/// populated, but git still counts the branch its HEAD names as *checked out
+/// there* — so a session continuing that branch could not be given a worktree of
+/// it. Detaching hands the name back and costs the clone nothing it uses: no
+/// index is read and no file is written, because `update-ref` writes the one ref.
+pub fn detach_head(cwd: &Path) -> Result<()> {
+    let head = head_sha(cwd)?;
+    checked(&["update-ref", "--no-deref", "HEAD", &head], Some(cwd)).map(|_| ())
+}
+
+/// The checked-out branch, or `HEAD` when the worktree is detached.
+pub fn current_branch(cwd: &Path) -> Result<String> {
+    Ok(checked(&["rev-parse", "--abbrev-ref", "HEAD"], Some(cwd))?.trimmed())
+}
+
+/// The branch a worktree has checked out, or `HEAD` when it is detached — read off
+/// its own `HEAD` file where the layout is the one git writes, and asked of git past
+/// any remembered answer where it is anything else.
+///
+/// Asked of every open session's worktree about every branch a pass examines, so a
+/// process each time is the whole cost of the question; and it is asked to decide
+/// whether a live session holds a branch, so it is never answered from earlier in the
+/// pass.
+pub fn checked_out_branch(worktree: &Path) -> Result<String> {
+    let dot_git = worktree.join(".git");
+    let admin = if dot_git.is_dir() {
+        Some(dot_git)
+    } else {
+        std::fs::read_to_string(&dot_git).ok().and_then(|text| {
+            text.trim()
+                .strip_prefix("gitdir: ")
+                .map(|dir| worktree.join(dir))
+        })
+    };
+    let named = admin
+        .and_then(|admin| std::fs::read_to_string(admin.join("HEAD")).ok())
+        .and_then(|head| {
+            let head = head.trim();
+            match head.strip_prefix("ref: ") {
+                Some(reference) => reference.strip_prefix("refs/heads/").map(str::to_owned),
+                None => ObjectId::parse(head).map(|_| "HEAD".to_owned()),
+            }
+        });
+    match named {
+        Some(branch) => Ok(branch),
+        None => unremembered(|| current_branch(worktree)),
+    }
+}
+
+/// When a commit was committed, as this repository records it, or `None` where it
+/// does not hold the commit.
+///
+/// The committer date rather than the author date: what a wait on a human step is
+/// measured from is when the work reached the base, and a squash lands a commit
+/// authored days earlier.
+pub fn committer_date<'a>(cwd: impl Into<Asked<'a>>, commit: &str) -> Option<String> {
+    run_in(
+        cwd.into(),
+        &[
+            "show",
+            "-s",
+            "--format=%cI",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )
+    .ok()
+    .filter(Output::ok)
+    .map(|output| output.trimmed())
+    .filter(|date| !date.is_empty())
+}
+
+/// Local branch names, in git's deterministic ref order.
+pub fn branches(cwd: &Path) -> Result<Vec<String>> {
+    if let Some(heads) = crate::native_refs::heads(cwd) {
+        return Ok(heads.into_iter().map(|(branch, _)| branch).collect());
+    }
+    Ok(checked(
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        Some(cwd),
+    )?
+    .stdout
+    .lines()
+    .filter(|line| !line.is_empty())
+    .map(str::to_owned)
+    .collect())
+}
+
+/// The branch names a remote's tracking refs carry, in git's deterministic ref
+/// order.
+///
+/// `HEAD` is dropped: `refs/remotes/<remote>/HEAD` is the symbolic ref naming which
+/// branch the remote's default is, not a branch of its own, and a caller asking
+/// which names are taken there would otherwise be told one that is not.
+pub fn remote_branches(cwd: &Path, remote: &str) -> Result<Vec<String>> {
+    if let Some(heads) = crate::native_refs::remote_heads(cwd, remote) {
+        return Ok(heads.into_keys().collect());
+    }
+    Ok(checked(
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3)",
+            &format!("refs/remotes/{remote}"),
+        ],
+        Some(cwd),
+    )?
+    .stdout
+    .lines()
+    .filter(|line| !line.is_empty() && *line != "HEAD")
+    .map(str::to_owned)
+    .collect())
+}
+
+/// Local branches holding commits no `origin` remote-tracking ref has.
+pub fn unpublished_branches(cwd: &Path) -> Result<Vec<String>> {
+    Ok(
+        unpublished_branches_among(cwd, |_| true, &BTreeSet::new(), |_| None)?
+            .into_iter()
+            .map(|(branch, _)| branch)
+            .collect(),
+    )
+}
+
+/// The local branches `keep` names that hold commits no `origin` remote-tracking
+/// ref has, each with its tip.
+///
+/// One listing of both namespaces, and then a count only where one is needed: a
+/// branch standing exactly at an `origin` tip is ahead of it by nothing, which is
+/// most branches in most checkouts — every clone's own copy of the base — and asking
+/// git to count zero is a process per branch per checkout. A branch `keep` declines
+/// is not counted either, which is what lets a report asked about a few sessions
+/// read only their branches out of a checkout holding many.
+///
+/// A name in `listed_anyway` that `keep` admits is answered whenever the checkout
+/// has it, without being counted: `recoverable`'s branches `onevcs preserve` put on
+/// the origin, whose own remote-tracking ref would otherwise make them read as
+/// published. Taken from the same listing, so they cost no process of their own.
+///
+/// `based_on` names the base a branch was cut on, where one was recorded: a local copy of
+/// that base is counted beside the `origin` refs for that branch alone, so a branch
+/// drafted on a base the checkout holds is measured by its own commits.
+pub fn unpublished_branches_among(
+    cwd: &Path,
+    keep: impl Fn(&str) -> bool,
+    listed_anyway: &BTreeSet<String>,
+    based_on: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>> {
+    unpublished_among(cwd, keep, listed_anyway, based_on, Undecided::Refuse)
+}
+
+/// What a read of unpublished branches does when one branch's count cannot be made.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Undecided {
+    /// Refuses the whole read, the way a close or a reclamation needs.
+    Refuse,
+    /// Lists the branch for its row to say so, keeping the host's other answers.
+    List,
+}
+
+/// [`unpublished_branches_among`] for a report that keeps answering when one branch's
+/// count cannot be made: that branch is listed, for its row to say what could not be
+/// decided, rather than failing the rest of the host's answer.
+pub(crate) fn unpublished_branches_answering(
+    cwd: &Path,
+    keep: impl Fn(&str) -> bool,
+    listed_anyway: &BTreeSet<String>,
+    based_on: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>> {
+    unpublished_among(cwd, keep, listed_anyway, based_on, Undecided::List)
+}
+
+fn unpublished_among(
+    cwd: &Path,
+    keep: impl Fn(&str) -> bool,
+    listed_anyway: &BTreeSet<String>,
+    based_on: impl Fn(&str) -> Option<String>,
+    undecided: Undecided,
+) -> Result<Vec<(String, String)>> {
+    let native = crate::native_refs::heads(cwd).zip(crate::native_refs::remote_tips(cwd, "origin"));
+    let (heads, origin_tips) = if let Some((heads, origin)) = native {
+        (heads, origin)
+    } else {
+        let listing = checked(
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(refname:short)%00%(objectname)",
+                "refs/heads",
+                "refs/remotes/origin",
+            ],
+            Some(cwd),
+        )?;
+        let mut heads: Vec<(String, String)> = Vec::new();
+        let mut origin_tips: BTreeSet<String> = BTreeSet::new();
+        for line in listing.stdout.lines() {
+            let mut fields = line.split('\0');
+            let (Some(full), Some(short), Some(tip)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if full.starts_with("refs/heads/") {
+                heads.push((short.to_owned(), tip.to_owned()));
+            } else if full.starts_with("refs/remotes/origin/") {
+                origin_tips.insert(tip.to_owned());
+            }
+        }
+        (heads, origin_tips)
+    };
+    let local: BTreeMap<String, String> = heads.iter().cloned().collect();
+    // Past a checkout's ordinary number of remote-tracking refs, each branch's count
+    // would be a process carrying every tip. One walk over standard input answers them
+    // all: the branches whose tip no such ref reaches are the tips it prints.
+    let walked: Option<BTreeSet<(Option<String>, String)>> = if origin_tips.len() > ARGV_LIST_LIMIT
+    {
+        let mut groups: BTreeMap<Option<String>, Vec<&str>> = BTreeMap::new();
+        for (branch, tip) in &heads {
+            if keep(branch) && !listed_anyway.contains(branch) && !origin_tips.contains(tip) {
+                let carried = based_on(branch).and_then(|base| local.get(&base).cloned());
+                if carried.as_deref() != Some(tip.as_str()) {
+                    groups.entry(carried).or_default().push(tip);
+                }
+            }
+        }
+        let mut found = BTreeSet::new();
+        let mut groups_failed = false;
+        for (carried, tips) in &groups {
+            let mut input = String::new();
+            for tip in tips {
+                input.push_str(tip);
+                input.push('\n');
+            }
+            input.push_str("--not\n");
+            for tip in origin_tips.iter().chain(carried.iter()) {
+                input.push_str(tip);
+                input.push('\n');
+            }
+            let given = run_given(cwd, &["rev-list", "--stdin", "--"], input.as_bytes())?;
+            if !given.ok() || !given.read_failures.is_empty() {
+                if undecided == Undecided::List {
+                    // llmlint: ignore[changed_behavior_has_e2e] a walk over thousands of
+                    // refs failing is object damage the row journey reaches through the
+                    // per-branch count below; only the size of the list differs here.
+                    // Counted branch by branch below, so the one that cannot be read
+                    // answers alone.
+                    found.clear();
+                    groups_failed = true;
+                    break;
+                }
+                return Err(error::invalid(format!(
+                    "git rev-list over {} branches in {} failed: {}",
+                    tips.len(),
+                    cwd.display(),
+                    given.diagnostic()
+                )));
+            }
+            found.extend(
+                given
+                    .stdout
+                    .lines()
+                    .map(|line| (carried.clone(), line.to_owned())),
+            );
+        }
+        (!groups_failed).then_some(found)
+    } else {
+        None
+    };
+    let mut unpublished = Vec::new();
+    for (branch, tip) in heads {
+        if !keep(&branch) {
+            continue;
+        }
+        if listed_anyway.contains(&branch) {
+            unpublished.push((branch, tip));
+            continue;
+        }
+        if origin_tips.contains(&tip) {
+            continue;
+        }
+        let base = based_on(&branch).and_then(|base| local.get(&base).cloned());
+        if base.as_deref() == Some(tip.as_str()) {
+            continue;
+        }
+        if let Some(walked) = &walked {
+            if walked.contains(&(base.clone(), tip.clone())) {
+                unpublished.push((branch, tip));
+            }
+            continue;
+        }
+        let carried: Vec<&str> = base.iter().map(String::as_str).collect();
+        match unpublished_ahead(cwd, &tip, &carried) {
+            Ok(ahead) if ahead > 0 => unpublished.push((branch, tip)),
+            Ok(_) => {}
+            Err(_) if undecided == Undecided::List => unpublished.push((branch, tip)),
+            Err(refused) => return Err(refused),
+        }
+    }
+    Ok(unpublished)
+}
+
+/// Every local branch whose tip no `origin` remote-tracking ref reaches — the branches
+/// [`unpublished_branches`] answers — asked in two listings however many branches the
+/// repository holds, rather than a count per branch.
+///
+/// A branch reached by some remote-tracking ref holds nothing that ref does not, which
+/// is exactly a count of zero; `--no-merged` given once per tip keeps the branches
+/// reached by none of them, in one walk of the history.
+///
+/// Each tip the first listing prints is parsed as an [`ObjectId`] before it becomes an
+/// argument of the second, and a line that is not one refuses the whole answer: a
+/// listing this cannot read names no branch as published.
+pub fn unpublished_heads(cwd: &Path) -> Result<BTreeSet<String>> {
+    let listing = checked(
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/remotes/origin",
+        ],
+        Some(cwd),
+    )?;
+    let mut tips = BTreeSet::new();
+    for line in listing.stdout.lines().filter(|line| !line.is_empty()) {
+        let tip = ObjectId::parse(line).ok_or_else(|| {
+            error::invalid(format!(
+                "`git for-each-ref` in {} printed {line:?} where a remote-tracking tip belongs",
+                cwd.display()
+            ))
+        })?;
+        tips.insert(format!("--no-merged={}", tip.as_str()));
+    }
+    let tips: Vec<String> = tips.into_iter().collect();
+    // `--no-merged` has no standard-input form, so the tips travel in batches of a
+    // fixed size: a branch survives one batch when no tip of it reaches the branch, and
+    // what no batch rules out is what no tip reaches. One empty batch list is still the
+    // one listing of every branch.
+    let mut surviving: Option<BTreeSet<String>> = None;
+    for batch in tips
+        .chunks(NO_MERGED_BATCH)
+        .chain(tips.is_empty().then_some(&[][..]))
+    {
+        let mut args: Vec<&str> = vec!["for-each-ref", "--format=%(refname:short)"];
+        args.extend(batch.iter().map(String::as_str));
+        args.push("refs/heads");
+        let listed = checked(&args, Some(cwd))?;
+        if !listed.read_failures.is_empty() {
+            return Err(error::invalid(format!(
+                "the branches of {} could not be read whole",
+                cwd.display()
+            )));
+        }
+        let listed: BTreeSet<String> = listed
+            .stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let narrowed = match surviving {
+            Some(surviving) => surviving.intersection(&listed).cloned().collect(),
+            None => listed,
+        };
+        let finished = narrowed.is_empty();
+        surviving = Some(narrowed);
+        if finished {
+            break;
+        }
+    }
+    Ok(surviving.unwrap_or_default())
+}
+
+/// How many commits `reference` holds that no `origin` remote-tracking ref has and
+/// none of `carried` reaches.
+///
+/// One `rev-list` rather than one per exclusion, because everything after `--not`
+/// is negated together — so "ahead of origin and of the branch this session was
+/// for" is the single question git answers, not two answers a caller subtracts.
+///
+/// `0` is the answer that tells [`workspace::close`] a clone can be let go of, so
+/// every way this could reach it without having counted is one way to delete work.
+/// Three of them are handled here rather than by the callers reading the number.
+///
+/// A `carried` name that does not resolve is dropped instead of being passed on. Git
+/// refuses the whole walk over one unknown name, and the refusal used to read as `0`
+/// — which is how a session whose worker *renamed* its branch was reaped: the work
+/// was on a name nothing outside the run root knew, and the name it was measured
+/// against no longer existed. A ref that is not there carries nothing, and saying so
+/// is not the same as failing to ask.
+///
+/// A count git still declines is `0` only where `reference` itself has gone, which is
+/// what the branch listing above has always assumed with one: the names come from
+/// git's own listing, so a refusal means the ref went away between the two commands.
+/// Anything else is git failing at a question it could answer, and that is refused.
+///
+/// A count that succeeded and is not a number is refused too, because output this
+/// build does not understand is not output saying none.
+///
+/// [`workspace::close`]: crate::workspace::close
+// llmlint: ignore[invalid_states_unrepresentable] the same as `refs_reach` above: these
+// are revisions git named and git resolves, and every other function in this module
+// spells one the same way.
+pub fn unpublished_ahead(cwd: &Path, reference: &str, carried: &[&str]) -> Result<u64> {
+    let held: Vec<&str> = carried
+        .iter()
+        .copied()
+        .filter(|name| tip(cwd, name).is_some())
+        .collect();
+    let native = crate::native_refs::remote_tips(cwd, "origin").zip(
+        if ObjectId::parse(reference).is_some() {
+            Some(reference.to_owned())
+        } else {
+            crate::native_refs::tip(cwd, reference).flatten()
+        },
+    );
+    let immutable_query = native.is_some();
+    let immutable;
+    let mut listed: Option<String> = None;
+    let mut args = if let Some((mut origin, tip)) = native {
+        origin.extend(held.iter().filter_map(|name| crate::git::tip(cwd, name)));
+        immutable = std::iter::once(tip).chain(origin).collect::<Vec<_>>();
+        if immutable.len() - 1 > ARGV_LIST_LIMIT {
+            // Too many to name on a command line whatever the checkout: every one goes
+            // over standard input, which is where `--not` can read a list of any length.
+            let mut input = format!("{}\n--not\n", immutable[0]);
+            for hidden in &immutable[1..] {
+                input.push_str(hidden);
+                input.push('\n');
+            }
+            listed = Some(input);
+            vec!["rev-list", "--count", "--stdin", "--"]
+        } else {
+            let mut args = vec!["rev-list", "--count", immutable[0].as_str(), "--not"];
+            args.extend(immutable[1..].iter().map(String::as_str));
+            args
+        }
+    } else {
+        vec![
+            "rev-list",
+            "--count",
+            reference,
+            "--not",
+            "--remotes=origin",
+        ]
+    };
+    if !immutable_query {
+        args.extend_from_slice(&held);
+    }
+    if args.last() != Some(&"--") {
+        args.push("--");
+    }
+    let counted = match &listed {
+        Some(input) => run_given(cwd, &args, input.as_bytes())?,
+        None => run(&args, Some(cwd))?,
+    };
+    if !counted.ok() {
+        // llmlint: ignore[changed_behavior_has_e2e] the reference going away between a
+        // listing and this count is a race with another process, which no journey can
+        // stage without a second writer in the clone; the refusal it falls through to is
+        // driven end to end by the close whose execution checkout is gone.
+        if tip(cwd, reference).is_none() {
+            return Ok(0);
+        }
+        return Err(error::invalid(format!(
+            "git could not count what {reference:?} holds in {}, and a count nobody got is \
+             not a count of none: {}",
+            cwd.display(),
+            counted.stderr.trim(),
+        )));
+    }
+    let answer = counted.trimmed();
+    // llmlint: ignore[changed_behavior_has_e2e] driving this would mean a program that is
+    // not git on the path, which this suite's e2e tier does not put there.
+    answer.parse::<u64>().map_err(|_| {
+        error::invalid(format!(
+            "git counted the commits {reference:?} holds and answered {answer:?}, which is not \
+             a number of commits"
+        ))
+    })
+}
+
+/// Git's full-ref grammar applied to a branch suffix. Unicode and punctuation
+/// are valid names too; only Git's forbidden bytes and component shapes reject.
+/// This validates names, never raw ref values or repository layout.
+pub(crate) fn plainly_a_ref_name(branch: &str) -> bool {
+    !branch.is_empty()
+        && !branch.ends_with('.')
+        && !branch.contains("..")
+        && !branch.contains("@{")
+        && !branch.bytes().any(|byte| {
+            byte <= b' '
+                || byte == 0x7f
+                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        && branch
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
+/// Whether a branch name is one git will accept.
+///
+/// Decided in process for the ordinary shapes ([`plainly_a_ref_name`]) and asked of
+/// git for everything else, once per distinct name for the life of the process:
+/// whether a name is a ref name is a fact about the name, so that answer cannot go
+/// stale.
+pub fn is_valid_branch_name(branch: &str) -> bool {
+    if branch.is_empty() || branch.starts_with('-') {
+        return false;
+    }
+    if plainly_a_ref_name(branch) {
+        return true;
+    }
+    static ACCEPTED: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+    let mut accepted = ACCEPTED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let accepted = accepted.get_or_insert_with(HashMap::new);
+    if let Some(known) = accepted.get(branch) {
+        return *known;
+    }
+    let valid = run(&["check-ref-format", &format!("refs/heads/{branch}")], None)
+        .map(|out| out.ok())
+        .unwrap_or(false);
+    accepted.insert(branch.to_owned(), valid);
+    valid
+}
+
+/// Whether the worktree has staged or unstaged changes.
+pub fn is_dirty(cwd: &Path) -> Result<bool> {
+    Ok(!checked(&["status", "--porcelain"], Some(cwd))?
+        .trimmed()
+        .is_empty())
+}
+
+/// Stage everything in the worktree.
+pub fn add_all(cwd: &Path) -> Result<()> {
+    checked(&["add", "-A"], Some(cwd)).map(|_| ())
+}
+
+/// Commit the staged tree, returning the new HEAD.
+pub fn commit(cwd: &Path, message: &str) -> Result<String> {
+    checked(&["commit", "-m", message], Some(cwd))?;
+    head_sha(cwd)
+}
+
+/// Create a metadata-only commit, returning its SHA.
+pub fn commit_empty(cwd: &Path, message: &str) -> Result<String> {
+    checked(&["commit", "--allow-empty", "-m", message], Some(cwd))?;
+    head_sha(cwd)
+}
+
+/// Commit an empty commit onto a branch by its ref, touching no worktree.
+///
+/// For a repository that keeps the branch without having it checked out for this
+/// process — an operator's own checkout, whose index and working tree are theirs.
+/// The commit carries the tip's own tree, so a worktree that does have the branch
+/// checked out still matches it afterwards, and the ref moves only from the tip this
+/// read: a branch that moved in between is refused rather than written over.
+pub fn commit_empty_on_branch(cwd: &Path, branch: &str, message: &str) -> Result<String> {
+    let reference = format!("refs/heads/{branch}");
+    let parent = tip(cwd, &reference).ok_or_else(|| {
+        crate::error::invalid(format!("{} has no branch {branch:?}", cwd.display()))
+    })?;
+    let tree = format!("{parent}^{{tree}}");
+    let commit = checked(
+        &["commit-tree", &tree, "-p", &parent, "-m", message],
+        Some(cwd),
+    )?
+    .trimmed();
+    checked(&["update-ref", &reference, &commit, &parent], Some(cwd))?;
+    Ok(commit)
+}
+
+/// One commit's full SHA and message.
+#[derive(Debug, Clone)]
+pub struct CommitMessage {
+    /// The commit's full SHA.
+    pub sha: String,
+    /// Its whole message, subject and body.
+    pub message: String,
+}
+
+/// Full commit messages in `branch` but not `base`, oldest first.
+pub fn log_messages<'a>(
+    cwd: impl Into<Asked<'a>>,
+    base: &str,
+    branch: &str,
+) -> Result<Vec<CommitMessage>> {
+    let cwd = cwd.into();
+    let base_tip = crate::native_refs::tip_with_objects(cwd.at, base, cwd.borrowing).flatten();
+    let branch_tip = crate::native_refs::tip_with_objects(cwd.at, branch, cwd.borrowing).flatten();
+    let base = base_tip.as_deref().unwrap_or(base);
+    let branch = branch_tip.as_deref().unwrap_or(branch);
+    let output = checked_in(
+        cwd,
+        &[
+            "log",
+            "--reverse",
+            "--format=%H%x00%B%x00%x1e",
+            &format!("{base}..{branch}"),
+            "--",
+        ],
+    )?;
+    Ok(output
+        .stdout
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let value = record.trim_matches(|c| c == '\n' || c == '\0');
+            let (sha, message) = value.split_once('\0')?;
+            Some(CommitMessage {
+                sha: sha.to_owned(),
+                message: message.trim_end().to_owned(),
+            })
+        })
+        .collect())
+}
+
+/// The commits on `branch`'s first-parent line that `base` does not reach, newest
+/// first.
+///
+/// The commits written *on* a branch, as against those a merge brought into it: what
+/// a stack base reads its own parents off, where every commit of a parent it merged —
+/// one drafted against another stack base among them — is in its history too.
+pub fn first_parent_line<'a>(
+    cwd: impl Into<Asked<'a>>,
+    base: &str,
+    branch: &str,
+) -> Result<Vec<String>> {
+    let cwd = cwd.into();
+    let base_tip = crate::native_refs::tip_with_objects(cwd.at, base, cwd.borrowing).flatten();
+    let branch_tip = crate::native_refs::tip_with_objects(cwd.at, branch, cwd.borrowing).flatten();
+    let base = base_tip.as_deref().unwrap_or(base);
+    let branch = branch_tip.as_deref().unwrap_or(branch);
+    let output = checked_in(
+        cwd,
+        &[
+            "rev-list",
+            "--first-parent",
+            &format!("{base}..{branch}"),
+            "--",
+        ],
+    )?;
+    Ok(output.stdout.lines().map(str::to_owned).collect())
+}
+
+/// Whether two refs' trees differ at all.
+///
+/// The question "does the base already carry this content" cannot be answered by
+/// ancestry once publication squashes: a published branch is never an ancestor of
+/// the base afterwards, and asking about ancestry would report finished work as
+/// still waiting forever.
+pub fn trees_differ<'a>(cwd: impl Into<Asked<'a>>, base: &str, branch: &str) -> Result<bool> {
+    let output = run_in(cwd.into(), &["diff", "--quiet", base, branch, "--"])?;
+    match output.status {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Error::Invalid {
+            reason: format!("git diff {base} {branch} failed: {}", output.diagnostic()),
+        }),
+    }
+}
+
+/// How many lines a comparison adds and how many it removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lines {
+    /// Lines added.
+    pub added: u64,
+    /// Lines removed.
+    pub removed: u64,
+}
+
+/// The lines two commits differ by, as git counts them.
+///
+/// `--numstat` rather than the `--shortstat` beside it: what comes back is
+/// tab-separated numbers rather than a sentence, so nothing here depends on how a
+/// locale spells "insertions". A file git compares as binary has no line count and it
+/// says so with `-`; that file is skipped rather than counted as nought, because
+/// nought is a number and this is the absence of one. Renames are not detected, for
+/// the reason every other comparison in this module declines them: a rename reported
+/// under its destination alone hides the lines the source took with it.
+pub fn line_change<'a>(cwd: impl Into<Asked<'a>>, from: &str, to: &str) -> Result<Lines> {
+    let listed = checked_in(
+        cwd.into(),
+        &["diff", "--numstat", "--no-renames", from, to, "--"],
+    )?;
+    let mut counted = Lines::default();
+    for line in listed.stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let unreadable = || Error::Invalid {
+            reason: format!(
+                "git diff --numstat {from} {to} printed {line:?}, which is not a count of lines \
+                 and a path"
+            ),
+        };
+        let (added, rest) = line.split_once('\t').ok_or_else(unreadable)?;
+        let (removed, _path) = rest.split_once('\t').ok_or_else(unreadable)?;
+        // Both or neither: git writes `-` for each side of a binary file, and a pair
+        // that is half a number is a line this cannot read rather than one to
+        // half-count.
+        if added == "-" && removed == "-" {
+            continue;
+        }
+        let added: u64 = added.parse().map_err(|_| unreadable())?;
+        let removed: u64 = removed.parse().map_err(|_| unreadable())?;
+        counted.added = counted.added.saturating_add(added);
+        counted.removed = counted.removed.saturating_add(removed);
+    }
+    Ok(counted)
+}
+
+/// What one commit records, in the facts two copies of a branch are told apart by.
+// llmlint: ignore-block[invalid_states_unrepresentable] every field here is a value
+// git just printed under a format string this module wrote, spelled the way the rest
+// of the module spells one; the crate's `Sha` wraps an unvalidated `String` at the
+// public surface, so a newtype here would make no state unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    /// The tree it records, which is its content.
+    pub tree: String,
+    /// Its parents, as git prints them: space-separated, and empty for a root commit.
+    pub parents: String,
+    /// When it was committed, in ISO 8601 — git's own `%cI`, so nothing here formats
+    /// a clock.
+    pub committed: String,
+    /// Its subject.
+    pub subject: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// What a commit records, read out of the repository that holds it.
+///
+/// NUL-separated, because a subject may hold anything a commit message may hold — a
+/// tab, a newline of a wrapped subject line — and a field separator a value can carry
+/// is a comparison that reads one commit as another.
+// llmlint: ignore[invalid_states_unrepresentable] see the note on `Shape` above.
+// llmlint: ignore[boundary_inputs_validated] this is not a trust boundary: every field
+// is git's own output under a format string written three lines below, read back in
+// the order it was asked for. What *is* checked is the one thing that can go wrong —
+// that all four fields arrived — and it is refused by name. Re-deriving whether git's
+// `%T` is an object id or its `%cI` an ISO 8601 date would be this module checking
+// git's arithmetic, and the values are compared against each other rather than parsed.
+pub fn shape_of(cwd: &Path, reference: &str) -> Result<Shape> {
+    let immutable = crate::native_refs::tip(cwd, reference).flatten();
+    let reference = immutable.as_deref().unwrap_or(reference);
+    let printed = checked(
+        &[
+            "log",
+            "-1",
+            "--format=%T%x00%P%x00%cI%x00%s",
+            reference,
+            "--",
+        ],
+        Some(cwd),
+    )?;
+    let mut fields = printed.stdout.trim_end_matches('\n').splitn(4, '\0');
+    let (Some(tree), Some(parents), Some(committed), Some(subject)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Err(Error::Invalid {
+            reason: format!(
+                "git log -1 {reference} in {} printed no tree, parents, date, and subject: {:?}",
+                cwd.display(),
+                printed.stdout
+            ),
+        });
+    };
+    Ok(Shape {
+        tree: tree.to_owned(),
+        parents: parents.to_owned(),
+        committed: committed.to_owned(),
+        subject: subject.to_owned(),
+    })
+}
+
+/// Whether `ancestor` is reachable from `descendant`.
+pub fn is_ancestor<'a>(
+    cwd: impl Into<Asked<'a>>,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool> {
+    let cwd = cwd.into();
+    let env = cwd.env();
+    // As in `has_commit`: only whole object ids are answered in process.
+    let fact = ObjectId::parse(ancestor)
+        .zip(ObjectId::parse(descendant))
+        .map(|(ancestor, descendant)| reads::Fact::Reaches(ancestor, descendant));
+    if let Some(answer) = fact
+        .clone()
+        .and_then(|fact| recalled_fact(cwd.path(), &env, fact))
+    {
+        return Ok(answer);
+    }
+    if let Some(answer) = crate::native_refs::is_ancestor(cwd.path(), &env, ancestor, descendant) {
+        if let Some(fact) = fact {
+            reads::learn(cwd.path(), &env, fact, answer);
+        }
+        return Ok(answer);
+    }
+    let output = run_in(cwd, &["merge-base", "--is-ancestor", ancestor, descendant])?;
+    match output.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(Error::Invalid {
+            reason: format!("git merge-base failed: {}", output.diagnostic()),
+        }),
+    }
+}
+
+/// Whether this repository can *show* that `descendant` reaches `ancestor`.
+///
+/// A revision it cannot see — either one, or a repository it could not read at all — is
+/// `false` rather than the failure [`is_ancestor`] alone answers with. That is the safe
+/// direction: the copy loses the comparison, and a comparison nothing wins is refused
+/// rather than resolved by picking. Both are revisions as [`is_ancestor`] takes them.
+// llmlint: ignore[invalid_states_unrepresentable] see `merge_base` for the same reason —
+// the crate's `Sha` is the contract's wrapper for its public surface and validates
+// nothing, and what this takes is what git just answered.
+pub fn known_to_reach<'a>(
+    cwd: impl Into<Asked<'a>>,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool> {
+    let cwd = cwd.into();
+    // llmlint: ignore-block[changed_behavior_has_e2e] uncovered: this answering `false`
+    // for an absent `descendant`, or for a repository it could not read. Its caller passes
+    // the tip `locate` resolved out of that same checkout moments earlier, so no journey
+    // reaches either; the absent-`ancestor` arm is driven by
+    // `a_copy_whose_checkout_cannot_see_the_others_commit_loses_the_comparison`.
+    for revision in [ancestor, descendant] {
+        if !has_commit(cwd, &Sha(revision.to_owned())) {
+            return Ok(false);
+        }
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    is_ancestor(cwd, ancestor, descendant)
+}
+
+/// The commit two refs last had in common, or `None` when they share no history.
+///
+/// A plain `String`, as every other SHA this module reads is: the crate's `Sha` is the
+/// contract's wrapper for its public surface and validates nothing, and git's answer to
+/// a command this module just ran is not a caller's input.
+// llmlint: ignore[invalid_states_unrepresentable,boundary_inputs_validated] see above.
+pub fn merge_base<'a>(
+    cwd: impl Into<Asked<'a>>,
+    first: &str,
+    second: &str,
+) -> Result<Option<String>> {
+    let output = run_in(cwd.into(), &["merge-base", first, second])?;
+    match output.status {
+        // Nothing but a SHA is printed on success, so an empty answer is one that did
+        // not survive being read — and "they share no history" is the safe reading of
+        // it: it is what stops a replay rather than what starts one.
+        0 => Ok(Some(output.trimmed()).filter(|sha| !sha.is_empty())),
+        1 => Ok(None),
+        _ => Err(Error::Invalid {
+            reason: format!(
+                "git merge-base {first} {second} failed: {}",
+                output.diagnostic()
+            ),
+        }),
+    }
+}
+
+/// The commit `current` and every commit in `decided` descend to: the point a read of
+/// what a base gained since them starts from. Asked in fixed-size batches, one result
+/// feeding the next, so no argument list grows with the commits named.
+pub(crate) fn octopus_base(
+    asked: Asked<'_>,
+    current: &str,
+    decided: &BTreeSet<String>,
+    batch: usize,
+) -> Result<String> {
+    let mut common = current.to_owned();
+    let decided: Vec<&str> = decided.iter().map(String::as_str).collect();
+    for chunk in decided.chunks(batch.saturating_sub(1).max(1)) {
+        let mut args = vec!["merge-base", "--octopus", common.as_str()];
+        args.extend(chunk.iter().copied());
+        let found = run_given(asked, &args, b"")?;
+        let answered = found.trimmed();
+        let whole =
+            found.ok() && found.read_failures.is_empty() && ObjectId::parse(&answered).is_some();
+        if !whole {
+            return Err(error::invalid(format!(
+                "git merge-base --octopus over {} commits failed: {}",
+                chunk.len() + 1,
+                found.diagnostic()
+            )));
+        }
+        common = answered;
+    }
+    Ok(common)
+}
+
+/// How many files git says two commits differ in.
+///
+/// `--shortstat` is a count and a summary, in ASCII whatever a repository names its
+/// files, which is what makes it the check on a listing of those names rather than a
+/// second copy of it. It counts what the listing lists, so it declines rename
+/// detection for the same reason the listing does.
+fn counted_files(cwd: Asked<'_>, from: &str, to: &str) -> Result<usize> {
+    let summary = checked_in(
+        cwd,
+        &["diff", "--shortstat", "--no-renames", from, to, "--"],
+    )?
+    .trimmed();
+    // Nothing at all is what git prints when no file changed, and it is the only
+    // summary that means zero: anything else this cannot read a count out of is an
+    // answer to refuse rather than to round down, since rounding it down would say
+    // that a listing of some paths is a listing of all of them.
+    if summary.is_empty() {
+        return Ok(0);
+    }
+    summary
+        .split_once(" file")
+        .map(|(count, _)| count.trim())
+        .and_then(|count| count.parse().ok())
+        .ok_or_else(|| Error::Invalid {
+            reason: format!(
+                "git diff --shortstat {from} {to} did not begin with a count of files: {summary}"
+            ),
+        })
+}
+
+/// Whether `base` is *known* to carry everything `commit` changed since `fork`.
+///
+/// One-sided deliberately: `true` is established, and `false` is either established
+/// or the answer to a question this could not put to git — a listing that did not
+/// arrive whole leaves only the whole trees to compare, and a base carrying those
+/// changes beside unrelated ones then answers `false`. Every caller acts on `true`
+/// by rewriting history, so uncertainty belongs on the side that leaves a branch
+/// alone.
+///
+/// Content rather than ancestry, for the reason [`trees_differ`] gives: a branch
+/// that reached the base as one squashed commit is an ancestor of nothing, and its
+/// individual commits are not in the base by any name it kept. What is true of it
+/// afterwards is that every path it touched — both ends of a rename included — reads
+/// on the base exactly as it reads on the commit — which is the question asked here, and asked over the paths that
+/// commit actually touched so that unrelated work landing on the base beside it
+/// does not change the answer.
+pub fn known_to_carry_changes<'a>(
+    cwd: impl Into<Asked<'a>>,
+    base: &str,
+    fork: &str,
+    commit: &str,
+) -> Result<bool> {
+    let cwd = cwd.into();
+    // Renames are deliberately not detected: git reports one under its destination
+    // alone, and a comparison scoped by that would never ask whether the source is
+    // still on the base — which is the half of a rename that says the change below has
+    // *not* landed. Without detection both paths are listed and both are compared.
+    let listed = checked_in(
+        cwd,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            fork,
+            commit,
+            "--",
+        ],
+    )?;
+    let touched: BTreeSet<&str> = listed
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    // How many paths there are is asked of git separately, in a report that is ASCII
+    // whatever the repository names its files, and the two answers have to agree
+    // before a diff is scoped by the names. Paths are bytes and this process reads
+    // git's output as text, so how much of a listing survived that is a question to
+    // settle rather than to assume — a comparison scoped by *some* of the paths a
+    // commit touched would answer that the base carries it when the base does not.
+    // A listing that arrived whole is text whole or not at all, as `changed_paths`
+    // says, so a read answering from its decision record does not pay a process per
+    // branch to count what it already read; only an empty one is asked.
+    let trust_listing =
+        crate::decisions::enabled() && !touched.is_empty() && listed.read_failures.is_empty();
+    if !trust_listing && touched.len() != counted_files(cwd, fork, commit)? {
+        // Which leaves the same question asked without paths: a base carrying this
+        // commit's whole tree carries its changes too, and that is the one answer
+        // that cannot be wrong about a path nobody here could name.
+        return Ok(!trees_differ(cwd, base, commit)?);
+    }
+    if touched.is_empty() {
+        // The commit changed nothing since the fork, and a base built on that fork
+        // carries the nothing it changed.
+        return Ok(true);
+    }
+    // Asked without naming a path: the whole-tree listing says which paths differ, and
+    // the question is whether any of those is one the commit touched, so no list of
+    // the commit's paths has to reach git however long it is.
+    let differing = checked_in(
+        cwd,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            base,
+            commit,
+            "--",
+        ],
+    )?;
+    // Git's `text` answer for a listing that was not text is empty, which would read as
+    // nothing differing: held to the whole-tree count, an unreadable listing falls back
+    // on comparing the trees whole, the question the `counted_files` branch asks too.
+    if !listing_whole(cwd, &differing, base, commit)? {
+        return Ok(!trees_differ(cwd, base, commit)?);
+    }
+    Ok(!differing
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .any(|path| touched.contains(path)))
+}
+
+/// How many files git says two commits differ in, for a caller holding a listing to it.
+pub(crate) fn count_files(cwd: Asked<'_>, from: &str, to: &str) -> Result<usize> {
+    counted_files(cwd, from, to)
+}
+
+/// Whether a whole-tree `diff --name-only -z` answered in full: a listing of text arrived
+/// whole, and an empty one is held to git's count of files, since an undecodable listing
+/// reads as empty.
+fn listing_whole(cwd: Asked<'_>, listed: &Output, from: &str, to: &str) -> Result<bool> {
+    if !listed.read_failures.is_empty() {
+        return Ok(false);
+    }
+    Ok(!listed.stdout.is_empty() || counted_files(cwd, from, to)? == 0)
+}
+
+/// Whether merging `commit` into `base` is a content no-op.
+///
+/// Unlike [`known_to_carry_changes`], this permits `base` to carry additional
+/// edits on paths `commit` touched. That is the shape of a squash made after its
+/// base advanced: the squash commit contains both sets of edits, and merging the
+/// old branch into it changes no tree even though the two path contents are not
+/// byte-for-byte equal.
+pub(crate) fn already_integrates<'a>(
+    cwd: impl Into<Asked<'a>>,
+    base: &str,
+    commit: &str,
+) -> Result<bool> {
+    let cwd = cwd.into();
+    // Merged by the commits the names are at, where this read resolves them, so the
+    // merge is a proof a later read of unmoved refs reuses. Only a clean merge's tree
+    // is compared and a conflict answers no, so a conflict's labels, which are the
+    // only part of a merge that spells what was merged, decide nothing here.
+    let base_tip = crate::native_refs::tip_with_objects(cwd.at, base, cwd.borrowing).flatten();
+    let commit_tip = crate::native_refs::tip_with_objects(cwd.at, commit, cwd.borrowing).flatten();
+    let base = base_tip.as_deref().unwrap_or(base);
+    let commit = commit_tip.as_deref().unwrap_or(commit);
+    let reusable = crate::recovery_cache::query(
+        &["merge-tree", "--write-tree", base, commit],
+        Some(cwd.path()),
+        &cwd.env(),
+    );
+    if let Some(output) = reusable
+        .as_ref()
+        .and_then(crate::recovery_cache::Query::read)
+    {
+        if output.status == 1 {
+            return Ok(false);
+        }
+        let tree =
+            checked_in(cwd, &["rev-parse", "--verify", &format!("{base}^{{tree}}")])?.trimmed();
+        return Ok(output.stdout.lines().next() == Some(tree.as_str()));
+    }
+    // `merge-tree --write-tree` writes the synthetic result into the object store.
+    // A report is read-only, so isolate those objects in a scratch store and read
+    // the repository's real objects through Git's alternates mechanism.
+    let scratch = tempfile::tempdir().map_err(|failure| Error::Invalid {
+        reason: format!("could not create a scratch object store for landing detection: {failure}"),
+    })?;
+    let mut env = vec![(
+        "GIT_OBJECT_DIRECTORY".to_owned(),
+        scratch.path().to_string_lossy().into_owned(),
+    )];
+    // Redirecting the primary store hides the repository's own, so its objects are
+    // named here beside anything it is borrowing — which is the one read that has to
+    // spell out what every other one gets from the repository it runs in.
+    env.extend(cwd.reading_also(&[objects_dir(cwd.path())?]));
+    let merged = run_with_env(
+        &["merge-tree", "--write-tree", base, commit],
+        Some(cwd.path()),
+        &env,
+    )?;
+    if let Some(reusable) = reusable {
+        reusable.write(&merged);
+    }
+    match merged.status {
+        // The first line is the tree the merge would write. Messages, when there
+        // are any, follow it; only a successful, no-op merge can establish that
+        // the base already integrates the branch.
+        0 => {
+            let tree = checked_with_env(
+                &["rev-parse", "--verify", &format!("{base}^{{tree}}")],
+                Some(cwd.path()),
+                &env,
+            )?
+            .trimmed();
+            Ok(merged.stdout.lines().next() == Some(tree.as_str()))
+        }
+        // `merge-tree` uses one for a merge with conflicts. A conflict establishes
+        // no landing; it is a domain answer rather than a failed git invocation.
+        1 => Ok(false),
+        _ => Err(Error::Invalid {
+            reason: format!(
+                "git merge-tree --write-tree {base} {commit} failed: {}",
+                merged.diagnostic()
+            ),
+        }),
+    }
+}
+
+/// The tree merging `second` into `first` cleanly writes, or `None` where the two
+/// conflict.
+///
+/// Read-only, as [`already_integrates`] is and for its reason: `merge-tree
+/// --write-tree` writes the merge it computes into the object store, so that store is
+/// a scratch one and the repository's own objects — and whatever it borrows — are read
+/// through the alternates.
+// llmlint: ignore[invalid_states_unrepresentable] what comes back is git's own printed
+// tree id, spelled as every other object id this module reads; see `merge_base`.
+pub(crate) fn clean_merge_tree<'a>(
+    cwd: impl Into<Asked<'a>>,
+    first: &str,
+    second: &str,
+) -> Result<Option<String>> {
+    let cwd = cwd.into();
+    let scratch = tempfile::tempdir().map_err(|failure| Error::Invalid {
+        reason: format!("could not create a scratch object store to merge in: {failure}"),
+    })?;
+    let mut env = vec![(
+        "GIT_OBJECT_DIRECTORY".to_owned(),
+        scratch.path().to_string_lossy().into_owned(),
+    )];
+    env.extend(cwd.reading_also(&[objects_dir(cwd.path())?]));
+    let merged = run_with_env(
+        &["merge-tree", "--write-tree", "--no-messages", first, second],
+        Some(cwd.path()),
+        &env,
+    )?;
+    match merged.status {
+        0 => Ok(merged.stdout.lines().next().map(str::to_owned)),
+        // A conflict is an answer — there is no clean merge — not a failed invocation.
+        1 => Ok(None),
+        _ => Err(Error::Invalid {
+            reason: format!(
+                "git merge-tree --write-tree {first} {second} failed: {}",
+                merged.diagnostic()
+            ),
+        }),
+    }
+}
+
+/// The tree one commit records.
+// llmlint: ignore[invalid_states_unrepresentable] git's own printed tree id; see
+// `merge_base`.
+pub(crate) fn tree_of<'a>(cwd: impl Into<Asked<'a>>, commit: &str) -> Result<String> {
+    Ok(checked_in(
+        cwd.into(),
+        &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+    )?
+    .trimmed())
+}
+
+/// Every commit `tip` reaches that none of `not` does, each with its parents, as
+/// git lists them.
+// llmlint: ignore[invalid_states_unrepresentable] git's own printed commit ids; see
+// `merge_base`.
+pub(crate) fn commits_with_parents<'a>(
+    cwd: impl Into<Asked<'a>>,
+    tip: &str,
+    not: &[&str],
+) -> Result<Vec<(String, Vec<String>)>> {
+    let asked = cwd.into();
+    let listed = if not.len() > ARGV_LIST_LIMIT {
+        let mut input = format!("{tip}\n--not\n");
+        for hidden in not {
+            input.push_str(hidden);
+            input.push('\n');
+        }
+        let given = run_given(
+            asked,
+            &["rev-list", "--parents", "--stdin", "--"],
+            input.as_bytes(),
+        )?;
+        if !given.ok() || !given.read_failures.is_empty() {
+            return Err(error::invalid(format!(
+                "git rev-list --parents {tip} over {} excluded commits failed: {}",
+                not.len(),
+                given.diagnostic()
+            )));
+        }
+        given.stdout
+    } else {
+        let mut args = vec!["rev-list", "--parents", tip, "--not"];
+        args.extend_from_slice(not);
+        args.push("--");
+        checked_in(asked, &args)?.stdout
+    };
+    Ok(listed
+        .lines()
+        .filter_map(|line| {
+            let mut ids = line.split_whitespace().map(str::to_owned);
+            ids.next().map(|commit| (commit, ids.collect()))
+        })
+        .collect())
+}
+
+/// What one attempt to bring a ref into a branch did.
+///
+/// Named rather than a `bool`, because "it conflicted" is a domain answer every
+/// caller acts on — it decides a refusal, a skipped candidate, another bounded
+/// attempt — and the one thing a caller must never read it as is a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Integrated {
+    /// The branch carries it now.
+    Settled,
+    /// It conflicted, and the branch is as it was found — carrying what conflicted.
+    Conflicted(Conflict),
+}
+
+/// What conflicted: the paths git left unmerged, and the hunks it renders for them.
+///
+/// Both are taken while the conflicted tree still stands, because after the abort
+/// neither exists. Its fields are private and [`conflict_in`] is its only
+/// constructor, so a `Conflict` with no paths — "it conflicted" without "and here is
+/// what" — cannot be built.
+///
+/// A pathname is git's own bytes, decoded the way this module decodes every other
+/// thing git prints: lossily. That is not a choice made here — the paths travel to
+/// a consumer in a JSON event payload, which has no other representation — and a
+/// listing this process cannot decode has journeys of its own.
+// llmlint: ignore-block[invalid_states_unrepresentable] the fields are private and
+// `conflict_in` is their only constructor, answering `None` rather than building an
+// empty one; the decode is the module's, and JSON has no bytes.
+// llmlint: ignore-block[boundary_inputs_validated] git's own output, decoded here as it
+// is at every other call in this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    paths: Vec<String>,
+    hunks: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+// llmlint: ignore-end[boundary_inputs_validated]
+
+impl Conflict {
+    /// The paths git left unmerged, in the order it listed them. Never empty.
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    /// The conflicting hunks, as git renders them. Empty where it would not print
+    /// them.
+    pub fn hunks(&self) -> &str {
+        &self.hunks
+    }
+}
+
+/// What git left unmerged in a tree it has just stopped in, or `None` where it left
+/// nothing unmerged — which is a failure that is not a conflict.
+///
+/// Both callers below ask this the moment their attempt fails and before they abort
+/// it, because both questions are only answerable while the conflicted tree stands.
+///
+/// `-z` rather than the default listing: git renders a pathname carrying a newline,
+/// a quote, or a leading space as a *quoted* C string, and one read back as plain
+/// text would name a file the repository does not have. NUL-delimited, each record
+/// is the pathname's own bytes and nothing has to be unquoted or trimmed.
+// llmlint: ignore-block[changed_behavior_has_e2e] what a listing this process cannot
+// decode does is the subject of its own journeys, and is this module's answer rather
+// than this function's.
+fn conflict_in(cwd: &Path) -> Result<Option<Conflict>> {
+    let unmerged = run(&["diff", "--name-only", "-z", "--diff-filter=U"], Some(cwd))?;
+    if !unmerged.ok() {
+        return Ok(None);
+    }
+    let paths: Vec<String> = unmerged
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    // Best effort, and deliberately not an error: the paths are the answer this
+    // exists for, and a git that would not render the hunks for them has still said
+    // what conflicts.
+    let hunks = run(&["diff", "--diff-filter=U"], Some(cwd))
+        .ok()
+        .filter(Output::ok)
+        .map(|out| out.stdout)
+        .unwrap_or_default();
+    Ok(Some(Conflict { paths, hunks }))
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Replay `branch`'s commits after `upstream` onto `onto`, keeping nothing else.
+///
+/// Answers [`Integrated::Conflicted`] only when the replay conflicted, and leaves
+/// the branch as it was in that case; every other git failure stays an error, so a
+/// caller does not mistake an invalid ref for a conflict it can report.
+pub fn rebase_onto(cwd: &Path, onto: &str, upstream: &str, branch: &str) -> Result<Integrated> {
+    let replayed = run(&["rebase", "--onto", onto, upstream, branch], Some(cwd))?;
+    if replayed.ok() {
+        return Ok(Integrated::Settled);
+    }
+    let conflict = conflict_in(cwd)?;
+    // Whatever stopped it, the tree is left as it was found: a replay that halted
+    // mid-way is a repository nothing else in this crate knows how to read.
+    run(&["rebase", "--abort"], Some(cwd))?;
+    if let Some(conflict) = conflict {
+        return Ok(Integrated::Conflicted(conflict));
+    }
+    Err(Error::Invalid {
+        reason: format!(
+            "git rebase --onto {onto} {upstream} {branch} failed: {}",
+            replayed.diagnostic()
+        ),
+    })
+}
+
+/// When a ref's commit was made, as whole seconds since the epoch.
+pub fn committed_at(cwd: &Path, reference: &str) -> Option<u64> {
+    let immutable = crate::native_refs::tip(cwd, reference).flatten();
+    let reference = immutable.as_deref().unwrap_or(reference);
+    run(&["log", "-1", "--format=%ct", reference, "--"], Some(cwd))
+        .ok()
+        .filter(Output::ok)
+        .and_then(|out| out.trimmed().parse().ok())
+}
+
+/// Create `branch` off `base`, checked out in a new worktree at `path`, and say what
+/// git's run of the repository's `post-checkout` hook came to.
+///
+/// With no upstream, for the reason [`NO_TRACK`] gives. The checkout is observed
+/// rather than required to succeed, for the reason [`observed_checkout`] gives.
+pub fn worktree_add(
+    cwd: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<Option<PostCheckout>> {
+    let spelled = git_path(path).to_string_lossy().into_owned();
+    let hooks = worktree_hooks(cwd, path)?;
+    observed_checkout(&Checkout {
+        args: &with_hooks(
+            &hooks,
+            &["worktree", "add", NO_TRACK, "-b", branch, &spelled, base],
+        ),
+        cwd,
+        worktree: path,
+        trigger: CheckoutTrigger::WorktreeAdd,
+        branch,
+        old: None,
+        target: base,
+    })
+}
+
+/// What a branch this crate cuts is given instead of git's default upstream.
+///
+/// Cut from `origin/<base>`, git's `branch.autoSetupMerge` would record the base as
+/// the branch's upstream, writing two keys into the clone's `.git/config` — and a
+/// warm pool slot's clone is one every sibling session's search reads, so each session
+/// placed in it would rename a new configuration over the one a sibling is reading.
+/// On Windows that read fails (see [`append_in_place`]). Nothing here reads an
+/// upstream: every push and comparison names its refs, and the base is not the
+/// branch's own remote anyway.
+const NO_TRACK: &str = "--no-track";
+
+/// Check out an existing local branch in a new worktree.
+pub fn worktree_add_existing(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path = git_path(path).to_string_lossy();
+    checked(&["worktree", "add", &path, branch], Some(cwd)).map(|_| ())
+}
+
+/// [`worktree_add_existing`] for the worktree a session opens in, saying what git's
+/// run of the repository's `post-checkout` hook came to as [`worktree_add`] does.
+pub fn worktree_add_continued(
+    cwd: &Path,
+    path: &Path,
+    branch: &str,
+) -> Result<Option<PostCheckout>> {
+    let target = format!("refs/heads/{branch}");
+    let spelled = git_path(path).to_string_lossy().into_owned();
+    let hooks = worktree_hooks(cwd, path)?;
+    observed_checkout(&Checkout {
+        args: &with_hooks(&hooks, &["worktree", "add", &spelled, branch]),
+        cwd,
+        worktree: path,
+        trigger: CheckoutTrigger::WorktreeAdd,
+        branch,
+        old: None,
+        target: &target,
+    })
+}
+
+/// Check out a publication's pointers without downloading unchanged LFS media.
+pub fn worktree_add_publication(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path = git_path(path).to_string_lossy();
+    checked_with_env(
+        &["worktree", "add", &path, branch],
+        Some(cwd),
+        &[("GIT_LFS_SKIP_SMUDGE".to_owned(), "1".to_owned())],
+    )
+    .map(|_| ())
+}
+
+/// Check out a ref detached in a new scratch worktree.
+pub fn worktree_add_detached(cwd: &Path, path: &Path, reference: &str) -> Result<()> {
+    let path = git_path(path).to_string_lossy();
+    checked(
+        &["worktree", "add", "--detach", &path, reference],
+        Some(cwd),
+    )
+    .map(|_| ())
+}
+
+/// Create `branch` off `base` and check it out in the worktree that is already there.
+///
+/// The in-place form of [`worktree_add`], for a pool slot whose worktree stands
+/// detached on the base: git rewrites only the files that differ between the two
+/// trees, which is what lets an incremental build in the slot see a branch diff.
+///
+/// With no upstream, for the reason [`NO_TRACK`] gives; observed, for the reason
+/// [`observed_checkout`] gives.
+pub fn checkout_new(worktree: &Path, branch: &str, base: &str) -> Result<Option<PostCheckout>> {
+    let old = commit_of(worktree, "HEAD")?;
+    observed_checkout(&Checkout {
+        args: &["checkout", "-q", NO_TRACK, "-b", branch, base],
+        cwd: worktree,
+        worktree,
+        trigger: CheckoutTrigger::SlotCheckout,
+        branch,
+        old,
+        target: base,
+    })
+}
+
+/// Check out an existing local branch in the worktree that is already there.
+///
+/// The in-place form of [`worktree_add_continued`], for the same slot.
+pub fn checkout_existing(worktree: &Path, branch: &str) -> Result<Option<PostCheckout>> {
+    let target = format!("refs/heads/{branch}");
+    let old = commit_of(worktree, "HEAD")?;
+    observed_checkout(&Checkout {
+        args: &["checkout", "-q", branch],
+        cwd: worktree,
+        worktree,
+        trigger: CheckoutTrigger::SlotCheckout,
+        branch,
+        old,
+        target: &target,
+    })
+}
+
+/// Which of the two checkouts a session's worktree is put on its branch by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutTrigger {
+    /// `git worktree add`: a run root's worktree, or a pool slot's cut for this session.
+    WorktreeAdd,
+    /// `git checkout` in a warm pool slot's worktree, which a session reuses.
+    SlotCheckout,
+}
+
+/// git's run of a repository's `post-checkout` hook, read off the checkout command
+/// that ran it — and never off a run of onevcs's own.
+#[derive(Debug, Clone)]
+pub struct PostCheckout {
+    /// Which checkout ran it.
+    pub trigger: CheckoutTrigger,
+    /// The worktree that was checked out, which is where git ran the hook.
+    pub worktree: PathBuf,
+    /// How git's checkout command ended — git takes its exit status from the hook
+    /// once the checkout itself has completed.
+    pub ended: Ended,
+    /// How long git's checkout command ran.
+    pub duration: Duration,
+    /// Everything git's checkout command wrote, both streams, unredacted and whole.
+    pub output: String,
+    /// The commit git handed the hook as the one before.
+    // llmlint: ignore[invalid_states_unrepresentable] git's own printed object id, only spliced into the `rerun` line as git handed it to the hook; the crate's `Sha` wraps an unvalidated `String` and would make no state unrepresentable.
+    pub previous: String,
+    /// The commit git handed the hook as the one checked out.
+    // llmlint: ignore[invalid_states_unrepresentable] git's own printed object id, only spliced into the `rerun` line as git handed it to the hook; the crate's `Sha` wraps an unvalidated `String` and would make no state unrepresentable.
+    pub commit: String,
+}
+
+impl PostCheckout {
+    /// Whether the hook passed: git's checkout command exited 0.
+    pub fn passed(&self) -> bool {
+        self.ended == Ended::Code(0)
+    }
+
+    /// One shell command line through which git runs the same hook with the same
+    /// three arguments in the same worktree — printed for a person, and never run here.
+    pub fn rerun(&self) -> String {
+        let worktree = std::path::absolute(git_path(&self.worktree))
+            .unwrap_or_else(|_| git_path(&self.worktree).to_path_buf());
+        format!(
+            "git -C {} hook run post-checkout -- {} {} 1",
+            shell_quoted(&worktree.to_string_lossy()),
+            self.previous,
+            self.commit
+        )
+    }
+}
+
+/// The file one checkout's git writes its trace2 events to, removed when dropped.
+struct HookTrace {
+    file: tempfile::NamedTempFile,
+}
+
+impl HookTrace {
+    fn cut() -> Result<Self> {
+        let file = tempfile::NamedTempFile::new()
+            .map_err(error::at("create the hook trace in", &std::env::temp_dir()))?;
+        Ok(Self { file })
+    }
+
+    fn env(&self) -> Vec<(String, String)> {
+        vec![(
+            "GIT_TRACE2_EVENT".to_owned(),
+            self.file.path().to_string_lossy().into_owned(),
+        )]
+    }
+
+    /// Whether the command itself started a `post-checkout` hook.
+    ///
+    /// Unreadable reads as no: nothing then says git ran one, and a failure over the
+    /// checkout goes on to be refused in git's own words.
+    fn ran_post_checkout(&self) -> bool {
+        std::fs::read_to_string(self.file.path())
+            .is_ok_and(|trace| trace_started_post_checkout(&trace))
+    }
+}
+
+/// Whether a trace2 event stream has its first process starting `post-checkout`.
+///
+/// The variable is inherited by everything the command starts, so a git a hook runs
+/// writes here too; the first line is always the command's own, and only its session
+/// id counts.
+fn trace_started_post_checkout(trace: &str) -> bool {
+    let mut events = trace
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    let Some(own) = events.next().and_then(|first| first.get("sid").cloned()) else {
+        return false;
+    };
+    events.any(|event| {
+        event.get("sid") == Some(&own)
+            && event["event"] == "child_start"
+            && event["child_class"] == "hook"
+            && event["hook_name"] == "post-checkout"
+    })
+}
+
+/// One checkout of a session's worktree onto its branch, as [`observed_checkout`]
+/// runs it.
+struct Checkout<'a> {
+    args: &'a [&'a str],
+    /// Where it runs: the clone for `worktree add`, the worktree for `checkout`.
+    cwd: &'a Path,
+    worktree: &'a Path,
+    trigger: CheckoutTrigger,
+    branch: &'a str,
+    /// The commit `HEAD` stood at before, as git hands it to the hook — `None` for a
+    /// worktree that did not exist, which git hands it as all zeros.
+    // llmlint: ignore[invalid_states_unrepresentable] git's own printed object id, only spliced into the `rerun` line as git handed it to the hook; the crate's `Sha` wraps an unvalidated `String` and would make no state unrepresentable.
+    old: Option<String>,
+    /// What names the commit the worktree is to stand at. Resolved only where an
+    /// answer needs it, so a checkout of a repository with no hook costs no read.
+    target: &'a str,
+}
+
+/// Run one checkout of a session's worktree, and say what git's run of the
+/// repository's `post-checkout` hook came to.
+///
+/// git runs `post-checkout` after the checkout itself has completed, and exits with
+/// the hook's status — so a failing provisioning hook made a session's open fail over
+/// a worktree that was in fact checked out, and what it said was lost. Git is still
+/// the only party that runs the hook, exactly once: nothing here installs, suppresses
+/// or runs one. What changes is what git's ending is taken to mean. A checkout that
+/// completed — the worktree is on the branch, at the commit asked for — is the
+/// checkout this crate asked for whatever the command ended with, and a non-zero,
+/// signalled or timed-out ending over it is the hook's, recorded rather than refused.
+/// One that did not complete is git's own failure, refused as it always was.
+///
+/// `None` where git ran no `post-checkout` hook, which git itself says: its trace2
+/// stream names every hook the command started. What is on disk afterwards cannot
+/// answer that, because [`HookShims`] are listed before the checkout, so a hook only
+/// the incoming branch tracks is on disk and was not run.
+fn observed_checkout(checkout: &Checkout<'_>) -> Result<Option<PostCheckout>> {
+    let trace = HookTrace::cut()?;
+    let started = Instant::now();
+    let output = run_unless(
+        checkout.args,
+        Some(checkout.cwd),
+        &trace.env(),
+        None,
+        Elapse::Answer,
+    )?;
+    let duration = started.elapsed();
+    let commit = || commit_of(checkout.cwd, checkout.target);
+    let completed = output.ok() || {
+        commit()?.is_some_and(|commit| {
+            unremembered(|| checked_out(checkout.worktree, checkout.branch, &commit))
+        })
+    };
+    let refused = || refusal(checkout.args, &output);
+    if !completed {
+        return Err(refused());
+    }
+    if !trace.ran_post_checkout() {
+        // No hook ran, so a failure over a completed checkout is git's own — which
+        // nothing has been seen to produce, and which is refused as it always was.
+        return match output.ok() {
+            true => Ok(None),
+            false => Err(refused()),
+        };
+    }
+    let Some(commit) = commit()? else {
+        return Err(refused());
+    };
+    let previous = checkout.old.clone().unwrap_or_else(|| null_like(&commit));
+    Ok(Some(PostCheckout {
+        trigger: checkout.trigger,
+        worktree: checkout.worktree.to_path_buf(),
+        duration,
+        output: output.combined(),
+        ended: output.ended,
+        previous,
+        commit,
+    }))
+}
+
+/// The refusal of a checkout git did not complete, as a checked command words it.
+fn refusal(args: &[&str], output: &Output) -> Error {
+    match &output.ended {
+        Ended::Elapsed { .. } => Error::Invalid {
+            reason: format!("git {} {}", args.join(" "), output.ended),
+        },
+        _ => Error::Invalid {
+            reason: format!(
+                "git {} failed (exit {}): {}",
+                args.join(" "),
+                output.status,
+                output.diagnostic()
+            ),
+        },
+    }
+}
+
+/// The `core.hooksPath=` a session's `worktree add` is handed, or none.
+///
+/// git resolves a relative `core.hooksPath` against the directory it runs in, and a
+/// `worktree add` runs in a clone with no working tree, so the repository's own tracked
+/// hooks directory is found nowhere and its `post-checkout` silently never runs. The
+/// absolute form of that same directory, resolved against the new worktree, makes git
+/// honour the repository's configuration; it names no hook and suppresses none. An
+/// absolute setting and a `~` one already mean the same from anywhere.
+fn worktree_hooks(cwd: &Path, worktree: &Path) -> Result<Option<String>> {
+    // The clone's own setting, which is what `carry_hooks` wrote, read in process.
+    let Some(configured) = local_setting(cwd, "core.hooksPath")?.map(PathBuf::from) else {
+        return Ok(None);
+    };
+    if configured.is_absolute() || configured.starts_with("~") {
+        return Ok(None);
+    }
+    let worktree = std::path::absolute(git_path(worktree))
+        .map_err(error::at("resolve the worktree at", worktree))?;
+    Ok(Some(format!(
+        "core.hooksPath={}",
+        git_path(&worktree.join(configured)).to_string_lossy()
+    )))
+}
+
+fn with_hooks<'a>(hooks: &'a Option<String>, args: &[&'a str]) -> Vec<&'a str> {
+    let mut all: Vec<&str> = match hooks {
+        Some(hooks) => vec!["-c", hooks],
+        None => Vec::new(),
+    };
+    all.extend_from_slice(args);
+    all
+}
+
+/// Whether a worktree stands on `branch` at `commit` — which is what a checkout that
+/// completed leaves, whatever the hook git ran after it did.
+fn checked_out(worktree: &Path, branch: &str, commit: &str) -> bool {
+    let on = run(&["symbolic-ref", "-q", "HEAD"], Some(worktree))
+        .is_ok_and(|head| head.ok() && head.trimmed() == format!("refs/heads/{branch}"));
+    on && run(&["rev-parse", "--verify", "-q", "HEAD"], Some(worktree))
+        .is_ok_and(|head| head.ok() && head.trimmed() == commit)
+}
+
+/// The commit `reference` names in `cwd`, or nothing where it names none — which is
+/// left for the checkout itself to refuse, in git's own words.
+fn commit_of(cwd: &Path, reference: &str) -> Result<Option<String>> {
+    let read = run(
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{reference}^{{commit}}"),
+        ],
+        Some(cwd),
+    )?;
+    Ok(read.ok().then(|| read.trimmed()))
+}
+
+/// git's null object id in the format `commit` is spelled in: what it hands
+/// `post-checkout` as the commit before a worktree that did not exist.
+fn null_like(commit: &str) -> String {
+    "0".repeat(commit.len())
+}
+
+/// Leave the branch the worktree is on, staying at the commit it stands on.
+///
+/// What a return does first, so that the reset that follows moves a detached head
+/// rather than the session's branch, and so that the branch can then be deleted out
+/// from under nothing.
+///
+/// A slot's return runs the repository's `post-checkout` as any checkout does, and a
+/// hook that failed over a checkout that completed is no reason a close should not:
+/// the worktree is detached at the commit it stood on, which is all this was for. It
+/// records nothing, because the session it would be recorded on is ending.
+pub fn checkout_detached(worktree: &Path) -> Result<()> {
+    let args = ["checkout", "-q", "--detach"];
+    let commit = commit_of(worktree, "HEAD")?;
+    let trace = HookTrace::cut()?;
+    let output = run_unless(&args, Some(worktree), &trace.env(), None, Elapse::Answer)?;
+    if output.ok()
+        || (trace.ran_post_checkout() && unremembered(|| detached_at(worktree, commit.as_deref()))?)
+    {
+        return Ok(());
+    }
+    Err(refusal(&args, &output))
+}
+
+/// Whether the worktree's head is detached at `commit`, which is what a `checkout
+/// --detach` from there leaves once it has completed.
+fn detached_at(worktree: &Path, commit: Option<&str>) -> Result<bool> {
+    let detached = !run(&["symbolic-ref", "-q", "HEAD"], Some(worktree))?.ok();
+    let at = run(&["rev-parse", "--verify", "-q", "HEAD"], Some(worktree))?;
+    Ok(detached && at.ok() && Some(at.trimmed().as_str()) == commit)
+}
+
+/// Move the worktree's head to `reference` and make the index and the tracked files
+/// match it, leaving untracked files where they are.
+pub fn reset_hard(worktree: &Path, reference: &str) -> Result<()> {
+    checked(&["reset", "-q", "--hard", reference], Some(worktree)).map(|_| ())
+}
+
+/// Remove every untracked file and directory the ignore rules do not cover.
+///
+/// Deliberately without `-x`: what `.gitignore` names is the repository's own
+/// declaration of its build output, and keeping that across sessions is the whole
+/// point of a warm slot.
+pub fn clean_untracked(worktree: &Path) -> Result<()> {
+    checked(&["clean", "-q", "-f", "-d"], Some(worktree)).map(|_| ())
+}
+
+/// Remove a worktree, forcing past an unclean tree.
+pub fn worktree_remove(cwd: &Path, path: &Path) -> Result<()> {
+    let path = git_path(path).to_string_lossy();
+    run(&["worktree", "remove", "--force", &path], Some(cwd)).map(|_| ())
+}
+
+/// Drop worktree registrations git considers prunable.
+pub fn worktree_prune(cwd: &Path) -> Result<()> {
+    run(&["worktree", "prune", "--expire", "now"], Some(cwd)).map(|_| ())
+}
+
+/// Whether merging `base` into `branch` would conflict, asked without touching either
+/// or any worktree.
+///
+/// `merge-tree --write-tree` performs the merge in the object store alone, so a branch
+/// whose identity merges its base only on a conflict can ask before deciding to merge
+/// at all. The tree it writes is unreferenced and left to git's own collection.
+pub fn merge_would_conflict(cwd: &Path, base: &str, branch: &str) -> Result<bool> {
+    let merged = run(&["merge-tree", "--write-tree", base, branch], Some(cwd))?;
+    match merged.status {
+        0 => Ok(false),
+        // `merge-tree` uses one for a merge with conflicts, which is the answer asked
+        // for rather than a failed invocation.
+        1 => Ok(true),
+        _ => Err(Error::Invalid {
+            reason: format!(
+                "git merge-tree --write-tree {base} {branch} failed: {}",
+                merged.diagnostic()
+            ),
+        }),
+    }
+}
+
+/// Merge a ref into the checked-out branch, reporting a conflict rather than
+/// raising one.
+///
+/// Answers [`Integrated::Conflicted`] only when the merge conflicted; every other
+/// git failure stays an error, so a caller does not mistake an invalid ref for a
+/// sync conflict.
+pub fn merge_into_branch(cwd: &Path, reference: &str, message: &str) -> Result<Integrated> {
+    let integrated = merge_leaving_conflict(cwd, reference, message)?;
+    if let Integrated::Conflicted(_) = integrated {
+        run(&["merge", "--abort"], Some(cwd))?;
+    }
+    Ok(integrated)
+}
+
+/// [`merge_into_branch`], except that a conflict is left standing where git stopped:
+/// `MERGE_HEAD`, the unmerged index entries and git's markers in the files, for
+/// whoever holds the worktree to conclude.
+///
+/// A merge that fails without conflicting is still raised as an error, exactly as
+/// [`merge_into_branch`] raises it: git left no unmerged path, so there is nothing
+/// for anybody to conclude.
+pub fn merge_leaving_conflict(cwd: &Path, reference: &str, message: &str) -> Result<Integrated> {
+    let merged = run(&["merge", "--no-edit", "-m", message, reference], Some(cwd))?;
+    if merged.ok() {
+        return Ok(Integrated::Settled);
+    }
+    let Some(conflict) = conflict_in(cwd)? else {
+        return Err(Error::Invalid {
+            reason: format!("git merge {reference} failed: {}", merged.diagnostic()),
+        });
+    };
+    Ok(Integrated::Conflicted(conflict))
+}
+
+/// [`merge_leaving_conflict`], always writing a merge commit: `--no-ff`, so a ref the
+/// branch could fast-forward to is still recorded as merged, under `message`.
+///
+/// What a stack base merges with, because each of its merges carries a trailer naming
+/// what it brought in — and a fast-forward writes no commit for one to be on.
+pub fn merge_commit_leaving_conflict(
+    cwd: &Path,
+    reference: &str,
+    message: &str,
+) -> Result<Integrated> {
+    let merged = run(
+        &["merge", "--no-ff", "--no-edit", "-m", message, reference],
+        Some(cwd),
+    )?;
+    if merged.ok() {
+        return Ok(Integrated::Settled);
+    }
+    let Some(conflict) = conflict_in(cwd)? else {
+        return Err(Error::Invalid {
+            reason: format!("git merge {reference} failed: {}", merged.diagnostic()),
+        });
+    };
+    Ok(Integrated::Conflicted(conflict))
+}
+
+/// A merge a worktree holds in progress: what it is merging, and which of its paths
+/// are still unmerged.
+///
+/// `unmerged` is empty once every conflicted path has been staged — which is still a
+/// merge in progress, because nothing has committed it, and is exactly the state a
+/// `git add -A && git commit` would conclude with whatever the files then held.
+// llmlint: ignore-block[invalid_states_unrepresentable] git's own answers, read off a
+// worktree the moment it is asked; an empty `unmerged` is a state git has, not one to
+// rule out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merging {
+    /// The commit `MERGE_HEAD` names.
+    pub merging: String,
+    /// The paths git still lists as unmerged, in its order.
+    pub unmerged: Vec<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// The merge `worktree` holds in progress, or `None` where it holds none.
+///
+/// Asked of `MERGE_HEAD` rather than of the index: a merge whose every conflict has
+/// been staged has no unmerged path left and is still not concluded.
+///
+/// Asked of git itself past any enclosing memo, because the answer is about the
+/// worktree as it stands now and a teardown or a resolution moves it.
+pub fn merge_in_progress(worktree: &Path) -> Result<Option<Merging>> {
+    reads::bypass(|| {
+        let Some(merging) = tip(worktree, "MERGE_HEAD") else {
+            return Ok(None);
+        };
+        let unmerged = conflict_in(worktree)?
+            .map(|conflict| conflict.paths)
+            .unwrap_or_default();
+        Ok(Some(Merging { merging, unmerged }))
+    })
+}
+
+/// Abort whatever merge `worktree` holds in progress, putting it back at the commit
+/// its branch stands on. `true` where there was one.
+///
+/// Best effort, and never a failure of whatever is tearing the tree down: what it
+/// discards is a resolution nobody committed, and every commit stays where it is.
+/// `git merge --abort` first, which keeps changes that predate the merge; where git
+/// will not, a hard reset to `HEAD` is what still ends it, because a teardown that
+/// left the merge standing would hand it to whatever touches the tree next.
+pub fn abort_merge(worktree: &Path) -> bool {
+    if !worktree.is_dir() || reads::bypass(|| tip(worktree, "MERGE_HEAD")).is_none() {
+        return false;
+    }
+    let aborted = run(&["merge", "--abort"], Some(worktree)).is_ok_and(|out| out.ok());
+    if !aborted || reads::bypass(|| tip(worktree, "MERGE_HEAD")).is_some() {
+        let _ = run(&["reset", "-q", "--hard", "HEAD"], Some(worktree));
+    }
+    true
+}
+
+/// Squash-merge a ref and commit it, or report that it added no content.
+pub fn merge_squash(cwd: &Path, reference: &str, message: &str) -> Result<Option<String>> {
+    checked(&["merge", "--squash", reference], Some(cwd))?;
+    if !is_dirty(cwd)? {
+        return Ok(None);
+    }
+    checked(&["commit", "-m", message], Some(cwd))?;
+    head_sha(cwd).map(Some)
+}
+
+/// Every tag whose commit carries `commit`, by name.
+pub fn tags_containing(cwd: &Path, commit: &str) -> Result<Vec<String>> {
+    let output = checked(&["tag", &format!("--contains={commit}")], Some(cwd))?;
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Fast-forward the current branch to a ref, or fail.
+///
+/// The only way a publication checkout is ever advanced: it is never worked in,
+/// and a merge that could rewrite what an operator has open is refused by git.
+pub fn merge_ff_only(cwd: &Path, reference: &str) -> Result<()> {
+    checked(&["merge", "--ff-only", reference], Some(cwd)).map(|_| ())
+}
+
+/// What a push did, in the form git reports rather than in the prose beside it.
+///
+/// One case or the other, so a push cannot be both accepted and carrying refs git
+/// turned down. Either way it keeps `output`: everything the push wrote, whole,
+/// because a `pre-push` hook runs the repository's complete gate and reports that
+/// run here — it is the merge path's only verification evidence, and callers
+/// preserve it whether the push passed or was rejected. A refusal keeps the refs
+/// besides, read out of `--porcelain`'s one line per ref —
+/// `<flag>\t<from>:<to>\t<summary>`, where `!` is the flag for a ref git declined.
+/// That flag and that ref name are git's machine-readable answer: no locale renames
+/// them and no hook's message can produce them, so a decision about *why* a push
+/// failed is made from them and never from the sentence a human would read.
+#[derive(Debug, Clone)]
+pub enum Pushed {
+    /// git took every ref it was given.
+    Accepted {
+        /// Everything the push wrote.
+        output: String,
+    },
+    /// git did not.
+    Refused {
+        /// Everything the push wrote.
+        output: String,
+        /// The remote refs it declined to update — none at all where it failed
+        /// before any ref was negotiated, which a credential or an unreachable
+        /// remote does.
+        refs: Vec<String>,
+        /// How the push itself ended, and why a read of either of its pipes
+        /// stopped short where one did.
+        ///
+        /// A refusal that captured output describes itself, and these add nothing
+        /// to it. A refusal that captured **none** describes nothing at all without
+        /// them — which is the state a push whose git was killed leaves, and the
+        /// one an operator could not tell from a tree the merge path turned down.
+        diagnostics: PushDiagnostics,
+    },
+}
+
+/// What a push's own run said about itself, for a refusal its captured output
+/// cannot describe.
+#[derive(Debug, Clone)]
+pub struct PushDiagnostics {
+    /// How the push ended: an exit code, or the signal that terminated it.
+    pub ended: Ended,
+    /// Why a read of one of its pipes stopped short, where one did.
+    pub read_failures: Vec<String>,
+}
+
+impl Pushed {
+    /// Whether git accepted the push whole.
+    pub fn accepted(&self) -> bool {
+        matches!(self, Pushed::Accepted { .. })
+    }
+
+    /// Everything the push wrote, porcelain and diagnostics together.
+    pub fn output(&self) -> &str {
+        match self {
+            Pushed::Accepted { output } | Pushed::Refused { output, .. } => output,
+        }
+    }
+
+    /// Whether git declined to update one particular remote branch.
+    ///
+    /// The ref is spelled as git spells it in the porcelain line — fully, as
+    /// `refs/heads/<branch>` — so a caller asks about the branch it pushed rather
+    /// than about a substring that could match another.
+    pub fn refused_branch(&self, branch: &str) -> bool {
+        let reference = format!("refs/heads/{branch}");
+        match self {
+            Pushed::Accepted { .. } => false,
+            Pushed::Refused { refs, .. } => refs.contains(&reference),
+        }
+    }
+
+    /// What the push's own run said about itself, where git refused it.
+    ///
+    /// Read only where the captured output describes nothing — see
+    /// [`PushDiagnostics`].
+    pub fn diagnostics(&self) -> Option<&PushDiagnostics> {
+        match self {
+            Pushed::Accepted { .. } => None,
+            Pushed::Refused { diagnostics, .. } => Some(diagnostics),
+        }
+    }
+
+    /// Why the push was refused, as git's own per-ref summary, for a human to read.
+    ///
+    /// The summary is *reported*, never classified on: `--porcelain` puts the ref
+    /// status on stdout and git's usual `! [rejected] …` line then never reaches
+    /// stderr, so without this a rejection would read only as "failed to push some
+    /// refs".
+    pub fn refusal(&self) -> Option<&str> {
+        let Pushed::Refused { output, .. } = self else {
+            return None;
+        };
+        output
+            .lines()
+            .find(|line| line.starts_with("!\t"))
+            .and_then(|line| line.split('\t').nth(2))
+    }
+}
+
+/// Upload objects from a screened branch's original history before a squash
+/// replaces that history with its final tree. No Git ref is written here.
+pub(crate) fn upload_lfs_history(
+    cwd: &Path,
+    branch: &str,
+    base: &str,
+    environment: &[(String, String)],
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Output>> {
+    lfs::upload_from(cwd, branch, "origin", Some(base), environment, Some(stop))
+}
+
+/// Push a branch, returning everything the push wrote.
+pub fn push(cwd: &Path, branch: &str, remote: &str, env: &[(String, String)]) -> Result<Pushed> {
+    if let Some(refused) = lfs::upload(cwd, branch, remote, env, None)? {
+        return Ok(read_push(&refused));
+    }
+    pushed(&["push", "--porcelain", remote, branch], cwd, env)
+}
+
+/// What a push its caller could stop came to.
+#[derive(Debug, Clone)]
+pub enum Pushing {
+    /// It ended of its own accord, as git reported it.
+    Ran(Pushed),
+    /// The caller stopped it first, and git, the `pre-push` hook it ran and every
+    /// process that hook started were ended and reaped. Whether the remote took the
+    /// update before that is not something the push could say: it is asked of the
+    /// remote. `output` is everything the push wrote up to the moment it was stopped.
+    Stopped {
+        /// Everything the push wrote before it was stopped.
+        output: String,
+        /// That every process the push started was ended with it, or why that could
+        /// not be confirmed — in which case some may still be running.
+        teardown: std::result::Result<(), String>,
+    },
+}
+
+/// Push a branch whose history was rewritten, replacing exactly what was last seen
+/// there.
+///
+/// `replacing` is the commit this repository last saw the remote's copy at, and the
+/// push is refused by git if the remote is anywhere else — somebody pushed to the
+/// branch while this ran, and overwriting that is losing work rather than replacing
+/// a history this run itself replaced. `None` is an ordinary push, which is every
+/// publication that rewrote nothing.
+///
+/// `stop` is asked for as long as the push runs — through its `pre-push` hook, which
+/// is a repository's whole gate — and the first time it says so the push is stopped
+/// and every process it started is reaped: see [`Pushing::Stopped`]. A publishing push
+/// is the one push a caller has a reason to abandon part way.
+pub fn push_replacing(
+    cwd: &Path,
+    branch: &str,
+    remote: &str,
+    replacing: Option<&str>,
+    env: &[(String, String)],
+    stop: &dyn Fn() -> bool,
+) -> Result<Pushing> {
+    let lease = replacing.map(|seen| format!("--force-with-lease={branch}:{seen}"));
+    let mut args = vec!["push", "--porcelain", remote, branch];
+    if let Some(lease) = lease.as_deref() {
+        args.insert(1, lease);
+    }
+    let output = match lfs::upload(cwd, branch, remote, env, Some(stop))? {
+        Some(refused) => refused,
+        None => run_unless(&args, Some(cwd), env, Some(stop), Elapse::Refuse)?,
+    };
+    let teardown = match &output.ended {
+        Ended::Stopped => Ok(()),
+        Ended::StoppedUnconfirmed(why) => Err(why.clone()),
+        _ => return Ok(Pushing::Ran(read_push(&output))),
+    };
+    Ok(Pushing::Stopped {
+        output: output.combined(),
+        teardown,
+    })
+}
+
+/// Push a branch **without running the repository's own `pre-push` hook**, and
+/// without replacing anything the remote has.
+///
+/// The one push in this crate that passes `--no-verify`, and the reason is that this
+/// is the one push that is not a publication. The `pre-push` hook is what verifies a
+/// *publishing* push for a local identity — it is the merge path — and a preservation
+/// is explicitly not one: it opens no change request, touches no base, and lands
+/// nothing. A preserving push that ran the hook would block for as long as that
+/// repository's whole gate takes, on a host that is shutting down, and would then
+/// refuse the very branch it is there to save — because the branch a shutdown exists
+/// to preserve is the one a worker was interrupted in the middle of, whose tree does
+/// not pass the gate yet. Preserving only the work that was already fine would drop
+/// the work that most needed keeping. **Do not remove this flag**: the next reader's
+/// instinct is to, and doing so turns this verb into one that saves nothing under
+/// exactly the conditions it exists for.
+///
+/// Never forced, in either spelling: a non-fast-forward push is a refusal for the
+/// caller to report, never a history to replace.
+///
+/// A stack base is pushed through it too, for the reason its own module states: a
+/// stack base lands nothing either, and merges only branches each verified on its
+/// own change request — so this is still the one push that skips the hook, reached
+/// by the two verbs that put a branch on its origin without publishing it.
+pub fn push_preserving(cwd: &Path, branch: &str, remote: &str) -> Result<Pushed> {
+    pushed(
+        &[
+            "push",
+            "--porcelain",
+            "--no-verify",
+            remote,
+            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+        ],
+        cwd,
+        &[],
+    )
+}
+
+/// Put a branch the origin no longer has back at `commit`, **without running the
+/// repository's own `pre-push` hook**, and only while the origin still has no branch
+/// of that name.
+///
+/// The third verb that puts a branch on its origin without publishing it, and it stays
+/// inside [`push_preserving`]'s exception for that verb's reason: restoring a merged
+/// parent's deleted branch at the head it already had lands nothing and proposes
+/// nothing — it exists so the drafts the deletion closed can be reopened and moved off
+/// it — and the commit it names was already on the origin before the deletion. The
+/// empty lease is what refuses it where somebody created the branch again meanwhile.
+pub fn restore_remote_branch(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    commit: &str,
+) -> Result<Pushed> {
+    pushed(
+        &[
+            "push",
+            "--porcelain",
+            "--no-verify",
+            &format!("--force-with-lease=refs/heads/{branch}:"),
+            remote,
+            &format!("{commit}:refs/heads/{branch}"),
+        ],
+        cwd,
+        &[],
+    )
+}
+
+/// One `git push`, read as what git reported rather than as the prose beside it.
+///
+/// Shared by every push above so that the two answers — every ref taken, or some ref
+/// declined with its per-ref lines — are read out of one invocation's output in one
+/// place, whatever flags the caller added.
+fn pushed(args: &[&str], cwd: &Path, env: &[(String, String)]) -> Result<Pushed> {
+    run_with_env(args, Some(cwd), env).map(|output| read_push(&output))
+}
+
+/// What one finished `git push` reported, read out of its porcelain.
+fn read_push(output: &Output) -> Pushed {
+    if output.ok() {
+        Pushed::Accepted {
+            output: output.combined(),
+        }
+    } else {
+        Pushed::Refused {
+            refs: refused_refs(&output.stdout),
+            diagnostics: PushDiagnostics {
+                ended: output.ended.clone(),
+                read_failures: output.read_failures.clone(),
+            },
+            output: output.combined(),
+        }
+    }
+}
+
+/// The variables git calls *local* to a repository, as the installed git lists them.
+///
+/// githooks(5): git exports `GIT_DIR`, `GIT_WORK_TREE` and their kin to every hook
+/// it runs, so that the hook's own git commands find the repository. In a linked
+/// worktree `GIT_DIR` is the worktree's absolute administrative directory, which
+/// every git command the hook starts — in a fixture directory included — then acts
+/// on. These are the names git itself clears before it talks to another repository,
+/// and so the ones a hook is handed without.
+///
+/// The list is the installed git's and does not change while this process runs, so it
+/// is asked once.
+fn local_env_vars() -> Result<&'static [String]> {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    if let Some(names) = NAMES.get() {
+        return Ok(names);
+    }
+    let listed = checked(&["rev-parse", "--local-env-vars"], None)?.stdout;
+    let mut names = Vec::new();
+    for name in listed.split_whitespace() {
+        // Each name is written into a shell script's `unset`, so only a word that is
+        // a variable name and nothing else is taken.
+        let mut characters = name.chars();
+        let identifier = characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && characters.all(|rest| rest == '_' || rest.is_ascii_alphanumeric());
+        if !identifier {
+            return Err(error::invalid(format!(
+                "`git rev-parse --local-env-vars` listed {name:?}, which is not an \
+                 environment variable name; check which git is first on PATH"
+            )));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(NAMES.get_or_init(|| names))
+}
+
+/// How many `GIT_CONFIG_KEY_<n>` pairs this process's environment already hands git,
+/// read the way git reads it: unset or empty is none, and anything else that is not a
+/// whole number is a value git refuses, so it is refused here naming it rather than
+/// written over.
+fn inherited_config_count() -> Result<usize> {
+    let Some(raw) = std::env::var_os("GIT_CONFIG_COUNT") else {
+        return Ok(0);
+    };
+    let count = raw.to_string_lossy();
+    if count.is_empty() {
+        return Ok(0);
+    }
+    count.parse().map_err(|_| {
+        error::invalid(format!(
+            "GIT_CONFIG_COUNT is {count:?}, which is not a count of configuration pairs \
+             and which git refuses too; unset it or set it to a whole number"
+        ))
+    })
+}
+
+/// The repository's hooks, each reached through a script that first drops git's
+/// local repository variables, for the one hook-running command they are cut for.
+///
+/// git exports those variables to a hook *after* onevcs has spawned it — a
+/// publication pushes from a linked worktree, where `GIT_DIR` is that worktree's
+/// absolute administrative directory — so they cannot be withheld from the command
+/// itself; they can only be removed between git and the hook. Each shim is named for
+/// a hook the repository's effective hooks directory holds and git would run, unsets
+/// [`local_env_vars`], and `exec`s that hook with the arguments and standard input
+/// git gave it. git has already moved to the root of the working tree, so a command
+/// the hook runs where it starts discovers that repository from its own `.git` and
+/// reads the commit being pushed or committed, and a command it runs in a fixture
+/// discovers the fixture. Every command this crate runs hooks through commits
+/// without pathspecs and without `-a`, so the index git would have named is the one
+/// discovery finds.
+///
+/// The command is pointed at the shims through `GIT_CONFIG_COUNT` — appended after
+/// whatever the caller's environment already configures — and that variable is
+/// among those the shims drop, so the hook reads the repository's own
+/// `core.hooksPath`. The directory lives in the git directory, as the message file
+/// [`message_policy`] writes does, and is removed when this is dropped.
+struct HookShims {
+    dir: PathBuf,
+    /// Where the shims' configuration pair goes: after every one inherited.
+    count: usize,
+}
+
+impl HookShims {
+    /// Shims for every hook git would run in `cwd`, or nothing when it would run none.
+    fn cut(cwd: &Path) -> Result<Option<Self>> {
+        // A directory that is not a repository, or a hooks directory or entry that
+        // will not answer, is one git cannot run a hook out of either, so the command
+        // is left to git exactly as it stands: git says what is wrong with the first,
+        // and whether the second is a refusal is the question [`message_policy`] asks.
+        let Ok(real) = hooks_dir(cwd) else {
+            return Ok(None);
+        };
+        let Ok(entries) = std::fs::read_dir(&real) else {
+            return Ok(None);
+        };
+        // llmlint: ignore[boundary_inputs_validated] an entry this process cannot read or
+        // stat is one git, running as this same user, cannot run either, so leaving it
+        // unshimmed changes nothing git does; refusing here would instead fail every
+        // hook-running command over a hook nothing could ever have run, and falling back
+        // to the unshimmed directory would hand every *readable* hook the inherited
+        // `GIT_DIR` this exists to keep out.
+        let hooks: Vec<_> = entries
+            .flatten()
+            .map(|entry| (entry.file_name(), entry.path()))
+            .filter(|(_, path)| is_executable(path).unwrap_or(false))
+            .collect();
+        if hooks.is_empty() {
+            return Ok(None);
+        }
+        let count = inherited_config_count()?;
+        let unset = local_env_vars()?.join(" ");
+        let dir = git_owned_path(cwd, &format!("onevcs-hooks-{}", ids::unique()))?;
+        std::fs::create_dir(&dir).map_err(error::at("create the hook shims in", &dir))?;
+        let shims = HookShims { dir, count };
+        for (name, hook) in hooks {
+            let shim = shims.dir.join(name);
+            let target = shell_quoted(&git_path(&hook).to_string_lossy());
+            std::fs::write(
+                &shim,
+                format!("#!/bin/sh\nunset {unset}\nexec {target} \"$@\"\n"),
+            )
+            .map_err(error::at("write the hook shim", &shim))?;
+            make_executable(&shim)?;
+        }
+        Ok(Some(shims))
+    }
+
+    /// The configuration that points one git command at these shims, after any the
+    /// environment already carries.
+    fn env(&self) -> Vec<(String, String)> {
+        let count = self.count;
+        vec![
+            ("GIT_CONFIG_COUNT".to_owned(), (count + 1).to_string()),
+            (
+                format!("GIT_CONFIG_KEY_{count}"),
+                "core.hooksPath".to_owned(),
+            ),
+            (
+                format!("GIT_CONFIG_VALUE_{count}"),
+                git_path(&self.dir).to_string_lossy().into_owned(),
+            ),
+        ]
+    }
+}
+
+impl Drop for HookShims {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// `value` as one single-quoted POSIX shell word.
+fn shell_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Executable by its owner alone: git runs the shim as the user that cut it.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(error::at("make the hook shim executable at", path))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// The remote refs a `--porcelain` push reported it declined to update.
+fn refused_refs(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            // A ref name cannot contain a colon, so the first one separates the two
+            // halves of `<from>:<to>` and the remote's is what follows it.
+            (fields.next()? == "!")
+                .then(|| fields.next()?.split_once(':').map(|(_, to)| to.to_owned()))
+                .flatten()
+        })
+        .collect()
+}
+
+/// A commit id, checked where it arrives from outside this process.
+///
+/// The only way to make one is [`ObjectId::parse`], so a value of this type is a
+/// hexadecimal object id and nothing else: what a remote advertises is external
+/// input, and a line of it that is not an id must not go on to be compared against
+/// a lease as though it were one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectId(String);
+
+impl ObjectId {
+    /// The id, if this is one at all.
+    ///
+    /// A remote advertises complete ids and never abbreviations, so the two lengths
+    /// git has object formats for are the two accepted: 40 hexadecimal characters
+    /// for SHA-1 and 64 for SHA-256. Any other length is output this does not
+    /// understand, whatever it is made of.
+    pub fn parse(value: &str) -> Option<Self> {
+        let complete = matches!(value.len(), 40 | 64);
+        (complete && value.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| ObjectId(value.to_owned()))
+    }
+
+    /// The id as git spells it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What a remote has for one branch, as it answers now.
+///
+/// Three answers rather than two: a remote that has no such branch and a remote
+/// that could not be asked at all are different facts, and collapsing them is how a
+/// caller comes to decide something from an answer nobody gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteTip {
+    /// The remote answered, and the branch is at this commit.
+    At(ObjectId),
+    /// The remote answered, and has no branch of that name.
+    Absent,
+    /// The remote could not be asked, so nothing about it is known here.
+    Unknown,
+}
+
+/// Ask the remote itself where a branch is, in its machine-readable form.
+///
+/// `ls-remote --exit-code` separates the three answers by exit status rather than
+/// by output: `0` is a branch it has, `2` is a remote that answered and has none,
+/// and anything else is a remote that could not be reached or would not say. What
+/// arrives on a `0` is still checked before it counts as a commit — a remote is
+/// outside this process, and an answer that is not an object id is one nothing here
+/// knows anything from.
+pub fn remote_tip(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    env: &[(String, String)],
+) -> Result<RemoteTip> {
+    let reference = format!("refs/heads/{branch}");
+    let listing = run_with_env(
+        &["ls-remote", "--exit-code", remote, &reference],
+        Some(cwd),
+        env,
+    )?;
+    Ok(match listing.status {
+        0 => advertised(&listing.stdout, &reference).map_or(RemoteTip::Unknown, RemoteTip::At),
+        2 => RemoteTip::Absent,
+        _ => RemoteTip::Unknown,
+    })
+}
+
+/// [`remote_tip`], answered from the remote's own refs where the remote is a plain bare
+/// repository on this filesystem, which is what that `ls-remote` would read anyway.
+pub fn remote_tip_read(cwd: &Path, remote: &str, branch: &str) -> Result<RemoteTip> {
+    match crate::native_refs::advertised_tip(cwd, remote, branch) {
+        Some(Some(id)) => Ok(ObjectId::parse(&id).map_or(RemoteTip::Unknown, RemoteTip::At)),
+        Some(None) => Ok(RemoteTip::Absent),
+        // A recovery read never asks a remote across a network.
+        None if LOCAL_ONLY.with(std::cell::Cell::get)
+            && !crate::native_refs::remote_on_this_filesystem(cwd, remote) =>
+        {
+            Ok(RemoteTip::Unknown)
+        }
+        None => remote_tip(cwd, remote, branch, &[]),
+    }
+}
+
+/// Write `refs/remotes/origin/<branch>` to a commit origin is known to carry under that
+/// name, answering whether the ref now names it.
+///
+/// What a fetch of that one ref would have written, and only where a fetch would have
+/// written it: the commit must be one this repository holds itself, and a ref already
+/// at or past it is left where it is — moving it back would hide a push somebody else
+/// made. It is written under the checkout's [`FETCH_LOCK`], so it takes turns with every
+/// fetch into the checkout: a session's close ([`crate::workspace::copy_back`]) writing
+/// it while another process fetched there would move a ref that fetch had already read,
+/// and git would refuse the fetch's whole update. The write is leased on the value read
+/// as well, so a push moving the ref meanwhile is never overwritten.
+pub fn record_on_origin(repo: &Path, branch: &str, commit: &ObjectId) -> bool {
+    // A ref already there is answered without the lock: a recovery read asks this of
+    // every branch origin carries, and almost always of one a fetch already wrote.
+    if tip(repo, &format!("refs/remotes/origin/{branch}")).as_deref() == Some(commit.as_str()) {
+        return true;
+    }
+    // Under the fetch lock, so a fetch into this checkout never has the ref moved
+    // between its read of it and its write: the two take turns. A lock that cannot be
+    // taken writes nothing, which is what every other way this can decline already is.
+    fetching(repo, || Ok(record_on_origin_now(repo, branch, commit))).unwrap_or(false)
+}
+
+/// [`record_on_origin`]'s read and write, made while its caller holds the fetch lock.
+fn record_on_origin_now(repo: &Path, branch: &str, commit: &ObjectId) -> bool {
+    let reference = format!("refs/remotes/origin/{branch}");
+    // llmlint: ignore-block[changed_behavior_has_e2e] uncovered: a commit this repository
+    // lacks. A copy-back fetches the commit first and a refresh only writes one it just read.
+    if !has_commit(repo, &Sha(commit.as_str().to_owned())) {
+        return false;
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let current = tip(repo, &reference);
+    if let Some(current) = &current {
+        if current == commit.as_str() {
+            return true;
+        }
+        if is_ancestor(repo, commit.as_str(), current).unwrap_or(true) {
+            return false;
+        }
+    }
+    let lease = current.unwrap_or_else(|| "0".repeat(commit.as_str().len()));
+    // llmlint: ignore-block[changed_behavior_has_e2e] uncovered: this lease lost to a push
+    // from this checkout moving the ref between the read above and this write — no fetch
+    // can, under the lock — and no verb can be held inside that span; losing it leaves
+    // the ref the push wrote. The write itself is every copy-back journey's assertion.
+    run(
+        &["update-ref", &reference, commit.as_str(), &lease],
+        Some(repo),
+    )
+    .is_ok_and(|written| written.ok())
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// Every branch a remote has and the commit each stands at, in one listing — or
+/// `None` where the remote could not be asked or answered with something that is not
+/// a listing, which is not the same fact as a remote with no branches.
+///
+/// One `ls-remote` for however many branches a caller then asks about, where
+/// [`remote_tip`] is one per branch: a pass over a few hundred branches of one origin
+/// asks it once. Every line has to be an object id and a branch; one that is not
+/// leaves the whole answer unknown rather than half of it believed.
+pub fn remote_branch_tips(cwd: &Path, remote: &str) -> Result<Option<BTreeMap<String, ObjectId>>> {
+    let listing = run(&["ls-remote", "--heads", remote], Some(cwd))?;
+    if !listing.ok() {
+        return Ok(None);
+    }
+    let mut tips = BTreeMap::new();
+    for line in listing
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        let parsed = line.split_once('\t').and_then(|(id, reference)| {
+            Some((
+                reference.strip_prefix("refs/heads/")?.to_owned(),
+                ObjectId::parse(id)?,
+            ))
+        });
+        let Some((branch, tip)) = parsed else {
+            return Ok(None);
+        };
+        tips.insert(branch, tip);
+    }
+    Ok(Some(tips))
+}
+
+/// The one object id a listing advertises for one ref, if that is what it is.
+///
+/// `ls-remote` answers `<id>\t<ref>` and, for a fully spelled ref, one line of it.
+/// The whole response has to be that: a second line, a missing field, a ref other
+/// than the one asked for, or an id that is not one leaves this with nothing it
+/// understands — and half of an answer is not a fact to decide a lease on.
+fn advertised(listing: &str, reference: &str) -> Option<ObjectId> {
+    let mut lines = listing.lines().filter(|line| !line.trim().is_empty());
+    let advertised = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let (id, named) = advertised.split_once('\t')?;
+    (named == reference).then(|| ObjectId::parse(id)).flatten()
+}
+
+/// Copy one local branch into another local repository, objects included.
+///
+/// Deliberately not forced, and deliberately a fetch from the destination side.
+/// The destination is shared between sessions, so a non-fast-forward write there
+/// would discard commits that are some other session's only record — and a push
+/// from a run clone would run the execution checkout's `pre-push` hook, rejecting
+/// exactly the gate-failed work this operation exists to preserve.
+pub fn copy_branch(source: &Path, destination: &Path, branch: &str) -> Result<bool> {
+    let source = git_path(source).to_string_lossy();
+    let output = run(
+        &[
+            "fetch",
+            &source,
+            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+        ],
+        Some(destination),
+    )?;
+    Ok(output.ok())
+}
+
+/// Fetch one branch from a repository path or a configured remote into a ref of
+/// this repository's own, replacing whatever that ref held.
+///
+/// The one call `onevcs import` makes against the source, and it writes a ref and
+/// nothing else: no index is read, no working tree is touched, and the ref it
+/// lands on is the caller's scratch rather than a branch. What the source is
+/// spelled as — a path or a remote name — is git's own question, so both go
+/// through one invocation rather than two that could come to fetch differently.
+///
+/// A fetch into the checkout like any other, so under its [`FETCH_LOCK`] and run again
+/// on a lost race ([`fetch_settled`]): from a configured remote git also moves that
+/// remote's `refs/remotes/<remote>/<branch>` on the side, which is the ref every other
+/// fetch and push into this checkout writes too.
+pub fn fetch_into_ref(cwd: &Path, source: &str, branch: &str, into: &str) -> Result<bool> {
+    let source = git_location(source);
+    let output = fetch_settled(
+        cwd,
+        &[
+            "fetch",
+            source.as_ref(),
+            &format!("+refs/heads/{branch}:{into}"),
+        ],
+    )?;
+    Ok(output.ok())
+}
+
+pub fn update_ref(cwd: &Path, reference: &str, commit: &str) -> Result<()> {
+    checked(&["update-ref", reference, commit], Some(cwd)).map(|_| ())
+}
+
+/// Remove a ref, whatever it held.
+///
+/// Best-effort by design: its one caller is clearing the scratch ref it fetched
+/// into, and a scratch ref left behind is untidy rather than wrong — refusing over
+/// it would turn a completed import into a failure.
+pub fn delete_ref(cwd: &Path, reference: &str) {
+    let _ = run(&["update-ref", "-d", reference], Some(cwd));
+}
+
+/// Every remote the repository has configured.
+///
+/// A failure is a failure rather than an empty list: its one caller decides from
+/// this whether `--from` names a remote, and a repository git could not be asked
+/// about would otherwise be reported as one with no remotes at all.
+pub fn remotes(cwd: &Path) -> Result<Vec<String>> {
+    Ok(checked(&["remote"], Some(cwd))?
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Adopt a branch from another local repository, overwriting the local ref.
+pub fn import_branch(cwd: &Path, source: &Path, branch: &str) -> Result<bool> {
+    let source = git_path(source).to_string_lossy();
+    let output = run(
+        &[
+            "fetch",
+            &source,
+            &format!("+refs/heads/{branch}:refs/heads/{branch}"),
+        ],
+        Some(cwd),
+    )?;
+    Ok(output.ok())
+}
+
+/// Where one local branch stands in a repository, as that repository answers now.
+///
+/// Three answers rather than two, for the reason [`RemoteTip`] has three: a
+/// repository that has no such branch and a repository git would not read are
+/// different facts, and the second is never an absence to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalTip {
+    /// The branch is there, at this commit.
+    At(ObjectId),
+    /// The repository answered, and has no branch of that name.
+    Absent,
+    /// The repository could not be asked, and this is what git said.
+    Unreadable(String),
+}
+
+/// Where `refs/heads/<branch>` stands in `cwd`, asked by its full ref name so a tag
+/// or a remote-tracking ref wearing the same name is not mistaken for it.
+///
+/// A directory that is not there holds nothing, which is the one negative answer that
+/// is a fact rather than a failure. Anything git declines about a directory that *is*
+/// there is [`LocalTip::Unreadable`], carrying git's own words.
+pub fn local_tip(cwd: &Path, branch: &str) -> LocalTip {
+    if !cwd.exists() {
+        return LocalTip::Absent;
+    }
+    let reference = format!("refs/heads/{branch}");
+    if let Some(tip) = crate::native_refs::raw_tip(cwd, &reference) {
+        return match tip.and_then(|tip| ObjectId::parse(&tip)) {
+            Some(tip) => LocalTip::At(tip),
+            None => LocalTip::Absent,
+        };
+    }
+    match run(
+        &["for-each-ref", "--format=%(objectname)", &reference],
+        Some(cwd),
+    ) {
+        Ok(output) if output.ok() => {
+            let listed = output.trimmed();
+            if listed.is_empty() {
+                return LocalTip::Absent;
+            }
+            match ObjectId::parse(&listed) {
+                Some(tip) => LocalTip::At(tip),
+                None => LocalTip::Unreadable(format!(
+                    "git listed {reference} as {listed:?}, which is not one commit"
+                )),
+            }
+        }
+        Ok(output) => LocalTip::Unreadable(output.diagnostic()),
+        Err(failure) => LocalTip::Unreadable(failure.to_string()),
+    }
+}
+
+/// Every local branch of a repository with the commit it stands at, in git's ref
+/// order.
+pub fn heads(cwd: &Path) -> Result<Vec<(String, String)>> {
+    if let Some(heads) = crate::native_refs::heads(cwd) {
+        return Ok(heads);
+    }
+    Ok(checked(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(objectname)",
+            "refs/heads",
+        ],
+        Some(cwd),
+    )?
+    .stdout
+    .lines()
+    .filter_map(|line| line.split_once('\0'))
+    .map(|(name, tip)| (name.to_owned(), tip.to_owned()))
+    .collect())
+}
+
+/// Every remote-tracking branch of one remote with the commit it stands at, by the
+/// name the remote gives it; `HEAD` is not a branch and is left out.
+pub fn remote_heads(cwd: &Path, remote: &str) -> Result<BTreeMap<String, String>> {
+    if let Some(heads) = crate::native_refs::remote_heads(cwd, remote) {
+        return Ok(heads);
+    }
+    let prefix = format!("refs/remotes/{remote}/");
+    Ok(checked(
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)",
+            &prefix,
+        ],
+        Some(cwd),
+    )?
+    .stdout
+    .lines()
+    .filter_map(|line| line.split_once('\0'))
+    .filter_map(|(name, tip)| Some((name.strip_prefix(&prefix)?.to_owned(), tip.to_owned())))
+    .filter(|(name, _)| name != "HEAD")
+    .collect())
+}
+
+/// Every worktree of a repository — its own and every linked one — with the branch
+/// each has checked out, or `None` for one that is detached or bare.
+pub fn worktrees(cwd: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
+    if let Some(worktrees) = crate::native_refs::worktrees(cwd) {
+        return Ok(worktrees);
+    }
+    let listing = checked(&["worktree", "list", "--porcelain", "-z"], Some(cwd))?;
+    let mut found = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    for field in listing.stdout.split('\0') {
+        if field.is_empty() {
+            if let Some(done) = path.take() {
+                found.push((done, branch.take()));
+            }
+            continue;
+        }
+        if let Some(at) = field.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(at));
+        } else if let Some(named) = field.strip_prefix("branch refs/heads/") {
+            branch = Some(named.to_owned());
+        }
+    }
+    if let Some(done) = path.take() {
+        found.push((done, branch.take()));
+    }
+    Ok(found)
+}
+
+/// The commits at the tip of `commit` that change no content — each one's tree equal
+/// to its first parent's — newest first, stopping at the first one that does change
+/// something and never walking past `stop` or a root.
+///
+/// What a landing record leaves behind: `publish` writes the landing of a branch onto
+/// it as an otherwise empty commit, and such a commit adds nothing a base could lack.
+/// Answered with the commit the walk stopped at, which is the branch's content tip.
+///
+/// One `log` along the first-parent chain, bounded at [`CONTENT_FREE_WALK`] commits:
+/// a walk that runs out of it stops where it is, which is the conservative end — a
+/// content tip no further back than the truth only ever makes a proof harder to meet.
+pub fn content_free_tail<'a>(
+    cwd: impl Into<Asked<'a>>,
+    commit: &str,
+    stop: &str,
+) -> Result<(Vec<String>, String)> {
+    let listed = checked_in(
+        cwd.into(),
+        &[
+            "log",
+            "--first-parent",
+            &format!("-n{}", CONTENT_FREE_WALK + 1),
+            "--format=%H%x00%T",
+            commit,
+            "--",
+        ],
+    )?;
+    let chain: Vec<(&str, &str)> = listed
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .collect();
+    let mut skipped = Vec::new();
+    for pair in chain.windows(2) {
+        let ((at, tree), (_, parent_tree)) = (pair[0], pair[1]);
+        if at == stop || tree != parent_tree {
+            return Ok((skipped, at.to_owned()));
+        }
+        skipped.push(at.to_owned());
+    }
+    let at = chain
+        .get(skipped.len())
+        .map(|(at, _)| (*at).to_owned())
+        .unwrap_or_else(|| commit.to_owned());
+    Ok((skipped, at))
+}
+
+/// How far back [`content_free_tail`] walks.
+const CONTENT_FREE_WALK: usize = 64;
+
+/// Whether `head` carries everything `tip` holds: `tip`, less the trailing commits that
+/// change no content, equals or is an ancestor of `head`.
+///
+/// What a merge reported for a change request has to show before it says anything about
+/// a branch: the head the host merged is what landed, and a branch that went on after
+/// it — a content commit pushed after that head — holds work the merge never saw. The
+/// walk back from `tip` stops where `tip` and `head` meet, so a branch standing at the
+/// merged head, or above it by nothing but landing records, carries nothing more.
+/// A `head` this repository does not have is `false`, which is the side that keeps.
+pub fn carries_content_of<'a>(cwd: impl Into<Asked<'a>>, head: &str, tip: &str) -> Result<bool> {
+    let cwd = cwd.into();
+    if !has_commit(cwd, &Sha(head.to_owned())) || !has_commit(cwd, &Sha(tip.to_owned())) {
+        return Ok(false);
+    }
+    let met = merge_base(cwd, head, tip)?.unwrap_or_default();
+    let (_, content_tip) = content_free_tail(cwd, tip, &met)?;
+    known_to_reach(cwd, &content_tip, head)
+}
+
+/// Every worktree of a repository with the branch each has checked out, read from the
+/// repository's own `HEAD` files where the layout is the one git writes, and from `git
+/// worktree list` where it is anything else.
+///
+/// Read off the files first because the question is asked of every place a branch is
+/// held on every classification, and a process per place per branch is the whole cost
+/// of a read a hook makes under a bound — and because `worktree list` is not a read the
+/// per-invocation memo can hold, so asking it would throw away every fact remembered so
+/// far.
+pub fn worktree_heads(cwd: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
+    match worktree_heads_on_disk(cwd) {
+        Some(found) => Ok(found),
+        None => worktrees(cwd),
+    }
+}
+
+fn worktree_heads_on_disk(cwd: &Path) -> Option<Vec<(PathBuf, Option<String>)>> {
+    let dot_git = cwd.join(".git");
+    if !dot_git.is_dir() {
+        return None;
+    }
+    // A symbolic `HEAD` names the branch checked out, and a detached one is a commit;
+    // anything else is a layout this does not know, and the process is asked instead.
+    let branch_of = |head: &Path| -> Option<Option<String>> {
+        let text = std::fs::read_to_string(head).ok()?;
+        let text = text.trim();
+        if let Some(named) = text.strip_prefix("ref: ") {
+            return Some(named.strip_prefix("refs/heads/").map(str::to_owned));
+        }
+        ObjectId::parse(text).map(|_| None)
+    };
+    let mut found = vec![(cwd.to_path_buf(), branch_of(&dot_git.join("HEAD"))?)];
+    let linked = dot_git.join("worktrees");
+    let entries = match std::fs::read_dir(&linked) {
+        Ok(entries) => entries,
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => return Some(found),
+        Err(_) => return None,
+    };
+    for entry in entries {
+        let admin = entry.ok()?.path();
+        let gitdir = std::fs::read_to_string(admin.join("gitdir")).ok()?;
+        let worktree = Path::new(gitdir.trim()).parent()?.to_path_buf();
+        found.push((worktree, branch_of(&admin.join("HEAD"))?));
+    }
+    Some(found)
+}
+
+/// One commit's whole message, or `None` where the repository does not hold it.
+pub fn commit_message<'a>(cwd: impl Into<Asked<'a>>, commit: &str) -> Result<Option<String>> {
+    let cwd = cwd.into();
+    if !has_commit(cwd, &Sha(commit.to_owned())) {
+        return Ok(None);
+    }
+    Ok(Some(
+        checked_in(cwd, &["log", "-1", "--format=%B", commit, "--"])?
+            .stdout
+            .trim_end()
+            .to_owned(),
+    ))
+}
+
+/// The newest commit `rev` reaches whose message carries `needle` verbatim, where
+/// one does.
+pub fn first_commit_mentioning(cwd: &Path, rev: &str, needle: &str) -> Option<String> {
+    let immutable = crate::native_refs::tip(cwd, rev).flatten();
+    let rev = immutable.as_deref().unwrap_or(rev);
+    run(
+        &[
+            "log",
+            "-n",
+            "1",
+            "--format=%H",
+            "--fixed-strings",
+            &format!("--grep={needle}"),
+            rev,
+            "--",
+        ],
+        Some(cwd),
+    )
+    .ok()
+    .filter(Output::ok)
+    .map(|out| out.trimmed())
+    .filter(|found| !found.is_empty())
+}
+
+/// Every commit `range` names — `A..B` — oldest first.
+pub fn commits_in<'a>(cwd: impl Into<Asked<'a>>, range: &str) -> Result<Vec<String>> {
+    Ok(
+        checked_in(cwd.into(), &["rev-list", "--reverse", range, "--"])?
+            .stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Whether one commit changes no content: its tree is its first parent's.
+///
+/// A root commit changes whatever it holds, so it is never one.
+pub fn changes_no_content<'a>(cwd: impl Into<Asked<'a>>, commit: &str) -> Result<bool> {
+    let cwd = cwd.into();
+    let parent = run_in(
+        cwd,
+        &["rev-parse", "--verify", &format!("{commit}^1^{{commit}}")],
+    )?;
+    if !parent.ok() {
+        return Ok(false);
+    }
+    let trees = checked_in(
+        cwd,
+        &[
+            "rev-parse",
+            &format!("{commit}^{{tree}}"),
+            &format!("{}^{{tree}}", parent.trimmed()),
+        ],
+    )?;
+    let mut lines = trees.stdout.lines();
+    Ok(lines.next() == lines.next())
+}
+
+/// Every path `to` changed since `from`, both ends of a rename included, as git
+/// names them.
+///
+/// Renames are not detected, for the reason every comparison in this module declines
+/// them. The listing is NUL-separated and its length is held to git's own count of
+/// files, so a name this process could not read whole is refused rather than dropped:
+/// a comparison over *some* of the paths a branch changed would answer that the base
+/// carries the branch when it does not.
+pub fn changed_paths<'a>(cwd: impl Into<Asked<'a>>, from: &str, to: &str) -> Result<Vec<String>> {
+    let cwd = cwd.into();
+    let listed = checked_in(
+        cwd,
+        &["diff", "--name-only", "--no-renames", "-z", from, to, "--"],
+    )?;
+    let paths: Vec<String> = listed
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    // A listing that arrived whole is text whole or not at all, so one that names a
+    // path names every path; only an empty one, or one whose pipe failed part way,
+    // can be a listing this process could not read, and only those are held to git's
+    // count.
+    if !paths.is_empty() && listed.read_failures.is_empty() {
+        return Ok(paths);
+    }
+    let counted = counted_files(cwd, from, to)?;
+    if paths.len() != counted {
+        return Err(Error::Invalid {
+            reason: format!(
+                "git diff {from} {to} listed {} path(s) and counted {counted}, so which paths it \
+                 changed could not be read whole",
+                paths.len()
+            ),
+        });
+    }
+    Ok(paths)
+}
+
+/// The paths among `paths` whose content differs between two commits — a path one
+/// side has and the other does not among them.
+pub fn differing_among<'a>(
+    cwd: impl Into<Asked<'a>>,
+    first: &str,
+    second: &str,
+    paths: &[String],
+) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Whole trees compared and the asked paths looked up in the answer, for the reason
+    // `known_to_carry_changes` gives: no argument list of them to overflow.
+    let cwd: Asked<'a> = cwd.into();
+    let listed = checked_in(
+        cwd,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            first,
+            second,
+            "--",
+        ],
+    )?;
+    if !listing_whole(cwd, &listed, first, second)? {
+        return Err(error::invalid(format!(
+            "the paths {first} and {second} differ in could not be read whole"
+        )));
+    }
+    let asked: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let mut differing: Vec<String> = listed
+        .stdout
+        .split('\0')
+        .filter(|path| !path.is_empty() && asked.contains(path))
+        .map(str::to_owned)
+        .collect();
+    differing.sort();
+    differing.dedup();
+    Ok(differing)
+}
+
+/// Delete `refs/heads/<branch>` only while it still stands at `expected`.
+///
+/// Compare-and-delete in one ref transaction: a branch that moved since it was read
+/// is refused by git itself rather than removed with the commit it gained, which is
+/// the one direction a deletion must never fail in.
+pub fn delete_branch_at(cwd: &Path, branch: &str, expected: &str) -> Result<()> {
+    checked(
+        &[
+            "update-ref",
+            "-d",
+            &format!("refs/heads/{branch}"),
+            expected,
+        ],
+        Some(cwd),
+    )
+    .map(|_| ())
+}
+
+/// Put `refs/heads/<branch>` back at `commit`, only where nothing has created it
+/// since.
+pub fn restore_branch(cwd: &Path, branch: &str, commit: &str) -> Result<()> {
+    checked(
+        &["update-ref", &format!("refs/heads/{branch}"), commit, ""],
+        Some(cwd),
+    )
+    .map(|_| ())
+}
+
+/// Delete a branch from a remote, **without running the repository's own `pre-push`
+/// hook**, and only while the remote still has it at `expected`.
+///
+/// `--no-verify` for the reason [`push_preserving`] carries it and more: a deletion
+/// lands nothing, so the merge path has nothing to rule on, and a repository whose
+/// hook runs its whole gate would otherwise run it to remove a ref. The lease is what
+/// keeps a deletion from taking a commit somebody pushed after the branch was read.
+pub fn delete_remote_branch(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    expected: &str,
+) -> Result<Pushed> {
+    pushed(
+        &[
+            "push",
+            "--porcelain",
+            "--no-verify",
+            &format!("--force-with-lease=refs/heads/{branch}:{expected}"),
+            "--delete",
+            remote,
+            &format!("refs/heads/{branch}"),
+        ],
+        cwd,
+        &[],
+    )
+}
+
+/// Fetch one commit, by its id, from a remote into this repository's object store,
+/// moving no ref but `FETCH_HEAD`, and answer whether it is here now.
+///
+/// A host that serves a commit by id serves one any of its refs reaches — on GitHub, a
+/// merged change request's own `refs/pull/*` keeps its last head after its branch is
+/// deleted — and one that will not is answered `false`, never an error, so the caller
+/// says what it could not restore.
+pub fn fetch_commit(cwd: &Path, remote: &str, commit: &str) -> Result<bool> {
+    let fetched = fetching(cwd, || {
+        run(
+            &["fetch", "--no-tags", "--refmap=", remote, commit],
+            Some(cwd),
+        )
+    })?
+    .ok();
+    Ok(fetched && has_commit(cwd, &Sha(commit.to_owned())))
+}
+
+/// Fetch one branch of a remote into this repository's object store without moving
+/// any ref but `FETCH_HEAD`, so a copy only the remote holds can be read here.
+///
+/// `--refmap=` is what keeps it from moving the remote-tracking ref too, which a fetch
+/// naming one branch otherwise updates on the side.
+pub fn fetch_objects_of(cwd: &Path, remote: &str, branch: &str) -> Result<bool> {
+    Ok(fetching(cwd, || {
+        run(
+            &[
+                "fetch",
+                "--no-tags",
+                "--refmap=",
+                remote,
+                &format!("refs/heads/{branch}"),
+            ],
+            Some(cwd),
+        )
+    })?
+    .ok())
+}
+
+/// Fetch one branch of a remote to its remote-tracking ref and nothing else — no tag,
+/// no prune — answering whether git took it.
+pub fn fetch_tracking(cwd: &Path, remote: &str, branch: &str) -> Result<bool> {
+    Ok(fetch_settled(
+        cwd,
+        &[
+            "fetch",
+            "--no-tags",
+            remote,
+            &format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}"),
+        ],
+    )?
+    .ok())
+}
+
+#[cfg(test)]
+mod list_bounds {
+    use super::*;
+    use std::io::Write as _;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("git starts");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+        (dir, repo)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_finished_commands_output_is_whole_on_windows() {
+        let output = run(&["--version"], None).expect("git runs");
+        assert!(output.ok(), "{}", output.diagnostic());
+        assert!(!output.stdout.is_empty());
+        assert_eq!(output.read_failures, Vec::<String>::new());
+    }
+
+    /// Past one batch of tips, a branch one tip reaches is ruled out by the batch holding
+    /// that tip, and one no tip reaches survives every batch.
+    #[test]
+    fn a_branch_survives_only_the_batches_of_tips_that_do_not_reach_it() {
+        let (_dir, repo) = repo();
+        let mut reached = String::new();
+        let mut updates = String::new();
+        for n in 0..NO_MERGED_BATCH * 3 {
+            git(
+                &repo,
+                &["commit", "-q", "--allow-empty", "-m", &format!("tip {n}")],
+            );
+            let tip = git(&repo, &["rev-parse", "HEAD"]);
+            updates.push_str(&format!("create refs/remotes/origin/t{n} {tip}\n"));
+            if n == NO_MERGED_BATCH * 2 + 1 {
+                reached = tip;
+            }
+        }
+        git(&repo, &["branch", "reached", &reached]);
+        git(&repo, &["checkout", "-q", "-b", "unpublished"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        let mut child = Command::new("git")
+            .current_dir(&repo)
+            .args(["update-ref", "--stdin"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(updates.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let unpublished = unpublished_heads(&repo).unwrap();
+        assert!(!unpublished.contains("reached"), "{unpublished:?}");
+        assert!(unpublished.contains("unpublished"), "{unpublished:?}");
+    }
+
+    /// Anchoring over more commits than one octopus names walks them in batches, and
+    /// still answers the commit they all descend from.
+    #[test]
+    fn the_anchor_of_many_commits_is_read_across_batches() {
+        let (_dir, repo) = repo();
+        let root = git(&repo, &["rev-parse", "HEAD"]);
+        let mut decided = BTreeSet::new();
+        for n in 0..70 {
+            git(
+                &repo,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{n}")],
+            );
+            decided.insert(git(&repo, &["rev-parse", "HEAD"]));
+        }
+        decided.insert(root.clone());
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        let asked = Asked::from(repo.as_path());
+        assert_eq!(octopus_base(asked, &tip, &decided, 8).unwrap(), root);
+    }
+}
+
+#[cfg(test)]
+mod ref_name_tests {
+    use super::*;
+
+    /// Names of every shape this crate meets, and several it must not accept.
+    ///
+    /// Each is put to both answers below, so the corpus is the one place a shape is
+    /// listed rather than two lists that could come to disagree.
+    const NAMES: &[&str] = &[
+        "main",
+        "HEAD",
+        "feature/x",
+        "onevcs/s-9fa99cfb80da",
+        "worktree-agent-7",
+        "preserved/by-trailer",
+        "release/v1.2.3",
+        "a_b-c.d/e",
+        "a.lock",
+        "locked/a.lock",
+        ".hidden",
+        "hidden/.x",
+        "a..b",
+        "ends.",
+        "with space",
+        "with~tilde",
+        "with^caret",
+        "with:colon",
+        "question?",
+        "star*",
+        "brack[et",
+        "at@{brace",
+        "@",
+        "back\\slash",
+        "double//slash",
+        "trailing/",
+        "/leading",
+        "unicode/ünïcøde",
+        "标点/分支.v1",
+        "punct/one!two#three$four%five&six(seven)+eight=nine;ten,eleven",
+        "unicode/space\u{a0}inside",
+        "dots/interior.part/last",
+        "control\u{1}char",
+    ];
+
+    /// Whether git itself accepts a name as a branch ref.
+    fn git_accepts(branch: &str) -> bool {
+        run(&["check-ref-format", &format!("refs/heads/{branch}")], None)
+            .map(|out| out.ok())
+            .unwrap_or(false)
+    }
+
+    /// The in-process fast path may only ever be *narrower* than git.
+    ///
+    /// This is the one assertion that makes deciding a ref name without a subprocess
+    /// safe at all: the fast path answers `true` only where git would, so the worst a
+    /// git whose grammar has moved can do is make a name fall through to it. It is a
+    /// unit test rather than a journey because there is no verb that asks whether a
+    /// name is a name — the question is a private function's, and the oracle it is
+    /// held against is the real `git` on this host, which is why it is not a mock.
+    #[test]
+    fn the_fast_path_accepts_only_names_git_accepts() {
+        for name in NAMES {
+            if plainly_a_ref_name(name) {
+                assert!(
+                    git_accepts(name),
+                    "{name:?} is accepted without asking git, and git refuses it"
+                );
+            }
+        }
+        // …and it is not vacuously narrow: the names this crate actually cuts are the
+        // ones that must never cost a process.
+        for ordinary in [
+            "main",
+            "feature/x",
+            "onevcs/s-9fa99cfb80da",
+            "worktree-agent-7",
+            "unicode/ünïcøde",
+            "标点/分支.v1",
+            "punct/one!two#three$four%five&six(seven)+eight=nine;ten,eleven",
+            "dots/interior.part/last",
+        ] {
+            assert!(
+                plainly_a_ref_name(ordinary),
+                "{ordinary:?} is the ordinary shape and must be decided in process"
+            );
+        }
+    }
+
+    /// And the answer as a whole is still git's, whichever route it took.
+    #[test]
+    fn a_name_is_valid_here_exactly_when_git_says_so() {
+        for name in NAMES {
+            // A leading `-` is refused before either route, because such a name goes
+            // on to be an argument and git's own parser would read it as an option.
+            let expected = git_accepts(name) && !name.starts_with('-');
+            assert_eq!(
+                is_valid_branch_name(name),
+                expected,
+                "{name:?}: this build and git disagree about whether it is a ref name"
+            );
+        }
+    }
+}
+
+/// Fetches into one checkout take turns, and a turn ends however its fetch did.
+///
+/// In this crate because a library caller is the one that can tell: `onepipeline`
+/// links it and keeps one process alive across many fetches, so a turn a failed or
+/// killed fetch did not hand back would wedge every later fetch into that checkout in
+/// that process — and a process that exits releases its locks whatever it leaked,
+/// which is all a journey through the binary could show. The overlap itself, a
+/// session opening that meets a fetch mid-way through its ref update, is driven
+/// through the binary in `tests/e2e/fetch_turns.rs`.
+///
+/// Every fetch here is held, refused, or killed by a real `reference-transaction`
+/// hook in the checkout, at `prepared` — its ref locks taken and its update not yet
+/// written, which is the point two fetches collide at.
+///
+/// The races below are the other writers of a checkout's remote-tracking refs —
+/// [`record_on_origin`], which a session's close runs and which no verb can be held
+/// inside, and a push from the checkout — run against real fetches many times over,
+/// because what they hold is an interleaving rather than an order. A journey holding
+/// one ordering of it through the binary is `stack_base`'s concurrent push.
+#[cfg(all(test, unix))]
+mod fetch_turns {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// A scratch directory, and a lock bound short enough that a turn nobody handed
+    /// back fails the test rather than hanging it.
+    ///
+    /// The bound is this process's own environment, which is safe because nextest
+    /// runs each test in a process of its own — the same footing `stream.rs` stands on.
+    fn scratch() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("a canonical scratch root");
+        std::env::set_var(lock::TIMEOUT_ENV, "10");
+        (directory, root)
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        checked(args, Some(cwd)).expect("the fixture's git succeeds");
+    }
+
+    /// A bare origin with one commit on `main`, and the clone that writes to it.
+    fn origin(root: &Path) -> (PathBuf, PathBuf) {
+        let origin = root.join("origin.git");
+        git(
+            root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                &origin.to_string_lossy(),
+            ],
+        );
+        let writer = root.join("writer");
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &writer.to_string_lossy(),
+            ],
+        );
+        advance(&writer);
+        (origin, writer)
+    }
+
+    /// Move origin's `main` on, so the next fetch has a ref to update.
+    fn advance(writer: &Path) {
+        git(
+            writer,
+            &[
+                "-c",
+                "user.name=Fetch",
+                "-c",
+                "user.email=fetch@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "move main on",
+            ],
+        );
+        git(writer, &["push", "-q", "origin", "HEAD:main"]);
+    }
+
+    fn checkout(root: &Path, origin: &Path, name: &str) -> PathBuf {
+        let checkout = root.join(name);
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &checkout.to_string_lossy(),
+            ],
+        );
+        checkout
+    }
+
+    /// Hold the first fetch into `checkout` at `prepared` until `<gate>/release`
+    /// exists, recording the git being held as `<gate>/held/git` — renamed into
+    /// place, so a test that sees the file never reads it before its pid; while
+    /// `<gate>/refuse` exists, refuse every update instead.
+    fn gate(root: &Path, checkout: &Path) -> PathBuf {
+        let gate = root.join(format!(
+            "gate-{}",
+            checkout.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let hooks = gate.join("hooks");
+        std::fs::create_dir_all(&hooks).expect("a hooks directory");
+        let hook = hooks.join("reference-transaction");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = prepared ] || exit 0\n\
+                 grep -q ' refs/remotes/origin/main$' || exit 0\n\
+                 [ -e {gate}/refuse ] && exit 1\n\
+                 mkdir {gate}/held 2>/dev/null || exit 0\n\
+                 echo \"$PPID\" > {gate}/held/git.tmp\n\
+                 mv {gate}/held/git.tmp {gate}/held/git\n\
+                 until [ -e {gate}/release ]; do sleep 0.02; done\n",
+                gate = gate.display()
+            ),
+        )
+        .expect("the hook is written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+        git(
+            checkout,
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+        );
+        gate
+    }
+
+    /// Start a fetch into `checkout` and return once its hook is holding it.
+    fn held_fetch(checkout: &Path, gate: &Path) -> std::thread::JoinHandle<Result<()>> {
+        let at = checkout.to_path_buf();
+        let fetching = std::thread::spawn(move || fetch(&at, "origin"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !gate.join("held/git").is_file() {
+            assert!(
+                !fetching.is_finished(),
+                "the fetch ended before its hook held it"
+            );
+            assert!(Instant::now() < deadline, "the fetch was never held");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        fetching
+    }
+
+    fn tracked_main(checkout: &Path) -> String {
+        checked(&["rev-parse", "refs/remotes/origin/main"], Some(checkout))
+            .expect("the checkout tracks origin's main")
+            .trimmed()
+    }
+
+    fn origin_main(origin: &Path) -> String {
+        checked(&["rev-parse", "main"], Some(origin))
+            .expect("origin has a main")
+            .trimmed()
+    }
+
+    #[test]
+    fn a_fetch_git_failed_hands_the_checkout_to_the_next_fetch() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        let gate = gate(&root, &checkout);
+        advance(&writer);
+
+        std::fs::write(gate.join("refuse"), "").expect("the hook refuses");
+        let refused = fetch(&checkout, "origin").expect_err("the hook refused the update");
+        assert!(
+            refused
+                .to_string()
+                .contains("git fetch origin --prune failed"),
+            "git's own failure is what is reported: {refused}"
+        );
+
+        std::fs::remove_file(gate.join("refuse")).expect("the hook stops refusing");
+        std::fs::write(gate.join("release"), "").expect("nothing is held");
+        fetch(&checkout, "origin").expect("the next fetch takes its turn");
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    #[test]
+    fn a_fetch_whose_git_was_killed_hands_the_checkout_to_the_next_fetch() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        let gate = gate(&root, &checkout);
+        advance(&writer);
+
+        let killed = held_fetch(&checkout, &gate);
+        let pid: libc::pid_t = std::fs::read_to_string(gate.join("held/git"))
+            .expect("the held git's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        // SAFETY: `kill` on the one git this test started, named by its own hook.
+        // TERM rather than KILL: git takes its ref locks away with it on TERM, and a
+        // `.lock` file KILL left behind would refuse the next fetch for a reason of
+        // git's rather than this crate's.
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGTERM) },
+            0,
+            "the git is signalled"
+        );
+        let ended = killed.join().expect("the fetching thread returns");
+        assert!(ended.is_err(), "a killed fetch is a failed one");
+        // The hook git was waiting on outlives it; let it go.
+        std::fs::write(gate.join("release"), "").expect("the orphaned hook ends");
+
+        fetch(&checkout, "origin").expect("the next fetch takes its turn");
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    #[test]
+    fn fetches_into_two_checkouts_do_not_wait_on_each_other() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let held = checkout(&root, &origin, "held");
+        let free = checkout(&root, &origin, "free");
+        let gate = gate(&root, &held);
+        advance(&writer);
+
+        let holding = held_fetch(&held, &gate);
+        fetch(&free, "origin").expect("a fetch into another checkout runs meanwhile");
+        assert_eq!(tracked_main(&free), origin_main(&origin));
+        assert!(
+            !holding.is_finished(),
+            "the other checkout's fetch is still held while this one completed"
+        );
+
+        std::fs::write(gate.join("release"), "").expect("the held fetch is let go");
+        holding
+            .join()
+            .expect("the fetching thread returns")
+            .expect("the held fetch completes");
+        assert_eq!(tracked_main(&held), origin_main(&origin));
+    }
+
+    /// How many fetches each race below runs against its concurrent writer.
+    const RACES: usize = 150;
+
+    /// A chain of `count` commits on top of origin's `main`, every one of them already
+    /// in `checkout`'s own object store under `refs/heads/chain` and in origin's, so a
+    /// writer can point either repository's refs at any of them without a transfer.
+    fn chain(writer: &Path, checkout: &Path, count: usize) -> Vec<String> {
+        let mut commits = Vec::with_capacity(count);
+        let mut parent = checked(&["rev-parse", "HEAD"], Some(writer))
+            .expect("the writer has a head")
+            .trimmed();
+        let tree = checked(&["rev-parse", "HEAD^{tree}"], Some(writer))
+            .expect("the writer has a tree")
+            .trimmed();
+        for n in 0..count {
+            let message = format!("link {n}");
+            let commit = checked_with_env(
+                &["commit-tree", &tree, "-p", &parent, "-m", &message],
+                Some(writer),
+                &[
+                    ("GIT_AUTHOR_NAME".into(), "Race".into()),
+                    ("GIT_AUTHOR_EMAIL".into(), "race@example.invalid".into()),
+                    ("GIT_COMMITTER_NAME".into(), "Race".into()),
+                    ("GIT_COMMITTER_EMAIL".into(), "race@example.invalid".into()),
+                ],
+            )
+            .expect("a link is committed")
+            .trimmed();
+            commits.push(commit.clone());
+            parent = commit;
+        }
+        git(
+            writer,
+            &[
+                "push",
+                "-q",
+                "origin",
+                &format!("{parent}:refs/heads/chain"),
+            ],
+        );
+        git(
+            checkout,
+            &["fetch", "-q", "origin", "chain:refs/heads/chain"],
+        );
+        commits
+    }
+
+    /// Run [`RACES`] fetches into `checkout` — `fetching(i)` — each started together
+    /// with `write(i)` on another thread, and answer every fetch's failure.
+    ///
+    /// The fetch of race `i` starts a step later than the one before it, wrapping at
+    /// `spread`, so the fetches' windows sweep across the whole of the writer's run
+    /// rather than all meeting it at one point of it.
+    fn race(
+        spread: Duration,
+        fetching: impl Fn(usize) -> Result<()> + Sync,
+        write: impl Fn(usize) + Sync,
+    ) -> Vec<String> {
+        let step = spread / 37;
+        let mut failures = Vec::new();
+        for i in 0..RACES {
+            let start = std::sync::Barrier::new(2);
+            let fetched = std::thread::scope(|scope| {
+                let fetched = scope.spawn(|| {
+                    start.wait();
+                    if !spread.is_zero() {
+                        std::thread::sleep(step * u32::try_from(i % 37).unwrap_or(0));
+                    }
+                    fetching(i)
+                });
+                start.wait();
+                write(i);
+                fetched.join().expect("the fetching thread returns")
+            });
+            if let Err(failed) = fetched {
+                failures.push(failed.to_string());
+            }
+        }
+        failures
+    }
+
+    /// The writer a session's close is: origin moves on — the session's clone pushed
+    /// — and [`record_on_origin`] writes the checkout's remote-tracking ref to it while
+    /// another process fetches into the checkout. 0.64.0 wrote that ref outside the
+    /// fetch lock, and the fetch lost its transaction to it with `cannot lock ref ...
+    /// is at <new> but expected <old>`. Every other race is the one-branch fetch a
+    /// recovery read makes beside that write ([`fetch_tracking`]).
+    #[test]
+    fn a_fetch_survives_a_session_close_recording_what_origin_carries() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        let links = chain(&writer, &checkout, 2 * RACES);
+
+        let fetching = |i: usize| {
+            if i.is_multiple_of(2) {
+                return fetch(&checkout, "origin");
+            }
+            match fetch_tracking(&checkout, "origin", "main")? {
+                true => Ok(()),
+                false => Err(error::invalid("a fetch of origin's main alone failed")),
+            }
+        };
+        let failures = race(Duration::ZERO, fetching, |i| {
+            let pushed = &links[2 * i + 1];
+            git(&origin, &["update-ref", "refs/heads/main", pushed]);
+            let recorded = ObjectId::parse(pushed).expect("an object id");
+            assert!(
+                record_on_origin(&checkout, "main", &recorded)
+                    || is_ancestor(checkout.as_path(), pushed, &tracked_main(&checkout))
+                        .unwrap_or(false),
+                "the close records origin's commit, or a fetch already carried the ref past it"
+            );
+        });
+        assert!(
+            failures.is_empty(),
+            "{} of {RACES} fetches failed beside a close recording origin's commit: {failures:#?}",
+            failures.len()
+        );
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    /// A `reference-transaction` hook in `repo` that runs `body` when a transaction
+    /// naming `trigger` has committed.
+    ///
+    /// A fetch reads every ref it will update before it transfers anything, and a
+    /// pruning fetch commits its prune before its updates whether it commits those one
+    /// ref at a time or as one batch, so a hook on the prune is inside the update's
+    /// window: what `body` writes is a concurrent writer arranged rather than raced for. Nothing `body` writes runs the
+    /// hook again. Answers the file each run of `body` adds the writing git's pid to —
+    /// git can commit one prune as two transactions, so a fetch is a pid, not a line.
+    fn on_committed(root: &Path, repo: &Path, trigger: &str, body: &str) -> PathBuf {
+        let name = repo.file_name().unwrap_or_default().to_string_lossy();
+        let hooks = root.join(format!("written-{name}"));
+        std::fs::create_dir_all(&hooks).expect("a hooks directory");
+        let runs = root.join(format!("runs-{name}"));
+        let hook = hooks.join("reference-transaction");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n\
+                 [ \"$1\" = committed ] || exit 0\n\
+                 [ -z \"$RACE_WRITING\" ] || exit 0\n\
+                 grep -q ' {trigger}$' || exit 0\n\
+                 export RACE_WRITING=1\n\
+                 echo \"$PPID\" >> {runs}\n\
+                 {body}\n",
+                runs = runs.display(),
+            ),
+        )
+        .expect("the hook is written");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("the hook is executable");
+        git(
+            repo,
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+        );
+        runs
+    }
+
+    /// The shell that points `reference` at a commit nothing else names — a child of
+    /// `parent` — as another writer would.
+    fn moves(reference: &str, parent: &str) -> String {
+        format!(
+            "git update-ref {reference} \"$(git -c user.name=Race \
+             -c user.email=race@example.invalid commit-tree {parent}^{{tree}} -p {parent} \
+             -m \"moved by $$\")\""
+        )
+    }
+
+    /// A remote-tracking ref origin no longer has, so the next fetch's first
+    /// transaction is its prune — the trigger every hook below waits for.
+    fn stale(checkout: &Path) {
+        git(
+            checkout,
+            &["update-ref", "refs/remotes/origin/stale", "HEAD"],
+        );
+    }
+
+    /// How many gits ran the hook's body: one per run of a fetch.
+    fn runs(file: &Path) -> usize {
+        std::fs::read_to_string(file).map_or(0, |runs| runs.lines().collect::<BTreeSet<_>>().len())
+    }
+
+    /// How many runs of a fetch the churn below makes lose: more than any small fixed
+    /// count of re-runs would outlast.
+    const LOST_RUNS: usize = 15;
+
+    /// The hook body that makes each run of a fetch lose its update of `origin/main` —
+    /// a fresh commit written there inside its window, and the stale ref put back so
+    /// the next run prunes, and so meets the hook, again — until `limit` fetches have
+    /// run, when the writer stops. `None` never stops.
+    fn churn(runs: &Path, limit: Option<usize>) -> String {
+        let stop = limit.map_or_else(String::new, |limit| {
+            format!(
+                "[ \"$(sort -u {runs} | wc -l)\" -gt {limit} ] && exit 0\n",
+                runs = runs.display()
+            )
+        });
+        format!(
+            "{stop}git update-ref refs/remotes/origin/stale HEAD\n{}",
+            moves("refs/remotes/origin/main", "HEAD")
+        )
+    }
+
+    /// A fetch that loses its update to [`LOST_RUNS`] writes in a row answers once the
+    /// writer stops: churn is outlasted however many updates it makes, so no small
+    /// fixed count of re-runs is what decides the answer.
+    #[test]
+    fn a_fetch_outlasts_a_writer_that_beats_it_many_times_and_then_stops() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        advance(&writer);
+        stale(&checkout);
+        let runs_file = root.join("runs-checkout");
+        let written = on_committed(
+            &root,
+            &checkout,
+            "refs/remotes/origin/stale",
+            &churn(&runs_file, Some(LOST_RUNS)),
+        );
+        assert_eq!(written, runs_file);
+
+        fetch(&checkout, "origin").expect("the fetch answers once the writer stops");
+        assert_eq!(
+            runs(&written),
+            LOST_RUNS + 1,
+            "the premise: {LOST_RUNS} runs each lost to a write, and the next one won"
+        );
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    /// A writer that never stops is waited out for as long as a fetch waits for its
+    /// turn, and then reported as that — never as git's refusal of one run.
+    #[test]
+    fn a_fetch_under_churn_that_never_stops_names_the_bound_it_waited() {
+        let (_directory, root) = scratch();
+        std::env::set_var(lock::TIMEOUT_ENV, "1");
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        advance(&writer);
+        stale(&checkout);
+        let runs_file = root.join("runs-checkout");
+        let written = on_committed(
+            &root,
+            &checkout,
+            "refs/remotes/origin/stale",
+            &churn(&runs_file, None),
+        );
+
+        let failed = fetch(&checkout, "origin")
+            .expect_err("a ref rewritten for the whole bound")
+            .to_string();
+        assert!(runs(&written) > 1, "the fetch was run again while it lost");
+        assert!(
+            failed.contains(lock::TIMEOUT_ENV) && failed.contains("without pause"),
+            "the bound is what is named: {failed}"
+        );
+        assert!(
+            !failed.contains("cannot lock ref") && !failed.contains("incorrect old value"),
+            "git's refusal of one run is not the answer: {failed}"
+        );
+    }
+
+    /// A bound too long to measure a wait in is refused, naming it, before any fetch
+    /// runs, rather than crashing the fetch that would have waited under it.
+    #[test]
+    fn a_fetch_refuses_a_bound_no_wait_can_be_measured_in() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        advance(&writer);
+        let before = tracked_main(&checkout);
+        std::env::set_var(lock::TIMEOUT_ENV, "1e100");
+
+        let refused = fetch(&checkout, "origin")
+            .expect_err("the bound is refused")
+            .to_string();
+        assert!(
+            refused.contains(lock::TIMEOUT_ENV) && refused.contains("1e100"),
+            "the refusal names the setting and its value: {refused}"
+        );
+        assert_eq!(tracked_main(&checkout), before, "no fetch ran");
+    }
+
+    /// A ref whose lock another writer holds for longer than git waits for one: the
+    /// first run's hook takes `origin/main`'s lock and keeps it until a second run of
+    /// the fetch — a different git — reaches the same point, so only a fetch that is
+    /// run again ever sees it let go.
+    #[test]
+    fn a_fetch_that_meets_another_writers_ref_lock_runs_again() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        advance(&writer);
+        stale(&checkout);
+        let holder = root.join("lock-holder");
+        let written = on_committed(
+            &root,
+            &checkout,
+            "refs/remotes/origin/stale",
+            &format!(
+                "lock=\"$(git rev-parse --git-path refs/remotes/origin/main.lock)\"\n\
+                 if [ ! -e {holder} ]; then\n\
+                 echo \"$PPID\" > {holder}\n\
+                 mkdir -p \"$(dirname \"$lock\")\"\n\
+                 : > \"$lock\"\n\
+                 fi\n\
+                 if [ \"$(cat {holder})\" = \"$PPID\" ]; then\n\
+                 git update-ref refs/remotes/origin/stale HEAD\n\
+                 else\n\
+                 rm -f \"$lock\"\n\
+                 fi",
+                holder = holder.display()
+            ),
+        );
+
+        fetch(&checkout, "origin").expect("the fetch runs again once the lock is let go");
+        assert_eq!(
+            runs(&written),
+            2,
+            "the premise: the first run met the lock and a second let it go"
+        );
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    /// Run `body` once, in `repo`, inside the next fetch into it: after the fetch read the
+    /// refs it updates and before it commits them. Answers the directory whose existence
+    /// says `body` ran.
+    ///
+    /// The command a repository with an object store to borrow from runs to list that
+    /// store's refs (`core.alternateRefsCommand`) is what runs it, because git runs that
+    /// while checking that what a fetch brought is connected. Not a
+    /// `reference-transaction` hook ([`on_committed`]): a git that commits a fetch's
+    /// updates as one batch makes no earlier transaction of an unpruned fetch to hang
+    /// the write on, so a hook there writes after the fetch rather than inside it. A
+    /// session's clone borrows its lender's store already (`clone --shared`); any other
+    /// `repo` is given `borrowed`'s, which adds nothing it needs.
+    fn inside_next_fetch(root: &Path, repo: &Path, borrowed: Option<&Path>, body: &str) -> PathBuf {
+        if let Some(borrowed) = borrowed {
+            let alternates = repo.join(".git/objects/info/alternates");
+            std::fs::create_dir_all(alternates.parent().unwrap_or(repo))
+                .expect("an objects/info directory");
+            std::fs::write(
+                &alternates,
+                format!("{}\n", borrowed.join("objects").display()),
+            )
+            .expect("the borrowed store is recorded");
+        }
+        let ran = root.join("ran-inside-fetch");
+        let command = root.join("alternate-refs");
+        std::fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\n\
+                 if mkdir {ran} 2>/dev/null; then\n\
+                 (cd {repo} && {body})\n\
+                 fi\n\
+                 git --git-dir=\"$1\" for-each-ref --format='%(objectname)'\n",
+                ran = ran.display(),
+                repo = repo.display(),
+            ),
+        )
+        .expect("the command is written");
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
+            .expect("the command is executable");
+        git(
+            repo,
+            &[
+                "config",
+                "core.alternateRefsCommand",
+                &command.to_string_lossy(),
+            ],
+        );
+        ran
+    }
+
+    /// A session's clone given its lender's view of origin while something writes one of
+    /// the clone's remote-tracking refs: the carry runs again rather than refusing the
+    /// session that is opening.
+    #[test]
+    fn a_clone_carried_its_lenders_refs_while_one_moves_runs_again() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let lender = checkout(&root, &origin, "lender");
+        let clone = root.join("clone");
+        git(
+            &root,
+            &[
+                "clone",
+                "-q",
+                "--shared",
+                "--no-checkout",
+                &lender.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        advance(&writer);
+        git(
+            &writer,
+            &["push", "-q", "origin", "HEAD:refs/heads/feature"],
+        );
+        fetch(&lender, "origin").expect("the lender sees origin move");
+        let ran = inside_next_fetch(
+            &root,
+            &clone,
+            None,
+            &moves("refs/remotes/origin/main", "refs/heads/main"),
+        );
+
+        carry_remote_refs(&lender, &clone, "main").expect("the carry runs again and answers");
+        assert!(ran.is_dir(), "the premise: a ref moved mid-carry");
+        assert_eq!(tracked_main(&clone), origin_main(&origin));
+    }
+
+    /// A fetch of one branch into a ref of the checkout's own from a configured remote,
+    /// as `onevcs import` makes it, which also moves that remote's tracking ref.
+    #[test]
+    fn a_fetch_into_a_ref_from_a_remote_whose_tracking_ref_moves_runs_again() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        advance(&writer);
+        let scratch_ref = "refs/onevcs/scratch";
+        let ran = inside_next_fetch(
+            &root,
+            &checkout,
+            Some(&origin),
+            &moves("refs/remotes/origin/main", "HEAD"),
+        );
+
+        assert!(
+            fetch_into_ref(&checkout, "origin", "main", scratch_ref).expect("the fetch runs"),
+            "the fetch runs again and takes the branch"
+        );
+        assert!(
+            ran.is_dir(),
+            "the premise: the tracking ref moved mid-fetch"
+        );
+        assert_eq!(
+            tip(&checkout, scratch_ref).as_deref(),
+            Some(origin_main(&origin).as_str())
+        );
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+
+    /// [`record_on_origin`] waits its turn behind a fetch, and writes nothing where the
+    /// turn never comes.
+    #[test]
+    fn a_close_recording_origin_waits_for_the_fetch_lock_and_writes_nothing_without_it() {
+        let (_directory, root) = scratch();
+        std::env::set_var(lock::TIMEOUT_ENV, "1");
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        let links = chain(&writer, &checkout, 1);
+        let recorded = ObjectId::parse(&links[0]).expect("an object id");
+        let before = tracked_main(&checkout);
+
+        let lock = common_dir(&checkout)
+            .expect("the checkout's common directory")
+            .join(FETCH_LOCK);
+        let held = lock::exclusive_at(&lock).expect("the fetch lock is taken");
+        assert!(
+            !record_on_origin(&checkout, "main", &recorded),
+            "no turn, no write"
+        );
+        assert_eq!(tracked_main(&checkout), before, "the ref was not written");
+
+        drop(held);
+        assert!(record_on_origin(&checkout, "main", &recorded));
+        assert_eq!(tracked_main(&checkout), links[0]);
+    }
+
+    /// The writer no lock can order: a push from the checkout, which moves the
+    /// checkout's own `refs/remotes/origin/<branch>` once origin takes it. A fetch into
+    /// the same checkout meanwhile loses its transaction to that write and is run again.
+    #[test]
+    fn a_fetch_survives_a_push_from_its_own_checkout() {
+        let (_directory, root) = scratch();
+        let (origin, writer) = origin(&root);
+        let checkout = checkout(&root, &origin, "checkout");
+        let links = chain(&writer, &checkout, 2 * RACES);
+
+        let failures = race(
+            Duration::from_millis(60),
+            |_| fetch(&checkout, "origin"),
+            |i| {
+                git(&origin, &["update-ref", "refs/heads/main", &links[2 * i]]);
+                git(
+                    &checkout,
+                    &[
+                        "push",
+                        "-q",
+                        "origin",
+                        &format!("{}:refs/heads/main", links[2 * i + 1]),
+                    ],
+                );
+            },
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {RACES} fetches failed beside a push from their checkout: {failures:#?}",
+            failures.len()
+        );
+        fetch(&checkout, "origin").expect("a last fetch settles the checkout");
+        assert_eq!(tracked_main(&checkout), origin_main(&origin));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn configure_repository(repo: &Path) {
+        checked(&["init", "-q", "-b", "main"], Some(repo)).expect("git initializes");
+        configure_identity(repo);
+        checked(&["commit", "--allow-empty", "-q", "-m", "seed"], Some(repo))
+            .expect("a seed commit");
+    }
+
+    fn configure_identity(repo: &Path) {
+        checked(&["config", "user.name", "Journey"], Some(repo)).expect("a user name");
+        checked(
+            &["config", "user.email", "journey@example.invalid"],
+            Some(repo),
+        )
+        .expect("a user email");
+    }
+
+    #[test]
+    fn canonical_windows_paths_cross_every_git_path_boundary() {
+        let directory = tempfile::tempdir().expect("a scratch directory");
+        let root = std::fs::canonicalize(directory.path()).expect("a canonical Windows path");
+        assert!(
+            root.to_string_lossy().starts_with(r"\\?\"),
+            "Windows canonicalize must exercise the verbatim-path defect"
+        );
+
+        let source = root.join("source");
+        std::fs::create_dir(&source).expect("a source directory");
+        configure_repository(&source);
+        let hooks = root.join("hooks");
+        std::fs::create_dir(&hooks).expect("a hooks directory");
+        checked(
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+            Some(&source),
+        )
+        .expect("a canonical hooks path is configured");
+
+        let clone = root.join("clone");
+        clone_sharing(&source, &clone, &source.to_string_lossy(), "main")
+            .expect("canonical source and clone paths reach git");
+        configure_identity(&clone);
+        fetch(&clone, "origin").expect("a canonical local origin reaches git");
+        assert_eq!(
+            hooks_dir(&clone).expect("the carried hooks path"),
+            git_path(&hooks),
+            "the clone carries the simplified hooks path"
+        );
+
+        let worktree = root.join("worktree");
+        worktree_add(&clone, &worktree, "feature/windows-path", "main")
+            .expect("a canonical worktree path reaches git");
+        commit_empty(&worktree, "work").expect("a canonical working directory reaches git");
+
+        let destination = root.join("destination");
+        std::fs::create_dir(&destination).expect("a destination directory");
+        configure_repository(&destination);
+        assert!(
+            copy_branch(&clone, &destination, "feature/windows-path")
+                .expect("a canonical local-fetch source reaches git"),
+            "the branch is copied"
+        );
+        assert!(
+            import_branch(&destination, &clone, "feature/windows-path")
+                .expect("a canonical import source reaches git"),
+            "the branch is imported"
+        );
+
+        worktree_remove(&clone, &worktree).expect("a canonical removal path reaches git");
+        assert!(!worktree.exists(), "git removed the worktree");
+
+        let existing = root.join("existing-worktree");
+        worktree_add_existing(&clone, &existing, "feature/windows-path")
+            .expect("a canonical existing-worktree path reaches git");
+        worktree_remove(&clone, &existing).expect("the existing worktree is removed");
+
+        let detached = root.join("detached-worktree");
+        worktree_add_detached(&clone, &detached, "main")
+            .expect("a canonical detached-worktree path reaches git");
+        worktree_remove(&clone, &detached).expect("the detached worktree is removed");
+    }
+}
+
+/// What a collector owes a command that wrote in the instant before it exited,
+/// held to it by forcing that instant rather than waiting for one.
+///
+/// In this crate because there is no other side of it. What this holds is an
+/// *interleaving* — the reader taking a read that finds the pipe empty, being held
+/// there, and finding the command already collected when it next looks — and
+/// nothing outside this process can decide when a reader looks. On an idle host
+/// that interleaving is nanoseconds wide, so a journey cannot wait for it; here it
+/// is arranged. `tests/e2e/inherited_pipes.rs` drives the same collector through
+/// the real binary, over a real command, and asserts on what a caller is shown.
+///
+/// Unix only, because that is where the hold goes in: on Windows a read that finds
+/// the pipe empty is answered by `PeekNamedPipe` before `Read` is reached at all,
+/// so a wrapper around `Read` never sees the answer it has to delay.
+#[cfg(all(test, unix))]
+mod collecting {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, RawFd};
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::PipeCapture;
+
+    /// How long the reader is held on a read that came back empty.
+    ///
+    /// It has to cover everything the command has left to do — be released, write,
+    /// exit, and be collected one exit poll later — so that when the reader looks
+    /// again the command is unambiguously over. A loaded host inserts a hold of its
+    /// own here at a width nobody chooses; this one is chosen, so the test decides
+    /// the same thing every run.
+    const HELD: Duration = Duration::from_millis(300);
+    /// Padding written before the command's last word, wider than two of the
+    /// collector's 8192-byte read buffers, so what is recovered has to have crossed
+    /// several reads rather than fitting in one.
+    const PADDING: usize = 20_000;
+    /// The end of what the command wrote, which is the part a truncating collector
+    /// loses first.
+    const LAST_WORD: &str = "released 1.2.3\n";
+
+    /// A command's own pipe, with the pause a descheduled reader takes between the
+    /// read that found nothing and its next look at whether the command is over.
+    ///
+    /// Nothing here stands in for the pipe: the read is the real read, on the real
+    /// descriptor, and its answer is passed through untouched. The only thing added
+    /// is when the reader gets to act on it.
+    struct Held<R> {
+        pipe: R,
+        empty_reads: Arc<AtomicUsize>,
+    }
+
+    impl<R: Read> Read for Held<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let answer = self.pipe.read(buffer);
+            if matches!(&answer, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock) {
+                self.empty_reads.fetch_add(1, Ordering::Release);
+                std::thread::sleep(HELD);
+            }
+            answer
+        }
+    }
+
+    impl<R: AsRawFd> AsRawFd for Held<R> {
+        fn as_raw_fd(&self) -> RawFd {
+            self.pipe.as_raw_fd()
+        }
+    }
+
+    #[test]
+    fn a_reader_held_past_the_exit_still_returns_everything_the_command_wrote() {
+        let expected = format!("{}{LAST_WORD}", "0".repeat(PADDING));
+        // A real child on a real pipe, holding its tongue until this test says go —
+        // so the reader is certain to have met the pipe empty before a byte of the
+        // answer exists, which is the instant the hold is placed at.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "read go; printf '%0{PADDING}d' 0; printf '{LAST_WORD}'"
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a shell is on PATH");
+        let empty_reads = Arc::new(AtomicUsize::new(0));
+        let (ended, _endings) = std::sync::mpsc::channel();
+        let reader = PipeCapture::start(
+            Held {
+                pipe: child.stdout.take().expect("stdout was piped"),
+                empty_reads: Arc::clone(&empty_reads),
+            },
+            ended,
+        );
+
+        while empty_reads.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        // The reader is now held, and everything below happens inside that hold:
+        // the command writes its whole answer and exits, and its exit is collected.
+        let mut go = child.stdin.take().expect("stdin was piped");
+        std::io::Write::write_all(&mut go, b"go\n").expect("the command is released");
+        drop(go);
+        let status = loop {
+            match child.try_wait().expect("the command can be asked") {
+                Some(status) => break status,
+                None => std::thread::yield_now(),
+            }
+        };
+        assert!(status.success(), "the command itself succeeded");
+
+        let collected = reader.finish();
+        assert!(
+            collected.failure.is_none(),
+            "no read failed: {:?}",
+            collected.failure
+        );
+        let collected = collected.bytes;
+
+        assert_eq!(
+            collected.len(),
+            expected.len(),
+            "a reader that met the pipe empty and was held past the command's exit must still \
+             return every byte the command wrote: {recovered} of {whole} bytes, ending {tail:?}",
+            recovered = collected.len(),
+            whole = expected.len(),
+            tail = String::from_utf8_lossy(&collected[collected.len().saturating_sub(24)..]),
+        );
+        assert!(
+            collected == expected.as_bytes(),
+            "and they are the command's own bytes, in the order it wrote them"
+        );
+    }
+}
+
+/// What a stopped command's teardown waits on when the platform refuses to say whether
+/// a killed group still has a member.
+///
+/// macOS answers `kill(-pgid, 0)` with `EPERM` rather than `ESRCH` while a group's only
+/// members are killed processes not yet reaped, which is how
+/// `publication_watch`'s two cancellation-in-`pre-push` journeys failed there. The group
+/// here is a real one with a real killed member, and the probe itself answers `EPERM`
+/// for as long as that member is unreaped — the answer the wait gets on macOS — so the
+/// refusal is the test's own on every Unix, whatever the host kernel would have said.
+/// Only once the member is reaped does it ask the kernel, whose `ESRCH` ends the wait.
+#[cfg(all(test, unix))]
+mod reaping {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{await_group_empty, REAP_BOUND};
+
+    /// The group's member is left unreaped this long, so the wait meets several
+    /// refusals before the group empties.
+    const UNREAPED: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn a_group_refused_while_its_killed_members_are_unreaped_is_confirmed_empty_once_reaped() {
+        let mut member = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("sleep spawns");
+        let leader = member.id();
+        let group = -(leader as libc::pid_t);
+        // SAFETY: the group is the one `member` was just put in, owned by this test.
+        assert_eq!(unsafe { libc::kill(group, libc::SIGKILL) }, 0);
+        let reaped = Arc::new(AtomicBool::new(false));
+        let reaper = std::thread::spawn({
+            let reaped = Arc::clone(&reaped);
+            move || {
+                std::thread::sleep(UNREAPED);
+                member.wait().expect("the killed member is reaped");
+                reaped.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let mut refusals = 0;
+        let answer = await_group_empty(leader, REAP_BOUND, || {
+            if !reaped.load(Ordering::SeqCst) {
+                refusals += 1;
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            // SAFETY: signal 0 delivers nothing, to the group this test owns.
+            if unsafe { libc::kill(group, 0) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+        reaper.join().expect("the reaper finishes");
+
+        assert_eq!(answer, Ok(()), "the group is confirmed empty once reaped");
+        assert!(
+            refusals > 1,
+            "the wait met the platform's refusal and asked again: {refusals}"
+        );
+    }
+
+    #[test]
+    fn a_group_still_refused_at_the_bound_is_reported_with_the_refusal() {
+        let answer = await_group_empty(7, Duration::from_millis(50), || {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        });
+
+        let reason = answer.expect_err("a refusal that never ends is not an empty group");
+        assert!(
+            reason.contains("process group 7") && reason.contains("still refused"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&std::io::Error::from_raw_os_error(libc::EPERM).to_string()),
+            "{reason}"
+        );
+    }
+}
+
+/// Every view a reader can be shown while [`append_in_place`] adds settings, read by
+/// the real git, and every state a failure can leave, recovered by the real write.
+///
+/// What is held is an interleaving no journey can stop the binary in: git reads a
+/// configuration in buffered `read`s, one after another, until one finds the end, so a
+/// reader can join what one `read` returned before a write to what the next returns
+/// after it. The plan the write executes ([`addition`]) is walked byte by byte here
+/// instead: every prefix of every write — a write across a page can be seen in part on
+/// Linux — and every view that joins one such state, up to a read boundary, to a later
+/// one beyond it.
+#[cfg(test)]
+mod config_addition_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// The read buffer git's stdio refills: one `read` of this many bytes at a time.
+    const READ_BUFFER: usize = 4096;
+
+    /// The local configuration shapes git reads: as `git init` leaves it, an operator's
+    /// last line with no end, one ended `\r\n`, one whose last line a backslash
+    /// continues — ended, and not — one whose last value ends in an escaped backslash
+    /// and no line end, none at all, and one spanning several read buffers.
+    fn shapes(initialized: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+        let unended = initialized[..initialized.len() - 1].to_vec();
+        let mut crlf = unended.clone();
+        crlf.extend_from_slice(b"\r\n");
+        let mut continued = initialized.to_vec();
+        continued.extend_from_slice(b"[onevcs-test]\n\tnote = kept \\\n");
+        let unended_continuation = continued[..continued.len() - 1].to_vec();
+        let mut escaped = initialized.to_vec();
+        escaped.extend_from_slice(b"[onevcs-test]\n\tnote = kept\\\\");
+        let mut large = initialized.to_vec();
+        for remote in 0..300 {
+            large.extend_from_slice(
+                format!(
+                    "[remote \"r{remote:03}\"]\n\turl = https://example.invalid/{remote:03}.git\n"
+                )
+                .as_bytes(),
+            );
+        }
+        vec![
+            ("as git init leaves it", initialized.to_vec()),
+            ("with an unended last line", unended),
+            ("ended with \\r\\n", crlf),
+            ("continued by a backslash", continued),
+            (
+                "continued by a backslash with no line end",
+                unended_continuation,
+            ),
+            ("ending in an escaped backslash", escaped),
+            ("empty", Vec::new()),
+            ("larger than three read buffers", large),
+        ]
+    }
+
+    /// A repository `git init` made, and the configuration it wrote.
+    fn initialized() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let repository = scratch.path().join("repository");
+        let made = Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repository)
+            .output()
+            .expect("git runs");
+        assert!(made.status.success(), "git init");
+        let written = std::fs::read(repository.join(".git").join("config"))
+            .expect("git init's configuration");
+        (scratch, repository, written)
+    }
+
+    /// Every setting git reads from a repository whose configuration is `state`, or why
+    /// it could not.
+    fn listing(repository: &Path, state: &[u8]) -> std::result::Result<String, String> {
+        std::fs::write(repository.join(".git").join("config"), state).expect("a state");
+        let output = Command::new("git")
+            .args(["config", "--local", "--list"])
+            .current_dir(repository)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                repository.join(".git").join("no-global"),
+            )
+            .output()
+            .expect("git runs");
+        if output.status.success() && output.stderr.is_empty() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
+    }
+
+    /// The listing without the retention keys, and each key's values, in file order.
+    fn split(listing: &str) -> (Vec<&str>, Vec<&str>, Vec<&str>) {
+        let (mut rest, mut auto, mut prune) = (Vec::new(), Vec::new(), Vec::new());
+        for line in listing.lines() {
+            match line.split_once('=') {
+                Some(("gc.auto", value)) => auto.push(value),
+                Some(("gc.pruneexpire", value)) => prune.push(value),
+                _ => rest.push(line),
+            }
+        }
+        (rest, auto, prune)
+    }
+
+    fn applied(content: &[u8], step: &Step, landed: usize) -> Vec<u8> {
+        let mut state = content.to_vec();
+        let at = step.at as usize;
+        if state.len() < at + landed {
+            state.resize(at + landed, 0);
+        }
+        state[at..at + landed].copy_from_slice(&step.bytes[..landed]);
+        state
+    }
+
+    /// Every state of the plan for `base`, in the order they occur: each prefix of each
+    /// write.
+    fn states(base: &[u8]) -> Vec<Vec<u8>> {
+        let mut found = vec![base.to_vec()];
+        let mut content = base.to_vec();
+        for step in addition(base, &RETENTION) {
+            for landed in 1..=step.bytes.len() {
+                found.push(applied(&content, &step, landed));
+            }
+            content = applied(&content, &step, step.bytes.len());
+        }
+        found
+    }
+
+    /// Every view a reader can be shown: each state, and each join of an earlier state,
+    /// up to a read boundary, to a later one beyond it. A boundary is where a `read`
+    /// ended — a buffer's end or the end of the file as that `read` found it — or, for
+    /// a reader whose buffers fall elsewhere, any byte of what the write changed.
+    fn views(base: &[u8], states: &[Vec<u8>]) -> BTreeSet<Vec<u8>> {
+        let mut found: BTreeSet<Vec<u8>> = states.iter().cloned().collect();
+        for (earlier, before) in states.iter().enumerate() {
+            let mut boundaries: BTreeSet<usize> = (base.len()..=before.len()).collect();
+            boundaries.extend((READ_BUFFER..before.len()).step_by(READ_BUFFER));
+            for after in &states[earlier + 1..] {
+                for &boundary in &boundaries {
+                    let mut view = before[..boundary].to_vec();
+                    view.extend_from_slice(&after[boundary.min(after.len())..]);
+                    found.insert(view);
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn lfs_settings_preserve_hashes_and_quotes_through_partial_appends() {
+        let (_scratch, repository, base) = initialized();
+        let settings = [
+            ("lfs.storage", r#""/cache/frames#1/with \"quotes\"""#),
+            ("remote \"origin\".lfsurl", r#""file:///store#endpoint""#),
+        ];
+        let mut content = base.clone();
+        for step in addition(&base, &settings) {
+            for landed in 1..=step.bytes.len() {
+                let state = applied(&content, &step, landed);
+                let read =
+                    listing(&repository, &state).expect("every partial append is valid Git config");
+                for line in read.lines().filter(|line| {
+                    line.starts_with("lfs.storage=") || line.starts_with("remote.origin.lfsurl=")
+                }) {
+                    assert!(
+                        matches!(
+                            line,
+                            "lfs.storage=/cache/frames#1/with \"quotes\""
+                                | "remote.origin.lfsurl=file:///store#endpoint"
+                        ),
+                        "partial setting: {line:?}"
+                    );
+                }
+            }
+            content = applied(&content, &step, step.bytes.len());
+        }
+        let read = listing(&repository, &content).unwrap();
+        assert!(read.contains("lfs.storage=/cache/frames#1/with \"quotes\"\n"));
+        assert!(read.contains("remote.origin.lfsurl=file:///store#endpoint\n"));
+    }
+
+    #[test]
+    fn every_view_of_an_addition_reads_and_every_failure_is_completed_by_the_next() {
+        let (_scratch, repository, initialized) = initialized();
+        let config = repository.join(".git").join("config");
+        for (shape, base) in shapes(&initialized) {
+            let before = listing(&repository, &base)
+                .unwrap_or_else(|e| panic!("the premise: git reads the base {shape}: {e}"));
+            let (kept, _, _) = split(&before);
+            let states = states(&base);
+            let views = views(&base, &states);
+            assert!(
+                views.len() > states.len(),
+                "{shape}: the premise: views join states"
+            );
+            for view in &views {
+                let shown = String::from_utf8_lossy(view);
+                let read = listing(&repository, view)
+                    .unwrap_or_else(|e| panic!("{shape}: git cannot read {shown:?}: {e}"));
+                // Nothing the file held moves, and a setting is in force whole or not at all.
+                let (rest, auto, prune) = split(&read);
+                assert_eq!(rest, kept, "{shape}: {shown:?}");
+                assert!(auto.iter().all(|value| *value == "0"), "{shape}: {shown:?}");
+                assert!(
+                    prune.iter().all(|value| *value == "never"),
+                    "{shape}: {shown:?}"
+                );
+            }
+            // A failure leaves one of the states; the next write completes it.
+            for state in &states {
+                std::fs::write(&config, state).expect("a failed write's state");
+                retain_objects_for_borrowers(&repository).unwrap_or_else(|e| {
+                    panic!(
+                        "{shape}: the next write after {:?} fails: {e}",
+                        String::from_utf8_lossy(state)
+                    )
+                });
+                let after = std::fs::read(&config).expect("the completed configuration");
+                let read = listing(&repository, &after).expect("the completed file reads");
+                let (rest, auto, prune) = split(&read);
+                assert_eq!(rest, kept, "{shape}");
+                assert_eq!(auto.last(), Some(&"0"), "{shape}");
+                assert_eq!(prune.last(), Some(&"never"), "{shape}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_configuration_git_cannot_read_is_refused_rather_than_taken_to_lack_the_keys() {
+        let (_scratch, repository, initialized) = initialized();
+        let config = repository.join(".git").join("config");
+        let mut broken = initialized.clone();
+        broken.extend_from_slice(b"[unterminated\n");
+        assert!(
+            listing(&repository, &broken).is_err(),
+            "the premise: git cannot read it"
+        );
+        let asked = retains_objects_for_borrowers(&repository)
+            .expect_err("whether it retains is not answered from a file git cannot read");
+        assert!(
+            asked.to_string().contains("could not read gc.auto"),
+            "{asked}"
+        );
+        retain_objects_for_borrowers(&repository).expect_err("nothing is written to it");
+        assert_eq!(std::fs::read(&config).expect("the configuration"), broken);
+    }
+}
+
+#[cfg(test)]
+mod hook_trace_tests {
+    use super::trace_started_post_checkout;
+
+    const OWN: &str = r#"{"event":"version","sid":"a"}"#;
+    const HOOK: &str =
+        r#"{"event":"child_start","child_class":"hook","hook_name":"post-checkout","#;
+
+    #[test]
+    fn only_the_commands_own_start_of_the_hook_counts() {
+        let own = format!("{OWN}\n{HOOK}\"sid\":\"a\"}}\n");
+        let nested = format!("{OWN}\n{HOOK}\"sid\":\"a/b\"}}\n");
+        assert!(trace_started_post_checkout(&own));
+        assert!(!trace_started_post_checkout(&nested), "a git a hook ran");
+        assert!(!trace_started_post_checkout(""), "no trace at all");
+    }
+}
+
+
+/// Prototype (spike-onepipeline-test-cost): see the call in [`run_fed`].
+fn spike_in_process(args: &[&str], cwd: &Path) -> Option<Output> {
+    if std::env::var_os("ONEVCS_SPIKE_NO_IN_PROCESS").is_some()
+        || std::env::vars_os().any(|(key, _)| spike_relocates_repository(&key.to_string_lossy()))
+    {
+        return None;
+    }
+    let answer = |status: i32, stdout: String, stderr: &str| Output {
+        status,
+        ended: Ended::Code(status),
+        stdout,
+        stderr: stderr.to_owned(),
+        read_failures: Vec::new(),
+    };
+    let open = || git2::Repository::open_ext(cwd, git2::RepositoryOpenFlags::empty(), std::iter::empty::<&std::ffi::OsStr>()).ok();
+    let short = |name: &str| -> String {
+        for prefix in ["refs/heads/", "refs/tags/", "refs/remotes/"] {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                return rest.to_owned();
+            }
+        }
+        name.to_owned()
+    };
+    let resolve = |repo: &git2::Repository, spec: &str| -> Option<String> {
+        if spec.starts_with('-') || spec.contains("..") || spec.contains(':') || spec.contains('@') {
+            return None;
+        }
+        Some(match repo.revparse_single(spec) {
+            Ok(object) => format!("{}\n", object.id()),
+            Err(_) => String::new(),
+        })
+    };
+    match args {
+        ["show-ref", "--verify", "--quiet", reference] if reference.starts_with("refs/") => {
+            let repo = open()?;
+            let exists = match repo.find_reference(reference) {
+                Ok(found) => found.resolve().is_ok(),
+                Err(error) if error.code() == git2::ErrorCode::NotFound => false,
+                Err(_) => return None,
+            };
+            Some(answer(if exists { 0 } else { 1 }, String::new(), ""))
+        }
+        ["symbolic-ref", "--short", reference] if reference.starts_with("refs/") => {
+            let repo = open()?;
+            let answered = match repo.find_reference(reference) {
+                Ok(found) => match found.symbolic_target().ok()? {
+                    Some(target) => Some(answer(0, format!("{}\n", short(target)), "")),
+                    None => Some(answer(128, String::new(), &format!("fatal: ref {reference} is not a symbolic ref\n"))),
+                },
+                Err(error) if error.code() == git2::ErrorCode::NotFound => {
+                    Some(answer(128, String::new(), &format!("fatal: ref {reference} is not a symbolic ref\n")))
+                }
+                Err(_) => None,
+            };
+            answered
+        }
+        ["symbolic-ref", "--quiet", "--short", "HEAD"] => {
+            let repo = open()?;
+            let head = repo.find_reference("HEAD").ok()?;
+            Some(match head.symbolic_target().ok()? {
+                Some(target) => answer(0, format!("{}\n", short(target)), ""),
+                None => answer(1, String::new(), ""),
+            })
+        }
+        ["rev-parse", "--is-inside-work-tree"] => {
+            let repo = open()?;
+            let inside = repo.workdir().is_some_and(|workdir| {
+                let here = std::fs::canonicalize(cwd).ok();
+                let root = std::fs::canonicalize(workdir).ok();
+                let git = std::fs::canonicalize(repo.path()).ok();
+                matches!((here, root, git), (Some(here), Some(root), Some(git)) if here.starts_with(&root) && !here.starts_with(&git))
+            });
+            Some(answer(0, format!("{inside}\n"), ""))
+        }
+        ["rev-parse", "--abbrev-ref", "HEAD"] => {
+            let repo = open()?;
+            let head = repo.find_reference("HEAD").ok()?;
+            match head.symbolic_target().ok()? {
+                Some(target) => {
+                    // An unborn branch is git's own error, which only git spells.
+                    repo.find_reference(target).ok()?;
+                    Some(answer(0, format!("{}\n", short(target)), ""))
+                }
+                None => Some(answer(0, "HEAD\n".to_owned(), "")),
+            }
+        }
+        ["rev-parse", "--verify", "--quiet", spec] => {
+            let repo = open()?;
+            let found = resolve(&repo, spec)?;
+            Some(if found.is_empty() { answer(1, found, "") } else { answer(0, found, "") })
+        }
+        ["rev-parse", "--verify", spec] => {
+            let repo = open()?;
+            let found = resolve(&repo, spec)?;
+            Some(if found.is_empty() {
+                answer(128, found, "fatal: Needed a single revision\n")
+            } else {
+                answer(0, found, "")
+            })
+        }
+        ["cat-file", "-e", object] if object.len() == 40 && object.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            let repo = open()?;
+            let id = git2::Oid::from_str(object).ok()?;
+            let odb = repo.odb().ok()?;
+            Some(answer(if odb.exists(id) { 0 } else { 1 }, String::new(), ""))
+        }
+        _ => None,
+    }
+}
+
+/// Prototype (spike-onepipeline-test-cost): the variables that change which
+/// repository, refs or objects git reads; any other `GIT_*` (configuration,
+/// identity, locks) leaves a ref read's answer as it is.
+fn spike_relocates_repository(key: &str) -> bool {
+    matches!(
+        key,
+        "GIT_DIR"
+            | "GIT_WORK_TREE"
+            | "GIT_COMMON_DIR"
+            | "GIT_INDEX_FILE"
+            | "GIT_OBJECT_DIRECTORY"
+            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+            | "GIT_NAMESPACE"
+            | "GIT_CEILING_DIRECTORIES"
+            | "GIT_DISCOVERY_ACROSS_FILESYSTEM"
+            | "GIT_REPLACE_REF_BASE"
+            | "GIT_NO_REPLACE_OBJECTS"
+            | "GIT_QUARANTINE_PATH"
+    )
+}

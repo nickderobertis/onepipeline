@@ -1,0 +1,15 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7ac8ac7b..a049d498 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1816,6 +1816,10 @@ codegen-units = 1
+ # registry at start, compiling a JSON Schema validator per payload: about 140 ms
+ # unoptimized, about 30 ms with these dependencies optimized. Workspace members stay
+ # at opt-level 0, so what coverage instruments is unchanged.
++# Prototype (spike-onepipeline-test-cost): every dependency optimized in test builds.
++[profile.dev.package."*"]
++opt-level = 2
++
+ [profile.dev.package]
+ ahash = { opt-level = 2 }
+ fancy-regex = { opt-level = 2 }

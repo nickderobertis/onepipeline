@@ -1,0 +1,730 @@
+//! A session: the clone and worktree a change is made in — a pooled slot the host
+//! keeps warm, or one cut for this run — and what is left behind when one does not
+//! finish.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+use crate::landed::Landed;
+use crate::workspaces::Bound;
+
+/// What to open a session over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRequest {
+    /// The repository: an identity key, a registered alias, or a path.
+    pub repo: String,
+    /// The branch to work on.
+    ///
+    /// A name that already exists — in a checkout of this identity, or on origin —
+    /// is **continued**: the session's worktree is opened at that branch's tip and
+    /// carries the work already on it. A name nothing carries yet is cut fresh from
+    /// [`base`](Self::base). Absent means one is derived, which is always a fresh
+    /// cut.
+    pub branch: Option<String>,
+    /// A name the caller wants a branch **cut** at, which is a different question
+    /// from [`branch`](Self::branch).
+    ///
+    /// `branch` names a branch to *continue* — anything already carrying that name
+    /// is opened at its tip — so a rendered name cannot arrive there: a collision
+    /// would silently continue somebody else's branch. This one is a *proposal*, and
+    /// this crate does all of the work of turning it into a branch: it is sanitized
+    /// into a name git accepts, the host's [branch prefix](crate::branches) is put
+    /// in front of it, and the first free of `<name>`, `<name>-2`, `<name>-3`, … is
+    /// taken — searched against this identity's local branches and its origin's. A
+    /// proposal nothing usable is left of, and one no suffix can make free, are
+    /// refused naming the proposal rather than silently replaced by a derived name.
+    ///
+    /// Absent means a name is derived from the session's own token, exactly as
+    /// before. Naming this **and** `branch` is refused: they are two answers to one
+    /// question.
+    // llmlint: ignore[invalid_states_unrepresentable] a proposal is arbitrary text by
+    // design, for the reason `SessionOpenArgs::branch_name` states: there is no
+    // invalid value here to make unrepresentable, only one this crate sanitizes. The
+    // amendment in docs/contract.md also fixes the declared shape as
+    // `Option<String>`, and two consuming repositories build against that spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    /// The branch prefix this one open cuts against, over everything the host
+    /// configures — the highest of the three layers [`branches`](crate::branches)
+    /// resolves. Absent means the host's resolution; `Some("")` is this open saying
+    /// it wants none.
+    ///
+    /// It reaches only branches this open **cuts**: a branch named by
+    /// [`branch`](Self::branch) is continued or cut at exactly that name, prefixed
+    /// by nothing.
+    // llmlint: ignore[invalid_states_unrepresentable] a newtype here would have to
+    // ask git whether a ref may start with the value, and the answer has to name the
+    // layer that set it — which a `TryFrom` cannot, because the same value reaches
+    // this field from a flag, from the environment and from the host's file.
+    // `branches::resolve` is that one boundary, and `branch` beside this field is an
+    // `Option<String>` for the same contract reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
+    /// The branch this session's work is merged with and published into.
+    ///
+    /// For a branch cut fresh it is also the point the branch starts from. For a
+    /// branch that already exists it is the integration target and nothing else:
+    /// what is merged in when it has moved on, and what the publication is compared
+    /// against. Absent means the identity's registered base. Naming the session's
+    /// own branch here is refused — it would publish the branch into itself.
+    pub base: Option<String>,
+    /// Which registered checkout to clone from. Absent means the identity's
+    /// default execution checkout.
+    pub execution_checkout: Option<String>,
+    /// The pool size this one open places against, over everything the host
+    /// configures: `0` places this session fresh under `runs/` — and still spends the
+    /// overflow, because the cap is about disk — and `N` may cut a slot while fewer
+    /// than `N` exist. It removes no slot. Absent means the host's resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
+    /// The overflow bound this one open is admitted against, over everything the
+    /// host configures; `Bound::Unlimited` is how one open opts out of the cap.
+    /// Absent means the host's resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow: Option<Bound>,
+    /// What the caller wants the session record to say about who opened it: the
+    /// run, the node, the launching process — whatever it takes to find this
+    /// session again without joining anything else. A key is `[A-Za-z0-9_-]+` and a
+    /// value is one line; what a key *means* is the caller's to declare. Stored on
+    /// the record, reported by `session holders` and on every `recoverable` row,
+    /// and what `--label` filters both by. A resumed session takes each key the
+    /// request names over the one it had and keeps the rest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Refuse a continued branch whose base conflicts with it, rather than open the
+    /// session with the merge left in progress.
+    ///
+    /// `false` — the default, and what a request that never names it reads as — opens
+    /// the session over the conflicted merge: git's markers in the worktree, the
+    /// unmerged paths in its index and `MERGE_HEAD` naming the base, with
+    /// [`Session::conflict`] saying so. `true` aborts that merge where it was
+    /// attempted and refuses the open as [`Error::SyncConflict`](crate::Error), with
+    /// the branch untouched — which is what every open did before this field existed.
+    /// Omitted when `false`.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract amendment fixes this
+    // field as `refuse_conflicts: bool`, omitted when false, and onepipeline's next node
+    // is written against exactly that name and type; both values are valid requests, and
+    // the crate turns it into its own two-variant choice where the open acts on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refuse_conflicts: bool,
+    /// The caller merges a moved base into the continued branch itself, so the open
+    /// does not ask the host whether the base requires an up-to-date branch.
+    ///
+    /// Under `base_merge: on-conflict` that question is the only host read a
+    /// continued or resumed branch's open makes, and its answer only ever merges a
+    /// base that already merges cleanly — which a caller that brings the base in
+    /// itself does anyway. With this set, such a base is left for the caller and the
+    /// branch opens at its tip; a base that conflicts is still merged as it always
+    /// was, and `base_merge: always` is unchanged. `false` — the default, and what a
+    /// request that never names it reads as — asks the host exactly as before.
+    /// Omitted when `false`.
+    // llmlint: ignore[invalid_states_unrepresentable] the amendment fixes this field as
+    // `caller_merges_base: bool`, omitted when false, beside `refuse_conflicts`; both
+    // values are valid requests, and the open turns it into the decision's own input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caller_merges_base: bool,
+}
+
+/// The handle a session is adopted, published, and closed by.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct SessionToken(pub String);
+
+/// An open session: a per-run shared clone plus a worktree, held under an
+/// occupancy lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    /// The handle this session is addressed by.
+    pub token: SessionToken,
+    /// The worktree the change is made in.
+    pub worktree: PathBuf,
+    /// The branch the worktree has checked out.
+    pub branch: String,
+    /// The branch this session's work is merged with and published into, which for
+    /// a branch cut fresh is also the one it was cut from.
+    pub base: String,
+    /// The merge this session opened with still in progress, where the branch it
+    /// continued conflicted with its base.
+    ///
+    /// `None` for every session that opened on a clean tree — a fresh cut, a
+    /// continuation that merged cleanly, and every handle a call other than an open
+    /// returns. Omitted when `None`, so a session without one serializes exactly as
+    /// it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<OpenConflict>,
+}
+
+/// A merge left in progress in a session's worktree, for the session to conclude.
+///
+/// What a continued branch whose base conflicts with it opens with unless the
+/// request [refuses conflicts](SessionRequest::refuse_conflicts). Publication refuses
+/// the session as a sync conflict until the merge is concluded — resolved, staged and
+/// committed in the worktree — and every teardown aborts it rather than committing
+/// it.
+// llmlint: ignore-block[invalid_states_unrepresentable] the contract amendment fixes
+// these three fields as `Vec<String>` and `String`, the way `Recoverable` and
+// `PreservedBranch` spell a sha and a path list, and onepipeline builds against exactly
+// that spelling; every value is git's own answer to a command the open ran, and a path
+// git prints is lossily decoded text, as `git::Conflict::paths` already carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenConflict {
+    /// The paths git left unmerged, in the order it listed them. Never empty.
+    pub paths: Vec<String>,
+    /// The full sha of the integration target that was merged into the branch.
+    pub base_commit: String,
+    /// The full sha the branch stood at before the merge.
+    pub branch_tip: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// Where a session is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Lifecycle {
+    /// It has a worktree and its work has not been published or released.
+    Open,
+    /// Its worktree is gone and its branch has been handed back. The session is
+    /// still addressable, because the branch it names is still the only record of
+    /// the work.
+    Closed,
+}
+
+/// Everything the implementation that opened a session records about it.
+///
+/// A [`Session`] is the handle a caller was given; this is what the repository side
+/// knows about it afterwards, and it is why the record had to come through the
+/// interface: which repository the session belongs to, whether it is still open,
+/// and whether its branch carries an incomplete-step marker are all questions a
+/// command asks between opening a session and publishing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    /// The session itself.
+    pub session: Session,
+    /// The identity key the session belongs to.
+    // llmlint: ignore[invalid_states_unrepresentable] an identity key is a `String`
+    // everywhere this contract spells one — `Recoverable::identity`, `Identity::origin`,
+    // and the registry document's own map key — so a newtype here would disagree with the
+    // types it names and add a public item the contract does not. Every value written here
+    // came out of a registry the implementation resolved against, which is where the key
+    // is normalized and decided.
+    pub identity: String,
+    /// Where the session is in its life.
+    pub lifecycle: Lifecycle,
+    /// What the session's branch carries now — an adopted session that was left
+    /// dirty carries [`Provenance::IncompleteStep`], and must pass the merge-path
+    /// merge path through `onevcs recover` before it may be published.
+    pub provenance: Provenance,
+    /// The session that continued this one's branch, once one has.
+    ///
+    /// A branch a run left behind is picked up by the next session over the same
+    /// name, and this is the link between the two — written onto the *older*
+    /// record when the newer one opens. It is the answer to "which of these two
+    /// copies of one branch is the work", which nothing else on either record
+    /// gives, and everything that reports what became of a session or a branch
+    /// follows it to the newest record before it answers.
+    ///
+    /// Absent on every session nothing has superseded, which is most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retried_by: Option<SessionToken>,
+}
+
+/// One session that holds a repository's workspace, as an enumeration reports it.
+///
+/// A [`SessionRecord`] answers about a session somebody already has the token for;
+/// this answers the question before that one — *who is in this repository* — for
+/// every session the host has recorded that anybody is left to answer for: one
+/// whose owner process is still there, and one a live process is still working
+/// inside. A record with neither is forgotten by the enumeration rather than
+/// reported above every launch. It is what `onevcs session holders` prints, so a
+/// caller reading the command's JSON and a caller embedding
+/// [`crate::session_holders`] read the same shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHolder {
+    /// The handle this session is addressed by, and the one every command that
+    /// takes a session takes.
+    pub token: SessionToken,
+    /// The identity key the session belongs to.
+    pub identity: String,
+    /// The branch its worktree has checked out.
+    pub branch: String,
+    /// The worktree the change is made in. A closed session's is gone; its branch
+    /// is not.
+    pub worktree: PathBuf,
+    /// The process that opened it, so a diagnostic can name who to look for.
+    pub owner_pid: u32,
+    /// Where the session is in its life. Spelled `state` because that is the key
+    /// `onevcs session holders --json` prints it under.
+    pub state: Lifecycle,
+    /// Whether the process that opened it is still there.
+    pub liveness: Liveness,
+    /// The labels the session was opened with. Always written — an empty object for
+    /// a session opened without any, and for every record written before there was
+    /// a field to write.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// Whether a session's owner is still running, which is what makes its lease real.
+///
+/// A recorded pid alone cannot answer this — the OS reuses pids, so a later process
+/// wearing a dead session's number would read as its owner. The answer is the pid
+/// *and* that process's creation identity, which is why it is reported rather than
+/// left for a caller to derive from [`SessionHolder::owner_pid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Liveness {
+    /// The session is open and the process that opened it is that same process,
+    /// still running.
+    Live,
+    /// Anything else: the session is closed, its owner exited, or its pid now
+    /// belongs to a different process.
+    Stale,
+}
+
+impl Liveness {
+    /// The word this crate reports it as, on the command line and in JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+/// Why a branch was preserved, and therefore what recovering it must do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provenance {
+    /// The step finished; the branch is ready to publish as it stands.
+    Complete,
+    /// The step did not finish. Its work was committed behind an incomplete-step
+    /// marker and must pass its merge path before it may be published.
+    IncompleteStep,
+}
+
+/// A branch that holds work outside its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreservedBranch {
+    /// The branch the work is on.
+    pub branch: String,
+    /// The base it was cut from.
+    pub base: String,
+    /// Why it was preserved.
+    pub provenance: Provenance,
+    /// The change request it belongs to, when one was opened. Host-neutral: a
+    /// GitHub pull request and a GitLab merge request both land here.
+    pub change_url: Option<Url>,
+    /// The base that change request targets, which for a stacked branch is the
+    /// branch below it rather than the root.
+    pub change_base: Option<String>,
+}
+
+/// Which preserved work to look for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    /// Every registered identity.
+    All,
+    /// One repository: an identity key, a registered alias, or a path.
+    Repo(String),
+}
+
+/// The detail a recovery read computes. Both modes answer the same branches and
+/// decisions, including the command that recovers them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Detail {
+    /// The complete recovery report.
+    #[default]
+    Full,
+    /// Omit costly presentation: stopped text, change metadata and line statistics.
+    /// Identity, branch/base, checkout/tip, landing evidence, holds, retirement,
+    /// session, labels and recovery command remain identical to `Full`.
+    Decision,
+}
+
+/// Which of the preserved work in scope a report is asked to answer with.
+///
+/// Both halves are `and`ed with each other and with the [`Scope`]: a row is answered
+/// with when its branch is one the named sessions hold or held *and* the labels of
+/// the session that answers for it carry every pair asked for. Empty asks nothing,
+/// which is what every read before there was a selection asked — so [`Default`] is
+/// the whole report.
+///
+/// A session token no record on this host names is refused by name rather than
+/// answered with an empty report: "nothing of that session is left to publish" and
+/// "there is no such session" are different answers to act on. A label pair nothing
+/// carries is the first of those, and answers empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Selection {
+    /// Detail to compute; default is the complete report.
+    #[serde(default)]
+    pub detail: Detail,
+    /// The sessions whose branches are asked about, by token.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<SessionToken>,
+    /// The pairs every answered row's labels must carry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// The one branch asked about, whichever sessions hold it.
+    // llmlint: ignore[invalid_states_unrepresentable] the contract fixes this field's type,
+    // and the name is only ever compared against ref names git listed, so a name that is
+    // not one matches nothing rather than reaching git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+impl Selection {
+    /// Whether this asks anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.labels.is_empty() && self.branch.is_none()
+    }
+}
+
+/// Preserved work, whether it reached its base, and what would land it.
+///
+/// Read through the conversion below, which is where the one thing this row could
+/// contradict itself about is settled: a row saying the work reached the base *and*
+/// carrying the argv that publishes it again does not deserialize at all. The row is
+/// read to be pasted, and the whole reason the answer is on it is that pasting one
+/// for finished work re-opens a change request for what the base has.
+// llmlint: ignore[invalid_states_unrepresentable] the two cannot be *one* field: this
+// row's field list is the recorded public surface in docs/inferred-surface.md, which a
+// consumer parses `--json` into, and folding the answer and the argv into one value would
+// change the document every consumer already reads. What is available is what this crate
+// does everywhere a rule spans two values it must keep: the one place that builds a row
+// derives both from the same verdict, and the boundary where a row is *read* refuses a
+// document whose two halves disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "AnyRecoverable")]
+pub struct Recoverable {
+    /// The identity the work belongs to.
+    pub identity: String,
+    /// The branch and why it was preserved.
+    pub branch: PreservedBranch,
+    /// The checkout the branch can be reached from.
+    pub checkout: PathBuf,
+    /// Full commit object name of the branch in this checkout, or `None` only
+    /// when its ref cannot be read. Always serialized, including `null`; older
+    /// documents default to `None`.
+    // llmlint: ignore[invalid_states_unrepresentable] The approved recovery-detail
+    // amendment fixes this public field as Option<String>; a commit-id newtype
+    // would change the agreed surface. AnyRecoverable's conversion validates a
+    // present full object name before a serialized row reaches this field.
+    #[serde(default)]
+    pub tip: Option<String>,
+    /// Why the workstream stopped.
+    pub stopped_because: String,
+    /// Whether the work reached the base, and what says so.
+    ///
+    /// The one field on this row that decides whether the row is an instruction at
+    /// all: a row whose work reached the base carries no argv.
+    ///
+    /// Written always and defaulted on the way in, so a stored document that
+    /// predates the field reads back as the answer it gave: nothing said.
+    #[serde(default)]
+    pub landed: Landed,
+    /// The argv that lands it, ready to run.
+    ///
+    /// Ready to run is a claim about the branch as much as about the argv, so it
+    /// holds only where the two fields below say nothing: work a live session is
+    /// still writing to has not stopped, and running this on it publishes a branch
+    /// mid-flight.
+    ///
+    /// **Empty where nothing may be run**, which is every row whose work reached the
+    /// base: the argv would publish work that is already there. A row is read to be
+    /// pasted, so the answer is the absence of a command rather than a command with
+    /// a warning beside it.
+    pub recover_command: Vec<String>,
+    /// The live session still writing to this branch, or the publication of it
+    /// running right now, when either is.
+    ///
+    /// Present at all is the answer: this is not preserved work yet, and
+    /// [`recover_command`](Self::recover_command) must not be run until whatever holds
+    /// it is done with it. Absent — every row of a report about work that really did
+    /// stop — and the row is exactly what it has always been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<HeldBy>,
+    /// What the branch would land, when it removes more lines than it adds.
+    ///
+    /// A branch that deletes far more than it adds may be perfectly correct, and it
+    /// is not something to publish unread — so it is marked rather than excluded,
+    /// and marked only then: a branch that adds at least as much as it removes
+    /// carries nothing here, and cannot, because [`NetNegative`] holds no such count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_negative: Option<NetNegative>,
+    /// The session that answers for this branch: the newest record naming it — the
+    /// end of its chain of retries, an open one preferred — or `None` where no record
+    /// on this host names the branch at all, which is what a `worktree-agent-*`
+    /// orphan left behind by nothing this crate opened reads as.
+    ///
+    /// Written always, `null` included, so a reader routing on it meets the key on
+    /// every row.
+    #[serde(default)]
+    pub session: Option<SessionToken>,
+    /// That session's labels: what the caller that opened it said about who opened
+    /// it. An empty object where the record carries none, and where
+    /// [`session`](Self::session) is `None`.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Where `onevcs preserve` put this branch on its identity's origin, when it has.
+    ///
+    /// Additive, and absent for a branch nothing has preserved — which is every row
+    /// of a report a consumer that predates the field reads. It changes nothing about
+    /// [`recover_command`](Self::recover_command): being on the origin under its own
+    /// name is not being published, and the verb that lands the work is the verb that
+    /// landed it before. That is the whole point of the verb being called *preserve*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_origin: Option<OnOrigin>,
+    /// What the branch is for the question of whether it may be deleted — the
+    /// classification `onevcs retire` and `onevcs reclaim` act on, made here from this
+    /// host's records and local refs alone, since this report never asks the host.
+    ///
+    /// Additive: every row `onevcs` answers carries it, and a row an implementation
+    /// that does not classify answered omits it, as a consumer that predates the field
+    /// never meets it. A row whose class is `retirable` is not in the default report,
+    /// as a row whose work landed is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<crate::retire::Retirement>,
+}
+
+/// A row as a document spells it, before the answer on it and the command beside it
+/// have been held to each other.
+///
+/// The same fields, and it exists only so that the check above has something to run
+/// on: serde hands a conversion the whole value or nothing, and what has to be
+/// checked here is one field against another.
+#[derive(Deserialize)]
+struct AnyRecoverable {
+    #[serde(default)]
+    tip: Option<String>,
+    identity: String,
+    branch: PreservedBranch,
+    checkout: PathBuf,
+    #[serde(default)]
+    landed: Landed,
+    stopped_because: String,
+    recover_command: Vec<String>,
+    #[serde(default)]
+    held_by: Option<HeldBy>,
+    #[serde(default)]
+    net_negative: Option<NetNegative>,
+    #[serde(default)]
+    session: Option<SessionToken>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    on_origin: Option<OnOrigin>,
+    #[serde(default)]
+    retirement: Option<crate::retire::Retirement>,
+}
+
+impl TryFrom<AnyRecoverable> for Recoverable {
+    type Error = String;
+
+    fn try_from(value: AnyRecoverable) -> std::result::Result<Self, Self::Error> {
+        if value
+            .tip
+            .as_ref()
+            .is_some_and(|tip| crate::git::ObjectId::parse(tip).is_none())
+        {
+            return Err(format!(
+                "the row for branch {:?} carries tip {:?}, which is not a full commit object name",
+                value.branch.branch, value.tip
+            ));
+        }
+        if value.landed.is_landed() && !value.recover_command.is_empty() {
+            return Err(format!(
+                "the row for branch {branch:?} says its work reached {base} and carries \
+                 {command:?} to publish it again; a row that landed carries no command",
+                branch = value.branch.branch,
+                base = value.branch.base,
+                command = value.recover_command.join(" "),
+            ));
+        }
+        if let Some(held) = &value.held_by {
+            // A running publication is the one hold that names no session, so a token
+            // and a holding that say otherwise describe a hold nothing could be.
+            if held.token.is_none() != (held.holding == Holding::PublicationRunning) {
+                return Err(format!(
+                    "the row for branch {branch:?} carries a {holding:?} hold that {names} a \
+                     session; a running publication is the one hold that names none",
+                    branch = value.branch.branch,
+                    holding = held.holding,
+                    names = if held.token.is_some() {
+                        "names"
+                    } else {
+                        "names no"
+                    },
+                ));
+            }
+        }
+        Ok(Recoverable {
+            identity: value.identity,
+            branch: value.branch,
+            checkout: value.checkout,
+            tip: value.tip,
+            landed: value.landed,
+            stopped_because: value.stopped_because,
+            recover_command: value.recover_command,
+            held_by: value.held_by,
+            net_negative: value.net_negative,
+            session: value.session,
+            labels: value.labels,
+            on_origin: value.on_origin,
+            retirement: value.retirement,
+        })
+    }
+}
+
+/// Where a branch was last put on its identity's origin without being published.
+///
+/// The readback of what `onevcs preserve` recorded, and the answer to one question:
+/// if this host went away now, is the work somewhere that outlives it? Both halves
+/// are needed to answer it — the origin says *where*, and the commit says *how much*,
+/// since a branch preserved and then committed to again is on its origin at a commit
+/// that is no longer its tip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnOrigin {
+    /// The origin URL the branch went to.
+    // llmlint: ignore[invalid_states_unrepresentable] a remote is a `String` everywhere
+    // this crate's public surface spells one, and this is the URL a repository's own
+    // `origin` was configured with rather than a form this crate composes — what makes it
+    // usable is checked where the record is read (`git::is_usable_remote`, before it can
+    // reach a line an operator reads), and the field itself is spelled by
+    // `docs/contract.md`.
+    pub remote: String,
+    /// The commit the origin carries it at.
+    // llmlint: ignore[invalid_states_unrepresentable] a commit is a `String` everywhere
+    // this crate's public surface spells one that came out of git — `Sha` wraps an
+    // unvalidated `String` and would make no state here unrepresentable — and this value
+    // is one `git push` reported or `git ls-remote` advertised, checked as an object id
+    // where it was read.
+    pub commit: String,
+}
+
+/// What still holds a preserved branch: a live session, or a publication of it
+/// running right now.
+// llmlint: ignore[invalid_states_unrepresentable] the shape is a shared contract fixed
+// for this change — `token` a session token or `null`, beside `holding` — which other
+// repositories build against as written; a tagged enum carrying the token only on a
+// session's hold would move the wire every reader of `held_by` parses. What is available
+// is what `Recoverable` does with its own two-field rule: `vcs::held_by` is the one place
+// that builds a hold and pairs `None` with `PublicationRunning` only, and the boundary
+// where a row is read refuses a hold whose token and holding disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldBy {
+    /// The session, so an operator can wait for it or close it by name.
+    ///
+    /// `None` exactly when [`holding`](Self::holding) is
+    /// [`Holding::PublicationRunning`]: a branch-keyed publication is made under no
+    /// session, so there is no token to name. Written as `null` rather than omitted,
+    /// so a reader meets the key on every row that carries this.
+    pub token: Option<SessionToken>,
+    /// The worktree its work is being made in — for a running publication, that
+    /// publication's own workspace. Absolute.
+    pub worktree: PathBuf,
+    /// How this host can tell it is still live.
+    pub holding: Holding,
+}
+
+/// How a host can tell that something still holds a branch.
+///
+/// Three answers rather than one, because they are true at different times: a
+/// consumer holding a [`Session`] keeps the process that opened it alive, while the
+/// CLI takes an occupancy lease per command and outlives none of them — either is a
+/// session that has not finished with its branch — and a branch-keyed publication
+/// (`publish-branch`, `recover`) holds the branch under no session at all, for as
+/// long as it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Holding {
+    /// The session is open and the process that opened it is still running, which is
+    /// the question [`Liveness::Live`] answers.
+    OwnerRunning,
+    /// Something holds the occupancy lease on its run root right now, so a command
+    /// is working in there whatever became of the process that opened the session.
+    RunRootOccupied,
+    /// A publication of the branch is running right now, under no session. Its
+    /// [`HeldBy::token`] is `None`.
+    PublicationRunning,
+}
+
+impl Holding {
+    /// The clause a report gives as the reason, for the command line: `--json`
+    /// carries the value itself.
+    pub fn because(&self) -> &'static str {
+        match self {
+            Self::OwnerRunning => "the process that opened it is still running",
+            Self::RunRootOccupied => "a command is working in its run root right now",
+            Self::PublicationRunning => "a publication is running on this branch right now",
+        }
+    }
+}
+
+/// The lines a branch would land, as git counts them against the commit it forked
+/// from.
+///
+/// The fork point rather than the base's tip, because what the branch did is what it
+/// did to the tree it started on: measured against a base that has moved on, every
+/// line that base gained reads as a line this branch removed and never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineChange {
+    /// Lines it adds.
+    pub added: u64,
+    /// Lines it removes.
+    pub removed: u64,
+}
+
+/// A [`LineChange`] that removes more than it adds, and the only thing that can be
+/// one.
+///
+/// The mark and its evidence are one value, so a row cannot carry a count that says
+/// the opposite of the field holding it — and the rule that decides "net-negative"
+/// lives here rather than at the site that measures a branch and at every consumer
+/// that reads one back. It serializes and reads as the [`LineChange`] it holds, so
+/// the two counts are what `--json` carries either way; a document naming a count
+/// that is not net-negative is refused where it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LineChange", into = "LineChange")]
+pub struct NetNegative(LineChange);
+
+impl NetNegative {
+    /// The count, when it is one a net-negative branch could have.
+    pub fn new(lines: LineChange) -> Option<Self> {
+        (lines.removed > lines.added).then_some(Self(lines))
+    }
+
+    /// Lines the branch adds.
+    pub fn added(&self) -> u64 {
+        self.0.added
+    }
+
+    /// Lines it removes, which is more than it adds.
+    pub fn removed(&self) -> u64 {
+        self.0.removed
+    }
+}
+
+impl TryFrom<LineChange> for NetNegative {
+    type Error = String;
+
+    fn try_from(lines: LineChange) -> std::result::Result<Self, Self::Error> {
+        Self::new(lines).ok_or_else(|| {
+            format!(
+                "{} line(s) added and {} removed is not a net-negative change",
+                lines.added, lines.removed
+            )
+        })
+    }
+}
+
+impl From<NetNegative> for LineChange {
+    fn from(value: NetNegative) -> Self {
+        value.0
+    }
+}

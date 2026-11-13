@@ -1,0 +1,847 @@
+//! Version control and its remote host behind one host-neutral vocabulary.
+//!
+//! The review unit is a [`ChangeRequest`] — GitHub maps it to a pull request,
+//! and a later host maps it to whatever it calls the same thing. [`Vcs`] owns the
+//! repository side (identities, sessions, preserved work) and [`RemoteHost`] owns
+//! the host side (opening a change, reading its checks, merging it). A
+//! [`rules`] file decides, per repository, how a change is published and whether
+//! it needs an approval. Everything a process does along the way is emitted as an
+//! [`Envelope`].
+//!
+//! # The shape of one change
+//!
+//! ```text
+//! session open  →  a --shared clone and one worktree, occupancy-leased: a warm
+//!                   pool slot where the host keeps one, else cut for this run
+//!    →  work happens in the worktree
+//!    →  publish   →  fetch and merge the current base  (bounded resolve-and-requeue)
+//!                 →  the repository's own merge path verifies it: its pre-push
+//!                    hook, or the host's required checks on the change request
+//!                 →  local-direct squash, or a change request the host lands
+//!    →  session close  →  the branch is copied out and stays; a slot is returned
+//!                         warm, a per-run worktree goes
+//! ```
+//!
+//! Everything durable lives under one state root (`ONEVCS_HOME`, otherwise
+//! `~/.onevcs`): the registry document, the advisory locks and merge-queue state,
+//! the per-session workspaces, the event streams, and their artifacts.
+//!
+//! # Two surfaces over one decision
+//!
+//! [`run`] is the command line: it answers a process, with an exit code and a line
+//! of prose. A caller embedding this crate wants the decision itself, so the same
+//! operations answer values — [`publish`] hands back a [`Publication`],
+//! [`close_session`] the session it released, [`session`] what the repository side
+//! recorded, [`preserve`] what putting a branch on its origin did, [`recoverable`] the
+//! branches that still hold unpublished work, and [`EventStream`] the envelopes one
+//! session wrote. The command line is a rendering of those rather than a second path
+//! through them.
+//!
+//! **Every** command is: [`registered_identities`] and [`repositories`] are what
+//! `onevcs repos` prints, [`register_checkout`], [`resolve_repository`],
+//! [`publish_branch`], [`recover`], [`work_status`], [`import_branch`],
+//! [`integrate`], [`sync`], [`sweep`], [`rules_check`], [`read_artifact`],
+//! [`review_comments`], [`reply_to_comment`], [`change_standings`],
+//! [`review_standings`], [`retarget_change`], [`reopen_change`] and [`EventLines`] are
+//! the rest, and a command with no such operation fails this crate's own contract
+//! suite.
+
+#![warn(missing_docs)]
+
+use std::path::Path;
+
+mod adoption;
+mod app;
+mod base_merge;
+pub mod boundary;
+mod branch;
+pub mod branches;
+mod change;
+mod checkout_reads;
+pub mod cli;
+mod closing;
+mod decisions;
+pub mod declaration;
+mod error;
+mod event;
+mod export;
+mod gate_run;
+mod gh;
+mod git;
+mod guidance;
+mod holdup;
+mod home;
+mod host;
+pub mod host_query;
+mod ids;
+mod import;
+mod integrate;
+mod label;
+mod landed;
+mod lfs_pointer;
+mod lock;
+mod merge_path;
+mod native_objects;
+mod native_refs;
+mod ops;
+mod policy;
+mod pool;
+mod preserve;
+mod probe;
+mod processes;
+pub mod provenance;
+mod providers;
+mod publish;
+mod publish_branch;
+mod publishing;
+mod queue;
+mod recover;
+mod recovery_cache;
+mod recovery_sessions;
+pub mod registry;
+mod release;
+pub mod releases;
+mod remainder;
+pub mod repository_config;
+mod retire;
+mod review;
+pub mod rules;
+mod rules_apply;
+mod session;
+mod significance;
+mod stack_base;
+mod standing_comment;
+mod standings;
+mod status;
+mod store;
+mod stream;
+mod sweep;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod testing;
+mod vcs;
+mod verdict;
+mod verified;
+mod vocabulary;
+mod workspace;
+pub mod workspaces;
+mod yaml;
+
+pub use adoption::{
+    AdoptionQuery, AdoptionRefusal, AdoptionRule, AdoptionState, AdoptionVerdict,
+    ADOPTION_VERDICT_VERSION,
+};
+pub use boundary::{
+    boundary_schema, check_public_output, check_public_output_with_evidence, declared_terms,
+    inspect_repository, public_phrases, repository_boundary, sanitize_public_output,
+    sanitize_public_output_with_evidence, BoundaryInput, BoundaryVerdict, PublicPhrases,
+    RepositoryBoundary, SanitizeAnswer, SanitizeInput, TermMatcher, TermMode, TermRule, TermScope,
+    TermsAnswer, TermsRequest, Visibility, PUBLIC_PHRASES_FILE, PUBLIC_PHRASES_VERSION,
+};
+pub use change::{ChangeDescription, SessionChange};
+pub use declaration::{
+    Declaration, DeclaredTarget, InstructionTemplate, RegistryId, RetiredArtifact,
+};
+pub use error::{Error, Result};
+pub use event::{
+    ArtifactId, ArtifactRef, Dimensions, Envelope, EventFilter, EventKind, EventMatcher, Labels,
+    MatchFields, Phase, PhaseOf, ProvisionTrigger, Significance, Source, VcsEvents,
+    WorktreeProvision, DIMENSIONS, PROVISION_OUTPUT_BYTES, RESERVED_LABELS, SOURCE_WORD,
+};
+pub use export::{
+    export, validate_accepted_opaque, ExportRequest, Exported, EXPORT_AUTHOR_EMAIL,
+    EXPORT_AUTHOR_NAME, EXPORT_SUBJECT,
+};
+pub use holdup::{release_holdup, ReleaseChange, ReleaseHoldup};
+pub use host::{
+    ChangeChecks, ChangeId, ChangeRequest, ChangeSpec, Check, CheckSource, CheckState, Description,
+    GitHub, HeadActivity, Hosting, MergeOutcome, Mergeability, MergedChange, ProtectionSource,
+    RemoteHost, RequiredChecks, Sha,
+};
+pub use import::{Imported, Source as ImportSource, Wrote};
+pub use integrate::{
+    BranchOutcome, Ending as IntegrationEnding, Outcome as Integration, Status as IntegrationStatus,
+};
+pub use landed::{Landed, LandingEvidence};
+pub use ops::{
+    import_branch, integrate, integrate_in_operation, publish_branch, publish_branch_in_operation,
+    read_artifact, recover, recover_in_operation, register_checkout, registered_identities,
+    repositories, resolve_repository, rules_check, sweep, sync, work_status, BasePush,
+    BranchPublishRequest, CheckoutAudit, DirectOperation, GateAudit, ImportRequest,
+    IntegrateRequest, MatchedRule, MergePathCoverage, OperationHandle, RecoverRequest,
+    RegisteredCheckout, RegisteredRepository, Registration, ReleaseFacts, RequiredChecksAnswer,
+    ResolvedPolicy, ResolvedRepository, RulesCheck, StatusReport, Sweeping, Synced,
+    TrailerPrefixSource,
+};
+pub use pool::{
+    pool_maintain, pool_prune, pool_status, workspace_capacity, IdentityMaintenance,
+    IdentityOutcome, Ineligibility, IneligibleSlot, MaintainReport, MaintenanceOutcome, PoolStatus,
+    PruneReport, SlotDisk, SlotMaintenance, SlotOutcome, SlotState, SlotStatus, WorkspaceCapacity,
+};
+pub use preserve::{Preservation, PreserveRequest, Preserved};
+pub use providers::Providers;
+pub use publish::{
+    ArmedMerge, DraftReason, FailureKind, Publication, PublicationCancellation, PublishOutcome,
+    PublishRequest, Retention, Subject, HOST_PREREQUISITE_MARKER,
+};
+pub use registry::Identity;
+pub use releases::{
+    Acknowledgement, Adoption, AdoptionSource, Baseline, BaselineRecord, DeclarationPolicy,
+    DeclarationSource, Discovery, Probe, ReleaseAnswer, ReleaseDefault, ReleaseMethod, ReleaseRule,
+    ReleaseSource, ReleaseStatus, ReleaseStyle, ReleaseTarget, ReleasesFile, RepositoryReleases,
+    ResolvedAdoption, SupersededRelease, TargetName, TargetRelease, TargetSource,
+};
+pub use retire::{
+    BranchHolder, BranchHolderKind, BranchRef, Derivation, FailedHolder, KeepReason, RetireMode,
+    RetireOutcome, RetirePass, RetireRequest, Retired, Retirement, RetirementClass,
+    RetirementPassReport, RetirementProof, RetirementQuery, SupersededBy, Supersession,
+    UnknownCause,
+};
+pub use review::{
+    reply_to_comment, review_comments, ChangeRef, CommentId, CommentKind, PostedReply, ReadCost,
+    ReadMarker, ReplyMarker, ReplyRequest, ReviewComment, ReviewRead,
+};
+pub use rules::MergePolicy;
+pub use rules_apply::{rules_apply, RulesApplied, RulesApplyRequest};
+pub use session::{
+    Detail, HeldBy, Holding, Lifecycle, LineChange, Liveness, NetNegative, OnOrigin, OpenConflict,
+    PreservedBranch, Provenance, Recoverable, Scope, Selection, Session, SessionHolder,
+    SessionRecord, SessionRequest, SessionToken,
+};
+pub use stack_base::{StackBase, StackBaseOutcome, StackBaseRequest, StackParent};
+pub use standing_comment::{
+    read_standing_comment, upsert_standing_comment, StandingComment, StandingCommentOutcome,
+    StandingCommentRequest, StandingCommentStatus,
+};
+pub use standings::{
+    change_standings, follow_checks, reopen_change, retarget_change, review_standings,
+    ChangeStanding, ChangeStandings, ChangeStandingsRequest, ChangeState, ChecksVerdict,
+    FollowChecksRequest, FollowedChange, FollowedChecks, FollowedHead, ReopenRequest, Reopened,
+    RetargetOutcome, RetargetRequest, Retargeted, ReviewStandings, ReviewStandingsRequest,
+    ReviewTarget,
+};
+pub use stream::{EventLine, EventLines, EventStream, OperationEvents};
+pub use sweep::Report as SweepReport;
+pub use vcs::{Git, Vcs};
+pub use workspaces::{first_matching, Bound, Span};
+
+/// A parsed absolute URL, re-exported so a caller needs no direct dependency on
+/// the parser this crate validates change-request URLs with.
+pub use url::Url;
+
+/// Run one parsed command line, returning the process exit code.
+///
+/// The binary is a thin shell over this, so a journey that drives `onevcs` and a
+/// caller that embeds it take the same path and cannot disagree about an exit code.
+pub fn run(cli: &cli::Cli) -> u8 {
+    run_with(cli, Providers::real())
+}
+
+/// Run one parsed command line against supplied implementations of the two
+/// interfaces, returning the process exit code.
+///
+/// [`run`] is this with [`Providers::real`], so nothing about the command's own
+/// behaviour changes with the implementations behind it: one code path, reached
+/// through [`Vcs`] and [`Hosting`] rather than through the types that satisfy them
+/// by default.
+pub fn run_with(cli: &cli::Cli, providers: Providers<'_>) -> u8 {
+    app::run(&cli.command, &providers)
+}
+
+/// Verify a session's work and publish it, returning what the publication did.
+///
+/// The library form of `onevcs publish`, and the reason it exists: a run answers
+/// with an exit code and prose, and a caller that has to branch on *what happened*
+/// can only parse the prose. [`Publication`] is that answer as a value — the policy
+/// it was taken under, whether it merged, opened a change request, queued one, or
+/// had nothing to publish, and the failure and what became of the branch when it
+/// did not land.
+///
+/// It runs through the seam, so a session a supplied [`Vcs`] opened publishes
+/// against a supplied [`Hosting`] with no git, no host, and no process.
+pub fn publish(
+    providers: &Providers<'_>,
+    token: &SessionToken,
+    request: &PublishRequest,
+) -> Result<Publication> {
+    providers.vcs.publish(token, request, providers.hosting)
+}
+
+/// [`publish`], stopping once `cancellation` says so.
+///
+/// What a caller that may have to abandon a publication — a manager cancelling or
+/// retrying the work it belongs to — runs instead of [`publish`], which is this with a
+/// cancellation nobody can trigger. Every phase that waits asks it at least once a
+/// second, whatever `ONEVCS_CHECKS_POLL_SECONDS` says: the publishing push and the
+/// `pre-push` hook it runs, the watch of the host's checks, a draft's settle and the
+/// one after an early lift, the watch of a merge the host was armed to perform, and the
+/// wait for the identity's merge queue. A cancelled
+/// publication answers `Ok` with [`PublishOutcome::Failed`] of kind
+/// [`FailureKind::Cancelled`].
+///
+/// **Nothing is undone.** The branch stays on its remote, a change request is neither
+/// closed nor deleted, and the session is left open, so a later publication of it
+/// continues the same branch. Publication cancellation interrupts a pending publishing
+/// push and reaps its hook descendants; a remote update that completed before the push
+/// was stopped is reported as completed, never undone.
+pub fn publish_with_cancellation(
+    providers: &Providers<'_>,
+    token: &SessionToken,
+    request: &PublishRequest,
+    cancellation: &dyn PublicationCancellation,
+) -> Result<Publication> {
+    providers
+        .vcs
+        .publish_with_cancellation(token, request, providers.hosting, cancellation)
+}
+
+/// Release a session's worktree and its occupancy lease, keeping its branch.
+///
+/// The library form of `onevcs session close`.
+pub fn close_session(providers: &Providers<'_>, token: &SessionToken) -> Result<Session> {
+    providers.vcs.close_session(token)
+}
+
+/// The session's own change request — the one [`publish`] would open or adopt for
+/// it, from its branch into the base its publication resolves — as the host holds
+/// it, or `None` when the host holds none.
+///
+/// The library form of `onevcs change show`. It never invents one: a session that
+/// has not published has no change request, and [`publish`] is what opens one.
+pub fn session_change(
+    providers: &Providers<'_>,
+    token: &SessionToken,
+) -> Result<Option<SessionChange>> {
+    change::session_change(providers, token)
+}
+
+/// Replace the description of the session's own change request — its body, and its
+/// title when one is given — and report the change as it stands after the write.
+///
+/// The library form of `onevcs change describe`. It refuses a session with no change
+/// request rather than opening one. A title is a [`Subject`] and is held to the
+/// repository's own `commit-msg` hook exactly as a publication's is, because it is
+/// the squash subject a `change-auto` merge lands under. The body is written
+/// verbatim and recorded as an artifact the `change-described` event names.
+pub fn describe_change(
+    providers: &Providers<'_>,
+    token: &SessionToken,
+    description: &ChangeDescription,
+) -> Result<SessionChange> {
+    change::describe_change(providers, token, description)
+}
+
+/// Mark the session's own change request ready for review, and report it as it
+/// stands.
+///
+/// The library form of `onevcs change ready`: the lift a publication carrying no
+/// [`DraftReason`] performs, asked for on its own. A change request that is not a
+/// draft is asked for nothing and reported as it stands.
+pub fn ready_change(providers: &Providers<'_>, token: &SessionToken) -> Result<SessionChange> {
+    change::ready_change(providers, token)
+}
+
+/// Every session recorded for one repository, live or not, in token order.
+///
+/// The library form of `onevcs session holders`, and the question a caller asks
+/// *before* it has a token: which sessions hold this repository's workspaces, which
+/// of them still have an owner, and which are the remains of a run that stopped.
+/// [`SessionHolder::token`] is what the rest of this surface takes, so a holder is
+/// a session to act on rather than a line to read.
+///
+/// It takes no [`Providers`] because there is nothing here for an implementation to
+/// answer: the holders are the records under this host's state root, which is where
+/// `Git` writes them and where the command reads them. A `Vcs` that keeps its
+/// sessions elsewhere therefore does not appear in this list — the same limit the
+/// command has, since the two are one path.
+///
+/// A record whose owner process has exited *and* whose run root no live process is
+/// working inside is forgotten as this answers rather than reported: nobody is left
+/// to be asked about it, and a list of those is what buries the one holder a caller
+/// had to act on. A session somebody is still working in is reported however long
+/// ago the command that opened it exited.
+pub fn session_holders(repo: &str) -> Result<Vec<SessionHolder>> {
+    workspace::holders(repo)
+}
+
+/// Put an unpublished branch on its identity's origin, under its own name, without
+/// publishing it.
+///
+/// The library form of `onevcs preserve`, and the half of a soft shutdown that makes
+/// the commits a host was about to lose survive it. **Nothing about it is a
+/// publication**: no change request is opened, no merge path is run, no base branch is
+/// touched, nothing is force-pushed, and no provenance marker or attestation is
+/// written — so a branch carrying an unattested incomplete-step marker is preserved
+/// exactly as it stands and still needs [`recoverable`]'s command afterwards.
+///
+/// The branch is looked for everywhere the landing verbs look, run clones included,
+/// so work a live dispatch committed a moment ago is found. A branch the origin
+/// already carries at that commit is [`Preservation::AlreadyOnOrigin`] and nothing is
+/// pushed; a location with no origin is [`Preservation::NoRemote`] and nothing is
+/// attempted. A refusal — non-fast-forward, credentials, a local-path origin that
+/// declines the ref — is an `Err` naming the identity, the branch, and git's own
+/// per-ref summary, so a caller preserving many branches reports that one and carries
+/// on.
+///
+/// It takes no [`Providers`] deliberately. Adding a method to the public [`Vcs`] trait
+/// would break every outside implementor of it, and this reaches git and nothing else
+/// — no host, no change request — so it sits beside [`workspace_capacity`] and
+/// [`pool_maintain`], which are free functions for the same reason.
+pub fn preserve(request: &PreserveRequest) -> Result<Preserved> {
+    preserve::run(&store::load()?, request)
+}
+
+/// Assemble, advance, or confirm a synthetic stack base, and push what moved.
+///
+/// The library form of `onevcs stack-base`. A stack base is a branch cut from
+/// `root` carrying a merge of each of `parents`, in order — what a change depending
+/// on several changes still in review is drafted against. A branch nothing carries is
+/// cut from the origin's `root` and merged with each parent's head
+/// ([`StackBaseOutcome::Created`]); one that exists — on the origin or held on this
+/// host — has the root's new head merged first and then each parent head it does not
+/// carry ([`StackBaseOutcome::Advanced`]), or is left as it is when it carries them
+/// all ([`StackBaseOutcome::Unchanged`]). Every merge is a merge commit carrying a
+/// `Stack-Base` trailer, and every push is forward-only: never a rebase, never a
+/// force, so a change drafted against it can always merge it forward.
+///
+/// A merge that conflicts is left in progress in a session opened on the branch —
+/// [`StackBaseOutcome::Conflicted`], exactly the [`OpenConflict`] `session open`
+/// leaves — and once that session commits it, the same request merges what is left
+/// and pushes.
+///
+/// No change request is opened and the repository's merge path is not run — a stack
+/// base merges branches each verified on its own change request — but the push is
+/// held to the public boundary like every other write to a remote. The host is asked
+/// through `providers.hosting` for that and nothing else; the repository side is
+/// git's own, as [`preserve`]'s is, and the session it may leave is a session of this
+/// host's state root.
+///
+/// Every call that answers emits one `stack-base-assembled` event on that session's
+/// stream; a call that fails emits none.
+pub fn assemble_stack_base(
+    providers: &Providers<'_>,
+    request: &StackBaseRequest,
+) -> Result<StackBase> {
+    stack_base::assemble(providers, request)
+}
+
+/// Every preserved-but-unpublished branch in scope, and what would land each.
+///
+/// The library form of `onevcs recoverable`, which had none: the enumeration was a
+/// private function over types this surface already exports, so the one consumer that
+/// wanted it had to spawn the binary and parse what it printed.
+///
+/// It answers exactly what the command answers without `--all`: a branch whose work
+/// reached the base is not one of these, because the row is read to be pasted and
+/// pasting one for finished work re-opens a change request for what the base already
+/// carries. [`Vcs::preserved`] is the wider question — every preserved branch,
+/// whatever became of its work — and it is on the seam because a supplied
+/// implementation answers it.
+///
+/// It takes no [`Providers`] for the reason [`session_holders`] does not: the branches
+/// are the ones under this host's own state root and in the checkouts its registry
+/// records, which is where `Git` keeps them and where the command reads them.
+pub fn recoverable(scope: &Scope) -> Result<Vec<Recoverable>> {
+    vcs::collect(scope, vcs::Reporting::UnpublishedOnly)
+}
+
+/// What the repository side recorded about a session.
+///
+/// The library form of the record every command that takes a token reads: which
+/// repository it belongs to, whether it is still open, and whether its branch
+/// carries an incomplete-step marker.
+pub fn session(providers: &Providers<'_>, token: &SessionToken) -> Result<SessionRecord> {
+    providers.vcs.session(token)
+}
+
+/// What one branch is, for the question of whether it may be deleted: `retirable`,
+/// `superseded-with-changes`, or `keep` with the one reason it is kept.
+///
+/// The library form of the classification `onevcs retire`, `onevcs reclaim` and
+/// `onevcs retire-finished` act on and `onevcs recoverable` reports per row. It
+/// deletes nothing and writes nothing: it reads every place this host keeps a copy of
+/// the branch, asks the origin where its copy is, and asks the host about a change
+/// request only where this host's own records do not decide it.
+///
+/// With [`RetirementQuery::repo`] `None` the branch is resolved across every
+/// registered identity, and refused, naming the candidates, where more than one holds
+/// it. A branch nothing holds any more is answered with the retirement recorded for
+/// it, and refused where none is.
+pub fn classify_retirement(
+    providers: &Providers<'_>,
+    query: &RetirementQuery,
+) -> Result<Retirement> {
+    retire::classify(providers.hosting, query)
+}
+
+/// Delete one branch everywhere this host holds it, where its class permits.
+///
+/// The library form of `onevcs retire` ([`RetireMode::Lossless`]), `onevcs
+/// reclaim` ([`RetireMode::Reclaim`]) and `onevcs reclaim --discard`
+/// ([`RetireMode::Discard`]). A class the mode does not permit deletes
+/// nothing and answers [`RetireOutcome::Kept`]; a branch nothing holds and whose
+/// retirement is recorded answers [`RetireOutcome::AlreadyRetired`]; a copy that could
+/// not be deleted answers [`RetireOutcome::Incomplete`], naming it, and a re-run
+/// finishes the job. A pool slot is returned and never removed.
+pub fn retire(providers: &Providers<'_>, request: &RetireRequest) -> Result<Retired> {
+    retire::retire_named(providers.hosting, request)
+}
+
+/// Retire every branch in scope that provably holds no work beyond its base.
+///
+/// The automatic pass: `onevcs retire-finished`, and what an engine calls from its
+/// idle maintenance. A change request opened from a branch whose landing is not
+/// recorded is asked about once first, through the same reconciliation a `status`
+/// read that meets a late merge makes. It acts on [`RetirementClass::Retirable`]
+/// alone — never on a branch superseded with changes — and the report lists every
+/// branch examined with its classification and what became of it.
+pub fn retire_finished(
+    providers: &Providers<'_>,
+    pass: &RetirePass,
+) -> Result<RetirementPassReport> {
+    retire::pass(Some(providers.hosting), pass, retire::Trigger::Pass)
+}
+
+/// Record that a branch was superseded by a retry that landed.
+///
+/// The library form of `onevcs supersede`. Idempotent: the same identity, branch,
+/// superseding branch and landing are recorded once. The record changes nothing
+/// about the branch itself; it is what makes one that still differs from its base
+/// `superseded-with-changes`, which `onevcs reclaim` acts on and nothing automatic
+/// does.
+///
+/// It takes no [`Providers`] for the reason [`preserve`] does not: it writes this
+/// host's own record, and there is nothing here for an implementation of either
+/// interface to answer.
+pub fn record_supersession(supersession: &Supersession) -> Result<()> {
+    retire::supersede(supersession)
+}
+
+/// What one repository releases, and what it adopts.
+///
+/// The library form of `onevcs release targets`. `repo` is the identity key, a
+/// registered alias, an origin URL, or a path, exactly as every other command takes
+/// one.
+///
+/// # Three layers, in one stated order
+///
+/// The answer is resolved from the repository's own declaration and this host's
+/// document together, and which of them decides is fixed rather than a consequence
+/// of read order:
+///
+/// 1. the **producer's** `release-targets.toml`, read from its publication
+///    checkout, contributes its targets in its own publication order;
+/// 2. a target this host's `releases.yml` names and the producer does not is
+///    **added** — a consumer standing in where nobody declared one;
+/// 3. a target both name is the **host's**, in the producer's position — an
+///    override, which is how a host runs a probe differently from the way the
+///    repository publishes it.
+///
+/// A rule saying [`DeclarationPolicy::Ignore`] drops layer 1 entirely, which is how
+/// a host says it does not consume what a repository declares. A host with no rules
+/// and repositories declaring nothing answers exactly what it always did.
+///
+/// [`RepositoryReleases::sources`] says which layer answered for each target, and
+/// [`RepositoryReleases::declaration`] says what the producer's half contributed —
+/// including the state that is neither a declaration nor its absence, a declaration
+/// this build could **not read**, which is never "this repository publishes
+/// nothing".
+///
+/// It takes no [`Providers`] for the reason [`session_holders`] does not: what a
+/// repository releases is this host's own configuration, the repository's own
+/// declaration, and this host's own record, and there is nothing here for an
+/// implementation of either interface to answer.
+pub fn release_targets(repo: &str) -> Result<RepositoryReleases> {
+    release::targets(&store::load()?, repo)
+}
+
+/// The GitHub issues a landing event reports closing, each `owner/name#N`, in the
+/// order the event lists them.
+///
+/// A `merge-completed` or `change-merged` an older release wrote carries no `closes`,
+/// and reads as `[]`, as does an event of any other kind; a `closes` that is not a list
+/// of `owner/name#N` is [`Error::Invalid`]. The field is `docs/contract.md`'s "Every
+/// landing reports the GitHub issues it closes".
+pub fn landing_closes(envelope: &Envelope) -> Result<Vec<String>> {
+    closing::reported(&envelope.payload)
+}
+
+/// Every target one repository has, and what each of them has released right now.
+///
+/// The library form of `onevcs release discover`, and the answer a consumer that
+/// waits on a release actually needs: [`release_targets`] says what there is to wait
+/// for and this says what each of those has done, over the same three layers and in
+/// one resolution rather than one per target.
+///
+/// Each target is answered exactly as [`release_latest`] answers it, so the two
+/// cannot disagree — and [`ReleaseAnswer::NotAnswered`] stays distinct from
+/// [`ReleaseAnswer::NoRelease`] here as everywhere: a consumer holds on the first
+/// and acts on the second.
+///
+/// A repository with no targets answers with none rather than refusing, because
+/// "there is nothing to wait for" is a thing a consumer acts on — but what it is
+/// worth depends on [`RepositoryReleases::declaration`], which travels with it.
+pub fn release_discovery(repo: &str) -> Result<Discovery> {
+    release::discover(&store::load()?, repo)
+}
+
+/// What version of one target is released right now.
+///
+/// The library form of `onevcs release latest`. An **automated** target is answered
+/// by running its probe; a **human-step** target executes nothing at all and is
+/// answered from the newest acknowledgement across its landings, or
+/// [`ReleaseAnswer::NoRelease`] where nobody has recorded one.
+///
+/// [`ReleaseAnswer::NotAnswered`] is never [`ReleaseAnswer::NoRelease`]: a consumer
+/// holds on the first and acts on the second.
+pub fn release_latest(repo: &str, target: Option<&TargetName>) -> Result<ReleaseAnswer> {
+    release::latest(&store::load()?, repo, target)
+}
+
+/// Whether the release that carries one landed change has happened yet.
+///
+/// The library form of `onevcs release status`. `reference` is the four-spelling
+/// reference `onevcs status` takes: a change request's URL, a session token, a
+/// branch name, or a commit.
+pub fn release_status(reference: &str, target: Option<&TargetName>) -> Result<ReleaseStatus> {
+    release::status(
+        &store::load()?,
+        reference,
+        target,
+        Providers::real().hosting,
+    )
+}
+
+/// [`release_status`] against supplied implementations, which is what the command
+/// line runs.
+///
+/// The signature above is the contract's and takes no [`Providers`], so it answers
+/// through the real host. The command line was handed implementations and asks the
+/// same question of those — the one question a release read puts to a host, which is
+/// whether a change request a `checks-unsettled` close stopped watching has merged
+/// since.
+pub(crate) fn release_status_with(
+    providers: &Providers<'_>,
+    reference: &str,
+    target: Option<&TargetName>,
+) -> Result<ReleaseStatus> {
+    release::status(&store::load()?, reference, target, providers.hosting)
+}
+
+/// Whether one piece of work reached its base, and what says so.
+///
+/// The landing decision on its own, which is what [`release_status`] answers *before*
+/// it selects a release target — and the reason this exists beside it. A repository
+/// that declares no release target has no target to select, so `release_status`
+/// refuses it; a refusal is undecided rather than "not landed", and a caller that
+/// only wanted to know whether the work is on the base was left with no answer at
+/// all. This takes no target, reads no release configuration, and answers every
+/// repository the same way.
+///
+/// `reference` is the four-spelling reference [`release_status`] takes: a change
+/// request's URL, a session token, a branch name, or a commit. `repo` is the
+/// repository the question is narrowed to — an identity key, a registered alias, an
+/// origin URL, or a path, exactly as every other repository-taking read here takes one
+/// — and `None` resolves the repository from the reference alone. Naming one is how a
+/// branch name two identities both hold is asked about; a reference belonging to
+/// another identity is refused rather than answered under the name of the one asked
+/// about.
+///
+/// The tiers are decided in one private place — `landed::decide` — and nowhere else,
+/// so this, `onevcs status` and `onevcs recoverable` cannot come to disagree about one
+/// branch. Which tier decided travels inside the [`Landed`] value, so a caller acting
+/// on a `yes` can say what it acted on.
+///
+/// It takes no [`Providers`] for the reason [`release_targets`] does not: a landing is
+/// decided from the history of the repositories under this host's own state root, and
+/// there is nothing here for an implementation of either interface to answer.
+///
+/// Asking it again of a repository nothing has moved in usually starts no git process:
+/// its ref and repository reads are made in process afresh on every call, and a read
+/// about a branch is asked by the commit the branch is at, so a later call whose refs
+/// have not moved reuses its answer — and one whose refs have moved asks about the
+/// commits they now name. What still asks git on every call: the default branch of a
+/// checkout with no `<remote>/HEAD`, unless the remote is a bare repository at a plain
+/// local path with nothing configured to reroute it — a remote over the network, a URL
+/// with a transport or helper, or one an upload-pack, protocol or transfer setting
+/// governs is asked with `ls-remote` each time — and every read where a `GIT_*`
+/// environment override or a repository shape this crate does not read in process
+/// sends it to git.
+pub fn landing_status(reference: &str, repo: Option<&str>) -> Result<Landed> {
+    let registry = store::load()?;
+    crate::recovery_cache::scope(|| {
+        git::memoized(|| Ok(status::landing_of_within(&registry, reference, repo, None)?.landed))
+    })
+}
+
+/// [`landing_status`] for several pieces of work of one repository, read together.
+///
+/// A view that re-reads the landing of every unlanded piece of work on each render
+/// asks one question per piece, and each [`landing_status`] call loads the registry,
+/// resolves the repository and reads this host's records from scratch. This answers
+/// them all from one load and one resolution of `repo` and of its identity, whatever
+/// the number of references — once in all where `repo` is the identity key: the
+/// registry, the event streams, the
+/// repository's base and object store, its rules and the session records are read
+/// once, and each reference is then decided exactly as [`landing_status`] decides
+/// it alone, by the same tiers.
+///
+/// `repo` is required, because what is shared is one identity's: it takes every
+/// spelling [`landing_status`]'s `repo` takes, and each reference is narrowed to it
+/// exactly as `landing_status(reference, Some(repo))` narrows one. The answers are in
+/// the order of `references`, one each, and each is what that call would have
+/// answered — a refusal about one reference included, which is that reference's
+/// answer rather than the whole call's. The call itself refuses only where every
+/// answer would have been the same refusal: a registry that cannot be read, a
+/// repository nobody registered, or a state root with no location.
+pub fn landing_statuses(references: &[&str], repo: &str) -> Result<Vec<Result<Landed>>> {
+    let registry = store::load()?;
+    crate::recovery_cache::scope(|| {
+        git::memoized(|| status::landings_within(&registry, references, repo))
+    })
+}
+
+/// Record the release somebody says carries a landing.
+///
+/// The library form of `onevcs release acknowledge`. It accepts an automated target
+/// whose landing has no established probed baseline, and refuses one whose baseline
+/// is established. Human-step targets behave the same way regardless of baselines.
+/// It also refuses a reference that has not landed, a version
+/// that is not a semantic version, and a target the repository does not declare.
+///
+/// Recording the same version for the same landing again succeeds and changes
+/// nothing, re-reporting the existing record with its original timestamp and actor.
+/// Recording a *different* version is refused unless `supersede` is set, which
+/// writes the new version and keeps the previous one in the record's own history.
+pub fn acknowledge_release(
+    reference: &str,
+    target: &TargetName,
+    version: &str,
+    supersede: bool,
+) -> Result<Acknowledgement> {
+    release::acknowledge(
+        &store::load()?,
+        reference,
+        target,
+        version,
+        supersede,
+        Providers::real().hosting,
+    )
+}
+
+/// [`acknowledge_release`] against supplied implementations, which is what the command
+/// line runs — for the reason [`release_status_with`] exists: the signature above is the
+/// contract's and answers through the real host, and the one question an
+/// acknowledgement puts to a host is whether a change request nothing here records
+/// landed.
+pub(crate) fn acknowledge_release_with(
+    providers: &Providers<'_>,
+    reference: &str,
+    target: &TargetName,
+    version: &str,
+    supersede: bool,
+) -> Result<Acknowledgement> {
+    release::acknowledge(
+        &store::load()?,
+        reference,
+        target,
+        version,
+        supersede,
+        providers.hosting,
+    )
+}
+
+/// What one repository declares that it publishes.
+///
+/// The library form of `onevcs release declaration`, and the producer half of the
+/// release contract: [`release_targets`] answers what *this host* waits on for a
+/// repository, and this answers what the repository itself says it publishes. The
+/// two are different documents on purpose — see [`declaration`] — and deciding
+/// between them is nobody's job here.
+///
+/// `path` is either a repository's root or the `release-targets.toml` in it. A
+/// repository carrying no declaration is refused rather than answered with an empty
+/// one: "this repository publishes nothing" and "nobody has said what this
+/// repository publishes" are different answers, and a consumer that waits on a
+/// release acts differently on each.
+///
+/// It takes no [`Providers`] for the reason [`release_targets`] does not: a
+/// declaration is a file in a checkout, and there is nothing here for an
+/// implementation of either interface to answer.
+pub fn read_release_declaration(path: &Path) -> Result<Declaration> {
+    declaration::read(path)
+}
+
+/// Validate one release declaration's text, and answer what it declares.
+///
+/// The half of [`read_release_declaration`] that touches no filesystem: a caller
+/// that fetched a declaration from a host, or is about to write one, holds it to
+/// exactly the checks a repository's own file gets. `origin` is what the refusals
+/// name the document by — a path, a URL, or whatever the caller knows it as.
+pub fn validate_release_declaration(document: &str, origin: &str) -> Result<Declaration> {
+    declaration::parse(document, origin)
+}
+
+/// Render a declaration back as the TOML document it declares.
+///
+/// **A producer's comments are not preserved, because they were never read.** A
+/// declaration is mostly prose — the reasoning about what is a target and what is
+/// not — and this answers with the declaration alone, so writing the result over a
+/// producer's own file deletes that reasoning. It is for *producing* a declaration;
+/// editing one is a job for a person.
+///
+/// What it does promise is that the result reads as the same declaration, and it
+/// keeps that promise by holding what it was handed to a document's own checks
+/// first: a [`Declaration`] a caller *built* rather than read is refused here if it
+/// is one no repository could mean, rather than written out as a document nothing
+/// can read back.
+pub fn render_release_declaration(declared: &Declaration) -> Result<String> {
+    declaration::render(declared)
+}
+
+/// Which rung of the adoption chain one repository resolves to.
+///
+/// The repository rung where a rule sets one and the global rung otherwise. It
+/// never answers the node rung and never defaults to [`Adoption::Fast`] itself:
+/// those two rungs belong to the consumer, and a crate that answered all four would
+/// make the chain unreadable from either side.
+pub fn adoption_for(repo: &str) -> Result<Adoption> {
+    release::adoption(&store::load()?, repo)
+}
+
+/// Whether one consumer's release adoption of one producer can ever complete.
+///
+/// The library form of `onevcs release check-adoption`. Every fact it reads is this
+/// host's own configuration — the producer's resolved targets and `default_target`
+/// (the same three layers [`release_targets`] resolves), the adoption rungs, and the
+/// consumer's resolved publication policy — so an engine or a host asks this rather
+/// than restating any rule over them. Two rules, each refusing by its
+/// [`AdoptionRule`] id with a reason naming the consumer, the producer and what to
+/// change:
+///
+/// - `published-no-target`: the effective rung is `published` behind a releasing
+///   producer, the query names no `consumes`, and the producer resolves no
+///   `default_target`;
+/// - `consumes-undeclared-target`: the `consumes` names a target the producer does not
+///   resolve.
+///
+/// A producer *releases* when it is a different identity from the consumer and
+/// resolves at least one target; the first rule applies only behind one, and the
+/// `consumes` rule applies whenever a `consumes` is named, a producer that releases
+/// nothing included. With no `consumes` named, a producer that releases nothing answers
+/// [`AdoptionState::Completes`] with `releasing: false`.
+///
+/// The consumer's publication policy decides no rule: a consumer that opens no change
+/// request is held unlanded until its release and then landed, under either adoption.
+/// It is still resolved where `consumer_policy` is `None`, so a rules file that does
+/// not read answers [`AdoptionState::Unanswered`].
+///
+/// A repository that does not resolve, a release-targets file that does not read, a
+/// producer's own declaration this build cannot read, and a producer whose
+/// `default_target` names no target each answer [`AdoptionState::Unanswered`] with the
+/// reason — never a refusal.
+///
+/// It takes no [`Providers`] for the reason [`release_targets`] does not.
+pub fn adoption_check(query: &AdoptionQuery) -> Result<AdoptionVerdict> {
+    adoption::check(query)
+}
