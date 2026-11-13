@@ -248,6 +248,40 @@ test("demonstration b replaces the one e2e binary with a target per suite", () =
   assert.doesNotMatch(store, /mod landing;/);
 });
 
+test("demonstration b's suites still archive under the e2e binary's nextest overrides", () => {
+  // A real crate holding the one e2e binary and an override naming it, as this
+  // repository's .config/nextest.toml does: nextest refuses an operator matching no
+  // binary, so the split archives only once the overrides name its suites.
+  const dir = crate("split-crate", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n", {
+    extra: {
+      ".github/workflows/visual-docs.yml": "name: Visual docs\n\non:\n  pull_request:\n",
+      "tests/e2e/main.rs": "mod harness;\nmod maintenance;\n",
+      "tests/e2e/harness.rs": "pub fn two() -> i32 { 2 }\n",
+      "tests/e2e/maintenance.rs":
+        "#[test]\nfn sweeps() { assert_eq!(super::harness::two(), split_crate::add(1, 1)); }\n",
+      ".config/nextest.toml":
+        "[[profile.default.overrides]]\nfilter = 'binary(e2e) and test(/^maintenance::/)'\nthreads-required = 2\n",
+      "scripts/crate-split/proposed.json": JSON.stringify({
+        suites: { "e2e-maintenance": { paths: ["tests/e2e/maintenance.rs"] } },
+      }),
+    },
+  });
+  const manifest = join(dir, "Cargo.toml");
+  writeFileSync(
+    manifest,
+    `${readFileSync(manifest, "utf8")}\n[[test]]\nname = "e2e"\npath = "tests/e2e/main.rs"\n`,
+  );
+  const result = demoRun(dir, "b");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    readFileSync(join(dir, ".config", "nextest.toml"), "utf8"),
+    "[[profile.default.overrides]]\nfilter = '(binary(e2e_maintenance)) and test(/^maintenance::/)'\nthreads-required = 2\n",
+  );
+  const archive = run(dir, "quick");
+  assert.equal(archive.status, 0, archive.stderr);
+  assert.match(archive.stdout, /^measure-archive: mode=quick wall_s=/m);
+});
+
 test("a demonstration of a layout it does not know is refused", () => {
   const result = demoRun(checkout("demo-unknown"), "d");
   assert.notEqual(result.status, 0);

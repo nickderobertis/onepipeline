@@ -18,7 +18,8 @@
 //
 // The layout: `today` changes nothing else; `b` is `prototype-b.mjs` with the one e2e
 // binary replaced by its suites (its `[[test]]` and its `tests/e2e/main.rs` root both
-// removed, since Cargo would discover the root by itself); `c` is `prototype-c.mjs`, the
+// removed, since Cargo would discover the root by itself, and `.config/nextest.toml`'s
+// `binary(e2e)` overrides pointed at the suites, which nextest would otherwise refuse); `c` is `prototype-c.mjs`, the
 // lock refreshed offline for its two new workspace members. `tests/reuse_harness/reuse-drift.test.mjs`
 // holds the workflow's setup steps equal to ci.yml's test jobs'.
 //
@@ -27,7 +28,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { prototypeB } from "./prototype-b.mjs";
+import { prototypeB, retargetNextest } from "./prototype-b.mjs";
 import { prototypeC } from "./prototype-c.mjs";
 import * as check from "./validate.mjs";
 
@@ -151,7 +152,7 @@ export function writeDemonstration(repo, variant) {
   );
   writeFileSync(visual, text.replace(triggers, "on:\n  workflow_dispatch:\n\n"));
   if (variant === "b") {
-    prototypeB(repo);
+    const layouts = prototypeB(repo);
     const manifest = join(repo, "Cargo.toml");
     const text = readFileSync(manifest, "utf8");
     const e2e = /\n\[\[test\]\]\nname = "e2e"\npath = "tests\/e2e\/main\.rs"\n/;
@@ -165,6 +166,8 @@ export function writeDemonstration(repo, variant) {
     // one binary is gone only once its root, which declares modules and nothing else,
     // is: every suite loads the modules it needs from where they are.
     rmSync(join(repo, "tests", "e2e", "main.rs"));
+    // Without it nextest refuses to archive the split, every `binary(e2e)` matching none.
+    retargetNextest(repo, layouts.targets);
   } else if (variant === "c") {
     prototypeC(repo);
     try {

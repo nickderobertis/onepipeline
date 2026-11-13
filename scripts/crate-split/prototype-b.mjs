@@ -78,7 +78,30 @@ export function prototypeB(repo) {
     targets.push(name);
   }
   appendFileSync(join(repo, "Cargo.toml"), cargo);
-  return { today: ["--test", "e2e"], split: targets.flatMap((t) => ["--test", t]) };
+  return { today: ["--test", "e2e"], split: targets.flatMap((t) => ["--test", t]), targets };
+}
+
+/**
+ * Point `.config/nextest.toml`'s overrides at the suites once the one `e2e` binary is
+ * gone: nextest refuses a `binary()` operator that matches no binary (exit 96), so every
+ * `binary(e2e)` becomes the suites' `binary()` set. Test names are unchanged, since each
+ * suite declares the same modules, so a `test()` beside it still matches what it did.
+ * A checkout without the file is left as it is. Returns how many operators it rewrote.
+ */
+export function retargetNextest(repo, targets) {
+  const path = join(repo, ".config", "nextest.toml");
+  if (!existsSync(path)) return 0;
+  check.need(
+    targets.length > 0,
+    "no suite to point nextest's overrides at",
+    "map at least one suite",
+  );
+  const text = readFileSync(path, "utf8");
+  const operator = /\bbinary\(e2e\)/g;
+  const count = (text.match(operator) ?? []).length;
+  const set = `(${targets.map((t) => `binary(${t})`).join(" or ")})`;
+  writeFileSync(path, text.replace(operator, set));
+  return count;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
