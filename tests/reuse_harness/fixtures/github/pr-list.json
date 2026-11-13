@@ -1,0 +1,22 @@
+[
+ {
+  "headRefName": "nick/1463/op-link-libraries",
+  "headRefOid": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28",
+  "mergeCommit": {
+   "oid": "5f7f4611e1a88685dd8846b50d77d06eb50d2f89"
+  },
+  "mergedAt": "2026-11-13T03:50:20Z",
+  "number": 1543,
+  "title": "feat: link the released store, judge, graph and onevcs crates and refuse adoptions onevcs says cannot complete"
+ },
+ {
+  "headRefName": "nick/A-large-run-s-first-screen-opens-in-under-one-second/engine-heads-fast",
+  "headRefOid": "1675894eba7b3042f308f413a5c625b4a1d86c0e",
+  "mergeCommit": {
+   "oid": "18e174494f0bd4a3a2f120bb3cb8ce27ae762104"
+  },
+  "mergedAt": "2026-11-13T00:50:26Z",
+  "number": 1544,
+  "title": "perf: read a run's record heads at the cost of its skim"
+ }
+]
