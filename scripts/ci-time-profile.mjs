@@ -5,7 +5,8 @@
 //   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE] [--min-remaining N]
 //   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE
-//        [--jobs test-linux,test-macos] [--repo OWNER/NAME] [--cache DIR] [--json FILE]
+//        [--compare-since DATE] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
+//        [--cache DIR] [--json FILE]
 //        [--min-remaining N]
 //
 // `job` reads, through the `gh` login and read-only, the job's steps, its log, and the
@@ -22,7 +23,8 @@
 // names is printed as `unattributed`.
 //
 // `history` lists the pull-request runs of ci.yml created in [since, until) and prints
-// each job's successful durations and medians before and after `split`.
+// each job's successful durations and medians before and after `split`, counting only runs
+// created at or after --compare-since (default: since).
 //
 // Every GitHub response is kept under --cache (default target/ci-time-profile), so a
 // second run of the same measurement makes no request; the command refuses to make one
@@ -998,6 +1000,10 @@ function history(opts) {
   const since = new Date(opts.since).toISOString();
   const until = new Date(opts.until).toISOString();
   const split = ms(opts.split);
+  // The populations compared may start later than the listing does, so one cached listing
+  // serves every split: runs created before --compare-since are listed and not counted.
+  const compareSince = ms(opts["compare-since"] ?? opts.since);
+  if (Number.isNaN(compareSince)) usage("--compare-since takes a date");
   const runs = [];
   for (let page = 1; page < 20; page++) {
     const r = gh.json(
@@ -1008,6 +1014,9 @@ function history(opts) {
   }
   const rows = [];
   for (const run of runs) {
+    if (ms(run.created_at) < compareSince) continue;
+    // A cancelled run's jobs were superseded by a later push, so none is a duration of record.
+    if (run.conclusion === "cancelled" || run.conclusion === "skipped") continue;
     const jobs = gh.json(
       `repos/${opts.repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
     );
