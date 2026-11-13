@@ -3,7 +3,7 @@
 // demonstration run whose timings `scripts/ci-time-profile.mjs` reads back. Spike tooling
 // (spike-onepipeline-profile): nothing in the repository's own CI runs this.
 //
-//   node scripts/ci-time-workflow.mjs <ci.yml> [--overhead-sample hash:K/N]
+//   node scripts/ci-time-workflow.mjs <ci.yml> [--overhead-sample hash:K/N] [--timings]
 //
 // Rewrites the file in place, so that a run of it:
 //   - writes no Actions-cache or Nx remote-cache entry: every Nx sidecar is
@@ -16,6 +16,9 @@
 //     rust-cache step (so its key is unchanged, and cargo-llvm-cov chains it);
 //   - keeps Nx's own task trace (`NX_PROFILE`), which a failed gate writes too, and the
 //     Nx task graph the job ran, and uploads all of it as `measure-<job>`;
+//   - prints a line per test with its binary (NEXTEST_STATUS_LEVEL=pass) for every tier;
+//   - with `--timings`, builds the workspace's test targets after the gate with cargo's
+//     --timings, plain and then instrumented, and keeps both reports;
 //   - with `--overhead-sample`, runs that partition of the e2e tier twice after the
 //     gate in `test-linux`, instrumented and then plain, for coverage's runtime overhead.
 // The job targets the graph step plans are read from `scripts/ci-job.sh` beside the
@@ -172,7 +175,10 @@ function timerStep() {
     'echo "ONEPIPELINE_RUSTC_TIMINGS=$m/rustc.tsv" >> "$GITHUB_ENV"\n' +
     "# Nx's own trace of every task's start and end, written whatever the tasks' outcome. Nx\n" +
     "# joins this onto its working directory, so it is relative to the checkout.\n" +
-    'echo "NX_PROFILE=target/ci-time-nx-profile.json" >> "$GITHUB_ENV"\n';
+    'echo "NX_PROFILE=target/ci-time-nx-profile.json" >> "$GITHUB_ENV"\n' +
+    "# A line per test with its binary and seconds, for every tier: the analysis reads each\n" +
+    "# binary's time from it. Set here rather than on the gate step, whose env tests pin.\n" +
+    'echo "NEXTEST_STATUS_LEVEL=pass" >> "$GITHUB_ENV"\n';
   return `      - name: 'Measure: time every rustc invocation, after rust-cache keyed (${MARK})'\n        shell: bash\n        run: |\n${indent(run, 10)}`;
 }
 
@@ -191,7 +197,7 @@ function graphStep(targets) {
   return `      - name: 'Measure: the Nx task graph this job ran (${MARK})'\n        if: always()\n        shell: bash\n        working-directory: \${{ github.workspace }}\n        run: |\n${indent(run, 10)}`;
 }
 
-// llmlint: ignore-block[work_goes_through_command_surface] One partition of one tier has to run both ways on the same runner after the gate; `_tier-test` takes no partition and `_tier-test-quick` partitions by count, not hash, so neither recipe can run this sample, and the commands are the ones those recipes run (coverage-unit.sh, nextest-run.sh).
+// llmlint: ignore-block[work_goes_through_command_surface] One partition of one tier has to run both ways on the same runner after the gate; `_tier-test` takes no partition and `_tier-test-quick` partitions by count, not hash, so neither recipe can run this sample, and the commands are the ones those recipes run (coverage-unit.sh, nextest-run.sh); and no recipe passes cargo's --timings, which the timed builds below exist to read, so they call cargo (through coverage-unit.sh --cargo for the instrumented tree) as the recipes do.
 function overheadStep(partition) {
   const run =
     'm="$RUNNER_TEMP/measure/overhead"; mkdir -p "$m"\n' +
@@ -216,6 +222,30 @@ function overheadStep(partition) {
   return `      - name: 'Measure: one e2e partition instrumented, then plain (${MARK})'\n        if: \${{ !cancelled() }}\n        continue-on-error: true\n        timeout-minutes: 60\n        run: |\n${indent(run, 10)}`;
 }
 
+// Cargo's own --timings for the workspace's test targets, built plain and then instrumented
+// after the gate, each from the same source edit and alone on the runner, so each unit's
+// compile and link time is cargo's report rather than the wrapper's.
+function timingsStep() {
+  const run =
+    'm="$RUNNER_TEMP/measure/timings"; mkdir -p "$m"\n' +
+    "run() {\n" +
+    '  label="$1"; shift\n' +
+    "  touch src/lib.rs\n" +
+    '  start="$(date +%s)"; status=0\n' +
+    '  "$@" > "$m/$label.log" 2>&1 || status=$?\n' +
+    '  echo "$label $start $(date +%s) $status" >> "$m/times.txt"\n' +
+    '  if [ "$status" -ne 0 ]; then\n' +
+    '    echo "::warning::measurement: the $label timed build exited $status, so its timings cover what it built before then. Its last lines follow. ACTION: fix what they report before reading its timings"\n' +
+    '    tail -20 "$m/$label.log"\n' +
+    "  fi\n" +
+    "}\n" +
+    "run plain env -u RUSTFLAGS cargo test --workspace --no-run --locked --timings\n" +
+    'cp target/cargo-timings/cargo-timing.html "$m/plain.html" || true\n' +
+    'run instrumented env RUSTFLAGS="-D warnings" bash scripts/coverage-unit.sh --cargo -- test --workspace --no-run --locked --timings\n' +
+    'cp target/llvm-cov-target/cargo-timings/cargo-timing.html "$m/instrumented.html" || true\n';
+  return `      - name: 'Measure: cargo --timings of the workspace tests, plain then instrumented (${MARK})'\n        if: \${{ !cancelled() }}\n        continue-on-error: true\n        timeout-minutes: 40\n        run: |\n${indent(run, 10)}`;
+}
+
 // llmlint: ignore-end[work_goes_through_command_surface]
 
 function uploadStep() {
@@ -226,7 +256,7 @@ function uploadStep() {
  * The measurement-only edits applied to one workflow's text, given `scripts/ci-job.sh`'s
  * text and an optional e2e partition (`hash:K/N`) to run twice after the gate.
  */
-export function edit(original, ciJob, overhead = null) {
+export function edit(original, ciJob, overhead = null, { timings = false } = {}) {
   const targets = jobTargets(ciJob);
   let text = original;
   if (text.includes(MARK))
@@ -285,6 +315,7 @@ export function edit(original, ciJob, overhead = null) {
       b = b.slice(0, after) + timerStep() + b.slice(after);
       let tail = graphStep(targets[job]);
       if (overhead && job === "test-linux") tail += overheadStep(overhead);
+      if (timings && job === "test-linux") tail += timingsStep();
       tail += uploadStep();
       return insertBefore(b, "      - name: Report cache entries and task executions\n", tail);
     });
@@ -294,7 +325,7 @@ export function edit(original, ciJob, overhead = null) {
 
 function usage(message) {
   process.stderr.write(
-    `ci-time-workflow: ${message}\nusage: ci-time-workflow.mjs <ci.yml> [--overhead-sample hash:K/N]\n`,
+    `ci-time-workflow: ${message}\nusage: ci-time-workflow.mjs <ci.yml> [--overhead-sample hash:K/N] [--timings]\n`,
   );
   process.exit(2);
 }
@@ -304,8 +335,13 @@ function main(argv) {
   const file = args.shift();
   if (!file || file.startsWith("-")) usage("name the workflow file to edit");
   let overhead = null;
+  let timings = false;
   while (args.length) {
     const flag = args.shift();
+    if (flag === "--timings") {
+      timings = true;
+      continue;
+    }
     const value = args.shift();
     if (flag !== "--overhead-sample") usage(`unknown argument ${flag}`);
     const m = /^hash:(\d{1,6})\/(\d{1,6})$/.exec(value ?? "");
@@ -330,7 +366,7 @@ function main(argv) {
   } catch (error) {
     fail(`cannot read ${file}: ${error.message}`, "name the checkout's .github/workflows/ci.yml");
   }
-  const edited = edit(original, ciJob, overhead);
+  const edited = edit(original, ciJob, overhead, { timings });
   try {
     writeFileSync(file, edited);
   } catch (error) {

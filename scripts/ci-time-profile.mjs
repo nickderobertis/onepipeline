@@ -440,6 +440,7 @@ function readMeasure(dir) {
     overhead: null,
     host: null,
     nxProfile: null,
+    timings: null,
   };
   const host = find("host.txt");
   if (host) out.host = readFileSync(host, "utf8").trim().split("\n");
@@ -525,7 +526,54 @@ function readMeasure(dir) {
       );
     }
   }
+  const timingsTimes = find("timings/times.txt");
+  if (timingsTimes) {
+    out.timings = { runs: {}, units: {} };
+    for (const run of measureLines(timingsTimes, (line) => {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length !== 4) return null;
+      const [label, start, end, status] = fields;
+      const ok =
+        ["plain", "instrumented"].includes(label) &&
+        /^\d+$/.test(start) &&
+        /^\d+$/.test(end) &&
+        Number(end) >= Number(start) &&
+        /^\d+$/.test(status);
+      return ok ? { label, s: Number(end) - Number(start), status: Number(status) } : null;
+    }))
+      out.timings.runs[run.label] = { s: run.s, status: run.status };
+    for (const label of ["plain", "instrumented"]) {
+      const html = find(`timings/${label}.html`);
+      if (html) out.timings.units[label] = cargoTimings(html);
+    }
+  }
   return out;
+}
+
+// The units of one `cargo --timings` report: cargo writes them into the HTML as the
+// JavaScript array `UNIT_DATA`, each with its name, target, start and duration in seconds.
+function cargoTimings(file) {
+  const text = readFileSync(file, "utf8");
+  const m = /const UNIT_DATA = (\[[\s\S]*?\]);\n/.exec(text);
+  let units;
+  try {
+    units = m && JSON.parse(m[1]);
+  } catch {
+    units = null;
+  }
+  check(
+    Array.isArray(units) &&
+      units.every(
+        (u) =>
+          typeof u?.name === "string" &&
+          typeof u.target === "string" &&
+          finite(u.start, u.duration) &&
+          u.start >= 0 &&
+          u.duration >= 0,
+      ),
+    file,
+  );
+  return units;
 }
 
 // A rustc invocation's tree: what kind of build it is part of.
@@ -1105,6 +1153,8 @@ function analyzeJob(opts) {
       );
   }
   if (measure?.overhead) result.overhead = summarizeOverhead(measure.overhead, records);
+  if (measure?.timings)
+    result.cargo_timings = summarizeTimings(measure.timings, workspaceNames(rustc));
   result.measure_host = measure?.host ?? null;
   result.requests = gh.requests;
   result.rate_checks = gh.rateChecks;
@@ -1253,6 +1303,40 @@ function summarizeSamples(samples, steps, tasks) {
       ]),
     ),
   };
+}
+
+// Each timed build: cargo's units by kind (a `bin` or `test` unit's time includes its link),
+// the workspace's own crates against dependencies, and cargo's own span from first start to
+// last end. A build that exited non-zero is noted.
+function summarizeTimings(timings, ours) {
+  const out = {};
+  for (const [label, units] of Object.entries(timings.units)) {
+    const kind = (u) =>
+      /"([^"]+)"/.exec(u.target)?.[1] ?? (/build script/.test(u.target) ? "build-script" : "lib");
+    const byKind = {};
+    for (const u of units) byKind[kind(u)] = (byKind[kind(u)] ?? 0) + u.duration;
+    const workspace = units.filter((u) => ours.has(u.name.replace(/-/g, "_")));
+    out[label] = {
+      units: units.length,
+      unit_s: units.reduce((a, u) => a + u.duration, 0),
+      workspace_units: workspace.length,
+      workspace_s: workspace.reduce((a, u) => a + u.duration, 0),
+      by_kind_s: byKind,
+      span_s: units.reduce((a, u) => Math.max(a, u.start + u.duration), 0),
+      step_s: timings.runs[label]?.s ?? null,
+      top: [...units]
+        .sort((a, b) => b.duration - a.duration)
+        .slice(0, 8)
+        .map((u) => ({ unit: `${u.name}${u.target}`, s: u.duration })),
+    };
+  }
+  for (const [label, r] of Object.entries(timings.runs))
+    if (r.status !== 0)
+      note(
+        `the ${label} --timings build exited ${r.status}, so its report covers what it built before then`,
+        `timings/${label}.log in the measure artifact says why; rerun the measurement before reading it`,
+      );
+  return out;
 }
 
 function summarizeOverhead(overhead, gateRecords) {
@@ -1536,6 +1620,48 @@ function printJob(r) {
           "; ",
         )}; tests in both ${o.tests_in_both}; test-seconds instrumented ${o.instrumented_test_seconds.toFixed(0)}, plain ${o.plain_test_seconds.toFixed(0)}, ratio ${o.ratio?.toFixed(3) ?? "-"}`,
     );
+  }
+  if (r.cargo_timings) {
+    out.push(
+      "",
+      "## Compile and link by cargo --timings (the workspace's tests, after the gate, plain then instrumented)",
+      "",
+    );
+    out.push(
+      table(
+        [
+          "build",
+          "units",
+          "unit seconds",
+          "workspace units",
+          "workspace seconds",
+          "lib s",
+          "test s",
+          "bin s",
+          "build-script s",
+          "cargo span s",
+          "step s",
+        ],
+        Object.entries(r.cargo_timings).map(([label, t]) => [
+          label,
+          t.units,
+          t.unit_s.toFixed(0),
+          t.workspace_units,
+          t.workspace_s.toFixed(0),
+          (t.by_kind_s.lib ?? 0).toFixed(0),
+          (t.by_kind_s.test ?? 0).toFixed(0),
+          (t.by_kind_s.bin ?? 0).toFixed(0),
+          (t.by_kind_s["build-script"] ?? 0).toFixed(0),
+          t.span_s.toFixed(0),
+          t.step_s ?? "-",
+        ]),
+      ),
+    );
+    for (const [label, t] of Object.entries(r.cargo_timings))
+      out.push(
+        "",
+        `${label}, slowest units: ${t.top.map((u) => `${u.unit.trim()} ${u.s.toFixed(1)}`).join("; ")}`,
+      );
   }
   if (NOTES.length) out.push("", "## Notes", "", ...NOTES.map((n) => `- ${n}`));
   out.push(

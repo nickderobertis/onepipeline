@@ -71,6 +71,7 @@ test("the workflow edits turn every cache write off, add the observers, and are 
     const block = edited.slice(edited.indexOf(`\n  ${job}:\n`));
     assert.match(block, /RUSTC_WRAPPER=\$m\/rustc-timer/);
     assert.match(block, /NX_PROFILE=target\/ci-time-nx-profile\.json/);
+    assert.match(block, /echo "NEXTEST_STATUS_LEVEL=pass" >> "\$GITHUB_ENV"/);
     assert.match(block, /name: measure-\$\{\{ github\.job \}\}/);
     // The graph step plans exactly the targets ci-job.sh runs for the job.
     assert.ok(block.includes(`-t "${targets(job)}" --graph=stdout`), job);
@@ -112,6 +113,34 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   const plain = checkout(join(scratch(t), "plain"));
   assert.equal(run(workflowScript, [plain]).status, 0);
   assert.doesNotMatch(readFileSync(plain, "utf8"), /one e2e partition/);
+  assert.doesNotMatch(readFileSync(plain, "utf8"), /cargo --timings of the workspace tests/);
+
+  // With --timings, test-linux builds the workspace's tests after the gate with cargo's
+  // --timings, plain and then through the coverage build, each from a fresh source edit.
+  const timed = checkout(join(scratch(t), "timed"));
+  assert.equal(run(workflowScript, [timed, "--timings"]).status, 0);
+  const timedText = readFileSync(timed, "utf8");
+  const step = timedText.slice(timedText.indexOf("cargo --timings of the workspace tests"));
+  assert.equal(timedText.match(/cargo --timings of the workspace tests/g).length, 1);
+  assert.ok(
+    timedText.indexOf("\n  test-macos:\n") >
+      timedText.indexOf("cargo --timings of the workspace tests"),
+  );
+  assert.match(step, /touch src\/lib\.rs/);
+  assert.match(
+    step,
+    /run plain env -u RUSTFLAGS cargo test --workspace --no-run --locked --timings/,
+  );
+  assert.match(step, /cp target\/cargo-timings\/cargo-timing\.html "\$m\/plain\.html"/);
+  assert.match(
+    step,
+    /run instrumented env RUSTFLAGS="-D warnings" bash scripts\/coverage-unit\.sh --cargo -- test --workspace --no-run --locked --timings/,
+  );
+  assert.match(
+    step,
+    /cp target\/llvm-cov-target\/cargo-timings\/cargo-timing\.html "\$m\/instrumented\.html"/,
+  );
+  assert.match(step, /::warning::measurement: the \$label timed build exited \$status.*ACTION: /);
 
   const again = run(workflowScript, [a]);
   assert.equal(again.status, 1);
@@ -1185,6 +1214,54 @@ test("nextest's own output, from the pinned cargo-nextest, is read into runs and
     Object.values(r.log_binaries).map((b) => b.tests),
     [1, 1],
   );
+});
+
+test("cargo's own --timings report, from the pinned cargo, is read by unit kind and crate", (t) => {
+  const dir = scratch(t);
+  // The probe crate, built with --timings as the measurement's timed builds are.
+  const crate = join(dir, "probe");
+  mkdirSync(join(crate, "src"), { recursive: true });
+  mkdirSync(join(crate, "tests"));
+  writeFileSync(
+    join(crate, "Cargo.toml"),
+    '[package]\nname = "probe"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
+  );
+  writeFileSync(join(crate, "src", "lib.rs"), "pub fn probe() -> u8 { 7 }\n");
+  writeFileSync(join(crate, "tests", "it.rs"), "#[test]\nfn integration() {}\n");
+  const env = { ...process.env, CARGO_TARGET_DIR: join(dir, "target") };
+  delete env.RUSTC_WRAPPER;
+  const built = spawnSync("cargo", ["test", "--no-run", "--timings"], {
+    cwd: crate,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(built.status, 0, built.stderr);
+  const report = readFileSync(join(dir, "target", "cargo-timings", "cargo-timing.html"), "utf8");
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(join(dir, "run")));
+  const timings = join(artifactDir(cache, "measure-test-linux"), "timings");
+  mkdirSync(timings);
+  writeFileSync(join(timings, "plain.html"), report);
+  writeFileSync(join(timings, "instrumented.html"), report);
+  writeFileSync(join(timings, "times.txt"), "plain 1100 1160 0\ninstrumented 1160 1250 101\n");
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  const plain = r.cargo_timings.plain;
+  // The lib, the lib's unit-test target and the integration test: three units of probe.
+  assert.equal(plain.units, 3);
+  assert.deepEqual(Object.keys(plain.by_kind_s).sort(), ["lib", "test"]);
+  assert.ok(plain.top.every((u) => u.unit.startsWith("probe")));
+  assert.equal(plain.step_s, 60);
+  assert.equal(r.cargo_timings.instrumented.step_s, 90);
+  assert.ok(r.notes.some((n) => /the instrumented --timings build exited 101/.test(n)));
+  assert.match(readFileSync(join(dir, "r.md"), "utf8"), /## Compile and link by cargo --timings/);
+  // A report with no unit data is not cargo's.
+  writeFileSync(join(timings, "plain.html"), "<html></html>");
+  const refused = run(profileScript, job(cache, join(dir, "r.md")));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /plain\.html is malformed\nnext: /);
 });
 
 test("a GitHub read that fails, or a report that cannot be written, refuses with what to do", (t) => {
