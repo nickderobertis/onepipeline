@@ -25,6 +25,7 @@ const fetchScript = join(root, "scripts", "crate-split", "fetch-evidence.mjs");
 const tierScript = join(root, "scripts", "crate-split", "tier-mapping.mjs");
 const graphScript = join(root, "scripts", "crate-split", "module-graph.mjs");
 const spikeScript = join(root, "scripts", "crate-split", "reuse-spike.mjs");
+const cacheScript = join(root, "scripts", "crate-split", "cache-inventory.mjs");
 
 let scratch;
 
@@ -82,6 +83,9 @@ if (args[0] === "api" && args[1] === "rate_limit") {
   process.stdout.write(JSON.stringify(state.merged));
 } else if (args[0] === "api" && args[1] === "graphql") {
   process.stdout.write(JSON.stringify(state.rollup));
+} else if (args.at(-1).includes("/actions/caches?")) {
+  const page = Number(args.at(-1).match(/[?&]page=(\\d+)/)[1]);
+  process.stdout.write(JSON.stringify({ actions_caches: state.caches[page - 1] ?? [] }));
 } else if (args.at(-1).includes("/artifacts?")) {
   process.stdout.write(JSON.stringify({ artifacts: [] }));
 } else if (args.at(-1).endsWith("/logs")) {
@@ -253,6 +257,72 @@ test("a floor that is not a whole number is refused before anything is read", ()
   assert.equal(run.status, 1);
   assert.match(run.stderr, /--floor is not a whole number/);
   assert.deepEqual(calls, []);
+});
+
+test("the cache inventory pages the listing read-only and counts entries by family, scope and Nx target", () => {
+  const dir = join(scratch, "caches");
+  const entry = (id, key, ref, bytes) => ({
+    id,
+    key,
+    ref,
+    size_in_bytes: bytes,
+    created_at: `2026-11-0${(id % 9) + 1}T00:00:00Z`,
+  });
+  const full = Array.from({ length: 100 }, (_, i) =>
+    entry(i + 1, `nx-cache-1234567890123${String(i).padStart(3, "0")}`, "refs/heads/main", 10),
+  );
+  const bin = ghDouble(dir, {
+    core: [4000],
+    graphql: [4000],
+    caches: [
+      full,
+      [
+        entry(100, full[99].key, "refs/heads/main", 10),
+        entry(201, "v0-rust-test-linux-Linux-x64-0123abcd-deadbeef", "refs/heads/main", 1000),
+        entry(202, "v0-rust-test-linux-Linux-x64-0123abcd-feedface", "refs/pull/7/merge", 2000),
+      ],
+    ],
+  });
+  write(dir, {
+    "executions/1.json": JSON.stringify({
+      tasks: [{ task: "onepipeline-e2e:test", hash: "1234567890123007" }],
+    }),
+  });
+  const run = spawnSync(process.execPath, [cacheScript, "--evidence", dir], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  // The entry the second page repeats is one entry.
+  assert.match(
+    run.stdout,
+    /^cache-inventory: 102 entries, 0\.00 GB, 2 pages read; largest families: nx-cache-# @ main 100/,
+  );
+  const inv = JSON.parse(readFileSync(join(dir, "caches", "inventory.json"), "utf8"));
+  assert.equal(inv.families["v0-rust-test-linux-Linux-x64-#-# @ pull request"].bytes, 2000);
+  assert.deepEqual(inv.families["nx-cache-# @ main"].targets, {
+    "onepipeline-e2e:test": { entries: 1, bytes: 10 },
+  });
+  // Every call was a read: the rate limit, and GETs of the listing.
+  const calls = readFileSync(join(dir, "calls.log"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(
+    calls.every((args) => args[0] === "api" && !args.includes("--method") && !args.includes("-X")),
+  );
+  // Below the floor it reads no page and says so.
+  const low = ghDouble(join(scratch, "caches-low"), { core: [10], graphql: [4000], caches: [] });
+  const stopped = spawnSync(
+    process.execPath,
+    [cacheScript, "--evidence", join(scratch, "caches-low")],
+    {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${low}:${process.env.PATH}` },
+    },
+  );
+  assert.equal(stopped.status, 2);
+  assert.match(stopped.stderr, /10 core remain, below the floor of 2500; 0 pages held/);
 });
 
 // ---- the observed replay, over a real Nx workspace --------------------------------
@@ -512,11 +582,12 @@ function evidenceDir() {
     ["onepipeline", "plan::tests::parses"],
     ["linked_engines", "the_lock_links_one_release"],
   ];
-  records.forEach(([binary, name], i) =>
+  for (const [i, [binary, name]] of records.entries()) {
     write(evidence, {
       [`profiles/110/test-linux/${i}.json`]: JSON.stringify({ ...golden, binary, test: name }),
-    }),
-  );
+    });
+  }
+
   pr(12, commits.several, [job(1201, "test-macos")], 120);
   pr(13, commits.release, [job(1301, "test-linux")], 130);
   pr(14, commits.src, [job(1401, "test-linux")], 140);
