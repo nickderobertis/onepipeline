@@ -6913,6 +6913,15 @@ impl HeldHost {
     /// default, and the consumer commits an `onevcs.toml` declaring `local-direct` on
     /// its base, which is where `onevcs` reads it from.
     fn declaring(name: &str) -> Self {
+        Self::declaring_as(
+            name,
+            "schema_version = 2\n\n[policy]\npublication = \"local-direct\"\n\
+             approvals = \"none\"\n",
+        )
+    }
+
+    /// The same, with `declaration` committed as the consumer's `onevcs.toml`.
+    fn declaring_as(name: &str, declaration: &str) -> Self {
         let host = Self::new(name);
         std::fs::write(
             host.world.onevcs_home().join("rules.yml"),
@@ -6929,11 +6938,8 @@ impl HeldHost {
         )
         .expect("the rules file is written");
         let checkout = &host.consumer.checkout;
-        std::fs::write(
-            checkout.join("onevcs.toml"),
-            "schema_version = 2\n\n[policy]\npublication = \"local-direct\"\napprovals = \"none\"\n",
-        )
-        .expect("the declaration is written");
+        std::fs::write(checkout.join("onevcs.toml"), declaration)
+            .expect("the declaration is written");
         crate::harness::git(&host.world, checkout, &["add", "onevcs.toml"]);
         crate::harness::git(
             &host.world,
@@ -7377,6 +7383,42 @@ fn a_fast_node_whose_repository_declares_local_direct_is_held_unlanded() {
         settled["payload"]["head"].as_str(),
         "the held branch is not on the consumer's origin at its commit"
     );
+    assert_eq!(host.bases(), (base_before, checkout_before));
+    assert!(
+        world.changes_opened().is_empty(),
+        "{:?}",
+        world.changes_opened()
+    );
+    assert!(!dispatched(world, &run, "follower"));
+}
+
+/// A repository whose own declaration `onevcs` cannot read resolves **no** policy,
+/// and a `fast` node there is neither held on a guessed one nor landed: `onevcs`
+/// refuses the declaration before the node is ever dispatched, so the node fails
+/// carrying that refusal, nothing reaches the base and nothing is kept as held. That
+/// refusal is why a closeout reading no policy is a declaration broken mid-dispatch.
+#[test]
+fn a_fast_node_whose_repository_declaration_is_unreadable_is_refused_before_dispatch() {
+    let host = HeldHost::declaring_as(
+        "adoption-held-unreadable",
+        "schema_version = 2\n\n[policy]\npublication = \"sideways\"\n",
+    );
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let (run, _) = start_held(&host, "adoption-held-unreadable", Some("crate"));
+
+    // It is `onevcs`'s own refusal of the declaration that the node carries, and no
+    // worker was paid for: the refusal came before the dispatch.
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("publication policy declaration could not be read")
+            && detail.contains("onevcs.toml"),
+        "the node does not carry onevcs's refusal of the declaration: {settled}"
+    );
+    assert!(tasks_of(world, "consumer").is_empty());
     assert_eq!(host.bases(), (base_before, checkout_before));
     assert!(
         world.changes_opened().is_empty(),

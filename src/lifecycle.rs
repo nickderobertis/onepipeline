@@ -1708,12 +1708,16 @@ fn release_hold(
         Some(stated) => stated,
         None => match onevcs::rules_check(node.repo.as_deref()?)
             .map_err(|error| error.to_string())
-            .and_then(|checked| match (checked.policy, checked.declaration) {
-                (Some(resolved), _) => Ok(resolved.publication),
-                // The one state that resolves no policy: the repository's own
-                // declaration could not be read, which its publication refuses too.
-                (None, onevcs::PolicyDeclaration::Unreadable { reason }) => Err(reason),
-                (None, declaration) => Err(format!("no policy resolved for {declaration:?}")),
+            // No policy resolves only where the repository's own declaration could not
+            // be read, which its publication refuses too; its state names why.
+            // llmlint: ignore[changed_behavior_has_e2e] onevcs refuses an unreadable
+            // declaration before the node is dispatched (tests/e2e/adoption.rs
+            // `a_fast_node_whose_repository_declaration_is_unreadable_is_refused_before_dispatch`),
+            // so a closeout reading none is a base edited mid-dispatch, the case the `Err`
+            // arm below is suppressed for, and it reaches that arm unchanged.
+            .and_then(|checked| match checked.policy {
+                Some(resolved) => Ok(resolved.publication),
+                None => Err(format!("{:?}", checked.declaration)),
             }) {
             Ok(policy) => policy,
             // llmlint: ignore[changed_behavior_has_e2e] a session for this identity was
