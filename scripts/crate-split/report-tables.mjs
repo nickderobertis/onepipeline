@@ -288,9 +288,9 @@ function delivered(spike, observed) {
   ];
   const typical = (p) => changeClass(p.changed ?? []) === "engine source and tests";
   for (const [label, pick, release] of [
-    ["the 30 non-release", (p) => !p.release, false],
+    ["the non-release", (p) => !p.release, false],
     ["the typical (engine source and tests)", (p) => !p.release && typical(p), false],
-    ["the 18 release", (p) => p.release, true],
+    ["the release", (p) => p.release, true],
   ]) {
     const prs = observed.prs.filter((p) => !p.unread && pick(p));
     const per = ["linux", "darwin", "win32"].map((platform) => {

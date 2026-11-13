@@ -744,3 +744,280 @@ test("a lockfile change moves every key that holds external dependencies, as Nx'
   assert.ok(!ran["p:none"].includes("external dependencies"), JSON.stringify(ran["p:none"]));
   assert.ok(result.prs[0].moved.includes("external"));
 });
+
+test("each option (a) variant removes exactly the inputs it names, and only from the tiers it names", async () => {
+  const { VARIANTS } = await import(pathToFileURL(script("tier-mapping.mjs")).href);
+  const paths = [
+    "src/**/*",
+    "docs/**/*",
+    "nx.json",
+    "scripts/**/*",
+    ".github/**/*",
+    "tests/*.rs",
+    "justfile",
+    "runtime:node scripts/nx-version-free-inputs.mjs --ecosystem python",
+  ];
+  const removed = (variant, task) =>
+    paths.filter((p) => !VARIANTS[variant](task, paths).includes(p));
+  assert.deepEqual(removed("docs-out-of-e2e", "onepipeline-e2e:test"), ["docs/**/*"]);
+  assert.deepEqual(removed("docs-out-of-e2e", "onepipeline-contract:test-quick"), ["docs/**/*"]);
+  assert.deepEqual(removed("docs-out-of-e2e", "onepipeline:test-rest"), []);
+  assert.deepEqual(removed("rest-own-tests", "onepipeline:test-rest"), [
+    "docs/**/*",
+    "scripts/**/*",
+    ".github/**/*",
+    "justfile",
+    "runtime:node scripts/nx-version-free-inputs.mjs --ecosystem python",
+  ]);
+  assert.deepEqual(removed("rest-own-tests", "onepipeline-e2e:test"), []);
+  assert.deepEqual(removed("nx-json-out", "onepipeline-npm:test"), ["nx.json"]);
+});
+
+test("the tier mapping finds a tier's archive recipe through the justfile, and refuses one just cannot read", () => {
+  const repo = join(scratch, "ws");
+  const branch = git(repo, ["rev-parse", "deleted"]);
+  // Today's tiers at a commit whose justfile runs `test` from the archive and `lint` not.
+  git(repo, ["checkout", "-q", "-b", "with-justfile", branch]);
+  const project = JSON.parse(readFileSync(join(repo, "project.json"), "utf8"));
+  project.targets.test.command = "just _p-test";
+  project.targets.lint.command = "just _p-lint";
+  write(repo, {
+    "project.json": JSON.stringify(project),
+    justfile: "_tier-test:\n    true\n_p-test: _tier-test\n_p-lint:\n    true\n",
+  });
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "justfile"]);
+  const good = git(repo, ["rev-parse", "HEAD"]);
+  write(repo, { justfile: "_p-test: _nowhere\n" });
+  git(repo, ["commit", "-qam", "a justfile just refuses"]);
+  const bad = git(repo, ["rev-parse", "HEAD"]);
+  git(repo, ["checkout", "-q", "main"]);
+  const changes = join(scratch, "observed.json");
+  const map = (commit) =>
+    spawnSync(
+      process.execPath,
+      [
+        script("tier-mapping.mjs"),
+        "--clone",
+        repo,
+        "--changes",
+        changes,
+        "--out",
+        join(scratch, "tiers.json"),
+        "--commit",
+        commit,
+      ],
+      {
+        encoding: "utf8",
+      },
+    );
+  let run = map(good);
+  assert.equal(run.status, 0, run.stderr);
+  const tiers = JSON.parse(readFileSync(join(scratch, "tiers.json"), "utf8"));
+  assert.equal(tiers.suites["p:test"].archive, true);
+  assert.equal(tiers.suites["p:lint"].archive, false);
+  run = map(bad);
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /just cannot read \S+'s justfile/);
+  assert.match(run.stderr, /^next: install the just the repository pins/m);
+});
+
+test("the module graph reads past raw and escaped strings and through every kind of re-export", () => {
+  const crate = join(scratch, "graph-crate");
+  write(crate, {
+    "src/lib.rs":
+      "pub mod a;\npub mod b;\npub mod c;\npub mod d;\npub mod e;\npub use d::Single;\npub use e::Inner as Aliased;\n",
+    "src/main.rs": "fn main() {}\n",
+    // Every crate:: below a, b's raw and escaped strings is text, not a reference.
+    "src/a.rs":
+      'pub const R: &str = r#"crate::b "quoted" crate::c"#;\npub const E: &str = "say \\"crate::c\\" here";\npub fn f() { let _ = crate::Single; }\n',
+    "src/b.rs": "pub fn g() { let _ = crate::Aliased; }\n",
+    "src/c.rs": "pub fn h() { crate::a::f(); }\n",
+    "src/d.rs": "pub struct Single;\n",
+    "src/e.rs": "pub struct Inner;\n",
+  });
+  const out = join(scratch, "graph.json");
+  const run = spawnSync(
+    process.execPath,
+    [script("module-graph.mjs"), "--repo", crate, "--out", out],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(readFileSync(out, "utf8"));
+  const depsOf = (m) =>
+    Object.values(result.crates)
+      .find((c) => c.modules.includes(m))
+      .deps.map((d) => result.crates[d].modules.join("+"));
+  assert.deepEqual(depsOf("a"), ["d"]);
+  assert.deepEqual(depsOf("b"), ["e"]);
+  assert.deepEqual(depsOf("c"), ["a"]);
+  assert.equal(result.components, 5);
+});
+
+test("option (c)'s unit suites run on a change to their crate or one it depends on, and on nothing else", () => {
+  const dir = join(scratch, "option-c");
+  const crate = join(scratch, "graph-crate");
+  write(dir, {
+    "base.json": JSON.stringify({
+      sources: ["src/**"],
+      fallback: "onepipeline",
+      crates: { onepipeline: { paths: ["src/**"] } },
+      suites: {
+        "onepipeline:test-rest": {
+          paths: ["tests/*.rs"],
+          crates: ["onepipeline"],
+          tasks: ["onepipeline:test-rest"],
+          archive: true,
+        },
+      },
+    }),
+    "observed.json": JSON.stringify({
+      prs: [
+        { pr: 1, title: "d", release: false, changed: ["src/d.rs"], moved: [] },
+        { pr: 2, title: "c", release: false, changed: ["src/c.rs"], moved: [] },
+        { pr: 3, title: "a test", release: false, changed: ["tests/x.rs"], moved: [] },
+      ],
+      weights: { tasks: {}, modules: {} },
+    }),
+  });
+  const mapping = join(dir, "c.json");
+  let run = spawnSync(
+    process.execPath,
+    [
+      script("module-graph.mjs"),
+      "--repo",
+      crate,
+      "--out",
+      join(dir, "g.json"),
+      "--mapping",
+      mapping,
+      "--base",
+      join(dir, "base.json"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  run = spawnSync(
+    process.execPath,
+    [
+      replay,
+      "--mapping",
+      mapping,
+      "--changes",
+      join(dir, "observed.json"),
+      "--out",
+      join(dir, "r.json"),
+      "--json",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const affected = Object.fromEntries(
+    JSON.parse(readFileSync(join(dir, "r.json"), "utf8")).perChange.map((c) => [
+      c.commit,
+      c.affected
+        .filter((s) => s.includes("."))
+        .map((s) => s.split(".m-")[1])
+        .sort(),
+    ]),
+  );
+  // d is below a, and a below c: a change to d runs d's, a's and c's unit suites.
+  assert.deepEqual(affected["#1"], ["a", "c", "d"]);
+  assert.deepEqual(affected["#2"], ["c"]);
+  // A test file is the tier's own, not any crate's.
+  assert.deepEqual(affected["#3"], []);
+  // A base the replayer would refuse is refused here too.
+  write(dir, { "bad.json": JSON.stringify({ crates: {}, suites: {} }) });
+  run = spawnSync(
+    process.execPath,
+    [
+      script("module-graph.mjs"),
+      "--repo",
+      crate,
+      "--out",
+      join(dir, "g.json"),
+      "--mapping",
+      mapping,
+      "--base",
+      join(dir, "bad.json"),
+    ],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /the mapping names no crate/);
+});
+
+test("prototype (c) splits a crate along its module graph into crates cargo builds, unit tests and all", () => {
+  const crate = join(scratch, "proto-c");
+  write(crate, {
+    "Cargo.toml":
+      '[workspace]\nmembers = ["."]\n\n[package]\nname = "onepipeline"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n\n[dev-dependencies]\n',
+    "src/lib.rs":
+      "pub mod leaf;\npub mod core_a;\npub mod core_b;\npub mod top;\npub use leaf::Leaf;\n",
+    "src/main.rs": "fn main() { onepipeline::top::run(); }\n",
+    // leaf is below the cycle, core_a and core_b are the cycle, top is above it.
+    "src/leaf.rs": "pub struct Leaf;\n#[cfg(test)]\npub const MEASURING: bool = true;\n",
+    "src/core_a.rs":
+      "pub(crate) fn a() -> i32 { crate::core_b::b() + 1 }\npub fn from_leaf() -> crate::Leaf { crate::leaf::Leaf }\n",
+    "src/core_b.rs":
+      "pub fn b() -> i32 { 1 }\npub fn back() -> i32 { crate::core_a::a() }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses_a_test_only_item_below() { assert!(crate::leaf::MEASURING); }\n}\n",
+    "src/top.rs": "pub fn run() { let _ = crate::core_b::back(); }\n",
+  });
+  spawnSync("cargo", ["generate-lockfile", "--offline"], { cwd: crate });
+  const run = spawnSync(process.execPath, [script("prototype-c.mjs"), "--repo", crate], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout, "prototype-c: onepipeline-base 1 modules, onepipeline-core 2, root 1\n");
+  const manifest = readFileSync(join(crate, "Cargo.toml"), "utf8");
+  assert.match(
+    manifest,
+    /default-members = \[".", "crates\/onepipeline-base", "crates\/onepipeline-core"\]/,
+  );
+  assert.match(
+    readFileSync(join(crate, "crates", "onepipeline-core", "Cargo.toml"), "utf8"),
+    /onepipeline-base = \{ path = "\.\.\/onepipeline-base", features = \["test-support"\] \}/,
+  );
+  assert.match(
+    readFileSync(join(crate, "src", "lib.rs"), "utf8"),
+    /pub use onepipeline_core::core_a;/,
+  );
+  assert.doesNotMatch(readFileSync(join(crate, "src", "core_a.rs"), "utf8"), /pub\(crate\)/);
+  // It builds, and the moved unit test runs against the test-only item below it.
+  const check = spawnSync("cargo", ["test", "--offline", "--quiet"], {
+    cwd: crate,
+    encoding: "utf8",
+    env: { ...process.env, CARGO_TARGET_DIR: join(crate, "target") },
+  });
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /1 passed/);
+});
+
+test("demonstration c writes the split and refreshes the lock for its new members", () => {
+  const crate = join(scratch, "proto-c-demo");
+  rmSync(crate, { recursive: true, force: true });
+  write(crate, {
+    "Cargo.toml":
+      '[workspace]\nmembers = ["."]\n\n[package]\nname = "onepipeline"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n',
+    "src/lib.rs": "pub mod x;\npub mod y;\n",
+    "src/main.rs": "fn main() {}\n",
+    "src/x.rs": "pub fn x() { crate::y::y() }\n",
+    "src/y.rs": "pub fn y() {}\npub fn back() { crate::x::x() }\n",
+    ".github/workflows/visual-docs.yml":
+      "name: Visual docs\non:\n  pull_request:\n    types: [closed]\njobs: {}\n",
+  });
+  spawnSync("cargo", ["generate-lockfile", "--offline"], { cwd: crate });
+  const run = spawnSync(
+    process.execPath,
+    [script("demo-commit.mjs"), "--repo", crate, "--variant", "c"],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(readFileSync(join(crate, "Cargo.lock"), "utf8"), /name = "onepipeline-core"/);
+  assert.match(
+    readFileSync(join(crate, ".github", "workflows", "ci.yml"), "utf8"),
+    /measure-archive\.mjs coverage/,
+  );
+});

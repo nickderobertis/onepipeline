@@ -855,6 +855,75 @@ test("the reuse spike's one command replays today's tiers and every option over 
     tablesText,
     /^- test-linux \(job 1101\): replayed 0: none\. Ran 5: \[rustBuild\] :test, :lint, e2e:test, :test-rest; \[not cacheable\] :smoke\.$/m,
   );
+  // The options table: today's tiers, each option, and (d2)'s estimate row.
+  assert.match(
+    tablesText,
+    /^\| today's tiers \(keys allow\) \| \d+ of \d+ \| [\d./ -]+ \| [\d./ -]+ \| - \|$/m,
+  );
+  assert.match(tablesText, /^\| \(b\) e2e split into suites \| /m);
+  assert.match(
+    tablesText,
+    /^\| \(d2\) documented install keyed on the commit it proves \(estimate\) \| 0 \/ 0 \/ 0 of 0 runs \| - \/ - \/ - \| as all 30 \| - \|$/m,
+  );
+  // What the cache delivered: #12's macOS lint replay weighs nothing, lint having no
+  // macOS run to weigh it by; today's keys would skip #12's Linux lint (1 min) and
+  // test-rest (4 min), 2.5 a pull request.
+  assert.match(
+    tablesText,
+    /^\| the non-release \(2\) \| 0\.0 \/ 0\.0 \/ 0\.0 \| 0 \/ 0 \/ 0 \| 2\.5 \/ 0\.0 \/ 0\.0 \|$/m,
+  );
+  // The model check counts each pull-request task run the mapping and Nx's plans judged.
+  assert.match(
+    tablesText,
+    /^\d+ of \d+ pull-request task runs agree \(\d+\.\d%\); the mapping runs \d+ that Nx's plan at the commit did not key on the diff, and skips \d+ it did\.$/m,
+  );
+  // With the cache's listing: #13's miss read a key #11's run stored, whose main copy
+  // came later; and with --clone, no run here holds #1493's merge.
+  write(evidence, {
+    "caches/page-1.json": JSON.stringify({
+      actions_caches: [
+        {
+          id: 1,
+          key: "nx-cache-999",
+          ref: "refs/heads/main",
+          size_in_bytes: 7,
+          created_at: at(50),
+        },
+      ],
+    }),
+  });
+  const inventory = spawnSync(
+    process.execPath,
+    [join(root, "scripts", "crate-split", "cache-inventory.mjs"), "--evidence", evidence],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(inventory.status, 0, inventory.stderr);
+  const cloned = spawnSync(
+    process.execPath,
+    [
+      join(root, "scripts", "crate-split", "report-tables.mjs"),
+      "--spike",
+      out,
+      "--evidence",
+      evidence,
+      "--out",
+      join(out, "tables2.md"),
+      "--clone",
+      repo,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(cloned.status, 0, cloned.stderr);
+  const withCache = readFileSync(join(out, "tables2.md"), "utf8");
+  assert.match(withCache, /^1 entries, 0\.00 GB\.$/m);
+  assert.match(withCache, /^\| nx-cache-999 @ main \| 1 \| 0\.000 \| /m);
+  assert.match(
+    withCache,
+    /^1 task runs missed a key an earlier run in the evidence stored; 1 of them read it before its main-scope copy was created, and 0 are no longer in the listing\.$/m,
+  );
+  assert.match(withCache, /^\| #11 \| before #1493 \| /m);
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
   const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
   const proposed = JSON.parse(
