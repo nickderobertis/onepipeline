@@ -32,12 +32,17 @@ export function logStep(text, start) {
   const at = lines.findIndex((m) => start.test(m[2]));
   if (at < 0) return null;
   const next = lines.slice(at + 1).find((m) => m[2].startsWith("##[group]Run "));
-  return next ? Math.round((Date.parse(next[1]) - Date.parse(lines[at][1])) / 1000) : null;
+  if (!next) return null;
+  const seconds = (Date.parse(next[1]) - Date.parse(lines[at][1])) / 1000;
+  // A stamp that is no time, or steps out of order, measure nothing.
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds) : null;
 }
 
 /** The seconds of cargo's `Finished `test` profile ... in [Mm ]S[.s]s` line. */
 export function cargoBuild(text) {
-  const m = text.match(/Finished `test` profile \[[^\]]*\] target\(s\) in (?:(\d+)m )?([\d.]+)s/);
+  const m = text.match(
+    /Finished `test` profile \[[^\]]*\] target\(s\) in (?:(\d+)m )?(\d+(?:\.\d+)?)s/,
+  );
   return m ? Number(m[1] ?? 0) * 60 + Number(m[2]) : null;
 }
 
@@ -53,7 +58,7 @@ export function readJob(job, log) {
   const size = text.match(/Cache Size: ~(\d+) MB/)?.[1];
   const step = job.steps.find((s) => /rust-cache/.test(s.name));
   const measured = text.match(
-    /measure-archive: mode=(\S+)( archive=failed)? wall_s=([\d.]+) units=(\d+) unit_s=([\d.]+) workspace_units=(\d+) workspace_unit_s=([\d.]+) dependency_unit_s=([\d.]+)/,
+    /measure-archive: mode=(\S+)( archive=failed)? wall_s=(\d+(?:\.\d+)?) units=(\d+) unit_s=(\d+(?:\.\d+)?) workspace_units=(\d+) workspace_unit_s=(\d+(?:\.\d+)?) dependency_unit_s=(-?\d+(?:\.\d+)?)/,
   );
   return {
     job: job.name,

@@ -1922,3 +1922,38 @@ test("the report tables the cache by family, with the rest summed, and Nx's entr
   assert.match(md, /^\| pull request \| 100 \| 58 \| 50 \| 0 \| 5 \| 0 \| 0 \| 3 \|$/m);
   assert.match(md, /^\| main \| 60 \| 7 \| 0 \| 0 \| 0 \| 7 \| 0 \| 0 \|$/m);
 });
+
+test("each pull request falls in the changed-file class its files make", async () => {
+  const { changeClass } = await import(pathToFileURL(script("report-tables.mjs")).href);
+  assert.equal(changeClass(["src/a.rs", "tests/e2e/a.rs"]), "engine source and tests");
+  assert.equal(changeClass(["crates/testfakes/src/lib.rs"]), "engine source, no tests");
+  assert.equal(changeClass(["tests/e2e/a.rs", "docs/x.md"]), "tests, no engine source");
+  assert.equal(changeClass(["Cargo.toml", "Cargo.lock", "justfile"]), "dependency bump");
+  assert.equal(changeClass(["Cargo.lock", ".github/workflows/ci.yml"]), "CI, scripts or docs only");
+  assert.equal(changeClass(["scripts/x.mjs"]), "CI, scripts or docs only");
+});
+
+test("a demonstration log whose stamps or figures are malformed measures nothing rather than NaN", () => {
+  const dir = join(scratch, "malformed-log");
+  write(dir, {
+    "6.jobs.json": JSON.stringify({ jobs: [{ name: "measure-linux (1)", id: 61, status: "completed", steps: [] }] }),
+    "61.log": [
+      "2026-13-45T99:99:99.0000000Z ##[group]Run Swatinem/rust-cache@v2.9.2",
+      "2026-11-13T07:43:00.0000000Z ##[group]Run actions/setup-node@v4",
+      "2026-11-13T07:44:00.0000000Z     Finished `test` profile [unoptimized] target(s) in 1..2s",
+      "2026-11-13T07:44:01.0000000Z measure-archive: mode=quick wall_s=1..2 units=3 unit_s=1 workspace_units=1 workspace_unit_s=1 dependency_unit_s=0",
+    ].join("\n"),
+  });
+  const run = spawnSync(process.execPath, [script("demo-runs.mjs"), "--dir", dir, "--out", join(dir, "t.md"), "6"], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(readFileSync(join(dir, "t.md"), "utf8"), /^\| 6 \| measure-linux \(1\) \| 61 \| - \| - \| - \| unknown \| - \| - \| 0 \| no measurement \| - \| - \| - \/ - \|$/m);
+  // A step that finishes before it starts is refused in the listing.
+  write(dir, {
+    "7.jobs.json": JSON.stringify({
+      jobs: [{ name: "x", id: 71, status: "completed", steps: [{ name: "s", started_at: "2026-11-13T08:00:00Z", completed_at: "2026-11-13T07:00:00Z" }] }],
+    }),
+  });
+  const refused = spawnSync(process.execPath, [script("demo-runs.mjs"), "--dir", dir, "--out", join(dir, "t.md"), "7"], { encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /a finished step with no start/);
+});

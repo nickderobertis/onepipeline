@@ -352,7 +352,10 @@ export function jobsListing(doc, run) {
     for (const s of j.steps) {
       need(
         isText(s.name) &&
-          (s.completed_at == null || (isTime(s.completed_at) && isTime(s.started_at))) &&
+          (s.completed_at == null ||
+            (isTime(s.completed_at) &&
+              isTime(s.started_at) &&
+              Date.parse(s.started_at) <= Date.parse(s.completed_at))) &&
           (s.started_at == null || isTime(s.started_at)),
         `run ${run}'s job ${j.id} has a step with no name, or a finished step with no start`,
         again,

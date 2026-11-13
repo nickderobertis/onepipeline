@@ -884,6 +884,9 @@ test("the reuse spike's one command replays today's tiers and every option over 
     tablesText,
     /^\| the non-release \(2\) \| 0\.0 \/ 0\.0 \/ 0\.0 \| 0 \/ 0 \/ 0 \| 2\.5 \/ 0\.0 \/ 0\.0 \|$/m,
   );
+  // The e2e tier by cause: #11's Linux run forced by rustBuild alone, nothing else.
+  assert.match(tablesText, /^\| non-release from #1493 \| test-linux \| 0 \| 1 rustBuild \| 0 \| 0 \| 0 \| 0 \| 0 \|$/m);
+  assert.match(tablesText, /^\| release \| test-linux \| 0 \| 0 \| 0 \| 0 \| 0 \| 0 \| 0 \|$/m);
   // With no cache listing read, eviction is said to be undecided, not counted as none.
   assert.match(tablesText, /^Undecided: no cache listing was read/m);
   // The model check: #11's four tiers and #12's test (run) and lint (replayed) are
