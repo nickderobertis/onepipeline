@@ -18,17 +18,25 @@
 //
 // The layout: `today` changes nothing else; `b` is `prototype-b.mjs` with the one e2e
 // binary replaced by its suites (its `[[test]]` and its `tests/e2e/main.rs` root both
-// removed, since Cargo would discover the root by itself); `c` is `prototype-c.mjs`, the lock refreshed offline
-// for its two new workspace members.
+// removed, since Cargo would discover the root by itself); `c` is `prototype-c.mjs`, the
+// lock refreshed offline for its two new workspace members. `npm/test/reuse-demo.test.mjs`
+// holds the workflow's setup steps equal to ci.yml's test jobs'.
+//
+// Exit 0: the demonstration is written; one line says which and where. 1: an argument or
+// the checkout was refused, with a `next:` action on stderr.
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { prototypeB } from "./prototype-b.mjs";
 import { prototypeC } from "./prototype-c.mjs";
+import * as check from "./validate.mjs";
+
+const USAGE = "node scripts/crate-split/demo-commit.mjs --repo DIR --variant today|b|c";
 
 /** A GitHub Actions expression, spelled for the workflow rather than for this script. */
 const expr = (body) => `$\{{ ${body} }}`;
 
+// llmlint: ignore-block[tool_output_is_signal] the three echo lines of "The tree this run measures" are the measured run's provenance (GITHUB_SHA, head and tree; the executed workflow's blob; the runner), each read by demo-runs.mjs; one line would change the workflow blob the recorded demonstrations ran (3d81753b817c), which this generator must still reproduce.
 const job = (platform) => {
   const runner = { linux: "ubuntu-24.04", macos: "macos-latest", windows: "windows-latest" }[
     platform
@@ -97,6 +105,8 @@ ${windows}      - uses: Swatinem/rust-cache@v2.9.2
 `;
 };
 
+// llmlint: ignore-end[tool_output_is_signal]
+
 export const MEASURE_WORKFLOW = `# A throwaway compile-cost demonstration (scripts/crate-split/demo-commit.mjs): it
 # builds the CI tiers' test archive on each platform and times it. It writes no cache.
 name: CI
@@ -113,22 +123,43 @@ env:
 jobs:
 ${["linux", "macos", "windows"].map(job).join("\n")}`;
 
-export function demoCommit(repo, variant) {
-  writeFileSync(join(repo, ".github", "workflows", "ci.yml"), MEASURE_WORKFLOW);
+export const VARIANTS = ["today", "b", "c"];
+
+/**
+ * Write one demonstration into the checkout at `repo`: the measurement-only workflow
+ * changes and the layout `variant` names. It edits files and commits nothing; the
+ * demonstration's one commit is made from what it wrote.
+ */
+export function writeDemonstration(repo, variant) {
+  check.need(VARIANTS.includes(variant), `--variant ${variant} is not today, b or c`, USAGE);
+  const workflows = join(repo, ".github", "workflows");
+  check.need(
+    existsSync(join(workflows, "visual-docs.yml")),
+    `${repo} holds no .github/workflows/visual-docs.yml`,
+    "give --repo a checkout of this repository",
+  );
+  writeFileSync(join(workflows, "ci.yml"), MEASURE_WORKFLOW);
   // Kept, since a test compiles it in (`include_str!`), but started by nothing a
   // demonstration does: its pull_request triggers become a manual dispatch.
   const visual = join(repo, ".github", "workflows", "visual-docs.yml");
   const text = readFileSync(visual, "utf8");
   const triggers = /^on:\n(?:[ \t].*\n|\n)*/m;
-  if (!triggers.test(text))
-    throw new Error("visual-docs.yml has no top-level on: block to replace");
+  check.need(
+    triggers.test(text),
+    "visual-docs.yml has no top-level on: block to replace",
+    "check the workflow still starts with an on: block",
+  );
   writeFileSync(visual, text.replace(triggers, "on:\n  workflow_dispatch:\n\n"));
   if (variant === "b") {
     prototypeB(repo);
     const manifest = join(repo, "Cargo.toml");
     const text = readFileSync(manifest, "utf8");
     const e2e = /\n\[\[test\]\]\nname = "e2e"\npath = "tests\/e2e\/main\.rs"\n/;
-    if (!e2e.test(text)) throw new Error("Cargo.toml declares no e2e test target to replace");
+    check.need(
+      e2e.test(text),
+      "Cargo.toml declares no e2e test target to replace",
+      "give --repo a checkout whose Cargo.toml has the e2e [[test]]",
+    );
     writeFileSync(manifest, text.replace(e2e, "\n"));
     // Cargo discovers `tests/<dir>/main.rs` as a test of that name by itself, so the
     // one binary is gone only once its root, which declares modules and nothing else,
@@ -136,20 +167,34 @@ export function demoCommit(repo, variant) {
     rmSync(join(repo, "tests", "e2e", "main.rs"));
   } else if (variant === "c") {
     prototypeC(repo);
-    execFileSync("cargo", ["metadata", "--format-version", "1", "--offline"], {
-      cwd: repo,
-      stdio: ["ignore", "ignore", "inherit"],
-    });
-  } else if (variant !== "today") throw new Error(`--variant ${variant} is not today, b or c`);
+    try {
+      execFileSync("cargo", ["metadata", "--format-version", "1", "--offline"], {
+        cwd: repo,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (error) {
+      throw new check.Refusal(
+        `cargo could not refresh the lock for layout c: ${String(error.stderr ?? error.message)
+          .trim()
+          .split("\n")
+          .at(-1)}`,
+        "fetch the workspace's dependencies first (cargo fetch --locked) and re-run",
+      );
+    }
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const arg = (name) => process.argv[process.argv.indexOf(name) + 1];
-  if (!process.argv.includes("--repo") || !process.argv.includes("--variant")) {
-    console.error("demo-commit: --repo DIR --variant today|b|c");
+  try {
+    const options = check.parseOptions(process.argv.slice(2), ["repo", "variant"], {
+      usage: USAGE,
+    });
+    check.need(options.repo && options.variant, "name the checkout and the layout", USAGE);
+    writeDemonstration(options.repo, options.variant);
+    console.log(`demo-commit: wrote the ${options.variant} demonstration into ${options.repo}`);
+  } catch (error) {
+    console.error(`demo-commit: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
-  } else {
-    demoCommit(arg("--repo"), arg("--variant"));
-    console.log(`demo-commit: wrote the ${arg("--variant")} demonstration into ${arg("--repo")}`);
   }
 }
