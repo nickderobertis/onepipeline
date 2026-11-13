@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.14.14"
+onetaskgraph-version := "0.14.9"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -357,11 +357,10 @@ version-package-tier := "binary(package_bundle) and test(=the_packaged_crate_car
 # against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
 offline-tiers := "(" + pooled-slot-tier + ") or (" + narrow-write-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ") or (" + version-contract-tier + ") or (" + version-e2e-tier + ") or (" + version-package-tier + ")"
 
-# 95% line coverage, measured as 95.74% under LCOV, is the gate; lower it only with a
-# documented reason in AGENTS.md. It is measured over the **whole** offline tier: each
-# tier below writes its own LCOV report and `_crate-coverage` holds their merge to the
-# floor, because each tier is its own Nx project and splitting the run must not split
-# the floor.
+# 95% line coverage is the gate; lower it only with a documented reason in
+# AGENTS.md. It is measured over the **whole** offline tier, which is why the five
+# tier runs below report nothing and one merge reports them all: each tier is its
+# own Nx project, and splitting the run must not split the floor.
 
 # cargo-llvm-cov's instrumented tree; `tests/coverage.rs` holds this path against
 # `LLVM_PROFILE_FILE`, so a drift fails there rather than cleaning the wrong tree.
@@ -402,17 +401,15 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
       rm -rf -- "$reached" || { echo "could not remove instrumented tree '$reached'" >&2; exit 1; }
 # llmlint: ignore-end[cli_output_contract]
 
-# One tier of the offline suite, instrumented, as one coverage unit: its Nx `test`
-# target's whole result is its `target/coverage-units/<project>.lcov`, so a tier whose
-# inputs did not change replays that report and runs nothing. `scripts/coverage-unit.sh`
-# owns the unit's contract, including `-failure-mode=all` over its profiles: the
-# cancellation journeys kill instrumented children, which leaves truncated `.profraw`
-# files, and one of those must not cost the tier its export. The test doubles under
-# `crates/testfakes` are left out as `cargo llvm-cov report` leaves out a workspace member
-# the run did not select; counting them would hold the floor to code no tier measures.
-_tier-test unit filter:
+# One tier of the offline suite, instrumented, reporting nothing. Each tier names
+# its profiles after itself, and its Nx `test` target declares exactly those
+# files as its outputs: a tier replayed from the cache then restores the profiles
+# the merge below reads, and only its own, beside whatever the tiers that ran
+# wrote. `cargo llvm-cov report` merges every `*.profraw` in the tree, so the
+# name changes nothing about what is counted.
+_tier-test tier filter:
     @bash scripts/ensure-test-archive.sh coverage
-    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
+    @LLVM_PROFILE_FILE_NAME="onepipeline-$1-%p-%14m.profraw" RUSTFLAGS="-D warnings" cargo llvm-cov --no-report nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers
 # build it lazily through ensure-test-archive.sh, so cache hits build nothing.
@@ -422,15 +419,18 @@ _crate-test-archive:
 
 # The crate's own tier: its unit tests and the integration binaries no other
 # project owns.
-_crate-test-rest: (_tier-test "onepipeline-rest" rest-tier)
+_crate-test-rest: (_tier-test "rest" rest-tier)
 
-# The one floor, over every tier's report, replayed or run: `scripts/coverage-tiers.mjs`
-# names the units from the project graph and refuses one this target would not count.
-# 95.74 is 95 re-based onto the LCOV measure `coverage-merge.mjs` reads, rounded up: over
-# the same profiles of every tier, it read 0.7397 points above `cargo llvm-cov report` on
-# the commit measured when this floor was set.
+# `--failure-mode all` is load-bearing, and belongs here rather than on either
+# instrumented run: the merge is what this step does. The cancellation journeys
+# kill instrumented processes, which leaves truncated `.profraw` files in the
+# merge set, and `llvm-profdata`'s default rejects the whole merge over one of
+# them — which this recipe then reports as a test failure. `all` refuses only when
+# every profile is unmergeable; `tests/coverage.rs` plants one, so removing the
+# flag fails the recipe rather than passing quietly.
 _crate-coverage:
-    @units="$(node scripts/coverage-tiers.mjs)" && node scripts/coverage-merge.mjs --fail-under-lines 95.74 --dir target/coverage-units --unit $units
+    @cargo llvm-cov report --failure-mode all --fail-under-lines 95 \
+      || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
 # The test-tier projects' own targets (`onepipeline-e2e`, `onepipeline-contract`,
 # `onepipeline-note-journeys`, `onepipeline-real-smoke`, `onepipeline-release-compat`),
@@ -459,15 +459,15 @@ _tier-lint bin:
 # Each tier's instrumented run, counted by `_crate-coverage` in the one floor.
 # The e2e journeys are the ones that run the binary under `strace` and drive the
 # released `onetaskgraph`, so that tier asks for both up front.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "onepipeline-e2e" e2e-tier)
+_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "e2e" e2e-tier)
 
-_contract-test: (_tier-test "onepipeline-contract" contract-tier)
+_contract-test: (_tier-test "contract" contract-tier)
 
-_pooled_slot-test: (_tier-test "onepipeline-pooled-slot" pooled-slot-tier)
+_pooled_slot-test: (_tier-test "pooled_slot" pooled-slot-tier)
 
-_narrow_write-test: (_tier-test "onepipeline-narrow-write" narrow-write-tier)
+_narrow_write-test: (_tier-test "narrow_write" narrow-write-tier)
 
-_note-test: (_tier-test "onepipeline-note-journeys" note-tier)
+_note-test: (_tier-test "note" note-tier)
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through every project's `test-quick` target instead of
@@ -1018,21 +1018,21 @@ lint-llm-diff base="origin/main" *nx_args:
 
 
 # The double's own protocol/backstop checks, with an independent cache edge.
-_codex-server-test: (_tier-test "onepipeline-codex-server" codex-server-tier)
+_codex-server-test: (_tier-test "codex_server" codex-server-tier)
 
 _codex-server-test-quick: (_tier-test-quick codex-server-tier)
 
 # Version-reading test: its own cache key retains the crate version.
-_version-contract-test: (_tier-test "onepipeline-version-contract" version-contract-tier)
+_version-contract-test: (_tier-test "version-contract" version-contract-tier)
 
 _version-contract-test-quick: (_tier-test-quick version-contract-tier)
 
 # Version-reading test: its own cache key retains the crate version.
-_version-e2e-test: (_tier-test "onepipeline-version-e2e" version-e2e-tier)
+_version-e2e-test: (_tier-test "version-e2e" version-e2e-tier)
 
 _version-e2e-test-quick: (_tier-test-quick version-e2e-tier)
 
 # Version-reading test: its own cache key retains the crate version.
-_version-package-test: (_tier-test "onepipeline-version-package" version-package-tier)
+_version-package-test: (_tier-test "version-package" version-package-tier)
 
 _version-package-test-quick: (_tier-test-quick version-package-tier)

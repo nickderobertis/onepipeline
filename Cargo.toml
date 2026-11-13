@@ -872,34 +872,12 @@ resolver = "2"
 # `tests/e2e/observer_follow.rs` holds it. It also keeps 0.9.3's replacing a
 # graph run's record whole, written to a sibling and renamed into place, so a
 # reader never opens it empty or half-written, and on Windows a read never meets
-# the record in the middle of that replace. It requires nothing this lock did
+# the record in the middle of that replace. Below 0.9.3 the real sibling's
+# `reset-timer` could read a run's state mid-write and refuse with `EOF while
+# parsing a value`. `tests/e2e/dispatch.rs`'s
+# `consuming_a_surface_restarts_the_real_pacemakers_clock` drives that read
+# through the sibling binary this lock builds. It requires nothing this lock did
 # not already resolve.
-#
-# `oneagentgraph` 0.11.4 is the floor because it keeps a reset clock's next
-# firing a **whole interval after the reset's `ts`** (oneagentgraph #272): it
-# publishes `cron-reset` before it starts counting, and counts a span on the
-# slower of the wall and monotonic clocks. Below it a host whose wall clock was
-# being pulled back stamped the run monitor's next progress report less than an
-# interval after the planner's read restarted it. `tests/e2e/observer_follow.rs`'s
-# `a_planner_reading_holds_the_next_report_a_whole_interval_away` holds it on
-# Linux. (0.11.3 was tagged and never published.) It requires `onejudge
-# ^0.23.0`, which `^0.22.4` admits no version of, so the two requirements move
-# as one.
-#
-# `oneagentgraph` 0.12.0 is the floor because it links `onemessagebus` 0.11.1,
-# the bus without validators (see that pin). It requires `onejudge ^0.23.1`,
-# `onemessagebus ^0.11.1` and `onevcs ^0.65.0` as a dev-dependency, so the four
-# move as one or the lock resolves the bus twice.
-#
-# `oneagentgraph` 0.13.0 is the floor because it removes `resettable`,
-# `run::Signal::Reset` and the `reset-timer` verb (oneagentgraph #280), and this
-# engine calls none of them: `next` restarts no clock, and an observer graph
-# restarts one only through `reset_on` over the journal it follows. A
-# requirement, because `^0.12` admits no 0.13.x, and this crate re-exports the
-# sibling's types (`note`, `config::ConfigRef`, `event::*`), so the move is a
-# breaking one for a consumer. `tests/e2e/observer_follow.rs` holds it over all
-# three launch paths, and `graphs/dag-scope.yaml` declares the `reset_on` its
-# `check-in` used to get from the engine.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
@@ -921,7 +899,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.13.0"
+oneagentgraph = "0.11.2"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
@@ -929,29 +907,7 @@ oneagentgraph = "0.13.0"
 # through its `EventKind` and `WorktreeProvision`.
 # 0.63.0 is the release onevcs-testing 0.20.5 pins exactly; that crate supplies
 # the export fixtures.
-# 0.64.0 records each branch's recovery decision under `$ONEVCS_HOME/decisions/`
-# and reuses it while the branch is unchanged, and adds `Selection.branch`, which
-# `src/unpublished.rs`'s acknowledgement asks with so it reads one branch's rows
-# rather than the whole host's. onevcs-testing 0.21.0 pins it exactly and carries
-# the host-shaped fixture (`recovery::build_host`, `age_host`) that
-# `tests/stop_verdict` times both reads over.
-# 0.65.1 is the floor because it assembles a stack's base
-# without racing its own fetch: below it `review_round`'s busy round failed four
-# CI tries in five on `cannot lock ref`. It requires `onemessagebus ^0.11`, which
-# moves the bus, `oneagentgraph` and `onejudge` with it; onevcs-testing 0.21.2
-# pins it exactly.
-# 0.65.2 is the floor because its host-wide recovery read answers a warm
-# `$ONEVCS_HOME` without re-deriving branches that did not change
-# (onevcs-host-reads-warm, onevcs #667): on a copy of this host's home that took
-# the read `src/unpublished.rs` delegates from about 20 s to 0.63 s.
-# onevcs-testing 0.21.3 pins it exactly.
-# 0.66.0 is the floor because it carries `adoption_check` without the
-# fast-no-change-request and consumes-without-change-request rules
-# (vcs-adoption-check): `src/adoptable.rs` asks it of every cross-repository edge
-# a plan loads, and below it a `fast` or `consumes` local-direct consumer the
-# engine has always held complete-but-held is refused. onevcs-testing 0.21.4
-# pins it exactly.
-onevcs = "0.66.0"
+onevcs = "0.63.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -978,13 +934,7 @@ onevcs = "0.66.0"
 # translation, as every sibling release linked beside it does.
 #
 # 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
-#
-# **0.11.1 removed validators** in favour of the hooks this crate already runs.
-# A requirement for the same pre-1.0 reason: `^0.10` admits no 0.11.x. Nothing
-# here reads a configuration's `validators` key except the launch-record read
-# in `src/ledger.rs`, which keeps a run launched with them readable and refuses
-# every offer to its channel (`docs/contract-divergences.md` entry 153).
-onemessagebus = "0.11.1"
+onemessagebus = "0.10.0"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -1106,15 +1056,7 @@ onemessagebus = "0.11.1"
 # holds both through the linked graph. Inside `^0.22.0`, so `oneagentgraph` 0.9.x
 # resolves this one copy, over the same `oneharness-core`; the requirement moves
 # so the floor says the fix is in.
-#
-# **0.23.0 is taken because `oneagentgraph` 0.11.4 requires it**, and `^0.22.4`
-# admits no 0.23.x, so without the move the lock carries onejudge twice. Nothing
-# here reads anything new from it.
-#
-# **0.23.1 links `onemessagebus ^0.11`**, and is taken with the bus pin and
-# `oneagentgraph` 0.12.0, which requires it. Nothing here reads anything new
-# from it.
-onejudge = "0.23.1"
+onejudge = "0.22.4"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1240,7 +1182,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.4"
+onevcs-testing = "0.20.5"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1444,20 +1386,14 @@ onevcs-testing = "0.21.4"
 # a repeat copy creates nothing and a document copied right after its project resolves every link
 # to it while Linear's filtered and searched reads lag its writes: the lagging-listings journey in
 # `tests/e2e/linear_launch.rs` fails on 0.14.7. 0.14.8 was tagged but never published its crates.
-# **0.14.12 writes an expandable block in each destination's own form on copy**
-# (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
-# as its collapsible section as well as GitHub as the HTML element.
-# **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
-# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes, and it is
-# the store release ai-orchestrator's own store CLI pin is held to, so it must be the one linked.
-onetaskgraph-core = "=0.14.14"
-onetaskgraph-plugin-api = "=0.14.14"
-onetaskgraph-local-md = "=0.14.14"
+onetaskgraph-core = "=0.14.9"
+onetaskgraph-plugin-api = "=0.14.9"
+onetaskgraph-local-md = "=0.14.9"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.14"
+onetaskgraph-linear = "=0.14.9"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
@@ -1475,7 +1411,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.110.1"
+version = "0.105.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

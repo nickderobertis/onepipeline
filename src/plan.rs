@@ -160,16 +160,6 @@ pub const AMENDMENT_PRECEDENCE: &str = "This node's manager amended its bar. Eve
      elsewhere, or an operational note below, the clause here wins and the contradicted \
      one no longer binds.";
 
-/// [`AMENDMENT_PRECEDENCE`] for an amendment that is the user's words, relayed
-/// by the manager: the same authority over the task, naming the party it is
-/// from. Which of the two a dispatch reads is the amendment's recorded
-/// provenance, stated on the attribution line above it.
-pub const USER_AMENDMENT_PRECEDENCE: &str = "The user amended this node's bar. Every clause \
-     below is an acceptance criterion of this node and takes precedence over the whole \
-     task: where a clause here contradicts a criterion above it, anything the task says \
-     elsewhere, or an operational note below, the clause here wins and the contradicted \
-     one no longer binds.";
-
 /// The heading the engine's own merge-resolution criterion is rendered under.
 ///
 /// A **sub-heading of the task's own `## Acceptance criteria`**, for
@@ -231,12 +221,12 @@ pub(crate) const MANAGER_NOTES_HEADING: &str = "## Manager notes";
 /// demoted it to observed state would be the incident this section exists to
 /// end: a worker obeying a manager ruling and its judge failing it for exactly
 /// that, having never been shown the ruling.
-const MANAGER_NOTES_PREAMBLE: &str = "These notes were delivered to this node during an \
+const MANAGER_NOTES_PREAMBLE: &str = "The manager delivered these notes to this node during an \
                                        earlier dispatch of it, and this dispatch continues that \
                                        node's work: each stands here exactly as it stood there, \
-                                       for the worker and for the supervisor alike, under the \
-                                       line that says whose ruling it is. A note that states a \
-                                       criterion is part of the bar this node is judged against.";
+                                       for the worker and for the supervisor alike. A note that \
+                                       states a criterion is part of the bar this node is judged \
+                                       against.";
 
 /// The task section an amendment is rendered above, and the notes an earlier
 /// dispatch read are rendered immediately above, when the task has one.
@@ -733,21 +723,8 @@ pub fn arrival_note(arrived: &[CrossRepoReference]) -> String {
 /// — the same placement read the same way, since a task with no notes has
 /// nothing for the amendment to sit above.
 fn amended(task: &str, amendment: &str) -> String {
-    // The attribution the amendment was recorded under, where it was: whose
-    // ruling it is opens the block, and the precedence sentence names that party.
-    let (origin, _) = crate::ruling::split_attribution(amendment);
-    let precedence = match origin.map(|origin| origin.provenance) {
-        Some(crate::provenance::Provenance::User) => USER_AMENDMENT_PRECEDENCE,
-        _ => AMENDMENT_PRECEDENCE,
-    };
-    let opening = origin.map_or_else(String::new, |origin| {
-        format!(
-            "{}\n",
-            crate::ruling::attribution(origin.provenance, origin.reference.as_ref())
-        )
-    });
     let block = format!(
-        "{AMENDMENT_HEADING}\n{opening}{precedence}\n\n{}",
+        "{AMENDMENT_HEADING}\n{AMENDMENT_PRECEDENCE}\n\n{}",
         amendment_clauses(amendment)
     );
     if let Some(end) = criteria_section_end(task) {
@@ -780,8 +757,6 @@ fn amended(task: &str, amendment: &str) -> String {
 ///   is kept as a bold label rather than as a heading, because a heading inside
 ///   the criteria section would end it, and the section is the point.
 pub(crate) fn amendment_clauses(amendment: &str) -> String {
-    // The attribution is who the ruling is from, never one of its clauses.
-    let (_, amendment) = crate::ruling::split_attribution(amendment);
     let mut lines: Vec<String> = Vec::new();
     let mut open: Option<String> = None;
     fn close(open: &mut Option<String>, lines: &mut Vec<String>) {
@@ -988,11 +963,10 @@ fn with_notes(task: &str, notes: &[crate::note::RecordedNote]) -> String {
         format!("{MANAGER_NOTES_HEADING}\n{NOTES_PRECEDENCE}\n\n{MANAGER_NOTES_PREAMBLE}\n");
     for (index, note) in notes.iter().enumerate() {
         block.push_str(&format!(
-            "\n{}. Addressed to {} — {}.\n   {}\n",
+            "\n{}. Addressed to {} — {}.\n",
             index + 1,
             addressed(note.addressee),
-            delivered_as(&note.reached),
-            crate::ruling::attribution(note.provenance, note.origin().reference.as_ref())
+            delivered_as(&note.reached)
         ));
         for line in note.text.as_str().lines() {
             block.push_str(&format!("   > {line}\n"));
@@ -1291,9 +1265,6 @@ pub enum NodeKind {
     /// An action only an external person or outside system can perform. The
     /// harness never infers or executes it.
     Human,
-    /// A command the engine runs itself — its [`Node::command`] argv, with no shell
-    /// — settling on its exit status. It dispatches no agent and opens no session.
-    Command,
 }
 
 impl NodeKind {
@@ -1372,17 +1343,6 @@ pub struct Node {
     /// node round-trips as the project wrote it.
     #[serde(default, skip_serializing_if = "NodeKind::is_agent")]
     pub kind: NodeKind,
-    /// A `kind: command` node's argv: the program and its arguments, run with no
-    /// shell from the launch directory. Required on such a node, non-empty and its
-    /// program not blank, and refused on every other kind — present at all, an empty
-    /// list included. Omitted when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
-    /// How long a `kind: command` node's command may run, in whole seconds, before
-    /// its process tree is stopped and the node settles `command-timed-out`.
-    /// Absent is no deadline at all. Refused on every other kind, and refused zero.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_seconds: Option<std::num::NonZeroU64>,
     /// The task prose: `## What`, `## Why`, `## Acceptance criteria`, then
     /// `## Additional info` only when it is nonempty. A `kind: human` node
     /// carries the action prose alone.
@@ -2323,8 +2283,6 @@ mod tests {
                     .expect("a usable note"),
                 criterion: None,
                 reached: crate::note::Reached::Worker { turn: None },
-                provenance: crate::provenance::Provenance::Manager,
-                ruling: None,
             },
             crate::note::RecordedNote {
                 addressee: crate::note::Addressee::Worker,
@@ -2337,11 +2295,6 @@ mod tests {
                         .expect("a usable criterion"),
                 ),
                 reached: crate::note::Reached::Carried { reason: None },
-                provenance: crate::provenance::Provenance::User,
-                ruling: Some(crate::ruling::Reference::Command {
-                    envelope: 4,
-                    index: 1,
-                }),
             },
         ];
         let rendered = step.rendered_task_carrying(&node, &[], &notes);
@@ -2362,12 +2315,11 @@ mod tests {
         assert!(
             rendered.contains(
                 "## Manager notes\nWhere this section and the operational notes below disagree, \
-                 this section wins.\n\nThese notes were delivered to this node during an \
+                 this section wins.\n\nThe manager delivered these notes to this node during an \
                  earlier dispatch of it, and this dispatch continues that node's work: each \
                  stands here exactly as it stood there, for the worker and for the supervisor \
-                 alike, under the line that says whose ruling it is. A note that states a \
-                 criterion is part of the bar this node is judged against.\n\n1. Addressed to \
-                 both parties"
+                 alike. A note that states a criterion is part of the bar this node is judged \
+                 against.\n\n1. Addressed to both parties"
             ),
             "the section's head is not rendered as one paragraph of prose:\n{rendered}"
         );
@@ -2384,10 +2336,6 @@ mod tests {
             "2. Addressed to the worker — delivered while no turn of that dispatch was live, \
              and carried to this one.",
             "   > bump the fixture\n   > and say so\n   Criterion: `version.txt` holds `v: 2`",
-            // Each note under whose ruling it is: the manager's, declinable, and
-            // the user's, binding and naming no reference.
-            "response.\n   Ruling from the manager: a strong default you may decline",
-            "carried to this one.\n   Ruling from the user, relayed by the manager: it binds.",
             "part of the bar this node is judged against",
             // And everything around it is still there, whole.
             "The four comment lines are out of scope: leave them.",

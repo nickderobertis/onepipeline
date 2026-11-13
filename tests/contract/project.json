@@ -54,10 +54,6 @@
       "command": "just _contract-test",
       "inputs": [
         "contractSource",
-        "coverageTierKey",
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _contract-test _ensure-onetaskgraph --variable contract-tier --variable onetaskgraph-version"
-        },
         {
           "runtime": "node -p process.platform"
         }
@@ -71,8 +67,9 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/coverage-units/onepipeline-contract.lcov"
-      ]
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-contract-*.profraw"
+      ],
+      "cache": false
     },
     "test-quick": {
       "command": "just _contract-test-quick",

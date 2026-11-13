@@ -4045,7 +4045,7 @@ fn an_elapsed_summary_names_a_live_observer_running_and_a_killed_one_dead() {
     let world =
         World::new("watch-wake-observer").with_env(crate::dispatch::OBSERVER_RESTARTS_ENV, "0");
     world.write_graphs();
-    let graph = world.write_observer_graph_with_clocks(&["zz-lantern", "q-7"]);
+    let graph = world.write_observer_graph_with_clocks(&[("zz-lantern", true), ("q-7", false)]);
     world.script("observer.wait", "hold");
     world.script("turn.hold", "hold");
     let run = "watchwakeobserved";

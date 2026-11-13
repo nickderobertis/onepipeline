@@ -249,7 +249,6 @@ fn report(kind: &str, node: &str, message: String) -> Surface {
         asker: None,
         workstream: Some(node.to_owned()),
         correlation: None,
-        declined_ruling: None,
     }
 }
 

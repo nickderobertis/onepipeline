@@ -54,10 +54,6 @@
       "command": "just _codex-server-test",
       "inputs": [
         "codexServerSource",
-        "coverageTierKey",
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _codex-server-test _ensure-onetaskgraph --variable codex-server-tier --variable onetaskgraph-version"
-        },
         {
           "runtime": "node -p process.platform"
         }
@@ -71,9 +67,10 @@
         }
       ],
       "outputs": [
-        "{workspaceRoot}/target/coverage-units/onepipeline-codex-server.lcov"
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-codex_server-*.profraw"
       ],
-      "parallelism": false
+      "parallelism": false,
+      "cache": false
     },
     "test-quick": {
       "command": "just _codex-server-test-quick",

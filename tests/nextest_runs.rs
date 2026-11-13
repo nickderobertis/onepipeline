@@ -1546,20 +1546,10 @@ fn the_instrumented_suite_archives_the_build_it_runs_before_running_it() {
         .iter()
         .any(|line| line.contains("bash scripts/ensure-test-archive.sh quick")));
     let flags = "RUSTFLAGS=\"-D warnings\" cargo llvm-cov --no-report nextest";
-    // A tier hands its nextest arguments to the coverage unit, which runs them as
-    // `cargo llvm-cov --no-report "$@"`: the archive's build, under the same flags.
     assert!(
         run.iter()
-            .any(|line| line.contains("RUSTFLAGS=\"-D warnings\"")
-                && line.contains("bash scripts/coverage-unit.sh \"$1\" -- nextest --locked -E")),
+            .any(|line| line.contains(flags) && line.contains("--locked -E")),
         "every tier runs the instrumented suite under the denied-warnings flags:\n{run:#?}"
-    );
-    let unit = fs::read_to_string(repo_root().join("scripts/coverage-unit.sh"))
-        .expect("the coverage unit reads");
-    assert!(
-        unit.lines()
-            .any(|line| line.contains("cargo llvm-cov --no-report \"$@\"")),
-        "the coverage unit runs the tier's arguments as the archive builds them"
     );
     assert!(
         archive

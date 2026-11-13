@@ -760,19 +760,12 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
         },
     );
     assert_eq!(outcomes(&repaired), ["projected"], "{:?}", repaired.records);
-    // The new store is what `initialize` counts; it resolves nothing again, because every
-    // instance of one Linear tracker in a process shares the vocabulary one of them read
-    // (`onetaskgraph-linear` 0.14.12's `shared` module).
     assert_eq!(
         repaired.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
-    assert_eq!(
-        scenario.world.store_asked("initialize"),
-        opened + 1,
+        1,
         "a repaired configuration needs a new store"
     );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
 
     // A write held past its deadline — the floor and one item's budget of a second — is
     // cancelled, and the attempt after it lands.
@@ -803,14 +796,10 @@ fn a_linear_destination_lands_current_values_after_each_way_a_call_fails() {
     assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
     assert_eq!(
         cancelled.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
-    assert_eq!(
-        scenario.world.store_asked("initialize"),
-        opened + 2,
+        1,
         "the cancelled store must be rebuilt"
     );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 2);
     scenario.finish();
 }
 
@@ -843,11 +832,7 @@ fn valid_configuration_edits_rebuild_only_when_resolved_content_changes() {
     );
     assert_eq!(outcomes(&changed_attempt), ["projected"]);
     assert_eq!(scenario.linear.state_of(&scenario.work), "Finished");
-    assert_eq!(
-        changed_attempt.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
+    assert_eq!(changed_attempt.resolutions(), 1);
     assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
     std::fs::write(
         &document,
@@ -900,14 +885,10 @@ fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_return
     assert_eq!(scenario.linear.state_of(&scenario.work), "Done");
     assert_eq!(
         gone.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
-    assert_eq!(
-        scenario.world.store_asked("initialize"),
-        opened + 1,
+        1,
         "an edited configuration needs a new store"
     );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
 
     std::fs::create_dir_all(&root).expect("the spare source's root returns");
     let returned = scenario.replied(
@@ -922,14 +903,10 @@ fn a_store_holding_a_source_it_could_not_build_is_rebuilt_once_the_source_return
     assert_eq!(scenario.linear.state_of(&scenario.work), "Needs Attention");
     assert_eq!(
         returned.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
-    assert_eq!(
-        scenario.world.store_asked("initialize"),
-        opened + 2,
+        1,
         "a store holding a source it could not build was kept for the next attempt"
     );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 2);
 
     let kept = scenario.replied(
         "a settlement on the store whose sources all built",
@@ -1020,14 +997,10 @@ fn a_retained_stores_blocked_configuration_read_is_bounded_and_rebuilt() {
     );
     assert_eq!(
         repaired.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
-    assert_eq!(
-        scenario.world.store_asked("initialize"),
-        opened + 1,
+        1,
         "the timed-out validation must discard the store"
     );
+    assert_eq!(scenario.world.store_asked("initialize"), opened + 1);
     scenario.finish();
 }
 
@@ -1039,9 +1012,8 @@ fn outcomes(spent: &Spent) -> Vec<&str> {
         .collect()
 }
 
-/// A plugin-agnostic command-end failure or cancellation discards the store. Every subsequent
-/// attempt lands its current values on a new source, which reads no Linear vocabulary again:
-/// every instance of one tracker in a process shares the one already read.
+/// A plugin-agnostic command-end failure or cancellation discards the store, including its
+/// Linear resolution cache. Every subsequent attempt lands its current values on a new source.
 #[test]
 fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
     let mut states = STATES.to_vec();
@@ -1075,11 +1047,7 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
         },
     );
     assert_eq!(outcomes(&recovered), ["projected"]);
-    assert_eq!(
-        recovered.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
+    assert_eq!(recovered.resolutions(), 1);
     assert_eq!(
         opened(),
         before + 1,
@@ -1115,12 +1083,7 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
         },
     );
     assert_eq!(outcomes(&recovered), ["projected"]);
-    assert_eq!(
-        recovered.resolutions(),
-        1,
-        "the refused write carried a held state id, which drops the vocabulary its tracker \
-         shares, so the rebuilt store reads it once"
-    );
+    assert_eq!(recovered.resolutions(), 1);
     assert_eq!(opened(), before + 2);
 
     let hold_name = format!("{}.end_command", crate::harness::SCRIPTED_KEY);
@@ -1149,11 +1112,7 @@ fn command_end_refusal_and_timeout_rebuild_the_workers_store() {
         },
     );
     assert_eq!(outcomes(&recovered), ["projected"]);
-    assert_eq!(
-        recovered.resolutions(),
-        0,
-        "a rebuilt store shares the vocabulary its tracker already read in this process"
-    );
+    assert_eq!(recovered.resolutions(), 1);
     assert_eq!(opened(), before + 1);
     scenario.finish();
 }
@@ -2137,10 +2096,7 @@ fn a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projec
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
-                    scope: onetaskgraph_core::CopyScope::Projects {
-                        tasks: true,
-                        documents: false,
-                    },
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                     destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)
                         .expect("a source name"),
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
@@ -2268,10 +2224,7 @@ fn a_private_linear_home_keeps_section_links_on_their_record_in_dispatch_and_on_
                 engine
                     .copy(&onetaskgraph_core::CopyRequest {
                         items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one draft"),
-                        scope: onetaskgraph_core::CopyScope::Projects {
-                            tasks: true,
-                            documents: false,
-                        },
+                        scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                         destination: onetaskgraph_plugin_api::SourceName::new(SOURCE).unwrap(),
                         status_policy: onetaskgraph_core::StatusPolicy::Source,
                         target_task: None,

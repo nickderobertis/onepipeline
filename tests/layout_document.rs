@@ -322,7 +322,7 @@ fn every_offer_is_prepared_by_the_document_as_the_compiled_layout_prepares_it() 
     let document = linked(scratch.path());
     let compiled = PlannerChannel;
     let alike: &[(&str, Value)] = &[
-        // Routed by its halves, a version-2 envelope read at 4.
+        // Routed by its halves, a version-2 envelope read at 3.
         (
             REPLIES,
             json!({"version": 2, "author": "sentinel", "completion": false, "message": "go on", "commands": [{"op": "finding", "message": "look"}]}),
@@ -332,12 +332,6 @@ fn every_offer_is_prepared_by_the_document_as_the_compiled_layout_prepares_it() 
             json!({"version": 3, "author": "sentinel", "commands": [{"op": "finding", "message": "look"}]}),
         ),
         (REPLIES, json!({"message": "carry on"})),
-        // The user's words, carried onto both halves.
-        (
-            REPLIES,
-            json!({"version": 4, "author": "sentinel", "provenance": "user", "message": "go on", "commands": [{"op": "finding", "message": "look"}]}),
-        ),
-        (REPLIES, json!({"provenance": "user", "message": "ruled"})),
         (REPLIES, json!({})),
         (REPLIES, json!({"author": "sentinel", "message": "noted"})),
         // Refused, in the engine's words.
@@ -429,25 +423,16 @@ fn where_the_step_vocabulary_cannot_say_what_the_code_does_the_document_differs_
                 (COMMANDS, json!({"author": "planner", "commands": edit})),
                 (
                     REPLIES,
-                    json!({"reply": {"version": 4, "message": "go on", "commands": edit}, "at": 0}),
+                    json!({"reply": {"version": 3, "message": "go on", "commands": edit}, "at": 0}),
                 ),
             ]),
             routed(&[
                 (COMMANDS, json!({"commands": edit})),
                 (
                     REPLIES,
-                    json!({"reply": {"version": 4, "message": "go on", "commands": edit}, "at": 0}),
+                    json!({"reply": {"version": 3, "message": "go on", "commands": edit}, "at": 0}),
                 ),
             ]),
-        ),
-        // The manager's provenance stated outright: the code writes the default
-        // as no key, the document's route copies the member as it was written.
-        // Both read back as the manager's.
-        (
-            REPLIES,
-            json!({"version": 4, "provenance": "manager", "commands": edit}),
-            routed(&[(COMMANDS, json!({"author": "planner", "commands": edit}))]),
-            routed(&[(COMMANDS, json!({"commands": edit, "provenance": "manager"}))]),
         ),
         (
             REPLIES,
@@ -463,7 +448,7 @@ fn where_the_step_vocabulary_cannot_say_what_the_code_does_the_document_differs_
             json!({"message": "hi", "context": "retired"}),
             refused(
                 "the reply is malformed: unknown field `context`, expected one of `version`, \
-                 `author`, `provenance`, `completion`, `message`, `reason`, `commands`",
+                 `author`, `completion`, `message`, `reason`, `commands`",
             ),
             refused(
                 "the reply is malformed: Additional properties are not allowed ('context' was \

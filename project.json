@@ -90,11 +90,7 @@
     "test-rest": {
       "command": "just _crate-test-rest",
       "inputs": [
-        "crateCoverageSource",
-        "coverageTierKey",
-        {
-          "runtime": "node scripts/nx-recipe-input.mjs _crate-test-rest _ensure-onetaskgraph --variable rest-tier --variable onetaskgraph-version"
-        },
+        "crateTestSource",
         {
           "runtime": "node -p process.platform"
         }
@@ -103,8 +99,9 @@
         "coverage-clean"
       ],
       "outputs": [
-        "{workspaceRoot}/target/coverage-units/onepipeline-rest.lcov"
-      ]
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-rest-*.profraw"
+      ],
+      "cache": false
     },
     "test": {
       "command": "just _crate-coverage",
@@ -119,7 +116,7 @@
           "runtime": "node -p process.platform"
         }
       ],
-      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's LCOV report, including the separate version-reading tests', so this aggregate depends on each tier's test. Each tier is a cached coverage unit that replays its report while its inputs are unchanged; this aggregate stays uncached, so the merge always reads the current set, and archives build only when a tier runs.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every instrumented tier's profiles, including the separate version-reading tests, so this report depends on each tier's test. LLVM profiles belong to the versioned binary, so the coverage tiers and this aggregate stay uncached; quick tiers replay separately and archives build when a tier runs.",
       "dependsOn": [
         "test-rest",
         {
@@ -272,10 +269,7 @@
     },
     "install-documented": {
       "command": "bash scripts/install-proof.sh documented",
-      "//": "README.md's `cargo install --git` one-liner. Uncached and network: it resolves the remote's default branch, which no input of this tree names. After install-smoke: both installs build into the job's one target directory, and cargo's lock on it serialises the two builds but not the copy `cargo install` makes of `target/release/onepipeline` after its build, so the default branch's build relinked that file under install-smoke's copy in test-linux's run 43040157700 (`failed to copy ... No such file or directory`). Ordered, install-smoke has installed, smoked and timed its own revision's binary before the default branch's build replaces it, and that build's compile no longer overlaps the host-view-time reads.",
-      "dependsOn": [
-        "install-smoke"
-      ],
+      "//": "README.md's `cargo install --git` one-liner. Uncached and network: it resolves the remote's default branch, which no input of this tree names.",
       "cache": false,
       "inputs": [
         "default",

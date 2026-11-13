@@ -2,13 +2,8 @@
 // Report the record `scripts/host-view-measure.mjs` leaves; this command never runs
 // `onepipeline host`.
 //
-// The budget is one read, and its value is the median of the steady single reads.
-// A read's wall clock is its own work plus the time it waited for a CPU, and on a
-// shared runner that wait comes from whatever else is running: a read reports its
-// run-queue wait in its phase line, and under load that wait, not its CPU time,
-// is what varies between reads. Judging the slowest read would judge the one other
-// load delayed most. The median stays over the threshold whenever most reads are,
-// as they all are when the view itself costs more. The slowest read, the phase
+// The budget is one read: each of the steady single reads is judged against the
+// threshold, so the value reported is the slowest of them. Their median, the phase
 // breakdown, the cold read and the 100/400/800-root scaling reads go in the detail
 // as evidence, never as the verdict.
 import { readFileSync } from "node:fs";
@@ -18,9 +13,6 @@ import { report } from "@onebudgetspec/sdk";
 const record = process.argv[2] ?? "target/budget-records/host-view.json";
 // What the budget's workload states, and so what a record has to have measured.
 export const READS = 5;
-
-/** The middle of an odd count of reads: the budget's value. */
-export const median = (reads) => [...reads].sort((a, b) => a - b)[Math.floor(reads.length / 2)];
 /** The run roots the scaling reads are taken over, in order: the same live set, more ended history. */
 export const SCALING = [100, 400, 800];
 /**
@@ -255,8 +247,8 @@ function breakdown(phases) {
 function detail(held) {
   const steady = held.steady;
   const parts = [
-    `median of ${steady.reads_ms.length} steady single reads of ${held.binary} (built by ${steady.built_by}) over the ${held.runs_root.run_roots}-run fixture: ` +
-      `${steady.reads_ms.map(fixed).join(", ")} ms; slowest ${fixed(Math.max(...steady.reads_ms))} ms (reported, not the budget); load1 ${fixed(steady.load1)}`,
+    `slowest of ${steady.reads_ms.length} steady single reads of ${held.binary} (built by ${steady.built_by}) over the ${held.runs_root.run_roots}-run fixture, each judged: ` +
+      `${steady.reads_ms.map(fixed).join(", ")} ms; median ${fixed(steady.median_ms)} ms (reported, not the budget); load1 ${fixed(steady.load1)}`,
     `breakdown: ${breakdown(steady.breakdown)}`,
     "every ended run's journal unreadable to the reads; that none is opened is held under strace by tests/e2e/host_view.rs",
     `cold read (every ended run's derived documents absent): ${fixed(held.cold.read_ms)} ms, ` +
@@ -288,7 +280,7 @@ function main() {
     const held = readRecord();
     next =
       "ensure ONEBUDGETSPEC_RESULT names a writable file, then rerun 'node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time'";
-    const reported = report(median(held.steady.reads_ms), detail(held));
+    const reported = report(Math.max(...held.steady.reads_ms), detail(held));
     if (!reported) {
       next =
         "invoke this command through 'node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time', which 'just host-view-budget BINARY' runs";

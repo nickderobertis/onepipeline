@@ -2,7 +2,8 @@
 //!
 //! Agent, harness, and model selection stay in that library, so every verb this
 //! crate needs is one of its **library** entry points: [`oneagentgraph::run::start`]
-//! for a graph, [`oneagentgraph::control::interrupt`] for a live redirection, and
+//! for a graph, [`oneagentgraph::run::signal`] for a check-in clock reset,
+//! [`oneagentgraph::control::interrupt`] for a live redirection, and
 //! [`oneagentgraph::health::read`] for the provider block. Composition, not
 //! reimplementation: nothing here decides a harness, a chain, or a model, and
 //! envelopes cross the same serialized boundary as the former NDJSON relay.
@@ -359,8 +360,8 @@ fn announced_run(envelope: &Envelope) -> Option<GraphRunId> {
 /// library's signals are addressed by, and it is what refuses a string that
 /// would name a path outside its run store. Aliased here so the rest of this
 /// crate can name it without naming the sibling's module path everywhere, and
-/// so it is visibly *not* a `onepipeline` run id — the two are different runs,
-/// and a signal addressed by the wrong one reaches nothing.
+/// so it is visibly *not* a `onepipeline` run id — the two are different runs
+/// and confusing them is what left the check-in reset dead.
 pub type GraphRunId = oneagentgraph::run::RunId;
 
 /// One graph run id read back off this crate's own launch record.
@@ -1931,8 +1932,8 @@ impl GraphRun {
     /// The `oneagentgraph` run id this launch minted, whichever way it ran.
     ///
     /// **Not this crate's run id**, and that distinction is the whole reason
-    /// this exists: the sibling addresses a run's signals — a stop among them —
-    /// by the id it minted, and a caller that handed it a
+    /// this exists: the sibling addresses a run's signals — a check-in reset
+    /// among them — by the id it minted, and a caller that handed it a
     /// `onepipeline` run id would be naming a run the sibling has never heard
     /// of. The library backend is told at startup; the retained-process backend
     /// reads it off the announcement its handshake already waits for, so a
@@ -2170,6 +2171,137 @@ impl Settled {
     }
 }
 
+/// Restart the clock of every resettable schedule in one graph run.
+///
+/// **Deprecated and to be removed, still working** (`docs/contract-divergences.md`
+/// entry 150): `reset_on`, which a graph declares over the journal its run
+/// follows, replaces it, and that is the only reset a scheduled note's clock answers to. Until this is removed,
+/// a surface a planner actually read restarts the check-in clock, so a run that
+/// is already reporting does not also get a check-in surface. **Which** clocks is the graph document's to
+/// say, and the engine names no member: a [`oneagentgraph::run::Signal::Reset`]
+/// is honoured only by a schedule that declared itself `resettable` and ignored
+/// by every other member — a scheduled one keeps its cadence, an unscheduled one
+/// has no clock — so every member the run's record declares is signalled, and
+/// what each does with it is the sibling's ruling on its own document. A graph
+/// declaring no resettable member is a graph nothing here restarts, and that is
+/// not a failure.
+///
+/// Every member is signalled even when one refuses, and the refusals are
+/// reported together: a clock that could be restarted is restarted whatever
+/// became of the one beside it.
+pub fn reset_resettable(run: &GraphRunId) -> Result<()> {
+    let refusals: Vec<String> = declared_members(run)?
+        .iter()
+        .filter_map(|member| {
+            reset_timer(run, member)
+                .err()
+                .map(|error| error.to_string())
+        })
+        .collect();
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    Err(sibling(refusals.join("; ")))
+}
+
+/// Every member one graph run declares, off the sibling's own record of it.
+///
+/// The record lists them before anything runs, which is what lets a member be
+/// addressed while the run is in flight; a record from a build before that field
+/// existed lists only the members that have settled, and that is what the
+/// sibling's own verbs fall back to. Read through the sibling's `history`,
+/// through the library or the executable an operator named at [`BINARY_ENV`],
+/// so what a run is said to declare comes from the same place a reset is sent.
+fn declared_members(run: &GraphRunId) -> Result<Vec<String>> {
+    let record = if std::env::var_os(BINARY_ENV).is_some() {
+        record_by_process(run)?
+    } else {
+        oneagentgraph::history::show(&state_dir(&process_env()), run.as_str())
+            .map_err(|error| sibling(format!("history show {run}: {error}")))?
+    };
+    Ok(if record.declared_members.is_empty() {
+        record.members.keys().cloned().collect()
+    } else {
+        record.declared_members
+    })
+}
+
+/// The arguments that ask the sibling's executable for one run's record.
+///
+/// Spelled once, here, and held to the sibling's own command definition by
+/// `history_show_is_spelled_as_the_sibling_parses_it` below: the executable is
+/// the sibling's and changes on its own cadence, so the spelling this crate
+/// sends is parsed through [`oneagentgraph::cli::Cli`] of the release the lock
+/// links rather than trusted.
+fn history_show_args(run: &GraphRunId) -> [&str; 3] {
+    ["history", "show", run.as_str()]
+}
+
+/// The same record, through an executable an operator named at [`BINARY_ENV`].
+///
+/// Read into the sibling's own [`Record`](oneagentgraph::run::Record), which
+/// refuses a shape it does not know rather than guessing at the members of a
+/// run it cannot read.
+fn record_by_process(run: &GraphRunId) -> Result<oneagentgraph::run::Record> {
+    let output = Command::new(binary())
+        .args(history_show_args(run))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| sibling(format!("cannot start `{} history show`: {e}", binary())))?;
+    if !output.status.success() {
+        return Err(sibling(format!(
+            "history show {run} exited {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        sibling(format!(
+            "history show {run} answered no run record: {error}"
+        ))
+    })
+}
+
+/// Restart one resettable schedule's clock.
+///
+/// [`oneagentgraph::run::signal`] is the same implementation the `reset-timer`
+/// verb runs, so which member names are addressable and where the run watches
+/// are decided once, in the sibling, rather than twice. A member whose schedule
+/// is not resettable, or that has no schedule, takes the signal and ignores it.
+pub fn reset_timer(run: &GraphRunId, member: &str) -> Result<()> {
+    if std::env::var_os(BINARY_ENV).is_some() {
+        return reset_timer_by_process(run, member);
+    }
+    let member_name = oneagentgraph::run::MemberName::parse(member)
+        .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))?;
+    oneagentgraph::run::signal(
+        &state_dir(&process_env()),
+        run,
+        &member_name,
+        oneagentgraph::run::Signal::Reset,
+    )
+    .map_err(|error| sibling(format!("reset-timer {run} {member}: {error}")))
+}
+
+/// The same reset, through an executable an operator named at [`BINARY_ENV`].
+fn reset_timer_by_process(run: &GraphRunId, member: &str) -> Result<()> {
+    let output = Command::new(binary())
+        .arg("reset-timer")
+        .arg(run.as_str())
+        .arg(member)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| sibling(format!("cannot start `{} reset-timer`: {e}", binary())))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(sibling(format!(
+        "reset-timer {run} {member} exited {}: {}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 /// Where one member's in-flight turn is addressed.
 ///
 /// Read off the sibling's own relayed envelopes rather than derived: the graph
@@ -2194,25 +2326,11 @@ pub struct TurnAddress {
 impl TurnAddress {
     /// One address, or `None` when what was read is not one.
     pub fn of(run: &str, member: &str) -> Option<Self> {
-        let mut address = Self {
-            run: String::new(),
-            member: String::new(),
-        };
-        address.set(run, member).then_some(address)
-    }
-
-    /// Make this the address [`of`](Self::of) reads `run` and `member` as, reusing what
-    /// it holds; where they are not one, leave it as it was and answer `false`.
-    pub(crate) fn set(&mut self, run: &str, member: &str) -> bool {
         let (run, member) = (run.trim(), member.trim());
-        if run.is_empty() || !oneagentgraph::config::is_member_name(member) {
-            return false;
-        }
-        self.run.clear();
-        self.run.push_str(run);
-        self.member.clear();
-        self.member.push_str(member);
-        true
+        (!run.is_empty() && oneagentgraph::config::is_member_name(member)).then(|| Self {
+            run: run.to_string(),
+            member: member.to_string(),
+        })
     }
 
     /// The graph run this turn belongs to.
@@ -2694,6 +2812,37 @@ mod tests {
                 "{refused} read as an address"
             );
         }
+    }
+
+    /// The spelling `record_by_process` sends is the one the linked sibling's
+    /// executable parses as `history show RUN`.
+    ///
+    /// The sibling's [`Cli`](oneagentgraph::cli::Cli) is the definition its
+    /// binary is built from, so parsing this crate's arguments through it is the
+    /// drift gate on a verb this crate cannot type-check: a release that renamed
+    /// or restructured `history show` fails here, not in an operator's run.
+    #[test]
+    fn history_show_is_spelled_as_the_sibling_parses_it() {
+        use clap::Parser;
+        use oneagentgraph::cli::{Cli, Command, HistoryCommand};
+
+        let run = GraphRunId::parse("graph-run-1").expect("a run id");
+        let parsed =
+            Cli::try_parse_from(std::iter::once("oneagentgraph").chain(history_show_args(&run)))
+                .expect("the sibling parses what this crate sends it");
+        let Command::History(history) = parsed.command else {
+            panic!(
+                "`history show` parsed as another verb: {:?}",
+                parsed.command
+            );
+        };
+        assert_eq!(
+            history.command,
+            Some(HistoryCommand::Show {
+                id: run.as_str().to_string()
+            }),
+            "`history show RUN` did not parse as showing that run's record"
+        );
     }
 
     /// Serialises every test below that reads or writes one of this module's
@@ -3864,6 +4013,144 @@ mod tests {
         drop(sent);
     }
 
+    /// A reset reaches the run's own signal directory, under the name the
+    /// sibling watches for.
+    ///
+    /// The file rather than an `Ok(())`: `signal` answers success for a write it
+    /// made, so asserting only on the return would pass against a call that wrote
+    /// somewhere the run never looks — which is the whole failure mode the
+    /// sibling grew `declared_members` to close.
+    #[test]
+    fn a_reset_leaves_the_signal_the_run_watches_for() {
+        let _env = env_lock();
+        let root = state_dir_holding("node-scope-1786304152340-19", &["pulse"]);
+        let graph_run = recorded_graph_run("node-scope-1786304152340-19", "demo")
+            .expect("the sibling accepts its own run id");
+        reset_timer(&graph_run, "pulse")
+            .expect("the sibling accepts a reset for a member it declared");
+        assert!(
+            root.join("node-scope-1786304152340-19")
+                .join(oneagentgraph::run::SIGNAL_DIR)
+                .join("pulse.reset")
+                .is_file(),
+            "the reset left no signal where the run watches for one"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The resettable rule names no member: every member the run's record
+    /// declares is signalled, under names nothing here knows, and which of them
+    /// restarts a clock is the sibling's ruling on the graph document.
+    ///
+    /// The signal files are the assertion, one per declared member and none for
+    /// a member the run never declared — a reset addressed to only the first
+    /// declared member, or to a member named here, would leave a different set.
+    #[test]
+    fn a_resettable_reset_signals_every_member_the_run_declares_and_names_none() {
+        let _env = env_lock();
+        let members = ["watcher", "pulse", "second-pulse", "fixed-cadence"];
+        let root = state_dir_holding("dag-scope-1786304152340-22", &members);
+        let graph_run = recorded_graph_run("dag-scope-1786304152340-22", "demo")
+            .expect("the sibling accepts its own run id");
+        reset_resettable(&graph_run).expect("every declared member takes a reset");
+        let signals = root
+            .join("dag-scope-1786304152340-22")
+            .join(oneagentgraph::run::SIGNAL_DIR);
+        let mut left: Vec<String> = std::fs::read_dir(&signals)
+            .expect("the run's signal directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        let mut expected: Vec<String> = members.iter().map(|m| format!("{m}.reset")).collect();
+        expected.sort();
+        assert_eq!(
+            left, expected,
+            "the reset did not reach exactly the declared members"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A member whose reset cannot be written does not stop the others, and
+    /// every refusal is reported together, each naming its member.
+    ///
+    /// The fault is the filesystem's: a directory standing where the sibling
+    /// writes a member's signal file makes that one write fail and no other,
+    /// which is what an aggregate has to be held against — a reset that stopped
+    /// at the first refusal would leave the member after it un-restarted and the
+    /// report naming one member where two could not be reached.
+    #[test]
+    fn a_reset_one_member_refuses_still_reaches_the_others_and_names_every_refusal() {
+        let _env = env_lock();
+        let root = state_dir_holding(
+            "dag-scope-1786304152340-25",
+            &["pulse", "second-pulse", "watcher"],
+        );
+        let signals = root
+            .join("dag-scope-1786304152340-25")
+            .join(oneagentgraph::run::SIGNAL_DIR);
+        for blocked in ["pulse", "second-pulse"] {
+            std::fs::create_dir_all(signals.join(format!("{blocked}.reset")))
+                .expect("a directory standing where the signal file goes");
+        }
+        let graph_run = recorded_graph_run("dag-scope-1786304152340-25", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_resettable(&graph_run)
+            .expect_err("two members could not be signalled")
+            .to_string();
+        for blocked in ["pulse", "second-pulse"] {
+            assert!(
+                refused.contains(&format!("{blocked}.reset")),
+                "{refused} does not name {blocked}, whose signal could not be written"
+            );
+        }
+        assert!(
+            signals.join("watcher.reset").is_file(),
+            "the member after the refused ones was not signalled"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run that declares no member at all is a run with nothing to restart,
+    /// and that is not a failure.
+    #[test]
+    fn a_resettable_reset_over_a_run_declaring_no_member_restarts_nothing_and_says_nothing() {
+        let _env = env_lock();
+        let root = state_dir_holding("dag-scope-1786304152340-23", &[]);
+        let graph_run = recorded_graph_run("dag-scope-1786304152340-23", "demo")
+            .expect("the sibling accepts its own run id");
+        reset_resettable(&graph_run).expect("nothing to restart is not a failure");
+        assert!(
+            !root
+                .join("dag-scope-1786304152340-23")
+                .join(oneagentgraph::run::SIGNAL_DIR)
+                .exists(),
+            "a reset was written for a member the run never declared"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run the sibling has no record of cannot say what it declares, and the
+    /// refusal names the run rather than any member.
+    #[test]
+    fn a_resettable_reset_over_a_run_the_sibling_cannot_find_is_refused_naming_it() {
+        let _env = env_lock();
+        let root = state_dir_holding("dag-scope-1786304152340-24", &["watcher"]);
+        let graph_run = recorded_graph_run("dag-scope-1786304152340-99", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_resettable(&graph_run).expect_err("no record, no members");
+        assert!(
+            refused.to_string().contains("dag-scope-1786304152340-99"),
+            "{refused} does not name the run it could not read"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A recorded value that is not an address leaves the observer reported as
     /// watching.
     ///
@@ -3918,6 +4205,23 @@ mod tests {
                 "{refused} does not name the value it refused"
             );
         }
+    }
+
+    /// A member the run never declared is refused rather than answered with a
+    /// signal file nothing will read.
+    #[test]
+    fn a_reset_for_a_member_the_run_never_declared_is_refused() {
+        let _env = env_lock();
+        let root = state_dir_holding("node-scope-1786304152340-20", &["worker"]);
+        let graph_run = recorded_graph_run("node-scope-1786304152340-20", "demo")
+            .expect("the sibling accepts its own run id");
+        let refused = reset_timer(&graph_run, "pulse")
+            .expect_err("a member the run does not have is not resettable");
+        assert!(
+            refused.to_string().contains("pulse"),
+            "{refused} does not name the member that could not be reset"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An interrupt against a run the sibling cannot find is a delivery that

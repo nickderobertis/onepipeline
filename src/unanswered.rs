@@ -992,7 +992,6 @@ fn wait_surface(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Nex
         asker: None,
         workstream: Some(node.to_owned()),
         correlation: None,
-        declined_ruling: None,
     }
 }
 
