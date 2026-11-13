@@ -1706,8 +1706,16 @@ fn release_hold(
     }
     let policy = match node.merge_policy {
         Some(stated) => stated,
-        None => match onevcs::rules_check(node.repo.as_deref()?) {
-            Ok(checked) => checked.policy.publication,
+        None => match onevcs::rules_check(node.repo.as_deref()?)
+            .map_err(|error| error.to_string())
+            .and_then(|checked| match (checked.policy, checked.declaration) {
+                (Some(resolved), _) => Ok(resolved.publication),
+                // The one state that resolves no policy: the repository's own
+                // declaration could not be read, which its publication refuses too.
+                (None, onevcs::PolicyDeclaration::Unreadable { reason }) => Err(reason),
+                (None, declaration) => Err(format!("no policy resolved for {declaration:?}")),
+            }) {
+            Ok(policy) => policy,
             // llmlint: ignore[changed_behavior_has_e2e] a session for this identity was
             // just opened and its dispatch accepted, both of which read the same registry
             // and rules file; an identity that resolved then and not now is a host edited
