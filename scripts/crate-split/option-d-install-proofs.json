@@ -1,0 +1,42 @@
+{
+  "//": "Option (d1): the install proofs, uncacheable today, keyed on what each one builds and runs. install-smoke is `cargo install --path .` of the revision and the release smoke over it; wheel-smoke builds the wheel with the release's script; test-launcher drives the npm launcher over the built binary. Each reads the crate's sources, the Cargo inputs with the version kept (the smoke asserts it) and sharedGlobals. Replayed with crate-split-replay.mjs --changes; weighed by each task's median executed minutes.",
+  "shared": [
+    "rust-toolchain.toml",
+    ".cargo/config.toml",
+    "nx.json",
+    ".github/ci-tool-versions.json",
+    ".github/read-ci-tool-versions.mjs",
+    ".github/onevcs-cli-version",
+    ".github/nx-version-files",
+    "scripts/nx-version-free-inputs.mjs",
+    "scripts/nx-recipe-input.mjs",
+    "runtime:node scripts/nx-version-free-inputs.mjs --ecosystem cargo --keep-version",
+    "runtime:node scripts/nx-version-free-inputs.mjs --ecosystem npm",
+    "runtime:node scripts/nx-version-free-inputs.mjs --ecosystem files"
+  ],
+  "sources": ["src/**", "crates/**", "schemas/**"],
+  "fallback": "onepipeline",
+  "crates": { "onepipeline": { "paths": ["src/**", "crates/**", "schemas/**"] } },
+  "suites": {
+    "onepipeline:install-smoke": {
+      "paths": ["scripts/install-proof.sh", "scripts/smoke-published.sh"],
+      "crates": ["onepipeline"],
+      "tasks": ["onepipeline:install-smoke"]
+    },
+    "onepipeline:wheel-smoke": {
+      "paths": [
+        "scripts/install-proof.sh",
+        "scripts/smoke-published.sh",
+        "scripts/build-linux-wheel.sh",
+        "pyproject.toml"
+      ],
+      "crates": ["onepipeline"],
+      "tasks": ["onepipeline:wheel-smoke"]
+    },
+    "onepipeline-npm:test-launcher": {
+      "paths": ["npm/**", "scripts/npm-build.mjs"],
+      "crates": ["onepipeline"],
+      "tasks": ["onepipeline-npm:test-launcher"]
+    }
+  }
+}

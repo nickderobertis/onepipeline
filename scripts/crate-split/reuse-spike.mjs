@@ -14,13 +14,16 @@
 //   4. option (b): today's tiers with the e2e tier split as proposed.json maps;
 //   5. option (c): today's tiers over the engine's crates along its module graph
 //      (`module-graph.mjs`);
+//   6. option (d): the install proofs keyed on what they build (option-d-install-proofs.json),
+//      and the documented install keyed on the commit it proves (`sameBase`, an estimate);
 // each replayed with `--changes observed.json`, weighed per platform, and (b) and (c)
 // charged the build delta a hosted demonstration measured, when one is given.
 // It reads nothing from GitHub: `fetch-evidence.mjs` is what fills --evidence.
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sameBase } from "./observed.mjs";
 import { VARIANTS } from "./tier-mapping.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -141,6 +144,22 @@ function main(argv) {
     today,
   ]);
   replayed("c", c, delta("build-delta-c"));
+  replayed("d-install-proofs", join(here, "option-d-install-proofs.json"));
+  const result = JSON.parse(readFileSync(observed, "utf8"));
+  const d2 = sameBase(result, "onepipeline:install-documented");
+  writeFileSync(join(out, "d-install-documented.json"), `${JSON.stringify(d2, null, 2)}\n`);
+  console.log(
+    `reuse-spike: d-install-documented (estimate, keyed on the run's base): ${[
+      "linux",
+      "darwin",
+      "win32",
+    ]
+      .map(
+        (p) =>
+          `${p} ${d2[p].replays} of ${d2[p].runs} runs replay, ${d2[p].minutesPerChange?.toFixed(1) ?? "-"} min per change`,
+      )
+      .join("; ")}`,
+  );
 }
 
 try {

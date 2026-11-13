@@ -372,7 +372,9 @@ export function observe(dir, clone, { nodeModules }) {
             : "absent: no run in the evidence stored this key";
           row.evictedFrom = earlier[0] ?? null;
         } else if (t.remote_read === "not_attempted") row.cause = "no remote read";
-        else row.cause = `remote read ${t.remote_read}`;
+        else if (t.remote_read === undefined) {
+          row.cause = "an executions record too old to say whether it read the remote cache";
+        } else row.cause = `remote read ${t.remote_read}`;
         out.ran.push(row);
       }
       record.jobs.push(out);
@@ -481,7 +483,12 @@ export function weigh(perPr, profilesDir) {
       const all = selectRun(loadRecords(join(profilesDir, run, job))).records;
       const restRecords = all.filter((r) => !OWN_TIER_BINARIES.test(r.binary));
       const restTotal = restRecords.reduce((sum, r) => sum + (r.wall_s ?? 0), 0);
-      if (rest && restTotal > 0) {
+      if (rest && restTotal === 0) {
+        // No record of the tier's own tests (the recorder times only the harness's
+        // journeys), so the tier cannot be split by them and weighs whole.
+        modules[`rest:${restTask}`] ??= {};
+        modules[`rest:${restTask}`][platform] = { minutes: rest, unsplit: true };
+      } else if (rest) {
         let unitShare = 0;
         const unit = new Map();
         for (const r of restRecords.filter((r) => r.binary === "onepipeline")) {
@@ -609,4 +616,51 @@ export function renderObserved(result) {
     lines.push("");
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Option (d2): a task keyed on the commit its run merged into rather than on the pull
+ * request's own tree, as a proof of the remote default branch (`install-documented`)
+ * could be. Each run of `task` replays when an earlier run in the evidence, on the same
+ * platform, ran it over the same base; its minutes are the task's median per platform.
+ * The base stands in for the remote's HEAD when the task ran, so this is an estimate.
+ */
+export function sameBase(observed, task, release = false) {
+  const runs = [];
+  for (const pr of observed.prs) {
+    if (pr.unread) continue;
+    for (const job of pr.jobs ?? []) {
+      const row = job.ran.find((r) => r.task === task);
+      if (row && PLATFORM_OF[job.job] !== "lint") {
+        runs.push({
+          run: pr.run,
+          release: pr.release,
+          base: pr.base,
+          platform: PLATFORM_OF[job.job],
+        });
+      }
+    }
+  }
+  const out = {};
+  for (const platform of ["linux", "darwin", "win32"]) {
+    // Run ids rise with time, so this is the order the runs started in.
+    const mine = runs.filter((r) => r.platform === platform).sort((a, b) => a.run - b.run);
+    const seen = new Set();
+    let replays = 0;
+    let counted = 0;
+    for (const r of mine) {
+      const hit = seen.has(r.base);
+      seen.add(r.base);
+      if (r.release !== release) continue;
+      counted++;
+      if (hit) replays++;
+    }
+    const minutes = observed.weights.tasks[task]?.[platform]?.minutes ?? 0;
+    out[platform] = {
+      runs: counted,
+      replays,
+      minutesPerChange: counted ? (replays * minutes) / counted : null,
+    };
+  }
+  return out;
 }

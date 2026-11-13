@@ -804,12 +804,18 @@ test("the reuse spike's one command replays today's tiers and every option over 
     "a-all",
     "b",
     "c",
+    "d-install-proofs",
   ]) {
     assert.ok(
       lines.some((line) => line.includes(`${join(out, `${name}.md`)}:`)),
       `${name} was not replayed:\n${run.stdout}`,
     );
   }
+  // (d2) is said to be an estimate, and replays nothing no run here made.
+  assert.match(
+    run.stdout,
+    /^reuse-spike: d-install-documented \(estimate, keyed on the run's base\): linux 0 of 0 runs replay, - min per change/m,
+  );
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
   const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
   const proposed = JSON.parse(
