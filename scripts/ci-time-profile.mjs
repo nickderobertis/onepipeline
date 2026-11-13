@@ -249,7 +249,23 @@ function unzipArtifact(gh, cache, repo, artifact) {
   mkdirSync(into, { recursive: true });
   const endpoint = `repos/${repo}/actions/artifacts/${artifact.id}/zip`;
   gh.fetch(endpoint, { binary: true });
-  execFileSync("unzip", ["-q", "-o", gh.path(endpoint, ".bin"), "-d", into]);
+  try {
+    execFileSync("unzip", ["-q", "-o", gh.path(endpoint, ".bin"), "-d", into], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (error) {
+    // A broken download kept in the cache would break every later read, so it goes.
+    rmSync(gh.path(endpoint, ".bin"), { force: true });
+    rmSync(into, { recursive: true, force: true });
+    refuse(
+      `artifact ${artifact.name} (${artifact.id}) did not unzip: ${
+        String(error.stderr || error.message)
+          .trim()
+          .split("\n")[0]
+      }`,
+      "run the same command again: the broken download was dropped and is fetched afresh",
+    );
+  }
   writeFileSync(done, "");
   return into;
 }

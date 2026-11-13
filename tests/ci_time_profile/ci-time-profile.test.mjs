@@ -1853,6 +1853,25 @@ test("a re-run's newer artifact is read over the earlier attempt's, and that is 
   );
 });
 
+test("a download that does not unzip is dropped, so the next read fetches it afresh", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  const served = oneRun(dir);
+  const gh = standInGh(join(dir, "gh"), served);
+  const zip = join(dir, "gh", "answers", key(`repos/${REPO}/actions/artifacts/0/zip`));
+  const good = readFileSync(zip);
+  writeFileSync(zip, "not a zip");
+  const broken = run(profileScript, job(cache, join(dir, "r.md")), { env: gh.env(4000) });
+  assert.equal(broken.status, 1);
+  assert.match(
+    broken.stderr,
+    /artifact test-profile-test-linux \(0\) did not unzip: .*\nnext: run the same command again/,
+  );
+  writeFileSync(zip, good);
+  const again = run(profileScript, job(cache, join(dir, "r.md")), { env: gh.env(4000) });
+  assert.equal(again.status, 0, again.stderr);
+});
+
 test("one cache serves two repositories' runs of the same id without mixing them", (t) => {
   const dir = scratch(t);
   const cache = join(dir, "cache");
