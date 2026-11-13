@@ -109,6 +109,8 @@ function parse(argv) {
     opts[name] = value;
   }
   if (!opts.out) usage("--out names the file the report is written to");
+  if (opts.json !== undefined && resolve(opts.json) === resolve(opts.out))
+    usage("--json and --out name the same file; give each its own");
   opts.repo ??= "nickderobertis/onepipeline";
   opts.cache ??= "target/ci-time-profile";
   const floor = opts["min-remaining"] ?? "2500";
@@ -366,7 +368,8 @@ function sampleLine(line) {
   } else {
     // iostat: us sy id
     const [us, sy, id] = parts.slice(1, 4).map(Number);
-    if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0 || x > 100)) return null;
+    // Whole percentages of one interval: each 0-100, together 100 give or take rounding.
+    if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0) || us + sy + id > 102) return null;
     cpu = { busy: (us + sy) / 100 };
   }
   return { t, rx, tx, cpu, load: load.trim() };

@@ -77,9 +77,7 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   }
   // The generated graph and overhead steps are held as text here, not run: they plan Nx over
   // the whole project graph and run the instrumented e2e tier, which only the CI job's
-  // toolchain and build can do. The hosted demonstration runs executed them; their
-  // measure artifacts (runs 43397555755, 43397566595, 43400483794) hold the graph, the Nx
-  // trace and the overhead times the analysis read back.
+  // toolchain and build can do; a hosted demonstration run is what executes them.
   assert.equal(edited.match(/one e2e partition instrumented, then plain/g).length, 1);
   // The rust-cache key is computed before the wrapper is set: the timer step comes after it.
   const linux = edited.slice(edited.indexOf("\n  test-linux:\n"));
@@ -202,6 +200,28 @@ test("the generated rustc timer times a real compile, passes its exit status thr
   });
   assert.equal(unwritable.status, 0);
   assert.match(unwritable.stderr, /rustc-timer: cannot append to .*this compile is not timed/);
+  // A stand-in compiler for what a real compile here does not show: a compiler ended by a
+  // signal, a test target, several crate types, and cargo-llvm-cov's instrumented flags.
+  const fake = join(dir, "fake-rustc");
+  writeFileSync(fake, '#!/bin/sh\n[ "$FAKE_SIGNAL" = 1 ] && kill -TERM $$\nexit 0\n');
+  chmodSync(fake, 0o755);
+  const fakeTimings = join(dir, "fake.tsv");
+  const timed = (args, env = {}) =>
+    spawnSync("perl", [timer, fake, "--crate-name", "x", ...args], {
+      encoding: "utf8",
+      env: { ...process.env, ONEPIPELINE_RUSTC_TIMINGS: fakeTimings, ...env },
+    });
+  assert.equal(timed([], { FAKE_SIGNAL: "1" }).status, 128 + 15);
+  assert.equal(timed(["--test"]).status, 0);
+  assert.equal(timed(["--crate-type", "lib", "--crate-type", "rlib"]).status, 0);
+  assert.equal(timed(["-Cinstrument-coverage", "--crate-type", "lib"]).status, 0);
+  assert.deepEqual(
+    readFileSync(fakeTimings, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => l.split("\t").slice(3, 7).join(" ")),
+    [" 0  143", "test 0  0", "lib,rlib 0  0", "lib 1  0"],
+  );
 });
 
 test("the generated sampler writes timestamped CPU, load and network lines", (t) => {
@@ -700,6 +720,18 @@ test("a measurement file not in its writer's shape refuses, naming the file and 
       () => '[{"ph":"X","name":5,"ts":1,"dur":1}]',
       /nx-profile\.json is malformed\nnext: /,
     ],
+    // A sample whose CPU percentages cannot belong to one interval.
+    [
+      "samples.txt",
+      (old) => `${(T0 + 30000) / 1000} 80 80 0 | 1 1 1 | 0 0\n${old}`,
+      /samples\.txt line 1 is malformed\nnext: /,
+    ],
+    // An overhead run with no exit status.
+    [
+      "overhead/times.txt",
+      (old) => `instrumented 1000 1060\n${old}`,
+      /times\.txt line 1 is malformed\nnext: /,
+    ],
     // A graph Nx did not finish writing.
     [
       "graph.json",
@@ -870,6 +902,7 @@ test("a run without the named job, or arguments the command does not take, are r
     ["job", "--run", "1", "--job", "test-linux"],
     ["job", "--run", "1", "--job", "test-linux", "--out", "r", "--since", "2026-11-01"],
     ["job", "--run", "1", "--job", "test-linux", "--out", "r", "--min-remaining", "-1"],
+    ["job", "--run", "1", "--job", "test-linux", "--out", "r", "--json", "./r"],
     [
       "history",
       "--since",
@@ -1394,6 +1427,32 @@ test("a listing at GitHub's 1,000-run limit is noted, not silently cut", (t) => 
     /1000 runs listed, 0 successful jobs counted; .*\(GitHub requests 10, .*1 note\(s\)/,
   );
   assert.match(readFileSync(join(dir, "h.md"), "utf8"), /GitHub's limit for a filtered listing/);
+});
+
+test("an overhead partition whose runs share no test reports no ratio", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const plain = join(
+    cache,
+    "runs",
+    String(RUN),
+    "test-linux",
+    "measure-test-linux",
+    "overhead",
+    "plain-records",
+    "e2e",
+  );
+  rmSync(plain, { recursive: true });
+  mkdirSync(plain);
+  writeFileSync(join(plain, "y.json"), JSON.stringify(record("y", 1061, 8, { spawn: 4 })));
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const o = JSON.parse(readFileSync(json, "utf8")).overhead;
+  assert.deepEqual(
+    [o.tests_in_both, o.instrumented_test_seconds, o.plain_test_seconds, o.ratio],
+    [0, 0, 0, null],
+  );
 });
 
 test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
