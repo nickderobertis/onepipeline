@@ -815,10 +815,13 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
   near("test: spawn: onepipeline", (137.5 * 120) / 200 + (37.5 * 40) / 100 + 3);
   near("task: after its last test (profdata merge, LCOV export)", 80);
   near("task: after its last test", 2);
+  // a (400-600 s) and b (400-500 s) overlap, so the binary's 303 test-seconds are 203
+  // elapsed: 400-600 s, and the late test's 683-686 s.
   assert.deepEqual(
-    r.binaries.map((b) => [b.binary, b.tests, b.task]),
-    [["e2e", 3, "demo-e2e:test"]],
+    r.binaries.map((b) => [b.binary, b.tests, b.task, b.test_seconds, b.elapsed_s]),
+    [["e2e", 3, "demo-e2e:test", 303, 203]],
   );
+  assert.match(report, /\| e2e \| e2e \| demo-e2e:test \| 3 \| 303 \| 203 \|/);
   // The later test is the other task's: the tier's last test, and so its export, stay put.
   assert.deepEqual(
     r.tasks.map((x) => [x.task, x.tests]),
@@ -1222,6 +1225,34 @@ test("nextest's own output, from the pinned cargo-nextest, is read into runs and
     Object.values(r.log_binaries).map((b) => b.tests),
     [1, 1],
   );
+});
+
+test("a binary's elapsed seconds from the log are the union of its tests' intervals, not their sum", (t) => {
+  const dir = scratch(t);
+  // Nextest prints a test's line when it ends. In `e2e`, a ends at 410 s after 10 s and b at
+  // 415 s after 10 s: 400-415 s, 15 s for 20 test-seconds. c, at 500 s after 5 s, is alone:
+  // 20 s in all for 25 test-seconds. `note` runs one test, so its two figures agree.
+  const lines = [
+    [399, "    Starting 4 tests across 2 binaries"],
+    [410, "        PASS [  10.000s] (1/4) onepipeline::e2e closures::a"],
+    [415, "        PASS [  10.000s] (2/4) onepipeline::e2e closures::b"],
+    [430, "        PASS [   7.500s] (3/4) onepipeline::note writes"],
+    [500, "        FAIL [   5.000s] (4/4) onepipeline::e2e closures::c"],
+    [501, "     Summary [ 102.000s] 4 tests run: 3 passed, 1 failed, 0 skipped"],
+  ];
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir, { log: lines.map(([s, l]) => `${iso(s)} ${l}`).join("\n") }));
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.deepEqual(r.log_binaries, {
+    e2e: { tests: 3, s: 25, elapsed_s: 20 },
+    note: { tests: 1, s: 7.5, elapsed_s: 7.5 },
+  });
+  const report = readFileSync(join(dir, "r.md"), "utf8");
+  assert.match(report, /\| e2e \| 3 \| 25 \| 20 \|/);
+  assert.match(report, /\| note \| 1 \| 8 \| 8 \|/);
 });
 
 test("cargo's own --timings report, from the pinned cargo, is read by unit kind and crate", (t) => {

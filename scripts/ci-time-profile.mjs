@@ -329,8 +329,11 @@ function logFacts(lines) {
 
 // Every nextest invocation the log shows: `Starting N tests across B binaries` paired with
 // the next `Summary [ S s] N tests run`, and, where the profile prints a line per test (the
-// cross-platform `ci` profile), each binary's summed test seconds. Records only cover the
-// e2e harness's binary; this covers every tier.
+// cross-platform `ci` profile), each binary's summed test seconds and its elapsed seconds.
+// Records only cover the e2e harness's binary; this covers every tier. Nextest prints a
+// test's line as it finishes, so the line's timestamp is the test's end and that less its
+// duration its start: a binary's elapsed seconds are the union of those intervals, since
+// its tests run concurrently and their summed seconds count each overlap more than once.
 function nextestRuns(lines) {
   const open = [];
   const runs = [];
@@ -351,11 +354,16 @@ function nextestRuns(lines) {
     if (test) {
       // `<crate>::<binary> <test>` for an integration binary, `<crate> <test>` for its lib.
       const binary = test[4] ?? test[3];
-      binaries[binary] ??= { tests: 0, s: 0 };
+      binaries[binary] ??= { tests: 0, s: 0, intervals: [] };
       const b = binaries[binary];
       b.tests++;
       b.s += Number(test[2]);
+      b.intervals.push({ start: t - Number(test[2]) * 1000, end: t });
     }
+  }
+  for (const b of Object.values(binaries)) {
+    b.elapsed_s = unionSeconds(b.intervals);
+    delete b.intervals;
   }
   return { runs, binaries };
 }
@@ -1110,6 +1118,9 @@ function analyzeJob(opts) {
         tier: b === "e2e" ? "e2e" : "other",
         tests: rs.length,
         test_seconds: rs.reduce((a, r) => a + r.wall_s, 0),
+        // The union of its tests' [start, start + wall] intervals: the seconds any of its
+        // tests was running, which concurrent tests do not count twice.
+        elapsed_s: unionSeconds(rs),
         elapsed_share_s: binaryShare.get(b) ?? 0,
       };
     })
@@ -1535,13 +1546,14 @@ function printJob(r) {
   out.push("", "### Test binaries", "");
   out.push(
     table(
-      ["binary", "tier", "task", "tests", "test-seconds", "elapsed share (min)"],
+      ["binary", "tier", "task", "tests", "test-seconds", "elapsed s", "elapsed share (min)"],
       r.binaries.map((b) => [
         b.binary,
         b.tier,
         b.task ?? "-",
         b.tests,
         b.test_seconds.toFixed(0),
+        b.elapsed_s.toFixed(0),
         min(b.elapsed_share_s),
       ]),
     ),
@@ -1556,13 +1568,17 @@ function printJob(r) {
     ),
   );
   if (Object.keys(r.log_binaries).length) {
-    out.push("", "### Test binaries from the log's per-test lines (summed test seconds)", "");
+    out.push(
+      "",
+      "### Test binaries from the log's per-test lines (summed test seconds, and elapsed seconds: the union of each test's [line time - duration, line time])",
+      "",
+    );
     out.push(
       table(
-        ["binary", "tests", "test-seconds"],
+        ["binary", "tests", "test-seconds", "elapsed s"],
         Object.entries(r.log_binaries)
           .sort((a, b) => b[1].s - a[1].s)
-          .map(([b, v]) => [b, v.tests, v.s.toFixed(0)]),
+          .map(([b, v]) => [b, v.tests, v.s.toFixed(0), v.elapsed_s.toFixed(0)]),
       ),
     );
   }
