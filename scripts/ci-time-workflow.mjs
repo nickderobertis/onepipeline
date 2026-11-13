@@ -55,7 +55,15 @@ export function jobTargets(ciJob) {
         `scripts/ci-job.sh names no targets for ${job}`,
         "check that scripts/ci-job.sh still sets `targets=` for each job in its case",
       );
-    targets[job] = /targets="([^"]+)"/.exec(line)[1];
+    const list = /targets="([^"]+)"/.exec(line)[1];
+    // Nx target names joined by commas, nothing a shell would read as more than words: the
+    // list is written into the generated step's command.
+    if (!/^[a-z][\w-]*(,[a-z][\w-]*)*$/.test(list))
+      fail(
+        `scripts/ci-job.sh's targets for ${job} are not Nx target names joined by commas: ${list}`,
+        "keep each job's `targets=` a comma-separated list of target names",
+      );
+    targets[job] = list;
   }
   return targets;
 }

@@ -129,6 +129,19 @@ test("a workflow or checkout not shaped as the edits expect is refused and left 
   assert.match(refused.stderr, /can save an Actions cache/);
   assert.equal(readFileSync(saving, "utf8"), before);
 
+  const unsafe = checkout(join(scratch(t), "unsafe"));
+  const ciJobPath = join(dirname(unsafe), "..", "..", "scripts", "ci-job.sh");
+  writeFileSync(
+    ciJobPath,
+    readFileSync(ciJobPath, "utf8").replace(
+      'test-linux) targets="test,',
+      'test-linux) targets="test;rm -rf /,',
+    ),
+  );
+  const shell = run(workflowScript, [unsafe]);
+  assert.equal(shell.status, 1);
+  assert.match(shell.stderr, /targets for test-linux are not Nx target names/);
+
   const noTargets = checkout(join(scratch(t), "no-targets"));
   writeFileSync(join(dirname(noTargets), "..", "..", "scripts", "ci-job.sh"), "#!/bin/sh\n");
   const missing = run(workflowScript, [noTargets]);
@@ -507,6 +520,7 @@ function oneRun(
       ),
       rustcRow(20, 50, "onepipeline", "release"),
       rustcRow(20, 24, "git2", "/tmp/cargo-installXyz/release/deps"),
+      rustcRow(24, 27, "zerocopy", "npm-staged/x86_64-unknown-linux-gnu/debug"),
       "17944\t",
     ].join("\n"),
   );
@@ -668,6 +682,7 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
       "msrv toolchain": [12, 12],
       "release (target/release)": [30, 0],
       "outside the checkout (cargo install)": [4, 4],
+      "target/npm-staged": [3, 3],
     },
   );
   assert.deepEqual(
@@ -807,11 +822,14 @@ test("a test retried in another record directory counts once, at its later attem
   const again = record("b", 400, 100, { spawn: 100 });
   again.attempt = 2;
   writeFileSync(join(retry, "b.json"), JSON.stringify(again));
+  // And test a written again by a later run of the same attempt: the later one counts.
+  writeFileSync(join(retry, "a.json"), JSON.stringify(record("a", 405, 200, { spawn: 150 })));
   const json = join(dir, "out.json");
   assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
   const r = JSON.parse(readFileSync(json, "utf8"));
   assert.equal(r.tests, 3);
   assert.equal(r.slowest.find((x) => x.test === "e2e::b").parts_s["spawn: onepipeline"], 100);
+  assert.equal(r.slowest.find((x) => x.test === "e2e::a").parts_s["spawn: onepipeline"], 150);
 });
 
 test("without cargo the workspace's crates are the instrumented ones, and the report says so", (t) => {
@@ -1395,8 +1413,14 @@ test("time between a tier's tests, rustc in two trees at once, and a stray recor
 
 test("samples taken twice at one moment, a counter reset, an idle CPU, quiet network and setup time are read as such", (t) => {
   const dir = scratch(t);
+  const served = oneRun(dir);
+  // The upload starts 2 s after the gate ends, so an interval falls between steps.
+  const jobsKey = key(`repos/${REPO}/actions/runs/${RUN}/jobs?per_page=100`);
+  const jobs = JSON.parse(served.answers[jobsKey]);
+  jobs.jobs[0].steps.find((st) => /Keep the per-test/.test(st.name)).started_at = iso(692);
+  served.answers[jobsKey] = JSON.stringify(jobs);
   const cache = join(dir, "cache");
-  seedCache(cache, oneRun(dir));
+  seedCache(cache, served);
   const at = (s) => (T0 + s * 1000) / 1000;
   writeFileSync(
     join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
@@ -1405,6 +1429,12 @@ test("samples taken twice at one moment, a counter reset, an idle CPU, quiet net
       `${at(30)} cpu 100 0 0 100 0 0 0 | 1/100 | 1000 0`,
       `${at(32)} cpu 50 0 0 0 0 0 0 | 1/100 | 1000 0`,
       `${at(34)} cpu 50 0 0 0 0 0 0 | 1/100 | 1100 0`,
+      `${at(680)} cpu 50 0 0 0 0 0 0 | 1/100 | 1100 0`,
+      // 680-682 s: in the gate, between the e2e tier and the version task.
+      `${at(682)} cpu 50 0 0 0 0 0 0 | 1/100 | 1300 0`,
+      `${at(690)} cpu 50 0 0 0 0 0 0 | 1/100 | 1300 0`,
+      // 690-692 s: between the gate step and the upload.
+      `${at(692)} cpu 50 0 0 0 0 0 0 | 1/100 | 1700 0`,
       "",
     ].join("\n"),
   );
@@ -1413,9 +1443,15 @@ test("samples taken twice at one moment, a counter reset, an idle CPU, quiet net
   const s = JSON.parse(readFileSync(json, "utf8")).samples;
   assert.equal(s.counter_resets, 1);
   assert.equal(s.cpu_busy_fraction, null);
-  assert.equal(s.network_bytes, 100);
+  assert.equal(s.network_bytes, 700);
   assert.equal(s.network_active_s, 0);
-  assert.deepEqual(s.network_by_place, { "step: setup and teardown": { bytes: 100, active_s: 0 } });
+  assert.deepEqual(s.network_by_place, {
+    "step: setup and teardown": { bytes: 100, active_s: 0 },
+    "gate: demo-e2e:test + demo:build": { bytes: 0, active_s: 0 },
+    "gate: no task": { bytes: 200, active_s: 0 },
+    "gate: demo-version:smoke": { bytes: 0, active_s: 0 },
+    "between steps": { bytes: 400, active_s: 0 },
+  });
 });
 
 test("the graph Nx itself writes for a task is read as the dependency map", (t) => {
@@ -1585,6 +1621,7 @@ test("the history counts each finished job by what its pull request changed, bef
     [7, heads.release, "2026-11-12T12:00:00Z", 40],
     [8, unknownHead, "2026-11-12T13:00:00Z", 60],
     [10, heads.late, "2026-11-12T14:00:00Z", 125],
+    [11, heads.docs, "2026-11-12T15:00:00Z", 50],
   ];
   const listed = (id, head, created, conclusion = "success") => ({
     id,
@@ -1657,6 +1694,9 @@ test("the history counts each finished job by what its pull request changed, bef
   answers[key(`repos/${REPO}/actions/runs/4/artifacts?per_page=100`)] = JSON.stringify({
     artifacts: [{ id: 99, name: "test-profile-test-linux", expired: true }],
   });
+  answers[key(`repos/${REPO}/actions/runs/11/artifacts?per_page=100`)] = JSON.stringify({
+    artifacts: [],
+  });
   answers[key(`repos/${REPO}/actions/runs/10/artifacts?per_page=100`)] = JSON.stringify({
     artifacts: [],
   });
@@ -1693,10 +1733,10 @@ test("the history counts each finished job by what its pull request changed, bef
     { cwd: repo, env: gh.env(4000) },
   );
   assert.equal(result.status, 0, result.stderr);
-  // Two listing pages, eight job lists, four artifact lists, two artifacts.
+  // Two listing pages, nine job lists, four artifact lists, two artifacts.
   assert.match(
     result.stdout,
-    /^ci-time-profile history: 108 runs listed, 8 successful jobs counted; report in .* \(GitHub requests 16, rate checks 16, read from cache 0\); 3 note\(s\)/,
+    /^ci-time-profile history: 109 runs listed, 9 successful jobs counted; report in .* \(GitHub requests 17, rate checks 17, read from cache 0\); 3 note\(s\)/,
   );
   const h = JSON.parse(readFileSync(json, "utf8"));
   const summary = (cls, side) => h.summary[`test-linux\t${cls}\t${side}`];
@@ -1713,11 +1753,12 @@ test("the history counts each finished job by what its pull request changed, bef
     min_min: 120,
     max_min: 130,
   });
-  assert.equal(summary("other", "after").median_min, 30);
+  // Two docs runs, 30 and 50 min: an even population's median is the middle pair's mean.
+  assert.deepEqual(summary("other", "after"), { n: 2, median_min: 40, min_min: 30, max_min: 50 });
   assert.equal(summary("edits crates/ or Cargo files, not src/", "after").median_min, 50);
   assert.equal(summary("release", "after").median_min, 40);
   assert.equal(summary("unknown", "after").median_min, 60);
-  assert.equal(summary("all", "after").n, 7);
+  assert.equal(summary("all", "after").n, 8);
   assert.deepEqual(
     h.rows
       .filter((r) => r.class === "edits src/")

@@ -61,7 +61,6 @@ class Refusal extends Error {
 const refuse = (message, next) => {
   throw new Refusal(message, next);
 };
-// A file the run left that is not the shape its writer gives it.
 const check = (ok, what) => {
   if (!ok)
     refuse(
@@ -389,7 +388,8 @@ function sampleLine(line) {
 
 function rustcLine(line) {
   const f = line.split("\t");
-  if (f.length < 7) return null;
+  // The timer writes eight fields; the compiler's path is what tells clippy and MSRV apart.
+  if (f.length !== 8 || f[7] === "") return null;
   const r = {
     start: num(f[0]) * 1000,
     end: num(f[1]) * 1000,
@@ -398,7 +398,7 @@ function rustcLine(line) {
     instrumented: f[4] === "1",
     outDir: f[5],
     code: num(f[6]),
-    compiler: f[7] ?? "",
+    compiler: f[7],
   };
   const valid =
     finite(r.start, r.end) &&
@@ -589,7 +589,6 @@ function readRecords(files) {
 // A record's wall clock split into named parts that sum to it: spawn split by the program
 // run, the other categories, and the recorder's own unattributed time.
 function recordParts(r) {
-  // A test that took no measurable time has no time to split.
   if (!(r.wall_s > 0)) return {};
   const parts = {};
   const spawnS = r.categories.spawn?.s ?? 0;
@@ -1548,6 +1547,8 @@ function history(opts) {
   // What each run's pull request changed, from the local clone: the head is fetched over git
   // (no API request) and diffed against its merge base with --base-ref.
   const baseRef = opts["base-ref"] ?? "origin/main";
+  if (!/^[\w./-]+$/.test(baseRef) || baseRef.startsWith("-"))
+    usage("--base-ref names a branch or commit, such as origin/main");
   const classes = new Map();
   // Quiet: a missing commit is fetched, and git's own complaint about it is not the answer.
   const git = (...a) =>
@@ -1564,7 +1565,7 @@ function history(opts) {
       } catch {
         git("fetch", "-q", "origin", sha);
       }
-      const files = git("diff", "--name-only", git("merge-base", sha, baseRef), sha)
+      const files = git("diff", "--name-only", git("merge-base", "--", sha, baseRef), sha, "--")
         .split("\n")
         .filter(Boolean);
       cls =
