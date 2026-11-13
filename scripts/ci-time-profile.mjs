@@ -1,0 +1,1100 @@
+#!/usr/bin/env node
+// Where one hosted CI test job's wall clock goes, read back from what the run left.
+// Spike tooling (spike-onepipeline-profile): nothing in the repository's own CI runs this.
+//
+//   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB [--repo OWNER/NAME]
+//        [--cache DIR] [--json FILE] [--min-remaining N]
+//   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE
+//        [--jobs test-linux,test-macos] [--repo OWNER/NAME] [--cache DIR] [--json FILE]
+//        [--min-remaining N]
+//
+// `job` reads, through the `gh` login and read-only, the job's steps, its log, and the
+// artifacts the run uploaded for it: `test-profile-<job>` (the per-test records
+// `crates/testfakes/src/profile.rs` writes), `nx-cache-entries-<job>` (the Nx sidecar's
+// per-task start and end) and, on a run whose workflow `scripts/ci-time-workflow.mjs`
+// edited, `measure-<job>` (CPU and network samples, every rustc invocation's start and
+// end, the Nx task graph, and the coverage-overhead partition). It prints one breakdown
+// of the job's wall clock that sums to it: the steps one after another; inside the gate
+// step, each moment shared equally among the Nx tasks running then; inside a task, the
+// moment is compile when a rustc it can be waiting on is running, a test category when
+// its tests are running (each running test's share split by its record's categories),
+// and the task's own phase otherwise. Nothing is counted twice, and what no source
+// names is printed as `unattributed`.
+//
+// `history` lists the pull-request runs of ci.yml created in [since, until) and prints
+// each job's successful durations and medians before and after `split`.
+//
+// Every GitHub response is kept under --cache (default target/ci-time-profile), so a
+// second run of the same measurement makes no request; the command refuses to make one
+// while `gh api rate_limit` reports fewer than --min-remaining (2500) core requests.
+// Exit 0 printed; 1 a source is missing or malformed, or the rate floor was reached;
+// 2 a usage error.
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { recordProblem } from "./test-profile-report.mjs";
+
+class Refusal extends Error {}
+const refuse = (message) => {
+  throw new Refusal(message);
+};
+
+// ---------------------------------------------------------------- arguments
+
+function parse(argv) {
+  const [command, ...rest] = argv;
+  if (!["job", "history"].includes(command)) usage("name a command: job or history");
+  const opts = { command };
+  for (let i = 0; i < rest.length; i += 2) {
+    const flag = rest[i];
+    const value = rest[i + 1];
+    if (!flag?.startsWith("--") || value === undefined)
+      usage(`cannot read ${flag ?? "the arguments"}`);
+    opts[flag.slice(2)] = value;
+  }
+  opts.repo ??= "nickderobertis/onepipeline";
+  opts.cache ??= "target/ci-time-profile";
+  opts["min-remaining"] = Number(opts["min-remaining"] ?? 2500);
+  if (!/^[\w.-]+\/[\w.-]+$/.test(opts.repo)) usage("--repo is OWNER/NAME");
+  if (command === "job") {
+    if (!/^\d+$/.test(opts.run ?? "")) usage("--run takes a run id");
+    if (!/^[\w-]+$/.test(opts.job ?? "")) usage("--job takes a job name");
+  } else {
+    for (const key of ["since", "split", "until"])
+      if (Number.isNaN(Date.parse(opts[key] ?? ""))) usage(`--${key} takes a date`);
+    opts.jobs = (opts.jobs ?? "test-linux,test-macos").split(",");
+  }
+  return opts;
+}
+
+function usage(message) {
+  process.stderr.write(
+    `ci-time-profile: ${message}\nusage: ci-time-profile.mjs job --run RUN_ID --job JOB [--repo R] [--cache DIR] [--json FILE]\n` +
+      `       ci-time-profile.mjs history --since DATE --split DATE --until DATE [--jobs a,b] [--repo R] [--cache DIR] [--json FILE]\n`,
+  );
+  process.exit(2);
+}
+
+// ---------------------------------------------------------------- GitHub, cached
+
+class Gh {
+  constructor(cache, floor) {
+    this.cache = join(cache, "api");
+    this.floor = floor;
+    this.requests = 0;
+    this.cached = 0;
+    mkdirSync(this.cache, { recursive: true });
+  }
+  path(endpoint, suffix) {
+    return join(this.cache, endpoint.replace(/[^\w.-]+/g, "_") + suffix);
+  }
+  guard() {
+    const remaining = Number(
+      execFileSync("gh", ["api", "rate_limit", "--jq", ".resources.core.remaining"], {
+        encoding: "utf8",
+      }).trim(),
+    );
+    if (!(remaining >= this.floor))
+      refuse(
+        `GitHub reports ${remaining} core requests remaining, under the floor of ${this.floor}; nothing more is read`,
+      );
+  }
+  fetch(endpoint, { binary = false, keep = true } = {}) {
+    const file = this.path(endpoint, binary ? ".bin" : ".txt");
+    if (keep && existsSync(file)) {
+      this.cached++;
+      return readFileSync(file, binary ? undefined : "utf8");
+    }
+    this.guard();
+    this.requests++;
+    const body = execFileSync("gh", ["api", endpoint], {
+      encoding: binary ? "buffer" : "utf8",
+      maxBuffer: 1 << 30,
+    });
+    if (keep) writeFileSync(file, body);
+    return body;
+  }
+  json(endpoint, opts) {
+    return JSON.parse(this.fetch(endpoint, opts));
+  }
+}
+
+// ---------------------------------------------------------------- small helpers
+
+const ms = (iso) => Date.parse(iso);
+const min = (seconds) => (seconds / 60).toFixed(1);
+const pct = (part, whole) => (whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "-");
+const median = (values) => {
+  const s = [...values].sort((a, b) => a - b);
+  if (!s.length) return null;
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+const table = (head, rows) =>
+  [
+    `| ${head.join(" | ")} |`,
+    `| ${head.map(() => "---").join(" | ")} |`,
+    ...rows.map((r) => `| ${r.join(" | ")} |`),
+  ].join("\n");
+
+function walk(dir, out = []) {
+  if (!existsSync(dir)) return out;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) walk(p, out);
+    else out.push(p);
+  }
+  return out;
+}
+
+function unzipArtifact(gh, repo, artifact, into) {
+  const done = join(into, ".complete");
+  if (existsSync(done)) return into;
+  mkdirSync(into, { recursive: true });
+  const zip = gh.fetch(`repos/${repo}/actions/artifacts/${artifact.id}/zip`, {
+    binary: true,
+  });
+  const file = join(into, "..", `${artifact.name}.zip`);
+  writeFileSync(file, zip);
+  execFileSync("unzip", ["-q", "-o", file, "-d", into]);
+  writeFileSync(done, "");
+  return into;
+}
+
+// ---------------------------------------------------------------- step classes
+
+function stepClass(name) {
+  if (/measurement-only|^'?Measure:/.test(name)) return "measurement-only";
+  if (/^Post /.test(name)) {
+    if (/rust-cache|setup-uv|actions\/cache/.test(name)) return "cache save";
+    return "setup and teardown";
+  }
+  if (/Swatinem\/rust-cache|Restore the bootstrap tools|Restore the visual docs/.test(name))
+    return "cache restore";
+  if (/Decide cache trust|op-nx\/github-cache|Wait for the cache recording proxy/.test(name))
+    return "Nx cache sidecar";
+  if (/Report cache entries|^Run actions\/upload-artifact/.test(name)) return "cache save";
+  if (/\(affected projects\)$/.test(name)) return "gate (Nx tasks)";
+  if (/^Does each failed test fail again/.test(name)) return "rerun of failed tests";
+  if (/^Keep the /.test(name)) return "artifact upload";
+  return "setup and teardown";
+}
+
+// ---------------------------------------------------------------- log
+
+function parseLog(text) {
+  const lines = [];
+  for (const raw of text.split("\n")) {
+    const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?(.*)$/.exec(raw.replace(/\r$/, ""));
+    if (m) lines.push({ t: ms(m[1]), text: m[2] });
+  }
+  return lines;
+}
+
+function logFacts(lines) {
+  const facts = { github_sha: null, selection: null, cache: [], readOnly: [] };
+  for (let i = 0; i < lines.length; i++) {
+    const { text } = lines[i];
+    if (!facts.github_sha && /log -1 --format=%H|log -1 --format='%H'/.test(text)) {
+      const next = lines[i + 1]?.text.trim();
+      if (/^[0-9a-f]{40}$/.test(next ?? "")) facts.github_sha = next;
+    }
+    const sel = /ci-job: (\S+) runs (\d+) task\(s\): (.*)$/.exec(text);
+    if (sel && !facts.selection)
+      facts.selection = {
+        job: sel[1],
+        count: Number(sel[2]),
+        tasks: sel[3].split(" ").filter(Boolean),
+      };
+    if (
+      /Cache restored from key|No cache found|Cache not found for input keys|Cache hit for|Restored from cache key|Cache Size: |cache hit|Skipping cache save|Cache saved|Cache up-to-date/i.test(
+        text,
+      )
+    )
+      facts.cache.push({ t: lines[i].t, text: text.trim() });
+    if (/CACHE_READ_ONLY is set/.test(text))
+      facts.readOnly.push({ t: lines[i].t, text: text.trim() });
+  }
+  return facts;
+}
+
+// ---------------------------------------------------------------- measurement artifact
+
+function readMeasure(dir) {
+  if (!dir) return null;
+  const files = walk(dir);
+  const find = (name) => files.find((f) => f.endsWith(`/${name}`));
+  const out = { samples: [], rustc: [], graph: null, overhead: null, host: null };
+  const host = find("host.txt");
+  if (host) out.host = readFileSync(host, "utf8").trim().split("\n");
+  const samples = find("samples.txt");
+  if (samples) {
+    for (const line of readFileSync(samples, "utf8").split("\n")) {
+      const [head, load, net] = line.split(" | ");
+      if (!net) continue;
+      const parts = head.trim().split(/\s+/);
+      const t = Number(parts[0]) * 1000;
+      const [rx, tx] = net.trim().split(/\s+/).map(Number);
+      let cpu = null;
+      if (parts[1] === "cpu") {
+        const v = parts.slice(2).map(Number);
+        const idle = v[3] + (v[4] || 0);
+        const total = v.reduce((a, b) => a + b, 0);
+        cpu = { idle, total };
+      } else if (parts.length >= 4) {
+        // iostat: us sy id [1m 5m 15m]
+        const [us, sy, id] = parts.slice(1, 4).map(Number);
+        cpu = { busy: (us + sy) / 100, idleFrac: id / 100 };
+      }
+      out.samples.push({ t, rx, tx, cpu, load: load.trim() });
+    }
+  }
+  const rustc = find("rustc.tsv");
+  if (rustc) {
+    for (const line of readFileSync(rustc, "utf8").split("\n")) {
+      const f = line.split("\t");
+      if (f.length < 7) continue;
+      out.rustc.push({
+        start: Number(f[0]) * 1000,
+        end: Number(f[1]) * 1000,
+        crate: f[2],
+        types: f[3],
+        instrumented: f[4] === "1",
+        outDir: f[5],
+        code: Number(f[6]),
+        compiler: f[7] ?? "",
+      });
+    }
+  }
+  const graph = find("graph.json");
+  if (graph) {
+    try {
+      const text = readFileSync(graph, "utf8");
+      out.graph = JSON.parse(text.slice(text.indexOf("{")));
+    } catch {
+      out.graph = null;
+    }
+  }
+  const times = find("overhead/times.txt");
+  if (times) {
+    out.overhead = { runs: {}, records: {} };
+    for (const line of readFileSync(times, "utf8").split("\n")) {
+      const [label, start, end, status] = line.trim().split(/\s+/);
+      if (label)
+        out.overhead.runs[label] = { s: Number(end) - Number(start), status: Number(status) };
+    }
+    for (const label of ["instrumented", "plain"]) {
+      out.overhead.records[label] = readRecords(
+        files.filter((f) => f.includes(`/overhead/${label}-records/`)),
+      );
+    }
+  }
+  return out;
+}
+
+// A rustc invocation's tree: what kind of build it is part of.
+function tree(r) {
+  if (/clippy-driver/.test(r.compiler)) return "clippy";
+  if (/llvm-cov-target/.test(r.outDir) || r.instrumented) return "instrumented";
+  if (
+    /\/toolchains\/1\.\d+/.test(r.compiler) &&
+    !/\/toolchains\/(stable|nightly)/.test(r.compiler)
+  ) {
+    // The MSRV check runs its own pinned toolchain; the workspace's is rust-toolchain.toml's.
+    if (/msrv|\/target\/msrv/.test(r.outDir)) return "msrv";
+  }
+  if (/\/release\//.test(r.outDir)) return "release (install proofs, wheel)";
+  return "plain";
+}
+
+// ---------------------------------------------------------------- records
+
+function readRecords(files) {
+  const records = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    let record;
+    try {
+      record = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (recordProblem(record)) continue;
+    records.push(record);
+  }
+  // One record per (binary, test): the last attempt of the run with the most records.
+  const byRun = new Map();
+  for (const r of records) byRun.set(r.run_id, (byRun.get(r.run_id) ?? 0) + 1);
+  const run = [...byRun.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const kept = new Map();
+  for (const r of records.filter((r) => r.run_id === run)) {
+    const key = `${r.binary}::${r.test}`;
+    const prev = kept.get(key);
+    if (!prev || (r.attempt ?? 0) > (prev.attempt ?? 0)) kept.set(key, r);
+  }
+  return [...kept.values()].map((r) => ({
+    ...r,
+    start: r.started_at * 1000,
+    end: r.started_at * 1000 + r.wall_s * 1000,
+  }));
+}
+
+const IN_TEST = ["spawn", "git", "build", "fixture", "wait", "fs"];
+
+// A record's wall clock split into named parts that sum to it: spawn split by the program
+// run, the other categories, and the recorder's own unattributed time.
+function recordParts(r) {
+  const parts = {};
+  const spawnS = r.categories.spawn?.s ?? 0;
+  const programs = Object.entries(r.programs ?? {}).filter(([p]) => p !== "git" && p !== "cargo");
+  const programTotal = programs.reduce((a, [, v]) => a + v.s, 0);
+  for (const c of IN_TEST) {
+    const s = r.categories[c]?.s ?? 0;
+    if (c === "spawn" && programTotal > 0) {
+      for (const [p, v] of programs) parts[`spawn: ${p}`] = (spawnS * v.s) / programTotal;
+    } else if (c === "wait") {
+      parts["wait (sleeps and polls)"] = s;
+    } else if (c === "build") {
+      parts["build (cargo run by a test)"] = s;
+    } else parts[c === "spawn" ? "spawn: (unnamed)" : c] = s;
+  }
+  parts["in-test computation (recorder-unattributed)"] = r.unattributed_s;
+  const total = Object.values(parts).reduce((a, b) => a + b, 0);
+  const scale = total > 0 ? r.wall_s / total : 0;
+  for (const k of Object.keys(parts)) parts[k] = (parts[k] * scale) / r.wall_s;
+  return parts; // fractions of the record's wall clock
+}
+
+// ---------------------------------------------------------------- the job
+
+function analyzeJob(opts) {
+  const gh = new Gh(opts.cache, opts["min-remaining"]);
+  const { repo } = opts;
+  const run = gh.json(`repos/${repo}/actions/runs/${opts.run}`);
+  if (run.status !== "completed") refuse(`run ${opts.run} is ${run.status}, not completed`);
+  const jobs = gh.json(`repos/${repo}/actions/runs/${opts.run}/jobs?per_page=100`);
+  const job = jobs.jobs.find((j) => j.name === opts.job);
+  if (!job) refuse(`run ${opts.run} has no job ${opts.job}`);
+  const lines = parseLog(gh.fetch(`repos/${repo}/actions/jobs/${job.id}/logs`));
+  const facts = logFacts(lines);
+  const artifacts = gh.json(
+    `repos/${repo}/actions/runs/${opts.run}/artifacts?per_page=100`,
+  ).artifacts;
+  const dir = join(opts.cache, "runs", String(opts.run), opts.job);
+  const get = (name) => {
+    const a = artifacts.find((x) => x.name === name && !x.expired);
+    return a ? unzipArtifact(gh, repo, a, join(dir, name)) : null;
+  };
+  const profileDir = get(`test-profile-${opts.job}`);
+  const nxDir = get(`nx-cache-entries-${opts.job}`);
+  const measureDir = get(`measure-${opts.job}`);
+  const executions =
+    nxDir && existsSync(join(nxDir, "executions.json"))
+      ? JSON.parse(readFileSync(join(nxDir, "executions.json"), "utf8"))
+      : null;
+  const manifest =
+    nxDir && existsSync(join(nxDir, "manifest.json"))
+      ? JSON.parse(readFileSync(join(nxDir, "manifest.json"), "utf8"))
+      : null;
+  const records = readRecords(walk(profileDir ?? ""));
+  const measure = readMeasure(measureDir);
+
+  const wall = (ms(job.completed_at) - ms(job.started_at)) / 1000;
+  const result = {
+    repo,
+    run: Number(opts.run),
+    job: opts.job,
+    job_id: job.id,
+    attempt: job.run_attempt,
+    runner: job.runner_name,
+    labels: job.labels,
+    conclusion: job.conclusion,
+    head_sha: run.head_sha,
+    head_branch: run.head_branch,
+    pull_requests: run.pull_requests?.map((p) => p.number) ?? [],
+    github_sha: facts.github_sha,
+    started_at: job.started_at,
+    completed_at: job.completed_at,
+    wall_s: wall,
+    selection: facts.selection,
+    cache_lines: facts.cache,
+    read_only_lines: facts.readOnly,
+    requests: 0,
+  };
+
+  // Steps: sequential ones partition the job; a background step overlaps the next.
+  const steps = job.steps.map((s) => ({
+    name: s.name,
+    number: s.number,
+    conclusion: s.conclusion,
+    start: ms(s.started_at),
+    end: ms(s.completed_at),
+    class: stepClass(s.name),
+  }));
+  steps.forEach((s, i) => {
+    const next = steps[i + 1];
+    s.background = Boolean(next && s.end > next.start + 1000 && s.end - s.start > 60_000);
+  });
+  const sequential = steps.filter((s) => !s.background && s.start && s.end);
+  const stepSum = sequential.reduce((a, s) => a + (s.end - s.start) / 1000, 0);
+  result.steps = steps.map((s) => ({
+    name: s.name,
+    class: s.class,
+    background: s.background,
+    s: (s.end - s.start) / 1000,
+    conclusion: s.conclusion,
+  }));
+  result.between_steps_s = wall - stepSum;
+  const byClass = {};
+  for (const s of sequential) byClass[s.class] = (byClass[s.class] ?? 0) + (s.end - s.start) / 1000;
+  result.step_classes = byClass;
+
+  // The gate: Nx tasks shared fairly, each task's share split by what it was doing.
+  const gate = sequential.find((s) => s.class === "gate (Nx tasks)");
+  const tasks = (executions?.tasks ?? []).map((t) => ({
+    task: t.task,
+    result: t.result,
+    remote_status: t.remote_status,
+    start: ms(t.started_at),
+    end: ms(t.finished_at),
+  }));
+  result.executions_available = Boolean(executions);
+  result.store_attempts = executions?.store_attempts ?? null;
+  result.stored = manifest
+    ? {
+        entries: manifest.entries.filter((e) => e.source === "stored").length,
+        bytes: manifest.stored_bytes,
+        replayed: manifest.entries.filter((e) => e.source === "replayed").length,
+      }
+    : null;
+
+  // Which task ran each test binary: the test task whose window holds most of its records.
+  const testTasks = tasks.filter((t) => /:(test|test-quick|smoke|release-compat)$/.test(t.task));
+  const binaryTask = new Map();
+  const binaries = [...new Set(records.map((r) => r.binary))];
+  for (const b of binaries) {
+    const counts = new Map();
+    for (const r of records.filter((x) => x.binary === b))
+      for (const t of testTasks)
+        if (r.start >= t.start - 2000 && r.end <= t.end + 2000)
+          counts.set(t, (counts.get(t) ?? 0) + 1);
+    const best = [...counts.entries()].sort(
+      (a, b2) => b2[1] - a[1] || a[0].end - a[0].start - (b2[0].end - b2[0].start),
+    )[0];
+    if (best) binaryTask.set(b, best[0]);
+  }
+  for (const t of tasks) {
+    t.records = records.filter((r) => binaryTask.get(r.binary) === t);
+    t.testStart = t.records.length ? Math.min(...t.records.map((r) => r.start)) : null;
+    t.testEnd = t.records.length ? Math.max(...t.records.map((r) => r.end)) : null;
+    t.coverage = /:test$/.test(t.task) && opts.job === "test-linux";
+  }
+  for (const r of records) r.parts = recordParts(r);
+  const rustc = measure?.rustc ?? [];
+
+  const categories = {};
+  const add = (k, s) => {
+    categories[k] = (categories[k] ?? 0) + s;
+  };
+  const taskShare = new Map(tasks.map((t) => [t.task, 0]));
+  const taskCats = new Map(tasks.map((t) => [t.task, {}]));
+  const binaryShare = new Map();
+  const testShare = new Map();
+  const compileCritical = {};
+  if (gate) {
+    const tick = 1000;
+    for (let t = gate.start; t < gate.end; t += tick) {
+      const mid = t + tick / 2;
+      const running = tasks.filter((x) => x.start <= mid && mid < x.end);
+      if (!running.length) {
+        const before = tasks.length && mid < Math.min(...tasks.map((x) => x.start));
+        const after = tasks.length && mid >= Math.max(...tasks.map((x) => x.end));
+        add(
+          !tasks.length
+            ? "gate without Nx task telemetry (unattributed)"
+            : before
+              ? "gate: Nx planning before the first task"
+              : after
+                ? "gate: after the last task (lockfile check, exit)"
+                : "gate: no Nx task running (scheduling gap)",
+          1,
+        );
+        continue;
+      }
+      const activeRustc = rustc.filter((r) => r.start <= mid && mid < r.end);
+      const trees = [...new Set(activeRustc.map(tree))];
+      const share = 1 / running.length;
+      for (const x of running) {
+        taskShare.set(x.task, taskShare.get(x.task) + share);
+        const tc = taskCats.get(x.task);
+        const put = (k, s) => {
+          add(k, s);
+          tc[k] = (tc[k] ?? 0) + s;
+        };
+        const inTests = x.records.filter((r) => r.start <= mid && mid < r.end);
+        if (inTests.length) {
+          for (const r of inTests) {
+            const each = share / inTests.length;
+            binaryShare.set(r.binary, (binaryShare.get(r.binary) ?? 0) + each);
+            const key = `${r.binary}::${r.test}`;
+            testShare.set(key, (testShare.get(key) ?? 0) + each);
+            for (const [k, f] of Object.entries(r.parts)) put(`test: ${k}`, each * f);
+          }
+        } else if (trees.length && !(x.testStart && mid >= x.testEnd && x.coverage)) {
+          for (const tr of trees) put(`compile: ${tr}`, share / trees.length);
+        } else if (x.testStart && mid < x.testStart) {
+          put("task: before its first test, no rustc running (cargo, nextest, archive)", share);
+        } else if (x.testStart && mid >= x.testEnd) {
+          put(
+            x.coverage
+              ? "task: after its last test (profdata merge, LCOV export)"
+              : "task: after its last test",
+            share,
+          );
+        } else if (x.testStart) {
+          put("task: between tests (nextest scheduling)", share);
+        } else {
+          put(`task without test records: ${x.task.replace(/^[^:]+:/, "")}`, share);
+        }
+      }
+    }
+  }
+  result.gate_s = gate ? (gate.end - gate.start) / 1000 : 0;
+  result.gate_categories = categories;
+  result.tasks = tasks.map((t) => {
+    const own = (t.end - t.start) / 1000;
+    let overlap = 0;
+    for (const o of tasks)
+      if (o !== t)
+        overlap += Math.max(0, Math.min(o.end, t.end) - Math.max(o.start, t.start)) / 1000;
+    return {
+      task: t.task,
+      result: t.result,
+      start_offset_s: gate ? (t.start - gate.start) / 1000 : null,
+      s: own,
+      avg_concurrency: own > 0 ? 1 + overlap / own : 1,
+      share_s: taskShare.get(t.task),
+      categories: taskCats.get(t.task),
+      tests: t.records.length,
+      test_seconds: t.records.reduce((a, r) => a + r.wall_s, 0),
+    };
+  });
+  result.critical_path = criticalPath(tasks, measure?.graph);
+
+  // Compile: every rustc invocation, by tree.
+  const compile = {};
+  for (const r of rustc) {
+    const k = tree(r);
+    compile[k] ??= { invocations: 0, cpu_s: 0, wall_s: 0, crates: {} };
+    compile[k].invocations++;
+    compile[k].cpu_s += (r.end - r.start) / 1000;
+    compile[k].crates[r.crate] = (compile[k].crates[r.crate] ?? 0) + (r.end - r.start) / 1000;
+  }
+  for (const k of Object.keys(compile))
+    compile[k].wall_s = unionSeconds(rustc.filter((r) => tree(r) === k));
+  result.compile = compile;
+  result.compile_any_wall_s = unionSeconds(rustc);
+  result.compile_on_critical_path_s = result.critical_path.length
+    ? unionSeconds(
+        rustc.filter((r) =>
+          result.critical_path.some(
+            (c) =>
+              tasks.find((t) => t.task === c.task) && r.start < ms(c.end) && r.end > ms(c.start),
+          ),
+        ),
+      )
+    : 0;
+  void compileCritical;
+
+  // Tests.
+  result.binaries = binaries
+    .map((b) => {
+      const rs = records.filter((r) => r.binary === b);
+      return {
+        binary: b,
+        task: binaryTask.get(b)?.task ?? null,
+        tier: b === "e2e" ? "e2e" : "other",
+        tests: rs.length,
+        test_seconds: rs.reduce((a, r) => a + r.wall_s, 0),
+        elapsed_share_s: binaryShare.get(b) ?? 0,
+      };
+    })
+    .sort((a, b) => b.test_seconds - a.test_seconds);
+  result.slowest = [...records]
+    .sort((a, b) => b.wall_s - a.wall_s)
+    .slice(0, 20)
+    .map((r) => ({
+      test: `${r.binary}::${r.test}`,
+      wall_s: r.wall_s,
+      elapsed_share_s: testShare.get(`${r.binary}::${r.test}`) ?? 0,
+      parts_s: Object.fromEntries(
+        Object.entries(r.parts)
+          .filter(([, f]) => f > 0.005)
+          .map(([k, f]) => [k, f * r.wall_s]),
+      ),
+      polls: r.categories.wait?.polls ?? 0,
+      sleeps: r.categories.wait?.count ?? 0,
+    }));
+  const programs = {};
+  for (const r of records)
+    for (const [p, v] of Object.entries(r.programs ?? {})) {
+      programs[p] ??= { count: 0, s: 0 };
+      programs[p].count += v.count;
+      programs[p].s += v.s;
+    }
+  result.programs = programs;
+  result.test_seconds = records.reduce((a, r) => a + r.wall_s, 0);
+  result.tests = records.length;
+  const totals = {};
+  for (const r of records)
+    for (const [k, f] of Object.entries(r.parts)) totals[k] = (totals[k] ?? 0) + f * r.wall_s;
+  result.test_category_seconds = totals;
+
+  // Network and CPU from the sampler.
+  if (measure?.samples.length) result.samples = summarizeSamples(measure.samples, steps, tasks);
+  if (measure?.overhead) result.overhead = summarizeOverhead(measure.overhead, records);
+  result.measure_host = measure?.host ?? null;
+  result.requests = gh.requests;
+  result.cached_reads = gh.cached;
+  return result;
+}
+
+function unionSeconds(intervals) {
+  const s = intervals.map((r) => [r.start, r.end]).sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let cur = null;
+  for (const [a, b] of s) {
+    if (!cur || a > cur[1]) {
+      if (cur) total += cur[1] - cur[0];
+      cur = [a, b];
+    } else cur[1] = Math.max(cur[1], b);
+  }
+  if (cur) total += cur[1] - cur[0];
+  return total / 1000;
+}
+
+// From the task that ended last, back through whatever it waited on: a dependency from the
+// graph when there is one, else the task whose end freed its start (within 5 s).
+function criticalPath(tasks, graph) {
+  if (!tasks.length) return [];
+  const deps = graph?.tasks?.dependencies ?? {};
+  const byId = new Map(tasks.map((t) => [t.task, t]));
+  let cur = [...tasks].sort((a, b) => b.end - a.end)[0];
+  const path = [];
+  const seen = new Set();
+  while (cur && !seen.has(cur.task)) {
+    seen.add(cur.task);
+    const waitedOn = (deps[cur.task] ?? []).map((d) => byId.get(d)).filter(Boolean);
+    const freed = tasks.filter(
+      (t) => t !== cur && t.end <= cur.start + 1000 && t.end >= cur.start - 5000,
+    );
+    const candidates = [...waitedOn, ...freed].filter((t) => t.end <= cur.start + 1000);
+    const pred = candidates.sort((a, b) => b.end - a.end)[0];
+    path.unshift({
+      task: cur.task,
+      start: new Date(cur.start).toISOString(),
+      end: new Date(cur.end).toISOString(),
+      s: (cur.end - cur.start) / 1000,
+      via: pred ? (waitedOn.includes(pred) ? "dependency" : "slot freed") : "start",
+      gap_before_s: pred ? (cur.start - pred.end) / 1000 : null,
+    });
+    cur = pred;
+  }
+  return path;
+}
+
+function summarizeSamples(samples, steps, tasks) {
+  const ticks = [];
+  for (let i = 1; i < samples.length; i++) {
+    const a = samples[i - 1];
+    const b = samples[i];
+    const dt = (b.t - a.t) / 1000;
+    if (dt <= 0) continue;
+    let busy = null;
+    if (a.cpu?.total !== undefined && b.cpu?.total !== undefined) {
+      const total = b.cpu.total - a.cpu.total;
+      busy = total > 0 ? 1 - (b.cpu.idle - a.cpu.idle) / total : null;
+    } else if (b.cpu?.busy !== undefined) busy = b.cpu.busy;
+    ticks.push({ t: a.t, dt, bytes: b.rx - a.rx + (b.tx - a.tx), busy });
+  }
+  const ACTIVE = 256 * 1024; // bytes a second
+  const where = (tick) => {
+    const mid = tick.t + (tick.dt * 1000) / 2;
+    const s = steps.find((x) => !x.background && x.start <= mid && mid < x.end);
+    if (!s) return "between steps";
+    if (s.class !== "gate (Nx tasks)") return `step: ${s.class}`;
+    const running = tasks
+      .filter((x) => x.start <= mid && mid < x.end)
+      .map((x) => x.task.replace(/^[^:]+:/, (p) => p));
+    return running.length ? `gate: ${running.sort().join(" + ")}` : "gate: no task";
+  };
+  const network = {};
+  let activeS = 0;
+  let bytes = 0;
+  const cpu = { s: 0, busy_s: 0 };
+  for (const tick of ticks) {
+    bytes += tick.bytes;
+    if (tick.busy !== null) {
+      cpu.s += tick.dt;
+      cpu.busy_s += tick.busy * tick.dt;
+    }
+    const k = where(tick);
+    network[k] ??= { bytes: 0, active_s: 0 };
+    network[k].bytes += tick.bytes;
+    if (tick.bytes / tick.dt >= ACTIVE) {
+      network[k].active_s += tick.dt;
+      activeS += tick.dt;
+    }
+  }
+  return {
+    sampled_s: ticks.reduce((a, t) => a + t.dt, 0),
+    network_bytes: bytes,
+    network_active_s: activeS,
+    network_active_threshold_bytes_per_s: ACTIVE,
+    network_by_place: network,
+    cpu_busy_fraction: cpu.s ? cpu.busy_s / cpu.s : null,
+  };
+}
+
+function summarizeOverhead(overhead, gateRecords) {
+  const ins = new Map(overhead.records.instrumented.map((r) => [`${r.binary}::${r.test}`, r]));
+  const pla = new Map(overhead.records.plain.map((r) => [`${r.binary}::${r.test}`, r]));
+  const both = [...ins.keys()].filter((k) => pla.has(k));
+  const sum = (m) => both.reduce((a, k) => a + m.get(k).wall_s, 0);
+  void gateRecords;
+  return {
+    runs: overhead.runs,
+    tests_in_both: both.length,
+    instrumented_test_seconds: sum(ins),
+    plain_test_seconds: sum(pla),
+    ratio: sum(pla) > 0 ? sum(ins) / sum(pla) : null,
+  };
+}
+
+// ---------------------------------------------------------------- printing
+
+function printJob(r) {
+  const out = [];
+  const w = r.wall_s;
+  out.push(
+    `ci-time-profile: ${r.repo} run ${r.run} job ${r.job} (id ${r.job_id}, attempt ${r.attempt}, ${r.conclusion}) on ${r.runner} [${(r.labels ?? []).join(",")}]`,
+  );
+  out.push(
+    `head ${r.head_sha} (${r.head_branch}, PR ${r.pull_requests.join(",") || "-"}); GITHUB_SHA ${r.github_sha ?? "not in log"}`,
+  );
+  out.push(`wall clock ${min(w)} min (${r.started_at} .. ${r.completed_at})`);
+  if (r.selection)
+    out.push(`Nx selection: ${r.selection.count} task(s): ${r.selection.tasks.join(" ")}`);
+  out.push("", "## Steps, one after another (sums to the wall clock)", "");
+  const classes = Object.entries(r.step_classes).sort((a, b) => b[1] - a[1]);
+  out.push(
+    table(
+      ["class", "min", "share"],
+      [
+        ...classes.map(([k, s]) => [k, min(s), pct(s, w)]),
+        ["between steps (runner)", min(r.between_steps_s), pct(r.between_steps_s, w)],
+        ["**job wall clock**", min(w), "100%"],
+      ],
+    ),
+  );
+  out.push("", "| step | class | s |", "| --- | --- | --- |");
+  for (const s of r.steps)
+    out.push(
+      `| ${s.name.replace(/\|/g, "/")} | ${s.class}${s.background ? " (background, overlaps)" : ""} | ${s.s.toFixed(0)} |`,
+    );
+  if (r.cache_lines.length) {
+    out.push("", "## Cache restore and save lines", "");
+    for (const c of r.cache_lines)
+      out.push(`- ${new Date(c.t).toISOString()} ${c.text.slice(0, 200)}`);
+  }
+  out.push("", "## Writes", "");
+  out.push(
+    r.stored
+      ? `Nx sidecar manifest: stored ${r.stored.entries} entries (${r.stored.bytes} bytes), replayed ${r.stored.replayed}`
+      : "Nx sidecar manifest: not uploaded",
+  );
+  if (r.store_attempts) {
+    const by = {};
+    for (const a of r.store_attempts)
+      by[`${a.status}/${a.http_status}`] = (by[`${a.status}/${a.http_status}`] ?? 0) + 1;
+    out.push(`Nx store attempts by status/http: ${JSON.stringify(by)}`);
+  }
+  for (const l of r.read_only_lines) out.push(`- ${l.text.slice(0, 160)}`);
+
+  out.push(
+    "",
+    `## Inside the gate step (${min(r.gate_s)} min): each moment shared among the Nx tasks running`,
+    "",
+  );
+  const cats = Object.entries(r.gate_categories).sort((a, b) => b[1] - a[1]);
+  out.push(
+    table(
+      ["category", "min", "share of job"],
+      cats.map(([k, s]) => [k, min(s), pct(s, w)]),
+    ),
+  );
+  const unattributed =
+    r.between_steps_s + cats.filter(([k]) => /unattributed/.test(k)).reduce((a, [, s]) => a + s, 0);
+  out.push("", `unattributed: ${min(unattributed)} min (${pct(unattributed, w)} of the job)`);
+
+  out.push("", "## Nx tasks", "");
+  out.push(
+    table(
+      [
+        "task",
+        "result",
+        "starts at (s)",
+        "own min",
+        "avg concurrency",
+        "fair-share min",
+        "tests",
+        "test-seconds",
+      ],
+      [...r.tasks]
+        .sort((a, b) => b.share_s - a.share_s)
+        .map((t) => [
+          t.task,
+          t.result,
+          t.start_offset_s?.toFixed(0) ?? "-",
+          min(t.s),
+          t.avg_concurrency.toFixed(2),
+          min(t.share_s),
+          t.tests,
+          t.test_seconds.toFixed(0),
+        ]),
+    ),
+  );
+  out.push("", "### Critical path (last task back to the first)", "");
+  out.push(
+    table(
+      ["task", "own min", "reached via", "gap before (s)"],
+      r.critical_path.map((c) => [c.task, min(c.s), c.via, c.gap_before_s?.toFixed(0) ?? "-"]),
+    ),
+  );
+  out.push(`critical path tasks: ${min(r.critical_path.reduce((a, c) => a + c.s, 0))} min`);
+
+  out.push("", "## Compile and link (every rustc invocation)", "");
+  if (Object.keys(r.compile).length) {
+    out.push(
+      table(
+        [
+          "tree",
+          "invocations",
+          "rustc seconds (summed)",
+          "wall with one running (min)",
+          "top crates (s)",
+        ],
+        Object.entries(r.compile).map(([k, c]) => [
+          k,
+          c.invocations,
+          c.cpu_s.toFixed(0),
+          min(c.wall_s),
+          Object.entries(c.crates)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([n, s]) => `${n} ${s.toFixed(0)}`)
+            .join(", "),
+        ]),
+      ),
+    );
+    out.push(
+      `any rustc running: ${min(r.compile_any_wall_s)} min of wall clock; during critical-path tasks: ${min(r.compile_on_critical_path_s)} min`,
+    );
+  } else out.push("no rustc timings (the run carried no measure artifact)");
+
+  out.push(
+    "",
+    `## Tests: ${r.tests} records, ${(r.test_seconds / 60).toFixed(1)} test-minutes`,
+    "",
+  );
+  out.push(
+    table(
+      ["category", "test-minutes", "share of test time"],
+      Object.entries(r.test_category_seconds)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, s]) => [k, min(s), pct(s, r.test_seconds)]),
+    ),
+  );
+  out.push("", "### Programs the tests ran (count, test-thread seconds)", "");
+  out.push(
+    table(
+      ["program", "count", "seconds"],
+      Object.entries(r.programs)
+        .sort((a, b) => b[1].s - a[1].s)
+        .map(([p, v]) => [p, v.count, v.s.toFixed(0)]),
+    ),
+  );
+  out.push("", "### Test binaries", "");
+  out.push(
+    table(
+      ["binary", "tier", "task", "tests", "test-seconds", "elapsed share (min)"],
+      r.binaries.map((b) => [
+        b.binary,
+        b.tier,
+        b.task ?? "-",
+        b.tests,
+        b.test_seconds.toFixed(0),
+        min(b.elapsed_share_s),
+      ]),
+    ),
+  );
+  out.push("", "### The 20 slowest tests", "");
+  out.push(
+    table(
+      ["test", "wall s", "elapsed share s", "split (s)"],
+      r.slowest.map((t) => [
+        t.test,
+        t.wall_s.toFixed(1),
+        t.elapsed_share_s.toFixed(1),
+        Object.entries(t.parts_s)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, s]) => `${k} ${s.toFixed(1)}`)
+          .join("; ") + `; polls ${t.polls}, sleeps ${t.sleeps}`,
+      ]),
+    ),
+  );
+  if (r.samples) {
+    const s = r.samples;
+    out.push("", "## Network and CPU (sampler)", "");
+    out.push(
+      `sampled ${min(s.sampled_s)} min; non-loopback bytes ${(s.network_bytes / 1e6).toFixed(0)} MB; seconds at >= ${s.network_active_threshold_bytes_per_s / 1024} KiB/s: ${s.network_active_s.toFixed(0)}; CPU busy ${((s.cpu_busy_fraction ?? 0) * 100).toFixed(0)}%`,
+    );
+    out.push(
+      table(
+        ["where", "MB", "active s"],
+        Object.entries(s.network_by_place)
+          .sort((a, b) => b[1].bytes - a[1].bytes)
+          .slice(0, 25)
+          .map(([k, v]) => [k, (v.bytes / 1e6).toFixed(1), v.active_s.toFixed(0)]),
+      ),
+    );
+  }
+  if (r.overhead) {
+    const o = r.overhead;
+    out.push(
+      "",
+      "## Coverage instrumentation runtime overhead (one e2e partition, run twice after the gate)",
+      "",
+    );
+    out.push(
+      `runs: ${Object.entries(o.runs)
+        .map(([k, v]) => `${k} ${v.s}s exit ${v.status}`)
+        .join(
+          "; ",
+        )}; tests in both ${o.tests_in_both}; test-seconds instrumented ${o.instrumented_test_seconds.toFixed(0)}, plain ${o.plain_test_seconds.toFixed(0)}, ratio ${o.ratio?.toFixed(3) ?? "-"}`,
+    );
+  }
+  out.push(
+    "",
+    `GitHub requests this invocation: ${r.requests} (read from cache: ${r.cached_reads})`,
+  );
+  return out.join("\n");
+}
+
+// ---------------------------------------------------------------- history
+
+function history(opts) {
+  const gh = new Gh(opts.cache, opts["min-remaining"]);
+  const since = new Date(opts.since).toISOString();
+  const until = new Date(opts.until).toISOString();
+  const split = ms(opts.split);
+  const runs = [];
+  for (let page = 1; page < 20; page++) {
+    const r = gh.json(
+      `repos/${opts.repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=${page}&created=${since.slice(0, 19)}..${until.slice(0, 19)}`,
+    );
+    runs.push(...r.workflow_runs);
+    if (r.workflow_runs.length < 100) break;
+  }
+  const rows = [];
+  for (const run of runs) {
+    const jobs = gh.json(
+      `repos/${opts.repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+    );
+    for (const j of jobs.jobs) {
+      if (!opts.jobs.includes(j.name) || j.conclusion !== "success") continue;
+      rows.push({
+        run: run.id,
+        attempt: run.run_attempt,
+        pr: run.pull_requests?.[0]?.number ?? null,
+        head_sha: run.head_sha,
+        created_at: run.created_at,
+        job: j.name,
+        minutes: (ms(j.completed_at) - ms(j.started_at)) / 60000,
+        side: ms(run.created_at) < split ? "before" : "after",
+      });
+    }
+  }
+  const summary = {};
+  for (const job of opts.jobs)
+    for (const side of ["before", "after"]) {
+      const v = rows.filter((r) => r.job === job && r.side === side).map((r) => r.minutes);
+      summary[`${job} ${side}`] = {
+        n: v.length,
+        median_min: median(v),
+        min_min: v.length ? Math.min(...v) : null,
+        max_min: v.length ? Math.max(...v) : null,
+      };
+    }
+  return { runs: runs.length, rows, summary, requests: gh.requests, cached_reads: gh.cached };
+}
+
+function printHistory(h, opts) {
+  const out = [
+    `ci-time-profile history: ${opts.repo} ci.yml pull_request runs created ${opts.since} .. ${opts.until}, split at ${opts.split}: ${h.runs} runs`,
+    "",
+  ];
+  out.push(
+    table(
+      ["job", "side", "n", "median min", "min", "max"],
+      Object.entries(h.summary).map(([k, v]) => {
+        const [job, side] = k.split(" ");
+        return [
+          job,
+          side,
+          v.n,
+          v.median_min?.toFixed(1) ?? "-",
+          v.min_min?.toFixed(1) ?? "-",
+          v.max_min?.toFixed(1) ?? "-",
+        ];
+      }),
+    ),
+  );
+  out.push(
+    "",
+    table(
+      ["run", "attempt", "PR", "created", "job", "min", "side"],
+      h.rows.map((r) => [
+        r.run,
+        r.attempt,
+        r.pr ?? "-",
+        r.created_at,
+        r.job,
+        r.minutes.toFixed(1),
+        r.side,
+      ]),
+    ),
+  );
+  out.push(
+    "",
+    `GitHub requests this invocation: ${h.requests} (read from cache: ${h.cached_reads})`,
+  );
+  return out.join("\n");
+}
+
+// ---------------------------------------------------------------- main
+
+try {
+  const opts = parse(process.argv.slice(2));
+  const result = opts.command === "job" ? analyzeJob(opts) : history(opts);
+  if (opts.json) writeFileSync(opts.json, `${JSON.stringify(result, null, 2)}\n`);
+  process.stdout.write(
+    `${opts.command === "job" ? printJob(result) : printHistory(result, opts)}\n`,
+  );
+} catch (error) {
+  if (error instanceof Refusal) {
+    process.stderr.write(`ci-time-profile: ${error.message}\n`);
+    process.exit(1);
+  }
+  throw error;
+}
