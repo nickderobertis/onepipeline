@@ -96,41 +96,7 @@ function load(spike, name) {
     );
     return doc;
   }
-  const finite = (v) => Number.isFinite(v);
-  check.need(
-    doc?.summary &&
-      platforms.every((p) => {
-        const x = doc.summary.platforms?.[p];
-        return (
-          x &&
-          [
-            "minutesPerFullRun",
-            "suiteMinutesSkipped",
-            "buildDeltaCharged",
-            "netMinutesSaved",
-          ].every((k) => finite(x[k])) &&
-          Number.isSafeInteger(x.archiveBuildsSkipped) &&
-          (x.netMinutesPerChange === null || finite(x.netMinutesPerChange)) &&
-          x.perSuite &&
-          typeof x.perSuite === "object" &&
-          Object.values(x.perSuite).every(finite)
-        );
-      }) &&
-      Array.isArray(doc.perChange) &&
-      doc.perChange.every(
-        (c) =>
-          typeof c.commit === "string" &&
-          Array.isArray(c.affected) &&
-          c.affected.every((s) => typeof s === "string" && Object.hasOwn(doc.suites ?? {}, s)),
-      ) &&
-      doc.suites &&
-      typeof doc.suites === "object" &&
-      Number.isSafeInteger(doc.summary.changes) &&
-      Number.isSafeInteger(doc.summary.suites) &&
-      Number.isSafeInteger(doc.summary.skippedSuiteRuns),
-    `${path} is not a weighed replay's JSON`,
-    again,
-  );
+  check.weighedReplay(doc, path);
   return doc;
 }
 

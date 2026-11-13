@@ -1486,6 +1486,17 @@ test("each document the harness reads is refused at its command when malformed, 
   );
   assert.equal(run.status, 1);
   assert.match(run.stderr, /the runtime result of runtime:x is not \{ok, out\}/);
+  write(evidence, {
+    [`plans/${base}.json`]: JSON.stringify({
+      plans: { "p:test": { plan: ["file:a"], config: "c", inputs: ["src/**"], root: ".", cache: "yes" } },
+      missing: [],
+      runtime: {},
+      external: "",
+    }),
+  });
+  run = spawnSync(process.execPath, [replay, "--observed", evidence, "--clone", repo, "--out", join(dir, "o.json")], { encoding: "utf8" });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /p:test's plan is not a list of inputs/);
   // An option replay's input: an observed result whose forced row names no inputs.
   write(dir, {
     "obs.json": JSON.stringify({
@@ -1530,6 +1541,27 @@ test("each document the harness reads is refused at its command when malformed, 
     run.stderr,
     /#1 has a job whose tasks are not rows of a task, a cause and the inputs that forced it/,
   );
+  // A row said forced by one input that names two.
+  write(dir, {
+    "obs2.json": JSON.stringify({
+      prs: [
+        {
+          pr: 1,
+          title: "t",
+          release: false,
+          base: SHA_A,
+          head: SHA_B,
+          changed: [],
+          moved: [],
+          jobs: [{ job: "test-linux", ran: [{ task: "p:t", cause: "one input", inputs: ["a", "b"] }], replayed: [] }],
+        },
+      ],
+      weights: { tasks: {}, modules: {} },
+    }),
+  });
+  run = spawnSync(process.execPath, [replay, "--mapping", join(dir, "m.json"), "--changes", join(dir, "obs2.json"), "--out", join(dir, "x")], { encoding: "utf8" });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /#1 has a job whose tasks are not rows/);
   run = spawnSync(
     process.execPath,
     [
@@ -1578,7 +1610,8 @@ test("each document the harness reads is refused at its command when malformed, 
   assert.match(run.stderr, /a finished step with no start/);
   // A named input that is not a list of inputs.
   git(repo, ["checkout", "-q", "-b", "bad-nx", "main"]);
-  write(repo, { "nx.json": JSON.stringify({ namedInputs: { rustBuild: "src" } }) });
+  // A named input that is a number, not a glob, a name or an input object.
+  write(repo, { "nx.json": JSON.stringify({ namedInputs: { rustBuild: ["src/**", 7] } }) });
   git(repo, ["commit", "-qam", "bad nx.json"]);
   const bad = git(repo, ["rev-parse", "HEAD"]);
   git(repo, ["checkout", "-q", "main"]);

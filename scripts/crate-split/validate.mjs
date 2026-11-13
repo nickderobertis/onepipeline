@@ -274,7 +274,9 @@ export function plan(doc, where) {
         Array.isArray(p.plan) &&
         p.plan.every(isText) &&
         typeof p.config === "string" &&
-        (p.inputs === null || Array.isArray(p.inputs)) &&
+        (p.inputs === null || (Array.isArray(p.inputs) && p.inputs.every(namedInput))) &&
+        (p.cache === null || typeof p.cache === "boolean") &&
+        (p.command === null || p.command === undefined || typeof p.command === "string") &&
         typeof p.root === "string",
       `${where}: ${task}'s plan is not a list of inputs with its configuration digest and root`,
       again,
@@ -290,10 +292,32 @@ export function plan(doc, where) {
   return doc;
 }
 
+/**
+ * One Nx input: a glob or named input's name, or an object of the kinds Nx reads
+ * (`runtime`, `env`, `externalDependencies`, `fileset`, `input`, `dependentTasksOutputFiles`).
+ */
+function namedInput(input) {
+  if (isText(input)) return true;
+  if (!isObject(input)) return false;
+  const kinds = [
+    "runtime",
+    "env",
+    "externalDependencies",
+    "fileset",
+    "input",
+    "dependentTasksOutputFiles",
+    "projects",
+    "dependencies",
+    "transitive",
+  ];
+  return Object.keys(input).length > 0 && Object.keys(input).every((k) => kinds.includes(k));
+}
+
 /** `nx.json`'s namedInputs: names to lists of inputs. */
 export function namedInputs(doc, where) {
   need(
-    isObject(doc) && Object.values(doc).every((list) => Array.isArray(list)),
+    isObject(doc) &&
+      Object.values(doc).every((list) => Array.isArray(list) && list.every(namedInput)),
     `${where}'s namedInputs is not an object of input lists`,
     "replay a commit whose nx.json Nx itself reads",
   );
@@ -364,8 +388,8 @@ export function observedResult(doc, where) {
     (r.evictedFrom === undefined ||
       r.evictedFrom === null ||
       (isObject(r.evictedFrom) && isCount(r.evictedFrom.run) && isCount(r.evictedFrom.pr))) &&
-    (!["one input", "several inputs"].includes(r.cause) ||
-      (Array.isArray(r.inputs) && r.inputs.every(isText)));
+    (r.cause !== "one input" || r.inputs.length === 1) &&
+    (r.cause !== "several inputs" || r.inputs.length >= 2);
   for (const pr of doc.prs) {
     need(
       isObject(pr) &&
@@ -397,7 +421,11 @@ export function observedResult(doc, where) {
           job.ran.every(forcedRow) &&
           job.replayed.every(
             (r) =>
-              isText(r.task) && (r.diffMatched === undefined || typeof r.diffMatched === "boolean"),
+              isText(r.task) &&
+              (r.diffMatched === undefined || typeof r.diffMatched === "boolean") &&
+              (r.minutes === null ||
+                r.minutes === undefined ||
+                (Number.isFinite(r.minutes) && r.minutes >= 0)),
           ),
         `${where}: #${pr.pr} has a job whose tasks are not rows of a task, a cause and the inputs that forced it`,
         again,
@@ -438,4 +466,42 @@ export function timingUnit(u) {
     "re-run the build; cargo's timings report was not one this reads",
   );
   return u;
+}
+
+/** A weighed `--changes` replay's JSON, as the report and the spike's summary read it. */
+export function weighedReplay(doc, where) {
+  const finite = (v) => Number.isFinite(v);
+  need(
+    isObject(doc?.summary) &&
+      ["linux", "darwin", "win32"].every((p) => {
+        const x = doc.summary.platforms?.[p];
+        return (
+          isObject(x) &&
+          [
+            "minutesPerFullRun",
+            "suiteMinutesSkipped",
+            "buildDeltaCharged",
+            "netMinutesSaved",
+          ].every((k) => finite(x[k])) &&
+          isCount(x.archiveBuildsSkipped) &&
+          (x.netMinutesPerChange === null || finite(x.netMinutesPerChange)) &&
+          isObject(x.perSuite) &&
+          Object.values(x.perSuite).every(finite)
+        );
+      }) &&
+      isObject(doc.suites) &&
+      Array.isArray(doc.perChange) &&
+      doc.perChange.every(
+        (c) =>
+          typeof c.commit === "string" &&
+          Array.isArray(c.affected) &&
+          c.affected.every((s) => typeof s === "string" && Object.hasOwn(doc.suites, s)),
+      ) &&
+      isCount(doc.summary.changes) &&
+      isCount(doc.summary.suites) &&
+      isCount(doc.summary.skippedSuiteRuns),
+    `${where} is not a weighed replay's JSON`,
+    "run scripts/crate-split/reuse-spike.mjs into --spike again",
+  );
+  return doc;
 }

@@ -159,7 +159,7 @@ function main(argv) {
   ]);
   replayed("c", c, delta("build-delta-c"));
   replayed("d-install-proofs", join(here, "option-d-install-proofs.json"));
-  const result = JSON.parse(readFileSync(observed, "utf8"));
+  const result = check.observedResult(JSON.parse(readFileSync(observed, "utf8")), observed);
   const d2 = sameBase(result, "onepipeline:install-documented");
   writeFileSync(join(out, "d-install-documented.json"), `${JSON.stringify(d2, null, 2)}\n`);
   steps.push(
@@ -180,8 +180,10 @@ function main(argv) {
 
 /** One line: the observed headline and each option's net minutes over today's tiers. */
 function summary(out, observed, d2) {
-  const net = (name) =>
-    JSON.parse(readFileSync(join(out, `${name}.json`), "utf8")).summary.platforms;
+  const net = (name) => {
+    const path = join(out, `${name}.json`);
+    return check.weighedReplay(JSON.parse(readFileSync(path, "utf8")), path).summary.platforms;
+  };
   const today = net("today");
   const platforms = ["linux", "darwin", "win32"];
   const over = (name) => {
