@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { artifactNames } from "../../scripts/ci-time-profile.mjs";
+import { artifactNames, stepClass } from "../../scripts/ci-time-profile.mjs";
 import { SAMPLER, TIMER } from "../../scripts/ci-time-workflow.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -84,6 +84,21 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   // The rust-cache key is computed before the wrapper is set: the timer step comes after it.
   const linux = edited.slice(edited.indexOf("\n  test-linux:\n"));
   assert.ok(linux.indexOf("Swatinem/rust-cache") < linux.indexOf("rustc-timer"));
+  // The overhead step runs the same partition both ways, the gate's records set aside first
+  // and each run's moved apart after it, and says when a run fails.
+  const overhead = linux.slice(linux.indexOf("one e2e partition instrumented, then plain"));
+  assert.match(overhead, /mv target\/test-profile "\$m\/gate-records"/);
+  assert.match(
+    overhead,
+    /run instrumented env RUSTFLAGS="-D warnings" .*bash scripts\/coverage-unit\.sh onepipeline-e2e-sample -- nextest --locked -E "\$filter" --partition hash:1\/6 --no-fail-fast/,
+  );
+  assert.match(
+    overhead,
+    /run plain bash scripts\/nextest-run\.sh cargo nextest run --locked -E "\$filter" --partition hash:1\/6 --no-fail-fast/,
+  );
+  assert.match(overhead, /mv target\/test-profile "\$m\/\$label-records"/);
+  assert.match(overhead, /echo "\$label \$start \$\(date \+%s\) \$status" >> "\$m\/times\.txt"/);
+  assert.match(overhead, /::warning::measurement: \$label exited \$status.*ACTION: /);
 
   const plain = checkout(join(scratch(t), "plain"));
   assert.equal(run(workflowScript, [plain]).status, 0);
@@ -392,7 +407,6 @@ function oneRun(
   put(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`, {
     artifacts: names.map((name, id) => ({ id, name, expired: false })),
   });
-  // The artifacts' contents, one directory each.
   const files = join(dir, "artifact-files");
   const artifact = (name) => {
     const d = join(files, name);
@@ -477,7 +491,7 @@ function oneRun(
         )
     ).join("\n"),
   );
-  // One e2e test, run plain then instrumented after the gate.
+  // The overhead partition's one test, 25% slower instrumented than plain.
   const overhead = join(measure, "overhead");
   for (const [label, wall] of [
     ["instrumented-records", 10],
@@ -933,6 +947,8 @@ test("nextest's own output, from the pinned cargo-nextest, is read into runs and
   );
   assert.equal(nextest.status, 0, nextest.stderr);
   const output = `${nextest.stdout}${nextest.stderr}`.split("\n").filter((l) => /\S/.test(l));
+  // A summary whose run's start line the log lost: kept, with no start and no task.
+  output.push("     Summary [   5.000s] 9 tests run: 9 passed, 0 skipped");
   const log = output.map((line, i) => `${iso(400 + i / 1000)} ${line}`).join("\n");
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir, { log }));
@@ -942,8 +958,11 @@ test("nextest's own output, from the pinned cargo-nextest, is read into runs and
   const r = JSON.parse(readFileSync(json, "utf8"));
   const summary = Number(/Summary \[\s*([\d.]+)s\] 2 tests run/.exec(output.join("\n"))[1]);
   assert.deepEqual(
-    r.nextest_runs.map((n) => [n.tests, n.binaries, n.s]),
-    [[2, 2, summary]],
+    r.nextest_runs.map((n) => [n.tests, n.binaries, n.s, n.started_at, n.tasks.length]),
+    [
+      [2, 2, summary, iso(400 + output.findIndex((l) => /Starting 2 tests/.test(l)) / 1000), 2],
+      [9, null, 5, null, 0],
+    ],
   );
   assert.deepEqual(Object.keys(r.log_binaries).sort(), ["it", "probe"]);
   assert.deepEqual(
@@ -996,7 +1015,6 @@ test("the artifacts the analysis reads are the ones ci.yml and the measurement e
   assert.equal(run(workflowScript, [file]).status, 0);
   const edited = readFileSync(file, "utf8");
   for (const job of ["test-linux", "test-macos"]) {
-    // The job's own block: from its key to the next job's.
     const start = edited.indexOf(`\n  ${job}:\n`);
     const next = edited.slice(start + 1).search(/\n {2}[a-z][\w-]*:\n/);
     const block = edited.slice(start, next < 0 ? undefined : start + 1 + next);
@@ -1052,6 +1070,331 @@ function gitRepo(dir) {
   git("remote", "add", "origin", origin);
   return heads;
 }
+
+test("every step of ci.yml's test jobs is classed as the analysis means it", (t) => {
+  const file = checkout(scratch(t));
+  assert.equal(run(workflowScript, [file]).status, 0);
+  const edited = readFileSync(file, "utf8");
+  for (const job of ["test-linux", "test-macos"]) {
+    const start = edited.indexOf(`\n  ${job}:\n`);
+    const next = edited.slice(start + 1).search(/\n {2}[a-z][\w-]*:\n/);
+    const block = edited.slice(start, next < 0 ? undefined : start + 1 + next);
+    // What GitHub calls each step: its name, or `Run <action>` for an unnamed one.
+    const steps = [...block.matchAll(/\n {6}- (name|uses): (.+)\n/g)].map(([, kind, value]) =>
+      kind === "name" ? value.replace(/^'(.*)'$/, "$1") : `Run ${value}`,
+    );
+    const classes = new Map(steps.map((name) => [name, stepClass(name)]));
+    assert.equal(
+      [...classes.values()].filter((c) => c === "gate (Nx tasks)").length,
+      1,
+      `${job} has one gate step`,
+    );
+    const expect = {
+      "Run Swatinem/rust-cache@v2.9.2": "cache restore",
+      "Restore the bootstrap tools": "cache restore",
+      "Decide cache trust and configure the sidecar": "Nx cache sidecar",
+      "Wait for the cache recording proxy": "Nx cache sidecar",
+      "Keep the per-test profile records": "artifact upload",
+      "Does each failed test fail again on this build": "rerun of failed tests",
+      "Report cache entries and task executions": "cache save",
+      "Run actions/upload-artifact@v4": "cache save",
+    };
+    for (const [name, cls] of Object.entries(expect))
+      assert.equal(classes.get(name), cls, `${job}: ${name}`);
+    for (const [name, cls] of classes)
+      if (/measurement-only/.test(name)) assert.equal(cls, "measurement-only", name);
+  }
+});
+
+test("each kind of step is summed into its class, and the classes are the job", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  const jobsKey = key(`repos/${REPO}/actions/runs/${RUN}/jobs?per_page=100`);
+  const jobs = JSON.parse(served.answers[jobsKey]);
+  jobs.jobs[0].steps = [
+    ["Set up job", 0, 50],
+    ["'Measure: sample CPU and network (measurement-only (spike-onepipeline-profile))'", 50, 60],
+    ["Run Swatinem/rust-cache@v2.9.2", 60, 90],
+    [
+      "Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)",
+      90,
+      690,
+    ],
+    ["Does each failed test fail again on this build", 690, 692],
+    ["Keep the per-test profile records", 692, 694],
+    ["Report cache entries and task executions", 694, 696],
+    ["Run actions/upload-artifact@v4", 696, 698],
+    ["Post Run Swatinem/rust-cache@v2.9.2", 698, 700],
+  ].map(([name, a, b], i) => ({
+    name,
+    number: i + 1,
+    conclusion: "success",
+    started_at: iso(a),
+    completed_at: iso(b),
+  }));
+  served.answers[jobsKey] = JSON.stringify(jobs);
+  const cache = join(dir, "cache");
+  seedCache(cache, served);
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.deepEqual(r.step_classes, {
+    "setup and teardown": 50,
+    "measurement-only": 10,
+    "cache restore": 30,
+    "gate (Nx tasks)": 600,
+    "rerun of failed tests": 2,
+    "artifact upload": 2,
+    "cache save": 6,
+  });
+});
+
+test("a GitHub answer or sidecar document not in its writer's shape refuses", (t) => {
+  const cases = [
+    ["run", `repos/${REPO}/actions/runs/${RUN}`, (v) => ({ ...v, head_sha: "x" })],
+    ["jobs", `repos/${REPO}/actions/runs/${RUN}/jobs?per_page=100`, () => ({ jobs: "nope" })],
+    [
+      "artifact list",
+      `repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`,
+      (v) => ({ artifacts: v.artifacts.map(({ expired, ...rest }) => rest) }),
+    ],
+  ];
+  for (const [what, endpoint, change] of cases) {
+    const dir = scratch(t);
+    const served = oneRun(dir);
+    served.answers[key(endpoint)] = JSON.stringify(
+      change(JSON.parse(served.answers[key(endpoint)])),
+    );
+    const cache = join(dir, "cache");
+    seedCache(cache, served);
+    const result = run(profileScript, job(cache, join(dir, "r.md")));
+    assert.equal(result.status, 1, what);
+    assert.match(result.stderr, /is malformed\nnext: /, what);
+  }
+  // The sidecar's report of another job is not this job's telemetry.
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const executions = join(
+    cache,
+    "runs",
+    String(RUN),
+    "test-linux",
+    "nx-cache-entries-test-linux",
+    "executions.json",
+  );
+  writeFileSync(
+    executions,
+    JSON.stringify({ ...JSON.parse(readFileSync(executions, "utf8")), job: "test-macos" }),
+  );
+  const result = run(profileScript, job(cache, join(dir, "r.md")));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /executions\.json is malformed/);
+});
+
+test("how test records split into categories, including unnamed spawns and a test that took no time", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const records = join(cache, "runs", String(RUN), "test-linux", "test-profile-test-linux", "e2e");
+  rmSync(records, { recursive: true });
+  mkdirSync(records);
+  const multi = record("multi", 400, 40, { spawn: 30, git: 5 });
+  multi.programs = {
+    onepipeline: { count: 2, s: 20 },
+    node: { count: 1, s: 10 },
+    git: { count: 1, s: 5 },
+  };
+  const unnamed = record("unnamed", 400, 20, { spawn: 10 });
+  unnamed.programs = {};
+  const categories = record("categories", 400, 10, { build: 5, fixture: 3, fs: 2 });
+  const zero = record("zero", 400, 0, {});
+  for (const r of [multi, unnamed, categories, zero])
+    writeFileSync(join(records, `${r.test}.json`), JSON.stringify(r));
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  const parts = (name) => r.slowest.find((x) => x.test === `e2e::${name}`).parts_s;
+  assert.deepEqual(parts("multi"), {
+    "spawn: onepipeline": 20,
+    "spawn: node": 10,
+    git: 5,
+    "in-test computation (recorder-unattributed)": 5,
+  });
+  assert.deepEqual(parts("unnamed"), {
+    "spawn: (unnamed)": 10,
+    "in-test computation (recorder-unattributed)": 10,
+  });
+  assert.deepEqual(parts("categories"), {
+    "build (cargo run by a test)": 5,
+    fixture: 3,
+    fs: 2,
+  });
+  assert.deepEqual(parts("zero"), {});
+  const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(gate - 600) < 1e-6, `gate categories sum to ${gate}`);
+});
+
+test("time between a tier's tests, rustc in two trees at once, and a stray record are each counted once", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const base = join(cache, "runs", String(RUN), "test-linux");
+  // A third e2e test 20 s after the tier's others end, and a record no task's window holds.
+  writeFileSync(
+    join(base, "test-profile-test-linux", "e2e", "c.json"),
+    JSON.stringify(record("c", 620, 20, { spawn: 20 })),
+  );
+  mkdirSync(join(base, "test-profile-test-linux", "stray"));
+  const stray = record("s", 30, 5, { spawn: 5 });
+  stray.binary = "stray";
+  writeFileSync(join(base, "test-profile-test-linux", "stray", "s.json"), JSON.stringify(stray));
+  // A plain rustc beside the instrumented one, and one during the e2e tier's LCOV export.
+  const tsv = join(base, "measure-test-linux", "rustc.tsv");
+  const toolchain = "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc";
+  const row = (a, b, dirName) =>
+    [
+      (T0 + a * 1000) / 1000,
+      (T0 + b * 1000) / 1000,
+      "onepipeline",
+      "lib",
+      0,
+      `/home/runner/work/onepipeline/onepipeline/target/${dirName}/deps`,
+      0,
+      toolchain,
+    ].join("\t");
+  writeFileSync(
+    tsv,
+    `${row(300, 380, "debug")}\n${row(650, 670, "debug")}\n${readFileSync(tsv, "utf8")}`,
+  );
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  const near = (category, seconds) =>
+    assert.ok(
+      Math.abs((r.gate_categories[category] ?? 0) - seconds) < 1e-6,
+      `${category}: ${r.gate_categories[category]}`,
+    );
+  near("task: between tests (nextest scheduling)", 20);
+  // The export runs from c's end at 640 s to the tier's end, rustc or not.
+  near("task: after its last test (profdata merge, LCOV export)", 40);
+  // 300-380 s: two tasks, each half the second, each half to each running tree.
+  near("compile: plain (target/debug)", 150 + 40);
+  near("compile: instrumented (llvm-cov-target)", 40);
+  assert.equal(r.binaries.find((b) => b.binary === "stray").task, null);
+  const gate = Object.values(r.gate_categories).reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(gate - 600) < 1e-6, `gate categories sum to ${gate}`);
+});
+
+test("samples taken twice at one moment, a counter reset, an idle CPU, quiet network and setup time are read as such", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const at = (s) => (T0 + s * 1000) / 1000;
+  writeFileSync(
+    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+    [
+      `${at(30)} cpu 100 0 0 100 0 0 0 | 1/100 | 1000 0`,
+      `${at(30)} cpu 100 0 0 100 0 0 0 | 1/100 | 1000 0`,
+      `${at(32)} cpu 50 0 0 0 0 0 0 | 1/100 | 1000 0`,
+      `${at(34)} cpu 50 0 0 0 0 0 0 | 1/100 | 1100 0`,
+      "",
+    ].join("\n"),
+  );
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const s = JSON.parse(readFileSync(json, "utf8")).samples;
+  assert.equal(s.counter_resets, 1);
+  assert.equal(s.cpu_busy_fraction, null);
+  assert.equal(s.network_bytes, 100);
+  assert.equal(s.network_active_s, 0);
+  assert.deepEqual(s.network_by_place, { "step: setup and teardown": { bytes: 100, active_s: 0 } });
+});
+
+test("the graph Nx itself writes for a task is read as the dependency map", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  // The pinned Nx's own --graph=stdout, as the measurement's graph step runs it.
+  const graph = execFileSync(
+    "bash",
+    [
+      join(root, "scripts", "nx.sh"),
+      "run-many",
+      "-t",
+      "test",
+      "-p",
+      "onepipeline-ci-time-profile",
+      "--graph=stdout",
+    ],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, ONEPIPELINE_NX_SHOW_OUTPUT: "1", NX_DAEMON: "false" },
+    },
+  );
+  const parsed = JSON.parse(graph.slice(graph.indexOf("{")));
+  assert.ok(Object.hasOwn(parsed.tasks.dependencies, "onepipeline-ci-time-profile:test"));
+  writeFileSync(
+    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "graph.json"),
+    graph,
+  );
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  // That graph names none of this run's tasks, so no path runs through it.
+  assert.deepEqual(
+    JSON.parse(readFileSync(json, "utf8")).critical_path.map((c) => c.task),
+    ["demo-version:smoke"],
+  );
+});
+
+test("a listing at GitHub's 1,000-run limit is noted, not silently cut", (t) => {
+  const dir = scratch(t);
+  const answers = {};
+  for (let page = 1; page <= 10; page++)
+    answers[
+      key(
+        `repos/${REPO}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=${page}&created=2026-11-04T00:00:00..2026-11-13T00:00:00`,
+      )
+    ] = JSON.stringify({
+      workflow_runs: Array.from({ length: 100 }, (_, i) => ({
+        id: page * 1000 + i,
+        run_attempt: 1,
+        head_sha: "f".repeat(40),
+        created_at: "2026-11-04T01:00:00Z",
+        conclusion: "success",
+      })),
+    });
+  const gh = standInGh(dir, { answers, files: dir, names: [] });
+  const result = run(
+    profileScript,
+    [
+      "history",
+      "--since",
+      "2026-11-04T00:00:00Z",
+      "--compare-since",
+      "2026-11-05T00:00:00Z",
+      "--split",
+      "2026-11-10T00:00:00Z",
+      "--until",
+      "2026-11-13T00:00:00Z",
+      "--repo",
+      REPO,
+      "--cache",
+      join(dir, "cache"),
+      "--out",
+      join(dir, "h.md"),
+    ],
+    { env: gh.env(4000) },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /1000 runs listed, 0 successful jobs counted; .*\(GitHub requests 10, .*1 note\(s\)/,
+  );
+  assert.match(readFileSync(join(dir, "h.md"), "utf8"), /GitHub's limit for a filtered listing/);
+});
 
 test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
   const dir = scratch(t);

@@ -21,7 +21,8 @@
 // by its record's categories), and the task's own phase otherwise. Nothing is counted
 // twice, and what no source names is reported as `unattributed`.
 //
-// `history` lists the pull-request runs of ci.yml created in [since, until) and reports
+// `history` lists the pull-request runs of ci.yml created from since to until (GitHub's
+// range, both ends included; at most 1,000 runs, which is noted) and reports
 // each job's successful durations and medians before and after `split`, counting only runs
 // created at or after --compare-since (default: since), overall and by what each run's pull
 // request changed: its head, fetched over git (no API request), diffed against its merge
@@ -242,7 +243,7 @@ function unzipArtifact(gh, repo, artifact, into) {
   return into;
 }
 
-function stepClass(name) {
+export function stepClass(name) {
   if (/measurement-only|^'?Measure:/.test(name)) return "measurement-only";
   if (/^Post /.test(name)) {
     if (/rust-cache|setup-uv|actions\/cache/.test(name)) return "cache save";
@@ -333,16 +334,18 @@ function nextestRuns(lines) {
 }
 
 // The lines of one of the measurement's files, each parsed by `parse` (null for a line not
-// in its writer's shape). The job can end in the middle of a write, so only the last line
-// may be cut short; any other malformed line refuses.
+// in its writer's shape). The job can end in the middle of a write, so a last line with no
+// newline after it may be cut short and is dropped; any other malformed line refuses.
 function measureLines(file, parse) {
-  const lines = readFileSync(file, "utf8").split("\n");
-  while (lines.length && lines.at(-1) === "") lines.pop();
+  const text = readFileSync(file, "utf8");
+  const lines = text.split("\n");
+  const cutShort = !text.endsWith("\n");
+  if (!cutShort) lines.pop();
   const out = [];
   lines.forEach((line, i) => {
     const value = parse(line);
     if (value) out.push(value);
-    else check(i === lines.length - 1, `${file} line ${i + 1}`);
+    else check(cutShort && i === lines.length - 1, `${file} line ${i + 1}`);
   });
   return out;
 }
@@ -443,6 +446,7 @@ function readMeasure(dir) {
       check(
         deps &&
           typeof deps === "object" &&
+          !Array.isArray(deps) &&
           Object.values(deps).every(
             (d) => Array.isArray(d) && d.every((x) => typeof x === "string"),
           ),
@@ -503,9 +507,14 @@ function workspaceNames(rustc) {
           stdio: ["ignore", "pipe", "ignore"],
         }),
       );
-      for (const p of Array.isArray(meta?.packages) ? meta.packages : [])
-        for (const t of Array.isArray(p?.targets) ? p.targets : [])
-          if (typeof t?.name === "string") workspaceCrates.add(t.name.replace(/-/g, "_"));
+      const shaped =
+        Array.isArray(meta?.packages) &&
+        meta.packages.every(
+          (p) => Array.isArray(p?.targets) && p.targets.every((t) => typeof t?.name === "string"),
+        );
+      if (!shaped) throw new Error("cargo metadata printed no package and target list");
+      for (const p of meta.packages)
+        for (const t of p.targets) workspaceCrates.add(t.name.replace(/-/g, "_"));
     } catch (error) {
       // The instrumented crates alone then name the workspace, and a crate only ever built
       // plain counts as a dependency.
@@ -560,6 +569,8 @@ function readRecords(files) {
 // A record's wall clock split into named parts that sum to it: spawn split by the program
 // run, the other categories, and the recorder's own unattributed time.
 function recordParts(r) {
+  // A test that took no measurable time has no time to split.
+  if (!(r.wall_s > 0)) return {};
   const parts = {};
   const spawnS = r.categories.spawn?.s ?? 0;
   const programs = Object.entries(r.programs ?? {}).filter(([p]) => p !== "git" && p !== "cargo");
@@ -616,7 +627,8 @@ function analyzeJob(opts) {
   const run = gh.json(runEndpoint);
   check(
     typeof run?.status === "string" &&
-      typeof run.head_sha === "string" &&
+      /^[0-9a-f]{40}$/.test(run.head_sha ?? "") &&
+      (run.head_branch === null || typeof run.head_branch === "string") &&
       (run.pull_requests === undefined ||
         (Array.isArray(run.pull_requests) &&
           run.pull_requests.every((pr) => Number.isInteger(pr?.number)))),
@@ -640,6 +652,9 @@ function analyzeJob(opts) {
     );
   check(
     Number.isInteger(job.id) &&
+      Number.isInteger(job.run_attempt) &&
+      (job.runner_name === null || typeof job.runner_name === "string") &&
+      (job.conclusion === null || typeof job.conclusion === "string") &&
       (job.labels === undefined ||
         (Array.isArray(job.labels) && job.labels.every((l) => typeof l === "string"))) &&
       !Number.isNaN(ms(job.started_at)) &&
@@ -649,6 +664,8 @@ function analyzeJob(opts) {
       job.steps.every(
         (st) =>
           typeof st?.name === "string" &&
+          Number.isInteger(st.number) &&
+          (st.conclusion === null || typeof st.conclusion === "string") &&
           !Number.isNaN(ms(st.started_at)) &&
           ms(st.completed_at) >= ms(st.started_at),
       ),
@@ -1446,7 +1463,7 @@ function history(opts) {
   const compareSince = ms(opts["compare-since"] ?? opts.since);
   if (Number.isNaN(compareSince)) usage("--compare-since takes a date");
   const runs = [];
-  for (let page = 1; page < 20; page++) {
+  for (let page = 1; page <= 10; page++) {
     const r = gh.json(
       `repos/${opts.repo}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=${page}&created=${since.slice(0, 19)}..${until.slice(0, 19)}`,
     );
@@ -1465,6 +1482,12 @@ function history(opts) {
     runs.push(...r.workflow_runs);
     if (r.workflow_runs.length < 100) break;
   }
+  // Filtered by date, event and status, GitHub lists at most 1,000 runs (ten pages).
+  if (runs.length >= 1000)
+    note(
+      `the listing holds ${runs.length} runs, GitHub's limit for a filtered listing, so runs past it are not counted`,
+      "narrow --since and --until so each listing holds fewer than 1,000 runs",
+    );
   const rows = [];
   for (const run of runs) {
     if (ms(run.created_at) < compareSince) continue;
