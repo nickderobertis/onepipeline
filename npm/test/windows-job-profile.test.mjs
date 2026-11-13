@@ -30,10 +30,11 @@ function run(...args) {
 
 // A job of 1,000 s: 60 s of setup, 40 s restoring caches, 100 s of bootstrap, a 780 s gate
 // and 20 s of post steps, 10 of them saving a cache.
-function jobLog() {
+function jobLog({ cpu } = {}) {
   const lines = [
     [0, "Current runner version: '2.338.2'"],
     [10, "##[group]Run actions/checkout@v4"],
+    ...(cpu ? [[20, `Name                      : ${cpu}                `]] : []),
     [60, "##[group]Run Swatinem/rust-cache@v2.9.2"],
     [99, "Cache restored successfully"],
     [100, "##[group]Run just bootstrap"],
@@ -74,10 +75,10 @@ function record(test, startedAt, wall, { spawn = 0, git = 0, wait = 0, programs 
   return r;
 }
 
-function job(name, { records = true, executions = true } = {}) {
+function job(name, { records = true, executions = true, cpu } = {}) {
   const dir = join(scratch, name);
   mkdirSync(join(dir, "test-profile", "e2e"), { recursive: true });
-  writeFileSync(join(dir, "job.log"), jobLog());
+  writeFileSync(join(dir, "job.log"), jobLog({ cpu }));
   if (records) {
     // 600 test-seconds in a 500 s test phase: two thirds onepipeline, a sixth git, a
     // sixth waiting.
@@ -191,6 +192,20 @@ test("set beside a baseline, each part's difference is what the other job adds",
   assert.equal(added.get("tests: spawn: onepipeline"), 4.9);
   assert.equal(added.get("tests: onepipeline-e2e tests (no profile records)"), -8.3);
   assert.equal(added.get("**job wall clock**"), 0);
+});
+
+test("each job names the processor its runner printed, or says it printed none", () => {
+  const r = run(
+    "fold",
+    `xeon=${job("c1", { cpu: "INTEL(R) XEON(R) PLATINUM 8573C" })}`,
+    `quiet=${job("c2")}`,
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(
+    r.stdout,
+    /\n## xeon\n\n[^\n]*; runner processor INTEL\(R\) XEON\(R\) PLATINUM 8573C\.\n/,
+  );
+  assert.match(r.stdout, /\n## quiet\n\n[^\n]*; runner processor not printed by the job\.\n/);
 });
 
 test("without Nx's executions, the test phases are the path and the rest is named scheduling", () => {

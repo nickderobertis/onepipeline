@@ -18,8 +18,9 @@
 // by name, git, build, fixtures, waits and polls, filesystem, unattributed), scaled from
 // test-seconds to that phase's wall seconds; and the remainder, named unattributed. Then
 // every Nx task with its result and minutes, each cargo build's elapsed time, each test
-// binary's seconds, and the slowest tests with their split. With a `--baseline` label,
-// each figure is set beside that job's and the difference is given.
+// binary's seconds, and the slowest tests with their split. Each job's section names the
+// processor its runner printed, since hosted runners of one label differ in it. With a
+// `--baseline` label, each figure is set beside that job's and the difference is given.
 //
 // `spawn` starts each CLI the suite's tests start, `--runs` times (default 30), and prints
 // the median, p10 and p90 wall milliseconds of one spawn-to-exit of its cheapest
@@ -319,6 +320,7 @@ export function foldJob(label, dir) {
   return {
     label,
     wall,
+    cpu: runnerCpu(lines),
     division,
     unattributed: wall - attributed,
     segs,
@@ -328,6 +330,19 @@ export function foldJob(label, dir) {
     builds: cargoBuilds(gate ? lines.filter((l) => l.t >= gate.start && l.t <= gate.end) : lines),
     records: inPhases,
   };
+}
+
+/**
+ * The runner's processor, when a step printed it (`Get-CimInstance Win32_Processor` on
+ * Windows, `lscpu` on Linux): hosted runners of one label differ in it, and a job's minutes
+ * move with it, so two jobs are only comparable beside the processor each ran on.
+ */
+export function runnerCpu(lines) {
+  for (const { text } of lines) {
+    const match = /^\s*(?:Name\s+:|Model name:)\s+(\S.*?)\s*$/.exec(text);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 const min = (s) => (s / 60).toFixed(1);
@@ -371,7 +386,7 @@ export function render(jobs, { baseline, top = 20 } = {}) {
   for (const j of jobs) {
     out.push(`\n## ${j.label}\n`);
     out.push(
-      `Job wall clock ${min(j.wall)} min; unattributed ${min(j.unattributed)} min (${pct(j.unattributed, j.wall)}).\n`,
+      `Job wall clock ${min(j.wall)} min; unattributed ${min(j.unattributed)} min (${pct(j.unattributed, j.wall)}); runner processor ${j.cpu ?? "not printed by the job"}.\n`,
     );
     out.push("### Steps\n\n| step | kind | min |\n| --- | --- | ---: |");
     for (const s of j.segs)
