@@ -101,7 +101,7 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   // A graph Nx cannot write is reported with how to reproduce it, not dropped.
   assert.match(
     linux,
-    /if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts\/nx-affected\.sh -t "[^"]+" --graph=stdout > "\$m\/graph\.json" 2> "\$m\/graph\.err"; then\n\s+echo "::warning::measurement: Nx could not write the task graph.*ACTION: .*reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts\/nx-affected\.sh -t [^"]+"\n\s+fi/,
+    /if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts\/nx-affected\.sh -t "[^"]+" --graph=stdout > "\$m\/graph\.json" 2> "\$m\/graph\.err"; then\n\s+echo "::warning::measurement: Nx could not write the task graph.*Its error follows.*ACTION: .*reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts\/nx-affected\.sh -t [^"]+"\n\s+head -20 "\$m\/graph\.err"\n\s+fi/,
   );
   // The sampler's errors go to sampler.err, which the graph step reports with an ACTION.
   assert.match(linux, /nohup bash "\$m\/sampler\.sh" "\$m" > \/dev\/null 2> "\$m\/sampler\.err" &/);
@@ -117,6 +117,10 @@ test("the workflow edits turn every cache write off, add the observers, and are 
 
   // With --timings, test-linux builds the workspace's tests after the gate with cargo's
   // --timings, plain and then through the coverage build, each from a fresh source edit.
+  // Held as text, like the graph and overhead steps: those two builds compile the whole
+  // workspace twice, with the CI job's toolchain and cargo-llvm-cov, which this target cannot
+  // do in a test's time. A hosted demonstration run is what executes them, and the test below
+  // reads a report from the pinned cargo the way the analysis reads theirs.
   const timed = checkout(join(scratch(t), "timed"));
   assert.equal(run(workflowScript, [timed, "--timings"]).status, 0);
   const timedText = readFileSync(timed, "utf8");

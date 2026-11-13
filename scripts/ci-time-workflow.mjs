@@ -187,7 +187,8 @@ function graphStep(targets) {
     'm="$RUNNER_TEMP/measure"; mkdir -p "$m"\n' +
     'if [ -f target/ci-time-nx-profile.json ]; then cp target/ci-time-nx-profile.json "$m/nx-profile.json"; fi\n' +
     `if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "${targets}" --graph=stdout > "$m/graph.json" 2> "$m/graph.err"; then\n` +
-    `  echo "::warning::measurement: Nx could not write the task graph, so this run has no critical path; graph.err in the measure artifact says why. ACTION: fix what it reports, then reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t ${targets} --graph=stdout"\n` +
+    `  echo "::warning::measurement: Nx could not write the task graph, so this run has no critical path. Its error follows. ACTION: fix what it reports, then reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t ${targets} --graph=stdout"\n` +
+    '  head -20 "$m/graph.err"\n' +
     "fi\n" +
     'date -u +%s > "$m/ended.txt"\n' +
     'if [ -s "$m/sampler.err" ]; then\n' +
