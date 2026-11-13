@@ -817,11 +817,22 @@ function summarizeSamples(samples, steps, tasks) {
   let activeS = 0;
   let bytes = 0;
   const cpu = { s: 0, busy_s: 0 };
+  const byK = {};
   for (const tick of ticks) {
     bytes += tick.bytes;
     if (tick.busy !== null) {
       cpu.s += tick.dt;
       cpu.busy_s += tick.busy * tick.dt;
+      const mid = tick.t + (tick.dt * 1000) / 2;
+      const gate = steps.find(
+        (x) => x.class === "gate (Nx tasks)" && x.start <= mid && mid < x.end,
+      );
+      if (gate) {
+        const k = tasks.filter((x) => x.start <= mid && mid < x.end).length;
+        byK[k] ??= { s: 0, busy_s: 0 };
+        byK[k].s += tick.dt;
+        byK[k].busy_s += tick.busy * tick.dt;
+      }
     }
     const k = where(tick);
     network[k] ??= { bytes: 0, active_s: 0 };
@@ -838,6 +849,12 @@ function summarizeSamples(samples, steps, tasks) {
     network_active_threshold_bytes_per_s: ACTIVE,
     network_by_place: network,
     cpu_busy_fraction: cpu.s ? cpu.busy_s / cpu.s : null,
+    cpu_busy_by_concurrency: Object.fromEntries(
+      Object.entries(byK).map(([k, v]) => [
+        k,
+        { s: v.s, busy_fraction: v.s ? v.busy_s / v.s : null },
+      ]),
+    ),
   };
 }
 
@@ -1064,6 +1081,15 @@ function printJob(r) {
     out.push("", "## Network and CPU (sampler)", "");
     out.push(
       `sampled ${min(s.sampled_s)} min; non-loopback bytes ${(s.network_bytes / 1e6).toFixed(0)} MB; seconds at >= ${s.network_active_threshold_bytes_per_s / 1024} KiB/s: ${s.network_active_s.toFixed(0)}; CPU busy ${((s.cpu_busy_fraction ?? 0) * 100).toFixed(0)}%`,
+    );
+    out.push(
+      `CPU busy in the gate by number of Nx tasks running: ${Object.entries(
+        s.cpu_busy_by_concurrency,
+      )
+        .map(
+          ([k, v]) => `k=${k} ${((v.busy_fraction ?? 0) * 100).toFixed(0)}% over ${min(v.s)} min`,
+        )
+        .join("; ")}`,
     );
     out.push(
       table(
