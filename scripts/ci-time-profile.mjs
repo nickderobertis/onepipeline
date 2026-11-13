@@ -238,16 +238,18 @@ function walk(dir, out = []) {
   return out;
 }
 
-function unzipArtifact(gh, repo, artifact, into) {
+// One artifact, extracted once under --cache: keyed by repository and artifact id, which
+// GitHub never reuses, so neither another repository's run nor a re-run's newer artifact can
+// be served from this one's extraction.
+function unzipArtifact(gh, cache, repo, artifact) {
+  const into = join(cache, "artifacts", repo.replace("/", "__"), String(artifact.id));
   const done = join(into, ".complete");
   if (existsSync(done)) return into;
+  rmSync(into, { recursive: true, force: true });
   mkdirSync(into, { recursive: true });
-  const zip = gh.fetch(`repos/${repo}/actions/artifacts/${artifact.id}/zip`, {
-    binary: true,
-  });
-  const file = join(into, "..", `${artifact.name}.zip`);
-  writeFileSync(file, zip);
-  execFileSync("unzip", ["-q", "-o", file, "-d", into]);
+  const endpoint = `repos/${repo}/actions/artifacts/${artifact.id}/zip`;
+  gh.fetch(endpoint, { binary: true });
+  execFileSync("unzip", ["-q", "-o", gh.path(endpoint, ".bin"), "-d", into]);
   writeFileSync(done, "");
   return into;
 }
@@ -405,7 +407,9 @@ function rustcLine(line) {
     r.end >= r.start &&
     /^[01]$/.test(f[4]) &&
     Number.isInteger(r.code) &&
-    /^\w+$/.test(r.crate);
+    /^\w+$/.test(r.crate) &&
+    // Only cargo's target-info probe (`--crate-name ___ --print=file-names`) has no out dir.
+    (r.outDir !== "" || r.crate === "___");
   return valid ? r : null;
 }
 
@@ -445,7 +449,10 @@ function readMeasure(dir) {
           finite(e.ts, e.dur) &&
           e.ts >= 0 &&
           e.dur >= 0 &&
-          (e.args?.status === undefined || typeof e.args.status === "string"),
+          (e.args === undefined ||
+            (e.args !== null &&
+              typeof e.args === "object" &&
+              (e.args.status === undefined || typeof e.args.status === "string"))),
       ),
       profile,
     );
@@ -507,6 +514,7 @@ function readMeasure(dir) {
 
 // A rustc invocation's tree: what kind of build it is part of.
 function tree(r) {
+  if (r.crate === "___" && r.outDir === "") return "cargo's target-info probe";
   if (/clippy-driver/.test(r.compiler)) return "clippy";
   // rust-toolchain.toml pins a patch release (1.97.1); the MSRV check's toolchain is the
   // bare minor (1.97) Cargo.toml's rust-version names.
@@ -734,10 +742,9 @@ function analyzeJob(opts) {
       ),
     `run ${opts.run}'s artifact list`,
   );
-  const dir = join(opts.cache, "runs", String(opts.run), opts.job);
   const get = (name) => {
     const a = newestArtifact(artifacts, name, `run ${opts.run}`);
-    return a ? unzipArtifact(gh, repo, a, join(dir, name)) : null;
+    return a ? unzipArtifact(gh, opts.cache, repo, a) : null;
   };
   const names = artifactNames(opts.job);
   const profileDir = get(names.records);
@@ -1665,12 +1672,7 @@ function history(opts) {
         );
         continue;
       }
-      const dir = unzipArtifact(
-        gh,
-        opts.repo,
-        a,
-        join(opts.cache, "runs", String(r.run), `attempt-${r.attempt}`, r.job, a.name),
-      );
+      const dir = unzipArtifact(gh, opts.cache, opts.repo, a);
       const e2e = readRecords(walk(dir)).filter((x) => x.binary === "e2e");
       let count = 0;
       let seconds = 0;

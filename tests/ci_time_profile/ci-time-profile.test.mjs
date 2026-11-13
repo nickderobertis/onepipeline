@@ -264,7 +264,7 @@ test("the generated sampler writes timestamped CPU, load and network lines", (t)
     line.replace(/^\d+/, String((T0 + (30 + 2 * i) * 1000) / 1000)),
   );
   writeFileSync(
-    join(cacheDir, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+    join(artifactDir(cacheDir, "measure-test-linux"), "samples.txt"),
     `${shifted.join("\n")}\n`,
   );
   const json = join(dir, "out.json");
@@ -545,6 +545,8 @@ function oneRun(
       rustcRow(20, 50, "onepipeline", "release"),
       rustcRow(20, 24, "git2", "/tmp/cargo-installXyz/release/deps"),
       rustcRow(24, 27, "zerocopy", "npm-staged/x86_64-unknown-linux-gnu/debug"),
+      // Cargo asking rustc what it can build: no out dir, and its own tree.
+      [(T0 + 5000) / 1000, (T0 + 6000) / 1000, "___", "bin,rlib", 0, "", 0, toolchain].join("\t"),
       // A macOS runner's checkout is under /Users/runner/work: still the checkout's target.
       rustcRow(
         27,
@@ -606,18 +608,24 @@ function seedCache(cache, served) {
   mkdirSync(join(cache, "api"), { recursive: true });
   for (const [k, body] of Object.entries(served.answers))
     writeFileSync(join(cache, "api", `${k}.txt`), body);
-  for (const name of served.names) {
-    const into = join(cache, "runs", String(RUN), "test-linux", name);
+  served.names.forEach((name, id) => {
+    const into = join(cache, "artifacts", REPO.replace("/", "__"), String(id));
     mkdirSync(into, { recursive: true });
     execFileSync("cp", ["-R", `${join(served.files, name)}/.`, into]);
     writeFileSync(join(into, ".complete"), "");
-  }
+  });
 }
+
+// Where the analysis extracts one of oneRun's artifacts: by repository and artifact id, the
+// artifact's position in oneRun's names.
+const ARTIFACTS = ["test-profile-test-linux", "nx-cache-entries-test-linux", "measure-test-linux"];
+const artifactDir = (cache, name) =>
+  join(cache, "artifacts", REPO.replace("/", "__"), String(ARTIFACTS.indexOf(name)));
 
 // A stand-in `gh` on PATH: `api rate_limit` answers FAKE_GH_REMAINING, and `api <endpoint>`
 // answers the file served for it (an artifact zip as bytes), or fails as GitHub's 404 does.
 // Every call is logged.
-function standInGh(dir, served) {
+function standInGh(dir, served, repo = REPO) {
   const bin = join(dir, "bin");
   const answers = join(dir, "answers");
   mkdirSync(bin, { recursive: true });
@@ -626,7 +634,7 @@ function standInGh(dir, served) {
   served.names.forEach((name, id) => {
     // `zip -` writes the archive to stdout; given a file name without `.zip`, it appends one.
     const archive = execFileSync("zip", ["-qr", "-", "."], { cwd: join(served.files, name) });
-    writeFileSync(join(answers, key(`repos/${REPO}/actions/artifacts/${id}/zip`)), archive);
+    writeFileSync(join(answers, key(`repos/${repo}/actions/artifacts/${id}/zip`)), archive);
   });
   writeFileSync(
     join(bin, "gh"),
@@ -714,6 +722,7 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
       "release (target/release)": [30, 0],
       "outside the checkout (cargo install)": [4, 4],
       "target/npm-staged": [3, 3],
+      "cargo's target-info probe": [1, 1],
     },
   );
   assert.deepEqual(
@@ -800,6 +809,18 @@ test("a measurement file not in its writer's shape refuses, naming the file and 
       () => '[{"ph":"X","name":5,"ts":1,"dur":1}]',
       /nx-profile\.json is malformed\nnext: /,
     ],
+    // An Nx trace whose task carries null where its args belong.
+    [
+      "nx-profile.json",
+      () => '[{"ph":"X","name":"demo:build","ts":1,"dur":1,"args":null}]',
+      /nx-profile\.json is malformed\nnext: /,
+    ],
+    // A rustc row with no out dir, which the timer always writes for a crate.
+    [
+      "rustc.tsv",
+      (old) => `${(T0 + 10000) / 1000}\t${(T0 + 20000) / 1000}\tx\tlib\t0\t\t0\trustc\n${old}`,
+      /rustc\.tsv line 1 is malformed\nnext: /,
+    ],
     // A sample whose CPU percentages cannot belong to one interval.
     [
       "samples.txt",
@@ -834,7 +855,7 @@ test("a measurement file not in its writer's shape refuses, naming the file and 
     const dir = scratch(t);
     const cache = join(dir, "cache");
     seedCache(cache, oneRun(dir));
-    const path = join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", file);
+    const path = join(artifactDir(cache, "measure-test-linux"), file);
     writeFileSync(path, body(readFileSync(path, "utf8")));
     const result = run(profileScript, job(cache, join(dir, "r.md")));
     assert.equal(result.status, 1, file);
@@ -846,15 +867,7 @@ test("a test retried in another record directory counts once, at its later attem
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const retry = join(
-    cache,
-    "runs",
-    String(RUN),
-    "test-linux",
-    "test-profile-test-linux",
-    "retry",
-    "e2e",
-  );
+  const retry = join(artifactDir(cache, "test-profile-test-linux"), "retry", "e2e");
   mkdirSync(retry, { recursive: true });
   const again = record("b", 400, 100, { spawn: 100 });
   again.attempt = 2;
@@ -900,15 +913,7 @@ test("a record in the recorder's syntax but not its schema is left out and noted
   const bad = record("unschemed", 400, 5, { spawn: 5 });
   bad.schema = 99;
   writeFileSync(
-    join(
-      cache,
-      "runs",
-      String(RUN),
-      "test-linux",
-      "test-profile-test-linux",
-      "e2e",
-      "unschemed.json",
-    ),
+    join(artifactDir(cache, "test-profile-test-linux"), "e2e", "unschemed.json"),
     JSON.stringify(bad),
   );
   const json = join(dir, "out.json");
@@ -1391,14 +1396,7 @@ test("a GitHub answer or sidecar document not in its writer's shape refuses", (t
   const manifestDir = scratch(t);
   const manifestCache = join(manifestDir, "cache");
   seedCache(manifestCache, oneRun(manifestDir));
-  const manifest = join(
-    manifestCache,
-    "runs",
-    String(RUN),
-    "test-linux",
-    "nx-cache-entries-test-linux",
-    "manifest.json",
-  );
+  const manifest = join(artifactDir(manifestCache, "nx-cache-entries-test-linux"), "manifest.json");
   writeFileSync(
     manifest,
     JSON.stringify({
@@ -1413,14 +1411,7 @@ test("a GitHub answer or sidecar document not in its writer's shape refuses", (t
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const executions = join(
-    cache,
-    "runs",
-    String(RUN),
-    "test-linux",
-    "nx-cache-entries-test-linux",
-    "executions.json",
-  );
+  const executions = join(artifactDir(cache, "nx-cache-entries-test-linux"), "executions.json");
   writeFileSync(
     executions,
     JSON.stringify({ ...JSON.parse(readFileSync(executions, "utf8")), job: "test-macos" }),
@@ -1434,7 +1425,7 @@ test("how test records split into categories, including unnamed spawns and a tes
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const records = join(cache, "runs", String(RUN), "test-linux", "test-profile-test-linux", "e2e");
+  const records = join(artifactDir(cache, "test-profile-test-linux"), "e2e");
   rmSync(records, { recursive: true });
   mkdirSync(records);
   const multi = record("multi", 400, 40, { spawn: 30, git: 5 });
@@ -1477,18 +1468,21 @@ test("time between a tier's tests, rustc in two trees at once, and a stray recor
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const base = join(cache, "runs", String(RUN), "test-linux");
+
   // A third e2e test 20 s after the tier's others end, and a record no task's window holds.
   writeFileSync(
-    join(base, "test-profile-test-linux", "e2e", "c.json"),
+    join(artifactDir(cache, "test-profile-test-linux"), "e2e", "c.json"),
     JSON.stringify(record("c", 620, 20, { spawn: 20 })),
   );
-  mkdirSync(join(base, "test-profile-test-linux", "stray"));
+  mkdirSync(join(artifactDir(cache, "test-profile-test-linux"), "stray"));
   const stray = record("s", 30, 5, { spawn: 5 });
   stray.binary = "stray";
-  writeFileSync(join(base, "test-profile-test-linux", "stray", "s.json"), JSON.stringify(stray));
+  writeFileSync(
+    join(artifactDir(cache, "test-profile-test-linux"), "stray", "s.json"),
+    JSON.stringify(stray),
+  );
   // A plain rustc beside the instrumented one, and one during the e2e tier's LCOV export.
-  const tsv = join(base, "measure-test-linux", "rustc.tsv");
+  const tsv = join(artifactDir(cache, "measure-test-linux"), "rustc.tsv");
   const toolchain = "/home/runner/.rustup/toolchains/1.97.1-x86_64-unknown-linux-gnu/bin/rustc";
   const row = (a, b, dirName) =>
     [
@@ -1536,7 +1530,7 @@ test("samples taken twice at one moment, a counter reset, an idle CPU, quiet net
   seedCache(cache, served);
   const at = (s) => (T0 + s * 1000) / 1000;
   writeFileSync(
-    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+    join(artifactDir(cache, "measure-test-linux"), "samples.txt"),
     [
       `${at(30)} cpu 100 0 0 100 0 0 0 | 1/100 | 1000 0`,
       `${at(30)} cpu 100 0 0 100 0 0 0 | 1/100 | 1000 0`,
@@ -1572,7 +1566,7 @@ test("a graph step that wrote no graph leaves no critical path, and the report s
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
   writeFileSync(
-    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "graph.json"),
+    join(artifactDir(cache, "measure-test-linux"), "graph.json"),
     "NX   Could not plan\n",
   );
   const json = join(dir, "out.json");
@@ -1594,7 +1588,7 @@ test("a CPU counter whose idle falls, or grows past the total, is a reset", (t) 
     seedCache(cache, oneRun(dir));
     const at = (s) => (T0 + s * 1000) / 1000;
     writeFileSync(
-      join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "samples.txt"),
+      join(artifactDir(cache, "measure-test-linux"), "samples.txt"),
       `${at(30)} cpu 100 0 0 100 0 0 0 | 1/1 | 0 0\n${at(32)} ${second} | 1/1 | 0 0\n`,
     );
     const json = join(dir, "out.json");
@@ -1633,10 +1627,7 @@ test("the graph Nx itself writes for a task is read as the dependency map", (t) 
   );
   const parsed = JSON.parse(graph.slice(graph.indexOf("{")));
   assert.ok(Object.hasOwn(parsed.tasks.dependencies, "onepipeline-ci-time-profile:test"));
-  writeFileSync(
-    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "graph.json"),
-    graph,
-  );
+  writeFileSync(join(artifactDir(cache, "measure-test-linux"), "graph.json"), graph);
   const json = join(dir, "out.json");
   const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
   assert.equal(result.status, 0, result.stderr);
@@ -1760,16 +1751,7 @@ test("an overhead partition whose runs share no test reports no ratio", (t) => {
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const plain = join(
-    cache,
-    "runs",
-    String(RUN),
-    "test-linux",
-    "measure-test-linux",
-    "overhead",
-    "plain-records",
-    "e2e",
-  );
+  const plain = join(artifactDir(cache, "measure-test-linux"), "overhead", "plain-records", "e2e");
   rmSync(plain, { recursive: true });
   mkdirSync(plain);
   writeFileSync(join(plain, "y.json"), JSON.stringify(record("y", 1061, 8, { spawn: 4 })));
@@ -1827,7 +1809,7 @@ test("an overhead run that failed is noted beside the figures it leaves short", 
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
   writeFileSync(
-    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "overhead", "times.txt"),
+    join(artifactDir(cache, "measure-test-linux"), "overhead", "times.txt"),
     "instrumented 1000 1060 0\nplain-build 1060 1061 0\nplain 1061 1121 101\n",
   );
   const json = join(dir, "out.json");
@@ -1869,6 +1851,67 @@ test("a re-run's newer artifact is read over the earlier attempt's, and that is 
       ),
     ),
   );
+});
+
+test("one cache serves two repositories' runs of the same id without mixing them", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  const first = oneRun(join(dir, "first"));
+  const ours = standInGh(join(dir, "gh-ours"), first);
+  assert.equal(
+    run(profileScript, job(cache, join(dir, "ours.md")), { env: ours.env(4000) }).status,
+    0,
+  );
+  // The other repository's run 42: test a ten times slower.
+  const other = "other/onepipeline";
+  const second = oneRun(join(dir, "second"));
+  writeFileSync(
+    join(second.files, "test-profile-test-linux", "e2e", "a.json"),
+    JSON.stringify(record("a", 400, 2000, { spawn: 2000 })),
+  );
+  second.answers = Object.fromEntries(
+    Object.entries(second.answers).map(([k, v]) => [k.replace(key(REPO), key(other)), v]),
+  );
+  const theirs = standInGh(join(dir, "gh-theirs"), second, other);
+  const json = join(dir, "theirs.json");
+  const args = job(cache, join(dir, "theirs.md"), ["--json", json]).map((a) =>
+    a === REPO ? other : a,
+  );
+  assert.equal(run(profileScript, args, { env: theirs.env(4000) }).status, 0);
+  assert.equal(JSON.parse(readFileSync(json, "utf8")).slowest[0].wall_s, 2000);
+});
+
+test("a newer artifact listed for a run already measured is extracted afresh, not served from the old one", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  const served = oneRun(dir);
+  const gh = standInGh(join(dir, "gh"), served);
+  assert.equal(
+    run(profileScript, job(cache, join(dir, "one.md")), { env: gh.env(4000) }).status,
+    0,
+  );
+  // GitHub now lists a newer test-profile artifact, id 3, from a re-run: test a ten times slower.
+  const newer = join(served.files, "newer-profile", "e2e");
+  mkdirSync(newer, { recursive: true });
+  writeFileSync(join(newer, "a.json"), JSON.stringify(record("a", 400, 2000, { spawn: 2000 })));
+  served.names.push("newer-profile");
+  const listKey = key(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`);
+  const list = JSON.parse(served.answers[listKey]);
+  list.artifacts.push({
+    id: 3,
+    name: "test-profile-test-linux",
+    expired: false,
+    created_at: iso(800),
+  });
+  served.answers[listKey] = JSON.stringify(list);
+  const regh = standInGh(join(dir, "regh"), served);
+  rmSync(join(cache, "api", `${listKey}.txt`));
+  const json = join(dir, "two.json");
+  const again = run(profileScript, job(cache, join(dir, "two.md"), ["--json", json]), {
+    env: regh.env(4000),
+  });
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(JSON.parse(readFileSync(json, "utf8")).slowest[0].wall_s, 2000);
 });
 
 test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
