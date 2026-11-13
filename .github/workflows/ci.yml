@@ -47,7 +47,7 @@ jobs:
   # syntax check, the dependency audit, the judged lint, the engine-currency
   # check, the PR title, the suppressions comment and the visual docs.
   lint:
-    if: github.event_name == 'pull_request'
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
@@ -105,7 +105,7 @@ jobs:
         env:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          CACHE_READ_ONLY: '1'
           GITHUB_TOKEN: ${{ github.token }}
       - name: Wait for the cache recording proxy
         shell: bash
@@ -151,7 +151,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          enable-cache: false
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # Whether the lock still resolves the sibling engines the manifest permits
@@ -274,7 +274,7 @@ jobs:
       - cancel: nx-cache
 
   test-linux:
-    if: github.event_name == 'pull_request'
+    if: false
     runs-on: ubuntu-24.04
     # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
     # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
@@ -310,7 +310,7 @@ jobs:
         env:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          CACHE_READ_ONLY: '1'
           GITHUB_TOKEN: ${{ github.token }}
       - name: Wait for the cache recording proxy
         shell: bash
@@ -365,7 +365,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          enable-cache: false
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
@@ -454,6 +454,10 @@ jobs:
   test-windows:
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, no-defender, no-devdrive, defender-off, threads-8, git-direct, combo]
     # From the two Windows shards' summed hosted durations (9,366-10,069 s) plus the
     # Windows install proof (897-1,275 s) and a cold build, with about a quarter's
     # headroom, since one job now runs the whole suite.
@@ -489,7 +493,7 @@ jobs:
         env:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          CACHE_READ_ONLY: '1'
           GITHUB_TOKEN: ${{ github.token }}
       - name: Wait for the cache recording proxy
         shell: bash
@@ -506,6 +510,7 @@ jobs:
       # repositories into, trusted so the Defender filter does not scan it,
       # and Defender's real-time scan kept off the toolchain's directories too.
       - uses: samypr100/setup-dev-drive@v3
+        if: matrix.variant != 'no-devdrive'
         with:
           drive-size: 60GB
           drive-format: ReFS
@@ -516,15 +521,50 @@ jobs:
             TEMP,{{ DEV_DRIVE }}/tmp
             TMP,{{ DEV_DRIVE }}/tmp
       - name: Keep Defender's real-time scan off the build and the suite
+        if: matrix.variant != 'no-defender'
         shell: pwsh
         run: |
-          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
-          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          $paths = @("$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP)
+          if ($env:DEV_DRIVE) { $paths += $env:DEV_DRIVE } else { $paths += $env:GITHUB_WORKSPACE, $env:TEMP }
+          Add-MpPreference -ExclusionPath $paths
+      - name: "Spike: the temp directory exists"
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      - name: "Spike: turn Defender's real-time monitoring off"
+        if: matrix.variant == 'defender-off' || matrix.variant == 'combo'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+      - name: "Spike: run e2e process trees eight at a time on four cores"
+        if: matrix.variant == 'threads-8' || matrix.variant == 'combo'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
+        run: |
+          sed -i 's/^e2e = { max-threads = 4 }$/e2e = { max-threads = 8 }/' .config/nextest.toml
+          grep -qx 'e2e = { max-threads = 8 }' .config/nextest.toml
+          echo "NEXTEST_TEST_THREADS=8" >> "$GITHUB_ENV"
+      - name: "Spike: start git itself, not Git for Windows' launcher"
+        if: matrix.variant == 'git-direct' || matrix.variant == 'combo'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\Git\mingw64\bin"
+      - name: "Spike: the runner's state"
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          "variant=${{ matrix.variant }}"
+          Get-MpComputerStatus | Select-Object AMRunningMode,AntivirusEnabled,RealTimeProtectionEnabled,OnAccessProtectionEnabled,IoavProtectionEnabled,BehaviorMonitorEnabled | Format-List
+          $pref = Get-MpPreference
+          "DisableRealtimeMonitoring=$($pref.DisableRealtimeMonitoring)"
+          "ExclusionPath=$($pref.ExclusionPath -join ';')"
+          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | Format-List
+          Get-Volume | Select-Object DriveLetter,FileSystemType,Size,SizeRemaining | Format-Table -AutoSize
+          "TEMP=$env:TEMP"
+          where.exe git
+          where.exe bash
+          $global:LASTEXITCODE = 0
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: test-windows
           save-if: false
-          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }} -> target
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.ci-tools.outputs.node }}
@@ -538,20 +578,20 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          enable-cache: false
       - name: What the bootstrap tools are built from
         id: pins
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         uses: actions/cache/restore@v4
         with:
           path: |
-            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+            ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}/target/tools
             ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Bootstrap
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: just bootstrap
       # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
       # documented install it runs reaches the remote default branch, because
@@ -559,7 +599,7 @@ jobs:
       # proven on every pull request this job's affected answer selects.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
       # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       # On Windows there are no process groups to make a leaked process visible
@@ -573,15 +613,20 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-profile-test-windows
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/test-profile/
+          name: test-profile-test-windows-${{ matrix.variant }}
+          path: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}/target/test-profile/
           if-no-files-found: warn
           retention-days: 30
+      - name: "Spike: one spawn of each CLI the suite starts"
+        if: always()
+        continue-on-error: true
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
+        run: node scripts/windows-job-profile.mjs spawn --runs 30 --program "git-mingw64=C:/Program Files/Git/mingw64/bin/git.exe" --program "git-bin=C:/Program Files/Git/bin/git.exe" --program "git-cmd=C:/Program Files/Git/cmd/git.exe"
       - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
+        if: false
         continue-on-error: true
         timeout-minutes: 25
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE || github.workspace }}
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
 
   # The macOS test job (Apple silicon): the same as Windows.
@@ -593,13 +638,115 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
         with:
+          name: nx-cache-entries-${{ github.job }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/nx-cache-report
+          retention-days: 7
+      - cancel: nx-cache
+
+  test-windows-tasks-on-linux:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide cache trust and configure the sidecar
+        id: nx-cache-trust
+        run: |
+          node scripts/nx-remote-cache.mjs trust
+          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
+        id: nx-cache
+        background: true
+        with:
+          port: '3000'
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+          CACHE_READ_ONLY: '1'
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Wait for the cache recording proxy
+        env:
+          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
+          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
+        run: node scripts/nx-remote-cache.mjs ready
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ steps.ci-tools.outputs.linux_tools }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.ci-tools.outputs.python }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ steps.ci-tools.outputs.uv }}
+          enable-cache: false
+      - name: What the bootstrap tools are built from
+        id: pins
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Bootstrap
+        run: just bootstrap
+      - name: "Spike: the runner's state"
+        continue-on-error: true
+        run: |
+          nproc; df -h . "${TMPDIR:-/tmp}"; command -v git bash; git --version
+      - name: The Windows job's tasks, on Linux
+        id: gate
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" bash scripts/ci-job.sh test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      - name: Keep the per-test profile records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-test-windows-tasks-on-linux
+          path: target/test-profile/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: "Spike: one spawn of each CLI the suite starts"
+        if: always()
+        continue-on-error: true
+        run: node scripts/windows-job-profile.mjs spawn --runs 30
+      - name: Report cache entries and task executions
+        if: always()
+        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
           name: nx-cache-entries-${{ github.job }}
           path: ${{ runner.temp }}/nx-cache-report
           retention-days: 7
       - cancel: nx-cache
 
   test-macos:
-    if: github.event_name == 'pull_request'
+    if: false
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
     # a cold build, with about a quarter's headroom.
@@ -635,7 +782,7 @@ jobs:
         env:
           NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
           NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
+          CACHE_READ_ONLY: '1'
           GITHUB_TOKEN: ${{ github.token }}
       - name: Wait for the cache recording proxy
         shell: bash
@@ -664,7 +811,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          enable-cache: false
       - name: What the bootstrap tools are built from
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
@@ -723,7 +870,7 @@ jobs:
   # and the group serializes comment writers.
   budgets:
     needs: [lint, test-linux, test-windows, test-macos]
-    if: always()
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

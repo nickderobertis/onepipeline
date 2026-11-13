@@ -188,3 +188,4 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+// spike-onepipeline-windows: the demonstration edit every variant shares; no behaviour.
