@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::{
     a_parked_run_is_read_as_driven, a_watch_armed_active_outlasts_the_run_turning_parked, agent,
-    counts, end_driver, human, lifecycle, plan_of, project_id, reporting, rows, until_parked,
-    Counts, Repository, World, LOOP_STATS_ENV, REFUSED,
+    counts, human, lifecycle, plan_of, project_id, reporting, rows, until_parked, Counts,
+    Repository, World, LOOP_STATS_ENV, REFUSED,
 };
 use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 use oneagentgraph::event::{session_label, SESSION_LABEL};
@@ -939,42 +939,20 @@ fn a_plan_consuming_a_dependency_it_does_not_have_is_refused_by_name() {
 /// A `published` node whose repository declares release targets but **not the one
 /// it consumes** holds indefinitely, and says so: an unanswerable question is not
 /// an answer that the release has happened.
-///
-/// A plan stating that at load is refused by onevcs's `consumes-undeclared-target`
-/// (`adoption_check.rs`), so the run here launches while the host still declares the
-/// target, and the host's declaration drops it before the run is adopted — the way a
-/// live run comes to wait on a target nobody declares. `adopt` raises onevcs's rule
-/// beside the wait and refuses nothing, so the wait below is what the node meets.
 #[test]
 fn a_target_this_host_cannot_name_holds_the_node_rather_than_releasing_it() {
     let world = watching("adoption-unanswerable");
     world.write_graphs();
     let (engine_repo, _consumer) = two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&document(
-        &script,
-        &format!(
-            "\x20   - name: wheel\n\x20     style: automated\n\x20     \
-             probe: {{script: {script}, timeout_seconds: 30}}"
-        ),
-    ));
+    world.releases(&automated(&script));
     // A release is out and past the baseline, so nothing about the *release* is
     // what holds this node.
     releases_at(&answer, "9.9.9");
 
-    world.script("engine.wait", "hold");
     let mut node = consumer(Some("published"));
     consumes_publishing_a_change(&mut node, json!({"engine": "wheel"}));
     let run = start(&world, "adoption-unanswerable", vec![engine(), node]);
-    world.until("the producer to be dispatched", |world| {
-        dispatched(world, &run, ENGINE)
-    });
-    // The host stops declaring `wheel`, and the run is adopted by a driver that reads
-    // the declaration as it now stands.
-    end_driver(&world, &run);
-    world.releases(&automated(&script));
-    world.run(&["adopt", &run, "--detach"]).exited(0);
-    world.release("engine.go");
     // Waited for on the **record**, which is what this reads, rather than on the
     // surface beside it. `release::Waits::report` raises the surface first and
     // emits the record second — deliberately, so a reader holding the record
@@ -7829,57 +7807,4 @@ fn a_node_naming_local_direct_itself_is_held_on_a_change_request_identity() {
         world.changes_opened()
     );
     assert_eq!(host.bases(), (base_before, checkout_before));
-}
-
-/// The plan-edit hook is shown a fast consumer's task as its dispatch is given it: the
-/// out-of-repository reference block naming the landed dependency included — and byte for byte
-/// the task that consumer is dispatched with.
-#[test]
-fn the_plan_edit_hook_is_shown_the_reference_block_the_consumers_dispatch_is_given() {
-    let world = watching("adoption-edit-hook");
-    world.write_graphs();
-    let (engine_repo, _consumer) = two_repositories(&world);
-    let (script, answer) = world.probe_in(&engine_repo, ENGINE);
-    world.releases(&instructed(&script));
-    releases_at(&answer, "0.1.0");
-    // The consumer waits on a gate as well as the engine, so a ruling reaches it after the
-    // engine has landed and before it is dispatched.
-    world.script("gate.wait", "hold");
-    let hook = crate::harness::recording_edit_hook(&world);
-    let mut gated = consumer(Some("fast"));
-    gated["deps"] = json!([ENGINE, "gate"]);
-    let run = start_with(
-        &world,
-        "adoption-edit-hook",
-        vec![engine(), crate::harness::agent("gate", &[]), gated],
-        &["--plan-edit-hook", &hook.display().to_string()],
-    );
-    world.until("the engine to land", |world| {
-        world
-            .events_of(&run, "node-settled")
-            .iter()
-            .any(|event| event["labels"]["node"] == ENGINE && event["payload"]["status"] == "done")
-    });
-    let ruling = "Build against the engine's public API only.";
-    world
-        .run_with_stdin(
-            &["reply", &run],
-            &json!({"version": 2, "commands": [
-                {"op": "amend", "id": "consumer", "text": ruling}]})
-            .to_string(),
-        )
-        .exited(0);
-    let body = crate::harness::edit_hook_body(&world, "consumer");
-    assert!(body.contains(CROSS_REPO_REFERENCES_HEADING), "{body}");
-    assert!(body.contains("| engine |"), "{body}");
-
-    world.release("gate.go");
-    world.until("the consumer to be dispatched", |world| {
-        !tasks_of(world, "consumer").is_empty()
-    });
-    assert_eq!(
-        tasks_of(&world, "consumer")[0],
-        body,
-        "the hook was shown a task other than the one the consumer was dispatched with"
-    );
 }

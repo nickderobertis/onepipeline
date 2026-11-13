@@ -5,13 +5,13 @@
 //! run's channel could not be kept under, and keeps the one it accepts in the
 //! launch record. What these journeys hold is that the configuration a launch
 //! accepts is the one the run enforces: the grants its `authors` block narrowed,
-//! the hooks its `hooks` block names, and the reply window its
+//! the validators its `validators` block names, and the reply window its
 //! `codecs.onejudge` block sets — each against the same plan launched without the
 //! file, so what is enforced is the configuration's doing and not the profile's.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its
 // subprocess boundary and nothing inside the crate under test, which is driven as a real
-// compiled binary. The hook is not a substitution either: it is a real command a host
+// compiled binary. The validator is not a substitution either: it is a real command a host
 // names, and this suite supplies a real one. `harness.rs` carries the same suppression and
 // the full rationale.
 
@@ -554,6 +554,156 @@ fn a_legacy_monitor_author_replays_from_the_journal_and_checkpoint() {
         .run(&["monitor", RUN])
         .exited(0)
         .out_has("legacy watcher park");
+    world.release("slow.go");
+}
+
+/// A validator the configuration names judges what is offered to the reply queue:
+/// a reply it refuses is refused with its own words as the reason and queued
+/// nowhere — a verdict and an edit envelope alike — while the same reply against
+/// the same plan launched without the file is queued.
+#[test]
+fn a_validator_a_bus_config_names_refuses_a_reply_in_its_own_words_and_queues_it_nowhere() {
+    let world = World::new("bus-config-validated");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
+        ),
+    );
+    let path = plan(&world, "busvalidated");
+    launched(&world, &path, "busvalidated", &["--bus-config", &file]);
+
+    let reason = "this ruling names no evidence the run holds";
+    world.script("bus-validator.refuse", reason);
+    let verdict = r#"{"completion":false,"reason":"carry on"}"#;
+    let edit = json!({"version": 3, "commands": [
+        {"op": "finding", "message": "the fixture is slow"}
+    ]})
+    .to_string();
+    for reply in [verdict, edit.as_str()] {
+        world
+            .run_with_stdin(&["reply", "busvalidated"], reply)
+            .exited(REFUSED)
+            .err_has(reason);
+    }
+    for file in ["replies.jsonl", "commands.jsonl"] {
+        assert_eq!(
+            channel_file(&world, "busvalidated", file),
+            "",
+            "a refused reply reached {file}"
+        );
+    }
+    let judged: Vec<Value> = std::fs::read_to_string(world.fakes.join("bus-validator.jsonl"))
+        .expect("the validator was run")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("the validator records JSON"))
+        .collect();
+    assert_eq!(judged.len(), 2, "{judged:?}");
+    assert_eq!(judged[0]["queue"], json!("replies"), "{judged:?}");
+    assert_eq!(
+        judged[0]["message"],
+        serde_json::from_str::<Value>(verdict).expect("the verdict is JSON"),
+        "the validator was handed another document than the reply"
+    );
+
+    // A validator that gives no verdict at all refuses the reply as well, rather
+    // than letting it through judged by nothing.
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
+    world.script("bus-validator.unjudged", "");
+    world
+        .run_with_stdin(&["reply", "busvalidated"], verdict)
+        .exited(REFUSED);
+    assert_eq!(
+        channel_file(&world, "busvalidated", "replies.jsonl"),
+        "",
+        "a reply no validator gave a verdict on was queued"
+    );
+    std::fs::remove_file(world.fakes.join("bus-validator.unjudged"))
+        .expect("the missing verdict is lifted");
+
+    // The project's first run still claims it, so launching it again is a takeover — of a run
+    // a shutdown ended, which this host's records prove nobody drives, so it waits on nothing.
+    let ended = world.run(&["shutdown", "busvalidated", "--grace", "1"]);
+    assert!([0, 2].contains(&ended.code), "{}", ended.stderr);
+    launched(&world, &path, "busvalidated-2", &["--take-over"]);
+    world
+        .run_with_stdin(&["reply", "busvalidated-2"], verdict)
+        .exited(0);
+    assert!(
+        channel_file(&world, "busvalidated-2", "replies.jsonl").contains("carry on"),
+        "the reply was not queued where no validator judges it"
+    );
+    world.release("slow.go");
+}
+
+/// A validator the configuration names on the commands queue judges the edits a
+/// reply carries: an envelope whose commands it refuses is refused in its words
+/// with nothing queued, while a verdict carrying no commands is never offered to
+/// it.
+#[test]
+fn a_validator_on_the_commands_queue_judges_the_edits_a_reply_carries() {
+    let world = World::new("bus-config-commands");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
+    let file = configuration(
+        &world,
+        "onemessagebus.yaml",
+        &format!(
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: commands, kind: command, command: [{validator:?}]}}\n"
+        ),
+    );
+    let path = plan(&world, "buscommands");
+    launched(&world, &path, "buscommands", &["--bus-config", &file]);
+    let judged = || -> Vec<Value> {
+        std::fs::read_to_string(world.fakes.join("bus-validator.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("the validator records JSON"))
+            .collect()
+    };
+
+    let reason = "an edit has to name the node it corrects";
+    world.script("bus-validator.refuse", reason);
+    let edit = json!({"version": 3, "commands": [
+        {"op": "finding", "message": "the fixture is slow"}
+    ]})
+    .to_string();
+    world
+        .run_with_stdin(&["reply", "buscommands"], &edit)
+        .exited(REFUSED)
+        .err_has(reason);
+    assert_eq!(
+        channel_file(&world, "buscommands", "commands.jsonl"),
+        "",
+        "an edit the commands validator refused was queued"
+    );
+    let offered = judged();
+    assert!(
+        !offered.is_empty()
+            && offered
+                .iter()
+                .all(|record| record["queue"] == json!("commands")),
+        "the edit was not offered to the commands queue's validator: {offered:?}"
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", "buscommands"],
+            r#"{"completion":false,"reason":"carry on"}"#,
+        )
+        .exited(0);
+    assert!(
+        channel_file(&world, "buscommands", "replies.jsonl").contains("carry on"),
+        "a verdict carrying no commands was not queued"
+    );
+    assert_eq!(
+        judged().len(),
+        offered.len(),
+        "a verdict carrying no commands was offered to the commands queue's validator"
+    );
     world.release("slow.go");
 }
 
@@ -1447,223 +1597,5 @@ fn an_engine_raised_surface_a_hook_rewrites_is_journalled_as_rewritten() {
     assert!(surfaces_read(&world, "hookenginerewrite")
         .iter()
         .any(|surface| surface["message"] == "the rewritten report"));
-    world.release("slow.go");
-}
-
-/// Amend `spare` on `run`, so the run holds a manager's ruling to decline, and
-/// answer the reference it is declined by.
-fn a_ruling_to_decline(world: &World, run: &str) -> String {
-    let replied = world.run_with_stdin(
-        &["reply", run],
-        &json!({"version": 4, "commands": [{"op": "amend", "id": "spare",
-            "text": "Keep the diff under fifty lines."}]})
-        .to_string(),
-    );
-    replied.exited(0);
-    let id = replied.json()["reply"].as_u64().expect("the envelope's id");
-    format!("c{id}.0")
-}
-
-/// A declined ruling meets the channel's hooks as any surface `surface` raises
-/// does: a hook rewriting its text queues the rewritten text with the typed
-/// record intact, a hook dropping it queues nothing and journals the drop, and a
-/// hook refusing it refuses the decline in its words, with nothing appended.
-#[test]
-fn a_declined_ruling_meets_the_channels_hooks_as_a_surface_does() {
-    let world = World::new("hook-decline-rewrite");
-    hooked_run(
-        &world,
-        "hookdeclinerewrite",
-        &[("surfaces", &["set-message", "the changed decline"], "")],
-    );
-    let reference = a_ruling_to_decline(&world, "hookdeclinerewrite");
-    world
-        .run_with_stdin(
-            &[
-                "decline-ruling",
-                "hookdeclinerewrite",
-                "--ruling",
-                &reference,
-            ],
-            "The user said otherwise.",
-        )
-        .exited(0)
-        .out_has("\"queued\"");
-    let read = surfaces_read(&world, "hookdeclinerewrite");
-    let declined = read
-        .iter()
-        .find(|surface| surface["kind"] == "declined-ruling")
-        .unwrap_or_else(|| panic!("no decline was queued: {read:?}"));
-    assert_eq!(declined["message"], "the changed decline", "{declined}");
-    assert_eq!(declined["declined_ruling"]["ruling"], json!(reference));
-    assert_eq!(
-        declined["declined_ruling"]["reason"],
-        "The user said otherwise."
-    );
-    assert_eq!(
-        world
-            .events_of("hookdeclinerewrite", "planner-surface-queued")
-            .last()
-            .expect("the decline is journalled")["payload"]["message"],
-        "the changed decline"
-    );
-    world.release("slow.go");
-
-    let world = World::new("hook-decline-drop");
-    hooked_run(&world, "hookdeclinedrop", &[("surfaces", &["drop"], "")]);
-    let reference = a_ruling_to_decline(&world, "hookdeclinedrop");
-    world
-        .run_with_stdin(
-            &["decline-ruling", "hookdeclinedrop", "--ruling", &reference],
-            "The user said otherwise.",
-        )
-        .exited(0)
-        .out_has("\"dropped\"");
-    assert!(surfaces_read(&world, "hookdeclinedrop").is_empty());
-    let dropped = world.events_of("hookdeclinedrop", "planner-surface-dropped");
-    assert_eq!(dropped.len(), 1, "{dropped:?}");
-    assert_eq!(
-        dropped[0]["payload"]["kind"], "declined-ruling",
-        "{dropped:?}"
-    );
-    assert_eq!(dropped[0]["payload"]["hook"]["index"], 0, "{dropped:?}");
-    world.release("slow.go");
-
-    let world = World::new("hook-decline-refuse");
-    hooked_run(
-        &world,
-        "hookdeclinerefuse",
-        &[("surfaces", &["refuse", "no declines today"], "")],
-    );
-    let reference = a_ruling_to_decline(&world, "hookdeclinerefuse");
-    world
-        .run_with_stdin(
-            &[
-                "decline-ruling",
-                "hookdeclinerefuse",
-                "--ruling",
-                &reference,
-            ],
-            "The user said otherwise.",
-        )
-        .exited(REFUSED)
-        .err_has("no declines today");
-    assert!(channel_file(&world, "hookdeclinerefuse", "surfaces.jsonl").is_empty());
-    world.release("slow.go");
-}
-
-/// How many records the run's surfaces queue holds.
-fn surface_lines(world: &World, run: &str) -> usize {
-    channel_file(world, run, "surfaces.jsonl").lines().count()
-}
-
-/// A declined ruling's record goes with its kind, both ways, after the channel's
-/// hooks as well as before: a hook that strips a decline of its record, renames
-/// it into another kind still carrying the record, makes it blocking, leaves a
-/// record that cannot be read, or moves it onto another node than its record
-/// names is refused at `decline-ruling` in the channel's words, with nothing
-/// appended.
-#[test]
-fn a_hook_that_breaks_a_declined_rulings_record_is_refused_with_nothing_appended() {
-    for (name, hook, why) in [
-        (
-            "hookdeclinestrip",
-            &["remove-field", "declined_ruling"][..],
-            "carries its typed `declined_ruling` record",
-        ),
-        (
-            "hookdeclinerename",
-            &["set-kind", "finding"][..],
-            "only a `declined-ruling` surface carries a `declined_ruling` record",
-        ),
-        ("hookdeclineblock", &["set-blocking"][..], "never blocks"),
-        (
-            "hookdeclineunread",
-            // Well-formed for the surface's schema, and still no record a decline
-            // writes: a user's ruling cannot be declined.
-            &[
-                "set-field",
-                "declined_ruling",
-                r#"{"node": "spare", "ruling": "c0.0", "provenance": "user", "kind": "amendment", "reply": 0, "text": "Keep the diff under fifty lines.", "reason": "The user said otherwise."}"#,
-            ][..],
-            "record cannot be read",
-        ),
-        (
-            "hookdeclinemoved",
-            &["set-field", "workstream", r#""slow""#][..],
-            "about the node its record names, `spare`",
-        ),
-    ] {
-        let world = World::new(&format!("hook-decline-{name}"));
-        hooked_run(&world, name, &[("surfaces", hook, "")]);
-        let reference = a_ruling_to_decline(&world, name);
-        let before = surface_lines(&world, name);
-        world
-            .run_with_stdin(
-                &["decline-ruling", name, "--ruling", &reference],
-                "The user said otherwise.",
-            )
-            .exited(REFUSED)
-            .err_has(why)
-            .err_has("nothing was appended");
-        assert_eq!(
-            surface_lines(&world, name),
-            before,
-            "{name}: a broken decline was appended"
-        );
-        assert!(
-            world
-                .events_of(name, "planner-surface-queued")
-                .iter()
-                .all(|event| event["payload"]["kind"] != "declined-ruling"),
-            "{name}: a broken decline was journalled queued"
-        );
-        world.release("slow.go");
-    }
-}
-
-/// The same holds for every other writer: a surface a hook renames into a
-/// `declined-ruling` carrying no record is refused, and so is a
-/// `declined-ruling` raised at `surface`, which no record comes with.
-#[test]
-fn no_surface_becomes_a_declined_ruling_without_its_record() {
-    let world = World::new("hook-surface-into-decline");
-    hooked_run(
-        &world,
-        "hookintodecline",
-        &[("surfaces", &["set-kind", "declined-ruling"], "")],
-    );
-    let before = surface_lines(&world, "hookintodecline");
-    world
-        .run(&[
-            "surface",
-            "hookintodecline",
-            "--kind",
-            "finding",
-            "--message",
-            "the fixture moved",
-        ])
-        .exited(REFUSED)
-        .err_has("carries its typed `declined_ruling` record");
-    assert_eq!(surface_lines(&world, "hookintodecline"), before);
-    world.release("slow.go");
-
-    let world = World::new("surface-as-decline");
-    let path = plan(&world, "surfaceasdecline");
-    launched(&world, &path, "surfaceasdecline", &[]);
-    let before = surface_lines(&world, "surfaceasdecline");
-    world
-        .run(&[
-            "surface",
-            "surfaceasdecline",
-            "--kind",
-            "declined-ruling",
-            "--message",
-            "I decline it",
-        ])
-        .exited(REFUSED)
-        .err_has("carries its typed `declined_ruling` record")
-        .err_has("nothing was appended");
-    assert_eq!(surface_lines(&world, "surfaceasdecline"), before);
     world.release("slow.go");
 }

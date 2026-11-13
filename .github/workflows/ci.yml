@@ -396,6 +396,9 @@ jobs:
           chmod +x "$m/rustc-timer"
           echo "RUSTC_WRAPPER=$m/rustc-timer" >> "$GITHUB_ENV"
           echo "ONEPIPELINE_RUSTC_TIMINGS=$m/rustc.tsv" >> "$GITHUB_ENV"
+          # Nx's own trace of every task's start and end, written whatever the tasks' outcome. Nx
+          # joins this onto its working directory, so it is relative to the checkout.
+          echo "NX_PROFILE=target/ci-time-nx-profile.json" >> "$GITHUB_ENV"
       # The MSRV floor's check, here rather than in `lint`: a second toolchain's
       # whole-workspace build, which in `lint` shared the runner with the
       # visual-docs capture's and left it no headroom under 30 minutes. After
@@ -501,7 +504,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           m="$RUNNER_TEMP/measure"; mkdir -p "$m"
-          ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t "test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true
+          if [ -f target/ci-time-nx-profile.json ]; then cp target/ci-time-nx-profile.json "$m/nx-profile.json"; fi
+          ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true
           date -u +%s > "$m/ended.txt"
       - name: 'Measure: keep the samples, compile timings and graph (measurement-only (spike-onepipeline-profile))'
         if: always()
@@ -781,6 +785,9 @@ jobs:
           chmod +x "$m/rustc-timer"
           echo "RUSTC_WRAPPER=$m/rustc-timer" >> "$GITHUB_ENV"
           echo "ONEPIPELINE_RUSTC_TIMINGS=$m/rustc.tsv" >> "$GITHUB_ENV"
+          # Nx's own trace of every task's start and end, written whatever the tasks' outcome. Nx
+          # joins this onto its working directory, so it is relative to the checkout.
+          echo "NX_PROFILE=target/ci-time-nx-profile.json" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.ci-tools.outputs.node }}
@@ -838,7 +845,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           m="$RUNNER_TEMP/measure"; mkdir -p "$m"
-          ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t "lint,test-quick,test-launcher,install-smoke,install-documented" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true
+          if [ -f target/ci-time-nx-profile.json ]; then cp target/ci-time-nx-profile.json "$m/nx-profile.json"; fi
+          ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "lint,test-quick,test-launcher,install-smoke,install-documented" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true
           date -u +%s > "$m/ended.txt"
       - name: 'Measure: keep the samples, compile timings and graph (measurement-only (spike-onepipeline-profile))'
         if: always()

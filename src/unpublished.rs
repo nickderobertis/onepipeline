@@ -354,7 +354,6 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
                 detail: Detail::Decision,
                 sessions: Vec::new(),
                 labels: BTreeMap::from([(SESSION_LAUNCHER_LABEL.to_owned(), session.clone())]),
-                branch: None,
             }
         }
         Target::Host => Selection {
@@ -369,7 +368,6 @@ pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
                 detail: Detail::Decision,
                 sessions: tokens.iter().cloned().map(SessionToken).collect(),
                 labels: BTreeMap::new(),
-                branch: None,
             }
         }
     };
@@ -399,12 +397,9 @@ fn listing(
     graph: Option<&Path>,
 ) -> Result<Unpublished> {
     let mut unresolved = Vec::new();
-    let read = {
-        let _read = crate::hostphases::phase("onevcs-read");
-        onevcs::Providers::real()
-            .vcs
-            .recoverable_matching(Scope::All, selection)
-    };
+    let read = onevcs::Providers::real()
+        .vcs
+        .recoverable_matching(Scope::All, selection);
     let recoverable = match read {
         Ok(rows) => rows,
         // A named session onevcs cannot load is refused, in onevcs's own words:
@@ -473,7 +468,6 @@ fn decided(
         Target::Session { session } => Some(session),
         Target::Host | Target::Tokens { .. } => request.acknowledging.as_ref(),
     };
-    let _acknowledgements = crate::hostphases::phase("acknowledgements");
     let acknowledged = match acknowledging {
         Some(session) => read_acknowledgements(
             &acknowledgement_file(&request.acknowledgements, session),
@@ -481,7 +475,6 @@ fn decided(
         ),
         None => Vec::new(),
     };
-    drop(_acknowledgements);
     let rows: Vec<Row> = recoverable
         .into_iter()
         .map(|row| {
@@ -1026,17 +1019,12 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
         ))
     })?;
     let providers = onevcs::Providers::real();
-    // Only the named branch's rows, whichever sessions hold it: the row this records
-    // is one of them, and a branch on none, or on several identities, is refused
-    // from them exactly as it is from the whole host's.
-    let branch_read = crate::hostphases::phase("branch-read");
     let rows = providers
         .vcs
         .recoverable_matching(
             Scope::All,
             &Selection {
                 detail: Detail::Decision,
-                branch: Some(request.branch.clone()),
                 ..Selection::default()
             },
         )
@@ -1046,7 +1034,6 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
                  {error}"
             ))
         })?;
-    drop(branch_read);
     let identity = match &request.repo {
         Some(repo) if rows.iter().any(|row| row.identity == *repo) => Some(repo.clone()),
         Some(repo) => Some(
@@ -1157,17 +1144,13 @@ pub fn acknowledge(request: &AcknowledgeRequest, graph: Option<PathBuf>) -> Resu
     };
     kept.retain(|other| !(other.identity == entry.identity && other.branch == entry.branch));
     kept.push(entry.clone());
-    {
-        let _write = crate::hostphases::phase("write");
-        write_file(
-            &file,
-            &AcknowledgementFile {
-                version: ACKNOWLEDGEMENT_FILE_VERSION,
-                acknowledged: kept,
-            },
-        )?;
-    }
-    let _listing = crate::hostphases::phase("listing");
+    write_file(
+        &file,
+        &AcknowledgementFile {
+            version: ACKNOWLEDGEMENT_FILE_VERSION,
+            acknowledged: kept,
+        },
+    )?;
     let listing = unpublished(&UnpublishedRequest {
         target: Target::Session {
             session: request.session.clone(),

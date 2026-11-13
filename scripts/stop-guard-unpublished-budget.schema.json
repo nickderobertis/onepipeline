@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Stop-verdict budget record",
-  "x-version": 2,
+  "x-version": 1,
   "x-record": "stop-guard-unpublished.json",
   "x-invocation": "stop-guard-unpublished-invocation.json",
   "x-binary": "stop-guard-unpublished-onepipeline",
@@ -10,17 +10,14 @@
     "1": [20, 371, 41, 2308],
     "10": [200, 3714, 414, 23085]
   },
-  "x-host-reads": ["unpublished-host", "acknowledge", "stop-guard-none", "stop-guard-owed", "stop-guard-unreadable"],
-  "x-host-shape": [20, 45, 120, 3, 2, 656],
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "build", "load_workers", "workloads", "host", "preparation_ms", "total_ms", "load1"],
+  "required": ["version", "build", "load_workers", "workloads", "preparation_ms", "total_ms", "load1"],
   "properties": {
     "version": {"type": "integer"},
     "build": {"$ref": "#/$defs/Build"},
     "load_workers": {"type": "integer"},
     "workloads": {"type": "array", "items": {"$ref": "#/$defs/Workload"}},
-    "host": {"$ref": "#/$defs/HostWorkload"},
     "preparation_ms": {"type": "integer"},
     "total_ms": {"type": "integer"},
     "load1": {"type": "number"}
@@ -60,32 +57,6 @@
         "cold": {"anyOf": [{"$ref": "#/$defs/Sample"}, {"type": "null"}]},
         "warm_git": {"type": "integer"},
         "cold_git": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-      }
-    },
-    "HostRead": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["read", "verdict_sha256", "warm", "cold_us", "phases_ms", "rederived", "git"],
-      "properties": {
-        "read": {"type": "string"},
-        "verdict_sha256": {"type": "string"},
-        "warm": {"$ref": "#/$defs/Sample"},
-        "cold_us": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-        "phases_ms": {"type": "object", "additionalProperties": {"type": "number"}},
-        "rederived": {"type": "integer"},
-        "git": {"type": "integer"}
-      }
-    },
-    "HostWorkload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["shape", "class_counts", "moved", "landed", "reads"],
-      "properties": {
-        "shape": {"type": "array", "items": {"type": "integer"}},
-        "class_counts": {"type": "object", "additionalProperties": {"type": "integer"}},
-        "moved": {"type": "integer"},
-        "landed": {"type": "integer"},
-        "reads": {"type": "array", "items": {"$ref": "#/$defs/HostRead"}}
       }
     },
     "Workload": {

@@ -27,8 +27,7 @@ use onemessagebus::{
 };
 use onepipeline::channel::layout::{
     allowlist, allows, allows_completion, Channel, CommandOutcome, Op, PlannerChannel,
-    QueuedCommands, QueuedReply, COMMANDS, COMMAND_OUTCOMES, REPLIES, REPLY_ENVELOPE_VERSION,
-    SURFACES,
+    QueuedCommands, QueuedReply, COMMANDS, COMMAND_OUTCOMES, REPLIES, SURFACES,
 };
 use serde_json::{json, Value};
 
@@ -559,8 +558,8 @@ fn a_reply_is_routed_by_its_halves_and_checked_against_its_author() {
     );
     assert_eq!(
         both[1].1["reply"]["version"],
-        json!(REPLY_ENVELOPE_VERSION),
-        "a version-2 envelope was not read at the version this build writes"
+        json!(3),
+        "a version-2 envelope was not read at 3"
     );
 
     let commands_only = layout
@@ -606,10 +605,7 @@ fn a_reply_is_routed_by_its_halves_and_checked_against_its_author() {
             &grants,
         )
         .expect_err("an edit envelope at a version this build does not read");
-    assert_eq!(
-        old,
-        format!("an edit envelope requires version {REPLY_ENVELOPE_VERSION}")
-    );
+    assert_eq!(old, "an edit envelope requires version 3");
     let unknown = layout
         .prepare(
             &replies,
@@ -674,7 +670,6 @@ fn the_typed_channel_answers_only_a_verdict_and_names_its_ops_by_word() {
             abandoned: false,
             asker: None,
             correlation: None,
-            declined_ruling: None,
         })
         .expect("queued");
     channel.claim().expect("a claim").expect("claimed");

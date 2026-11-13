@@ -2041,16 +2041,6 @@ pub(crate) fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
     crate::event::EventKind(wire)
 }
 
-/// Whether `kind` is `of` as [`kind_of`] spells it, that spelling derived once into
-/// `wire`: the fold asks these of every record it reads, and deriving it serializes.
-fn is_kind_of(
-    kind: &crate::event::EventKind,
-    of: onevcs::EventKind,
-    wire: &'static std::sync::OnceLock<crate::event::EventKind>,
-) -> bool {
-    *kind == *wire.get_or_init(|| kind_of(of))
-}
-
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
@@ -2875,15 +2865,13 @@ fn capped(patch: String, cap: usize) -> String {
 /// sibling's to decide, and a literal here would keep matching after a rename
 /// and silently stop folding anything.
 pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
-    static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
-    *kind == *WIRE.get_or_init(session_opened_kind)
+    *kind == session_opened_kind()
 }
 
 /// Whether an envelope is a push `onevcs` recorded, in its own vocabulary — the
 /// read [`is_session_opened`] makes, for the same reason.
 pub(crate) fn is_push(kind: &crate::event::EventKind) -> bool {
-    static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
-    is_kind_of(kind, onevcs::EventKind::Push, &WIRE)
+    *kind == kind_of(onevcs::EventKind::Push)
 }
 
 /// How `onevcs` spells a session opening, for a caller that has to *write* one
@@ -2899,16 +2887,14 @@ pub(crate) fn session_opened_kind() -> crate::event::EventKind {
 /// Asked through that library's enum for the reason
 /// [`is_session_opened`] is: how a kind is spelled is the sibling's to decide.
 pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
-    static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
-    is_kind_of(kind, onevcs::EventKind::MergeCompleted, &WIRE)
+    *kind == kind_of(onevcs::EventKind::MergeCompleted)
 }
 
 /// Whether an envelope is one of the two records `onevcs` writes for a landing — a
 /// `merge-completed`, or the `change-merged` beside it on the change-request path — each of
 /// which reports the issues the landing closes.
 pub(crate) fn is_landing(kind: &crate::event::EventKind) -> bool {
-    static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
-    is_merge_completed(kind) || is_kind_of(kind, onevcs::EventKind::ChangeMerged, &WIRE)
+    is_merge_completed(kind) || *kind == kind_of(onevcs::EventKind::ChangeMerged)
 }
 
 /// The commit one publication reached its base at, off the sibling's own record.

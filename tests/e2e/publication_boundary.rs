@@ -21,7 +21,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{double, lifecycle, plan_of, Repository, World, REFUSED};
+use crate::harness::{lifecycle, plan_of, Repository, World, REFUSED};
 use crate::mixed_world_support::declare_replacement;
 pub(crate) use crate::mixed_world_support::{declare_visibility, mixed_world};
 
@@ -2052,13 +2052,6 @@ fn validated(world: &World, run: &str, document: &Value) -> crate::harness::Run 
     );
     if validated.code != 0 {
         names_no_node(world, run, &validated.stderr);
-    } else {
-        // A pass is a keep under the bus's hook protocol: the document back, unchanged.
-        assert_eq!(
-            validated.stdout,
-            document.to_string(),
-            "a pass did not print back the document it was handed"
-        );
     }
     validated
 }
@@ -2247,19 +2240,17 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
 }
 
 /// Start `run` over the mixed plan with a `held` node beside it, under a bus whose
-/// reply queue is judged by a hook running the compiled validator — kept when it passes,
-/// refused in its words when it refuses — which keeps its passes in a cache keyed by the
+/// reply queue runs the compiled validator and keeps its passes in a cache keyed by the
 /// validator's own fingerprint; answer that cache's directory once `held` is in flight.
 fn bussed_run(world: &World, run: &str) -> std::path::PathBuf {
     let validator = crate::harness::binary().to_string_lossy().into_owned();
-    let hook = double("bus-hook").to_string_lossy().into_owned();
     let cache = world.root.join("validator-passes");
     let config = world.root.join("onemessagebus.yaml");
     std::fs::write(
         &config,
         format!(
-            "version: 1\ntransport: {{kind: local}}\nhooks:\n  - on: replies\n    \
-             command: [{hook:?}, judge, {validator:?}, boundary, validate-envelope, --run, \
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  - on: replies\n    kind: \
+             command\n    command: [{validator:?}, boundary, validate-envelope, --run, \
              {run}]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
              boundary, validate-envelope, --run, {run}, --fingerprint]\n"
         ),
@@ -2316,8 +2307,8 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
     let (world, private, _) = mixed_world("boundary-revalidated");
     declare_terms(&world, &private, &["zephyrine"]);
     world.script("generalize.wait", "hold");
-    // The bus this run launched under runs the compiled validator as a hook on its reply
-    // queue, keeping passes in a cache keyed by the validator's own fingerprint.
+    // The bus this run launched under runs the compiled validator on its reply queue,
+    // keeping passes in a cache keyed by the validator's own fingerprint.
     let cache = bussed_run(&world, "bussed");
 
     let payload =
@@ -3564,10 +3555,7 @@ fn a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_link
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
-                    scope: onetaskgraph_core::CopyScope::Projects {
-                        tasks: true,
-                        documents: false,
-                    },
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                     destination: onetaskgraph_plugin_api::SourceName::new("plans")
                         .expect("a source name"),
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
@@ -6274,113 +6262,5 @@ fn a_human_item_surface_on_a_mixed_run_withholds_what_the_boundary_refuses() {
     for hidden in ["zephyrine", "Pick the", "plain one"] {
         assert!(!neutral.contains(hidden), "{hidden}: {neutral}");
     }
-    world.release("generalize.go");
-}
-
-/// The plan-edit hook is shown a public consumer's task as its dispatch is given it: the
-/// `## Repository boundary` section included, while the producer it waits on is still running
-/// — and byte for byte the task that consumer is dispatched with once the export is made.
-#[test]
-fn the_plan_edit_hook_is_shown_the_boundary_section_the_consumers_dispatch_is_told() {
-    let (world, _private, _public) = mixed_world("boundary-edit-hook");
-    world.script("generalize.work-at", "examples/generic/sample.md");
-    world.script("generalize.work", "a generic example\n");
-    world.script("examples.work", "what the public node built on it\n");
-    world.script("generalize.wait", "hold");
-    let hook = crate::harness::recording_edit_hook(&world);
-    let name = "hookedboundary";
-    let project = world.plan(name, &exported_plan(name));
-    world
-        .run(&[
-            "start",
-            &project,
-            "--detach",
-            "--plan-edit-hook",
-            &hook.display().to_string(),
-        ])
-        .exited(0);
-    world.until("the producer to be in flight", |world| {
-        !world.events_of(name, "node-dispatched").is_empty()
-    });
-    let ruling = "Keep each example to one screen of code.";
-    world
-        .run_with_stdin(
-            &["reply", name],
-            &json!({"version": 2, "commands": [
-                {"op": "amend", "id": "examples", "text": ruling}]})
-            .to_string(),
-        )
-        .exited(0);
-    let body = crate::harness::edit_hook_body(&world, "examples");
-    assert!(body.contains("## Repository boundary"), "{body}");
-    assert!(body.contains(ruling), "{body}");
-
-    world.release("generalize.go");
-    world.until("the consumer to be dispatched", |world| {
-        !tasks_of(world, "examples").is_empty()
-    });
-    assert_eq!(
-        tasks_of(&world, "examples")[0],
-        body,
-        "the hook was shown a task other than the one the consumer was dispatched with"
-    );
-}
-
-/// A declined ruling is text addressed to the manager, which a public node may
-/// yet be shown, so `decline-ruling` meets the boundary as `surface` does: a
-/// reason carrying a private term is refused, naming no node, with nothing
-/// queued, and the same decline in clean words is queued.
-#[test]
-fn a_decline_carrying_a_private_term_is_refused_before_anything_is_queued() {
-    let (world, _) = held_mixed_run("declined", &["zephyrine"]);
-    let replied = world.run_with_stdin(
-        &["reply", "declined"],
-        &json!({"version": 4, "commands": [{"op": "amend", "id": "examples",
-            "text": "Keep the examples short."}]})
-        .to_string(),
-    );
-    assert!(
-        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
-        "{}",
-        replied.stderr
-    );
-    let id = replied.json()["reply"].as_u64().expect("the envelope's id");
-    world.until("the amendment to be committed", |world| {
-        world
-            .events_of("declined", "edit-committed")
-            .iter()
-            .any(|event| event["payload"]["envelope"] == json!(id))
-    });
-    let reference = format!("c{id}.0");
-    let refused = world.run_with_stdin(
-        &["decline-ruling", "declined", "--ruling", &reference],
-        "the zephyrine layout needs the long form",
-    );
-    refused.exited(REFUSED);
-    assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
-    names_no_node(&world, "declined", &refused.stderr);
-    assert!(
-        world
-            .events_of("declined", "planner-surface-queued")
-            .iter()
-            .all(|event| event["payload"]["kind"] != "declined-ruling"),
-        "a refused decline was queued"
-    );
-    world
-        .run_with_stdin(
-            &["decline-ruling", "declined", "--ruling", &reference],
-            "the plain layout needs the long form",
-        )
-        .exited(0)
-        .out_has("\"queued\"");
-    assert_eq!(
-        world
-            .events_of("declined", "planner-surface-queued")
-            .iter()
-            .filter(|event| event["payload"]["kind"] == "declined-ruling")
-            .count(),
-        1,
-        "the clean decline was not queued"
-    );
     world.release("generalize.go");
 }

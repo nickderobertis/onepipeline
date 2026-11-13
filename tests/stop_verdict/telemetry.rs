@@ -11,7 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub(super) const VERSION: u32 = 2;
+pub(super) const VERSION: u32 = 1;
 
 /// The record the journey writes, under `target/budget-records/`.
 pub(super) const RECORD: &str = "stop-guard-unpublished.json";
@@ -27,16 +27,6 @@ pub(super) const LOAD_RECORD: &str = "stop-guard-unpublished-load.json";
 
 /// The scenarios every workload is measured in.
 pub(super) const SCENARIOS: [&str; 3] = ["none", "owed", "unreadable"];
-
-/// The host-shaped workload's reads, each one budget's figure or, for the guard, one
-/// scenario of it.
-pub(super) const HOST_READS: [&str; 5] = [
-    "unpublished-host",
-    "acknowledge",
-    "stop-guard-none",
-    "stop-guard-owed",
-    "stop-guard-unreadable",
-];
 
 /// Where the measured binary came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,45 +93,6 @@ pub(super) struct Workload {
     pub scenarios: Vec<Scenario>,
 }
 
-/// One read of the host-shaped workload: ten calls, each from the aged state restored
-/// and verified, and one separate traced and counted call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HostRead {
-    /// One of [`HOST_READS`].
-    pub read: String,
-    /// SHA-256 of the answer every timed call gave once checked: the listing's rows
-    /// and verdict, the receipt's branch set, or the guard's standard output.
-    pub verdict_sha256: String,
-    /// The ten calls.
-    pub warm: Sample,
-    /// The host listing's cold first read of the aged state, restored and verified, in
-    /// microseconds; stated, not budgeted, and `null` for every other read.
-    pub cold_us: Option<u64>,
-    /// The traced call's phases by name, in milliseconds of wall clock.
-    pub phases_ms: BTreeMap<String, f64>,
-    /// Branches onevcs derived rather than served from its record in the traced call.
-    pub rederived: u64,
-    /// Git executions of the separate counting call.
-    pub git: u64,
-}
-
-/// The host-shaped workload, `onevcs_testing::recovery::HOST`, aged by `age_host`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct HostWorkload {
-    /// Identities, checkouts, preserved branches, in flight, branches changing many
-    /// paths, and loose commits, as the fixture declares them.
-    pub shape: [usize; 6],
-    /// The host listing's rows by the class the fixture declares.
-    pub class_counts: BTreeMap<String, usize>,
-    /// Branches `age_host` moved, and branches its base gains landed.
-    pub moved: usize,
-    pub landed: usize,
-    /// Every read, in [`HOST_READS`] order.
-    pub reads: Vec<HostRead>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Record {
@@ -151,9 +102,7 @@ pub(super) struct Record {
     pub load_workers: u32,
     /// Scale 1, then scale 10.
     pub workloads: Vec<Workload>,
-    /// The host-shaped workload.
-    pub host: HostWorkload,
-    /// Empty fixture roots to every workload built and readied, in milliseconds.
+    /// Empty fixture roots to both workloads built, in milliseconds.
     pub preparation_ms: u64,
     /// The whole journey, preparation included, in milliseconds.
     pub total_ms: u64,
@@ -360,43 +309,10 @@ pub(super) fn sample_record() -> Record {
                 cold_git: Some(1),
             }],
         }],
-        host: HostWorkload {
-            shape: host_shape(),
-            class_counts: BTreeMap::from([("owed".into(), 1)]),
-            moved: 20,
-            landed: 6,
-            reads: vec![HostRead {
-                read: HOST_READS[0].into(),
-                verdict_sha256: "e".repeat(64),
-                warm: Sample {
-                    calls_us: vec![1; 10],
-                    median_us: 1,
-                    max_us: 1,
-                    load1: 0.5,
-                },
-                cold_us: Some(1),
-                phases_ms: BTreeMap::from([("render".into(), 0.5)]),
-                rederived: 1,
-                git: 1,
-            }],
-        },
         preparation_ms: 1,
         total_ms: 2,
         load1: 0.5,
     }
-}
-
-/// The host-shaped fixture's shape as the record states it.
-pub(super) fn host_shape() -> [usize; 6] {
-    let host = onevcs_testing::recovery::HOST;
-    [
-        host.identities,
-        host.checkouts,
-        host.preserved.iter().sum(),
-        host.in_flight,
-        host.many_path_branches,
-        host.loose_commits,
-    ]
 }
 
 #[test]
@@ -416,20 +332,6 @@ fn the_checked_schema_is_the_shape_this_producer_writes() {
     shape["workloads"]["array"]["class_counts"] = serde_json::json!({
         "map": shape_of(counts.values().next().expect("the sample counts a class"))
     });
-    for (field, at) in [
-        ("class_counts", &written["host"]),
-        ("phases_ms", &written["host"]["reads"][0]),
-    ] {
-        let values = at[field].as_object().expect("a map");
-        let mapped = serde_json::json!({
-            "map": shape_of(values.values().next().expect("the sample carries one"))
-        });
-        if field == "class_counts" {
-            shape["host"][field] = mapped;
-        } else {
-            shape["host"]["reads"]["array"][field] = mapped;
-        }
-    }
     assert_eq!(
         shape,
         shape_of_schema(&schema, &schema),
@@ -448,12 +350,6 @@ fn the_checked_schema_is_the_shape_this_producer_writes() {
             "10": onevcs_testing::recovery::Scale::Ten.counts(),
         }),
         "the workloads the reader requires are the ones the fixture builds"
-    );
-    assert_eq!(schema["x-host-reads"], serde_json::json!(HOST_READS));
-    assert_eq!(
-        schema["x-host-shape"],
-        serde_json::json!(host_shape()),
-        "the host shape the reader requires is the one the fixture declares"
     );
     assert_eq!(schema["x-record"], RECORD);
     assert_eq!(schema["x-invocation"], INVOCATION);

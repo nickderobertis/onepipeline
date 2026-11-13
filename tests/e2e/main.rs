@@ -25,7 +25,6 @@ mod github_world_support;
 mod mixed_world_support;
 
 mod adoption;
-mod adoption_check;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] two journeys, a few
 // minutes together, and what they exercise is the environment every dispatch the
 // engine starts is composed with — `executor`, `driver`, `lifecycle` and `agents`
@@ -63,13 +62,6 @@ mod change_telemetry;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod channel;
 mod compatibility;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] one journey that adopts all
-// three generic primitives through a host's own store, template root and launch config — the
-// launch checks in `plancheck` and `driver`, the plan-edit hook in `planedit` and `edits`, the
-// command node in `engine` and `commandstep`, the store and its write-back in `taskgraph` and
-// `writeback` — so no project edged narrower than the crate could honestly run it. A few seconds.
-mod configured_host;
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four journeys, about
 // 40s together, and what they exercise is the fold every view and the reconcile loop read
 // through — `checkpoint`, `views` and `engine` — so a project edged narrower than the crate
@@ -84,14 +76,6 @@ mod checkpoint;
 // a project edged narrower than the crate could not honestly run them, and any change to how a
 // run ends can put the cost back. Entries 132 and 134.
 mod closures;
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a command node is loaded by
-// `taskgraph` and `graph`, run by `engine` and `commandstep`, folded by `projection`, written back
-// by `writeback`, read by `views` and recovered by `driver`'s adoption, and the flow journey runs
-// `flow` and `watch` beside them — so the crate is the narrowest edge these journeys can honestly
-// sit behind, and any change under `src/` can move what they prove. Same grounds as `mod
-// continuation` below.
-mod command_step;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a continuation is read by
@@ -166,8 +150,7 @@ mod human_board_projection;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
 // 100-run root's ~260 MB of journals by this suite's debug build, two of them the budget
-// measurement's, run whole by its own journey; a fourth is that measurement's again, over a
-// slowed stand-in for the budget's failing path (158 s alone at load1 about 10 on 8 cores). What they exercise is
+// measurement's, run whole by its own journey. What they exercise is
 // `hostview`, `checkpoint`, `summary`, `views` and `sys` together through the compiled
 // binary, so the narrowest edge they can honestly sit behind is the crate itself, which is
 // this target's; a project edged narrower would drop them out of `nx affected` for the very
@@ -267,13 +250,6 @@ mod out_of_band;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod plan;
 mod plan_check;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the hook is resolved by
-// `filter` and `driver`, replayed by `ledger` and adoption, composed from `plan`'s rendering,
-// offered by `planedit` inside the submission `driver` and `edits` run, and journalled by
-// `engine` — so the crate is the narrowest edge these journeys can honestly sit behind. Their one
-// wait is the timeout under test, two seconds.
-mod plan_edit_hook;
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // prove is the record every test in this binary writes — the harness's constructor and
 // teardown and `onepipeline_testfakes::profile` behind them — so they run this binary's own
@@ -318,15 +294,6 @@ mod review;
 mod review_reply;
 mod review_round;
 mod rework;
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
-// exercise is whose words a ruling is through the whole engine at once — `channel`, the
-// layout, `edits`, `engine`'s reconcile and live delivery, `note`, `plan`'s rendering,
-// `ask`, `verbs`' decline, `projection` across a checkpoint and an adoption, and the
-// supervised conversation the real `oneagentgraph` runs — so any Rust source can move what
-// they prove, and the narrowest edge they can honestly sit behind is the crate's own, as
-// for `mod retirement` above. The slowest takes about three seconds.
-mod rulings;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod run_end_hooks;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys

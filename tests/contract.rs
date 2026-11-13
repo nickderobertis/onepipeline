@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("157.")["bundle_versions"]["events"],
+        divergence_block("151.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1246,7 +1246,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("157.")["bundle_versions"]["planner_channel"],
+        divergence_block("136.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -1802,8 +1802,6 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         }),
         id: "n".into(),
         kind: NodeKind::Human,
-        command: Some(vec!["./scripts/step.sh".into()]),
-        timeout_seconds: std::num::NonZeroU64::new(600),
         task: Some("t".into()),
         persona: Some("engineer".into()),
         deps: vec!["other".into()],
@@ -2732,7 +2730,6 @@ fn the_release_adoption_surface_is_what_the_divergence_record_names() {
         asker: None,
         workstream: Some("consumer".into()),
         correlation: None,
-        declined_ruling: None,
     })
     .expect("a surface serializes");
     assert_eq!(
@@ -6233,6 +6230,17 @@ fn the_contract_declares_an_open_surface_kind_vocabulary() {
     assert_eq!(host_kind.as_str(), "host-defined");
     assert!(CONTRACT.contains("--kind KIND"));
     assert!(CONTRACT.contains("^[a-z][a-z0-9-]{0,63}$"));
+    assert!(
+        CONTRACT.contains(
+            "restarts the check-in clock of **every member the run's recorded observer graph \
+             declares `resettable` in its `schedule`**"
+        ),
+        "consuming a surface restarts the resettable clocks"
+    );
+    assert!(
+        !CONTRACT.contains("reset-timer RUN check-in"),
+        "the contract names a member of one host's observer graph"
+    );
     // The one kind the engine raises of its own, stated with its source and its
     // message.
     assert!(CONTRACT.contains("`edit-applied`, queued non-blocking"));
@@ -6795,7 +6803,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 71, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 69, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -7472,49 +7480,13 @@ fn a_command_outside_the_surface_is_refused() {
         .expect_err("the surface is exactly what the contract names");
 }
 
-/// Entry 155 is accepted with the contract left verbatim, so it is where the
-/// approved text describing the removed reset is named as superseded: the
-/// channel contract's `reset-timer` paragraph and the driver contract's
-/// resettable-cron `check-in`, each at the line the entry points at.
 #[test]
-fn the_removed_reset_names_every_approved_passage_it_supersedes() {
-    let record = std::fs::read_to_string(repo_root().join("docs/contract-divergences.md"))
-        .expect("the divergence record ships");
-    let entry = record
-        .split("\n## ")
-        .find(|entry| entry.starts_with("155."))
-        .expect("the divergence record carries entry 155");
-    assert!(entry
-        .lines()
-        .next()
-        .is_some_and(|heading| heading.ends_with("— ACCEPTED")));
-    let lines: Vec<&str> = CONTRACT.lines().collect();
-    for (line, superseded) in [
-        (534, "`oneagentgraph reset-timer RUN MEMBER` for each"),
-        (534, "That is the whole check-in reset contract."),
-        (296, "beside a resettable-cron `check-in` member"),
-    ] {
-        assert!(
-            lines[line - 1].contains(superseded),
-            "docs/contract.md:{line} no longer carries `{superseded}`"
-        );
-        assert!(
-            entry.contains(&format!("`docs/contract.md:{line}`")),
-            "entry 155 does not name docs/contract.md:{line}, which says `{superseded}`"
-        );
-    }
-}
-
-#[test]
-fn the_dag_scope_graph_is_a_monitor_plus_a_check_in() {
-    // The contract's word for the `check-in` member's clock is not held here: the
-    // shipped graph restarts it through `reset_on`, because the linked
-    // `oneagentgraph` has no other reset (`docs/contract-divergences.md` entry
-    // 155). The rest of the sentence holds.
-    assert!(CONTRACT
-        .contains("the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a"));
-    assert!(CONTRACT
-        .contains("a host copies it or brings its own, and the engine names no member of it"));
+fn the_dag_scope_graph_is_a_monitor_plus_a_resettable_check_in() {
+    assert!(CONTRACT.contains(
+        "the shipped example, `graphs/dag-scope.yaml`, is an observer member beside a \
+         resettable-cron `check-in` member; a host copies it or brings its own, and the \
+         engine names no member of it"
+    ));
 
     let text = std::fs::read_to_string(repo_root().join("graphs/dag-scope.yaml"))
         .expect("the dag-scope graph ships");
@@ -7549,21 +7521,9 @@ fn the_dag_scope_graph_is_a_monitor_plus_a_check_in() {
         panic!("the pacemaker is a single-sided member");
     };
     let schedule = check_in.schedule.clone().expect("it is a cron member");
-    let reset_on = serde_json::to_value(
-        schedule
-            .reset_on
-            .clone()
-            .expect("a planner's reading restarts the check-in"),
-    )
-    .expect("the filter serialises");
     assert!(
-        reset_on["include"]
-            .as_array()
-            .is_some_and(|matchers| matchers
-                .iter()
-                .any(|matcher| matcher["source"] == "pipeline"
-                    && matcher["kind"] == "planner-surfaced")),
-        "the check-in does not restart on a planner's reading: {reset_on}"
+        schedule.resettable,
+        "the contract makes the check-in resettable"
     );
     assert_eq!(
         schedule.every, 1_800,
@@ -7974,18 +7934,6 @@ const RULINGS: &[(&str, &str)] = &[
     // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
     ("147.", "decided against `onemessagebus`"),
     ("149.", "planner-surface-dropped"),
-    // The 0.11.1 link: validators are gone from the bus, so the marked copy is
-    // re-decided against it and the core no longer names them.
-    ("153.", "decided against `onemessagebus` 0.11.1"),
-    // The heads read heads a writers'-form line of an unparsed kind by its opening, even
-    // where the complete reader refuses its middle.
-    ("156.", "which is headed by its opening"),
-    // The loader gains a third refusal source, carrying onevcs's verdict rather than a rule
-    // of the engine's own.
-    (
-        "158.",
-        "Release adoptions onevcs says can never complete are refused at load",
-    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -8090,38 +8038,6 @@ fn every_recorded_divergence_is_ruled_on_or_states_the_proposal_it_waits_on() {
                 section.contains("Superseded by entry"),
                 "divergence `{heading}` is marked superseded and its prose does not say so"
             );
-            continue;
-        }
-        // Or accepted with the contract left verbatim: the planner ruled the
-        // proposal in and directed that `docs/contract.md` stay unedited, so the
-        // entry is where the superseded approved text is named. It records the
-        // ruling and points at each passage by line, and every line it points at
-        // is one the contract has, so a pointer cannot outlive the text it names.
-        if heading.ends_with("— ACCEPTED") {
-            assert!(
-                section.contains("**Ruling:"),
-                "divergence `{heading}` is marked accepted but records no ruling"
-            );
-            let lines: Vec<usize> = section
-                .split("`docs/contract.md:")
-                .skip(1)
-                .map(|rest| {
-                    rest.split('`')
-                        .next()
-                        .and_then(|number| number.parse().ok())
-                        .unwrap_or_else(|| panic!("`{heading}` names a contract line oddly"))
-                })
-                .collect();
-            assert!(
-                !lines.is_empty(),
-                "divergence `{heading}` is accepted and names no contract passage it supersedes"
-            );
-            for line in lines {
-                assert!(
-                    (1..=CONTRACT.lines().count()).contains(&line),
-                    "`{heading}` names docs/contract.md:{line}, which the contract does not have"
-                );
-            }
             continue;
         }
         assert!(
@@ -9499,61 +9415,6 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
         Vec<onepipeline::event::Envelope>,
     ) -> onepipeline::Result<onepipeline::views::RunView> =
         onepipeline::views::RunView::over_selected;
-    // The heads read and the fetch beside it, at their signatures, and every field each
-    // answer carries at its type: a head's fields are `Envelope`'s of the same names.
-    let _: fn(&onepipeline::views::RunPaths) -> onepipeline::Result<onepipeline::views::RunHeads> =
-        onepipeline::views::RunView::heads;
-    let _: fn(
-        &std::path::Path,
-        &[onepipeline::journal::RecordHandle],
-    ) -> onepipeline::Result<Vec<onepipeline::event::Envelope>> = onepipeline::journal::fetch;
-    let _ = |heads: onepipeline::views::RunHeads| {
-        let onepipeline::views::RunHeads {
-            view,
-            heads,
-            store_len,
-            last_seq,
-        } = heads;
-        let _: (onepipeline::views::RunView, usize, u64) = (view, store_len, last_seq);
-        let _: Vec<onepipeline::journal::RecordHead> = heads;
-    };
-    let _ = |head: onepipeline::journal::RecordHead, record: onepipeline::event::Envelope| {
-        let onepipeline::journal::RecordHead {
-            ts,
-            stream,
-            seq,
-            source,
-            kind,
-            phase,
-            labels,
-            evidence,
-            place,
-            handle,
-        } = head;
-        let mut record = record;
-        (record.ts, record.stream, record.seq) = (ts, stream, seq);
-        (
-            record.source,
-            record.kind,
-            record.dimensions.phase,
-            record.labels,
-        ) = (source, kind, phase, labels);
-        let _: (bool, Option<usize>) = (evidence, place);
-        let _: onepipeline::journal::RecordHandle = handle.clone();
-        let _ = (handle == handle.clone(), format!("{handle:?}"));
-        let _: std::collections::HashSet<onepipeline::journal::RecordHandle> = [handle].into();
-    };
-    let _ = |error: onepipeline::Error| {
-        if let onepipeline::Error::RecordMoved {
-            path,
-            offset,
-            stream,
-            seq,
-        } = error
-        {
-            let _: (std::path::PathBuf, u64, String, u64) = (path, offset, stream, seq);
-        }
-    };
     let _: fn(&Path) -> Host = verbs::host;
     let _: fn(&Host) -> String = verbs::render_host;
     let _: fn(&Path, Option<&str>) -> Result<Goals> = verbs::goals;
@@ -9849,7 +9710,7 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         );
     }
 
-    // An edit envelope requires version 4, refused in the contract's words.
+    // An edit envelope requires version 3, refused in the contract's words.
     let replies: onemessagebus::QueueName = REPLIES.parse().expect("a queue name");
     let grants = PlannerChannel.allowlist();
     let refused = PlannerChannel
@@ -9863,7 +9724,7 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         named.contains(&refused),
         "the contract does not quote `{refused}`"
     );
-    assert_eq!(REPLY_ENVELOPE_VERSION, 4);
+    assert_eq!(REPLY_ENVELOPE_VERSION, 3);
 
     // A bare reply is routed by its halves.
     let routed = |envelope: Value| -> Vec<String> {
@@ -9906,7 +9767,6 @@ fn the_planner_channel_layout_is_this_crates_and_is_what_the_contract_states() {
         abandoned: false,
         asker: None,
         correlation: None,
-        declined_ruling: None,
     };
     for (message, from) in [
         ("an observer's first", source::PROPOSAL),
@@ -11551,15 +11411,10 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             == Some(flag)),
         "`start` takes no {flag}"
     );
-    // The version that added the key, which later versions go on reading.
-    let added = block["launch"]["config_schema_version"]
-        .as_u64()
-        .expect("the version the key arrived at");
-    assert_eq!(added, 13);
-    assert!(onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ
-        .iter()
-        .any(|read| u64::from(*read) == added));
-    assert!(u64::from(LAUNCH_CONFIG_SCHEMA_VERSION) >= added);
+    assert_eq!(
+        block["launch"]["config_schema_version"],
+        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
+    );
     let key = block["launch"]["config_key"].as_str().expect("the key");
     assert_eq!(block["launch"]["launch_record_key"], key);
     let named = LaunchConfig {
@@ -12839,242 +12694,4 @@ fn the_provisioning_failure_names_are_what_the_contract_documents() {
         .parse()
         .expect("the kind is a valid word");
     assert_eq!(kind.as_str(), "provisioning-failed");
-}
-
-/// The three generic primitives, as the contract's `generic_primitives` block states them,
-/// driven through the public types: a command node reads and round-trips and its fields are
-/// the reserved keys the block names (the loader's rules over it are `plan check`'s, held by
-/// `tests/e2e/command_step.rs`), a schema-14 launch config carrying both keys reads and an earlier
-/// one carrying them is refused by name, the flags are `start`'s, the journal kinds are in
-/// the closed set, and the published versions are the ones this build writes.
-#[test]
-fn the_generic_primitives_block_is_what_this_build_reads() {
-    let block: Value = serde_json::from_str(&fenced_block_naming("json", "generic_primitives"))
-        .expect("the block is JSON");
-    let block = &block["generic_primitives"];
-
-    let node: Node =
-        serde_json::from_value(block["command_node"].clone()).expect("a command node reads");
-    assert_eq!(node.kind, NodeKind::Command);
-    assert_eq!(
-        node.command.as_deref(),
-        Some(
-            [
-                "./scripts/publish-notes.sh".to_owned(),
-                "--quiet".to_owned()
-            ]
-            .as_slice()
-        )
-    );
-    assert_eq!(node.timeout_seconds, NonZeroU64::new(300));
-    let written = serde_json::to_value(&node).expect("a node writes");
-    assert_eq!(
-        written, block["command_node"],
-        "a command node does not round-trip"
-    );
-    for key in block["metadata_keys"].as_array().expect("the keys") {
-        let field = key
-            .as_str()
-            .and_then(|key| key.strip_prefix("onepipeline."))
-            .expect("a reserved key");
-        assert!(
-            written.get(field).is_some(),
-            "`{field}` is not a node field"
-        );
-    }
-
-    let dir = std::env::temp_dir().join(format!("generic-primitives-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch");
-    let path = dir.join("launch.json");
-    std::fs::write(&path, block["launch_config"].to_string()).expect("written");
-    let config = LaunchConfig::load(&path).expect("a schema-14 launch config reads");
-    assert_eq!(
-        block["launch_config"]["schema_version"],
-        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
-    );
-    assert_eq!(config.checks.len(), 2);
-    assert_eq!(config.checks[1].program(), "python3");
-    assert_eq!(config.checks[1].arguments(), ["./scripts/check-budget.py"]);
-    assert!(onepipeline::filter::Argv::new(Vec::new()).is_err());
-    let hook = config.plan_edit_hook.expect("the hook is named");
-    assert_eq!(hook.program(), "./scripts/judge-edit.sh");
-    assert!(hook.arguments().is_empty());
-    assert_eq!(hook.timeout_seconds().get(), 120);
-    assert!(onepipeline::filter::PlanEditHook::new(Vec::new(), hook.timeout_seconds()).is_err());
-    assert!(
-        onepipeline::filter::PlanEditHook::new(vec![" ".into()], hook.timeout_seconds()).is_err()
-    );
-    assert_eq!(
-        block["plan_edit_hook_default_timeout_seconds"],
-        json!(onepipeline::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS.get())
-    );
-    for key in ["checks", "plan_edit_hook"] {
-        let mut earlier = json!({"schema_version": 13});
-        earlier[key] = block["launch_config"][key].clone();
-        std::fs::write(&path, earlier.to_string()).expect("written");
-        let refused = LaunchConfig::load(&path).expect_err("an earlier schema cannot carry it");
-        assert!(
-            refused.to_string().contains(&format!("`{key}`")),
-            "{refused}"
-        );
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let start = Cli::command();
-    let start = start.find_subcommand("start").expect("`start` is a verb");
-    for flag in block["start_flags"].as_array().expect("the flags") {
-        assert!(
-            start.get_arguments().any(|argument| argument
-                .get_long()
-                .map(|long| format!("--{long}"))
-                .as_deref()
-                == flag.as_str()),
-            "`start` takes no {flag}"
-        );
-    }
-    for kind in block["journal_kinds"].as_array().expect("the kinds") {
-        let kind = kind.as_str().expect("a kind");
-        assert!(
-            PipelineKind::from_wire(&EventKind(kind.to_owned())).is_some(),
-            "{kind} is not a kind this build emits"
-        );
-    }
-    assert_eq!(
-        block["events_bundle_version"],
-        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
-    );
-}
-
-/// The contract's paragraph on rulings is what the public types are: the
-/// `Provenance` words and default, the envelope version and the versions read,
-/// the two verbs, the surface kind, the `RulingKind` words, both precedence
-/// sentences, and the `DeclinedRuling` record field for field — so the
-/// paragraph a reader restates the record from cannot drift from the type.
-#[test]
-fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() {
-    use onepipeline::channel::{
-        DeclinedRuling, RulingKind, SurfaceKind, REPLY_ENVELOPE_VERSION,
-        REPLY_ENVELOPE_VERSIONS_READ,
-    };
-    use onepipeline::provenance::Provenance;
-    let passage = CONTRACT
-        .split("\n\n")
-        .find(|paragraph| paragraph.starts_with("**Whose words a ruling is.**"))
-        .expect("the contract states whose words a ruling is");
-    let named = backticked_in(passage);
-    for word in [
-        "onepipeline::provenance::Provenance",
-        "Manager",
-        "User",
-        "channel::Reply",
-        "channel::layout::ReplyEnvelope",
-        "REPLY_ENVELOPE_VERSION",
-        "REPLY_ENVELOPE_VERSIONS_READ",
-        "verbs::reply_as",
-        "verbs::reply",
-        "reply RUN [FILE] [--as manager|user]",
-        "onepipeline decline-ruling",
-        "plan::AMENDMENT_PRECEDENCE",
-        "plan::USER_AMENDMENT_PRECEDENCE",
-        "## Planner context",
-        "### Amendment",
-        "## Manager notes",
-        "edit-committed",
-        "planner-replied",
-        "note-delivered",
-        "task-amended",
-    ] {
-        assert!(
-            named.contains(word),
-            "the rulings paragraph does not name `{word}`"
-        );
-    }
-    for (provenance, word) in [(Provenance::Manager, "manager"), (Provenance::User, "user")] {
-        assert_eq!(serde_json::to_value(provenance).unwrap(), json!(word));
-        assert!(
-            named.contains(&format!("\"{word}\"")),
-            "`\"{word}\"` is not named"
-        );
-    }
-    assert_eq!(Provenance::default(), Provenance::Manager);
-    assert!(passage.contains("defaulting to `Manager`"));
-    assert_eq!(REPLY_ENVELOPE_VERSION, 4);
-    assert!(passage.contains("`REPLY_ENVELOPE_VERSION` is 4"));
-    assert!(named.contains(&format!("{REPLY_ENVELOPE_VERSIONS_READ:?}")));
-    assert_eq!(SurfaceKind::DECLINED_RULING, "declined-ruling");
-    assert!(named.contains(SurfaceKind::DECLINED_RULING));
-    for (kind, word) in [
-        (RulingKind::Note, "note"),
-        (RulingKind::Amendment, "amendment"),
-        (RulingKind::Answer, "answer"),
-    ] {
-        assert_eq!(serde_json::to_value(kind).unwrap(), json!(word));
-        assert!(
-            named.contains(word),
-            "`{word}` is not named as a ruling kind"
-        );
-    }
-    // The record, field for field and type for type, as the paragraph spells it.
-    let spelled = named
-        .iter()
-        .find(|span| span.starts_with("channel::DeclinedRuling {"))
-        .expect("the paragraph spells the declined-ruling record");
-    let fields: Vec<(String, String)> = spelled
-        .trim_start_matches("channel::DeclinedRuling {")
-        .trim_end_matches('}')
-        .split(',')
-        .map(|field| {
-            let (name, ty) = field.split_once(':').expect("a field and its type");
-            (name.trim().to_owned(), ty.trim().to_owned())
-        })
-        .collect();
-    let record = DeclinedRuling {
-        node: "build".into(),
-        ruling: "c3.0".into(),
-        provenance: Provenance::Manager,
-        kind: RulingKind::Note,
-        reply: 3,
-        text: "Keep the diff small.".into(),
-        reason: "The user said otherwise.".into(),
-    };
-    let written = serde_json::to_value(&record).unwrap();
-    let keys: Vec<&String> = written.as_object().unwrap().keys().collect();
-    assert_eq!(
-        keys,
-        fields.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-        "the record's fields are not the ones the paragraph spells"
-    );
-    for (name, ty) in &fields {
-        let value = &written[name.as_str()];
-        let matches = match ty.as_str() {
-            "String" => value.is_string(),
-            "u64" => value.is_u64(),
-            "Provenance" | "RulingKind" => value.is_string(),
-            other => {
-                panic!("the paragraph spells `{name}` as `{other}`, a type this test does not know")
-            }
-        };
-        assert!(matches, "`{name}` is spelled `{ty}` and written as {value}");
-    }
-    let read: DeclinedRuling = serde_json::from_value(written.clone()).unwrap();
-    assert_eq!(read, record);
-    let mut stray = written.clone();
-    stray["stray"] = json!(true);
-    assert!(serde_json::from_value::<DeclinedRuling>(stray).is_err());
-    // No decline produces a user's record or a blank reason, node or reference,
-    // so none is read.
-    for (field, value) in [
-        ("provenance", json!("user")),
-        ("reason", json!("  ")),
-        ("node", json!("")),
-        ("ruling", json!("")),
-    ] {
-        let mut refused = written.clone();
-        refused[field] = value;
-        assert!(
-            serde_json::from_value::<DeclinedRuling>(refused).is_err(),
-            "a declined ruling with that `{field}` was read"
-        );
-    }
-    assert!(passage.contains("never from the surface's `message`"));
 }

@@ -1396,34 +1396,33 @@ fn a_correlated_ruling_beside_commands_applied_here_never_completes_the_run() {
     );
 }
 
-/// A correlated ruling the run's reply hook refuses is refused in its words, with
-/// nothing appended to the channel and nothing journalled — and the question
-/// still stands, so the ruling the hook keeps once its refusal is lifted reaches
-/// its asker.
+/// A correlated ruling the run's reply validator refuses is refused in its
+/// words, with nothing appended to the channel and nothing journalled — and the
+/// question still stands, so the ruling the validator accepts reaches its asker.
 #[test]
-fn a_correlated_ruling_the_reply_hook_refuses_leaves_the_question_standing() {
-    let world = World::new("wake-correlated-hooked");
-    let hook = double("bus-hook").to_string_lossy().into_owned();
+fn a_correlated_ruling_the_reply_validator_refuses_leaves_the_question_standing() {
+    let world = World::new("wake-correlated-validated");
+    let validator = double("bus-validator").to_string_lossy().into_owned();
     let config = world.root.join("onemessagebus.yaml");
     std::fs::write(
         &config,
         format!(
-            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
-             - {{on: replies, command: [{hook:?}, scripted]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: replies, kind: command, command: [{validator:?}]}}\n"
         ),
     )
     .expect("the bus configuration is written");
     world.script("build.work", "the worker wrote this\n");
     let run = settled(
         &world,
-        "correlatedhooked",
+        "correlatedvalidated",
         "build",
         &["--bus-config", &config.to_string_lossy()],
     );
     let asked = Asked::on(&world, &run, "is the bar met?", false);
 
     let reason = "this ruling names no evidence the run holds";
-    world.script("bus-hook.refuse", reason);
+    world.script("bus-validator.refuse", reason);
     let replies = replies_on(&world, &run);
     let journal = world.kinds(&run);
     world
@@ -1444,7 +1443,7 @@ fn a_correlated_ruling_the_reply_hook_refuses_leaves_the_question_standing() {
         "a refused ruling was journalled"
     );
 
-    std::fs::remove_file(world.fakes.join("bus-hook.refuse")).expect("the refusal is lifted");
+    std::fs::remove_file(world.fakes.join("bus-validator.refuse")).expect("the refusal is lifted");
     ruled(
         &world,
         &run,
@@ -1558,7 +1557,7 @@ fn the_verdict_is_the_same_whatever_observes_the_run() {
     let world = World::new("wake-observers");
     world.write_graphs();
     world.script("observer.wait", "");
-    let graph = world.write_observer_graph_with_clocks(&["zebra-herder", "q7"]);
+    let graph = world.write_observer_graph_with_clocks(&[("zebra-herder", false), ("q7", true)]);
     let bare = world.as_session("observed-bare");
     let observed = world.as_session("observed-graph");
     let args = ["--wake-budget", BUDGET];

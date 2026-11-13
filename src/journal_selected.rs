@@ -47,7 +47,7 @@ const MOST_WORKERS: usize = 8;
 
 /// The threads a read of many items works across: the host's parallelism, up to
 /// [`MOST_WORKERS`], and the four spike-first-screen measured at where it cannot say.
-pub(crate) fn workers() -> usize {
+fn workers() -> usize {
     std::thread::available_parallelism().map_or(4, |cores| cores.get().min(MOST_WORKERS))
 }
 
@@ -119,23 +119,23 @@ fn instant_of(ts: &str) -> Option<u64> {
 
 /// One line of a journal, as far as a selection needs it.
 #[derive(Debug)]
-pub(crate) struct Skim<'a> {
-    pub(crate) line: &'a [u8],
+struct Skim<'a> {
+    line: &'a [u8],
     ts: Cow<'a, str>,
-    pub(crate) stream: Cow<'a, str>,
-    pub(crate) seq: u64,
-    pub(crate) kind: Cow<'a, str>,
+    stream: Cow<'a, str>,
+    seq: u64,
+    kind: Cow<'a, str>,
     node: Option<Cow<'a, str>>,
-    pub(crate) evidence: bool,
+    evidence: bool,
     /// Its `ts` as [`instant_of`] reads it.
     instant: Option<u64>,
     /// The record, where reading this line already parsed it.
-    pub(crate) parsed: Option<Box<Envelope>>,
+    parsed: Option<Box<Envelope>>,
 }
 
 /// The bytes from the start of `line` up to the closing quote of a string with no
 /// escape in it, and what follows that quote.
-pub(crate) fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
+fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let end = memchr::memchr2(b'"', b'\\', line)?;
     if line[end] != b'"' {
         return None;
@@ -144,14 +144,14 @@ pub(crate) fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// [`bytes_of`], where what is wanted is the text.
-pub(crate) fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
+fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
     let (text, rest) = bytes_of(line)?;
     Some((std::str::from_utf8(text).ok()?, rest))
 }
 
 /// The decimal number at the start of `line`, as an envelope's serializer writes
 /// one, and what follows it.
-pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
+fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     let digits = line.iter().position(|byte| !byte.is_ascii_digit())?;
     if digits == 0 || (digits > 1 && line[0] == b'0') {
         return None;
@@ -160,46 +160,22 @@ pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     Some((number, &line[digits..]))
 }
 
-/// The keys a labels object has named so far, held inline for as many as a writer's
-/// labels carry, so walking one allocates nothing.
-#[derive(Default)]
-struct Keys<'a> {
-    inline: [&'a [u8]; 12],
-    held: usize,
-    beyond: Vec<&'a [u8]>,
-}
-
-impl<'a> Keys<'a> {
-    /// Whether `key` is new, holding it if it is.
-    fn first_time(&mut self, key: &'a [u8]) -> bool {
-        if self.inline[..self.held].contains(&key) || self.beyond.contains(&key) {
-            return false;
-        }
-        if self.held < self.inline.len() {
-            self.inline[self.held] = key;
-            self.held += 1;
-        } else {
-            self.beyond.push(key);
-        }
-        true
-    }
-}
-
 /// The `node` label off a labels object in the form: its values are strings, or a
 /// number for `round`, and anything else is read by the parse. Also what follows
 /// the object.
 fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     let mut node = None;
-    let mut seen = Keys::default();
+    let mut seen: Vec<&[u8]> = Vec::new();
     if let Some(after) = rest.strip_prefix(b"}") {
         return Some((None, after));
     }
     loop {
         // Only `node`'s value is text anything reads, so no other is decoded.
         let (key, after) = bytes_of(rest.strip_prefix(b"\"")?)?;
-        if !seen.first_time(key) {
+        if seen.contains(&key) {
             return None;
         }
+        seen.push(key);
         let after = after.strip_prefix(b":")?;
         rest = if let Some(value) = after.strip_prefix(b"\"") {
             if key == b"round" {
@@ -226,68 +202,44 @@ fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
 
 /// The fields a merge needs off the opening of a line in the writers' form, with nothing
 /// past `labels` looked at. What a reader asks whose answer is the source alone.
-pub(crate) struct Opening<'a> {
-    pub(crate) v: u32,
-    pub(crate) ts: &'a str,
-    pub(crate) stream: &'a str,
-    pub(crate) seq: u64,
-    pub(crate) source: Source,
-    pub(crate) kind: &'a str,
-    pub(crate) phase: Option<Phase>,
+struct Opening<'a> {
+    ts: &'a str,
+    stream: &'a str,
+    seq: u64,
+    source: Source,
+    kind: &'a str,
     node: Option<&'a str>,
-    /// The line from just inside its `labels` object's opening brace.
-    pub(crate) labels: &'a [u8],
 }
 
-pub(crate) fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
+fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
     let (v, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
-    let v = u32::try_from(v).ok()?;
+    u32::try_from(v).ok()?;
     let (ts, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
     let (stream, rest) = string_of(rest.strip_prefix(b",\"stream\":\"")?)?;
     let (seq, rest) = number_of(rest.strip_prefix(b",\"seq\":")?)?;
     let (source, rest) = string_of(rest.strip_prefix(b",\"source\":\"")?)?;
     let source = Source::deserialize(StrDeserializer::<ValueError>::new(source)).ok()?;
     let (kind, mut rest) = string_of(rest.strip_prefix(b",\"kind\":\"")?)?;
-    let mut phase = None;
-    if let Some(stamped) = rest.strip_prefix(b",\"phase\":\"") {
-        let (stamped, after) = string_of(stamped)?;
-        phase = Some(Phase::deserialize(StrDeserializer::<ValueError>::new(stamped)).ok()?);
+    if let Some(phase) = rest.strip_prefix(b",\"phase\":\"") {
+        let (phase, after) = string_of(phase)?;
+        Phase::deserialize(StrDeserializer::<ValueError>::new(phase)).ok()?;
         rest = after;
     }
-    let labels = rest.strip_prefix(b",\"labels\":{")?;
-    let (node, rest) = labels_of(labels)?;
+    let (node, rest) = labels_of(rest.strip_prefix(b",\"labels\":{")?)?;
     rest.strip_prefix(b",\"payload\":{")?;
     Some(Opening {
-        v,
         ts,
         stream,
         seq,
         source,
         kind,
-        phase,
         node,
-        labels,
     })
 }
 
 /// Where a line's top-level `artifacts` array opens: the last time this appears in it,
 /// since that array is an envelope's last field and an artifact holds no array.
 const ARTIFACTS: &[u8] = b",\"artifacts\":[";
-
-/// An envelope's opening, which a line holds past its start only where a fragment was
-/// glued to a later append.
-const OPENING: &[u8] = b"{\"v\":";
-
-/// The searchers for [`OPENING`] and [`ARTIFACTS`], built once rather than for each line.
-static SEARCHERS: std::sync::LazyLock<(
-    memchr::memmem::Finder<'static>,
-    memchr::memmem::FinderRev<'static>,
-)> = std::sync::LazyLock::new(|| {
-    (
-        memchr::memmem::Finder::new(OPENING),
-        memchr::memmem::FinderRev::new(ARTIFACTS),
-    )
-});
 
 /// A line in the one form the writers leave, its merge fields read off its opening and
 /// whether it carries evidence off its end, with nothing between parsed; `None` for any
@@ -300,32 +252,16 @@ static SEARCHERS: std::sync::LazyLock<(
 // llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a line the
 // selection discards is read for its merge fields, node and artifact emptiness and never
 // parsed, because validating each one cost a 102 MB journal's first screen 731 ms at the
-// median. No skimmed field is trusted for a record `read_selected` returns: every kept line is
-// the complete reader's own parse. The heads read (`src/journal_heads.rs`) does take fields
-// from a line it never parses whole, for the five kinds `HEADED_KINDS` names, and no others:
-// `v`, `ts`, `stream`, `seq`, `source`, `kind`, `phase` and `labels` off this opening, and
-// `evidence` off the artifacts' end, because parsing those kinds' payloads is most of what a
-// large run's first view waited on. A line outside the writers' form, or with an escape in
-// any of those fields, is parsed whole instead. `tests/run_reads.rs`'s
-// `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds
-// every such head equal to the complete read's record for every line the writers produce. A
-// line in the form whose middle a complete reader refuses is still headed by its opening, the
-// one departure the planner ruled for that cost, which
-// `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds.
-pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
-    skimmed_opening(line).map(|(skim, _)| skim)
-}
-
-/// [`skimmed_line`], with the opening it read the line's skim off.
-pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
+// median. No skimmed field is trusted for a record returned: every kept line is the complete
+// reader's own parse, which `tests/run_reads.rs` holds against a complete read.
+fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
-    let (opens, artifacts) = &*SEARCHERS;
-    if opens.find(&line[1..]).is_some() {
+    if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
         return None;
     }
-    let artifacts = artifacts.rfind(body)?;
-    let skim = Skim {
+    let artifacts = memchr::memmem::rfind(body, ARTIFACTS)?;
+    Some(Skim {
         line,
         ts: Cow::Borrowed(opening.ts),
         stream: Cow::Borrowed(opening.stream),
@@ -335,16 +271,12 @@ pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
         evidence: artifacts + ARTIFACTS.len() < body.len(),
         instant: instant_of(opening.ts),
         parsed: None,
-    };
-    Some((skim, opening))
+    })
 } // llmlint: ignore-end[boundary_inputs_validated]
 
-/// A finished line parsed whole as the complete reader parses it: a whole record, or the
+/// A finished line read as the complete reader reads it: a whole record, or the
 /// whole record after a fragment, or nothing.
-///
-/// The one place this read, the heads read and [`fetch`](crate::journal::fetch) hand a
-/// line to the JSON parser whole, so a test counting what they parse counts it here.
-pub(crate) fn whole_record(line: &[u8]) -> Option<Envelope> {
+fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
     let parsed = std::str::from_utf8(line)
         .ok()
         .and_then(|text| serde_json::from_str::<Envelope>(text).ok());
@@ -352,83 +284,6 @@ pub(crate) fn whole_record(line: &[u8]) -> Option<Envelope> {
         let text = String::from_utf8_lossy(line);
         crate::journal::glued_tail(text.trim_end_matches('\r')).map(|(_, event)| event)
     })?;
-    #[cfg(test)]
-    whole_parses::parsed(&event, line);
-    Some(event)
-}
-
-/// What the tests of these reads count: every record [`whole_record`] parsed, on
-/// whichever of a read's threads it parsed it.
-#[cfg(test)]
-pub(crate) mod whole_parses {
-    use std::cell::RefCell;
-    use std::sync::{Arc, Mutex};
-
-    use crate::event::Envelope;
-
-    /// One record parsed whole.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Parsed {
-        pub(crate) stream: String,
-        pub(crate) seq: u64,
-        pub(crate) kind: String,
-        /// The line's bytes, all of which went to the parser.
-        pub(crate) line_bytes: usize,
-        /// Its payload's, as the writers serialize it.
-        pub(crate) payload_bytes: usize,
-    }
-
-    type Sink = Arc<Mutex<Vec<Parsed>>>;
-
-    thread_local! {
-        static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
-    }
-
-    /// Count from here on, on this thread and the workers its reads start.
-    pub(crate) fn start() {
-        SINK.with_borrow_mut(|sink| *sink = Some(Sink::default()));
-    }
-
-    /// What was counted since [`start`], which stops counting.
-    pub(crate) fn finish() -> Vec<Parsed> {
-        let sink = SINK
-            .with_borrow_mut(Option::take)
-            .expect("counting was started");
-        let parsed = sink.lock().expect("the count").clone();
-        parsed
-    }
-
-    /// This thread's count, for a worker it starts to join.
-    pub(super) fn current() -> Option<Sink> {
-        SINK.with_borrow(Clone::clone)
-    }
-
-    /// Count on this worker into `sink`.
-    pub(super) fn join(sink: Option<Sink>) {
-        SINK.with_borrow_mut(|own| *own = sink);
-    }
-
-    pub(super) fn parsed(event: &Envelope, line: &[u8]) {
-        SINK.with_borrow(|sink| {
-            if let Some(sink) = sink {
-                sink.lock().expect("the count").push(Parsed {
-                    stream: event.stream.clone(),
-                    seq: event.seq,
-                    kind: event.kind.0.clone(),
-                    line_bytes: line.len(),
-                    payload_bytes: serde_json::to_string(&event.payload)
-                        .expect("a payload serializes")
-                        .len(),
-                });
-            }
-        });
-    }
-}
-
-/// A finished line read as the complete reader reads it: a whole record, or the
-/// whole record after a fragment, or nothing.
-pub(crate) fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
-    let event = whole_record(line)?;
     Some(Skim {
         line,
         ts: Cow::Owned(event.ts.clone()),
@@ -443,7 +298,7 @@ pub(crate) fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
 }
 
 /// Every finished line of `bytes`, up to where a final unfinished one begins.
-pub(crate) fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut start = 0;
     memchr::memchr_iter(b'\n', bytes).map(move |end| {
         let line = &bytes[start..end];
@@ -453,91 +308,28 @@ pub(crate) fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 /// `work` over each of `items`, in their order, across threads where there are many.
-pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     if items.len() < WORKED_ALONE {
         return items.iter().map(work).collect();
     }
-    let parts: Vec<&[T]> = items.chunks(run_size(items.len())).collect();
-    let done = on_threads(parts, |items| items.iter().map(&work).collect::<Vec<_>>());
-    joined(done, items.len())
-}
-
-/// How many of `len` items one worker takes: all of them where they are few.
-pub(crate) fn run_size(len: usize) -> usize {
-    if len < WORKED_ALONE {
-        len.max(1)
-    } else {
-        len.div_ceil(workers())
-    }
-}
-
-/// The runs of `parts`, one after another.
-pub(crate) fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
-    let mut done = Vec::with_capacity(len);
-    for part in parts {
-        done.extend(part);
-    }
-    done
-}
-
-/// `work` over each of `parts`, each on a thread of its own where there are several,
-/// the answers in `parts`' order: what every parallel step of these reads is made of.
-pub(crate) fn on_threads<P: Send, R: Send>(parts: Vec<P>, work: impl Fn(P) -> R + Sync) -> Vec<R> {
-    if parts.len() < 2 {
-        return parts.into_iter().map(work).collect();
-    }
     let work = &work;
-    #[cfg(test)]
-    let counted = whole_parses::current();
     std::thread::scope(|scope| {
-        let workers: Vec<_> = parts
-            .into_iter()
-            .map(|part| {
-                #[cfg(test)]
-                let counted = counted.clone();
-                scope.spawn(move || {
-                    #[cfg(test)]
-                    whole_parses::join(counted);
-                    work(part)
-                })
-            })
+        let workers: Vec<_> = items
+            .chunks(items.len().div_ceil(workers()))
+            .map(|items| scope.spawn(move || items.iter().map(work).collect::<Vec<_>>()))
             .collect();
         workers
             .into_iter()
-            .map(|worker| worker.join().expect("reading a line does not panic"))
+            .flat_map(|worker| worker.join().expect("reading a line does not panic"))
             .collect()
     })
-}
-
-/// A journal this short is skimmed on one thread.
-const SKIMMED_ALONE: usize = 1 << 20;
-
-/// The finished lines of `bytes`, cut in their order into a run for each thread a read
-/// works across, each run ending where a line does: what [`finished_lines`] yields of
-/// each run, one run after another, is what it yields of `bytes`, and no thread waits on
-/// another to find where its lines start.
-pub(crate) fn line_runs(bytes: &[u8]) -> Vec<&[u8]> {
-    let finished = &bytes[..memchr::memrchr(b'\n', bytes).map_or(0, |end| end + 1)];
-    if finished.len() < SKIMMED_ALONE {
-        return vec![finished];
-    }
-    let size = finished.len().div_ceil(workers());
-    let mut runs = Vec::new();
-    let mut start = 0;
-    while start < finished.len() {
-        let at = (start + size).min(finished.len() - 1);
-        let end = memchr::memchr(b'\n', &finished[at..]).map_or(finished.len(), |end| at + end + 1);
-        runs.push(&finished[start..end]);
-        start = end;
-    }
-    runs
 }
 
 /// `lines` parsed in their order, `None` for one that does not parse.
 fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
     in_order(lines, |skim| match &skim.parsed {
         Some(event) => Some((**event).clone()),
-        None => whole_record(skim.line),
+        None => serde_json::from_slice::<Envelope>(skim.line).ok(),
     })
 }
 
@@ -547,23 +339,7 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 /// Where every line's `ts` is in the writers' form the heads are compared as numbers,
 /// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
 /// streams, which orders them as their text does; otherwise as the text itself.
-pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
-    merged_in(lines, None)
-}
-
-/// Each line's stream as a number: `of[line]` names the stream `names` holds at that
-/// number. Every number is some line's, and no two name the same stream.
-pub(crate) struct Numbered<'n> {
-    pub(crate) of: Vec<usize>,
-    pub(crate) names: Vec<&'n str>,
-}
-
-/// [`merged`], with each line's stream already numbered where the reader did that on its
-/// own workers, so the merge hashes no line's stream itself.
-pub(crate) fn merged_in(
-    lines: &[Skim<'_>],
-    numbered: Option<Numbered<'_>>,
-) -> (Vec<Vec<usize>>, Vec<usize>) {
+fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
     let Some(instants) = lines
         .iter()
         .map(|line| line.instant)
@@ -577,26 +353,14 @@ pub(crate) fn merged_in(
         let order = crate::journal::merge_queues(queues.clone(), key);
         return (queues.into_iter().map(|(_, queue)| queue).collect(), order);
     };
-    let mut queues: Vec<(&str, Vec<usize>)>;
-    if let Some(numbered) = numbered {
-        queues = numbered
-            .names
-            .into_iter()
-            .map(|name| (name, Vec::new()))
-            .collect();
-        for (index, at) in numbered.of.into_iter().enumerate() {
-            queues[at].1.push(index);
-        }
-    } else {
-        queues = Vec::new();
-        let mut streams: HashMap<&str, usize> = HashMap::new();
-        for (index, line) in lines.iter().enumerate() {
-            let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
-                queues.push((line.stream.as_ref(), Vec::new()));
-                queues.len() - 1
-            });
-            queues[at].1.push(index);
-        }
+    let mut streams: HashMap<&str, usize> = HashMap::new();
+    let mut queues: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
+            queues.push((line.stream.as_ref(), Vec::new()));
+            queues.len() - 1
+        });
+        queues[at].1.push(index);
     }
     // By stream, so a queue's position is its stream's rank.
     queues.sort_unstable_by(|left, right| left.0.cmp(right.0));
@@ -621,40 +385,6 @@ pub(crate) fn merged_in(
         }
     }
     (queues, order)
-}
-
-/// What every record of `lines` covers, as absorbing each in turn would leave a
-/// [`Coverage`](crate::checkpoint::Coverage) with no bytes: how many there are, the
-/// furthest of them by `(ts, stream)`, and each stream's greatest `seq`.
-///
-/// Read off [`merged`]'s `queues`, each a stream's lines in `seq` order, so no record is
-/// hashed for it, and where two lines' `ts` are both in the writers' form they are
-/// compared as the numbers [`instant_of`] reads, which order as their text does.
-pub(crate) fn covered(lines: &[Skim<'_>], queues: &[Vec<usize>]) -> crate::checkpoint::Coverage {
-    let placed_order = |left: &Skim<'_>, right: &Skim<'_>| match (left.instant, right.instant) {
-        (Some(left), Some(right)) if left != right => left.cmp(&right),
-        _ => (left.ts.as_ref(), left.stream.as_ref())
-            .cmp(&(right.ts.as_ref(), right.stream.as_ref())),
-    };
-    let mut coverage = crate::checkpoint::Coverage {
-        records: lines.len() as u64,
-        ..crate::checkpoint::Coverage::default()
-    };
-    coverage.at = lines
-        .iter()
-        .max_by(|left, right| placed_order(left, right))
-        .map(|line| crate::checkpoint::Placed {
-            ts: line.ts.to_string(),
-            stream: line.stream.to_string(),
-        });
-    for queue in queues {
-        if let (Some(first), Some(last)) = (queue.first(), queue.last()) {
-            coverage
-                .streams
-                .insert(lines[*first].stream.to_string(), lines[*last].seq);
-        }
-    }
-    coverage
 }
 
 /// A selection over the lines of a journal, or `None` where a kept line in the
@@ -794,7 +524,7 @@ const READ_ALONE: usize = 8 << 20;
 /// across threads, since one thread's copy out of the page cache is most of what a
 /// 100 MB first screen used to wait on. A file that came up shorter than its length
 /// was read again whole, which is what a reader of an append-only file never meets.
-pub(crate) fn whole_file(path: &Path) -> Option<Vec<u8>> {
+fn whole_file(path: &Path) -> Option<Vec<u8>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
@@ -1021,55 +751,5 @@ mod tests {
         let evidence = whole.replace(r#""artifacts":[]"#, r#""artifacts":[{"id":"a"}]"#);
         assert!(skimmed_line(evidence.as_bytes()).is_some_and(|skim| skim.evidence));
         assert!(skimmed_line(whole.as_bytes()).is_some_and(|skim| !skim.evidence));
-    }
-
-    /// A labels object holding more keys than the skim keeps inline is skimmed, and a
-    /// key repeated past them is refused as one repeated among them is.
-    #[test]
-    fn a_labels_object_past_the_keys_held_inline_is_skimmed_and_a_repeat_there_is_not() {
-        let line = |keys: &[String]| {
-            let labels = keys
-                .iter()
-                .map(|key| format!(r#""{key}":"x""#))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                r#"{{"v":2,"ts":"2026-11-06T10:00:00.000Z","stream":"s","seq":1,"source":"pipeline","kind":"node-started","labels":{{"node":"n",{labels}}},"payload":{{}},"artifacts":[]}}"#
-            )
-        };
-        let keys: Vec<String> = (0..20).map(|key| format!("k{key}")).collect();
-        assert!(skimmed_line(line(&keys).as_bytes())
-            .is_some_and(|skim| skim.node.as_deref() == Some("n")));
-        for (at, repeated) in [(15, "k14"), (16, "k3"), (17, "node")] {
-            let mut keys = keys.clone();
-            keys[at] = repeated.to_owned();
-            assert!(
-                skimmed_line(line(&keys).as_bytes()).is_none(),
-                "{repeated} repeated at {at} was skimmed"
-            );
-        }
-    }
-
-    /// The runs a journal is cut into for its workers hold its finished lines, each run
-    /// ending where a line does, in their order, and never the unfinished one after them.
-    #[test]
-    fn the_runs_a_journal_is_cut_into_hold_its_finished_lines_in_order() {
-        let mut bytes = Vec::new();
-        let mut at = 0_usize;
-        while bytes.len() < 3 * SKIMMED_ALONE {
-            // Lines of many lengths, so no cut falls at the same place in each.
-            bytes.extend(format!("line {at} {}\n", "x".repeat(at % 977)).into_bytes());
-            at += 1;
-        }
-        bytes.extend(b"an unfinished line");
-        let runs = line_runs(&bytes);
-        assert_eq!(runs.len() > 1, workers() > 1, "{} runs", runs.len());
-        assert!(runs.iter().all(|run| run.ends_with(b"\n")));
-        let cut: Vec<&[u8]> = runs.iter().flat_map(|run| finished_lines(run)).collect();
-        let whole: Vec<&[u8]> = finished_lines(&bytes).collect();
-        assert_eq!(cut.len(), at);
-        assert!(cut == whole, "the runs' lines are not the journal's");
-        assert_eq!(line_runs(b"one\ntwo\nthree"), vec![&b"one\ntwo\n"[..]]);
-        assert_eq!(line_runs(b"unfinished"), vec![&b""[..]]);
     }
 }

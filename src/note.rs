@@ -574,9 +574,7 @@ pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Op
     let alike: Vec<usize> = entries
         .iter()
         .enumerate()
-        // An entry is carried under its attribution line, which says whose ruling
-        // it is and is no part of what the withdrawal names.
-        .filter(|(_, candidate)| crate::ruling::split_attribution(candidate).1 == entry)
+        .filter(|(_, candidate)| **candidate == entry)
         .map(|(at, _)| at)
         .collect();
     let Some(at) = alike
@@ -589,16 +587,6 @@ pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Op
     entries.remove(*at);
     let left = entries.join(CARRIED_SEPARATOR);
     (!left.trim().is_empty()).then_some(left)
-}
-
-/// A planner context with each carried entry's attribution taken off, leaving
-/// the notes as they were written, in order.
-pub(crate) fn without_attributions(context: &str) -> String {
-    context
-        .split(CARRIED_SEPARATOR)
-        .map(|entry| crate::ruling::split_attribution(entry).1)
-        .collect::<Vec<_>>()
-        .join(CARRIED_SEPARATOR)
 }
 
 /// Whether two carried notes are written as the same entry of a planner
@@ -677,11 +665,11 @@ pub(crate) fn reaches_nobody(node: &str, why: &str) -> Error {
 /// no path assembles a note the conversation would have refused.
 pub(crate) fn of(
     addressee: Addressee,
-    text: &str,
+    text: &NoteText,
     criterion: Option<&Criterion>,
     delivery: Delivery,
 ) -> std::result::Result<Note, NoteRefused> {
-    let note = Note::new(addressee, text)?.with_delivery(delivery);
+    let note = Note::new(addressee, text.as_str())?.with_delivery(delivery);
     match criterion {
         None => Ok(note),
         Some(criterion) => note.binding(criterion.as_str()),
@@ -715,28 +703,6 @@ pub(crate) struct RecordedNote {
     /// none did and it was carried.
     #[serde(flatten)]
     pub reached: Reached,
-    /// Whose words it is. Absent from a record written before the field
-    /// existed, which reads as the manager's.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::provenance::Provenance::is_manager"
-    )]
-    pub provenance: crate::provenance::Provenance,
-    /// The ruling reference a dispatch declines it by, where the delivery named
-    /// the envelope it came in. Omitted otherwise, and absent from every record
-    /// written before the field existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ruling: Option<crate::ruling::Reference>,
-}
-
-impl RecordedNote {
-    /// Where it came from, as its attribution names it.
-    pub(crate) fn origin(&self) -> crate::ruling::Origin {
-        crate::ruling::Origin {
-            provenance: self.provenance,
-            reference: self.ruling,
-        }
-    }
 }
 
 impl RecordedNote {
@@ -747,9 +713,6 @@ impl RecordedNote {
             text,
             criterion,
             reached,
-            envelope,
-            index,
-            provenance,
             ..
         } = operation
         else {
@@ -760,8 +723,6 @@ impl RecordedNote {
             text: text.clone(),
             criterion: criterion.clone(),
             reached: reached.clone(),
-            provenance: *provenance,
-            ruling: crate::ruling::Origin::of_record(*provenance, *envelope, *index).reference,
         })
     }
 }
@@ -1038,7 +999,7 @@ pub(crate) fn carry(
     let store = carry_store(paths, node);
     let dir = paths.dir.join(CARRY_DIR);
     std::fs::create_dir_all(&dir).map_err(|source| Error::Ledger { path: dir, source })?;
-    of(addressee, text.as_str(), criterion, Delivery::default())
+    of(addressee, text, criterion, Delivery::default())
         .map_err(|why| why.to_string())
         .and_then(|note| {
             onemessagebus::Carry::sender::<Note, Accepted>(&store)
@@ -1662,7 +1623,6 @@ mod tests {
                     reached,
                     envelope: None,
                     index: None,
-                    provenance: crate::provenance::Provenance::Manager,
                 }]),
             )],
         )
@@ -1843,7 +1803,6 @@ mod tests {
             reached,
             envelope: None,
             index: None,
-            provenance: crate::provenance::Provenance::Manager,
         };
         let wire =
             serde_json::to_value(record(Reached::Carried { reason: None })).expect("it serializes");
@@ -1984,8 +1943,6 @@ mod tests {
             text: text.parse().expect("a usable note"),
             criterion: None,
             reached,
-            provenance: crate::provenance::Provenance::Manager,
-            ruling: None,
         }
     }
 
@@ -2322,7 +2279,6 @@ mod tests {
             reached: Reached::Supervisor { turn: None },
             envelope: None,
             index: None,
-            provenance: crate::provenance::Provenance::Manager,
         })
         .expect("it serializes");
         let fields: Vec<String> = serde_json::from_value(block["note_delivered_fields"].clone())
@@ -2380,7 +2336,6 @@ mod tests {
             reached: Reached::Supervisor { turn: None },
             envelope: None,
             index: None,
-            provenance: crate::provenance::Provenance::Manager,
         };
         let note = RecordedNote::of_delivery(&delivery).expect("a delivery carries a note");
         let mut written = serde_json::to_value(&delivery).expect("it serializes");
