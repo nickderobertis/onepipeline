@@ -412,14 +412,20 @@ export function observedResult(doc, where) {
     `${where}'s totals are not the alone, several, unforced and replayed tables of each scope`,
     again,
   );
+  // A row's minutes: its own, its archive build's and its tests', each a duration or absent.
+  const durations = (r) =>
+    ["minutes", "buildMinutes", "testMinutes"].every(
+      (k) =>
+        r[k] === undefined ||
+        (k === "minutes" && r[k] === null) ||
+        (Number.isFinite(r[k]) && r[k] >= 0),
+    );
   const forcedRow = (r) =>
     isText(r.task) &&
     isText(r.cause) &&
     Array.isArray(r.inputs) &&
     r.inputs.every(isText) &&
-    (r.minutes === null ||
-      r.minutes === undefined ||
-      (Number.isFinite(r.minutes) && r.minutes >= 0)) &&
+    durations(r) &&
     (r.cacheable === undefined || typeof r.cacheable === "boolean") &&
     (r.evictedFrom === undefined ||
       r.evictedFrom === null ||
@@ -468,9 +474,7 @@ export function observedResult(doc, where) {
             (r) =>
               isText(r.task) &&
               (r.diffMatched === undefined || typeof r.diffMatched === "boolean") &&
-              (r.minutes === null ||
-                r.minutes === undefined ||
-                (Number.isFinite(r.minutes) && r.minutes >= 0)),
+              durations(r),
           ),
         `${where}: #${pr.pr} has a job whose tasks are not rows of a task, a cause and the inputs that forced it`,
         again,

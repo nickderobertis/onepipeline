@@ -1552,6 +1552,42 @@ test("each document the harness reads is refused at its command when malformed, 
     run.stderr,
     /#1 has a job whose tasks are not rows of a task, a cause and the inputs that forced it/,
   );
+  // A ran row whose archive build or test minutes are no duration, and a replayed one.
+  for (const [i, row, replayed] of [
+    [1, { task: "p:t", cause: "one input", inputs: ["rustBuild"], buildMinutes: -3 }, []],
+    [2, { task: "p:t", cause: "one input", inputs: ["rustBuild"], testMinutes: "2" }, []],
+    [3, { task: "p:t", cause: "one input", inputs: ["rustBuild"] }, [{ task: "p:u", buildMinutes: null }]],
+  ]) {
+    write(dir, {
+      [`timing${i}.json`]: JSON.stringify({
+        prs: [
+          {
+            pr: 1,
+            title: "t",
+            release: false,
+            base: SHA_A,
+            head: SHA_B,
+            run: 1,
+            changed: [],
+            moved: [],
+            jobs: [{ job: "test-linux", id: 1, minutes: 1, ran: [row], replayed }],
+          },
+        ],
+        weights: { tasks: {}, modules: {} },
+      }),
+    });
+    run = spawnSync(
+      process.execPath,
+      [replay, "--mapping", join(dir, "m.json"), "--changes", join(dir, `timing${i}.json`), "--out", join(dir, "x")],
+      { encoding: "utf8" },
+    );
+    assert.equal(run.status, 1, `timing${i}`);
+    assert.match(
+      run.stderr,
+      /#1 has a job whose tasks are not rows of a task, a cause and the inputs that forced it/,
+      `timing${i}`,
+    );
+  }
   // A row said forced by one input that names two.
   write(dir, {
     "obs2.json": JSON.stringify({
