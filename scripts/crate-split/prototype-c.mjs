@@ -103,7 +103,17 @@ export function prototypeC(repo) {
   const versionAt = manifest.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
   check.need(versionAt, "Cargo.toml's [package] gives no version", refuse);
   const version = versionAt[1];
+  check.need(
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version),
+    `Cargo.toml's version ${version} is not a version Cargo takes`,
+    refuse,
+  );
   const edition = manifest.match(/^\[package\][\s\S]*?^edition\s*=\s*"([^"]+)"/m)?.[1] ?? "2021";
+  check.need(
+    ["2015", "2018", "2021", "2024"].includes(edition),
+    `Cargo.toml's edition ${edition} is none Cargo has`,
+    refuse,
+  );
   const deps = dependencySections(manifest);
   const allow = "#![allow(missing_docs, unreachable_pub, dead_code, unused, clippy::all)]";
   // A dependency's `#[cfg(test)]` items are not built for a dependent's tests, so a

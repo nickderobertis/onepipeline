@@ -101,6 +101,19 @@ test("the archive timer builds the plain archive and reports its wall and unit s
   // The lib and the integration test are the workspace's units; helper is not one.
   assert.ok(Number(lines[0].match(/workspace_units=(\d+)/)[1]) >= 2, lines[0]);
   assert.ok(existsSync(join(dir, "tests.tar.zst")));
+  // The demonstration reader reads this very output as a hosted run's log carries it.
+  const stamp = (line) => `2026-11-13T07:46:08.0000000Z ${line}`;
+  const runs = join(scratch, "real-runs");
+  write(runs, {
+    "3.jobs.json": JSON.stringify({ jobs: [{ name: "measure-linux (1)", id: 31, status: "completed", steps: [] }] }),
+    "31.log": [...result.stderr.split("\n"), ...result.stdout.split("\n")].filter(Boolean).map(stamp).join("\n"),
+  });
+  const read = spawnSync(process.execPath, [join(root, "scripts", "crate-split", "demo-runs.mjs"), "--dir", runs, "--out", join(runs, "t.md"), "3"], {
+    encoding: "utf8",
+  });
+  assert.equal(read.status, 0, read.stderr);
+  const wall = lines[0].match(/wall_s=([\d.]+)/)[1];
+  assert.match(readFileSync(join(runs, "t.md"), "utf8"), new RegExp(`\\| quick \\| [\\d.]+ \\| ${wall.replace(".", "\\.")} \\| `));
 });
 
 test("the coverage archive is cargo-llvm-cov's instrumented build, under -D warnings", () => {

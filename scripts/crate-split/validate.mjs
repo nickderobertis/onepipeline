@@ -355,6 +355,12 @@ export function observedResult(doc, where) {
   const forcedRow = (r) =>
     isText(r.task) &&
     isText(r.cause) &&
+    Array.isArray(r.inputs) &&
+    r.inputs.every(isText) &&
+    (r.minutes === null ||
+      r.minutes === undefined ||
+      (Number.isFinite(r.minutes) && r.minutes >= 0)) &&
+    (r.cacheable === undefined || typeof r.cacheable === "boolean") &&
     (r.evictedFrom === undefined ||
       r.evictedFrom === null ||
       (isObject(r.evictedFrom) && isCount(r.evictedFrom.run) && isCount(r.evictedFrom.pr))) &&
@@ -371,8 +377,8 @@ export function observedResult(doc, where) {
     );
     if (pr.unread) continue;
     need(
-      pr.base === undefined || isSha(pr.base),
-      `${where}: #${pr.pr}'s base is not a commit`,
+      isSha(pr.base) && isSha(pr.head),
+      `${where}: #${pr.pr} has no base and head commits`,
       again,
     );
     need(

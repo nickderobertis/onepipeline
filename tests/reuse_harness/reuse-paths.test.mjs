@@ -20,6 +20,8 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = (name) => join(root, "scripts", "crate-split", name);
 const replay = join(root, "scripts", "crate-split-replay.mjs");
@@ -891,9 +893,9 @@ test("option (c)'s unit suites run on a change to their crate or one it depends 
     }),
     "observed.json": JSON.stringify({
       prs: [
-        { pr: 1, title: "d", release: false, changed: ["src/d.rs"], moved: [] },
-        { pr: 2, title: "c", release: false, changed: ["src/c.rs"], moved: [] },
-        { pr: 3, title: "a test", release: false, changed: ["tests/x.rs"], moved: [] },
+        { pr: 1, title: "d", release: false, base: SHA_A, head: SHA_B, changed: ["src/d.rs"], moved: [] },
+        { pr: 2, title: "c", release: false, base: SHA_A, head: SHA_B, changed: ["src/c.rs"], moved: [] },
+        { pr: 3, title: "a test", release: false, base: SHA_A, head: SHA_B, changed: ["tests/x.rs"], moved: [] },
       ],
       weights: { tasks: {}, modules: {} },
     }),
@@ -1144,11 +1146,13 @@ test("the report prices a typical pull request, charging a split's build delta o
           pr: 1,
           title: "typical",
           release: false,
+          base: SHA_A,
+          head: SHA_B,
           changed: ["src/a.rs", "tests/e2e/a.rs"],
           moved: [],
           jobs: [],
         },
-        { pr: 2, title: "docs", release: false, changed: ["docs/a.md"], moved: [], jobs: [] },
+        { pr: 2, title: "docs", release: false, base: SHA_A, head: SHA_B, changed: ["docs/a.md"], moved: [], jobs: [] },
       ],
       weights: { tasks: {}, modules: {} },
       totals: {
@@ -1490,6 +1494,8 @@ test("each document the harness reads is refused at its command when malformed, 
           pr: 1,
           title: "t",
           release: false,
+          base: SHA_A,
+          head: SHA_B,
           changed: [],
           moved: [],
           jobs: [{ job: "test-linux", ran: [{ task: "p:t", cause: "one input" }], replayed: [] }],
@@ -1705,4 +1711,50 @@ test("a fetch a floor stopped resumes, keeping what it held and reading only wha
     calls.filter((args) => args[1] !== "rate_limit").map((args) => args.at(-1)),
     ["repos/nickderobertis/onepipeline/actions/jobs/7102/logs"],
   );
+});
+
+test("the log reader reads a real CI job's log lines and what Nx itself prints", async () => {
+  const { parseLog } = await import(pathToFileURL(script("observed.mjs")).href);
+  // Lines of test-linux job 131609728908 (#1543's run), colour codes and all.
+  const ci = parseLog(readFileSync(join(root, "tests", "reuse_harness", "fixtures", "test-linux-131609728908.log"), "utf8"));
+  assert.deepEqual(ci.merge, { head: "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28", base: "5e84f1b8db8896afb1604640fbffca8ee72b62cd" });
+  assert.deepEqual(
+    ci.tasks.map((t) => [t.task, t.replayed]),
+    [
+      ["onepipeline:build", null],
+      ["onepipeline-contract:test", "remote cache"],
+      ["onepipeline-e2e:test", null],
+    ],
+  );
+  const e2e = ci.tasks.find((t) => t.task === "onepipeline-e2e:test");
+  assert.equal(e2e.summary, 3883.872);
+  assert.equal(Date.parse(e2e.starting) - Date.parse(e2e.at), 390532);
+  assert.deepEqual(ci.summaries, [{ replayed: 15, of: 39 }]);
+  // Nx's own output for a task it runs, then for the same task it replays: with no
+  // outputs to restore, Nx says they already match.
+  const repo = join(scratch, "ws");
+  const nx = () =>
+    execFileSync("npx", ["nx", "run", "p:lint", "--outputStyle=stream-without-prefixes"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, NX_DAEMON: "false", NX_NO_CLOUD: "true", NX_TUI: "false", FORCE_COLOR: "1" },
+    });
+  git(repo, ["checkout", "-q", "-f", "main"]);
+  rmSync(join(repo, ".nx"), { recursive: true, force: true });
+  const first = parseLog(nx());
+  const second = parseLog(nx());
+  assert.deepEqual(first.tasks.map((t) => [t.task, t.replayed]), [["p:lint", null]]);
+  assert.deepEqual(second.tasks.map((t) => [t.task, t.replayed]), [["p:lint", "existing outputs match the cache, left as is"]]);
+  assert.deepEqual(second.summaries, [{ replayed: 1, of: 1 }]);
+});
+
+test("a timings report the build did not write as cargo does is refused with what to do", async () => {
+  const { timingUnits } = await import(pathToFileURL(script("measure-archive.mjs")).href);
+  assert.throws(() => timingUnits("<html>nothing</html>"), (e) => /holds no UNIT_DATA/.test(e.message) && /re-run the build/.test(e.next));
+  assert.throws(() => timingUnits("const UNIT_DATA = [{oops}];"), (e) => /UNIT_DATA is not JSON/.test(e.message));
+  assert.throws(
+    () => timingUnits('const UNIT_DATA = [{"name":"x","target":"","duration":-1}];'),
+    (e) => /no name, target or nonnegative duration/.test(e.message),
+  );
+  assert.deepEqual(timingUnits('const UNIT_DATA = [{"name":"x","target":" lib","duration":1.5}];'), [{ name: "x", target: " lib", seconds: 1.5 }]);
 });

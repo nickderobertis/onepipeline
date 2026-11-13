@@ -19,6 +19,7 @@ import * as check from "./validate.mjs";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: an Actions log's colour codes are ESC sequences.
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] a supplementary signal over the save messages the cache actions print (actions/cache "Cache saved", Swatinem/rust-cache "Saving cache", the Nx sidecar's PUT); the proof that a run wrote no cache is the read-only listing of the caches its ref holds, which a producer whose message changed cannot hide from.
 const SAVES =
   /(Saving cache|Cache saved|Uploading cache|Successfully saved cache|nx-remote-cache|PUT \/v1\/cache)/;
 

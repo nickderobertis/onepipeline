@@ -161,6 +161,17 @@ export function tierMapping({ clone, commit, observed, variants = [] }) {
         "install the just the repository pins (`just bootstrap` names it) and re-run",
       );
     }
+    check.need(
+      dump !== null &&
+        typeof dump === "object" &&
+        Object.values(dump).every(
+          (r) =>
+            Array.isArray(r?.dependencies) &&
+            r.dependencies.every((d) => typeof d?.recipe === "string"),
+        ),
+      `${sha}'s justfile dump is not recipes with dependency lists`,
+      "install the just the repository pins (`just bootstrap` names it) and re-run",
+    );
   }
   const archiveRecipe = (name, seen = new Set()) => {
     if (seen.has(name) || !dump[name]) return false;

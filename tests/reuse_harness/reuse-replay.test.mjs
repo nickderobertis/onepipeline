@@ -19,6 +19,8 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const replayScript = join(root, "scripts", "crate-split-replay.mjs");
 const fetchScript = join(root, "scripts", "crate-split", "fetch-evidence.mjs");
@@ -940,6 +942,23 @@ test("the reuse spike's one command replays today's tiers and every option over 
   );
   // #11's base is the seed, which does not hold the commit standing for #1493.
   assert.match(withCache, /^\| #11 \| before #1493 \| /m);
+  // A stored key the listing no longer holds is counted gone.
+  write(evidence, {
+    "caches/page-1.json": JSON.stringify({
+      actions_caches: [{ id: 2, key: "nx-cache-555", ref: "refs/heads/main", size_in_bytes: 7, created_at: at(50) }],
+    }),
+  });
+  assert.equal(spawnSync(process.execPath, [join(root, "scripts", "crate-split", "cache-inventory.mjs"), "--evidence", evidence], { encoding: "utf8" }).status, 0);
+  const gone = spawnSync(
+    process.execPath,
+    [join(root, "scripts", "crate-split", "report-tables.mjs"), "--spike", out, "--evidence", evidence, "--out", join(out, "tables4.md")],
+    { encoding: "utf8" },
+  );
+  assert.equal(gone.status, 0, gone.stderr);
+  assert.match(
+    readFileSync(join(out, "tables4.md"), "utf8"),
+    /^1 task runs missed a key an earlier run in the evidence stored; 0 of them read it before its main-scope copy was created, and 1 are no longer in the listing\.$/m,
+  );
   // A clone that cannot answer, because it lacks the commit, is refused, not guessed.
   const unanswered = spawnSync(
     process.execPath,
@@ -980,9 +999,9 @@ test("a split is weighed per platform: skipped suites, the shared build only whe
   write(dir, {
     "observed.json": JSON.stringify({
       prs: [
-        { pr: 1, title: "docs only", release: false, changed: ["docs/a.md"], moved: [] },
-        { pr: 2, title: "a journey", release: false, changed: ["tests/one.rs"], moved: [] },
-        { pr: 3, title: "the lock", release: false, changed: [], moved: ["runtime:cargo"] },
+        { pr: 1, title: "docs only", release: false, base: SHA_A, head: SHA_B, changed: ["docs/a.md"], moved: [] },
+        { pr: 2, title: "a journey", release: false, base: SHA_A, head: SHA_B, changed: ["tests/one.rs"], moved: [] },
+        { pr: 3, title: "the lock", release: false, base: SHA_A, head: SHA_B, changed: [], moved: ["runtime:cargo"] },
       ],
       weights: {
         tasks: {
