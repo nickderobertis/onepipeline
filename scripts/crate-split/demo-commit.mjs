@@ -17,10 +17,11 @@
 // false`, there is no Nx sidecar, no `actions/cache/save` and no `setup-uv` cache.
 //
 // The layout: `today` changes nothing else; `b` is `prototype-b.mjs` with the one e2e
-// binary replaced by its suites; `c` is `prototype-c.mjs`, the lock refreshed offline
+// binary replaced by its suites (its `[[test]]` and its `tests/e2e/main.rs` root both
+// removed, since Cargo would discover the root by itself); `c` is `prototype-c.mjs`, the lock refreshed offline
 // for its two new workspace members.
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { prototypeB } from "./prototype-b.mjs";
 import { prototypeC } from "./prototype-c.mjs";
@@ -129,6 +130,10 @@ export function demoCommit(repo, variant) {
     const e2e = /\n\[\[test\]\]\nname = "e2e"\npath = "tests\/e2e\/main\.rs"\n/;
     if (!e2e.test(text)) throw new Error("Cargo.toml declares no e2e test target to replace");
     writeFileSync(manifest, text.replace(e2e, "\n"));
+    // Cargo discovers `tests/<dir>/main.rs` as a test of that name by itself, so the
+    // one binary is gone only once its root, which declares modules and nothing else,
+    // is: every suite loads the modules it needs from where they are.
+    rmSync(join(repo, "tests", "e2e", "main.rs"));
   } else if (variant === "c") {
     prototypeC(repo);
     execFileSync("cargo", ["metadata", "--format-version", "1", "--offline"], {

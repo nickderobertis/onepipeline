@@ -10,13 +10,25 @@
 // step's seconds), whether any line of the log saves a cache, and what
 // `measure-archive.mjs` measured. The measurement workflow runs no Nx task, so the Nx
 // selection is none. It reads only DIR.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: an Actions log's colour codes are ESC sequences.
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 const SAVES =
   /(Saving cache|Cache saved|Uploading cache|Successfully saved cache|nx-remote-cache|PUT \/v1\/cache)/;
+
+/** A step's seconds from the log: its `##[group]Run` line to the next step's. */
+export function logStep(text, start) {
+  const lines = text
+    .split("\n")
+    .map((l) => l.match(/^(\d{4}-\d\d-\d\dT[\d:.]+Z) (.*)$/))
+    .filter(Boolean);
+  const at = lines.findIndex((m) => start.test(m[2]));
+  if (at < 0) return null;
+  const next = lines.slice(at + 1).find((m) => m[2].startsWith("##[group]Run "));
+  return next ? Math.round((Date.parse(next[1]) - Date.parse(lines[at][1])) / 1000) : null;
+}
 
 export function readJob(job, log) {
   const text = log.replace(ANSI, "");
@@ -41,9 +53,9 @@ export function readJob(job, log) {
     workflowBlob: text.match(/workflow blob=(\w+)/)?.[1] ?? null,
     restore: restore ?? (/No cache found|Cache not found/.test(text) ? "miss" : "unknown"),
     restoreMB: size ? Number(size) : null,
-    restoreSeconds: step?.started_at
+    restoreSeconds: step?.completed_at
       ? (Date.parse(step.completed_at) - Date.parse(step.started_at)) / 1000
-      : null,
+      : logStep(text, /^##\[group\]Run Swatinem\/rust-cache/),
     saves: text.split("\n").filter((l) => SAVES.test(l)).length,
     mode: measured?.[1] ?? null,
     wallSeconds: measured ? Number(measured[2]) : null,
@@ -68,7 +80,14 @@ function main(argv) {
   for (const run of runs) {
     const { jobs } = JSON.parse(readFileSync(join(dir, `${run}.jobs.json`), "utf8"));
     for (const job of jobs.sort((a, b) => a.name.localeCompare(b.name))) {
-      const r = readJob(job, readFileSync(join(dir, `${job.id}.log`), "utf8"));
+      const path = join(dir, `${job.id}.log`);
+      if (!existsSync(path)) {
+        console.log(
+          `| ${run} | ${job.name} | ${job.id} | not read: ${job.status} when the jobs were listed | | | | | | | | | |`,
+        );
+        continue;
+      }
+      const r = readJob(job, readFileSync(path, "utf8"));
       console.log(
         `| ${run} | ${r.job} | ${r.id} | \`${r.sha?.slice(0, 12)}\` | \`${r.head?.slice(0, 12)}\` | \`${r.workflowBlob?.slice(0, 12)}\` | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${r.mode} | ${r.wallSeconds} | ${r.workspaceUnitSeconds} / ${r.dependencyUnitSeconds} |`,
       );

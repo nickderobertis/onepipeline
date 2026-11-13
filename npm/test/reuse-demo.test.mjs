@@ -161,6 +161,8 @@ test("demonstration b replaces the one e2e binary with a target per suite", () =
   const dir = join(scratch, "demo-b");
   const manifest = readFileSync(join(dir, "Cargo.toml"), "utf8");
   assert.doesNotMatch(manifest, /name = "e2e"\n/);
+  // Cargo would discover the root on its own, so it goes too.
+  assert.ok(!existsSync(join(dir, "tests", "e2e", "main.rs")));
   assert.match(manifest, /name = "other"/);
   assert.match(manifest, /name = "e2e_landing"\npath = "tests\/e2e_split\/e2e_landing\.rs"/);
   const landing = readFileSync(join(dir, "tests", "e2e_split", "e2e_landing.rs"), "utf8");
@@ -224,6 +226,27 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
   assert.match(
     run.stdout,
     /^\| 9 \| measure-linux \(1\) \| 1 \| `4fc389b6aa` \| `2cac816a6a` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 26 \| 0 \| coverage \| 118\.9 \| 363\.1 \/ 0 \|$/m,
+  );
+  // A job listed before it ran: its restore is timed from its log, and one with no log
+  // is said to be unread rather than dropped.
+  write(dir, {
+    "8.jobs.json": JSON.stringify({
+      jobs: [
+        { name: "measure-macos (1)", id: 3, status: "queued", steps: [] },
+        { name: "measure-macos (2)", id: 4, status: "queued", steps: [] },
+      ],
+    }),
+    "3.log": `2026-11-13T07:42:34.0000000Z ##[group]Run Swatinem/rust-cache@v2.9.2\n${log([])}\n2026-11-13T07:43:10.0000000Z ##[group]Run actions/setup-node@v4`,
+  });
+  const listed = spawnSync(process.execPath, [runsScript, "--dir", dir, "8"], { encoding: "utf8" });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(
+    listed.stdout,
+    /^\| 8 \| measure-macos \(1\) \| 3 \| .* \| 1869 \| 36 \| 0 \| coverage \|/m,
+  );
+  assert.match(
+    listed.stdout,
+    /^\| 8 \| measure-macos \(2\) \| 4 \| not read: queued when the jobs were listed \|/m,
   );
   // A miss is a miss, and a line that saves a cache is counted, not hidden.
   assert.match(

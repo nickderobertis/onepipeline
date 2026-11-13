@@ -178,7 +178,9 @@ export function prototypeC(repo) {
   const members = manifest.match(/^members = \[([^\]]*)\]/m);
   let next = manifest.replace(
     members[0],
-    `members = [${members[1]}, "crates/onepipeline-base", "crates/onepipeline-core"]`,
+    // Default members too: an archive built without --workspace (as the tiers' is)
+    // builds the default members, which must hold the unit tests that moved.
+    `members = [${members[1]}, "crates/onepipeline-base", "crates/onepipeline-core"]\ndefault-members = [".", "crates/onepipeline-base", "crates/onepipeline-core"]`,
   );
   next = next.replace(
     /^\[dev-dependencies\]$/m,
