@@ -582,8 +582,12 @@ party. A user's ruling binds. A manager's is a strong default the dispatch may
 decline with its reason, and names the **ruling reference** that does it:
 
 ```bash
-onepipeline decline-ruling "$ONEPIPELINE_RUN_ID" --ruling c4.0 <<<'The user asked for the opposite.'
+onepipeline decline-ruling "$ONEPIPELINE_RUN_ID" --ruling c4.0 --reason 'The user asked for the opposite.'
 ```
+
+`--reason TEXT` is the reason as one argument, for a caller that can pass nothing
+else. Without it the reason is read from a `FILE` argument, or from stdin; naming
+both `--reason` and a file is refused.
 
 A decline raises one non-blocking `declined-ruling` surface for the manager, whose
 `declined_ruling` field is a typed record — `node`, `ruling`, `provenance` (always

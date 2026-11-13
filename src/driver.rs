@@ -376,12 +376,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             said(&receipt)
         }
         Verb::DeclineRuling(args) => {
-            let reason = match &args.file {
-                Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
+            let reason = match (&args.reason, &args.file) {
+                (Some(_), Some(path)) => {
+                    return Err(Error::Invalid(format!(
+                        "a decline's reason is `--reason` or a file, never both: \
+                         `--reason` was given beside the file {}",
+                        path.display()
+                    )))
+                }
+                (Some(reason), None) => reason.clone(),
+                (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
                     path: path.clone(),
                     source: e,
                 })?,
-                None => {
+                (None, None) => {
                     let mut buffer = String::new();
                     std::io::stdin()
                         .read_to_string_compat(&mut buffer)

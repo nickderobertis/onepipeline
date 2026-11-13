@@ -1723,9 +1723,10 @@ pub struct SurfaceArgs {
 
 /// `onepipeline decline-ruling`.
 ///
-/// The reason arrives as [`SurfaceArgs`]'s message does — from a file, or from
-/// stdin when none is named — so a dispatch's prose never passes through a
-/// shell.
+/// The reason is `--reason TEXT` when given — the one form a caller that can
+/// pass only arguments, such as a read-only judge, can use — and otherwise
+/// arrives as [`SurfaceArgs`]'s message does: from a file, or from stdin when
+/// none is named. `--reason` with a file is refused naming both.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct DeclineRulingArgs {
     /// The run id.
@@ -1733,6 +1734,9 @@ pub struct DeclineRulingArgs {
     /// The ruling reference the declined ruling was rendered beside.
     #[arg(long, value_name = "REF")]
     pub ruling: String,
+    /// The reason, as one argument. Given, neither the file nor stdin is read.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
     /// The file the reason is read from. Omitted, it is read from stdin.
     pub file: Option<PathBuf>,
 }
