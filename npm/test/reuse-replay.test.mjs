@@ -56,7 +56,6 @@ function git(repo, args, date = "2026-11-01T00:00:00Z") {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: gitEnv(date) }).trim();
 }
 
-// ---- the evidence fetch, against a gh double --------------------------------------
 
 /** A `gh` on PATH that answers from a state file and appends each call to a log. */
 function ghDouble(dir, state) {
@@ -325,7 +324,6 @@ test("the cache inventory pages the listing read-only and counts entries by fami
   assert.match(stopped.stderr, /10 core remain, below the floor of 2500; 0 pages held/);
 });
 
-// ---- the observed replay, over a real Nx workspace --------------------------------
 
 let repo;
 let evidence;
@@ -875,7 +873,6 @@ test("the reuse spike's one command replays today's tiers and every option over 
   assert.ok(Object.keys(c.suites).some((name) => name.startsWith("onepipeline:test-rest.")));
 });
 
-// ---- per-platform weights and the build a split adds ------------------------------
 
 test("a split is weighed per platform: skipped suites, the shared build only when every archive suite skips, less what the split adds", () => {
   const dir = join(scratch, "weights");
@@ -970,7 +967,6 @@ test("a split is weighed per platform: skipped suites, the shared build only whe
   assert.match(notObserved.stderr, /is not an --observed replay's JSON/);
 });
 
-// ---- the module graph ---------------------------------------------------------------
 
 test("the module graph puts a cycle in one component and leaves the modules outside it their own", () => {
   const crate = join(scratch, "crate");
