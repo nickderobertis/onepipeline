@@ -393,6 +393,14 @@ const PLATFORM_OF = {
   "test-macos": "darwin",
   lint: "lint",
 };
+const REST_TASK = {
+  linux: "onepipeline:test-rest",
+  darwin: "onepipeline:test-quick",
+  win32: "onepipeline:test-quick",
+};
+// The test binaries a tier of their own runs; every other binary is the rest tier's.
+const OWN_TIER_BINARIES =
+  /^(e2e|contract|pooled_slot|narrow_write|note|codex_server|smoke|release_channel|stop_verdict|package_bundle|\w+_workload)$/;
 const E2E_TASK = {
   linux: "onepipeline-e2e:test",
   darwin: "onepipeline-e2e:test-quick",
@@ -466,12 +474,37 @@ export function weigh(perPr, profilesDir) {
         modules[name] ??= {};
         modules[name][platform] = { minutes: (e2e * s) / total, testSeconds: s };
       }
+      // The rest tier: the library's unit tests by top-level module, apart from the
+      // integration binaries the tier also runs (`rest:<task>`).
+      const restTask = REST_TASK[platform];
+      const rest = tasks[restTask]?.[platform]?.minutes;
+      const all = selectRun(loadRecords(join(profilesDir, run, job))).records;
+      const restRecords = all.filter((r) => !OWN_TIER_BINARIES.test(r.binary));
+      const restTotal = restRecords.reduce((sum, r) => sum + (r.wall_s ?? 0), 0);
+      if (rest && restTotal > 0) {
+        let unitShare = 0;
+        const unit = new Map();
+        for (const r of restRecords.filter((r) => r.binary === "onepipeline")) {
+          const name = moduleOf(r.test);
+          unit.set(name, (unit.get(name) ?? 0) + (r.wall_s ?? 0));
+        }
+        for (const [name, s] of unit) {
+          const key = `unit:${restTask}:${name}`;
+          modules[key] ??= {};
+          modules[key][platform] = { minutes: (rest * s) / restTotal, testSeconds: s };
+          unitShare += s / restTotal;
+        }
+        modules[`rest:${restTask}`] ??= {};
+        modules[`rest:${restTask}`][platform] = { minutes: rest * (1 - unitShare) };
+      }
       sources[platform] = {
         run,
         job,
         records: records.length,
         testSeconds: total,
         e2eMinutes: e2e,
+        restRecords: restRecords.length,
+        restUnitRecords: restRecords.filter((r) => r.binary === "onepipeline").length,
       };
     }
   }

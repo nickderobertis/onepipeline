@@ -3,7 +3,7 @@
 // replay of it is what Nx's cache keys do now and an option is a variant of it.
 //
 //   node scripts/crate-split/tier-mapping.mjs --clone DIR --changes OBSERVED.json
-//        --out FILE [--commit REF] [--variant NAME]...
+//        --out FILE [--commit REF] [--variant NAME]... [--split-e2e PROPOSED.json]
 //
 // One suite per cacheable Nx task an --observed replay (OBSERVED.json) saw run in a
 // test job, weighed by that task's minutes: its `paths` are the globs its configured
@@ -15,6 +15,8 @@
 // (`!glob`) are not modelled, so a replay of the mapping can only over-run.
 //
 // --variant rewrites the mapping into one option (a) names; each is listed in VARIANTS.
+// --split-e2e replaces the e2e tier with the suites a proposal maps (option (b),
+// `optionB`).
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -146,12 +148,47 @@ export function tierMapping({ clone, commit, observed, variants = [] }) {
   };
 }
 
+const E2E_TIERS = ["onepipeline-e2e:test", "onepipeline-e2e:test-quick"];
+
+/**
+ * Option (b): `base` (today's tiers) with the e2e tier, on every platform, replaced by
+ * the suites `proposed` (`proposed.json`) maps. Each suite is keyed on its own files
+ * (`paths`) and on everything else the e2e tier's key held that is not an e2e test file
+ * — the harness's inputs, the runtime and configuration inputs, the crate — and weighed
+ * by its modules' share of the e2e tier per platform. It runs from the shared archive.
+ */
+export function optionB(base, proposed) {
+  const tiers = E2E_TIERS.filter((t) => base.suites[t]);
+  if (tiers.length === 0) throw new Error("the base mapping has no e2e tier to split");
+  const shared = [
+    ...new Set(
+      tiers.flatMap((t) => base.suites[t].paths.filter((p) => !p.startsWith("tests/e2e/"))),
+    ),
+  ];
+  const suites = Object.fromEntries(
+    Object.entries(base.suites).filter(([name]) => !tiers.includes(name)),
+  );
+  for (const [name, suite] of Object.entries(proposed.suites)) {
+    suites[name] = {
+      paths: [...new Set([...suite.paths, ...shared])].sort(),
+      crates: ["onepipeline"],
+      modules: suite.modules,
+      archive: true,
+    };
+  }
+  return {
+    ...base,
+    "//": `Option (b): ${base["//"]} with the e2e tier split into proposed.json's ${Object.keys(proposed.suites).length} suites.`,
+    suites,
+  };
+}
+
 function main(argv) {
   const options = { commit: "refs/spike/main", variant: [] };
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i]?.replace(/^--/, "");
     if (
-      !["clone", "changes", "out", "commit", "variant"].includes(name) ||
+      !["clone", "changes", "out", "commit", "variant", "split-e2e"].includes(name) ||
       argv[i + 1] === undefined
     ) {
       throw new Error(`${argv[i]} is not an option this generator reads`);
@@ -167,12 +204,16 @@ function main(argv) {
     if (!options[required]) throw new Error(`--${required} is required`);
   }
   const observed = JSON.parse(readFileSync(options.changes, "utf8"));
-  const mapping = tierMapping({
+  let mapping = tierMapping({
     clone: options.clone,
     commit: options.commit,
     observed,
     variants: options.variant,
   });
+  // --split-e2e PROPOSED: option (b) over those tiers.
+  if (options["split-e2e"]) {
+    mapping = optionB(mapping, JSON.parse(readFileSync(options["split-e2e"], "utf8")));
+  }
   writeFileSync(options.out, `${JSON.stringify(mapping, null, 2)}\n`);
   console.log(`tier-mapping: wrote ${options.out}: ${Object.keys(mapping.suites).length} suites`);
 }

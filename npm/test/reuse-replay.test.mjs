@@ -24,6 +24,7 @@ const replayScript = join(root, "scripts", "crate-split-replay.mjs");
 const fetchScript = join(root, "scripts", "crate-split", "fetch-evidence.mjs");
 const tierScript = join(root, "scripts", "crate-split", "tier-mapping.mjs");
 const graphScript = join(root, "scripts", "crate-split", "module-graph.mjs");
+const spikeScript = join(root, "scripts", "crate-split", "reuse-spike.mjs");
 
 let scratch;
 
@@ -277,7 +278,7 @@ function nxWorkspace() {
       },
     }),
     "project.json": JSON.stringify({
-      name: "eng",
+      name: "onepipeline",
       root: ".",
       targets: {
         test: {
@@ -286,8 +287,14 @@ function nxWorkspace() {
           inputs: ["e2eSource", "docsSource", { runtime: "node scripts/recipe.cjs" }],
         },
         lint: { command: "true", cache: true, inputs: ["rustBuild"] },
+        "test-rest": { command: "true", cache: true, inputs: ["rustBuild"] },
         smoke: { command: "true", cache: false, inputs: ["rustBuild"] },
       },
+    }),
+    "tests/e2e/project.json": JSON.stringify({
+      name: "onepipeline-e2e",
+      root: "tests/e2e",
+      targets: { test: { command: "true", cache: true, inputs: ["e2eSource"] } },
     }),
     "scripts/recipe.cjs": 'console.log(require("node:fs").readFileSync("recipe.txt", "utf8"))\n',
     "recipe.txt": "v1\n",
@@ -373,16 +380,18 @@ function evidenceDir() {
     }),
     // #11: the source changed, so test and lint ran; smoke is never cached.
     "logs/1101.log": log(commits.src, [
-      "##[group]> nx run eng:test",
+      "##[group]> nx run onepipeline:test",
       "     Starting 3 tests across 1 binary",
       "     Summary [  120.000s] 3 tests run: 3 passed",
-      "> nx run eng:lint",
-      "> nx run eng:smoke",
+      "> nx run onepipeline:lint",
+      "> nx run onepipeline:smoke",
+      "> nx run onepipeline-e2e:test",
+      "> nx run onepipeline:test-rest",
     ]),
     "executions/1101.json": JSON.stringify({
       tasks: [
         {
-          task: "eng:test",
+          task: "onepipeline:test",
           hash: "111",
           cacheable: true,
           result: "executed",
@@ -391,7 +400,7 @@ function evidenceDir() {
           finished_at: at(11),
         },
         {
-          task: "eng:lint",
+          task: "onepipeline:lint",
           hash: "222",
           cacheable: true,
           result: "executed",
@@ -400,7 +409,7 @@ function evidenceDir() {
           finished_at: at(12),
         },
         {
-          task: "eng:smoke",
+          task: "onepipeline:smoke",
           hash: "333",
           cacheable: false,
           result: "executed",
@@ -408,18 +417,38 @@ function evidenceDir() {
           started_at: at(12),
           finished_at: at(15),
         },
+        {
+          task: "onepipeline-e2e:test",
+          hash: "666",
+          cacheable: true,
+          result: "executed",
+          remote_read: "miss",
+          started_at: at(15),
+          finished_at: at(35),
+        },
+        {
+          task: "onepipeline:test-rest",
+          hash: "777",
+          cacheable: true,
+          result: "executed",
+          remote_read: "miss",
+          started_at: at(35),
+          finished_at: at(39),
+        },
       ],
-      store_attempts: [{ task: "eng:lint", hash: "999", status: "stored", attempted_at: at(12) }],
+      store_attempts: [
+        { task: "onepipeline:lint", hash: "999", status: "stored", attempted_at: at(12) },
+      ],
     }),
     // #12: a journey and the recipe a runtime input prints both moved; lint replayed.
     "logs/1201.log": log(commits.several, [
-      "> nx run eng:test",
-      "> nx run eng:lint  [remote cache]",
+      "> nx run onepipeline:test",
+      "> nx run onepipeline:lint  [remote cache]",
     ]),
     "executions/1201.json": JSON.stringify({
       tasks: [
         {
-          task: "eng:test",
+          task: "onepipeline:test",
           hash: "444",
           cacheable: true,
           result: "executed",
@@ -428,7 +457,7 @@ function evidenceDir() {
           finished_at: at(28),
         },
         {
-          task: "eng:lint",
+          task: "onepipeline:lint",
           hash: "222",
           cacheable: true,
           result: "remote_hit",
@@ -441,13 +470,13 @@ function evidenceDir() {
     }),
     // #13: only the changelog moved, which no key holds; lint missed a key #11's run stored.
     "logs/1301.log": log(commits.release, [
-      "> nx run eng:test  [remote cache]",
-      "> nx run eng:lint",
+      "> nx run onepipeline:test  [remote cache]",
+      "> nx run onepipeline:lint",
     ]),
     "executions/1301.json": JSON.stringify({
       tasks: [
         {
-          task: "eng:test",
+          task: "onepipeline:test",
           hash: "555",
           cacheable: true,
           result: "remote_hit",
@@ -456,7 +485,7 @@ function evidenceDir() {
           finished_at: at(40.1),
         },
         {
-          task: "eng:lint",
+          task: "onepipeline:lint",
           hash: "999",
           cacheable: true,
           result: "executed",
@@ -469,6 +498,25 @@ function evidenceDir() {
     }),
   });
   pr(11, commits.src, [job(1101, "test-linux"), job(1102, "budgets")], 110);
+  // The newest profile records #11's test-linux job uploaded: two e2e modules, one
+  // three times the other, and the rest tier's library unit tests of one module beside
+  // an integration binary of its own.
+  const golden = JSON.parse(
+    readFileSync(join(root, "tests", "golden", "test-profile-record-v2.json"), "utf8"),
+  );
+  const records = [
+    ["e2e", "alpha::one"],
+    ["e2e", "beta::one"],
+    ["e2e", "beta::two"],
+    ["e2e", "beta::three"],
+    ["onepipeline", "plan::tests::parses"],
+    ["linked_engines", "the_lock_links_one_release"],
+  ];
+  records.forEach(([binary, name], i) =>
+    write(evidence, {
+      [`profiles/110/test-linux/${i}.json`]: JSON.stringify({ ...golden, binary, test: name }),
+    }),
+  );
   pr(12, commits.several, [job(1201, "test-macos")], 120);
   pr(13, commits.release, [job(1301, "test-linux")], 130);
   pr(14, commits.src, [job(1401, "test-linux")], 140);
@@ -490,7 +538,7 @@ test("the observed replay names the key input each pull request's diff matched f
   assert.equal(run.status, 0, run.stderr);
   assert.equal(
     run.stdout.trim(),
-    `crate-split-replay: wrote ${observedJson}: 3 of 4 pull requests read, 2 task runs replayed and 5 ran; 3 of those the diff forced, 2 it did not`,
+    `crate-split-replay: wrote ${observedJson}: 3 of 4 pull requests read, 2 task runs replayed and 7 ran; 5 of those the diff forced, 2 it did not`,
   );
   const result = JSON.parse(readFileSync(observedJson, "utf8"));
   const pr = (n) => result.prs.find((p) => p.pr === n);
@@ -498,28 +546,31 @@ test("the observed replay names the key input each pull request's diff matched f
 
   // A source file is rustBuild's, however many named inputs reach it.
   assert.deepEqual(pr(11).changed, ["src/a.rs"]);
-  assert.deepEqual(ran(11, "eng:test").inputs, ["rustBuild"]);
-  assert.equal(ran(11, "eng:test").cause, "one input");
-  assert.equal(ran(11, "eng:test").minutes, 10);
+  assert.deepEqual(ran(11, "onepipeline:test").inputs, ["rustBuild"]);
+  assert.equal(ran(11, "onepipeline:test").cause, "one input");
+  assert.equal(ran(11, "onepipeline:test").minutes, 10);
   // The log's nextest lines split the task into its build and its tests.
-  assert.equal(ran(11, "eng:test").buildMinutes, 1);
-  assert.equal(ran(11, "eng:test").testMinutes, 2);
-  assert.deepEqual(ran(11, "eng:lint").inputs, ["rustBuild"]);
-  assert.equal(ran(11, "eng:smoke").cause, "not cacheable");
+  assert.equal(ran(11, "onepipeline:test").buildMinutes, 1);
+  assert.equal(ran(11, "onepipeline:test").testMinutes, 2);
+  assert.deepEqual(ran(11, "onepipeline:lint").inputs, ["rustBuild"]);
+  assert.equal(ran(11, "onepipeline:smoke").cause, "not cacheable");
 
   // A journey file and a runtime input whose command prints differently are two inputs.
-  assert.deepEqual(ran(12, "eng:test").inputs, ["e2eSource", "runtime:node scripts/recipe.cjs"]);
-  assert.equal(ran(12, "eng:test").cause, "several inputs");
+  assert.deepEqual(ran(12, "onepipeline:test").inputs, [
+    "e2eSource",
+    "runtime:node scripts/recipe.cjs",
+  ]);
+  assert.equal(ran(12, "onepipeline:test").cause, "several inputs");
   assert.deepEqual(pr(12).moved, ["runtime:node scripts/recipe.cjs"]);
   // lint's key holds neither, so it replayed, and that replay is no diff-forced key.
   assert.deepEqual(
     pr(12).jobs[0].replayed.map((row) => [row.task, row.diffMatched]),
-    [["eng:lint", false]],
+    [["onepipeline:lint", false]],
   );
 
   // Nothing a key holds moved, so the cause is the run's own record: a key run 110 stored.
-  assert.deepEqual(ran(13, "eng:lint").inputs, []);
-  assert.equal(ran(13, "eng:lint").cause, "missed a key run 110 (#11 test-linux) stored");
+  assert.deepEqual(ran(13, "onepipeline:lint").inputs, []);
+  assert.equal(ran(13, "onepipeline:lint").cause, "missed a key run 110 (#11 test-linux) stored");
   assert.equal(pr(13).release, true);
 
   // A pull request with no log naming its checkout is reported unread, not dropped.
@@ -527,8 +578,8 @@ test("the observed replay names the key input each pull request's diff matched f
 
   // The totals split forced-alone, forced-together and not-forced, per job.
   assert.deepEqual(result.totals.alone.nonRelease.rustBuild["test-linux"], {
-    tasks: 2,
-    minutes: 11,
+    tasks: 4,
+    minutes: 35,
   });
   assert.deepEqual(result.totals.several.nonRelease["several inputs together"]["test-macos"], {
     tasks: 1,
@@ -539,8 +590,16 @@ test("the observed replay names the key input each pull request's diff matched f
     1,
   );
   // The weights: each task's median executed minutes, less a build it did.
-  assert.equal(result.weights.tasks["eng:test"].linux.minutes, 9);
+  assert.equal(result.weights.tasks["onepipeline:test"].linux.minutes, 9);
   assert.equal(result.weights.build.linux.minutes, 1);
+  // Each e2e module weighs its share of the e2e tier's minutes on its platform, and the
+  // rest tier splits into its library's unit tests by module and the rest of it.
+  const minutesOf = (name) => result.weights.modules[name].linux.minutes;
+  assert.equal(minutesOf("alpha"), 5);
+  assert.equal(minutesOf("beta"), 15);
+  assert.equal(minutesOf("unit:onepipeline:test-rest:plan"), 2);
+  assert.equal(minutesOf("rest:onepipeline:test-rest"), 2);
+  assert.equal(result.weights.sources.linux.restUnitRecords, 1);
 });
 
 test("the observed replay's Markdown tables the inputs and lists each pull request's tasks", () => {
@@ -549,8 +608,11 @@ test("the observed replay's Markdown tables the inputs and lists each pull reque
   assert.equal(run.status, 0, run.stderr);
   const md = readFileSync(out, "utf8");
   assert.match(md, /### Ran: forced by one input alone, non-release pull requests/);
-  assert.match(md, /\| rustBuild \| - \| 2 \/ 11\.0 \| - \| - \|/);
-  assert.match(md, /ran `eng:test` \(8\.0 min\): e2eSource \+ runtime:node scripts\/recipe\.cjs/);
+  assert.match(md, /\| rustBuild \| - \| 4 \/ 35\.0 \| - \| - \|/);
+  assert.match(
+    md,
+    /ran `onepipeline:test` \(8\.0 min\): e2eSource \+ runtime:node scripts\/recipe\.cjs/,
+  );
   assert.match(
     md,
     /#### #14 — run 140 — fix: a run whose log is gone\n\nUnread: no job log names the merge it checked out\./,
@@ -590,10 +652,15 @@ test("today's tiers, generated from the workspace and replayed over the observed
   assert.equal(gen.status, 0, gen.stderr);
   const tiers = JSON.parse(readFileSync(mapping, "utf8"));
   // smoke is never cached, so it is no suite a key could skip.
-  assert.deepEqual(Object.keys(tiers.suites).sort(), ["eng:lint", "eng:test"]);
-  assert.deepEqual(tiers.suites["eng:test"].crates, ["onepipeline"]);
-  assert.ok(tiers.suites["eng:test"].paths.includes("tests/e2e/**/*"));
-  assert.ok(tiers.suites["eng:test"].paths.includes("runtime:node scripts/recipe.cjs"));
+  assert.deepEqual(Object.keys(tiers.suites).sort(), [
+    "onepipeline-e2e:test",
+    "onepipeline:lint",
+    "onepipeline:test",
+    "onepipeline:test-rest",
+  ]);
+  assert.deepEqual(tiers.suites["onepipeline:test"].crates, ["onepipeline"]);
+  assert.ok(tiers.suites["onepipeline:test"].paths.includes("tests/e2e/**/*"));
+  assert.ok(tiers.suites["onepipeline:test"].paths.includes("runtime:node scripts/recipe.cjs"));
   const out = join(scratch, "tiers-replay.json");
   const run = spawnSync(
     process.execPath,
@@ -606,11 +673,15 @@ test("today's tiers, generated from the workspace and replayed over the observed
   assert.deepEqual(
     result.perChange.map((change) => [change.commit, change.affected.sort()]),
     [
-      ["#11", ["eng:lint", "eng:test"]],
-      ["#12", ["eng:test"]],
+      [
+        "#11",
+        ["onepipeline-e2e:test", "onepipeline:lint", "onepipeline:test", "onepipeline:test-rest"],
+      ],
+      ["#12", ["onepipeline-e2e:test", "onepipeline:test"]],
     ],
   );
-  assert.equal(result.summary.platforms.linux.suiteMinutesSkipped, 1);
+  // #12 skips lint (1 min) and test-rest (4) on Linux.
+  assert.equal(result.summary.platforms.linux.suiteMinutesSkipped, 5);
   // --release replays the release pull requests instead: the changelog moves no key.
   const release = spawnSync(
     process.execPath,
@@ -629,6 +700,59 @@ test("today's tiers, generated from the workspace and replayed over the observed
   );
   assert.equal(release.status, 0, release.stderr);
   assert.deepEqual(JSON.parse(readFileSync(out, "utf8")).perChange[0].affected, []);
+});
+
+test("the reuse spike's one command replays today's tiers and every option over the same pull requests", () => {
+  const out = join(scratch, "spike");
+  const run = spawnSync(
+    process.execPath,
+    [
+      spikeScript,
+      "--evidence",
+      evidence,
+      "--clone",
+      repo,
+      "--out",
+      out,
+      "--build-delta-b",
+      "linux=1",
+      "--commit",
+      commits.base,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const lines = run.stdout.trim().split("\n");
+  assert.match(lines[0], /--observed|observed\.json: 3 of 4 pull requests read/);
+  for (const name of [
+    "today",
+    "today-release",
+    "a-docs-out-of-e2e",
+    "a-rest-own-tests",
+    "a-nx-json-out",
+    "a-all",
+    "b",
+    "c",
+  ]) {
+    assert.ok(
+      lines.some((line) => line.includes(`${join(out, `${name}.md`)}:`)),
+      `${name} was not replayed:\n${run.stdout}`,
+    );
+  }
+  // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
+  const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
+  const proposed = JSON.parse(
+    readFileSync(join(root, "scripts", "crate-split", "proposed.json"), "utf8"),
+  );
+  assert.ok(!("onepipeline-e2e:test" in b.suites));
+  for (const suite of Object.keys(proposed.suites)) assert.equal(b.suites[suite].archive, true);
+  // The build delta is charged on each change that still builds the archive: both.
+  const bResult = JSON.parse(readFileSync(join(out, "b.json"), "utf8"));
+  assert.equal(bResult.summary.platforms.linux.buildDeltaCharged, 2);
+  // (c): the rest tier keeps its integration binaries' share and splits its unit tests.
+  const c = JSON.parse(readFileSync(join(out, "c.mapping.json"), "utf8"));
+  assert.deepEqual(c.suites["onepipeline:test-rest"].modules, ["rest:onepipeline:test-rest"]);
+  assert.ok(Object.keys(c.suites).some((name) => name.startsWith("onepipeline:test-rest.")));
 });
 
 // ---- per-platform weights and the build a split adds ------------------------------

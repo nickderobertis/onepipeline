@@ -244,10 +244,12 @@ export function optionC(result, base) {
   for (const [name, suite] of Object.entries(base.suites)) {
     const crate = suite.crates.length ? ["root"] : [];
     if (/^onepipeline:(test-rest|test-quick)$/.test(name)) {
-      // The tier's integration binaries and the unit tests of the root still need it all.
-      suites[name] = { ...suite, crates: crate };
+      // The tier's integration binaries and the unit tests of the root still need it all,
+      // and weigh what the unit suites below do not (`rest:<task>`).
+      const { tasks, ...rest } = suite;
+      suites[name] = { ...rest, crates: crate, modules: [`rest:${name}`] };
       for (const [cname, c] of Object.entries(result.crates)) {
-        suites[`${name}@${cname}`] = {
+        suites[`${name}.${cname}`] = {
           paths: suite.paths.filter((p) => !p.startsWith("tests/")),
           crates: [cname],
           modules: c.modules.map((m) => `unit:${name}:${m}`),
