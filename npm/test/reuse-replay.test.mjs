@@ -735,12 +735,15 @@ test("the module graph puts a cycle in one component and leaves the modules outs
       "pub mod a;\npub mod b;\npub mod c;\npub mod d;\npub use d::{Leaf, Other as Renamed};\n",
     "src/main.rs": "fn main() { onepipeline::c::go(); }\n",
     // a and b reach each other, one through a grouped import; c reaches a and the
-    // re-exported item of d; d names `crate::a` only in a comment and a string.
+    // re-exported item of d; d names `crate::a` only in a comment and a string, and
+    // `crate::b` only inside a nested block comment.
     "src/a.rs": "use crate::{b::B, Leaf};\npub struct A;\n",
     "src/b.rs": "pub struct B(crate::a::A);\n",
-    "src/c.rs": "pub fn go() { let _ = crate::a::A; let _ = crate::Renamed; }\n",
+    // A char literal holding a quote opens no string: the references after it count.
+    "src/c.rs":
+      "pub fn go<'a>() { let _q = '\"'; let _ = crate::a::A; let _ = crate::Renamed; }\nconst M: &str = \"m\";\n",
     "src/d.rs":
-      '// crate::a is prose\npub struct Leaf;\npub struct Other;\nconst S: &str = "crate::b";\n',
+      '/* outer /* crate::b */ still a comment crate::b */\n// crate::a is prose\npub struct Leaf;\npub struct Other;\nconst S: &str = "crate::b";\n',
     "src/d/inner.rs": "pub fn x() {}\n",
   });
   const out = join(scratch, "graph.json");

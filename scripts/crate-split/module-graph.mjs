@@ -32,13 +32,68 @@ function files(dir) {
   return out;
 }
 
-/** Strip comments and string literals so a word in prose is not a reference. */
+/**
+ * The code of a Rust source with its comments, string literals and char literals
+ * blanked, so a word in prose or in a message is not a reference. A small lexer rather
+ * than a pattern: a char literal such as `'"'` or a lifetime opens no string, block
+ * comments nest, and a raw string ends only at its own number of `#`.
+ */
 export function code(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/\/\/[^\n]*/g, " ")
-    .replace(/r#*"[\s\S]*?"#*/g, '""')
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  let out = "";
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < n && text[i] !== "\n") i++;
+      out += " ";
+    } else if (c === "/" && next === "*") {
+      let depth = 0;
+      do {
+        if (text[i] === "/" && text[i + 1] === "*") {
+          depth++;
+          i += 2;
+        } else if (text[i] === "*" && text[i + 1] === "/") {
+          depth--;
+          i += 2;
+        } else i++;
+      } while (i < n && depth > 0);
+      out += " ";
+    } else if (
+      (c === "r" || (c === "b" && next === "r")) &&
+      /^b?r#*"/.test(text.slice(i, i + 260)) &&
+      !/\w/.test(text[i - 1] ?? "")
+    ) {
+      const head = text.slice(i).match(/^b?r(#*)"/);
+      const close = `"${head[1]}`;
+      const end = text.indexOf(close, i + head[0].length);
+      i = end < 0 ? n : end + close.length;
+      out += '""';
+    } else if (c === '"' || (c === "b" && next === '"' && !/\w/.test(text[i - 1] ?? ""))) {
+      i += c === "b" ? 2 : 1;
+      while (i < n && text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
+      i++;
+      out += '""';
+    } else if (c === "'") {
+      // A char literal is one char or one escape and a closing quote; anything else
+      // is a lifetime or a label, which is code.
+      const literal = text
+        .slice(i)
+        .match(/^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'/);
+      if (literal) {
+        i += literal[0].length;
+        out += "' '";
+      } else {
+        out += c;
+        i++;
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
 }
 
 /** The top-level names a module's code reaches through `crate::`. */
