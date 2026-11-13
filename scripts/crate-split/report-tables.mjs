@@ -241,6 +241,54 @@ function options(spike, observed) {
   return out.join("\n");
 }
 
+/**
+ * What the cache delivered: each replayed task weighed by its median executed minutes
+ * on its platform, per pull request, beside what today's keys allow measured from the
+ * base. A replay the base's key would not allow is one of the pull request's own
+ * earlier pushes, from its own scope.
+ */
+function delivered(spike, observed) {
+  const today = load(spike, "today");
+  const out = [
+    "| pull requests | delivered min per PR: linux / macOS / Windows | replays the base's key would not allow, linux / macOS / Windows | keys allow from the base (today's tiers replayed), linux / macOS / Windows |",
+    "| --- | --- | --- | --- |",
+  ];
+  const typical = (p) => changeClass(p.changed ?? []) === "engine source and tests";
+  for (const [label, pick, release] of [
+    ["the 30 non-release", (p) => !p.release, false],
+    ["the typical (engine source and tests)", (p) => !p.release && typical(p), false],
+    ["the 18 release", (p) => p.release, true],
+  ]) {
+    const prs = observed.prs.filter((p) => !p.unread && pick(p));
+    const per = ["linux", "darwin", "win32"].map((platform) => {
+      let saved = 0;
+      let own = 0;
+      for (const p of prs) {
+        const j = p.jobs.find((x) => PLATFORM[x.job] === platform);
+        for (const r of j?.replayed ?? []) {
+          saved += observed.weights.tasks[r.task]?.[platform]?.minutes ?? 0;
+          if (r.diffMatched) own++;
+        }
+      }
+      return { saved: prs.length ? saved / prs.length : null, own };
+    });
+    const allowed = ["linux", "darwin", "win32"].map((platform) => {
+      const changes = today.perChange.filter((c) => prs.some((p) => `#${p.pr}` === c.commit));
+      // today.json replays the non-release pull requests; the release ones are apart.
+      if (!changes.length || release) return null;
+      const w = today.summary.platforms[platform].perSuite;
+      let skipped = 0;
+      for (const c of changes)
+        for (const [suite, m] of Object.entries(w)) if (!c.affected.includes(suite)) skipped += m;
+      return skipped / changes.length;
+    });
+    out.push(
+      `| ${label} (${prs.length}) | ${per.map((x) => min(x.saved)).join(" / ")} | ${per.map((x) => x.own).join(" / ")} | ${allowed.map(min).join(" / ")} |`,
+    );
+  }
+  return out.join("\n");
+}
+
 function agreement(spike, observed) {
   const today = load(spike, "today");
   let n = 0;
@@ -370,6 +418,7 @@ function main(argv) {
     ["Population", population(observed)],
     ["Totals per input", totals(observed)],
     ["The e2e tier", e2e(observed)],
+    ["What the cache delivered", delivered(options_.spike, observed)],
     ["Options replayed", options(options_.spike, observed)],
     [
       "Today's tier mapping against Nx's own hash plans",
