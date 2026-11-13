@@ -19,8 +19,13 @@
 // suite per component weighed by its modules' test-seconds share (`unit:` modules) and
 // the rest of the tier, and every e2e-family suite still exercising every crate, since
 // it drives the one binary that links them all.
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+//
+// Exit 0: FILE (and the mapping) is written; one line says how many modules fall in how
+// many components. 1: an argument or --base was refused, with a `next:` action.
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { compileMapping } from "../crate-split-replay.mjs";
+import * as check from "./validate.mjs";
 
 function files(dir) {
   const out = [];
@@ -267,22 +272,35 @@ export function optionC(result, base) {
   };
 }
 
+const USAGE =
+  "node scripts/crate-split/module-graph.mjs --repo DIR --out FILE [--mapping FILE --base MAPPING]";
+
 function main(argv) {
-  const options = {};
-  for (let i = 0; i < argv.length; i += 2) {
-    const name = argv[i]?.replace(/^--/, "");
-    if (!["repo", "out", "mapping", "base"].includes(name) || argv[i + 1] === undefined) {
-      throw new Error(`${argv[i]} is not an option this reads`);
-    }
-    options[name] = argv[i + 1];
-  }
-  if (!options.repo || !options.out) throw new Error("--repo and --out are required");
+  const options = check.parseOptions(argv, ["repo", "out", "mapping", "base"], { usage: USAGE });
+  check.need(options.repo && options.out, "--repo and --out are required", USAGE);
+  check.need(
+    existsSync(join(options.repo, "src", "lib.rs")),
+    `${options.repo} holds no src/lib.rs`,
+    "give --repo a crate's checkout",
+  );
+  check.need(!options.mapping === !options.base, "--mapping and --base go together", USAGE);
   const result = split(options.repo);
   writeFileSync(options.out, `${JSON.stringify(result, null, 2)}\n`);
   if (options.mapping) {
-    if (!options.base) throw new Error("--mapping needs --base, today's tier mapping");
-    const base = JSON.parse(readFileSync(options.base, "utf8"));
-    writeFileSync(options.mapping, `${JSON.stringify(optionC(result, base), null, 2)}\n`);
+    let base;
+    try {
+      base = JSON.parse(readFileSync(options.base, "utf8"));
+    } catch (error) {
+      throw new check.Refusal(
+        `--base ${options.base} cannot be read as JSON: ${error.message}`,
+        "give --base the mapping tier-mapping.mjs wrote",
+      );
+    }
+    // The replayer's own check of a mapping, so a base it would refuse is refused here.
+    compileMapping(base);
+    const mapping = optionC(result, base);
+    compileMapping(mapping);
+    writeFileSync(options.mapping, `${JSON.stringify(mapping, null, 2)}\n`);
   }
   console.log(
     `module-graph: ${result.modules} modules in ${result.components} components; the largest holds ${result.largest}`,
@@ -294,6 +312,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     main(process.argv.slice(2));
   } catch (error) {
     console.error(`module-graph: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : USAGE}`);
     process.exitCode = 1;
   }
 }

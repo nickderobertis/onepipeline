@@ -16,9 +16,13 @@
 // resolve unchanged. `pub(crate)` becomes `pub` throughout `src/`, which a crate
 // boundary needs, and the new crates and the root allow the lints that change raises
 // (missing docs, unreachable pub, dead code): a prototype's allowances, not a proposal.
+//
+// Exit 0: written; one line gives each crate's module count. 1: --repo or its manifest
+// was refused, with a `next:` action on stderr.
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { split } from "./module-graph.mjs";
+import * as check from "./validate.mjs";
 
 const MOD = /^(?:pub(?:\(crate\))?\s+)?mod\s+(\w+);/;
 
@@ -94,7 +98,11 @@ export function prototypeC(repo) {
   const blocks = libBlocks(lib);
   const manifestPath = join(repo, "Cargo.toml");
   const manifest = readFileSync(manifestPath, "utf8");
-  const version = manifest.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)[1];
+  const refuse =
+    "give --repo a checkout whose Cargo.toml has a [package] version and a [workspace] members list";
+  const versionAt = manifest.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
+  check.need(versionAt, "Cargo.toml's [package] gives no version", refuse);
+  const version = versionAt[1];
   const edition = manifest.match(/^\[package\][\s\S]*?^edition\s*=\s*"([^"]+)"/m)?.[1] ?? "2021";
   const deps = dependencySections(manifest);
   const allow = "#![allow(missing_docs, unreachable_pub, dead_code, unused, clippy::all)]";
@@ -176,6 +184,7 @@ export function prototypeC(repo) {
     writeFileSync(file, text);
   }
   const members = manifest.match(/^members = \[([^\]]*)\]/m);
+  check.need(members, "Cargo.toml's [workspace] has no one-line members list", refuse);
   let next = manifest.replace(
     members[0],
     // Default members too: an archive built without --workspace (as the tiers' is)
@@ -199,14 +208,17 @@ export function prototypeC(repo) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const at = process.argv.indexOf("--repo");
-  if (at < 0 || !process.argv[at + 1]) {
-    console.error("prototype-c: --repo DIR names the checkout to write the prototype into");
-    process.exitCode = 1;
-  } else {
-    const n = prototypeC(process.argv[at + 1]);
+  const usage = "node scripts/crate-split/prototype-c.mjs --repo DIR";
+  try {
+    const options = check.parseOptions(process.argv.slice(2), ["repo"], { usage });
+    check.need(options.repo, "--repo names the checkout to write the prototype into", usage);
+    const n = prototypeC(options.repo);
     console.log(
       `prototype-c: onepipeline-base ${n.base} modules, onepipeline-core ${n.core}, root ${n.root}`,
     );
+  } catch (error) {
+    console.error(`prototype-c: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : usage}`);
+    process.exitCode = 1;
   }
 }

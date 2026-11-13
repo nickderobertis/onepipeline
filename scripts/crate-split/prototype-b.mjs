@@ -11,13 +11,47 @@
 // to `Cargo.toml`, leaving the `e2e` target in place: a build selects one layout or the
 // other with `--test`. Each suite allows dead code and unused imports, which a subset of
 // the shared harness would otherwise fail under `-D warnings`; that is a prototype's
-// allowance, not a proposal. It prints the `--test` arguments of each layout.
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// allowance, not a proposal. It prints one line: the `--test` arguments of each layout.
+//
+// Exit 0: written. 1: --repo or its proposal was refused, with a `next:` action.
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import * as check from "./validate.mjs";
 
 export function prototypeB(repo) {
-  const proposed = JSON.parse(
-    readFileSync(join(repo, "scripts", "crate-split", "proposed.json"), "utf8"),
+  const path = join(repo, "scripts", "crate-split", "proposed.json");
+  let proposed;
+  try {
+    proposed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new check.Refusal(
+      `${path} cannot be read as JSON: ${error.message}`,
+      "give --repo a checkout that holds scripts/crate-split/proposed.json",
+    );
+  }
+  const next = "keep proposed.json in the shape crate-split-replay.mjs's head gives";
+  check.need(
+    proposed?.suites && typeof proposed.suites === "object",
+    `${path} holds no suites`,
+    next,
+  );
+  for (const [suite, spec] of Object.entries(proposed.suites)) {
+    // The name becomes a file name, a Rust comment and a Cargo target name.
+    check.need(
+      /^[A-Za-z0-9-]+$/.test(suite),
+      `${JSON.stringify(suite)} is not a suite name a target can take`,
+      next,
+    );
+    check.need(
+      Array.isArray(spec?.paths) && spec.paths.every((p) => typeof p === "string"),
+      `suite ${suite} has no list of paths`,
+      next,
+    );
+  }
+  check.need(
+    existsSync(join(repo, "tests", "e2e", "main.rs")),
+    `${repo} holds no tests/e2e/main.rs`,
+    "give --repo a checkout of this repository",
   );
   const main = readFileSync(join(repo, "tests", "e2e", "main.rs"), "utf8");
   const declared = new Set([...main.matchAll(/^mod (\w+);/gm)].map((m) => m[1]));
@@ -47,13 +81,15 @@ export function prototypeB(repo) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const at = process.argv.indexOf("--repo");
-  if (at < 0 || !process.argv[at + 1]) {
-    console.error("prototype-b: --repo DIR names the checkout to write the prototype into");
+  const usage = "node scripts/crate-split/prototype-b.mjs --repo DIR";
+  try {
+    const options = check.parseOptions(process.argv.slice(2), ["repo"], { usage });
+    check.need(options.repo, "--repo names the checkout to write the prototype into", usage);
+    const layouts = prototypeB(options.repo);
+    console.log(`prototype-b: today ${layouts.today.join(" ")}; split ${layouts.split.join(" ")}`);
+  } catch (error) {
+    console.error(`prototype-b: ${error.message.split("\n")[0]}`);
+    console.error(`next: ${error instanceof check.Refusal ? error.next : usage}`);
     process.exitCode = 1;
-  } else {
-    const layouts = prototypeB(process.argv[at + 1]);
-    console.log(`today: ${layouts.today.join(" ")}`);
-    console.log(`split: ${layouts.split.join(" ")}`);
   }
 }
