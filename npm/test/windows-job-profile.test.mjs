@@ -87,13 +87,18 @@ function job(name, { records = true, executions = true } = {}) {
         git: 50,
         programs: { onepipeline: { count: 3, s: 150 }, git: { count: 10, s: 50 } },
       }),
-      record("adoption::a_slower_one", 402, 400, {
-        spawn: 250,
-        git: 50,
-        wait: 100,
-        programs: { onepipeline: { count: 1, s: 200 }, onevcs: { count: 1, s: 50 } },
-      }),
-      // Another run's record, which the reader sets aside.
+      {
+        // A second nextest run inside the same window still counts.
+        ...record("adoption::a_slower_one", 402, 400, {
+          spawn: 250,
+          git: 50,
+          wait: 100,
+          programs: { onepipeline: { count: 1, s: 200 }, onevcs: { count: 1, s: 50 } },
+        }),
+        run_id: "run-c",
+      },
+      // A record a restored cache carried in from another job, outside every test phase,
+      // which the reader sets aside.
       { ...record("old::one", 10, 999, {}), run_id: "run-b" },
     ];
     rs.forEach((r, i) => {

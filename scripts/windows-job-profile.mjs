@@ -160,7 +160,11 @@ export function cargoBuilds(lines) {
   return out;
 }
 
-/** The profile records under `dir`, keeping only the run that holds the most of them. */
+/**
+ * The profile records under `dir`, a test retried within one nextest run read at its last
+ * attempt. Every run is kept: each tier is its own nextest run, and a record a restored
+ * cache carried in from another job is set aside by the test phase windows, not here.
+ */
 export function loadRecords(dir) {
   if (!existsSync(dir)) return [];
   const all = [];
@@ -178,12 +182,9 @@ export function loadRecords(dir) {
     }
   };
   walk(dir);
-  const counts = new Map();
-  for (const r of all) counts.set(r.run_id, (counts.get(r.run_id) ?? 0) + 1);
-  const run = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
   const byTest = new Map();
-  for (const r of all.filter((r) => r.run_id === run)) {
-    const key = `${r.binary}::${r.test}`;
+  for (const r of all.filter((r) => r && typeof r === "object" && r.categories)) {
+    const key = `${r.run_id} ${r.binary}::${r.test}`;
     const seen = byTest.get(key);
     if (!seen || (r.attempt ?? 0) >= (seen.attempt ?? 0)) byTest.set(key, r);
   }
@@ -274,7 +275,9 @@ export function foldJob(label, dir) {
   if (gate) {
     const gateLines = lines.filter((l) => l.t >= gate.start && l.t <= gate.end);
     const found = testPhases(gateLines);
-    const gateTasks = executions?.filter((t) => t.end >= gate.start - 1 && t.start <= gate.end + 1);
+    const gateTasks = executions?.filter(
+      (t) => t.start >= gate.start - 1 && t.start <= gate.end + 1,
+    );
     path = gateTasks?.length ? criticalPath(gateTasks) : [];
     // Every test phase gets the records that started inside its window.
     for (const p of found) {
@@ -312,6 +315,7 @@ export function foldJob(label, dir) {
     );
   }
   const attributed = [...division.values()].reduce((a, b) => a + b, 0);
+  const inPhases = phases.flatMap((p) => p.records);
   return {
     label,
     wall,
@@ -322,7 +326,7 @@ export function foldJob(label, dir) {
     path,
     executions,
     builds: cargoBuilds(gate ? lines.filter((l) => l.t >= gate.start && l.t <= gate.end) : lines),
-    records,
+    records: inPhases,
   };
 }
 
