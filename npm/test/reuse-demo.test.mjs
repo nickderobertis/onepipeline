@@ -104,7 +104,8 @@ function checkout(name) {
   const dir = join(scratch, name);
   write(dir, {
     ".github/workflows/ci.yml": "name: CI\n",
-    ".github/workflows/visual-docs.yml": "name: Visual docs\n",
+    ".github/workflows/visual-docs.yml":
+      "name: Visual docs\n\non:\n  pull_request:\n    # closed deletes the preview\n    types: [opened, closed]\n\njobs:\n  docs:\n    runs-on: ubuntu-latest\n",
     "Cargo.toml":
       '[package]\nname = "x"\nversion = "0.1.0"\n\n[[test]]\nname = "e2e"\npath = "tests/e2e/main.rs"\n\n[[test]]\nname = "other"\npath = "tests/other.rs"\n',
     "tests/e2e/main.rs": "mod harness;\nmod landing;\nmod store;\n",
@@ -125,7 +126,11 @@ test("every demonstration replaces CI with the timed build and writes to no cach
   const dir = checkout("demo-today");
   const result = demoRun(dir, "today");
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(!existsSync(join(dir, ".github", "workflows", "visual-docs.yml")));
+  // The visual docs workflow stays (a test compiles it in) and nothing starts it.
+  assert.equal(
+    readFileSync(join(dir, ".github", "workflows", "visual-docs.yml"), "utf8"),
+    "name: Visual docs\n\non:\n  workflow_dispatch:\n\njobs:\n  docs:\n    runs-on: ubuntu-latest\n",
+  );
   const workflow = readFileSync(join(dir, ".github", "workflows", "ci.yml"), "utf8");
   for (const platform of ["linux", "macos", "windows"])
     assert.match(workflow, new RegExp(`^  measure-${platform}:$`, "m"));

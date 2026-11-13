@@ -10,8 +10,9 @@
 // of hosted Linux (instrumented, as test-linux), macOS and Windows (plain, as their
 // `test-quick` tiers), twice each on separate runners, after the same checkout,
 // toolchain, Dev Drive, Defender exclusion, tool install and read-only Rust cache
-// restore those jobs make; and `.github/workflows/visual-docs.yml` is removed, so
-// closing the demonstration deploys and deletes nothing. Nothing in it writes an
+// restore those jobs make; and `.github/workflows/visual-docs.yml`'s triggers become
+// `workflow_dispatch` alone, so closing the demonstration deploys and deletes nothing
+// (the file stays: `tests/visual_docs.rs` compiles it in). Nothing in it writes an
 // Actions-cache or Nx remote-cache entry: the Rust cache restores with `save-if:
 // false`, there is no Nx sidecar, no `actions/cache/save` and no `setup-uv` cache.
 //
@@ -19,7 +20,7 @@
 // binary replaced by its suites; `c` is `prototype-c.mjs`, the lock refreshed offline
 // for its two new workspace members.
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { prototypeB } from "./prototype-b.mjs";
 import { prototypeC } from "./prototype-c.mjs";
@@ -113,7 +114,14 @@ ${["linux", "macos", "windows"].map(job).join("\n")}`;
 
 export function demoCommit(repo, variant) {
   writeFileSync(join(repo, ".github", "workflows", "ci.yml"), MEASURE_WORKFLOW);
-  rmSync(join(repo, ".github", "workflows", "visual-docs.yml"), { force: true });
+  // Kept, since a test compiles it in (`include_str!`), but started by nothing a
+  // demonstration does: its pull_request triggers become a manual dispatch.
+  const visual = join(repo, ".github", "workflows", "visual-docs.yml");
+  const text = readFileSync(visual, "utf8");
+  const triggers = /^on:\n(?:[ \t].*\n|\n)*/m;
+  if (!triggers.test(text))
+    throw new Error("visual-docs.yml has no top-level on: block to replace");
+  writeFileSync(visual, text.replace(triggers, "on:\n  workflow_dispatch:\n\n"));
   if (variant === "b") {
     prototypeB(repo);
     const manifest = join(repo, "Cargo.toml");
