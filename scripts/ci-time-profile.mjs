@@ -2,27 +2,26 @@
 // Where one hosted CI test job's wall clock goes, read back from what the run left.
 // Spike tooling (spike-onepipeline-profile): nothing in the repository's own CI runs this.
 //
-//   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB [--repo OWNER/NAME]
+//   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB --out FILE [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE] [--min-remaining N]
-//   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE
-//        [--compare-since DATE] [--base-ref REF] [--profiles CLASS] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
-//        [--cache DIR] [--json FILE]
-//        [--min-remaining N]
+//   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE --out FILE
+//        [--compare-since DATE] [--base-ref REF] [--profiles CLASS] [--jobs a,b]
+//        [--repo OWNER/NAME] [--cache DIR] [--json FILE] [--min-remaining N]
 //
 // `job` reads, through the `gh` login and read-only, the job's steps, its log, and the
 // artifacts the run uploaded for it: `test-profile-<job>` (the per-test records
 // `crates/testfakes/src/profile.rs` writes), `nx-cache-entries-<job>` (the Nx sidecar's
 // per-task start and end) and, on a run whose workflow `scripts/ci-time-workflow.mjs`
 // edited, `measure-<job>` (CPU and network samples, every rustc invocation's start and
-// end, the Nx task graph, and the coverage-overhead partition). It prints one breakdown
-// of the job's wall clock that sums to it: the steps one after another; inside the gate
-// step, each moment shared equally among the Nx tasks running then; inside a task, the
-// moment is compile when a rustc it can be waiting on is running, a test category when
-// its tests are running (each running test's share split by its record's categories),
-// and the task's own phase otherwise. Nothing is counted twice, and what no source
-// names is printed as `unattributed`.
+// end, Nx's own task trace and graph, and the coverage-overhead partition). Its report is
+// one breakdown of the job's wall clock that sums to it: the steps one after another;
+// inside the gate step, each moment shared equally among the Nx tasks running then;
+// inside a task, the moment is compile when a rustc is running and the task is not
+// testing, a test category when its tests are running (each running test's share split
+// by its record's categories), and the task's own phase otherwise. Nothing is counted
+// twice, and what no source names is reported as `unattributed`.
 //
-// `history` lists the pull-request runs of ci.yml created in [since, until) and prints
+// `history` lists the pull-request runs of ci.yml created in [since, until) and reports
 // each job's successful durations and medians before and after `split`, counting only runs
 // created at or after --compare-since (default: since), overall and by what each run's pull
 // request changed: its head, fetched over git (no API request), diffed against its merge
@@ -30,37 +29,86 @@
 // job of that class's test-profile artifact (e2e tests, e2e test-seconds, seconds per spawn
 // of `onepipeline`).
 //
-// Every GitHub response is kept under --cache (default target/ci-time-profile), so a
-// second run of the same measurement makes no request; the command refuses to make one
-// while `gh api rate_limit` reports fewer than --min-remaining (2500) core requests.
-// Exit 0 printed; 1 a source is missing or malformed, or the rate floor was reached;
-// 2 a usage error.
+// The report (Markdown) goes to --out and, with --json, the figures to that file; what is
+// printed is one line naming the file and the headline figures. Every GitHub response is
+// kept under --cache (default target/ci-time-profile), so a second run of the same
+// measurement makes no request; no request is made while `gh api rate_limit` reports fewer
+// than --min-remaining (default 2500) core requests.
+// Exit 0 written; 1 refused, with the reason and a `next:` line on stderr (a source missing
+// or malformed, a run not finished, the rate floor reached, a GitHub read failing); 2 a
+// usage error.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
-import { recordProblem } from "./test-profile-report.mjs";
+import { CATEGORIES, recordProblem } from "./test-profile-report.mjs";
 
-class Refusal extends Error {}
-const refuse = (message) => {
-  throw new Refusal(message);
+class Refusal extends Error {
+  constructor(message, next) {
+    super(message);
+    this.next = next;
+  }
+}
+const refuse = (message, next) => {
+  throw new Refusal(message, next);
 };
+// A file the run left that is not the shape its writer gives it.
+const check = (ok, what) => {
+  if (!ok)
+    refuse(
+      `${what} is malformed`,
+      "delete that run's directory under --cache and measure again; if it recurs, the writer changed",
+    );
+};
+const finite = (...values) => values.every((v) => Number.isFinite(v));
 
-// ---------------------------------------------------------------- arguments
+const FLAGS = {
+  job: ["run", "job", "out", "repo", "cache", "json", "min-remaining"],
+  history: [
+    "since",
+    "compare-since",
+    "split",
+    "until",
+    "out",
+    "jobs",
+    "base-ref",
+    "profiles",
+    "repo",
+    "cache",
+    "json",
+    "min-remaining",
+  ],
+};
+const CLASSES = ["edits src/", "edits crates/ or Cargo files, not src/", "release", "other"];
 
 function parse(argv) {
   const [command, ...rest] = argv;
-  if (!["job", "history"].includes(command)) usage("name a command: job or history");
+  if (!FLAGS[command]) usage("name a command: job or history");
   const opts = { command };
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i];
     const value = rest[i + 1];
     if (!flag?.startsWith("--") || value === undefined)
       usage(`cannot read ${flag ?? "the arguments"}`);
-    opts[flag.slice(2)] = value;
+    const name = flag.slice(2);
+    if (!FLAGS[command].includes(name)) usage(`${command} takes no ${flag}`);
+    if (name in opts) usage(`${flag} is given twice`);
+    opts[name] = value;
   }
+  if (!opts.out) usage("--out names the file the report is written to");
   opts.repo ??= "nickderobertis/onepipeline";
   opts.cache ??= "target/ci-time-profile";
-  opts["min-remaining"] = Number(opts["min-remaining"] ?? 2500);
+  const floor = opts["min-remaining"] ?? "2500";
+  if (!/^\d+$/.test(floor) || Number(floor) > 5000)
+    usage("--min-remaining is a whole number of requests, 0 to 5000");
+  opts["min-remaining"] = Number(floor);
   if (!/^[\w.-]+\/[\w.-]+$/.test(opts.repo)) usage("--repo is OWNER/NAME");
   if (command === "job") {
     if (!/^\d+$/.test(opts.run ?? "")) usage("--run takes a run id");
@@ -68,42 +116,63 @@ function parse(argv) {
   } else {
     for (const key of ["since", "split", "until"])
       if (Number.isNaN(Date.parse(opts[key] ?? ""))) usage(`--${key} takes a date`);
+    opts["compare-since"] ??= opts.since;
+    if (Number.isNaN(Date.parse(opts["compare-since"]))) usage("--compare-since takes a date");
+    const order = ["since", "compare-since", "split", "until"].map((k) => Date.parse(opts[k]));
+    if (!order.every((t, i) => i === 0 || order[i - 1] <= t) || order[2] === order[3])
+      usage("the dates run since <= compare-since <= split < until");
     opts.jobs = (opts.jobs ?? "test-linux,test-macos").split(",");
+    if (!opts.jobs.every((j) => /^[\w-]+$/.test(j))) usage("--jobs is job names joined by commas");
+    if (opts.profiles !== undefined && !CLASSES.includes(opts.profiles))
+      usage(`--profiles is one of: ${CLASSES.join("; ")}`);
   }
   return opts;
 }
 
 function usage(message) {
   process.stderr.write(
-    `ci-time-profile: ${message}\nusage: ci-time-profile.mjs job --run RUN_ID --job JOB [--repo R] [--cache DIR] [--json FILE]\n` +
-      `       ci-time-profile.mjs history --since DATE --split DATE --until DATE [--jobs a,b] [--repo R] [--cache DIR] [--json FILE]\n`,
+    `ci-time-profile: ${message}\nusage: ci-time-profile.mjs job --run RUN_ID --job JOB --out FILE [--repo R] [--cache DIR] [--json FILE] [--min-remaining N]\n` +
+      `       ci-time-profile.mjs history --since DATE --split DATE --until DATE --out FILE [--compare-since DATE] [--base-ref REF] [--profiles CLASS] [--jobs a,b] [--repo R] [--cache DIR] [--json FILE] [--min-remaining N]\n`,
   );
   process.exit(2);
 }
-
-// ---------------------------------------------------------------- GitHub, cached
 
 class Gh {
   constructor(cache, floor) {
     this.cache = join(cache, "api");
     this.floor = floor;
     this.requests = 0;
+    this.rateChecks = 0;
     this.cached = 0;
     mkdirSync(this.cache, { recursive: true });
   }
   path(endpoint, suffix) {
     return join(this.cache, endpoint.replace(/[^\w.-]+/g, "_") + suffix);
   }
+  // `gh api rate_limit` itself is not counted against the allowance, so it is kept apart.
   guard() {
-    const remaining = Number(
-      execFileSync("gh", ["api", "rate_limit", "--jq", ".resources.core.remaining"], {
-        encoding: "utf8",
-      }).trim(),
-    );
+    this.rateChecks++;
+    const remaining = Number(this.gh(["api", "rate_limit", "--jq", ".resources.core.remaining"]));
     if (!(remaining >= this.floor))
       refuse(
         `GitHub reports ${remaining} core requests remaining, under the floor of ${this.floor}; nothing more is read`,
+        "wait for the allowance's reset (`gh api rate_limit` names it) and run the same command again; what was read is kept",
       );
+  }
+  gh(args, binary = false) {
+    try {
+      const out = execFileSync("gh", args, {
+        encoding: binary ? "buffer" : "utf8",
+        maxBuffer: 1 << 30,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return binary ? out : out.trim();
+    } catch (error) {
+      refuse(
+        `gh ${args.join(" ")} failed: ${String(error.stderr ?? error.message).trim()}`,
+        "check `gh auth status` and the network, then run the same command again",
+      );
+    }
   }
   fetch(endpoint, { binary = false, keep = true } = {}) {
     const file = this.path(endpoint, binary ? ".bin" : ".txt");
@@ -114,19 +183,19 @@ class Gh {
     this.guard();
     this.requests++;
     // A job log carries cargo's colour codes; the body goes to a file, never a terminal.
-    const body = execFileSync("gh", ["api", "--allow-escape-sequences", endpoint], {
-      encoding: binary ? "buffer" : "utf8",
-      maxBuffer: 1 << 30,
-    });
+    const body = this.gh(["api", "--allow-escape-sequences", endpoint], binary);
     if (keep) writeFileSync(file, body);
     return body;
   }
   json(endpoint, opts) {
-    return JSON.parse(this.fetch(endpoint, opts));
+    try {
+      return JSON.parse(this.fetch(endpoint, opts));
+    } catch (error) {
+      if (error instanceof Refusal) throw error;
+      return check(false, `GitHub's answer to ${endpoint}`);
+    }
   }
 }
-
-// ---------------------------------------------------------------- small helpers
 
 const ms = (iso) => Date.parse(iso);
 const min = (seconds) => (seconds / 60).toFixed(1);
@@ -168,8 +237,6 @@ function unzipArtifact(gh, repo, artifact, into) {
   return into;
 }
 
-// ---------------------------------------------------------------- step classes
-
 function stepClass(name) {
   if (/measurement-only|^'?Measure:/.test(name)) return "measurement-only";
   if (/^Post /.test(name)) {
@@ -186,8 +253,6 @@ function stepClass(name) {
   if (/^Keep the /.test(name)) return "artifact upload";
   return "setup and teardown";
 }
-
-// ---------------------------------------------------------------- log
 
 function parseLog(text) {
   const lines = [];
@@ -251,7 +316,8 @@ function nextestRuns(lines) {
         text,
       );
     if (test) {
-      const b = (binaries[test[4]] ??= { tests: 0, s: 0 });
+      binaries[test[4]] ??= { tests: 0, s: 0 };
+      const b = binaries[test[4]];
       b.tests++;
       b.s += Number(test[2]);
     }
@@ -259,7 +325,64 @@ function nextestRuns(lines) {
   return { runs, binaries };
 }
 
-// ---------------------------------------------------------------- measurement artifact
+// The lines of one of the measurement's files, each parsed by `parse` (null for a line not
+// in its writer's shape). The job can end in the middle of a write, so only the last line
+// may be cut short; any other malformed line refuses.
+function measureLines(file, parse) {
+  const lines = readFileSync(file, "utf8").split("\n");
+  while (lines.length && lines.at(-1) === "") lines.pop();
+  const out = [];
+  lines.forEach((line, i) => {
+    const value = parse(line);
+    if (value) out.push(value);
+    else check(i === lines.length - 1, `${file} line ${i + 1}`);
+  });
+  return out;
+}
+
+function sampleLine(line) {
+  const [head, load, net] = line.split(" | ");
+  if (net === undefined) return null;
+  const parts = head.trim().split(/\s+/);
+  const t = Number(parts[0]) * 1000;
+  const [rx, tx] = net.trim().split(/\s+/).map(Number);
+  if (!finite(t, rx, tx) || rx < 0 || tx < 0) return null;
+  let cpu = null;
+  if (parts[1] === "cpu") {
+    // /proc/stat's first line: user nice system idle iowait ...
+    const v = parts.slice(2).map(Number);
+    if (v.length < 4 || !finite(...v)) return null;
+    cpu = { idle: v[3] + (v[4] || 0), total: v.reduce((a, b) => a + b, 0) };
+  } else {
+    // iostat: us sy id
+    const [us, sy, id] = parts.slice(1, 4).map(Number);
+    if (!finite(us, sy, id)) return null;
+    cpu = { busy: (us + sy) / 100 };
+  }
+  return { t, rx, tx, cpu, load: load.trim() };
+}
+
+function rustcLine(line) {
+  const f = line.split("\t");
+  if (f.length < 7) return null;
+  const r = {
+    start: Number(f[0]) * 1000,
+    end: Number(f[1]) * 1000,
+    crate: f[2],
+    types: f[3],
+    instrumented: f[4] === "1",
+    outDir: f[5],
+    code: Number(f[6]),
+    compiler: f[7] ?? "",
+  };
+  const valid =
+    finite(r.start, r.end) &&
+    r.end >= r.start &&
+    /^[01]$/.test(f[4]) &&
+    Number.isInteger(r.code) &&
+    /^\w+$/.test(r.crate);
+  return valid ? r : null;
+}
 
 function readMeasure(dir) {
   if (!dir) return null;
@@ -276,69 +399,63 @@ function readMeasure(dir) {
   const host = find("host.txt");
   if (host) out.host = readFileSync(host, "utf8").trim().split("\n");
   const samples = find("samples.txt");
-  if (samples) {
-    for (const line of readFileSync(samples, "utf8").split("\n")) {
-      const [head, load, net] = line.split(" | ");
-      if (!net) continue;
-      const parts = head.trim().split(/\s+/);
-      const t = Number(parts[0]) * 1000;
-      const [rx, tx] = net.trim().split(/\s+/).map(Number);
-      let cpu = null;
-      if (parts[1] === "cpu") {
-        const v = parts.slice(2).map(Number);
-        const idle = v[3] + (v[4] || 0);
-        const total = v.reduce((a, b) => a + b, 0);
-        cpu = { idle, total };
-      } else if (parts.length >= 4) {
-        // iostat: us sy id [1m 5m 15m]
-        const [us, sy, id] = parts.slice(1, 4).map(Number);
-        cpu = { busy: (us + sy) / 100, idleFrac: id / 100 };
-      }
-      out.samples.push({ t, rx, tx, cpu, load: load.trim() });
-    }
-  }
+  if (samples) out.samples = measureLines(samples, sampleLine);
   const rustc = find("rustc.tsv");
-  if (rustc) {
-    for (const line of readFileSync(rustc, "utf8").split("\n")) {
-      const f = line.split("\t");
-      if (f.length < 7) continue;
-      out.rustc.push({
-        start: Number(f[0]) * 1000,
-        end: Number(f[1]) * 1000,
-        crate: f[2],
-        types: f[3],
-        instrumented: f[4] === "1",
-        outDir: f[5],
-        code: Number(f[6]),
-        compiler: f[7] ?? "",
-      });
-    }
-  }
+  if (rustc) out.rustc = measureLines(rustc, rustcLine);
   const profile = find("nx-profile.json");
   if (profile) {
+    let trace;
     try {
-      out.nxProfile = JSON.parse(readFileSync(profile, "utf8")).filter((e) => e.ph === "X");
+      trace = JSON.parse(readFileSync(profile, "utf8"));
     } catch {
-      out.nxProfile = null;
+      check(false, profile);
     }
+    check(Array.isArray(trace), profile);
+    // Nx's TaskProfilingLifeCycle: one complete event (`ph: "X"`) per task, in microseconds.
+    out.nxProfile = trace.filter((e) => e?.ph === "X");
+    check(
+      out.nxProfile.every(
+        (e) => typeof e.name === "string" && finite(e.ts, e.dur) && e.ts >= 0 && e.dur >= 0,
+      ),
+      profile,
+    );
   }
   const graph = find("graph.json");
   if (graph) {
-    try {
-      const text = readFileSync(graph, "utf8");
-      out.graph = JSON.parse(text.slice(text.indexOf("{")));
-    } catch {
-      out.graph = null;
+    // Nx prints its plan before the graph; the graph is the JSON object after it. A graph the
+    // step could not write leaves no object, and the run has no dependency path.
+    const text = readFileSync(graph, "utf8");
+    if (text.includes("{")) {
+      let parsed;
+      try {
+        parsed = JSON.parse(text.slice(text.indexOf("{")));
+      } catch {
+        check(false, graph);
+      }
+      const deps = parsed?.tasks?.dependencies;
+      check(
+        deps &&
+          typeof deps === "object" &&
+          Object.values(deps).every(
+            (d) => Array.isArray(d) && d.every((x) => typeof x === "string"),
+          ),
+        graph,
+      );
+      out.graph = parsed;
     }
   }
   const times = find("overhead/times.txt");
   if (times) {
     out.overhead = { runs: {}, records: {} };
-    for (const line of readFileSync(times, "utf8").split("\n")) {
+    for (const run of measureLines(times, (line) => {
       const [label, start, end, status] = line.trim().split(/\s+/);
-      if (label)
-        out.overhead.runs[label] = { s: Number(end) - Number(start), status: Number(status) };
-    }
+      const ok =
+        ["instrumented", "plain-build", "plain"].includes(label) &&
+        finite(Number(start), Number(end), Number(status)) &&
+        Number(end) >= Number(start);
+      return ok ? { label, s: Number(end) - Number(start), status: Number(status) } : null;
+    }))
+      out.overhead.runs[run.label] = { s: run.s, status: run.status };
     for (const label of ["instrumented", "plain"]) {
       out.overhead.records[label] = readRecords(
         files.filter((f) => f.includes(`/overhead/${label}-records/`)),
@@ -378,18 +495,18 @@ function workspaceNames(rustc) {
           stdio: ["ignore", "pipe", "ignore"],
         }),
       );
-      for (const p of meta.packages)
-        for (const t of p.targets) workspaceCrates.add(t.name.replace(/-/g, "_"));
+      for (const p of Array.isArray(meta?.packages) ? meta.packages : [])
+        for (const t of Array.isArray(p?.targets) ? p.targets : [])
+          if (typeof t?.name === "string") workspaceCrates.add(t.name.replace(/-/g, "_"));
     } catch {
-      /* the instrumented set alone */
+      // No cargo, or a checkout cargo cannot read offline: the instrumented crates alone name
+      // the workspace, and a crate only ever built plain counts as a dependency.
     }
   }
   const names = new Set(workspaceCrates);
   for (const r of rustc) if (r.instrumented) names.add(r.crate);
   return names;
 }
-
-// ---------------------------------------------------------------- records
 
 function readRecords(files) {
   const records = [];
@@ -420,8 +537,6 @@ function readRecords(files) {
   }));
 }
 
-const IN_TEST = ["spawn", "git", "build", "fixture", "wait", "fs"];
-
 // A record's wall clock split into named parts that sum to it: spawn split by the program
 // run, the other categories, and the recorder's own unattributed time.
 function recordParts(r) {
@@ -429,7 +544,7 @@ function recordParts(r) {
   const spawnS = r.categories.spawn?.s ?? 0;
   const programs = Object.entries(r.programs ?? {}).filter(([p]) => p !== "git" && p !== "cargo");
   const programTotal = programs.reduce((a, [, v]) => a + v.s, 0);
-  for (const c of IN_TEST) {
+  for (const c of CATEGORIES) {
     const s = r.categories[c]?.s ?? 0;
     if (c === "spawn" && programTotal > 0) {
       for (const [p, v] of programs) parts[`spawn: ${p}`] = (spawnS * v.s) / programTotal;
@@ -446,21 +561,62 @@ function recordParts(r) {
   return parts; // fractions of the record's wall clock
 }
 
-// ---------------------------------------------------------------- the job
+// One file of the Nx sidecar's report (`scripts/nx-remote-cache.mjs report`), or null when the
+// run uploaded none. That script is an upstream copy whose own validator is not exported, so
+// the fields read here are checked here.
+function sidecarFile(dir, name, valid) {
+  const file = dir && join(dir, name);
+  if (!file || !existsSync(file)) return null;
+  let doc;
+  try {
+    doc = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    check(false, file);
+  }
+  check(doc && typeof doc === "object" && valid(doc), file);
+  return doc;
+}
 
 function analyzeJob(opts) {
   const gh = new Gh(opts.cache, opts["min-remaining"]);
   const { repo } = opts;
-  const run = gh.json(`repos/${repo}/actions/runs/${opts.run}`);
-  if (run.status !== "completed") refuse(`run ${opts.run} is ${run.status}, not completed`);
+  const runEndpoint = `repos/${repo}/actions/runs/${opts.run}`;
+  const run = gh.json(runEndpoint);
+  check(typeof run?.status === "string" && typeof run.head_sha === "string", `run ${opts.run}`);
+  if (run.status !== "completed") {
+    // Not kept: the next measurement of this run has to see it finish.
+    rmSync(gh.path(runEndpoint, ".txt"), { force: true });
+    refuse(
+      `run ${opts.run} is ${run.status}, not completed`,
+      "measure it once it has finished: its artifacts are uploaded as its jobs end",
+    );
+  }
   const jobs = gh.json(`repos/${repo}/actions/runs/${opts.run}/jobs?per_page=100`);
-  const job = jobs.jobs.find((j) => j.name === opts.job);
-  if (!job) refuse(`run ${opts.run} has no job ${opts.job}`);
+  check(Array.isArray(jobs?.jobs), `run ${opts.run}'s jobs`);
+  const job = jobs.jobs.find((j) => j?.name === opts.job);
+  if (!job)
+    refuse(
+      `run ${opts.run} has no job ${opts.job}`,
+      `name one of its jobs: ${jobs.jobs.map((j) => j?.name).join(", ")}`,
+    );
+  check(
+    Number.isInteger(job.id) &&
+      !Number.isNaN(ms(job.started_at)) &&
+      !Number.isNaN(ms(job.completed_at)) &&
+      Array.isArray(job.steps) &&
+      job.steps.every((st) => typeof st?.name === "string"),
+    `job ${opts.job} of run ${opts.run}`,
+  );
   const lines = parseLog(gh.fetch(`repos/${repo}/actions/jobs/${job.id}/logs`));
   const facts = logFacts(lines);
   const artifacts = gh.json(
     `repos/${repo}/actions/runs/${opts.run}/artifacts?per_page=100`,
-  ).artifacts;
+  )?.artifacts;
+  check(
+    Array.isArray(artifacts) &&
+      artifacts.every((x) => Number.isInteger(x?.id) && typeof x.name === "string"),
+    `run ${opts.run}'s artifact list`,
+  );
   const dir = join(opts.cache, "runs", String(opts.run), opts.job);
   const get = (name) => {
     const a = artifacts.find((x) => x.name === name && !x.expired);
@@ -469,14 +625,34 @@ function analyzeJob(opts) {
   const profileDir = get(`test-profile-${opts.job}`);
   const nxDir = get(`nx-cache-entries-${opts.job}`);
   const measureDir = get(`measure-${opts.job}`);
-  const executions =
-    nxDir && existsSync(join(nxDir, "executions.json"))
-      ? JSON.parse(readFileSync(join(nxDir, "executions.json"), "utf8"))
-      : null;
-  const manifest =
-    nxDir && existsSync(join(nxDir, "manifest.json"))
-      ? JSON.parse(readFileSync(join(nxDir, "manifest.json"), "utf8"))
-      : null;
+  const executions = sidecarFile(nxDir, "executions.json", (doc) => {
+    const tasksOk =
+      Array.isArray(doc.tasks) &&
+      doc.tasks.every(
+        (t) =>
+          typeof t?.task === "string" &&
+          typeof t.result === "string" &&
+          ms(t.finished_at) >= ms(t.started_at),
+      );
+    const attemptsOk =
+      doc.store_attempts === undefined ||
+      (Array.isArray(doc.store_attempts) &&
+        doc.store_attempts.every(
+          (a) =>
+            typeof a?.status === "string" &&
+            (a.http_status === null || Number.isInteger(a.http_status)),
+        ));
+    return tasksOk && attemptsOk;
+  });
+  const manifest = sidecarFile(
+    nxDir,
+    "manifest.json",
+    (doc) =>
+      Array.isArray(doc.entries) &&
+      doc.entries.every((e) => ["stored", "replayed"].includes(e?.source)) &&
+      Number.isInteger(doc.stored_bytes) &&
+      doc.stored_bytes >= 0,
+  );
   const records = readRecords(walk(profileDir ?? ""));
   const measure = readMeasure(measureDir);
 
@@ -616,7 +792,6 @@ function analyzeJob(opts) {
   const taskCats = new Map(tasks.map((t) => [t.task, {}]));
   const binaryShare = new Map();
   const testShare = new Map();
-  const compileCritical = {};
   if (gate) {
     const tick = 1000;
     for (let t = gate.start; t < gate.end; t += tick) {
@@ -707,14 +882,13 @@ function analyzeJob(opts) {
   result.critical_path = criticalPath(tasks, measure?.graph, gate?.start ?? 0);
   result.concurrency_profile = concurrencyProfile(tasks, gate);
 
-  // Compile: every rustc invocation, by tree.
   const compile = {};
   const ours = workspaceNames(rustc);
   for (const r of rustc) {
     const k = tree(r);
-    compile[k] ??= { invocations: 0, cpu_s: 0, wall_s: 0, dependency_s: 0, crates: {} };
+    compile[k] ??= { invocations: 0, rustc_s: 0, wall_s: 0, dependency_s: 0, crates: {} };
     compile[k].invocations++;
-    compile[k].cpu_s += (r.end - r.start) / 1000;
+    compile[k].rustc_s += (r.end - r.start) / 1000;
     if (!ours.has(r.crate)) compile[k].dependency_s += (r.end - r.start) / 1000;
     compile[k].crates[r.crate] = (compile[k].crates[r.crate] ?? 0) + (r.end - r.start) / 1000;
   }
@@ -722,19 +896,7 @@ function analyzeJob(opts) {
     compile[k].wall_s = unionSeconds(rustc.filter((r) => tree(r) === k));
   result.compile = compile;
   result.compile_any_wall_s = unionSeconds(rustc);
-  result.compile_on_critical_path_s = result.critical_path.length
-    ? unionSeconds(
-        rustc.filter((r) =>
-          result.critical_path.some(
-            (c) =>
-              tasks.find((t) => t.task === c.task) && r.start < ms(c.end) && r.end > ms(c.start),
-          ),
-        ),
-      )
-    : 0;
-  void compileCritical;
 
-  // Tests.
   result.binaries = binaries
     .map((b) => {
       const rs = records.filter((r) => r.binary === b);
@@ -778,11 +940,11 @@ function analyzeJob(opts) {
     for (const [k, f] of Object.entries(r.parts)) totals[k] = (totals[k] ?? 0) + f * r.wall_s;
   result.test_category_seconds = totals;
 
-  // Network and CPU from the sampler.
   if (measure?.samples.length) result.samples = summarizeSamples(measure.samples, steps, tasks);
   if (measure?.overhead) result.overhead = summarizeOverhead(measure.overhead, records);
   result.measure_host = measure?.host ?? null;
   result.requests = gh.requests;
+  result.rate_checks = gh.rateChecks;
   result.cached_reads = gh.cached;
   return result;
 }
@@ -803,8 +965,9 @@ function unionSeconds(intervals) {
 
 // From the task that ended last, back through the dependency (from the Nx graph the run
 // wrote) that ended last before it started. A start later than that dependency's end is time
-// the task waited for one of Nx's parallel slots. With no graph there is no path: the
-// concurrency profile is printed instead.
+// Nx held the task back for something other than its dependencies: a free slot, or, for a
+// `parallelism: false` task, a runner with nothing else running. With no graph there is no
+// path: the concurrency profile is reported instead.
 function criticalPath(tasks, graph, gateStart) {
   const deps = graph?.tasks?.dependencies;
   if (!tasks.length || !deps) return [];
@@ -824,7 +987,7 @@ function criticalPath(tasks, graph, gateStart) {
       end: new Date(cur.end).toISOString(),
       s: (cur.end - cur.start) / 1000,
       after: pred?.task ?? "(gate start)",
-      waited_for_slot_s: Math.max(0, (cur.start - (pred ? pred.end : gateStart)) / 1000),
+      after_dependencies_s: Math.max(0, (cur.start - (pred ? pred.end : gateStart)) / 1000),
     });
     cur = pred;
   }
@@ -926,8 +1089,6 @@ function summarizeOverhead(overhead, gateRecords) {
     ratio: sum(pla) > 0 ? sum(ins) / sum(pla) : null,
   };
 }
-
-// ---------------------------------------------------------------- printing
 
 function printJob(r) {
   const out = [];
@@ -1038,13 +1199,15 @@ function printJob(r) {
   if (r.critical_path.length) {
     out.push(
       table(
-        ["task", "own min", "after", "waited for a slot (min)"],
-        r.critical_path.map((c) => [c.task, min(c.s), c.after, min(c.waited_for_slot_s)]),
+        ["task", "own min", "after", "started after its dependencies ended (min)"],
+        r.critical_path.map((c) => [c.task, min(c.s), c.after, min(c.after_dependencies_s)]),
       ),
     );
     const own = r.critical_path.reduce((a, c) => a + c.s, 0);
-    const waited = r.critical_path.reduce((a, c) => a + c.waited_for_slot_s, 0);
-    out.push(`critical path: ${min(own)} min running, ${min(waited)} min waiting for a slot`);
+    const waited = r.critical_path.reduce((a, c) => a + c.after_dependencies_s, 0);
+    out.push(
+      `critical path: ${min(own)} min running, ${min(waited)} min between a task's last dependency ending and the task starting`,
+    );
   } else
     out.push("no Nx graph in this run's artifacts, so no dependency path; see the profile above");
 
@@ -1055,7 +1218,7 @@ function printJob(r) {
         [
           "tree",
           "invocations",
-          "rustc seconds (summed)",
+          "rustc seconds (summed elapsed)",
           "of which dependencies (s)",
           "wall with one running (min)",
           "top crates (s)",
@@ -1063,7 +1226,7 @@ function printJob(r) {
         Object.entries(r.compile).map(([k, c]) => [
           k,
           c.invocations,
-          c.cpu_s.toFixed(0),
+          c.rustc_s.toFixed(0),
           c.dependency_s.toFixed(0),
           min(c.wall_s),
           Object.entries(c.crates)
@@ -1074,9 +1237,7 @@ function printJob(r) {
         ]),
       ),
     );
-    out.push(
-      `any rustc running: ${min(r.compile_any_wall_s)} min of wall clock; during critical-path tasks: ${min(r.compile_on_critical_path_s)} min`,
-    );
+    out.push(`any rustc running: ${min(r.compile_any_wall_s)} min of wall clock`);
   } else out.push("no rustc timings (the run carried no measure artifact)");
 
   out.push(
@@ -1143,10 +1304,10 @@ function printJob(r) {
         t.test,
         t.wall_s.toFixed(1),
         t.elapsed_share_s.toFixed(1),
-        Object.entries(t.parts_s)
+        `${Object.entries(t.parts_s)
           .sort((a, b) => b[1] - a[1])
           .map(([k, s]) => `${k} ${s.toFixed(1)}`)
-          .join("; ") + `; polls ${t.polls}, sleeps ${t.sleeps}`,
+          .join("; ")}; polls ${t.polls}, sleeps ${t.sleeps}`,
       ]),
     ),
   );
@@ -1192,12 +1353,10 @@ function printJob(r) {
   }
   out.push(
     "",
-    `GitHub requests this invocation: ${r.requests} (read from cache: ${r.cached_reads})`,
+    `GitHub requests this invocation: ${r.requests} (rate checks, which the allowance does not count: ${r.rate_checks}; read from cache: ${r.cached_reads})`,
   );
   return out.join("\n");
 }
-
-// ---------------------------------------------------------------- history
 
 function history(opts) {
   const gh = new Gh(opts.cache, opts["min-remaining"]);
@@ -1317,7 +1476,14 @@ function history(opts) {
           max_min: v.length ? Math.max(...v) : null,
         };
       }
-  return { runs: runs.length, rows, summary, requests: gh.requests, cached_reads: gh.cached };
+  return {
+    runs: runs.length,
+    rows,
+    summary,
+    requests: gh.requests,
+    rate_checks: gh.rateChecks,
+    cached_reads: gh.cached,
+  };
 }
 
 function printHistory(h, opts) {
@@ -1375,24 +1541,41 @@ function printHistory(h, opts) {
   );
   out.push(
     "",
-    `GitHub requests this invocation: ${h.requests} (read from cache: ${h.cached_reads})`,
+    `GitHub requests this invocation: ${h.requests} (rate checks, which the allowance does not count: ${h.rate_checks}; read from cache: ${h.cached_reads})`,
   );
   return out.join("\n");
 }
-
-// ---------------------------------------------------------------- main
 
 try {
   const opts = parse(process.argv.slice(2));
   const result = opts.command === "job" ? analyzeJob(opts) : history(opts);
   if (opts.json) writeFileSync(opts.json, `${JSON.stringify(result, null, 2)}\n`);
-  process.stdout.write(
+  writeFileSync(
+    opts.out,
     `${opts.command === "job" ? printJob(result) : printHistory(result, opts)}\n`,
   );
+  const reads = `GitHub requests ${result.requests}, rate checks ${result.rate_checks}, read from cache ${result.cached_reads}`;
+  if (opts.command === "job") {
+    const unattributed =
+      result.between_steps_s +
+      Object.entries(result.gate_categories)
+        .filter(([k]) => /unattributed/.test(k))
+        .reduce((a, [, v]) => a + v, 0);
+    process.stdout.write(
+      `ci-time-profile: run ${result.run} ${result.job}: wall ${min(result.wall_s)} min, gate ${min(result.gate_s)} min, unattributed ${pct(unattributed, result.wall_s)}; report in ${opts.out} (${reads})\n`,
+    );
+  } else {
+    process.stdout.write(
+      `ci-time-profile history: ${result.runs} runs listed, ${result.rows.length} successful jobs counted; report in ${opts.out} (${reads})\n`,
+    );
+  }
 } catch (error) {
   if (error instanceof Refusal) {
-    process.stderr.write(`ci-time-profile: ${error.message}\n`);
-    process.exit(1);
+    process.stderr.write(`ci-time-profile: ${error.message}\nnext: ${error.next}\n`);
+  } else {
+    process.stderr.write(
+      `ci-time-profile: ${error.message}\nnext: a file or answer this does not expect; run the same command again, and if it recurs, delete that run's directory under --cache and measure it afresh\n`,
+    );
   }
-  throw error;
+  process.exit(1);
 }
