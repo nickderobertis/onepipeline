@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const measure = join(root, "scripts", "crate-split", "measure-archive.mjs");
 const demo = join(root, "scripts", "crate-split", "demo-commit.mjs");
+const runsScript = join(root, "scripts", "crate-split", "demo-runs.mjs");
 
 let scratch;
 before(() => {
@@ -175,4 +176,58 @@ test("a demonstration of a layout it does not know is refused", () => {
   const result = demoRun(checkout("demo-unknown"), "d");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /--variant d is not today, b or c/);
+});
+
+test("a demonstration run's jobs are read for the tree, the restore, any save and the measured build", () => {
+  const dir = join(scratch, "runs");
+  const step = (name, start, end) => ({ name, started_at: start, completed_at: end });
+  const log = (extra) =>
+    [
+      "2026-11-13T07:42:28.1711356Z Cache mode: write",
+      "2026-11-13T07:42:49.8948806Z ... Restoring cache ...",
+      "2026-11-13T07:42:49.9576538Z Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-9da64e3b",
+      "2026-11-13T07:42:58.0984206Z Cache Size: ~1869 MB (1959374798 B)",
+      "2026-11-13T07:43:01.0000000Z GITHUB_SHA=4fc389b6aa head=2cac816a6a tree=abcdef1234",
+      "2026-11-13T07:43:01.0000001Z workflow blob=3d81753b817c",
+      "2026-11-13T07:46:08.0000000Z \u001b[1mmeasure-archive: mode=coverage wall_s=118.9 units=430 unit_s=363.1 workspace_units=62 workspace_unit_s=363.1 dependency_unit_s=0.0 workspace=onepipeline\u001b[0m",
+      ...extra,
+    ].join("\n");
+  write(dir, {
+    "9.jobs.json": JSON.stringify({
+      jobs: [
+        {
+          name: "measure-linux (1)",
+          id: 1,
+          conclusion: "success",
+          steps: [
+            step("Run Swatinem/rust-cache@v2.9.2", "2026-11-13T07:42:34Z", "2026-11-13T07:43:00Z"),
+          ],
+        },
+        {
+          name: "measure-linux (2)",
+          id: 2,
+          conclusion: "success",
+          steps: [
+            step("Run Swatinem/rust-cache@v2.9.2", "2026-11-13T07:42:34Z", "2026-11-13T07:42:40Z"),
+          ],
+        },
+      ],
+    }),
+    "1.log": log([]),
+    "2.log": log(["2026-11-13T07:46:10.0000000Z Saving cache v0-rust-test-linux"]).replace(
+      /Cache hit for restore-key: \S+/,
+      "No cache found.",
+    ),
+  });
+  const run = spawnSync(process.execPath, [runsScript, "--dir", dir, "9"], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /^\| 9 \| measure-linux \(1\) \| 1 \| `4fc389b6aa` \| `2cac816a6a` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 26 \| 0 \| coverage \| 118\.9 \| 363\.1 \/ 0 \|$/m,
+  );
+  // A miss is a miss, and a line that saves a cache is counted, not hidden.
+  assert.match(
+    run.stdout,
+    /^\| 9 \| measure-linux \(2\) \| 2 \| .* \| miss \| 1869 \| 6 \| 1 \| coverage \|/m,
+  );
 });
