@@ -183,7 +183,7 @@ function graphStep(targets) {
   return `      - name: 'Measure: the Nx task graph this job ran (${MARK})'\n        if: always()\n        shell: bash\n        working-directory: \${{ github.workspace }}\n        run: |\n${indent(run, 10)}`;
 }
 
-// llmlint: ignore[work_goes_through_command_surface] One partition of one tier has to run both ways on the same runner after the gate; `_tier-test` takes no partition and `_tier-test-quick` partitions by count, not hash, so neither recipe can run this sample, and the commands are the ones those recipes run (coverage-unit.sh, nextest-run.sh).
+// llmlint: ignore-block[work_goes_through_command_surface] One partition of one tier has to run both ways on the same runner after the gate; `_tier-test` takes no partition and `_tier-test-quick` partitions by count, not hash, so neither recipe can run this sample, and the commands are the ones those recipes run (coverage-unit.sh, nextest-run.sh).
 function overheadStep(partition) {
   const run =
     'm="$RUNNER_TEMP/measure/overhead"; mkdir -p "$m"\n' +
@@ -207,6 +207,8 @@ function overheadStep(partition) {
     `run plain bash scripts/nextest-run.sh cargo nextest run --locked -E "$filter" --partition ${partition} --no-fail-fast --final-status-level fail\n`;
   return `      - name: 'Measure: one e2e partition instrumented, then plain (${MARK})'\n        if: \${{ !cancelled() }}\n        continue-on-error: true\n        timeout-minutes: 60\n        run: |\n${indent(run, 10)}`;
 }
+
+// llmlint: ignore-end[work_goes_through_command_surface]
 
 function uploadStep() {
   return `      - name: 'Measure: keep the samples, compile timings and graph (${MARK})'\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: measure-\${{ github.job }}\n          path: \${{ runner.temp }}/measure/\n          if-no-files-found: warn\n          retention-days: 30\n`;

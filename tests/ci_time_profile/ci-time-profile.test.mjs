@@ -1455,6 +1455,46 @@ test("an overhead partition whose runs share no test reports no ratio", (t) => {
   );
 });
 
+test("a gate that does not end on a whole second is accounted to its last fraction", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  const jobsKey = key(`repos/${REPO}/actions/runs/${RUN}/jobs?per_page=100`);
+  const jobs = JSON.parse(served.answers[jobsKey]);
+  const steps = jobs.jobs[0].steps;
+  const gate = steps.find((st) => /affected projects/.test(st.name));
+  const upload = steps.find((st) => /Keep the per-test/.test(st.name));
+  gate.completed_at = iso(690.5);
+  upload.started_at = iso(690.5);
+  served.answers[jobsKey] = JSON.stringify(jobs);
+  const cache = join(dir, "cache");
+  seedCache(cache, served);
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+  assert.equal(r.gate_s, 600.5);
+  assert.ok(Math.abs(sum(r.gate_categories) - 600.5) < 1e-6, `${sum(r.gate_categories)}`);
+  assert.ok(Math.abs(sum(r.concurrency_profile) - 600.5) < 1e-6, `${sum(r.concurrency_profile)}`);
+  assert.ok(
+    Math.abs(r.gate_categories["gate: after the last task (lockfile check, exit)"] - 2.5) < 1e-6,
+  );
+});
+
+test("a GitHub answer that is not JSON refuses, naming the endpoint", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  served.answers[key(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`)] =
+    "<html>rate limited</html>";
+  const cache = join(dir, "cache");
+  seedCache(cache, served);
+  const result = run(profileScript, job(cache, join(dir, "r.md")));
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /GitHub's answer to repos\/example\/onepipeline\/actions\/runs\/42\/artifacts\?per_page=100 is malformed\nnext: /,
+  );
+});
+
 test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
   const dir = scratch(t);
   const repo = join(dir, "repo");

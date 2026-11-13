@@ -369,7 +369,9 @@ function sampleLine(line) {
     // iostat: us sy id
     const [us, sy, id] = parts.slice(1, 4).map(Number);
     // Whole percentages of one interval: each 0-100, together 100 give or take rounding.
-    if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0) || us + sy + id > 102) return null;
+    const total = us + sy + id;
+    if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0 || x > 100)) return null;
+    if (total < 98 || total > 102) return null;
     cpu = { busy: (us + sy) / 100 };
   }
   return { t, rx, tx, cpu, load: load.trim() };
@@ -428,7 +430,12 @@ function readMeasure(dir) {
     out.nxProfile = trace.filter((e) => e?.ph === "X");
     check(
       out.nxProfile.every(
-        (e) => typeof e.name === "string" && finite(e.ts, e.dur) && e.ts >= 0 && e.dur >= 0,
+        (e) =>
+          typeof e.name === "string" &&
+          finite(e.ts, e.dur) &&
+          e.ts >= 0 &&
+          e.dur >= 0 &&
+          (e.args?.status === undefined || typeof e.args.status === "string"),
       ),
       profile,
     );
@@ -873,9 +880,10 @@ function analyzeJob(opts) {
   const binaryShare = new Map();
   const testShare = new Map();
   if (gate) {
-    const tick = 1000;
-    for (let t = gate.start; t < gate.end; t += tick) {
-      const mid = t + tick / 2;
+    for (let t = gate.start; t < gate.end; t += 1000) {
+      // Each second of the gate, the last one only as long as the gate runs on.
+      const width = Math.min(1000, gate.end - t) / 1000;
+      const mid = t + (width * 1000) / 2;
       const running = tasks.filter((x) => x.start <= mid && mid < x.end);
       if (!running.length) {
         const before = tasks.length && mid < Math.min(...tasks.map((x) => x.start));
@@ -888,13 +896,13 @@ function analyzeJob(opts) {
               : after
                 ? "gate: after the last task (lockfile check, exit)"
                 : "gate: no Nx task running (scheduling gap)",
-          1,
+          width,
         );
         continue;
       }
       const activeRustc = rustc.filter((r) => r.start <= mid && mid < r.end);
       const trees = [...new Set(activeRustc.map(tree))];
-      const share = 1 / running.length;
+      const share = width / running.length;
       for (const x of running) {
         taskShare.set(x.task, taskShare.get(x.task) + share);
         const tc = taskCats.get(x.task);
@@ -1086,8 +1094,10 @@ function concurrencyProfile(tasks, gate) {
   const profile = {};
   if (!gate) return profile;
   for (let t = gate.start; t < gate.end; t += 1000) {
-    const k = tasks.filter((x) => x.start <= t + 500 && t + 500 < x.end).length;
-    profile[k] = (profile[k] ?? 0) + 1;
+    const width = Math.min(1000, gate.end - t) / 1000;
+    const mid = t + (width * 1000) / 2;
+    const k = tasks.filter((x) => x.start <= mid && mid < x.end).length;
+    profile[k] = (profile[k] ?? 0) + width;
   }
   return profile;
 }
@@ -1478,7 +1488,10 @@ function history(opts) {
             Number.isInteger(run.run_attempt) &&
             !Number.isNaN(ms(run.created_at)) &&
             /^[0-9a-f]{40}$/.test(run.head_sha ?? "") &&
-            (run.conclusion === null || typeof run.conclusion === "string"),
+            (run.conclusion === null || typeof run.conclusion === "string") &&
+            (run.pull_requests === undefined ||
+              (Array.isArray(run.pull_requests) &&
+                run.pull_requests.every((pr) => Number.isInteger(pr?.number)))),
         ),
       `ci.yml's run listing, page ${page}`,
     );
