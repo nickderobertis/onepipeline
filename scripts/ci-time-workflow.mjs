@@ -239,10 +239,15 @@ function timingsStep() {
     '    tail -20 "$m/$label.log"\n' +
     "  fi\n" +
     "}\n" +
+    "keep() {\n" +
+    '  if ! cp "$1" "$m/$2.html"; then\n' +
+    '    echo "::warning::measurement: cargo wrote no --timings report at $1, so the $2 build has no compile timings. ACTION: check $2.log in the measure artifact for why cargo did not finish the report"\n' +
+    "  fi\n" +
+    "}\n" +
     "run plain env -u RUSTFLAGS cargo test --workspace --no-run --locked --timings\n" +
-    'cp target/cargo-timings/cargo-timing.html "$m/plain.html" || true\n' +
+    "keep target/cargo-timings/cargo-timing.html plain\n" +
     'run instrumented env RUSTFLAGS="-D warnings" bash scripts/coverage-unit.sh --cargo -- test --workspace --no-run --locked --timings\n' +
-    'cp target/llvm-cov-target/cargo-timings/cargo-timing.html "$m/instrumented.html" || true\n';
+    "keep target/llvm-cov-target/cargo-timings/cargo-timing.html instrumented\n";
   return `      - name: 'Measure: cargo --timings of the workspace tests, plain then instrumented (${MARK})'\n        if: \${{ !cancelled() }}\n        continue-on-error: true\n        timeout-minutes: 40\n        run: |\n${indent(run, 10)}`;
 }
 
