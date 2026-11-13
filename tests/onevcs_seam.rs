@@ -400,6 +400,10 @@ fn published_under_the_rules_default(
     .expect("a git config");
     std::env::set_var("ONEVCS_HOME", &home);
     std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+    // Registering asks the real `gh` whether `owner/service` is public, and with no
+    // token that lookup autolaunches a session bus that outlives the test; the e2e
+    // harness's `NO_SESSION_BUS` is the same guard.
+    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "disabled:");
 
     let git = |dir: &std::path::Path, args: &[&str]| {
         let ran = std::process::Command::new("git")
