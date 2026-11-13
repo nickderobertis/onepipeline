@@ -95,7 +95,7 @@ const CLASSES = ["edits src/", "edits crates/ or Cargo files, not src/", "releas
 
 function parse(argv) {
   const [command, ...rest] = argv;
-  if (!FLAGS[command]) usage("name a command: job or history");
+  if (!Object.hasOwn(FLAGS, command ?? "")) usage("name a command: job or history");
   const opts = { command };
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i];
@@ -614,7 +614,14 @@ function analyzeJob(opts) {
   const { repo } = opts;
   const runEndpoint = `repos/${repo}/actions/runs/${opts.run}`;
   const run = gh.json(runEndpoint);
-  check(typeof run?.status === "string" && typeof run.head_sha === "string", `run ${opts.run}`);
+  check(
+    typeof run?.status === "string" &&
+      typeof run.head_sha === "string" &&
+      (run.pull_requests === undefined ||
+        (Array.isArray(run.pull_requests) &&
+          run.pull_requests.every((pr) => Number.isInteger(pr?.number)))),
+    `run ${opts.run}`,
+  );
   if (run.status !== "completed") {
     // Not kept: the next measurement of this run has to see it finish.
     rmSync(gh.path(runEndpoint, ".txt"), { force: true });
@@ -633,6 +640,8 @@ function analyzeJob(opts) {
     );
   check(
     Number.isInteger(job.id) &&
+      (job.labels === undefined ||
+        (Array.isArray(job.labels) && job.labels.every((l) => typeof l === "string"))) &&
       !Number.isNaN(ms(job.started_at)) &&
       !Number.isNaN(ms(job.completed_at)) &&
       ms(job.completed_at) >= ms(job.started_at) &&
@@ -652,7 +661,10 @@ function analyzeJob(opts) {
   )?.artifacts;
   check(
     Array.isArray(artifacts) &&
-      artifacts.every((x) => Number.isInteger(x?.id) && typeof x.name === "string"),
+      artifacts.every(
+        (x) =>
+          Number.isInteger(x?.id) && typeof x.name === "string" && typeof x.expired === "boolean",
+      ),
     `run ${opts.run}'s artifact list`,
   );
   const dir = join(opts.cache, "runs", String(opts.run), opts.job);
@@ -988,7 +1000,14 @@ function analyzeJob(opts) {
     for (const [k, f] of Object.entries(r.parts)) totals[k] = (totals[k] ?? 0) + f * r.wall_s;
   result.test_category_seconds = totals;
 
-  if (measure?.samples.length) result.samples = summarizeSamples(measure.samples, steps, tasks);
+  if (measure?.samples.length) {
+    result.samples = summarizeSamples(measure.samples, steps, tasks);
+    if (result.samples.counter_resets)
+      note(
+        `${result.samples.counter_resets} sampling interval(s) saw a CPU or network counter fall, so they are left out of the network and CPU figures`,
+        "nothing to fix in the run; the figures cover the remaining intervals",
+      );
+  }
   if (measure?.overhead) result.overhead = summarizeOverhead(measure.overhead, records);
   result.measure_host = measure?.host ?? null;
   result.requests = gh.requests;
@@ -1055,11 +1074,20 @@ function concurrencyProfile(tasks, gate) {
 
 function summarizeSamples(samples, steps, tasks) {
   const ticks = [];
+  let resets = 0;
   for (let i = 1; i < samples.length; i++) {
     const a = samples[i - 1];
     const b = samples[i];
     const dt = (b.t - a.t) / 1000;
     if (dt <= 0) continue;
+    // Counters only grow; one that falls was reset (an interface or counter restarted), so
+    // that interval says nothing about its traffic or CPU, and is noted rather than counted.
+    const reset =
+      b.rx < a.rx || b.tx < a.tx || (a.cpu?.total !== undefined && b.cpu?.total < a.cpu.total);
+    if (reset) {
+      resets++;
+      continue;
+    }
     let busy = null;
     if (a.cpu?.total !== undefined && b.cpu?.total !== undefined) {
       const total = b.cpu.total - a.cpu.total;
@@ -1114,6 +1142,7 @@ function summarizeSamples(samples, steps, tasks) {
     network_active_threshold_bytes_per_s: ACTIVE,
     network_by_place: network,
     cpu_busy_fraction: cpu.s ? cpu.busy_s / cpu.s : null,
+    counter_resets: resets,
     cpu_busy_by_concurrency: Object.fromEntries(
       Object.entries(byK).map(([k, v]) => [
         k,

@@ -151,7 +151,7 @@ function samplerStep() {
     'm="$RUNNER_TEMP/measure"; mkdir -p "$m"\n' +
     '{ uname -a; getconf _NPROCESSORS_ONLN; date -u +%s; } > "$m/host.txt"\n' +
     heredoc("$m/sampler.sh", SAMPLER) +
-    'nohup bash "$m/sampler.sh" "$m" > /dev/null 2>&1 &\n';
+    'nohup bash "$m/sampler.sh" "$m" > /dev/null 2> "$m/sampler.err" &\n';
   return `      - name: 'Measure: sample CPU and network every two seconds (${MARK})'\n        shell: bash\n        run: |\n${indent(run, 10)}`;
 }
 
@@ -175,7 +175,11 @@ function graphStep(targets) {
     `if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "${targets}" --graph=stdout > "$m/graph.json" 2> "$m/graph.err"; then\n` +
     `  echo "::warning::measurement: Nx could not write the task graph, so this run has no critical path; graph.err in the measure artifact says why. ACTION: fix what it reports, then reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t ${targets} --graph=stdout"\n` +
     "fi\n" +
-    'date -u +%s > "$m/ended.txt"\n';
+    'date -u +%s > "$m/ended.txt"\n' +
+    'if [ -s "$m/sampler.err" ]; then\n' +
+    '  echo "::warning::measurement: the CPU and network sampler reported errors, so its figures may have gaps. Its first lines follow; sampler.err in the measure artifact holds the rest. ACTION: fix the command they name in scripts/ci-time-workflow.mjs\'s SAMPLER"\n' +
+    '  head -5 "$m/sampler.err"\n' +
+    "fi\n";
   return `      - name: 'Measure: the Nx task graph this job ran (${MARK})'\n        if: always()\n        shell: bash\n        working-directory: \${{ github.workspace }}\n        run: |\n${indent(run, 10)}`;
 }
 
@@ -331,8 +335,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     main(process.argv.slice(2));
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    process.stderr.write(`ci-time-workflow: ${error.message}\nACTION: ${error.action}\n`);
+    const action =
+      error instanceof Refusal
+        ? error.action
+        : "this is a defect in ci-time-workflow.mjs, not in the workflow; run it again, and report the message with the workflow it was given if it recurs";
+    process.stderr.write(`ci-time-workflow: ${error.message}\nACTION: ${action}\n`);
     process.exit(1);
   }
 }

@@ -329,7 +329,10 @@ function sidecarReport(dir, into, { cancelled = false } = {}) {
 // Nx sidecar's start step running in the background beside them. Each answer is keyed as
 // the harness keys its cache, so it seeds a cache or a stand-in `gh`. `sidecarOnly` leaves
 // out Nx's trace and the sidecar's manifest and gives the sidecar a cancelled invocation.
-function oneRun(dir, { status = "completed", sidecarOnly = false, log = null } = {}) {
+function oneRun(
+  dir,
+  { status = "completed", sidecarOnly = false, log = null, macSamples = false } = {},
+) {
   const answers = {};
   const put = (endpoint, body) => {
     answers[key(endpoint)] = typeof body === "string" ? body : JSON.stringify(body);
@@ -460,14 +463,19 @@ function oneRun(dir, { status = "completed", sidecarOnly = false, log = null } =
     `Nx planned 3 tasks\n${JSON.stringify({ tasks: { dependencies: { "demo-version:smoke": ["demo-e2e:test"], "demo-e2e:test": [], "demo:build": [] } } })}`,
   );
   // Three samples, 2 s apart, while both tasks run: 60% of the CPU busy, 1 MB in a second.
+  // macOS's sampler writes iostat's percentages (us sy id) instead of /proc/stat's counters:
+  // 30% busy, and a fourth sample whose network counter fell, as a reset leaves it.
+  const at = (i) => (T0 + (400 + 2 * i) * 1000) / 1000;
   writeFileSync(
     join(measure, "samples.txt"),
-    [0, 1, 2]
-      .map(
-        (i) =>
-          `${(T0 + (400 + 2 * i) * 1000) / 1000} cpu ${600 * i} 0 0 ${400 * i} 0 0 0 | 3/200 | ${2_000_000 * i} 0`,
-      )
-      .join("\n"),
+    (macSamples
+      ? [0, 1, 2, 3].map(
+          (i) => `${at(i)} 10 20 70 | 1.20 1.10 1.00 | ${i < 3 ? 2_000_000 * i : 0} 0`,
+        )
+      : [0, 1, 2].map(
+          (i) => `${at(i)} cpu ${600 * i} 0 0 ${400 * i} 0 0 0 | 3/200 | ${2_000_000 * i} 0`,
+        )
+    ).join("\n"),
   );
   // One e2e test, run plain then instrumented after the gate.
   const overhead = join(measure, "overhead");
@@ -668,15 +676,108 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
   assert.deepEqual(r.concurrency_profile, { 0: 14, 1: 436, 2: 150 });
 });
 
-test("a malformed measurement line other than the last refuses, naming the file and what to do", (t) => {
+test("a measurement file not in its writer's shape refuses, naming the file and what to do", (t) => {
+  for (const [file, body, message] of [
+    // A rustc row anywhere but last.
+    ["rustc.tsv", (old) => `not a row\n${old}`, /rustc\.tsv line 1 is malformed\nnext: /],
+    // An Nx trace whose task has no name.
+    [
+      "nx-profile.json",
+      () => '[{"ph":"X","name":5,"ts":1,"dur":1}]',
+      /nx-profile\.json is malformed\nnext: /,
+    ],
+    // A graph Nx did not finish writing.
+    [
+      "graph.json",
+      () => 'Nx planned 3 tasks\n{"tasks": {"dependencies":',
+      /graph\.json is malformed\nnext: /,
+    ],
+  ]) {
+    const dir = scratch(t);
+    const cache = join(dir, "cache");
+    seedCache(cache, oneRun(dir));
+    const path = join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", file);
+    writeFileSync(path, body(readFileSync(path, "utf8")));
+    const result = run(profileScript, job(cache, join(dir, "r.md")));
+    assert.equal(result.status, 1, file);
+    assert.match(result.stderr, message);
+  }
+});
+
+test("a test retried in another record directory counts once, at its later attempt", (t) => {
   const dir = scratch(t);
   const cache = join(dir, "cache");
   seedCache(cache, oneRun(dir));
-  const tsv = join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "rustc.tsv");
-  writeFileSync(tsv, `not a row\n${readFileSync(tsv, "utf8")}`);
-  const result = run(profileScript, job(cache, join(dir, "r.md")));
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /rustc\.tsv line 1 is malformed\nnext: /);
+  const retry = join(
+    cache,
+    "runs",
+    String(RUN),
+    "test-linux",
+    "test-profile-test-linux",
+    "retry",
+    "e2e",
+  );
+  mkdirSync(retry, { recursive: true });
+  const again = record("b", 400, 100, { spawn: 100 });
+  again.attempt = 2;
+  writeFileSync(join(retry, "b.json"), JSON.stringify(again));
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.equal(r.tests, 3);
+  assert.equal(r.slowest.find((x) => x.test === "e2e::b").parts_s["spawn: onepipeline"], 100);
+});
+
+test("without cargo the workspace's crates are the instrumented ones, and the report says so", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const json = join(dir, "out.json");
+  // Only node on PATH: no cargo to list the workspace's crates.
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]), {
+    env: { ...process.env, PATH: dirname(process.execPath) },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /2 note\(s\)/);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.ok(r.notes.some((n) => /^cargo metadata could not list the workspace's crates/.test(n)));
+  // onepipeline was instrumented, so it is still the workspace's; serde and git2 are not.
+  assert.equal(r.compile["msrv toolchain"].dependency_s, 12);
+  assert.equal(r.compile["plain (target/debug)"].dependency_s, 0);
+});
+
+test("a job that uploaded nothing is reported as one unattributed gate", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  served.answers[key(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`)] = JSON.stringify({
+    artifacts: [],
+  });
+  served.names = [];
+  const cache = join(dir, "cache");
+  seedCache(cache, served);
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(cache, join(dir, "r.md"), ["--json", json]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /unattributed 85\.7%/);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.deepEqual(r.gate_categories, { "gate without Nx task telemetry (unattributed)": 600 });
+  assert.equal(r.task_source, "none");
+  assert.equal(r.tests, 0);
+});
+
+test("macOS's iostat samples are read as CPU percentages, and a counter that falls is noted, not counted", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir, { macSamples: true }));
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.ok(Math.abs(r.samples.cpu_busy_fraction - 0.3) < 1e-9);
+  assert.equal(r.samples.network_bytes, 4_000_000);
+  assert.equal(r.samples.counter_resets, 1);
+  assert.ok(
+    r.notes.some((n) => /^1 sampling interval\(s\) saw a CPU or network counter fall/.test(n)),
+  );
 });
 
 test("a first measurement reads through gh and keeps every answer, so the second reads nothing", (t) => {
@@ -928,12 +1029,28 @@ function gitRepo(dir) {
     git("commit", "-qm", branch);
     return git("rev-parse", "HEAD");
   };
-  return {
+  const heads = {
     src: head("src", { "src/lib.rs": "\n" }),
     docs: head("docs", { "docs/a.md": "\n" }),
     crates: head("crates", { "crates/x/lib.rs": "\n" }),
     release: head("release", { "Cargo.toml": "\n", "CHANGELOG.md": "\n" }),
   };
+  // A head pushed to origin after this clone last fetched: not in the clone until fetched.
+  const origin = `${dir}-origin.git`;
+  execFileSync("git", ["clone", "-q", "--bare", dir, origin]);
+  const other = `${dir}-other`;
+  execFileSync("git", ["clone", "-q", "-b", "main", origin, other]);
+  const otherGit = (...args) => execFileSync("git", args, { cwd: other, encoding: "utf8" }).trim();
+  otherGit("config", "user.email", "spike@example.invalid");
+  otherGit("config", "user.name", "spike");
+  mkdirSync(join(other, "src"));
+  writeFileSync(join(other, "src", "late.rs"), "\n");
+  otherGit("add", "-A");
+  otherGit("commit", "-qm", "late");
+  otherGit("push", "-q", "origin", "HEAD:refs/heads/late");
+  heads.late = otherGit("rev-parse", "HEAD");
+  git("remote", "add", "origin", origin);
+  return heads;
 }
 
 test("the history counts each finished job by what its pull request changed, before and after the split", (t) => {
@@ -951,6 +1068,7 @@ test("the history counts each finished job by what its pull request changed, bef
     [6, heads.crates, "2026-11-12T11:00:00Z", 50],
     [7, heads.release, "2026-11-12T12:00:00Z", 40],
     [8, unknownHead, "2026-11-12T13:00:00Z", 60],
+    [10, heads.late, "2026-11-12T14:00:00Z", 125],
   ];
   const listed = (id, head, created, conclusion = "success") => ({
     id,
@@ -1023,6 +1141,9 @@ test("the history counts each finished job by what its pull request changed, bef
   answers[key(`repos/${REPO}/actions/runs/4/artifacts?per_page=100`)] = JSON.stringify({
     artifacts: [{ id: 99, name: "test-profile-test-linux", expired: true }],
   });
+  answers[key(`repos/${REPO}/actions/runs/10/artifacts?per_page=100`)] = JSON.stringify({
+    artifacts: [],
+  });
   const gh = standInGh(join(dir, "gh"), { answers, files: artifactFiles, names });
   const out = join(dir, "history.md");
   const json = join(dir, "history.json");
@@ -1056,10 +1177,10 @@ test("the history counts each finished job by what its pull request changed, bef
     { cwd: repo, env: gh.env(4000) },
   );
   assert.equal(result.status, 0, result.stderr);
-  // Two listing pages, seven job lists, three artifact lists, two artifacts.
+  // Two listing pages, eight job lists, four artifact lists, two artifacts.
   assert.match(
     result.stdout,
-    /^ci-time-profile history: 107 runs listed, 7 successful jobs counted; report in .* \(GitHub requests 14, rate checks 14, read from cache 0\); 2 note\(s\)/,
+    /^ci-time-profile history: 108 runs listed, 8 successful jobs counted; report in .* \(GitHub requests 16, rate checks 16, read from cache 0\); 3 note\(s\)/,
   );
   const h = JSON.parse(readFileSync(json, "utf8"));
   const summary = (cls, side) => h.summary[`test-linux\t${cls}\t${side}`];
@@ -1069,8 +1190,9 @@ test("the history counts each finished job by what its pull request changed, bef
     min_min: 100,
     max_min: 100,
   });
+  // Run 10's head was fetched from origin, then classed.
   assert.deepEqual(summary("edits src/", "after"), {
-    n: 2,
+    n: 3,
     median_min: 125,
     min_min: 120,
     max_min: 130,
@@ -1079,7 +1201,7 @@ test("the history counts each finished job by what its pull request changed, bef
   assert.equal(summary("edits crates/ or Cargo files, not src/", "after").median_min, 50);
   assert.equal(summary("release", "after").median_min, 40);
   assert.equal(summary("unknown", "after").median_min, 60);
-  assert.equal(summary("all", "after").n, 6);
+  assert.equal(summary("all", "after").n, 7);
   assert.deepEqual(
     h.rows
       .filter((r) => r.class === "edits src/")
@@ -1088,6 +1210,7 @@ test("the history counts each finished job by what its pull request changed, bef
       [1, 1, 2],
       [2, 1, 1],
       [4, null, null],
+      [10, null, null],
     ],
   );
   assert.match(
@@ -1095,8 +1218,9 @@ test("the history counts each finished job by what its pull request changed, bef
     new RegExp(`head ${unknownHead} could not be classed: .*\\(next: run from a clone`),
   );
   assert.match(h.notes[1], /run 4 has no unexpired test-profile-test-linux artifact/);
+  assert.match(h.notes[2], /run 10 has no unexpired test-profile-test-linux artifact/);
   assert.match(
     readFileSync(out, "utf8"),
-    /\| test-linux \| edits src\/ \| after \| 2 \| 125\.0 \|/,
+    /\| test-linux \| edits src\/ \| after \| 3 \| 125\.0 \|/,
   );
 });
