@@ -176,10 +176,15 @@ path = "src/bin/node-validator.rs"
 name = "envelope-reviewer"
 path = "src/bin/envelope-reviewer.rs"
 
-# A third real program at a hook seam: a configuration's `hooks` entry, which
-# keeps, changes, reroutes, drops or refuses whatever the bus offers a queue, by
-# argv — so a journey about a host's hook drives a real command rather than a stub
-# of the bus's own.
+# A third real program at a hook seam: a command validator, as a bus
+# configuration's `validators` block names one. It judges whatever the bus offers
+# a queue, so a journey about a host's validator drives a real command rather than
+# a stub of the bus's own.
+[[bin]]
+name = "bus-validator"
+path = "src/bin/bus-validator.rs"
+
+# A configuration's `hooks` entry, keep, change, reroute, drop or refuse by argv.
 [[bin]]
 name = "bus-hook"
 path = "src/bin/bus-hook.rs"

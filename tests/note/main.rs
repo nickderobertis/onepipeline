@@ -5112,11 +5112,10 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
         .unwrap_or_else(|| panic!("the second dispatch opened no turn:\n{dispatched:#?}"));
     for said in [
         "## Manager notes\nWhere this section and the operational notes below disagree, this \
-         section wins.\n\nThese notes were delivered to this node during an earlier \
+         section wins.\n\nThe manager delivered these notes to this node during an earlier \
          dispatch of it, and this dispatch continues that node's work: each stands here exactly \
-         as it stood there, for the worker and for the supervisor alike, under the line that \
-         says whose ruling it is. A note that states a criterion is part of the bar this node is \
-         judged against.\n\n1. Addressed to both parties",
+         as it stood there, for the worker and for the supervisor alike. A note that states a \
+         criterion is part of the bar this node is judged against.\n\n1. Addressed to both parties",
         NOTE,
         CRITERION,
         // And the diagnosis is still there beside it: carrying the note did not
@@ -6717,10 +6716,17 @@ fn a_carried_note_withdrawn_before_its_nodes_next_dispatch_is_composed_into_none
             .is_some_and(|turns| !turns.is_empty())
     });
     let task = dispatches_of(&world, run, "later")[0][0].clone();
+    let context = task
+        .split_once("## Planner context")
+        .map(|(_, context)| context)
+        .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
     // Every carried note but the withdrawn ones, together and in carry order.
     assert_eq!(
-        planner_notes(&task),
-        format!("{SECOND_CARRIED}\n\n{FOURTH_CARRIED}"),
+        context
+            .trim()
+            .split_once("\n\n")
+            .map(|(_, notes)| notes.trim()),
+        Some(format!("{SECOND_CARRIED}\n\n{FOURTH_CARRIED}").as_str()),
         "later's planner context is not the two remaining carried notes in carry order:\n{task}"
     );
     assert!(
@@ -8353,30 +8359,11 @@ const READ_AS_BOTH: &str = "the fixture moved to fixtures/v4\n\nand the loader m
 
 /// The planner context `task` was composed with: its notes, after the heading
 /// and the sentence that says the section reports observed state.
-///
-/// Each carried note sits under its attribution line, which is held here to be
-/// the manager's, naming the reference that declines it, and is then taken off:
-/// what is answered is the notes themselves, in carry order.
 fn planner_notes(task: &str) -> String {
-    let notes = task
-        .split_once("## Planner context")
+    task.split_once("## Planner context")
         .and_then(|(_, context)| context.trim().split_once("\n\n"))
         .map(|(_, notes)| notes.trim().to_string())
-        .unwrap_or_else(|| panic!("the dispatch has no planner context:\n{task}"));
-    notes
-        .split("\n\n")
-        .map(|entry| {
-            let (attribution, note) = entry
-                .split_once('\n')
-                .unwrap_or_else(|| panic!("a carried note with no attribution: {entry:?}"));
-            assert!(
-                attribution.starts_with("Ruling from the manager (ruling reference `c"),
-                "a carried note is not under the manager's attribution: {entry:?}"
-            );
-            note
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .unwrap_or_else(|| panic!("the dispatch has no planner context:\n{task}"))
 }
 
 /// Withdrawing a carried note takes out that note alone — even where a later

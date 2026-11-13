@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use crate::agentgraph;
 use crate::channel::{
     Author, ChannelState, Command, CommandOutcome, QueuedCommands, QueuedReply, Reply, Surface,
     SurfaceKind,
@@ -355,20 +356,6 @@ pub fn render_results_json(results: &Results) -> Result<String> {
                     .copied()
                     .unwrap_or(crate::graph::NodeStatus::Pending),
                 outcome: view.state.outcomes.get(&node.id).map(String::as_str),
-                // The standing settlement's own words, as `status --json` reads them: only
-                // for a node settled, never for one still to run or running again.
-                detail: statuses
-                    .get(&node.id)
-                    .filter(|status| {
-                        !matches!(
-                            status,
-                            crate::graph::NodeStatus::Pending
-                                | crate::graph::NodeStatus::Ready
-                                | crate::graph::NodeStatus::Running
-                        )
-                    })
-                    .and_then(|_| view.state.settled_details.get(&node.id))
-                    .map(String::as_str),
                 comments: comments.get(&node.id).cloned().unwrap_or_default(),
                 provisioning_failures: view
                     .state
@@ -712,17 +699,18 @@ pub struct Next {
 /// `onepipeline next RUN` — the channel's only consumer.
 ///
 /// Rendering is not reading: `monitor` shows a pending surface without
-/// consuming it, and this is what advances the queue and journals
-/// `planner-surfaced`. It signals nothing to the observer graph: a graph whose
-/// clock a read should restart declares `reset_on` over the journal it follows
-/// (`docs/contract-divergences.md` entry 155).
+/// consuming it, and this is what advances the queue, journals
+/// `planner-surfaced`, and restarts the check-in clock of every member the run's
+/// observer graph declares resettable. That automatic reset is deprecated and
+/// will be removed (`docs/contract-divergences.md` entry 150); `reset_on` replaces
+/// it.
 ///
 /// One surface is never handed out: a `release-wait` whose hold has cleared
 /// since it was queued — `release::wait_outlived`
 /// says which record cleared it. It is claimed, so the queue moves past it, and
 /// withheld rather than delivered: said on stderr, and recorded neither as
-/// `planner-surfaced`, which it was not, so no `reset_on` reads it as a
-/// reading. The next surface waiting is handed out
+/// `planner-surfaced`, which it was not, nor by restarting any check-in clock,
+/// which a reading nobody made does not. The next surface waiting is handed out
 /// in its place.
 ///
 /// # Errors
@@ -772,6 +760,23 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
             ("queued_at", json!(surface.queued_at)),
         ]),
     )?;
+
+    // The engine's automatic reset, deprecated and to be removed
+    // (`docs/contract-divergences.md` entry 150), still working until then:
+    // `reset_on` over the journal the graph follows replaces it. Which clocks is the observer graph's own to say: every member it
+    // declared `resettable`, and the engine names none. Addressed by the
+    // **graph** run's id, which is what the sibling minted and the only id its
+    // signals answer to; this run's id names a run `oneagentgraph` has never
+    // heard of. A run that launched no observer graph has no clock to restart
+    // and nothing to report. A failure to reach the sibling is reported and does
+    // not fail the read: the planner has the surface either way.
+    if view.launch.observer_graph().is_some() {
+        if let Err(error) = agentgraph::recorded_graph_run(&view.launch.graph_run, &paths.run)
+            .and_then(|graph_run| agentgraph::reset_resettable(&graph_run))
+        {
+            eprintln!("onepipeline: could not restart the check-in clock: {error}");
+        }
+    }
 
     // The surface is delivered whatever the profile said. A profile shapes the
     // **event view** and nothing else: which surfaces exist, and the unread
@@ -1113,7 +1118,7 @@ pub fn render_receipt(receipt: &Receipt) -> Result<String> {
 /// # Errors
 ///
 /// A malformed envelope — read a second time, leniently, to say when a retired
-/// plan field is why — and every refusal the channel, its hooks and the
+/// plan field is why — and every refusal the channel, the validators and the
 /// reconciler can make.
 pub fn reply(
     paths: &RunPaths,
@@ -1140,50 +1145,6 @@ pub fn reply(
         Error::Refused(format!("the reply is malformed: {why}"))
     })?;
     submit(paths, correlation, &envelope)
-}
-
-/// `onepipeline reply RUN [FILE] --as manager|user`: [`reply`], recording whose
-/// words the envelope carries as `provenance` rather than as the envelope says.
-///
-/// The envelope may say it too, and then it must say the same: an envelope
-/// stating one provenance while `provenance` names the other is refused, with
-/// nothing queued, because which of two contradicting statements is true is not
-/// this call's to guess.
-///
-/// # Errors
-///
-/// Every refusal [`reply`] makes, and the conflict above.
-pub fn reply_as(
-    paths: &RunPaths,
-    correlation: Option<&onemessagebus::Correlation>,
-    envelope_json: &str,
-    provenance: crate::provenance::Provenance,
-) -> Result<Receipt> {
-    reply(paths, correlation, &stated_as(envelope_json, provenance)?)
-}
-
-/// `envelope_json` with its `provenance` set to `provenance`, or the refusal for
-/// an envelope that states the other one. Text that is not a JSON object is
-/// returned as it came, so the caller's own parse refuses it in its own words.
-pub(crate) fn stated_as(
-    envelope_json: &str,
-    provenance: crate::provenance::Provenance,
-) -> Result<String> {
-    let Ok(serde_json::Value::Object(mut envelope)) =
-        serde_json::from_str::<serde_json::Value>(envelope_json.trim())
-    else {
-        return Ok(envelope_json.to_owned());
-    };
-    if let Some(stated) = envelope.get("provenance") {
-        if stated != &json!(provenance) {
-            return Err(Error::Refused(format!(
-                "the envelope states `\"provenance\": {stated}` and `--as` names `{provenance}`; \
-                 say whose words these are once. Nothing was queued"
-            )));
-        }
-    }
-    envelope.insert("provenance".to_owned(), json!(provenance));
-    Ok(serde_json::Value::Object(envelope).to_string())
 }
 
 /// `onepipeline attest RUN REF` — the shorthand for a reply carrying one
@@ -1438,7 +1399,6 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
             asker: None,
             workstream: None,
             correlation: None,
-            declined_ruling: None,
         },
         |changed| {
             // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the surface met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`; a hook rewriting a surface into a boundary violation is that path over changed input.
@@ -1461,7 +1421,6 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
                 asker: None,
                 workstream: None,
                 correlation: None,
-                declined_ruling: None,
             },
             &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
         )?;
@@ -1473,113 +1432,6 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
     journal.emit(
         journal::PipelineKind::PlannerSurfaceQueued,
         journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("kind", json!(queued.kind)),
-            ("message", json!(queued.message)),
-            ("source", json!(queued.source)),
-            ("blocking", json!(queued.blocking)),
-        ]),
-    )?;
-    Ok(surfaced)
-}
-
-/// `onepipeline decline-ruling RUN --ruling REF [FILE]`: decline a manager's
-/// ruling with a reason, raising one non-blocking surface of kind
-/// [`SurfaceKind::DECLINED_RULING`] that carries what was declined as the typed
-/// [`DeclinedRuling`](crate::channel::DeclinedRuling) record.
-///
-/// The engine acts on the surface no further: it is a report to the manager,
-/// who may take it to the user. A user's ruling binds, so it cannot be declined.
-///
-/// # Errors
-///
-/// [`Error::Refused`], with nothing appended, for a reason with nothing in it
-/// once trimmed, a reference the run does not know, a ruling that is the user's,
-/// and a channel that refuses the push.
-pub fn decline_ruling(paths: &RunPaths, ruling: &str, reason: &str) -> Result<Surfaced> {
-    let reason = reason.trim().to_owned();
-    if reason.is_empty() {
-        return Err(Error::Refused(
-            "a declined ruling carries the reason it was declined, and this one carried none; \
-             nothing was appended"
-                .to_owned(),
-        ));
-    }
-    let ruling = ruling.trim().to_owned();
-    let resolved = crate::ruling::resolve(paths, &ruling)?;
-    if resolved.provenance != crate::provenance::Provenance::Manager {
-        return Err(Error::Refused(format!(
-            "ruling `{ruling}` is the user's, relayed by the manager: a user's ruling binds and \
-             cannot be declined. Raise what is wrong with it through `onepipeline ask` instead; \
-             nothing was appended"
-        )));
-    }
-    let view = crate::views::RunView::open(paths)?;
-    let declined = crate::channel::DeclinedRuling {
-        node: resolved.node,
-        ruling,
-        provenance: resolved.provenance,
-        kind: resolved.kind,
-        reply: resolved.reply,
-        text: resolved.text,
-        reason,
-    };
-    let kind_word = match declined.kind {
-        crate::channel::RulingKind::Note => "note",
-        crate::channel::RulingKind::Amendment => "amendment",
-        crate::channel::RulingKind::Answer => "answer to its question",
-    };
-    let message = format!(
-        "node '{}' declined the manager's {kind_word} (ruling `{}`, reply {}).\n\nThe ruling:\n{}\n\n\
-         Why it was declined:\n{}",
-        declined.node, declined.ruling, declined.reply, declined.text, declined.reason
-    );
-    let surface = Surface {
-        id: 0,
-        kind: SurfaceKind::DECLINED_RULING.to_owned(),
-        message,
-        source: crate::channel::source::PROPOSAL.to_owned(),
-        // A report to the manager rather than a request: it holds nothing.
-        blocking: false,
-        queued_at: crate::sys::now_millis(),
-        abandoned: false,
-        asker: None,
-        workstream: Some(declined.node.clone()),
-        correlation: None,
-        declined_ruling: Some(declined),
-    };
-    // The publication boundary, as every surface meets it — over the typed record
-    // as well as the message, since a reader takes its facts from the record.
-    crate::boundary::guard(
-        &view.state,
-        &json!({ "message": surface.message, "declined_ruling": surface.declined_ruling }),
-    )?;
-    let offer = ChannelState::of_paths(paths)?.push_checked(surface.clone(), |changed| {
-        // llmlint: ignore[changed_behavior_has_e2e] this is the same `boundary::guard` the decline met before the hooks, held end to end by `tests/e2e/publication_boundary.rs`'s decline journey; a hook rewriting a surface into a boundary violation is that path over changed input, as `surface` above says of its own.
-        crate::boundary::guard(
-            &view.state,
-            &json!({
-                "message": changed.get("message"),
-                "declined_ruling": changed.get("declined_ruling"),
-            }),
-        )
-    })?;
-    let mut journal = Journal::open(paths);
-    if let crate::channel::SurfaceOffer::Dropped { hook, .. } = &offer {
-        crate::engine::record_surface_dropped(
-            paths,
-            &mut journal,
-            &surface,
-            &crate::payload::SurfaceDropCause::Dropped { hook: hook.clone() },
-        )?;
-    }
-    let surfaced = surfaced_of(offer.clone())?;
-    let crate::channel::SurfaceOffer::Queued(queued) = offer else {
-        return Ok(surfaced);
-    };
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, queued.workstream.as_deref()),
         journal::payload(&[
             ("kind", json!(queued.kind)),
             ("message", json!(queued.message)),

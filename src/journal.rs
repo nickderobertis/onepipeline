@@ -8,10 +8,8 @@
 //! state. Reading is unlocked and takes no lock a writer needs, which is what
 //! lets every view run beside a live run.
 //!
-//! What this module publishes is the merge's rule, [`merge_order`], the
-//! selective read, [`read_selected`], and the payload-free heads of every record with
-//! [`fetch`] of whole records by their [`RecordHandle`]s. Everything else here is the
-//! engine's.
+//! What this module publishes is the merge's rule, [`merge_order`], and the
+//! selective read, [`read_selected`]. Everything else here is the engine's.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -26,7 +24,6 @@ use crate::ledger::{self, RunPaths};
 use crate::sys;
 
 pub(crate) use crate::event::PipelineKind;
-pub use crate::journal_heads::{fetch, RecordHandle, RecordHead};
 pub use crate::journal_selected::{read_selected, SelectedRecords, Selection};
 
 /// The next sequence number this process's stream may claim on each run's journal,

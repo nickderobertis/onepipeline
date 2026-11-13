@@ -1,5 +1,5 @@
-//! The planner-facing channel: reading a surface, answering it, and raising one.
-//! **Rendering is not reading** —
+//! The planner-facing channel: reading a surface, answering it, raising one, and
+//! the check-in clock reset that consumption triggers. **Rendering is not reading** —
 //! `monitor` shows a pending surface without consuming it, and `next` is the
 //! only consumer.
 //!
@@ -20,6 +20,39 @@ use serde_json::{json, Value};
 fn running(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
     let path = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the run to dispatch something", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    name.to_string()
+}
+
+/// The same, with an observer graph attached.
+///
+/// Only the clock-reset journeys need one: the clock a surface resets belongs to
+/// a member of that graph, and a run launched with `--dag-graph off` — the
+/// shipped default — has no member to address.
+///
+/// The observer is **held** at its first instruction, which is what keeps the id
+/// it answers to still. A double that is not held announces itself and exits at
+/// once, the driver starts another in its place, and the launch record's
+/// `graph_run` moves to the replacement — so a journey that reads that value and
+/// then consumes a surface is addressing whichever observer the restart loop
+/// happened to be on, and on a slow host it has read one and seen the reset use
+/// the other. A real monitor member stays up for the run it watches, which is
+/// also the only state in which resetting its clock means anything. Callers
+/// release it with `observer.go`.
+fn observed(world: &World, name: &str, nodes: Vec<serde_json::Value>) -> String {
+    world.script("observer.wait", "hold");
+    let path = world.plan(name, &plan_of(name, nodes));
+    world
+        .run(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.shipped_dag_graph(),
+        ])
+        .exited(0);
     world.until("the run to dispatch something", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });
@@ -121,10 +154,83 @@ fn a_second_check_in_replaces_the_one_still_waiting_to_be_read() {
     world.release("build.go");
 }
 
-/// A run launched with no observer graph — the shipped default — queues and
-/// consumes its surfaces through `next` without error.
+/// Consumption restarts the observer graph's resettable clocks, addressed by the
+/// **graph** run's id — every member the graph run declares is signalled, and
+/// the shipped example graph's `check-in` is among them.
+///
+/// The two run ids on one run are the whole trap here. `oneagentgraph` mints an
+/// id for the graph it starts, and its signals — a resettable schedule's clock
+/// among them — answer only to that one; this crate's run id names a run that
+/// library has never heard of. Handing over the wrong one is silent, because the
+/// reset is best-effort by design, so the assertion names the id rather than
+/// only the verb.
 #[test]
-fn a_run_with_no_observer_graph_consumes_surfaces() {
+fn consuming_a_surface_restarts_the_observer_graphs_clocks() {
+    let world = World::new("channel-clock-reset");
+    world.script("build.wait", "hold");
+    let run = observed(&world, "paced", vec![agent("build", &[])]);
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "host-heartbeat",
+            "--message",
+            "steady",
+        ])
+        .exited(0);
+
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer"]),
+        "queuing a surface reset the clock; only reading one does"
+    );
+
+    let graph_run = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+    assert_ne!(
+        graph_run, run,
+        "the two run ids are the same, so this journey could not tell them apart"
+    );
+
+    world.run(&["next", &run]).exited(0);
+    // The premise of the assertion below, stated rather than assumed: one
+    // observer, so the id read above is still the id a reset addresses. A
+    // replacement started between the two would move `graph_run` on to it, and
+    // the mismatch that follows reads as the crate having addressed the wrong
+    // run rather than as this journey having read a superseded one.
+    assert_eq!(
+        world.observer_saw().len(),
+        1,
+        "the observer was replaced mid-journey, so the id read above is not the one addressed: {:?}",
+        world.observer_saw()
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] the id a reset is addressed by never
+    // appears on a product surface — `next` prints the surface whether or not the clock
+    // restarted, deliberately — so the argv the double recorded is where that value exists.
+    // `dispatch.rs` runs the same journey against the real sibling and asserts the outcome
+    // where the sibling puts it; this is the half that names the argument.
+    assert!(
+        world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "check-in"]),
+        "consumption did not restart the check-in clock by the graph run's own id: {:?}",
+        world.invocations()
+    );
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer", &run]),
+        "the reset was addressed with this crate's run id, which names no graph run: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
+    world.release("build.go");
+}
+
+/// A run launched with no observer graph — the shipped default — has no clock
+/// to restart: its surfaces are queued and consumed through `next` without
+/// error, nothing is addressed to the sibling, and no reset failure is reported.
+#[test]
+fn a_run_with_no_observer_graph_consumes_surfaces_and_reports_no_reset() {
     let world = World::new("channel-no-observer");
     world.script("build.wait", "hold");
     // `running` launches with no `--dag-graph`, which is the shipped default.
@@ -140,7 +246,13 @@ fn a_run_with_no_observer_graph_consumes_surfaces() {
                 message,
             ])
             .exited(0);
-        world.run(&["next", &run]).exited(0).out_has(message);
+        let read = world.run(&["next", &run]);
+        read.exited(0).out_has(message);
+        assert!(
+            !read.stderr.contains("could not restart"),
+            "a run with no observer graph reported a reset failure: {}",
+            read.stderr
+        );
     }
     // Both were read, and nothing is left waiting: the next read answers with
     // no surface, and the stream shows each one handed over.
@@ -156,6 +268,16 @@ fn a_run_with_no_observer_graph_consumes_surfaces() {
         "the stream does not show both surfaces handed over:\n{}",
         stream.stdout
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] that nothing was sent has no product
+    // surface — `next` prints the surface either way — so the double's record of what it
+    // was asked is where a reset addressed to no run would show.
+    assert!(
+        !world.was_invoked("oneagentgraph", &["reset-timer"])
+            && !world.was_invoked("oneagentgraph", &["history"]),
+        "a reset was addressed with no observer graph to address it to: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.release("build.go");
 }
 
@@ -202,6 +324,7 @@ fn rendering_a_surface_is_not_reading_it() {
     world.run(&["monitor", &run]).exited(0);
     world.run(&["status", &run]).exited(0);
     assert!(world.events_of(&run, "planner-surfaced").is_empty());
+    assert!(!world.was_invoked("oneagentgraph", &["reset-timer"]));
 
     world.run(&["next", &run]).exited(0).out_has("steady");
     world.release("build.go");
@@ -1552,6 +1675,72 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
         "the edit an undriven run took was never executed: {:?}",
         world.kinds("settledgraph")
     );
+}
+
+#[test]
+fn a_read_survives_a_clock_it_could_not_restart_and_says_so() {
+    let world = World::new("channel-reset-fails");
+    world.script("build.wait", "hold");
+    world.script("reset-timer.fail", "");
+    let run = observed(&world, "unresettable", vec![agent("build", &[])]);
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+
+    // The planner has the surface either way, so a sibling that cannot reset
+    // the clock is reported rather than allowed to fail the read.
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has("could not restart the check-in clock");
+    assert_eq!(world.events_of(&run, "planner-surfaced").len(), 1);
+    world.release("observer.go");
+    world.release("build.go");
+}
+
+/// One clock the sibling would not restart does not stop the reset reaching the
+/// members beside it, and the read names the member that refused.
+///
+/// The shipped example graph declares two members, so a reset that stopped at
+/// the first refusal would leave the second un-restarted with nothing saying
+/// so. The double refuses exactly the member the script names: the read still
+/// delivers, reports that member's refusal and no other's, and the member
+/// beside it is signalled all the same.
+#[test]
+fn a_read_names_the_one_clock_it_could_not_restart_and_still_restarts_the_others() {
+    let world = World::new("channel-reset-partial");
+    world.script("build.wait", "hold");
+    world.script("reset-timer.fail", "check-in");
+    let run = observed(&world, "partlyreset", vec![agent("build", &[])]);
+    world
+        .run(&["surface", &run, "--kind", "check-in", "--message", "steady"])
+        .exited(0);
+    let graph_run = world.run_json(&run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the launch record names the graph run driving this run")
+        .to_string();
+
+    let read = world.run(&["next", &run]);
+    read.exited(0).out_has("steady");
+    read.err_has(&format!("reset-timer {graph_run} check-in"));
+    assert!(
+        !read
+            .stderr
+            .contains(&format!("reset-timer {graph_run} monitor")),
+        "a member whose reset was taken was reported as refused:\n{}",
+        read.stderr
+    );
+    // llmlint: ignore-block[tests_mirror_real_usage] whether the member beside the refused
+    // one was signalled never appears on a product surface — `next` reports refusals and
+    // nothing about the resets that landed, deliberately — so the argv the double recorded
+    // is where that fact exists.
+    assert!(
+        world.was_invoked("oneagentgraph", &["reset-timer", &graph_run, "monitor"]),
+        "the reset stopped at the member that refused: {:?}",
+        world.invocations()
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.release("observer.go");
+    world.release("build.go");
 }
 
 /// A message the shell would have eaten reaches the queue byte for byte, by

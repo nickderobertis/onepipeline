@@ -247,12 +247,6 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             if let Some(reason) = judged.reason() {
                 eprintln!("{reason}");
             }
-            // A pass prints the document back unchanged: under the bus's hook
-            // protocol, which is the only one `onemessagebus` 0.11 names a command
-            // under, that is a keep, where printing nothing would drop it.
-            if judged == crate::boundary::Judged::Pass {
-                print!("{stdin}");
-            }
             Ok(judged.exit_code())
         }
         Verb::Template(command) => {
@@ -358,42 +352,11 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             let (target, file) =
                 target_and_file(args.run.as_ref(), args.file.as_ref(), args.flow.as_deref())?;
             let text = reply_text(file.as_ref())?;
-            let receipt = match (target, args.provenance) {
-                (Target::Run(paths), None) => {
-                    verbs::reply(&paths, args.correlation.as_ref(), &text)?
-                }
-                (Target::Run(paths), Some(provenance)) => {
-                    verbs::reply_as(&paths, args.correlation.as_ref(), &text, provenance)?
-                }
-                (Target::Flow(flow), provenance) => {
-                    let text = match provenance {
-                        Some(provenance) => verbs::stated_as(&text, provenance)?,
-                        None => text,
-                    };
-                    crate::flow::reply(&flow, args.correlation.as_ref(), &text)?
-                }
+            let receipt = match target {
+                Target::Run(paths) => verbs::reply(&paths, args.correlation.as_ref(), &text)?,
+                Target::Flow(flow) => crate::flow::reply(&flow, args.correlation.as_ref(), &text)?,
             };
             said(&receipt)
-        }
-        Verb::DeclineRuling(args) => {
-            let reason = match &args.file {
-                Some(path) => std::fs::read_to_string(path).map_err(|e| Error::Ledger {
-                    path: path.clone(),
-                    source: e,
-                })?,
-                None => {
-                    let mut buffer = String::new();
-                    std::io::stdin()
-                        .read_to_string_compat(&mut buffer)
-                        .map_err(|e| {
-                            Error::Refused(format!("cannot read the reason from stdin: {e}"))
-                        })?;
-                    buffer
-                }
-            };
-            let surfaced = verbs::decline_ruling(&resolve(&args.run)?, &args.ruling, &reason)?;
-            println!("{}", verbs::render_surfaced(&surfaced));
-            Ok(EXIT_SUCCESS)
         }
         Verb::Surface(args) => {
             let (target, file) =
@@ -666,7 +629,6 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // standard output, because that stream is the decision.
             eprint!("{}", unresolved.concat());
             print!("{}", verdict.render(args.format));
-            crate::hostphases::flush();
             Ok(EXIT_SUCCESS)
         }
         // llmlint: ignore-end[cli_output_contract]
@@ -700,20 +662,16 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                     },
                     graph,
                 )?;
-                {
-                    let _render = crate::hostphases::phase("render");
-                    eprint!(
-                        "{}",
-                        acknowledged
-                            .listing
-                            .unresolved
-                            .iter()
-                            .map(|line| format!("unpublished: {line}\n"))
-                            .collect::<String>()
-                    );
-                    print!("{}", verbs::render_unpublished_acknowledged(&acknowledged));
-                }
-                crate::hostphases::flush();
+                eprint!(
+                    "{}",
+                    acknowledged
+                        .listing
+                        .unresolved
+                        .iter()
+                        .map(|line| format!("unpublished: {line}\n"))
+                        .collect::<String>()
+                );
+                print!("{}", verbs::render_unpublished_acknowledged(&acknowledged));
                 return Ok(acknowledged.listing.exit_code());
             }
             let (target, acknowledging) = if args.host {
@@ -741,24 +699,20 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 disk: args.disk,
                 pr_author_graph: graph,
             })?;
-            {
-                let _render = crate::hostphases::phase("render");
-                match args.format {
-                    crate::cli::UnpublishedFormat::Json => println!("{}", listing.json()),
-                    crate::cli::UnpublishedFormat::Text => {
-                        eprint!(
-                            "{}",
-                            listing
-                                .unresolved
-                                .iter()
-                                .map(|line| format!("unpublished: {line}\n"))
-                                .collect::<String>()
-                        );
-                        print!("{}", verbs::render_unpublished(&listing));
-                    }
+            match args.format {
+                crate::cli::UnpublishedFormat::Json => println!("{}", listing.json()),
+                crate::cli::UnpublishedFormat::Text => {
+                    eprint!(
+                        "{}",
+                        listing
+                            .unresolved
+                            .iter()
+                            .map(|line| format!("unpublished: {line}\n"))
+                            .collect::<String>()
+                    );
+                    print!("{}", verbs::render_unpublished(&listing));
                 }
             }
-            crate::hostphases::flush();
             // llmlint: ignore-end[cli_output_contract]
             Ok(listing.exit_code())
         }
@@ -781,12 +735,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 (None, None) => return Err(crate::ask::no_run()),
             };
             let asker = crate::ask::asker()?;
-            let about = crate::ask::about(
-                &args,
-                std::env::var(crate::dispatchenv::NODE_ID_ENV)
-                    .ok()
-                    .as_deref(),
-            )?;
+            let about = crate::ask::about(&args)?;
             let raised = crate::ask::Question::raise_on(
                 &on,
                 crate::ask::Request {
@@ -806,12 +755,6 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 eprintln!("waiting up to {} seconds for the reply", window.as_secs());
             }
             let asked = raised.answer();
-            // A run's answer is a ruling, so it says whose, as every ruling a
-            // dispatch reads does; a flow's names no run to decline it on.
-            let asked = match &on {
-                crate::ask::On::Run(_) => asked.attributed(),
-                crate::ask::On::Flow(_) => asked,
-            };
             // llmlint: ignore-block[cli_output_contract] the bus's one-line answer is the
             // whole of standard output, by contract, and the advice beside it goes on standard
             // error where it changes nothing an asker parses.
@@ -1671,25 +1614,6 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
 
-    // Whether each release adoption the plan states can ever complete, as the linked onevcs
-    // answers it: a plan onevcs says can never complete is refused here, before any run
-    // exists, with onevcs's rule and reason; one it could not answer about is a notice.
-    crate::adoptable::load(&read.plan)?;
-
-    // The checks this launch registered — the config's, then each `--check` — offered the
-    // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
-    // and before any run exists: a refusal, or a check that could not be run, refuses the
-    // launch with the report `plan check` prints and mints nothing. `adopt` runs none.
-    let mut registered: Vec<crate::plancheck::Registered> = declared
-        .checks
-        .iter()
-        .map(crate::plancheck::Registered::argv)
-        .collect();
-    for path in &args.checks {
-        registered.push(crate::plancheck::Registered::path(path)?);
-    }
-    crate::plancheck::launch(&read, &args.project, &registered)?;
-
     // The write-back's per-item budget, by the same three rungs. Every rung is *read*
     // rather than merely present: zero is no budget at all, and each rung refuses it by
     // its own spelling rather than falling through to the one below.
@@ -1735,18 +1659,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         .dispatch_env_hook_timeout
         .or(declared.dispatch_env_hook_timeout)
         .unwrap_or(crate::cli::DEFAULT_DISPATCH_ENV_HOOK_TIMEOUT_SECONDS);
-    // The plan-edit hook, by two rungs: the flag names one executable at the default
-    // timeout and replaces the config's hook entirely. Made absolute against the launch
-    // directory, so every driver that adopts the run — from wherever it was started —
-    // offers edits to the executable this launch named. The config's argv is kept as the
-    // document wrote it, and is run from the launch directory.
-    let plan_edit_hook = match &args.plan_edit_hook {
-        Some(path) => Some(crate::filter::PlanEditHook::new(
-            vec![launch_dir.join(path).display().to_string()],
-            crate::filter::DEFAULT_PLAN_EDIT_HOOK_TIMEOUT_SECONDS,
-        )?),
-        None => declared.plan_edit_hook.clone(),
-    };
     let node_graph_ref = resolve_graph(&engine::configured_node_graph(), &launch_dir)?;
     let launched = |read: &crate::taskgraph::Read,
                     continuation: &crate::continuation::Continuation|
@@ -1985,7 +1897,6 @@ fn start(args: &StartArgs) -> Result<i32> {
             .unwrap_or_default(),
         require_rendered: templates.require_rendered,
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        plan_edit_hook,
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
         public_id: public.id.into_string(),
@@ -2143,6 +2054,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         );
     }
 
+    warn_of_deprecated_reset(&record);
+
     if args.detach {
         // Before the driver exists, and only on this path: a detaching launcher
         // is about to exit, and the driver it is about to start must not hold
@@ -2201,6 +2114,24 @@ fn plural(count: usize, what: &str) -> String {
     match count {
         1 => format!("1 {what}"),
         _ => format!("{count} {what}s"),
+    }
+}
+
+/// Tell the operator this launch's observer graph leans on the deprecated reset.
+///
+/// One line whichever member and however many declare it: the warning is about
+/// what the engine does on `next`, which is one thing. Read leniently, because a
+/// graph that cannot be read is the observer's launch to report.
+fn warn_of_deprecated_reset(record: &LaunchRecord) {
+    let Some(graph) = record.observer_graph() else {
+        return;
+    };
+    if graph::declares_resettable(graph, &record.dag_sets) {
+        eprintln!(
+            "onepipeline: warning: this run's observer graph declares `resettable`: the engine's \
+             automatic clock reset on `next` is deprecated and will be removed — declare \
+             `reset_on` on the schedule instead"
+        );
     }
 }
 
@@ -3395,7 +3326,8 @@ pub(crate) fn adopt_detached(
     retain: &crate::verbs::Retain,
     budget: Option<u64>,
 ) -> Result<u32> {
-    validate_and_displace_for_adoption(paths)?;
+    let (record, _) = validate_and_displace_for_adoption(paths)?;
+    warn_of_deprecated_reset(&record);
     if let Some(budget) = budget {
         let _lock = engine::claim(paths)?;
         let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
@@ -3420,6 +3352,7 @@ pub(crate) fn adopt_attached(
     said: &mut dyn FnMut(Settlement),
 ) -> Result<Settlement> {
     let (mut record, view) = validate_and_displace_for_adoption(paths)?;
+    warn_of_deprecated_reset(&record);
 
     // And the lock decides, before anything is written: an adoption that
     // recorded itself and *then* lost the race would leave the record naming
@@ -3613,79 +3546,7 @@ fn report_and_journal_adoption(
         journal::PipelineKind::DriverAdopted,
         journal::labels(&paths.run, None),
         journal::payload(&adopted),
-    )?;
-    raise_adoptions_that_never_complete(paths, &mut journal, &view.state)
-}
-
-/// Ask the linked onevcs whether each unsettled lifecycle node's release adoption can
-/// still complete, and raise each rule that says it cannot as a non-blocking surface.
-///
-/// An adoption **refuses nothing**: the run is already under way, and refusing it would
-/// strand every node of it because the host's configuration moved after launch. So the
-/// planner is told — the node, the dependency, and onevcs's rule and reason — and the
-/// run is driven exactly as before. An adoption onevcs could not answer about is a
-/// notice on stderr.
-fn raise_adoptions_that_never_complete(
-    paths: &RunPaths,
-    journal: &mut Journal,
-    state: &crate::projection::RunState,
-) -> Result<()> {
-    let statuses = state.statuses();
-    let source = state.plan.clone().unwrap_or_else(|| Plan {
-        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
-        goal: None,
-        name: None,
-        concurrency: state.graph.concurrency,
-        tasks: Vec::new(),
-        export_edges: Vec::new(),
-    });
-    let plan = state.graph.to_plan(&source);
-    let asked = crate::adoptable::ask(&plan, |node| {
-        // Every node the loop has not finished with for good: a held or drafted
-        // completion still waits on its release, and a parked or blocked node can
-        // still be released to run.
-        statuses.get(&node.id).is_some_and(|status| {
-            !matches!(
-                status,
-                graph::NodeStatus::Done
-                    | graph::NodeStatus::Failed
-                    | graph::NodeStatus::Skipped
-                    | graph::NodeStatus::Cancelled
-            )
-        })
-    });
-    asked.report_unanswered();
-    for refused in &asked.refused {
-        eprintln!("onepipeline: run '{}': {}", paths.run, refused.line());
-        engine::raise(
-            paths,
-            journal,
-            crate::channel::Surface {
-                id: 0,
-                kind: crate::channel::SurfaceKind::ADOPTION_NEVER_COMPLETES.into(),
-                message: format!(
-                    "node '{node}' waits on the release of its dependency '{dependency}', and \
-                     onevcs says that adoption can never complete ({rule}): {reason}\n\
-                     The run is driven on as it was; change the node's `{field}` (or what \
-                     onevcs names above) with a `requeue` or a `retry` for it to complete.",
-                    node = refused.node,
-                    dependency = refused.dependency,
-                    rule = refused.rule,
-                    reason = refused.reason,
-                    field = refused.field(),
-                ),
-                source: crate::channel::source::RECONCILER.into(),
-                blocking: false,
-                queued_at: sys::now_millis(),
-                abandoned: false,
-                asker: None,
-                workstream: Some(refused.node.clone()),
-                correlation: None,
-                declined_ruling: None,
-            },
-        )?;
-    }
-    Ok(())
+    )
 }
 
 /// End a driver that holds a run nothing is driving, and wait for it to go.
@@ -4490,7 +4351,7 @@ fn journal_verdict(
     journal.emit(
         journal::PipelineKind::PlannerReplied,
         journal::labels(&paths.run, None),
-        engine::with_provenance(journal::payload(&replied), envelope.provenance),
+        journal::payload(&replied),
     )?;
     if let (Some(reason), None) = (&envelope.reason, correlation) {
         if envelope.completion == Some(true) {
@@ -4832,21 +4693,13 @@ pub(crate) fn submit_offered(
             // `edits::compile` can raise, but a note's own validation is not one
             // of those and belongs here rather than beside a delivery.
             let mut staged: Vec<engine::Staged> = Vec::with_capacity(envelope.commands.len());
-            // The run as the envelope would leave it, for the plan-edit hook below: each
-            // validated command folded on as the reconciler's own validation folds it.
-            let mut staged_state = view.state.clone();
-            // The id this envelope is recorded under once it has applied: this
-            // process holds the run, so it is the next the command queue gives.
-            // What its rulings are declined by, named before they are delivered.
-            let recorded_as = channel.next_command_id();
-            for (index, command) in envelope.commands.iter().enumerate() {
+            for command in &envelope.commands {
                 let step = match validate_here(
                     paths,
                     &mut graph,
                     &frontier,
                     &view.state,
                     envelope.author.clone(),
-                    crate::ruling::Origin::of_command(envelope.provenance, recorded_as, index),
                     command,
                 ) {
                     Ok(step) => step,
@@ -4865,38 +4718,7 @@ pub(crate) fn submit_offered(
                     }
                 };
                 edits::advance(&mut frontier, &step.staged());
-                // Stamped as its commit will be, so the plan-edit hook is shown each
-                // ruling under the attribution the node's dispatch then reads.
-                crate::projection::fold_operations(
-                    &mut staged_state,
-                    &engine::from_envelope(&step.staged(), recorded_as, index, envelope.provenance),
-                    Some(sys::now_millis()),
-                );
                 staged.push(step);
-            }
-            // Every node the envelope introduces or changes, offered to the plan-edit hook
-            // the run's launch named, with the task its next dispatch would be given — this
-            // process being the run's writer, from the inputs a driver starting on the run
-            // composes it from — before anything of the envelope is applied or journalled as
-            // an edit. A refusal turns the whole envelope away, journalled `edit-rejected`.
-            if let Err((index, error)) = crate::planedit::judge(
-                paths,
-                &view.launch,
-                &envelope.commands,
-                &staged_state.graph,
-                &mut |node| crate::composition::of_a_fresh_driver(paths, &staged_state, node),
-            ) {
-                engine::record_rejection(
-                    paths,
-                    &mut journal,
-                    envelope.author.clone(),
-                    &envelope.commands[index],
-                    &error,
-                    // Never queued, so no envelope id names it.
-                    None,
-                )?;
-                lock.release();
-                return Err(error);
             }
             // Then deliver, which is the first thing here that reaches outside
             // the run. Nothing is driving it, so nothing of it is in flight — the
@@ -4946,9 +4768,7 @@ pub(crate) fn submit_offered(
             let pending: Vec<Vec<edits::Operation>> = pending
                 .iter()
                 .enumerate()
-                .map(|(index, operations)| {
-                    engine::from_envelope(operations, reply, index, envelope.provenance)
-                })
+                .map(|(index, operations)| engine::from_envelope(operations, reply, index))
                 .collect();
             // Answered as a reconciler answers an envelope it applied, and at once:
             // every command of it has validated and delivered, so it is applied
@@ -4973,18 +4793,15 @@ pub(crate) fn submit_offered(
                 journal.emit(
                     engine::journalled_as(operations),
                     journal::labels(&paths.run, None),
-                    engine::with_provenance(
-                        journal::payload(&[
-                            ("author", json!(envelope.author.clone())),
-                            ("command", json!(command)),
-                            ("operations", json!(operations)),
-                            (
-                                "operation_kinds",
-                                json!(engine::operation_kinds(operations)),
-                            ),
-                        ]),
-                        envelope.provenance,
-                    ),
+                    journal::payload(&[
+                        ("author", json!(envelope.author.clone())),
+                        ("command", json!(command)),
+                        ("operations", json!(operations)),
+                        (
+                            "operation_kinds",
+                            json!(engine::operation_kinds(operations)),
+                        ),
+                    ]),
                 )?;
                 engine::record_operation_facts(
                     paths,
@@ -5286,7 +5103,6 @@ fn validate_here(
     frontier: &Frontier,
     state: &crate::projection::RunState,
     author: Author,
-    origin: crate::ruling::Origin,
     command: &Command,
 ) -> Result<engine::Staged> {
     let operations = edits::compile(graph, frontier, author, command)?;
@@ -5332,7 +5148,6 @@ fn validate_here(
         return Ok(engine::Staged::Compiled(operations));
     };
     engine::validate_manager_note(&engine::Offered {
-        origin,
         id,
         addressee: *addressee,
         text,
@@ -5682,7 +5497,6 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
-            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),

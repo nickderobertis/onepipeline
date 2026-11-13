@@ -197,8 +197,6 @@
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/scripts/host-view-measure.mjs",
-      "{workspaceRoot}/scripts/host-view-budget.mjs",
-      "{workspaceRoot}/budgets.yaml",
       "{workspaceRoot}/scripts/review-round-quota-budget.sh"
     ],
     "e2eCoverageSource": [

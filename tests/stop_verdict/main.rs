@@ -1,8 +1,6 @@
 //! The stop-verdict budget journeys: the native Stop hook,
 //! `onepipeline stop-guard --format claude-code --unpublished`, timed over both
-//! unchanged host-shaped workloads, and then — in [`host`] — the host listing, an
-//! acknowledgement and the guard timed over `onevcs_testing::recovery::HOST` aged by
-//! `age_host`.
+//! unchanged host-shaped workloads.
 //!
 //! One journey builds each workload once from an empty root — 20 identities, 371
 //! retained sessions, 41 launcher-labelled and 2,308 streams, then ten times that —
@@ -27,7 +25,6 @@
 // one is the git-counting shim, which forwards every call to the real git and is used only
 // in the separate counting calls, never in a timed one.
 
-mod host;
 mod telemetry;
 
 use std::collections::BTreeMap;
@@ -146,37 +143,16 @@ impl Host {
         command
     }
 
-    /// Claude Code's Stop payload for the measured session.
-    fn payload(&self) -> String {
-        json!({
+    /// One call: the guard fed the measured session's Stop payload, and its stdout.
+    fn call(&self, acknowledgements: &Path, path: &std::ffi::OsStr) -> (Duration, String) {
+        let payload = json!({
             "session_id": self.fixture.launcher,
             "stop_hook_active": false,
             "hook_event_name": "Stop",
             "transcript_path": "/dev/null",
             "cwd": self.fixture.root,
         })
-        .to_string()
-    }
-
-    /// A listing leaves each copied run's summary current, as on a real host.
-    fn refresh_runs(&self) {
-        let refreshed = Command::new(binary().0)
-            .arg("runs")
-            .env("ONEPIPELINE_RUNS_DIR", &self.runs)
-            .env("HOSTNAME", RECORDING_HOST)
-            .env(
-                "ONEPIPELINE_ONEAGENTGRAPH_BIN",
-                "/nonexistent/oneagentgraph",
-            )
-            .env("XDG_STATE_HOME", &self.state)
-            .output()
-            .expect("runs");
-        assert!(refreshed.status.success(), "{refreshed:?}");
-    }
-
-    /// One call: the guard fed the measured session's Stop payload, and its stdout.
-    fn call(&self, acknowledgements: &Path, path: &std::ffi::OsStr) -> (Duration, String) {
-        let payload = self.payload();
+        .to_string();
         let started = Instant::now();
         let mut child = self
             .guard(acknowledgements, path)
@@ -518,40 +494,12 @@ impl Drop for Load {
     }
 }
 
-/// Every workload's fixture, each built once from an empty root, and all of them
-/// before anything is timed: each builder is only partly parallel, so overlapping the
-/// three shortens the preparation, and no timed call ever runs beside a build.
-fn fixtures(scratch: &Path) -> [(PathBuf, Fixture); 3] {
-    let roots = [
-        scratch.join("scale-1"),
-        scratch.join("scale-10"),
-        scratch.join("host-shaped"),
-    ];
-    for root in &roots {
-        let _ = std::fs::remove_dir_all(root);
-    }
-    let [one, ten, shaped] = roots;
-    std::thread::scope(|scope| {
-        let built = [
-            scope.spawn(|| build(&one.join("host"), Scale::One)),
-            scope.spawn(|| build(&ten.join("host"), Scale::Ten)),
-            scope.spawn(|| onevcs_testing::recovery::build_host(&shaped.join("host"))),
-        ]
-        .map(|building| {
-            building
-                .join()
-                .expect("a fixture builder")
-                .expect("the host-shaped fixture builds")
-        });
-        let [a, b, c] = built;
-        [(one.clone(), a), (ten.clone(), b), (shaped.clone(), c)]
-    })
-}
-
-/// One workload end to end: its fixture validated, timed, counted, removed.
-fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> Workload {
-    let scale = fixture.scale;
+/// One workload end to end: built from empty, validated, timed, counted, removed.
+fn workload(scale: Scale, scratch: &Path, preparation_ms: &mut u64) -> Workload {
+    let root = scratch.join(format!("scale-{}", scale.number()));
+    let _ = std::fs::remove_dir_all(&root);
     let preparation = Instant::now();
+    let fixture = build(&root.join("host"), scale).expect("the host-shaped fixture builds");
     let runs = root.join("runs");
     assemble_runs(&runs, &fixture.launcher);
     let host = Host {
@@ -566,7 +514,19 @@ fn workload(root: PathBuf, fixture: Fixture, preparation_ms: &mut u64) -> Worklo
     std::fs::create_dir_all(&host.owed).expect("an empty acknowledgements directory");
     acknowledge_all(&host);
     install_shim(&host.shim, &host.counted);
-    host.refresh_runs();
+    // A listing leaves each copied run's summary current, as on a real host.
+    let refreshed = Command::new(binary().0)
+        .arg("runs")
+        .env("ONEPIPELINE_RUNS_DIR", &host.runs)
+        .env("HOSTNAME", RECORDING_HOST)
+        .env(
+            "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+            "/nonexistent/oneagentgraph",
+        )
+        .env("XDG_STATE_HOME", &host.state)
+        .output()
+        .expect("runs");
+    assert!(refreshed.status.success(), "{refreshed:?}");
     *preparation_ms += ms(preparation);
 
     let counts = scale.counts();
@@ -698,14 +658,11 @@ fn full_workload_stop_verdict() {
         .join(format!("stop-verdict-{}", std::process::id()));
     let started = Instant::now();
     let initial_load = load1();
-    let building = Instant::now();
-    let [(one_root, one), (ten_root, ten), (host_root, shaped)] = fixtures(&scratch);
-    let mut preparation_ms = ms(building);
+    let mut preparation_ms = 0;
     let workloads = vec![
-        workload(one_root, one, &mut preparation_ms),
-        workload(ten_root, ten, &mut preparation_ms),
+        workload(Scale::One, &scratch, &mut preparation_ms),
+        workload(Scale::Ten, &scratch, &mut preparation_ms),
     ];
-    let host = host::workload(host_root, shaped, &mut preparation_ms);
     let _ = std::fs::remove_dir_all(&scratch);
     assert_eq!(
         telemetry::source_fingerprint(&root()),
@@ -723,7 +680,6 @@ fn full_workload_stop_verdict() {
         },
         load_workers,
         workloads,
-        host,
         preparation_ms,
         total_ms: ms(started),
         load1: initial_load,

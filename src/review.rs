@@ -340,7 +340,6 @@ pub(crate) fn pass(
                 .map_err(|error| Error::Invalid(format!("review correlation: {error}")))?;
             let offered = Surface {
                 id: 0, kind: "review-comment".to_owned(), message: format!("Node {node}, change request {url}: {} at {}\n{}\n\n{}\n\nAnswer with rework on {node}, naming {} in comments, or decline this comment.", comment.author, location(comment), comment.url, comment.body, comment.id.0), source: crate::channel::source::RECONCILER.to_owned(), blocking: false, queued_at: crate::sys::now_millis(), workstream: Some(node.to_owned()), abandoned: false, asker: None, correlation: Some(correlation),
-                declined_ruling: None,
             };
             let Some(surface) = crate::engine::offer_surface(paths, journal, &channel, &offered)?
             else {
@@ -534,7 +533,6 @@ fn not_drafted(
         abandoned: false,
         asker: None,
         correlation: Some(correlation),
-        declined_ruling: None,
     };
     // llmlint: ignore[changed_behavior_has_e2e] the hook outcomes here are `engine::offer_surface`'s, driven end to end by `bus_config::an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_continues`; this surface is reachable only through a failed review reply and adds no branch of its own.
     let Some(surface) = crate::engine::offer_surface(paths, journal, channel, &offered)? else {
@@ -632,12 +630,10 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 
 // llmlint: ignore-block[invalid_states_unrepresentable] Entry 122 fixes this output-only JSON document’s run and node ids as strings. They borrow the recorded RunPaths and validated graph identities; these DTOs never accept or execute external input. Changing their serialized shape would change that agreed view contract.
 /// The JSON results view's schema version: **2** since an answered comment names the
-/// rework that answered it and the commits its reply links (entry 130), **3**
-/// since a node names its sessions whose provisioning failed, and **4** since a settled
-/// node carries its settlement's `detail` — a failed command's exit status and stderr
-/// tail among them. Each is omitted where empty, so an older reader reads every newer
-/// document's other fields.
-pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 4;
+/// rework that answered it and the commits its reply links (entry 130), and **3**
+/// since a node names its sessions whose provisioning failed. Each is omitted where
+/// empty, so an older reader reads every newer document's other fields.
+pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 3;
 
 /// The JSON results view; comment lists are absent when empty.
 #[derive(Serialize)]
@@ -653,9 +649,6 @@ pub(crate) struct ResultNode<'a> {
     pub(crate) status: crate::graph::NodeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) outcome: Option<&'a str>,
-    /// What its standing settlement said beyond its outcome; absent for a node with none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) detail: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) comments: Vec<Comment>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]

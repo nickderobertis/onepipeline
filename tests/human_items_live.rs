@@ -2709,7 +2709,6 @@ fn the_sdk_refuses_an_action_naming_no_actor_and_records_nothing() {
             id: id.clone(),
             actor: "  ".into(),
             on_behalf_of: None,
-            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap_err();
     assert!(
@@ -2723,7 +2722,6 @@ fn the_sdk_refuses_an_action_naming_no_actor_and_records_nothing() {
             id: id.clone(),
             actor: "ui:operator".into(),
             on_behalf_of: None,
-            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap();
     assert_eq!(done.item.item.resolution.unwrap().actor, "ui:operator");
@@ -3020,7 +3018,6 @@ fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
                 id: id.clone(),
                 actor: " ".into(),
                 on_behalf_of: None,
-                provenance: onepipeline::provenance::Provenance::Manager,
             },
             "names its actor",
         ),
@@ -3030,7 +3027,6 @@ fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
                 text: "said".into(),
                 actor: String::new(),
                 on_behalf_of: None,
-                provenance: onepipeline::provenance::Provenance::Manager,
             },
             "names its actor",
         ),
@@ -3040,7 +3036,6 @@ fn an_sdk_reopen_or_note_names_its_actor_and_says_something() {
                 text: "  ".into(),
                 actor: "user:someone".into(),
                 on_behalf_of: None,
-                provenance: onepipeline::provenance::Provenance::Manager,
             },
             "must not be blank",
         ),
@@ -3083,7 +3078,6 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
             Actor {
                 actor: "  ".into(),
                 on_behalf_of: None,
-                provenance: onepipeline::provenance::Provenance::Manager,
             },
         )
         .unwrap_err();
@@ -3098,7 +3092,6 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
             text: Some("Yes.".into()),
             actor: " ".into(),
             on_behalf_of: None,
-            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap_err();
     assert!(
@@ -3110,7 +3103,6 @@ fn the_sdk_refuses_a_batch_naming_no_actor_or_sent_to_apply() {
             answers,
             actor: "ui:operator".into(),
             on_behalf_of: None,
-            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap_err();
     assert!(
@@ -3213,7 +3205,6 @@ fn an_answer_by_the_engine_reaches_its_owner_and_no_run() {
             text: Some("Decided.".into()),
             actor: "engine".into(),
             on_behalf_of: None,
-            provenance: onepipeline::provenance::Provenance::Manager,
         })
         .unwrap();
     let events = world.watch("s");

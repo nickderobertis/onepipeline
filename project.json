@@ -272,10 +272,7 @@
     },
     "install-documented": {
       "command": "bash scripts/install-proof.sh documented",
-      "//": "README.md's `cargo install --git` one-liner. Uncached and network: it resolves the remote's default branch, which no input of this tree names. After install-smoke: both installs build into the job's one target directory, and cargo's lock on it serialises the two builds but not the copy `cargo install` makes of `target/release/onepipeline` after its build, so the default branch's build relinked that file under install-smoke's copy in test-linux's run 43040157700 (`failed to copy ... No such file or directory`). Ordered, install-smoke has installed, smoked and timed its own revision's binary before the default branch's build replaces it, and that build's compile no longer overlaps the host-view-time reads.",
-      "dependsOn": [
-        "install-smoke"
-      ],
+      "//": "README.md's `cargo install --git` one-liner. Uncached and network: it resolves the remote's default branch, which no input of this tree names.",
       "cache": false,
       "inputs": [
         "default",

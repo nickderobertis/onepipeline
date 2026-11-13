@@ -376,7 +376,6 @@ mod tests {
                     abandoned: false,
                     asker: None,
                     correlation: Some(correlation.clone()),
-                    declined_ruling: None,
                 })
                 .expect("the finding queues");
             correlation

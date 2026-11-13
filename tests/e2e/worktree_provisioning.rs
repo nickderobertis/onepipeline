@@ -224,7 +224,7 @@ fn a_failed_hook_reaches_the_workers_first_turn_the_watch_and_the_results() {
     );
 
     let results = results_json(&world, run);
-    assert_eq!(results["schema_version"], 4);
+    assert_eq!(results["schema_version"], 3);
     let failures = node_of(&results, "service")["provisioning_failures"]
         .as_array()
         .expect("results names the failure under the node");

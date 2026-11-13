@@ -47,7 +47,7 @@ fn graph(relative: &str) -> GraphConfig {
 }
 
 #[test]
-fn the_dag_scope_graph_is_the_monitor_and_a_check_in_a_reading_restarts() {
+fn the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in() {
     let config = graph("graphs/dag-scope.yaml");
     assert_eq!(config.name, "dag-scope");
 
@@ -87,25 +87,9 @@ fn the_dag_scope_graph_is_the_monitor_and_a_check_in_a_reading_restarts() {
         .schedule
         .clone()
         .expect("the check-in member is on a schedule");
-    // The engine restarts no clock itself, so the graph's own filter over the
-    // journal it follows is the only thing a planner's reading restarts it by.
-    let reset_on = serde_json::to_value(schedule.reset_on.clone().expect(
-        "the pacemaker cannot be reset, so a run that is already reporting still gets one",
-    ))
-    .expect("the filter serialises");
     assert!(
-        reset_on["include"]
-            .as_array()
-            .is_some_and(|matchers| matchers
-                .iter()
-                .any(|matcher| matcher["source"] == "pipeline"
-                    && matcher["kind"] == "planner-surfaced")),
-        "a planner's reading does not restart the pacemaker: {reset_on}"
-    );
-    assert_eq!(
-        schedule.start_after,
-        Some(0),
-        "the first check-in is no longer at launch"
+        schedule.resettable,
+        "the pacemaker cannot be reset, so a run that is already reporting still gets one"
     );
     // The interval the driver seeds by default.
     assert_eq!(schedule.every, 1_800);

@@ -435,14 +435,6 @@ pub enum PipelineKind {
     ///
     /// Last, so adding it moves no earlier variant's place in the order.
     HomeStatus,
-    /// A `kind: command` node's command was started: its `command` argv, the `log` its
-    /// output is kept in, and its `timeout_seconds` where it has one. Records the node
-    /// running; no agent is dispatched for it.
-    CommandStarted,
-    /// A `kind: command` node's command ended: `ending` (`exited`, `timed-out`,
-    /// `cancelled` or `not-started`), its `exit_code` where it exited with one, and how
-    /// long it ran. The node's `node-settled` follows it.
-    CommandExited,
 }
 
 impl PipelineKind {
@@ -518,8 +510,6 @@ impl PipelineKind {
             Self::ScratchRetained => "scratch-retained",
             Self::CheckFailed => "check-failed",
             Self::ChecksUnfollowed => "checks-unfollowed",
-            Self::CommandStarted => "command-started",
-            Self::CommandExited => "command-exited",
         }
     }
 
@@ -528,21 +518,10 @@ impl PipelineKind {
     /// `None` for anything else, which is every kind a sibling produced: the
     /// merged store holds all three vocabularies and only this one is closed.
     pub fn from_wire(kind: &EventKind) -> Option<Self> {
-        // Looked up rather than scanned for: the fold asks this of every record, and a
-        // sibling's kind, the most numerous by far, is none of them.
-        static BY_WIRE: OnceLock<std::collections::HashMap<&'static str, PipelineKind>> =
-            OnceLock::new();
-        BY_WIRE
-            .get_or_init(|| {
-                // Reversed, so where two kinds were spelled alike the first would win.
-                PIPELINE_KINDS
-                    .iter()
-                    .rev()
-                    .map(|candidate| (candidate.as_str(), *candidate))
-                    .collect()
-            })
-            .get(kind.0.as_str())
+        PIPELINE_KINDS
+            .iter()
             .copied()
+            .find(|candidate| candidate.as_str() == kind.0)
     }
 }
 
@@ -629,8 +608,6 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ScratchRetained,
     PipelineKind::CheckFailed,
     PipelineKind::ChecksUnfollowed,
-    PipelineKind::CommandStarted,
-    PipelineKind::CommandExited,
 ];
 
 /// The id of a stored artifact.

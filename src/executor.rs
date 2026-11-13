@@ -583,12 +583,6 @@ fn prepare_dispatch_env(labels: &Labels, session: Option<&str>) -> Result<Vec<(S
     if let Some(token) = session {
         env.push((crate::agentgraph::SESSION_ENV.to_string(), token.to_owned()));
     }
-    // The node this dispatch is of, as a command step and the dispatch-env hook
-    // are told it: what `onepipeline ask` names as the node a question is about
-    // when the asker names none, so a ruling answering it is addressed to a node.
-    if let Some(node) = &labels.node {
-        env.push((crate::dispatchenv::NODE_ID_ENV.to_string(), node.clone()));
-    }
     let scratch = make_node_scratch_dir(labels)?.display().to_string();
     // The asker's name is the scratch directory's own path rather than a second
     // thing minted beside it: what has to be true of it is that every session
