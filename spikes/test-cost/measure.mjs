@@ -49,7 +49,17 @@ function parseArgs(argv) {
     if (arg === "--side") {
       const [name, runs] = value().split("=");
       if (!name || !runs) fail("--side takes NAME=RUN[,RUN...]");
-      options.sides.push({ name, runs: runs.split(",").filter(Boolean) });
+      options.sides.push({
+        name,
+        runs: runs
+          .split(",")
+          .filter(Boolean)
+          .map((spec) => {
+            const match = /^(\d+)(?:#(\d+))?(?:@([\w-]+))?$/.exec(spec);
+            if (!match) fail(`'${spec}' is not RUN[#ATTEMPT][@VARIANT]`);
+            return { run: match[1], attempt: match[2] ? Number(match[2]) : null, variant: match[3] ?? null };
+          }),
+      });
     } else if (arg === "--tests") {
       const [name, file] = value().split("=");
       if (!name || !file) fail("--tests takes SET=FILE");
@@ -158,39 +168,64 @@ function cached(cache, name, produce) {
   return path;
 }
 
-function fetchRun(options, run) {
+function fetchRun(options, spec) {
+  const { run } = spec;
   const dir = join(options.cache, String(run));
   mkdirSync(dir, { recursive: true });
-  const meta = JSON.parse(
+  const top = JSON.parse(
     readFileSync(cached(dir, "run.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}`])), "utf8"),
   );
-  if (meta.status !== "completed") return { run, meta, incomplete: true };
+  const attempt = spec.attempt ?? top.run_attempt;
+  const adir = join(dir, `attempt-${attempt}`);
+  mkdirSync(adir, { recursive: true });
+  const meta = JSON.parse(
+    readFileSync(cached(adir, "attempt.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}`])), "utf8"),
+  );
+  if (meta.status !== "completed") return { run, attempt, meta, incomplete: true };
   const jobs = JSON.parse(
-    readFileSync(cached(dir, "jobs.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/jobs?per_page=50&filter=all`])), "utf8"),
+    readFileSync(cached(adir, "jobs.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`])), "utf8"),
   ).jobs;
-  const logs = join(dir, "logs");
+  const logs = join(adir, "logs");
   if (!existsSync(logs)) {
-    const zip = cached(dir, "logs.zip", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${meta.run_attempt}/logs`], { binary: true }));
+    const zip = cached(adir, "logs.zip", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/logs`], { binary: true }));
     mkdirSync(logs, { recursive: true });
     execFileSync("unzip", ["-o", "-q", zip, "-d", logs]);
   }
-  const artifacts = join(dir, "artifacts");
-  if (!existsSync(join(artifacts, ".done"))) {
-    mkdirSync(artifacts, { recursive: true });
-    for (const job of JOBS) {
-      try {
-        gh(["run", "download", String(run), "--repo", options.repo, "-n", `test-profile-${job}`, "-D", join(artifacts, job)]);
-      } catch {
-        // A job that never reached its upload has no records; reported as such below.
-      }
-    }
-    writeFileSync(join(artifacts, ".done"), "");
+  // A re-run keeps the first attempt's artifacts beside its own, under the same
+  // names, so an attempt's are the ones created while it ran.
+  const listed = JSON.parse(
+    readFileSync(cached(dir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])), "utf8"),
+  ).artifacts;
+  const started = Date.parse(meta.run_started_at);
+  const later = listed.filter((a) => Date.parse(a.created_at) >= started);
+  const artifacts = join(adir, "artifacts");
+  mkdirSync(artifacts, { recursive: true });
+  return { run, attempt, meta, jobs, logs, artifacts, listed: later, variant: spec.variant, cacheDir: adir };
+}
+
+function jobName(job, variant) {
+  return variant ? `${job} (${variant})` : job;
+}
+
+function records_(options, fetched, job) {
+  const name = `test-profile-${job}${fetched.variant ? `-${fetched.variant}` : ""}`;
+  const into = join(fetched.artifacts, name);
+  if (!existsSync(join(into, ".done"))) {
+    const artifact = fetched.listed
+      .filter((a) => a.name === name && !a.expired)
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0];
+    if (!artifact) return [];
+    const zip = cached(fetched.cacheDir, `${name}.zip`, () => gh(["api", `repos/${options.repo}/actions/artifacts/${artifact.id}/zip`], { binary: true }));
+    mkdirSync(into, { recursive: true });
+    execFileSync("unzip", ["-o", "-q", zip, "-d", into]);
+    writeFileSync(join(into, ".done"), "");
   }
-  return { run, meta, jobs, logs, artifacts };
+  return readRecords(into);
 }
 
 function jobLog(fetched, job) {
-  const top = readdirSync(fetched.logs).find((name) => name.endsWith(`_${job}.txt`));
+  const name = jobName(job, fetched.variant);
+  const top = readdirSync(fetched.logs).find((file) => file.endsWith(`_${name}.txt`));
   if (!top) return null;
   return readFileSync(join(fetched.logs, top), "utf8").replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "");
 }
@@ -281,19 +316,20 @@ function workflowBlob(sha) {
   }
 }
 
-function measureRun(options, run) {
-  const fetched = fetchRun(options, run);
+function measureRun(options, spec) {
+  const fetched = fetchRun(options, spec);
+  const run = spec.attempt || spec.variant ? `${spec.run}#${fetched.attempt}${spec.variant ? `@${spec.variant}` : ""}` : spec.run;
   if (fetched.incomplete) return { run, incomplete: true, status: fetched.meta.status };
   const out = {
     run,
-    attempt: fetched.meta.run_attempt,
+    attempt: fetched.attempt,
     head_sha: fetched.meta.head_sha,
     head_branch: fetched.meta.head_branch,
     workflow_blob: workflowBlob(fetched.meta.head_sha),
     jobs: {},
   };
   for (const job of JOBS) {
-    const meta = fetched.jobs.find((entry) => entry.name === job);
+    const meta = fetched.jobs.find((entry) => entry.name === jobName(job, fetched.variant));
     const log = jobLog(fetched, job);
     if (!meta || !log) {
       out.jobs[job] = null;
@@ -302,7 +338,7 @@ function measureRun(options, run) {
     const head = headOf(log);
     const tasks = /ci-job: \S+ runs (\d+) task\(s\): (.*)$/m.exec(log);
     const coverage = /lines percent: ([\d.]+)/.exec(log);
-    const records = summarizeRecords(readRecords(join(fetched.artifacts, job)));
+    const records = summarizeRecords(records_(options, fetched, job));
     out.jobs[job] = {
       conclusion: meta.conclusion,
       minutes: (Date.parse(meta.completed_at) - Date.parse(meta.started_at)) / 60000,
