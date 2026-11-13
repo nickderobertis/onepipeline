@@ -119,13 +119,7 @@ export function tierMapping({ clone, commit, observed, variants = [] }) {
       for (const row of job.replayed) tasks.add(row.task);
     }
   }
-  const plan = checkOutAndPlan(
-    clone,
-    sha,
-    [...tasks].sort(),
-    join(observed.evidence, "plans"),
-    join(import.meta.dirname, "..", "..", "node_modules"),
-  );
+  // nx.json first: named inputs this cannot read are refused before Nx is asked to plan.
   let nxJson;
   try {
     nxJson = JSON.parse(git(clone, ["show", `${sha}:nx.json`]));
@@ -137,6 +131,13 @@ export function tierMapping({ clone, commit, observed, variants = [] }) {
     );
   }
   check.namedInputs(nxJson.namedInputs ?? {}, `${sha}'s nx.json`);
+  const plan = checkOutAndPlan(
+    clone,
+    sha,
+    [...tasks].sort(),
+    join(observed.evidence, "plans"),
+    join(import.meta.dirname, "..", "..", "node_modules"),
+  );
   git(clone, ["checkout", "-q", "-f", "--detach", sha]);
   // A checkout with no justfile has no recipe a task could run a tier from; one with a
   // justfile `just` cannot read is refused rather than read as having none.
@@ -178,7 +179,10 @@ export function tierMapping({ clone, commit, observed, variants = [] }) {
       ...globs.filter((g) => !(rust && rustSources.includes(g))),
       ...at.plan.filter((e) => e.startsWith("runtime:")),
       `config:${task.slice(0, task.indexOf(":"))}`,
-      ...(at.plan.includes("AllExternalDependencies") ? ["external"] : []),
+      // Nx's plan holds the external dependencies whole, or by named npm package.
+      ...(at.plan.some((e) => e === "AllExternalDependencies" || e.startsWith("npm:"))
+        ? ["external"]
+        : []),
     ];
     for (const name of variants) paths = VARIANTS[name](task, paths);
     const recipe = /^just (\S+)$/.exec(String(at.command ?? ""))?.[1];

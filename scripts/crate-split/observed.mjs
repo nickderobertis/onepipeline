@@ -200,10 +200,12 @@ export function checkOutAndPlan(clone, commit, tasks, cache, nodeModules) {
     });
   } catch (error) {
     throw new Refusal(
-      `Nx could not plan ${commit}'s tasks: ${String(error.stderr ?? error.message)
-        .trim()
-        .split("\n")
-        .at(-1)}`,
+      `Nx could not plan ${commit}'s tasks: ${
+        String(error.stderr ?? error.message)
+          .trim()
+          .split("\n")
+          .find((line) => !line.startsWith("next:")) ?? "it printed no reason"
+      }`,
       `run node scripts/crate-split/hash-plan.cjs OUT TASK in a checkout of ${commit} with node_modules linked, and fix what it says`,
     );
   }

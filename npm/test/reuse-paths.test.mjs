@@ -1233,3 +1233,407 @@ test("a merge whose commit the clone lacks is refused with what to fetch, not re
   assert.match(run.stderr, /git merge-tree \S+ e{40} failed in /);
   assert.match(run.stderr, /^next: fetch the pull requests' heads into the clone/m);
 });
+
+test("prototype (b)'s suites are targets cargo builds and runs, each with the modules it reaches", () => {
+  const crate = join(scratch, "proto-b");
+  write(crate, {
+    "Cargo.toml":
+      '[package]\nname = "proto-b"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n\n[[test]]\nname = "e2e"\npath = "tests/e2e/main.rs"\n',
+    "src/lib.rs": "pub fn one() -> i32 { 1 }\n",
+    "tests/e2e/main.rs": "mod harness;\nmod landing;\nmod store;\n",
+    "tests/e2e/harness.rs": "pub fn helper() -> i32 { proto_b::one() }\npub fn unused_here() {}\n",
+    "tests/e2e/landing.rs": "#[test]\nfn lands() { assert_eq!(crate::store::kept(), 1); }\n",
+    "tests/e2e/store.rs":
+      "pub fn kept() -> i32 { crate::harness::helper() }\n#[test]\nfn stores() { assert_eq!(kept(), 1); }\n",
+    "scripts/crate-split/proposed.json": JSON.stringify({
+      suites: {
+        "e2e-landing": {
+          paths: ["tests/e2e/landing.rs", "tests/e2e/store.rs"],
+          modules: ["landing"],
+        },
+        "e2e-store": { paths: ["tests/e2e/store.rs"], modules: ["store"] },
+      },
+    }),
+  });
+  spawnSync("cargo", ["generate-lockfile", "--offline"], { cwd: crate });
+  const run = spawnSync(process.execPath, [script("prototype-b.mjs"), "--repo", crate], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(
+    run.stdout,
+    "prototype-b: today --test e2e; split --test e2e_landing --test e2e_store\n",
+  );
+  const env = { ...process.env, CARGO_TARGET_DIR: join(crate, "target"), RUSTFLAGS: "-D warnings" };
+  const landing = spawnSync("cargo", ["test", "--offline", "--test", "e2e_landing"], {
+    cwd: crate,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(landing.status, 0, landing.stderr);
+  assert.match(landing.stdout, /test landing::lands \.\.\. ok/);
+  assert.match(landing.stdout, /test store::stores \.\.\. ok/);
+  const store = spawnSync("cargo", ["test", "--offline", "--test", "e2e_store"], {
+    cwd: crate,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(store.status, 0, store.stderr);
+  assert.doesNotMatch(store.stdout, /landing::/);
+  // A suite named like an object's own property is refused before anything is written.
+  write(crate, {
+    "scripts/crate-split/proposed.json": JSON.stringify({
+      suites: { constructor: { paths: [], modules: [] } },
+    }),
+  });
+  const refused = spawnSync(process.execPath, [script("prototype-b.mjs"), "--repo", crate], {
+    encoding: "utf8",
+  });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /"constructor" is not a suite name a target can take/);
+});
+
+test("prototype (c) re-roots path dependencies and copies platform dependency sections into its crates", () => {
+  const crate = join(scratch, "proto-c-deps");
+  write(crate, {
+    "Cargo.toml":
+      '[workspace]\nmembers = ["."]\n\n[package]\nname = "onepipeline"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nhelper = { path = "helper" }\n\n[target.\'cfg(unix)\'.dependencies]\nhelper = { path = "helper" }\n\n[dev-dependencies]\n',
+    "helper/Cargo.toml": '[package]\nname = "helper"\nversion = "0.1.0"\nedition = "2021"\n',
+    "helper/src/lib.rs": "pub fn two() -> i32 { 2 }\n",
+    "src/lib.rs": "pub mod x;\npub mod y;\n",
+    "src/main.rs": "fn main() {}\n",
+    "src/x.rs": "pub fn x() -> i32 { crate::y::y() }\n",
+    "src/y.rs": "pub fn y() -> i32 { helper::two() }\npub fn back() -> i32 { crate::x::x() }\n",
+  });
+  spawnSync("cargo", ["generate-lockfile", "--offline"], { cwd: crate });
+  const run = spawnSync(process.execPath, [script("prototype-c.mjs"), "--repo", crate], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const core = readFileSync(join(crate, "crates", "onepipeline-core", "Cargo.toml"), "utf8");
+  assert.match(core, /^helper = \{ path = "\.\.\/\.\.\/helper" \}$/m);
+  assert.match(core, /^\[target\.'cfg\(unix\)'\.dependencies\]$/m);
+  const built = spawnSync("cargo", ["build", "--offline", "--workspace"], {
+    cwd: crate,
+    encoding: "utf8",
+    env: { ...process.env, CARGO_TARGET_DIR: join(crate, "target") },
+  });
+  assert.equal(built.status, 0, built.stderr);
+});
+
+test("each document the harness reads is refused at its command when malformed, naming it and what to do", () => {
+  const dir = join(scratch, "malformed");
+  const good = {
+    population: {
+      window_from: at(0),
+      non_release: [{ number: 61, title: "feat", mergedAt: at(1) }],
+      release: [],
+    },
+    rollup: rollup("f".repeat(40), [suite(610, 0, "CI", [checkRun("test-linux", 6101, 0, 10)])]),
+  };
+  const fetchWith = (name, files, state = {}) => {
+    const at_ = join(dir, name);
+    write(join(at_, "out"), files);
+    const bin = ghDouble(at_, { routes: {}, ...state });
+    return spawnSync(
+      process.execPath,
+      [script("fetch-evidence.mjs"), "--out", join(at_, "out"), "--prs", "1"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+  };
+  const cases = [
+    [
+      "a population that is not one",
+      { "population.json": JSON.stringify({ non_release: "x" }) },
+      {},
+      /population\.json is not \{non_release, release\}/,
+    ],
+    [
+      "check suites GitHub answered with errors",
+      {
+        "population.json": JSON.stringify(good.population),
+        "rollup/61.json": JSON.stringify({ errors: [{}] }),
+      },
+      {},
+      /the check suites read for #61 hold no last commit/,
+    ],
+    [
+      "a check run that ends before it starts",
+      {
+        "population.json": JSON.stringify(good.population),
+        "rollup/61.json": JSON.stringify(
+          rollup("f".repeat(40), [suite(610, 0, "CI", [checkRun("test-linux", 6101, 10, 0)])]),
+        ),
+      },
+      {},
+      /#61's test-linux job has no start and end, or ends before it starts/,
+    ],
+    [
+      "an artifact listing that is not one",
+      {
+        "population.json": JSON.stringify(good.population),
+        "rollup/61.json": JSON.stringify(good.rollup),
+        "artifacts/610.json": JSON.stringify({ artifacts: [{ id: "x" }] }),
+      },
+      {},
+      /the artifact listing of run 610 is not a list/,
+    ],
+    [
+      "a rate limit answer that is not one",
+      {},
+      { graphql: ["lots"] },
+      /graphql rate limit answer is not \{remaining, reset\}/,
+    ],
+  ];
+  for (const [what, files, state, message] of cases) {
+    const run = fetchWith(what.replace(/\W+/g, "-"), files, state);
+    assert.equal(run.status, 1, `${what}: ${run.stderr}`);
+    assert.match(run.stderr, message, what);
+    assert.match(run.stderr, /^next: /m, what);
+  }
+  // The observed replay's own inputs: an executions row, a plan's runtime value.
+  const evidence = join(dir, "observed");
+  const repo = join(scratch, "ws");
+  const base = git(repo, ["rev-parse", "main"]);
+  const head = git(repo, ["rev-parse", "changelog"]);
+  write(evidence, {
+    "population.json": JSON.stringify(good.population),
+    "rollup/61.json": JSON.stringify(
+      rollup(head, [suite(610, 0, "CI", [checkRun("test-linux", 6101, 0, 10)])]),
+    ),
+    "logs/6101.log": `${at(0)} HEAD is now at 1234567 Merge ${head} into ${base}\n${at(1)} > nx run p:test\n`,
+    "executions/6101.json": JSON.stringify({
+      tasks: [
+        {
+          task: "p:test",
+          hash: "1",
+          cacheable: "yes",
+          result: "executed",
+          started_at: at(1),
+          finished_at: at(2),
+        },
+      ],
+      store_attempts: [],
+    }),
+  });
+  let run = spawnSync(
+    process.execPath,
+    [replay, "--observed", evidence, "--clone", repo, "--out", join(dir, "o.json")],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /p:test has no cacheability or a result this reads/);
+  write(evidence, {
+    "executions/6101.json": JSON.stringify({
+      tasks: [
+        {
+          task: "p:test",
+          hash: "1",
+          cacheable: true,
+          result: "executed",
+          started_at: at(1),
+          finished_at: at(2),
+        },
+      ],
+      store_attempts: [],
+    }),
+    [`plans/${base}.json`]: JSON.stringify({
+      plans: {},
+      missing: ["p:test"],
+      runtime: { "runtime:x": { ok: "yes" } },
+      external: "",
+    }),
+  });
+  run = spawnSync(
+    process.execPath,
+    [replay, "--observed", evidence, "--clone", repo, "--out", join(dir, "o.json")],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /the runtime result of runtime:x is not \{ok, out\}/);
+  // An option replay's input: an observed result whose forced row names no inputs.
+  write(dir, {
+    "obs.json": JSON.stringify({
+      prs: [
+        {
+          pr: 1,
+          title: "t",
+          release: false,
+          changed: [],
+          moved: [],
+          jobs: [{ job: "test-linux", ran: [{ task: "p:t", cause: "one input" }], replayed: [] }],
+        },
+      ],
+      weights: { tasks: {}, modules: {} },
+    }),
+    "m.json": JSON.stringify({
+      crates: { c: { paths: ["src/**"] } },
+      suites: { s: { paths: [], crates: ["c"] } },
+    }),
+    "neg.json": JSON.stringify({
+      prs: [],
+      weights: { tasks: { "p:t": { linux: { minutes: -1 } } }, modules: {} },
+    }),
+  });
+  run = spawnSync(
+    process.execPath,
+    [
+      replay,
+      "--mapping",
+      join(dir, "m.json"),
+      "--changes",
+      join(dir, "obs.json"),
+      "--out",
+      join(dir, "x"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(
+    run.stderr,
+    /#1 has a job whose tasks are not rows of a task, a cause and the inputs that forced it/,
+  );
+  run = spawnSync(
+    process.execPath,
+    [
+      replay,
+      "--mapping",
+      join(dir, "m.json"),
+      "--changes",
+      join(dir, "neg.json"),
+      "--out",
+      join(dir, "x"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(
+    run.stderr,
+    /the tasks weight of p:t on linux is not a nonnegative number of minutes/,
+  );
+  // A cache page and a jobs listing that are not ones.
+  write(join(dir, "inv"), {
+    "caches/page-1.json": JSON.stringify({ actions_caches: [{ id: 1 }] }),
+  });
+  run = spawnSync(
+    process.execPath,
+    [script("cache-inventory.mjs"), "--evidence", join(dir, "inv")],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(
+    run.stderr,
+    /cache page 1 is not a list of \{id, key, ref, size_in_bytes, created_at\}/,
+  );
+  write(join(dir, "runs"), {
+    "7.jobs.json": JSON.stringify({
+      jobs: [
+        { id: 1, name: "a", status: "completed", steps: [{ name: "s", completed_at: at(1) }] },
+      ],
+    }),
+  });
+  run = spawnSync(
+    process.execPath,
+    [script("demo-runs.mjs"), "--dir", join(dir, "runs"), "--out", join(dir, "r.md"), "7"],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /a finished step with no start/);
+  // A named input that is not a list of inputs.
+  git(repo, ["checkout", "-q", "-b", "bad-nx", "main"]);
+  write(repo, { "nx.json": JSON.stringify({ namedInputs: { rustBuild: "src" } }) });
+  git(repo, ["commit", "-qam", "bad nx.json"]);
+  const bad = git(repo, ["rev-parse", "HEAD"]);
+  git(repo, ["checkout", "-q", "main"]);
+  run = spawnSync(
+    process.execPath,
+    [
+      script("tier-mapping.mjs"),
+      "--clone",
+      repo,
+      "--changes",
+      join(scratch, "observed.json"),
+      "--out",
+      join(dir, "t.json"),
+      "--commit",
+      bad,
+    ],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /namedInputs is not an object of input lists/);
+});
+
+test("option (d1)'s external key moves in a generated mapping's replay as Nx's plan does", () => {
+  const repo = join(scratch, "ws-external");
+  const out = join(scratch, "external.json");
+  const mapping = join(scratch, "external-tiers.json");
+  const base = git(repo, ["rev-parse", "main"]);
+  let run = spawnSync(
+    process.execPath,
+    [
+      script("tier-mapping.mjs"),
+      "--clone",
+      repo,
+      "--changes",
+      out,
+      "--out",
+      mapping,
+      "--commit",
+      base,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const tiers = JSON.parse(readFileSync(mapping, "utf8"));
+  // Every key Nx's plan holds the external dependencies in names `external`.
+  assert.ok(tiers.suites["p:plain"].paths.includes("external"));
+  assert.ok(!tiers.suites["p:none"].paths.includes("external"));
+  run = spawnSync(
+    process.execPath,
+    [
+      replay,
+      "--mapping",
+      mapping,
+      "--changes",
+      out,
+      "--out",
+      join(scratch, "ext-replay.json"),
+      "--json",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const [change] = JSON.parse(readFileSync(join(scratch, "ext-replay.json"), "utf8")).perChange;
+  assert.deepEqual(change.affected.sort(), ["p:plain", "p:uses"]);
+});
+
+test("a demonstration whose archive nextest refused still shows cargo's build time and what it compiled", () => {
+  const dir = join(scratch, "failed-archive");
+  write(dir, {
+    "8.jobs.json": JSON.stringify({
+      jobs: [{ name: "measure-linux (1)", id: 1, status: "completed", steps: [] }],
+    }),
+    "1.log": [
+      "2026-11-13T09:41:46.0000000Z GITHUB_SHA=7164a08c3495 head=bd9084502f8e tree=abc",
+      "2026-11-13T09:41:46.1000000Z workflow blob=3d81753b817c",
+      "2026-11-13T09:44:06.9346444Z     Finished `test` profile [unoptimized] target(s) in 2m 18s",
+      "2026-11-13T09:44:07.0000000Z measure-archive: mode=coverage archive=failed wall_s=140.4 units=430 unit_s=380.0 workspace_units=62 workspace_unit_s=380.0 dependency_unit_s=0.0 workspace=onepipeline units_in=/x",
+    ].join("\n"),
+  });
+  const run = spawnSync(
+    process.execPath,
+    [script("demo-runs.mjs"), "--dir", dir, "--out", join(dir, "t.md"), "8"],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    readFileSync(join(dir, "t.md"), "utf8"),
+    /\| coverage \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
+  );
+});

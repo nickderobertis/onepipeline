@@ -233,6 +233,9 @@ function main(argv) {
         pr.number,
       );
       if (!run) continue;
+      // A job still running, or one whose times say nothing, is refused before any read.
+      for (const job of run.jobs.filter((j) => NX_JOBS.includes(j.name)))
+        check.finishedJob(job, pr.number);
       const listPath = join(out, "artifacts", `${run.run}.json`);
       if (!existsSync(listPath)) {
         guard();
@@ -251,7 +254,6 @@ function main(argv) {
         run.run,
       );
       for (const job of run.jobs.filter((j) => NX_JOBS.includes(j.name))) {
-        check.finishedJob(job, pr.number);
         const logPath = join(out, "logs", `${job.id}.log`);
         if (!existsSync(logPath)) {
           guard();
