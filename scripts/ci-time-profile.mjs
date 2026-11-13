@@ -111,7 +111,8 @@ class Gh {
     }
     this.guard();
     this.requests++;
-    const body = execFileSync("gh", ["api", endpoint], {
+    // A job log carries cargo's colour codes; the body goes to a file, never a terminal.
+    const body = execFileSync("gh", ["api", "--allow-escape-sequences", endpoint], {
       encoding: binary ? "buffer" : "utf8",
       maxBuffer: 1 << 30,
     });
@@ -188,7 +189,8 @@ function stepClass(name) {
 
 function parseLog(text) {
   const lines = [];
-  for (const raw of text.split("\n")) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: strips the ANSI colour codes cargo writes
+  for (const raw of text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split("\n")) {
     const m = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?(.*)$/.exec(raw.replace(/\r$/, ""));
     if (m) lines.push({ t: ms(m[1]), text: m[2] });
   }
@@ -558,7 +560,7 @@ function analyzeJob(opts) {
         } else if (x.testStart) {
           put("task: between tests (nextest scheduling)", share);
         } else {
-          put(`task without test records: ${x.task.replace(/^[^:]+:/, "")}`, share);
+          put(`task (no test records): ${x.task}`, share);
         }
       }
     }
@@ -583,7 +585,8 @@ function analyzeJob(opts) {
       test_seconds: t.records.reduce((a, r) => a + r.wall_s, 0),
     };
   });
-  result.critical_path = criticalPath(tasks, measure?.graph);
+  result.critical_path = criticalPath(tasks, measure?.graph, gate?.start ?? 0);
+  result.concurrency_profile = concurrencyProfile(tasks, gate);
 
   // Compile: every rustc invocation, by tree.
   const compile = {};
@@ -677,34 +680,45 @@ function unionSeconds(intervals) {
   return total / 1000;
 }
 
-// From the task that ended last, back through whatever it waited on: a dependency from the
-// graph when there is one, else the task whose end freed its start (within 5 s).
-function criticalPath(tasks, graph) {
-  if (!tasks.length) return [];
-  const deps = graph?.tasks?.dependencies ?? {};
+// From the task that ended last, back through the dependency (from the Nx graph the run
+// wrote) that ended last before it started. A start later than that dependency's end is time
+// the task waited for one of Nx's parallel slots. With no graph there is no path: the
+// concurrency profile is printed instead.
+function criticalPath(tasks, graph, gateStart) {
+  const deps = graph?.tasks?.dependencies;
+  if (!tasks.length || !deps) return [];
   const byId = new Map(tasks.map((t) => [t.task, t]));
   let cur = [...tasks].sort((a, b) => b.end - a.end)[0];
   const path = [];
   const seen = new Set();
   while (cur && !seen.has(cur.task)) {
     seen.add(cur.task);
-    const waitedOn = (deps[cur.task] ?? []).map((d) => byId.get(d)).filter(Boolean);
-    const freed = tasks.filter(
-      (t) => t !== cur && t.end <= cur.start + 1000 && t.end >= cur.start - 5000,
-    );
-    const candidates = [...waitedOn, ...freed].filter((t) => t.end <= cur.start + 1000);
-    const pred = candidates.sort((a, b) => b.end - a.end)[0];
+    const pred = (deps[cur.task] ?? [])
+      .map((d) => byId.get(d))
+      .filter((t) => t && t.end <= cur.start + 1000)
+      .sort((a, b) => b.end - a.end)[0];
     path.unshift({
       task: cur.task,
       start: new Date(cur.start).toISOString(),
       end: new Date(cur.end).toISOString(),
       s: (cur.end - cur.start) / 1000,
-      via: pred ? (waitedOn.includes(pred) ? "dependency" : "slot freed") : "start",
-      gap_before_s: pred ? (cur.start - pred.end) / 1000 : null,
+      after: pred?.task ?? "(gate start)",
+      waited_for_slot_s: Math.max(0, (cur.start - (pred ? pred.end : gateStart)) / 1000),
     });
     cur = pred;
   }
   return path;
+}
+
+// Seconds of the gate during which exactly k Nx tasks were running.
+function concurrencyProfile(tasks, gate) {
+  const profile = {};
+  if (!gate) return profile;
+  for (let t = gate.start; t < gate.end; t += 1000) {
+    const k = tasks.filter((x) => x.start <= t + 500 && t + 500 < x.end).length;
+    profile[k] = (profile[k] ?? 0) + 1;
+  }
+  return profile;
 }
 
 function summarizeSamples(samples, steps, tasks) {
@@ -868,14 +882,26 @@ function printJob(r) {
         ]),
     ),
   );
-  out.push("", "### Critical path (last task back to the first)", "");
+  out.push("", "### Concurrency: seconds of the gate with k Nx tasks running", "");
   out.push(
     table(
-      ["task", "own min", "reached via", "gap before (s)"],
-      r.critical_path.map((c) => [c.task, min(c.s), c.via, c.gap_before_s?.toFixed(0) ?? "-"]),
+      ["k", "min", "share of gate"],
+      Object.entries(r.concurrency_profile).map(([k, n]) => [k, min(n), pct(n, r.gate_s)]),
     ),
   );
-  out.push(`critical path tasks: ${min(r.critical_path.reduce((a, c) => a + c.s, 0))} min`);
+  out.push("", "### Critical path (from the last task back, through the Nx graph)", "");
+  if (r.critical_path.length) {
+    out.push(
+      table(
+        ["task", "own min", "after", "waited for a slot (min)"],
+        r.critical_path.map((c) => [c.task, min(c.s), c.after, min(c.waited_for_slot_s)]),
+      ),
+    );
+    const own = r.critical_path.reduce((a, c) => a + c.s, 0);
+    const waited = r.critical_path.reduce((a, c) => a + c.waited_for_slot_s, 0);
+    out.push(`critical path: ${min(own)} min running, ${min(waited)} min waiting for a slot`);
+  } else
+    out.push("no Nx graph in this run's artifacts, so no dependency path; see the profile above");
 
   out.push("", "## Compile and link (every rustc invocation)", "");
   if (Object.keys(r.compile).length) {
