@@ -6907,6 +6907,48 @@ impl HeldHost {
         }
     }
 
+    /// The same host, except that `local-direct` is the consumer repository's **own
+    /// declaration** rather than the host's: the rules file holds the engine at
+    /// `local-direct` by name and leaves every other repository at a `change-open`
+    /// default, and the consumer commits an `onevcs.toml` declaring `local-direct` on
+    /// its base, which is where `onevcs` reads it from.
+    fn declaring(name: &str) -> Self {
+        let host = Self::new(name);
+        std::fs::write(
+            host.world.onevcs_home().join("rules.yml"),
+            "version: 4\n\
+             rules:\n\
+             \x20 - match: {host: github.com, owner: owner, name: engine}\n\
+             \x20   publication: local-direct\n\
+             \x20   visibility: private\n\
+             \x20 - match: {owner: owner}\n\
+             \x20   visibility: private\n\
+             default:\n\
+             \x20 publication: change-open\n\
+             \x20 approvals: none\n",
+        )
+        .expect("the rules file is written");
+        let checkout = &host.consumer.checkout;
+        std::fs::write(
+            checkout.join("onevcs.toml"),
+            "schema_version = 2\n\n[policy]\npublication = \"local-direct\"\napprovals = \"none\"\n",
+        )
+        .expect("the declaration is written");
+        crate::harness::git(&host.world, checkout, &["add", "onevcs.toml"]);
+        crate::harness::git(
+            &host.world,
+            checkout,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "chore: declare the publication policy",
+            ],
+        );
+        crate::harness::git(&host.world, checkout, &["push", "-q", "origin", "main"]);
+        host
+    }
+
     /// How many times the consumer's `pre-push` hook has run.
     fn pushes(&self) -> usize {
         std::fs::read_to_string(&self.pushes)
@@ -7304,6 +7346,44 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
         world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
     });
     assert!(dispatched(world, &run, "follower"));
+}
+
+/// The policy that holds a `fast` node is whatever `onevcs` resolves for its
+/// repository, and a repository's own `onevcs.toml` is part of that: one the host's
+/// rules leave at a `change-open` default but that declares `local-direct` itself is
+/// held unlanded on its origin exactly as a rules-file `local-direct` one is, with no
+/// change request opened for it.
+#[test]
+fn a_fast_node_whose_repository_declares_local_direct_is_held_unlanded() {
+    let host = HeldHost::declaring("adoption-held-declared");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let (run, _) = start_held(&host, "adoption-held-declared", Some("crate"));
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    assert_eq!(
+        settled["payload"]["outcome"], "held-for-release",
+        "{settled}"
+    );
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "crate"}]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    let branch = branch_of(world, &run, "consumer");
+    assert_eq!(
+        host.on_origin(&format!("refs/heads/{branch}")).as_deref(),
+        settled["payload"]["head"].as_str(),
+        "the held branch is not on the consumer's origin at its commit"
+    );
+    assert_eq!(host.bases(), (base_before, checkout_before));
+    assert!(
+        world.changes_opened().is_empty(),
+        "{:?}",
+        world.changes_opened()
+    );
+    assert!(!dispatched(world, &run, "follower"));
 }
 
 /// A dispatch whose judge does **not** accept the work is never held: it settles as
