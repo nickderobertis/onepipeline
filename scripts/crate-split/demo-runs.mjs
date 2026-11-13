@@ -129,8 +129,11 @@ function main(argv) {
       read++;
       const r = readJob(job, readFileSync(path, "utf8"));
       saves += r.saves;
+      const code = (v) => (v ? `\`${v.slice(0, 12)}\`` : "-");
+      const archive =
+        r.mode ?? (r.cargoSeconds === null ? "no measurement" : "failed after the build");
       lines.push(
-        `| ${run} | ${r.job} | ${r.id} | \`${r.sha?.slice(0, 12)}\` | \`${r.head?.slice(0, 12)}\` | \`${r.workflowBlob?.slice(0, 12)}\` | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${r.mode ?? "failed after the build"} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
+        `| ${run} | ${r.job} | ${r.id} | ${code(r.sha)} | ${code(r.head)} | ${code(r.workflowBlob)} | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${archive} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
       );
     }
   }
