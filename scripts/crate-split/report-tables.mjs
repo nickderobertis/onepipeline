@@ -392,10 +392,13 @@ function caches(evidence, observed) {
           count(t.entries) &&
           Number.isFinite(t.bytes) &&
           t.bytes >= 0 &&
-          typeof t.oldest === "string" &&
-          typeof t.newest === "string" &&
+          check.isTimestamp(t.oldest) &&
+          check.isTimestamp(t.newest) &&
+          t.oldest <= t.newest &&
           t.targets &&
-          Object.values(t.targets).every((x) => count(x.entries) && Number.isFinite(x.bytes)),
+          Object.values(t.targets).every(
+            (x) => count(x.entries) && Number.isFinite(x.bytes) && x.bytes >= 0,
+          ),
       ),
     `${join(dir, "inventory.json")} is not a cache inventory`,
     "run scripts/crate-split/cache-inventory.mjs --evidence DIR again",

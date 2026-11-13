@@ -13,6 +13,7 @@ export function need(ok, message, next) {
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 const isText = (v) => typeof v === "string" && v !== "";
+export const isTimestamp = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
 const isTime = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
 const isSha = (v) => typeof v === "string" && /^[0-9a-f]{40}$/.test(v);
 
@@ -298,19 +299,21 @@ export function plan(doc, where) {
  */
 function namedInput(input) {
   if (isText(input)) return true;
-  if (!isObject(input)) return false;
-  const kinds = [
-    "runtime",
-    "env",
-    "externalDependencies",
-    "fileset",
-    "input",
-    "dependentTasksOutputFiles",
-    "projects",
-    "dependencies",
-    "transitive",
-  ];
-  return Object.keys(input).length > 0 && Object.keys(input).every((k) => kinds.includes(k));
+  if (!isObject(input) || Object.keys(input).length === 0) return false;
+  const strings = (v) => Array.isArray(v) && v.every(isText);
+  // Each kind Nx reads, with the value it takes.
+  const kinds = {
+    runtime: isText,
+    env: isText,
+    fileset: isText,
+    input: isText,
+    externalDependencies: strings,
+    projects: (v) => isText(v) || strings(v),
+    dependentTasksOutputFiles: isText,
+    dependencies: (v) => typeof v === "boolean",
+    transitive: (v) => typeof v === "boolean",
+  };
+  return Object.entries(input).every(([k, v]) => Object.hasOwn(kinds, k) && kinds[k](v));
 }
 
 /** `nx.json`'s namedInputs: names to lists of inputs. */

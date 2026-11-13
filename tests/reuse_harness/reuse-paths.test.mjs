@@ -1610,8 +1610,8 @@ test("each document the harness reads is refused at its command when malformed, 
   assert.match(run.stderr, /a finished step with no start/);
   // A named input that is not a list of inputs.
   git(repo, ["checkout", "-q", "-b", "bad-nx", "main"]);
-  // A named input that is a number, not a glob, a name or an input object.
-  write(repo, { "nx.json": JSON.stringify({ namedInputs: { rustBuild: ["src/**", 7] } }) });
+  // A named input that is a number, and one whose runtime command is not a command.
+  write(repo, { "nx.json": JSON.stringify({ namedInputs: { rustBuild: ["src/**", 7], other: [{ runtime: 7 }] } }) });
   git(repo, ["commit", "-qam", "bad nx.json"]);
   const bad = git(repo, ["rev-parse", "HEAD"]);
   git(repo, ["checkout", "-q", "main"]);
