@@ -32,7 +32,7 @@ use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::{Node, NodeKind};
 
 /// The schema of the document a plan-edit hook reads on its stdin.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// How often a running hook is asked whether it has exited.
 const POLL: Duration = Duration::from_millis(20);
@@ -153,7 +153,7 @@ enum Verdict {
 ///
 /// The refusal, as [`Error::Refused`] naming the hook and the node, beside the position of the
 /// command that named that node; the caller journals it there.
-pub(crate) fn judge(
+pub fn judge(
     paths: &RunPaths,
     launch: &LaunchRecord,
     commands: &[Command],

@@ -136,12 +136,12 @@ pub struct Gone {
     /// stale registry entries on their own line, apart from stopped runs.
     #[serde(skip)]
     #[schemars(skip)]
-    pub(crate) by: GoneBy,
+    pub by: GoneBy,
 }
 
 /// What proved a dispatch gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum GoneBy {
+pub enum GoneBy {
     /// Its registry entry names a process that is gone or reissued.
     #[default]
     StaleEntry,
@@ -161,7 +161,7 @@ pub struct SkippedRoot {
 
 /// The host's one reading, which the text and `--json` forms both render, so they
 /// cannot disagree.
-pub(crate) fn read(root: &Path) -> HostReading {
+pub fn read(root: &Path) -> HostReading {
     let index = {
         let _list = phase("list");
         ledger::all_runs(root)

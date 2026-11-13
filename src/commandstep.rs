@@ -36,23 +36,23 @@ use crate::payload::{CommandEnding, CommandExited, CommandStarted};
 use crate::plan::Node;
 
 /// The outcome a command that exited non-zero settles under.
-pub(crate) const COMMAND_FAILED: &str = "command-failed";
+pub const COMMAND_FAILED: &str = "command-failed";
 
 /// The outcome a command that outlived its `timeout_seconds` settles under.
-pub(crate) const COMMAND_TIMED_OUT: &str = "command-timed-out";
+pub const COMMAND_TIMED_OUT: &str = "command-timed-out";
 
 /// The variables a command is told the run's coordinates in.
-pub(crate) const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
+pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 /// The node the command runs for.
-pub(crate) const NODE_ID_ENV: &str = "ONEPIPELINE_NODE_ID";
+pub const NODE_ID_ENV: &str = "ONEPIPELINE_NODE_ID";
 /// The run's own directory, absolute.
-pub(crate) const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
+pub const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
 /// The run's qualified project, `<source>:<project>`.
-pub(crate) const PLAN_ENV: &str = "ONEPIPELINE_PLAN";
+pub const PLAN_ENV: &str = "ONEPIPELINE_PLAN";
 /// The flow the run belongs to, where it belongs to one.
-pub(crate) const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
+pub const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
 /// The session that launched the run, where the launch recorded one.
-pub(crate) const LAUNCHER_SESSION_ENV: &str = "ONEPIPELINE_LAUNCHER_SESSION";
+pub const LAUNCHER_SESSION_ENV: &str = "ONEPIPELINE_LAUNCHER_SESSION";
 
 /// How much of a command's stderr its failure's detail carries, from the end.
 const STDERR_TAIL_BYTES: usize = 2048;
@@ -65,14 +65,14 @@ const POLL: Duration = Duration::from_millis(50);
 const STDERR_GRACE: Duration = Duration::from_secs(2);
 
 /// Where a command node's output is kept.
-pub(crate) fn log_of(paths: &RunPaths, node: &str) -> PathBuf {
+pub fn log_of(paths: &RunPaths, node: &str) -> PathBuf {
     crate::hooks::run_root(paths)
         .join("commands")
         .join(format!("{node}.log"))
 }
 
 /// What `command-started` records for this node, running `argv`.
-pub(crate) fn started(paths: &RunPaths, node: &Node, argv: &Argv) -> CommandStarted {
+pub fn started(paths: &RunPaths, node: &Node, argv: &Argv) -> CommandStarted {
     CommandStarted {
         command: argv.clone(),
         log: log_of(paths, &node.id).display().to_string(),
@@ -86,7 +86,7 @@ pub(crate) fn started(paths: &RunPaths, node: &Node, argv: &Argv) -> CommandStar
 /// # Errors
 ///
 /// A thread this host would not start; the node is then left for the loop to settle.
-pub(crate) fn spawn(
+pub fn spawn(
     paths: &RunPaths,
     launch: &LaunchRecord,
     node: &Node,

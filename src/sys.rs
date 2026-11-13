@@ -1491,7 +1491,7 @@ impl StartToken {
     }
 
     /// How a token recorded earlier reads against this process's.
-    pub(crate) fn reads(&self, recorded: &str) -> TokenReading {
+    pub fn reads(&self, recorded: &str) -> TokenReading {
         if recorded.is_empty() {
             return TokenReading::Different;
         }
@@ -1544,7 +1544,7 @@ fn macos_reading(now: &str, recorded: &str) -> TokenReading {
 
 /// What comparing a recorded start token with a process's own says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenReading {
+pub enum TokenReading {
     /// The same process, to the resolution the token is spelled at.
     Same,
     /// Another process: the host answered, in a spelling that does not drift,
@@ -1672,7 +1672,7 @@ pub fn process_start_token(pid: u32) -> Option<StartToken> {
 /// exited leaves its pid in the launch record, and by the time anything reads
 /// it the host has given it to a stranger.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Claim {
+pub enum Claim {
     /// Still the process the record was written for: its stamp says so.
     Proved,
     /// Not a process at all — the pid is gone.
@@ -1698,7 +1698,7 @@ impl Claim {
     /// the host has since given to somebody else. Neither of the two open
     /// answers is that — an unstamped or undescribed live pid resolves toward
     /// "still working", for the reason on [`process_may_be_live`].
-    pub(crate) fn is_over(&self) -> bool {
+    pub fn is_over(&self) -> bool {
         matches!(self, Self::Gone | Self::Reissued)
     }
 }
@@ -1712,7 +1712,7 @@ impl Claim {
 /// somebody else's — the host answered with a different stamp — or a pid this
 /// build has nothing to compare, which is *cannot say* rather than *nothing is
 /// running there*.
-pub(crate) fn claim_on(pid: u32, started: &str) -> Claim {
+pub fn claim_on(pid: u32, started: &str) -> Claim {
     let reading = process_start_token(pid).map(|token| token.reads(started));
     match reading {
         Some(TokenReading::Same) => Claim::Proved,
@@ -1971,7 +1971,7 @@ fn filetime_token(created: &windows_sys::Win32::Foundation::FILETIME) -> StartTo
 /// pid is asked as any other is: a child that has exited and not been reaped
 /// still answers with its start.
 #[cfg(unix)]
-pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
     process_start_token(child.id())
 }
 
@@ -1987,7 +1987,7 @@ pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToke
 /// pins the process object, so its creation time is still that process's, and
 /// is asked with no exit check.
 #[cfg(windows)]
-pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+pub fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetProcessTimes;
@@ -2402,13 +2402,13 @@ fn platform_disown_standard_handles() {
 ///
 /// On Windows the guard installs nothing: a console's Ctrl-C there is not a
 /// signal this seam can hold, and the landing's cleanup is its drop alone.
-pub(crate) struct OnInterrupt {
+pub struct OnInterrupt {
     #[cfg(unix)]
     held: Option<unix_interrupt::Held>,
 }
 
 /// Hold [`OnInterrupt`] until the guard is dropped, or say why it could not be.
-pub(crate) fn on_interrupt(
+pub fn on_interrupt(
     then: impl Fn() + Send + 'static,
 ) -> std::result::Result<OnInterrupt, String> {
     #[cfg(unix)]
@@ -2616,7 +2616,7 @@ mod unix_interrupt {
 ///
 /// On Windows nothing is installed: a console's Ctrl-C reaches every process
 /// attached to it, the program among them.
-pub(crate) fn forward_terminating_signals(child: u32) {
+pub fn forward_terminating_signals(child: u32) {
     #[cfg(unix)]
     unix_forward::to(child);
     #[cfg(not(unix))]
@@ -2705,7 +2705,7 @@ pub fn session_digest(session: &str) -> String {
 /// so the absence is proved rather than assumed. The child is this test binary
 /// asked only to list its tests, which is portable and returns immediately.
 #[cfg(test)]
-pub(crate) fn reaped_pid() -> u32 {
+pub fn reaped_pid() -> u32 {
     let mut child = std::process::Command::new(
         std::env::current_exe().expect("the test binary knows its own path"),
     )

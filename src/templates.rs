@@ -350,7 +350,7 @@ struct RegistrationFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Registered {
+pub struct Registered {
     pub name: String,
     pub role: Role,
     pub description: String,
@@ -358,7 +358,7 @@ pub(crate) struct Registered {
 
 /// Every name a host root registers, beside the built-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Registry {
+pub struct Registry {
     /// Where the names came from.
     from: Registration,
     /// [`BUILT_IN`] first, then the host's names in name order.
@@ -396,7 +396,7 @@ impl Registry {
     /// registration that does not parse, carries an unknown key, declares a version this
     /// build does not read, a bad name, a blank description, or [`BUILT_IN`] again; and for
     /// a file that is there and cannot be read.
-    pub(crate) fn load(root: Option<&Path>) -> Result<Self> {
+    pub fn load(root: Option<&Path>) -> Result<Self> {
         let built_in = Registered {
             name: BUILT_IN.to_owned(),
             role: Role::Task,
@@ -472,7 +472,7 @@ impl Registry {
     }
 
     /// The registration file read, where one was.
-    pub(crate) fn file(&self) -> Option<PathBuf> {
+    pub fn file(&self) -> Option<PathBuf> {
         match &self.from {
             Registration::Read(file) => Some(file.clone()),
             Registration::NoRoot | Registration::NoFile(_) => None,
@@ -480,7 +480,7 @@ impl Registry {
     }
 
     /// Every registered name, [`BUILT_IN`] first.
-    pub(crate) fn names(&self) -> &[Registered] {
+    pub fn names(&self) -> &[Registered] {
         &self.names
     }
 
@@ -490,7 +490,7 @@ impl Registry {
     ///
     /// [`Error::Refused`] — `template <name> is not registered` — naming the registration
     /// file read, or saying none was.
-    pub(crate) fn get(&self, name: &str) -> Result<&Registered> {
+    pub fn get(&self, name: &str) -> Result<&Registered> {
         self.names
             .iter()
             .find(|registered| registered.name == name)
@@ -516,14 +516,14 @@ impl Registry {
 
 /// Where one resolution looks: the explicit file, the repository checkout, the host root.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Search<'a> {
+pub struct Search<'a> {
     pub explicit: Option<&'a Path>,
     pub repo: Option<&'a Path>,
     pub root: Option<&'a Path>,
 }
 
 /// A name resolved, and its chain loaded.
-pub(crate) struct Resolution {
+pub struct Resolution {
     pub stated: ResolvedTemplate,
     pub template: Template,
     lookup: Lookup,
@@ -621,7 +621,7 @@ fn lower_files(
 
 impl Resolution {
     /// How a refusal about this resolution names where it came from.
-    pub(crate) fn whence(&self) -> String {
+    pub fn whence(&self) -> String {
         whence(self.stated.layer, self.stated.path.as_deref())
     }
 }
@@ -645,13 +645,13 @@ fn repository_dir(repo: &Path) -> PathBuf {
 /// `path` without the extended-length prefix Windows adds to a canonical path (`\\?\C:\…`,
 /// `\\?\UNC\server\…`), which is how `onevcs` can answer a checkout while the caller
 /// registered it plainly; any other path, and every path elsewhere, is returned as it is.
-pub(crate) fn plain(path: PathBuf) -> PathBuf {
+pub fn plain(path: PathBuf) -> PathBuf {
     plain_on(path, cfg!(windows))
 }
 
 /// [`plain`] as it reads on Windows when `windows`, and as it reads elsewhere otherwise,
 /// so a caller can prove the Windows spelling on any host.
-pub(crate) fn plain_on(path: PathBuf, windows: bool) -> PathBuf {
+pub fn plain_on(path: PathBuf, windows: bool) -> PathBuf {
     if windows {
         if let Some(stripped) = path.to_str().and_then(without_verbatim_prefix) {
             return PathBuf::from(stripped);
@@ -692,7 +692,7 @@ fn absolute(path: &Path, base: &Path) -> PathBuf {
 /// [`Error::Refused`] for a name that is not registered, a registered name no layer
 /// supplies — naming every path searched — and a chain that does not load, naming the
 /// layer and the file; [`Error::Invalid`] for an explicit file that is not one.
-pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Result<Resolution> {
+pub fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Result<Resolution> {
     let registered = registry.get(name)?;
     let (layer, path) = locate(name, search)?;
     let reference = format!("{REFERENCE_PREFIX}{name}");
@@ -828,7 +828,7 @@ pub(crate) fn resolve(registry: &Registry, name: &str, search: Search<'_>) -> Re
 /// `template list` asks this: a broken template still reports the layer it sits at.
 /// [`Error::Refused`] is `no template for <name>` and nothing else, which is what lets a
 /// listing read it as a null layer and refuse every other error.
-pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<PathBuf>)> {
+pub fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<PathBuf>)> {
     if let Some(explicit) = search.explicit {
         if !explicit.is_file() {
             return Err(Error::Invalid(format!(
@@ -900,7 +900,7 @@ pub(crate) fn locate(name: &str, search: Search<'_>) -> Result<(Layer, Option<Pa
 /// # Errors
 ///
 /// The rule the template breaks, spelled as the contract spells it.
-pub(crate) fn validate(resolution: &Resolution) -> std::result::Result<(), &'static str> {
+pub fn validate(resolution: &Resolution) -> std::result::Result<(), &'static str> {
     if resolution.stated.role != Role::Task {
         return Ok(());
     }
@@ -1037,12 +1037,12 @@ fn extends_base(path: &Path, lookup: &Lookup) -> bool {
 /// # Errors
 ///
 /// The rule's own words.
-pub(crate) fn check_rendering(text: &str) -> std::result::Result<(), &'static str> {
+pub fn check_rendering(text: &str) -> std::result::Result<(), &'static str> {
     crate::plan::check_criteria(text).map_err(crate::plan::CriteriaRule::as_str)
 }
 
 /// One stored item C7 is asked about.
-pub(crate) struct Stored<'a> {
+pub struct Stored<'a> {
     /// Its qualified id, which the remedy names.
     pub qualified: &'a crate::taskgraph::QualifiedId,
     /// Its metadata, where its provenance is.
@@ -1066,7 +1066,7 @@ pub(crate) struct Stored<'a> {
 /// Each of the three refusals, followed by the remedy that clears it. A checkout that
 /// cannot be resolved, or a name no layer supplies now, is refused as that, with no
 /// remedy: re-rendering from a template that does not resolve cannot clear it.
-pub(crate) fn check_rendered(
+pub fn check_rendered(
     registry: &Registry,
     explicit: Option<&Path>,
     root: Option<&Path>,
@@ -1157,7 +1157,7 @@ pub(crate) fn check_rendered(
 ///
 /// [`Error::Invalid`] naming the rung, for a blank one, a variable this build cannot read
 /// as text, and a root that cannot be read.
-pub(crate) fn resolve_root(
+pub fn resolve_root(
     flag: Option<&Path>,
     configured: Option<&str>,
     working_dir: &Path,
@@ -1209,7 +1209,7 @@ pub(crate) fn resolve_root(
 /// # Errors
 ///
 /// [`Error::Invalid`] for a variable that is not `true` or `false`.
-pub(crate) fn resolve_require_rendered(
+pub fn resolve_require_rendered(
     flag: Option<bool>,
     configured: Option<bool>,
 ) -> Result<bool> {
@@ -1239,7 +1239,7 @@ pub(crate) fn resolve_require_rendered(
 /// # Errors
 ///
 /// [`Error::Invalid`] for an origin `onevcs` cannot resolve to a checkout.
-pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
+pub fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
     if let Some(repo) = &options.repo {
         let checkout = absolute(repo, &options.working_dir);
         // A checkout that is not there would search nothing at the repository layer and
@@ -1272,7 +1272,7 @@ pub(crate) fn verb_checkout(options: &TemplateOptions) -> Result<PathBuf> {
     Ok(options.working_dir.clone())
 }
 
-pub(crate) fn verb_explicit(options: &TemplateOptions) -> Option<PathBuf> {
+pub fn verb_explicit(options: &TemplateOptions) -> Option<PathBuf> {
     options
         .template
         .as_deref()
@@ -1282,7 +1282,7 @@ pub(crate) fn verb_explicit(options: &TemplateOptions) -> Option<PathBuf> {
 /// What one launch holds its plan's templates to: the host root it read, and whether a
 /// node has to be the rendering its provenance records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Launch {
+pub struct Launch {
     pub root: Option<PathBuf>,
     pub require_rendered: bool,
 }
@@ -1294,7 +1294,7 @@ pub(crate) struct Launch {
 /// # Errors
 ///
 /// The first refusal, naming the node.
-pub(crate) fn check_plan(
+pub fn check_plan(
     launch: &Launch,
     read: &crate::taskgraph::Read,
     launch_dir: &Path,

@@ -7,7 +7,7 @@ mod live;
 pub mod phases;
 mod present;
 mod projection;
-pub(crate) mod runtime;
+pub mod runtime;
 pub use approval::REREAD;
 pub use live::{item_id_for, Actor, HumanItems, ReadMode, ReadTelemetry, RUN_ENDED, TELEMETRY_ENV};
 /// The store priority vocabulary; human-item boundaries reject None.
@@ -34,7 +34,7 @@ fn priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Priority, D::Error
     }
     Ok(value)
 }
-pub(crate) fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = Priority::ALL
         .into_iter()
         .filter(|p| *p != Priority::None)
@@ -1505,12 +1505,12 @@ fn sample_entry(
     }
 }
 
-pub(crate) const NOTE_REFUSED: &str = "only a completed or dismissed item takes a note";
-pub(crate) const BATCH_ELSEWHERE: &str =
+pub const NOTE_REFUSED: &str = "only a completed or dismissed item takes a note";
+pub const BATCH_ELSEWHERE: &str =
     "an answer-batch answers a batch receipt, so it is applied through apply_batch";
 
 /// Why an answer's own words and choice cannot be an answer, whichever item it names.
-pub(crate) fn answer_refusal(choice: Option<&str>, text: Option<&str>) -> Option<&'static str> {
+pub fn answer_refusal(choice: Option<&str>, text: Option<&str>) -> Option<&'static str> {
     match (choice, text) {
         (_, Some(text)) if text.trim().is_empty() => Some("answer text must not be blank"),
         (None, None) => Some("an answer names a choice, text, or both"),
@@ -1519,7 +1519,7 @@ pub(crate) fn answer_refusal(choice: Option<&str>, text: Option<&str>) -> Option
 }
 
 /// Why `choice` is not one of the choices `item` offers, if it is not.
-pub(crate) fn unknown_choice(item: &HumanItem, choice: &str) -> Option<String> {
+pub fn unknown_choice(item: &HumanItem, choice: &str) -> Option<String> {
     if item.choices.is_empty() {
         return Some(format!(
             "{} offers no choices, so it takes text only; {choice} is not an answer to it",
@@ -1531,7 +1531,7 @@ pub(crate) fn unknown_choice(item: &HumanItem, choice: &str) -> Option<String> {
 }
 
 /// Why a batch is malformed and refused whole, if it is.
-pub(crate) fn batch_refusal(answers: &[HumanItemBatchAnswer], actor: &str) -> Option<String> {
+pub fn batch_refusal(answers: &[HumanItemBatchAnswer], actor: &str) -> Option<String> {
     if actor.trim().is_empty() {
         return Some("an action names its actor".into());
     }
@@ -1554,7 +1554,7 @@ pub(crate) fn batch_refusal(answers: &[HumanItemBatchAnswer], actor: &str) -> Op
 /// Why `item` cannot be reopened, if it cannot: the one answer the CLI, the browser and
 /// the action itself give. `undoable` is whether a completed approval's adapter declares
 /// an undo, which only a configuration can say.
-pub(crate) fn reopen_refusal(item: &HumanItem, undoable: bool) -> Option<String> {
+pub fn reopen_refusal(item: &HumanItem, undoable: bool) -> Option<String> {
     let reason = match item.state {
         HumanItemState::Open => "the item is open, so there is nothing to reopen",
         HumanItemState::Answered => "an answered question cannot be reopened",
@@ -1578,7 +1578,7 @@ pub(crate) fn reopen_refusal(item: &HumanItem, undoable: bool) -> Option<String>
 }
 
 /// [`reopen_refusal`] as the record a view carries.
-pub(crate) fn reopen_availability(item: &HumanItem, undoable: bool) -> HumanItemReopen {
+pub fn reopen_availability(item: &HumanItem, undoable: bool) -> HumanItemReopen {
     let reason = reopen_refusal(item, undoable);
     HumanItemReopen {
         available: reason.is_none(),
@@ -1633,7 +1633,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
     )
 }
 
-pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
+pub fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
     use crate::error::Error;
     let Some(path) = args.sample else {
         return live_dispatch(args.command);
@@ -2219,7 +2219,7 @@ fn optional_priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Pr
     }
     Ok(value)
 }
-pub(crate) fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = std::iter::once(serde_json::Value::Null)
         .chain(
             Priority::ALL

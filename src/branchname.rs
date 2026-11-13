@@ -65,7 +65,7 @@ fn environment() -> minijinja::Environment<'static> {
 /// again wherever it is read back off the launch record, which is external input
 /// like any other file this process re-reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BranchTemplate(String);
+pub struct BranchTemplate(String);
 
 impl BranchTemplate {
     /// Parse `text`, refusing one that does not parse and naming `whence` — the
@@ -74,7 +74,7 @@ impl BranchTemplate {
     /// # Errors
     ///
     /// [`Error::Invalid`] naming `whence` and the parser's own error.
-    pub(crate) fn parse(text: &str, whence: &str) -> Result<Self> {
+    pub fn parse(text: &str, whence: &str) -> Result<Self> {
         environment().template_from_str(text).map_err(|error| {
             Error::Invalid(format!(
                 "{whence}: the branch-name template does not parse: {error}"
@@ -84,7 +84,7 @@ impl BranchTemplate {
     }
 
     /// The template as it was written, which is what the launch record keeps.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -103,7 +103,7 @@ impl BranchTemplate {
 ///
 /// [`Error::Invalid`] for a template that does not parse, and for a variable
 /// this build cannot read as text.
-pub(crate) fn resolve(
+pub fn resolve(
     flag: Option<&str>,
     configured: Option<&str>,
     config: Option<&std::path::Path>,
@@ -163,7 +163,7 @@ pub fn render(template: &str, variables: &Value) -> std::result::Result<String, 
 /// What one run names its branches with: the template the launch resolved and
 /// the plan and run it renders over.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Naming {
+pub struct Naming {
     /// The template the launch record retains.
     pub template: BranchTemplate,
     /// `plan.name`: `onepipeline.name`, else the project's own title.
@@ -180,7 +180,7 @@ pub(crate) struct Naming {
 
 /// What a run names its branches with, or why it cannot name one: the sentence a
 /// node that would cut a branch settles on.
-pub(crate) type RunNaming = std::result::Result<Naming, String>;
+pub type RunNaming = std::result::Result<Naming, String>;
 
 impl Naming {
     /// What `launch`'s run names its branches with, or `None` for a run whose
@@ -290,7 +290,7 @@ impl Naming {
 ///
 /// A sentence naming the node, carrying why no name could be rendered — the
 /// settlement's detail as it stands.
-pub(crate) fn name_for(
+pub fn name_for(
     naming: &RunNaming,
     node: &crate::plan::Node,
 ) -> std::result::Result<String, String> {

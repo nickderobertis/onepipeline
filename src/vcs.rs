@@ -74,31 +74,31 @@ fn providers() -> Providers<'static> {
 }
 
 /// Standings and review feedback from the sibling's single repository read.
-pub(crate) fn review_standings(
+pub fn review_standings(
     request: &onevcs::ReviewStandingsRequest,
 ) -> Result<onevcs::ReviewStandings> {
     onevcs::review_standings(&providers(), request).map_err(refusal)
 }
 
 /// Where each named change request of one repository stands, in one batched read.
-pub(crate) fn change_standings(
+pub fn change_standings(
     request: &onevcs::ChangeStandingsRequest,
 ) -> Result<onevcs::ChangeStandings> {
     onevcs::change_standings(&providers(), request).map_err(refusal)
 }
 
 /// Move a change request onto `base`, writing its description in the same request.
-pub(crate) fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
+pub fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
     onevcs::retarget_change(&providers(), request).map_err(refusal)
 }
 
 /// Restore a closed draft's deleted base and reopen it.
-pub(crate) fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
+pub fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
     onevcs::reopen_change(&providers(), request).map_err(refusal)
 }
 
 /// Normalize a repository spelling before collecting a batched host read.
-pub(crate) fn repository_identity(repo: &str) -> Result<String> {
+pub fn repository_identity(repo: &str) -> Result<String> {
     providers()
         .vcs
         .resolve_identity(repo)
@@ -107,12 +107,12 @@ pub(crate) fn repository_identity(repo: &str) -> Result<String> {
 }
 
 /// Answer one review comment on the host, as `onevcs`'s `reply_to_comment` does.
-pub(crate) fn reply_to_comment(request: &onevcs::ReplyRequest) -> Result<onevcs::PostedReply> {
+pub fn reply_to_comment(request: &onevcs::ReplyRequest) -> Result<onevcs::PostedReply> {
     onevcs::reply_to_comment(&providers(), request).map_err(refusal)
 }
 
 /// A full host snapshot, by URL, including on a host with no local session.
-pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
+pub fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
     onevcs::review_comments(
         &providers(),
         &onevcs::ChangeRef::Url(change_url.to_owned()),
@@ -207,7 +207,7 @@ fn session_refusal(error: onevcs::Error) -> Error {
 /// all three — the refusal is [`Error::Sibling`], it names [`ONEVCS`], and its
 /// message *begins* with [`SESSION_OPEN_CONFLICT`] rather than merely containing
 /// it somewhere.
-pub(crate) fn session_open_conflicted(error: &Error) -> bool {
+pub fn session_open_conflicted(error: &Error) -> bool {
     matches!(
         error,
         Error::Sibling { tool, message }
@@ -222,7 +222,7 @@ pub(crate) fn session_open_conflicted(error: &Error) -> bool {
 /// [`session_open_conflicted`]'s terms and for its reason — the decision it
 /// drives takes a node out of flight without a settlement, which must not be
 /// reachable from anything a dispatch says about itself.
-pub(crate) fn session_open_exhausted(error: &Error) -> bool {
+pub fn session_open_exhausted(error: &Error) -> bool {
     matches!(
         error,
         Error::Sibling { tool, message }
@@ -299,7 +299,7 @@ pub fn publish(
 }
 
 /// Push into a recorded review draft; watch it when this host lacks its branch record.
-pub(crate) fn republish(
+pub fn republish(
     token: &SessionToken,
     policy: Option<MergePolicy>,
     title: Option<&str>,
@@ -370,7 +370,7 @@ impl onevcs::PublicationCancellation for NodeCancellation<'_> {
 /// node into a re-dispatch and the other settles it, and that decision is made
 /// off `onevcs`'s own typed refusal rather than off any wording downstream of it.
 #[derive(Debug)]
-pub(crate) enum PublishRefused {
+pub enum PublishRefused {
     /// The session holds its base's merge unfinished: it opened with the merge in
     /// progress and the worker did not conclude it. `onevcs` refuses that as a
     /// [`SyncConflict`](onevcs::Error::SyncConflict) before committing or pushing
@@ -512,7 +512,7 @@ pub const HELD_FOR_RELEASE: &str = "held-for-release";
 pub const REVIEW_DRAFTED: &str = "change-review-draft";
 
 /// A review draft pushed without a check watch, awaiting the next standings read.
-pub(crate) const REVIEW_DRAFTED_UNCHECKED: &str = "change-review-draft-unchecked";
+pub const REVIEW_DRAFTED_UNCHECKED: &str = "change-review-draft-unchecked";
 
 /// How a publication settles the node that made it.
 ///
@@ -813,7 +813,7 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
 /// The refusal is prose because it is somebody else's error, which is the one
 /// thing here that has no type to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LandingRead {
+pub enum LandingRead {
     /// `onevcs` decided it, and this is what it decided.
     Answered(onevcs::Landed),
     /// The read did not get an answer, and this is what refused.
@@ -826,7 +826,7 @@ pub(crate) enum LandingRead {
 impl LandingRead {
     /// Whether this read shows the work on its base: `onevcs` answered, and what
     /// it answered is landed. A refusal proves nothing either way.
-    pub(crate) fn proves_landed(&self) -> bool {
+    pub fn proves_landed(&self) -> bool {
         matches!(self, LandingRead::Answered(landed) if landed.is_landed())
     }
 }
@@ -857,7 +857,7 @@ impl LandingRead {
 // records: it is what the journal payload carries and what the sibling's own reference
 // grammar takes. What could go wrong with an unchecked one is checked where it enters,
 // by `usable`, which is what wrote every value that reaches this.
-pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
+pub fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
     let answered = read_of(onevcs::landing_status(branch, repo));
     // One per read, because the read takes one from scratch. Recorded after it
@@ -890,7 +890,7 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
 /// sibling declining to answer at all. A caller acts on `true` alone — it
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
-pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
+pub fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
     landing_now(branch, repo).proves_landed()
 }
 
@@ -912,7 +912,7 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// one repository, and the sibling's answer is about that branch alone. The read
 /// is counted against the first node asked that names it, and handed back for
 /// every one.
-pub(crate) fn landings_now(
+pub fn landings_now(
     state: &crate::projection::RunState,
     nodes: &[&String],
 ) -> Vec<(String, LandingRead)> {
@@ -955,7 +955,7 @@ pub(crate) fn landings_now(
 /// `held`, answering as well each of `nodes` that names the branch and repository
 /// a node of `held` names — the rule [`landings_now`] reads by, for answers
 /// already in hand.
-pub(crate) fn sharing_work<T: Clone>(
+pub fn sharing_work<T: Clone>(
     state: &crate::projection::RunState,
     nodes: &[&String],
     mut held: BTreeMap<String, T>,
@@ -1037,7 +1037,7 @@ fn side_by_side<T: Sync, R: Send>(
 /// nothing lifts stops a run just as surely — so this is what lifts it. Bounded
 /// by [`HOLD_ASKS`], and asked only about a node actually holding something.
 #[derive(Debug, Default)]
-pub(crate) struct UnreadMergePaths {
+pub struct UnreadMergePaths {
     /// Keyed by the type that *is* a node identity rather than by the string one
     /// spells: every key here came from a node in this run's graph, and
     /// [`crate::graph::NodeRef`] is what carries that past the boundary.
@@ -1081,13 +1081,13 @@ impl UnreadMergePaths {
     /// How long to leave between asks: the publication's own first backoff,
     /// because it is the same question about the same host and how patient a run
     /// is with a merge path should not need saying twice.
-    pub(crate) fn every(&self) -> Duration {
+    pub fn every(&self) -> Duration {
         crate::engine::merge_path_backoff()
     }
 
     /// The nodes still worth asking about: settled with their work on the origin,
     /// holding at least one dependent, and neither answered nor asked out.
-    pub(crate) fn watching(
+    pub fn watching(
         &self,
         state: &crate::projection::RunState,
         statuses: &BTreeMap<String, crate::graph::NodeStatus>,
@@ -1127,7 +1127,7 @@ impl UnreadMergePaths {
     /// Every pass rather than once where it was read, because the loop re-folds
     /// the whole state from the journal each time a node settles and this is not
     /// in the journal. Reports whether the state had lost one.
-    pub(crate) fn apply(&self, state: &mut crate::projection::RunState) -> bool {
+    pub fn apply(&self, state: &mut crate::projection::RunState) -> bool {
         let mut restored = false;
         for (node, _) in self
             .asking
@@ -1150,7 +1150,7 @@ impl UnreadMergePaths {
     /// read of something this run does not write, so a fresh driver re-derives it
     /// rather than inheriting a claim it cannot check. Reports whether anything
     /// became decidable.
-    pub(crate) fn read_again(
+    pub fn read_again(
         &mut self,
         state: &mut crate::projection::RunState,
         watching: &[crate::graph::NodeRef],
@@ -1626,12 +1626,12 @@ pub struct Commit(String);
 
 impl Commit {
     /// The commit `sha` names, or `None` where this crate will not carry it.
-    pub(crate) fn of(sha: &str) -> Option<Self> {
+    pub fn of(sha: &str) -> Option<Self> {
         usable(sha).map(Self)
     }
 
     /// The commit as a settlement, a view, and an event payload spell it.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -1722,7 +1722,7 @@ pub fn session_tip(token: &SessionToken) -> SessionTip {
 /// is the branch's head, whatever the worktree's own `HEAD` says — a publication
 /// that merged its base again as it synced pushes a commit the worktree never
 /// held. `None` when nothing was pushed, or the stream cannot be read.
-pub(crate) fn pushed_head_in(token: &SessionToken) -> Option<String> {
+pub fn pushed_head_in(token: &SessionToken) -> Option<String> {
     events(token, None)
         .iter()
         .rev()
@@ -2029,7 +2029,7 @@ fn phase_of_kind(kind: onevcs::EventKind) -> Option<crate::event::Phase> {
 /// copy of a vocabulary this crate does not own — which is what
 /// `src/AGENTS.md` forbids and what let a double script a kind the sibling has
 /// never emitted.
-pub(crate) fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
+pub fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
     let wire = serde_json::to_value(kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -2195,7 +2195,7 @@ impl Watermarks {
     }
 
     /// The marks each stream stands at, as already counted.
-    pub(crate) fn of_streams(reached: BTreeMap<String, u64>) -> Self {
+    pub fn of_streams(reached: BTreeMap<String, u64>) -> Self {
         Self { reached }
     }
 
@@ -2334,7 +2334,7 @@ pub fn session_opened_event(session: &Session, labels: &crate::event::Labels) ->
 /// What a `worktree-provision-failed` record states, read as `onevcs`'s own payload.
 ///
 /// `None` for every other record, and for one that does not read as that payload.
-pub(crate) fn provision_failure(envelope: &Envelope) -> Option<onevcs::WorktreeProvision> {
+pub fn provision_failure(envelope: &Envelope) -> Option<onevcs::WorktreeProvision> {
     if envelope.source != crate::event::Source::Vcs
         || envelope.kind != kind_of(onevcs::EventKind::WorktreeProvisionFailed)
     {
@@ -2348,7 +2348,7 @@ pub(crate) fn provision_failure(envelope: &Envelope) -> Option<onevcs::WorktreeP
 ///
 /// Read from the stream directly, because the worker's first turn is composed
 /// before anything of this session has been relayed.
-pub(crate) fn provision_failure_in(
+pub fn provision_failure_in(
     token: &SessionToken,
     labels: &crate::event::Labels,
 ) -> Option<Envelope> {
@@ -2379,7 +2379,7 @@ const OPENED_CONFLICT: &str = "conflict";
 // conflict not in the sibling's shape, are reachable only by a producer writing into this
 // run's stream what no producer here writes; `an_opened_conflict_rides_the_session_opened_
 // envelope_and_reads_back` holds both over real envelopes.
-pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConflict> {
+pub fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConflict> {
     if envelope.source != crate::event::Source::Vcs
         || envelope.kind != kind_of(onevcs::EventKind::SessionOpened)
     {
@@ -2406,7 +2406,7 @@ pub(crate) fn conflict_opened_in(envelope: &Envelope) -> Option<onevcs::OpenConf
 // are held over real git by `a_merge_in_progress_lists_the_bases_commits_on_the_unmerged_
 // paths_and_bounds_them`, since a journey building twenty-two base commits would prove the
 // fixture's history rather than this function.
-pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeInProgress> {
+pub fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeInProgress> {
     let conflict = session.conflict.clone()?;
     let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
     let git = |args: &[&str]| -> Option<String> {
@@ -2476,7 +2476,7 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
 /// or its diff against that base is not its own. Merge only, never a rebase: the branch
 /// only grows. The base is read off the session clone's `origin/<base>`, which `onevcs`
 /// brings up to the origin at the open, and off the local branch where that is absent.
-pub(crate) fn bring_base_in(
+pub fn bring_base_in(
     session: &Session,
 ) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
     let at = &session.worktree;
@@ -2775,7 +2775,7 @@ fn token_of(value: &str) -> Option<SessionToken> {
 ///   carries whitespace or a control character, and both are rendered into
 ///   line-oriented views where a value carrying a newline forges a line — a
 ///   record that appears to be about a node nobody dispatched.
-pub(crate) fn usable(value: &str) -> Option<String> {
+pub fn usable(value: &str) -> Option<String> {
     if value.is_empty() || value.len() >= crate::event::MAX_PAYLOAD_TEXT_BYTES {
         return None;
     }
@@ -2786,7 +2786,7 @@ pub(crate) fn usable(value: &str) -> Option<String> {
 }
 
 /// How much of a rework's net diff its drafting dispatch is shown, in bytes.
-pub(crate) const NET_DIFF_CAP: usize = 200 * 1024;
+pub const NET_DIFF_CAP: usize = 200 * 1024;
 
 /// The patch a session's change makes against its base, as its worktree stands
 /// now — committed or not, new files included — capped at [`NET_DIFF_CAP`] with a
@@ -2800,7 +2800,7 @@ pub(crate) const NET_DIFF_CAP: usize = 200 * 1024;
 /// # Errors
 ///
 /// What git refused, in its own words.
-pub(crate) fn net_diff(
+pub fn net_diff(
     worktree: &std::path::Path,
     base: &str,
 ) -> std::result::Result<String, String> {
@@ -2881,7 +2881,7 @@ pub fn is_session_opened(kind: &crate::event::EventKind) -> bool {
 
 /// Whether an envelope is a push `onevcs` recorded, in its own vocabulary — the
 /// read [`is_session_opened`] makes, for the same reason.
-pub(crate) fn is_push(kind: &crate::event::EventKind) -> bool {
+pub fn is_push(kind: &crate::event::EventKind) -> bool {
     static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
     is_kind_of(kind, onevcs::EventKind::Push, &WIRE)
 }
@@ -2889,7 +2889,7 @@ pub(crate) fn is_push(kind: &crate::event::EventKind) -> bool {
 /// How `onevcs` spells a session opening, for a caller that has to *write* one
 /// rather than recognise it. One derivation with [`is_session_opened`], so a
 /// test that builds the record and the fold that reads it cannot disagree.
-pub(crate) fn session_opened_kind() -> crate::event::EventKind {
+pub fn session_opened_kind() -> crate::event::EventKind {
     kind_of(onevcs::EventKind::SessionOpened)
 }
 
@@ -2906,7 +2906,7 @@ pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
 /// Whether an envelope is one of the two records `onevcs` writes for a landing — a
 /// `merge-completed`, or the `change-merged` beside it on the change-request path — each of
 /// which reports the issues the landing closes.
-pub(crate) fn is_landing(kind: &crate::event::EventKind) -> bool {
+pub fn is_landing(kind: &crate::event::EventKind) -> bool {
     static WIRE: std::sync::OnceLock<crate::event::EventKind> = std::sync::OnceLock::new();
     is_merge_completed(kind) || is_kind_of(kind, onevcs::EventKind::ChangeMerged, &WIRE)
 }
@@ -2971,7 +2971,7 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
 ///
 /// `request` is that node's [`request_for`]. `Err` carries the template's own
 /// failure, naming the node, and no session is opened.
-pub(crate) fn opening_for(
+pub fn opening_for(
     mut request: SessionRequest,
     node: &crate::plan::Node,
     naming: Option<&crate::branchname::RunNaming>,
@@ -2994,7 +2994,7 @@ pub(crate) fn opening_for(
 /// `PATH` as it registers a hosted identity, and with no token that lookup autolaunches a
 /// session bus whose daemon outlives the test and holds one of the host's inotify instances.
 #[cfg(test)]
-pub(crate) fn scratch_home_held() -> std::sync::MutexGuard<'static, ()> {
+pub fn scratch_home_held() -> std::sync::MutexGuard<'static, ()> {
     static IN_USE: Mutex<()> = Mutex::new(());
     let held = IN_USE
         .lock()

@@ -83,7 +83,7 @@ const PUBLICATION_LINE: &str = "publication:";
 /// Each repository is resolved once however many nodes name it — a plan's nodes
 /// are commonly all in one — so a launch pays two subprocesses per repository
 /// rather than two per node.
-pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
+pub fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
     let mut resolved: BTreeMap<String, Result<Destination, String>> = BTreeMap::new();
     for node in &plan.tasks {
         let Some(repo) = node.repo.as_deref() else {
@@ -148,7 +148,7 @@ fn report_unchecked(node: &str, repo: &str, why: &str) {
 /// `workflow`, which `onevcs` 0.20.0 stopped printing when it retired the
 /// inferred classification; the policy line below is what names the same thing.
 #[derive(serde::Deserialize)]
-pub(crate) struct Resolved {
+pub struct Resolved {
     // llmlint: ignore-block[invalid_states_unrepresentable] a repository identity is a
     // `String` on every surface `onevcs` publishes — `registry::Identity::origin`,
     // `SessionHolder::identity`, `RepositoryReleases::identity` — and this crate already
@@ -160,19 +160,19 @@ pub(crate) struct Resolved {
     identity: String, // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Where this repository's own hooks are, which is the whole of what it is
     /// read for here.
-    pub(crate) publication_checkout: PathBuf,
+    pub publication_checkout: PathBuf,
 }
 
 /// What one repository answered about itself.
-pub(crate) struct Destination {
-    pub(crate) resolved: Resolved,
+pub struct Destination {
+    pub resolved: Resolved,
     /// The policy its rules file resolves it to, or why this build has no answer.
     ///
     /// Held apart from the resolution around it rather than sinking the whole of
     /// it, because the two refusals need different halves: the subject policy
     /// needs only the checkout, and a rules file this build could not read is no
     /// reason to stop asking a repository's own hook about a title.
-    pub(crate) publication: std::result::Result<MergePolicy, String>,
+    pub publication: std::result::Result<MergePolicy, String>,
 }
 
 /// The executable this process asks.
@@ -180,7 +180,7 @@ pub(crate) struct Destination {
 /// Read as an `OsString`, because a path is one: a value this platform allows and
 /// Unicode does not would be *lost* by a `String` read, and the loader would then
 /// ask an executable the operator never named while believing they named none.
-pub(crate) fn binary() -> std::ffi::OsString {
+pub fn binary() -> std::ffi::OsString {
     std::env::var_os(BINARY_ENV)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_BINARY.into())
@@ -222,7 +222,7 @@ fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
 ///
 /// Asked by the loader of every lifecycle node's repository, and by the
 /// out-of-band landing verbs of the one `--repo` names — see [`crate::land`].
-pub(crate) fn resolve(repo: &str) -> Result<Destination, String> {
+pub fn resolve(repo: &str) -> Result<Destination, String> {
     let resolved: Resolved =
         serde_json::from_str(ask(&["resolve"], repo)?.trim()).map_err(|error| {
             format!("`onevcs resolve {repo}` did not answer the shape this build reads: {error}")
@@ -344,7 +344,7 @@ fn draft_refusal(
 ///
 /// One policy does not, and it is the one `onevcs` names when it refuses a draft:
 /// `local-direct` squashes the branch onto the base with git alone.
-pub(crate) fn opens_a_change_request(policy: MergePolicy) -> bool {
+pub fn opens_a_change_request(policy: MergePolicy) -> bool {
     policy != MergePolicy::LocalDirect
 }
 

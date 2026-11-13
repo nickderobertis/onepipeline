@@ -42,7 +42,7 @@ pub const STEP_SEPARATOR: char = '/';
 /// Ordered, so a map this crate keys by node identity can be keyed by the type
 /// that *is* one rather than by the string it spells.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct NodeRef(String);
+pub struct NodeRef(String);
 
 impl NodeRef {
     /// The identity of `node`, or `None` where it has none.
@@ -51,13 +51,13 @@ impl NodeRef {
     /// refused a blank id on every path a plan reaches execution by: a
     /// constructor that took the id on trust would leave the empty identity
     /// representable again, one indirection later.
-    pub(crate) fn of(node: &Node) -> Option<Self> {
+    pub fn of(node: &Node) -> Option<Self> {
         let id = node.id.trim();
         (!id.is_empty()).then(|| Self(id.to_string()))
     }
 
     /// The identity as a graph, a journal label, and a surface spell it.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -479,7 +479,7 @@ pub fn validate(plan: &Plan) -> Result<()> {
 /// `onepipeline plan check` reports to a program, which needs the node and the
 /// field beside that sentence. One implementation, so the two cannot disagree
 /// about what a plan is.
-pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
+pub fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
     if plan.tasks.is_empty() {
         return Err(Refusal::plain("a plan needs at least one node").field("tasks"));
     }
@@ -500,7 +500,7 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
 /// carries the tasks it was launched with, and refusing them there would refuse
 /// every later edit to it. What an edit states is held to C6b where the edit is
 /// compiled, and a run's whole graph where it is loaded or adopted.
-pub(crate) fn check_criteria(node: &Node) -> std::result::Result<(), Refusal> {
+pub fn check_criteria(node: &Node) -> std::result::Result<(), Refusal> {
     // Neither a human action nor a command is judged: nothing is dispatched for either.
     if matches!(node.kind, NodeKind::Human | NodeKind::Command) {
         return Ok(());
@@ -615,7 +615,7 @@ pub fn validate_edited(plan: &Plan) -> Result<()> {
 }
 
 /// Compose the overrides for one agent dispatch in precedence order.
-pub(crate) fn dispatch_sets(
+pub fn dispatch_sets(
     run_sets: &[String],
     persona: Option<&str>,
     controls: NodeControls,
@@ -632,7 +632,7 @@ pub(crate) fn dispatch_sets(
 
 /// Apply a complete ordered list through oneagentgraph's loader and schema, answering with the
 /// graph it validated.
-pub(crate) fn validate_graph_sets(
+pub fn validate_graph_sets(
     reference: &str,
     sets: &[String],
     context: &str,
@@ -680,7 +680,7 @@ pub(crate) fn validate_graph_sets(
 }
 
 /// Check each affected dispatch with the graph loader and schema oneagentgraph runs.
-pub(crate) fn validate_dispatch_sets(
+pub fn validate_dispatch_sets(
     node: &Node,
     default_graph: &str,
     run_sets: &[String],
@@ -741,7 +741,7 @@ pub(crate) fn validate_dispatch_sets(
 }
 
 /// [`validate_edited`], answering with what each refusal is about.
-pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
+pub fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
     // Every version this build reads, because what each newer one added is keyed
     // to the version a document declares: a plan written at an earlier one
     // describes a graph this engine executes exactly as it always did, and its
@@ -880,7 +880,7 @@ pub(crate) fn check_edited(plan: &Plan) -> std::result::Result<(), Refusal> {
 
 /// Resolve placement along kept-branch chains, after ordinary graph validation.
 /// Repository identity comes from the same sibling read as release references.
-pub(crate) fn stacking_bases<'a>(
+pub fn stacking_bases<'a>(
     nodes: &BTreeMap<&'a str, &'a Node>,
 ) -> std::result::Result<BTreeMap<&'a str, &'a str>, Refusal> {
     let mut identities = BTreeMap::new();
@@ -995,12 +995,12 @@ pub(crate) fn stacking_bases<'a>(
 /// claiming this name would be composed as the drafting dispatch and lose the
 /// overrides it declared, silently, which is the one direction this crate
 /// refuses to fail in. So the name is refused where a plan is read.
-pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
+pub const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
 
 /// What a plan naming the reserved reply-drafting persona is told, on
 /// [`RESERVED_PERSONA`]'s terms: a node claiming it would be composed as a reply
 /// drafting and lose the overrides it declared.
-pub(crate) const RESERVED_REPLY_PERSONA: &str = "`review-reply` is the persona this crate \
+pub const RESERVED_REPLY_PERSONA: &str = "`review-reply` is the persona this crate \
      dispatches a review comment's reply drafting under, so a node's own worker cannot run as it";
 
 /// A `kind: command` node's own rules: an argv naming a program, and none of the fields
@@ -1070,7 +1070,7 @@ pub fn validate_node(node: &Node) -> Result<()> {
 }
 
 /// [`validate_node`], answering with what the refusal is about.
-pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
+pub fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     let named = |what: &str| Refusal::node(&node.id, what);
     for entry in &node.sets {
         oneagentgraph::run::parse_set(entry).map_err(|why| {
@@ -1322,7 +1322,7 @@ fn validate_title(title: &str) -> std::result::Result<(), String> {
 /// onto a change request already in review is the squash subject it lands under,
 /// and nothing between this op and the host would refuse a prose one.
 // llmlint: ignore[invalid_states_unrepresentable] the validated title is `onevcs::Subject`, which the sibling owns and builds at the description request; this reads the plain `String` an op or a drafter's answer carried, which serde parses before any type could constrain it.
-pub(crate) fn validate_subject(title: &str) -> std::result::Result<(), String> {
+pub fn validate_subject(title: &str) -> std::result::Result<(), String> {
     validate_title(title)?;
     let title = title.trim();
     if title.chars().any(char::is_control) {
@@ -1644,7 +1644,7 @@ pub fn derive(
 /// Whether [`derive`] answers this node's status without reading any dependency of
 /// it: a parked node, and one whose recorded settlement stands, which is every
 /// settlement but the two gates derivation works out again against the graph.
-pub(crate) fn status_stands_without_its_dependencies(
+pub fn status_stands_without_its_dependencies(
     graph: &Graph,
     id: &str,
     settled: &BTreeMap<NodeRef, Settled>,

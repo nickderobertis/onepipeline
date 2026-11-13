@@ -166,7 +166,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 15;
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 15;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -187,9 +187,9 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 /// order the merge compares them in.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Placed {
-    pub(crate) ts: String,
-    pub(crate) stream: String,
+pub struct Placed {
+    pub ts: String,
+    pub stream: String,
 }
 
 fn placed(event: &Envelope) -> Placed {
@@ -206,13 +206,13 @@ fn placed(event: &Envelope) -> Placed {
 /// the other three fields are for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Coverage {
+pub struct Coverage {
     /// The bytes of the journal, from its first, this state accounts for.
     ///
     /// Always a **record boundary**, and only ever a boundary between *finished*
     /// records: a marker inside a line whose writer had not finished it would
     /// lose that record the moment the writer did.
-    pub(crate) bytes: u64,
+    pub bytes: u64,
     /// How many records those bytes hold, this build's unreadable lines
     /// included.
     ///
@@ -220,14 +220,14 @@ pub(crate) struct Coverage {
     /// counted against, and it counts lines rather than foldable ones for the
     /// reason [`journal::finished_records_after`] pairs a record it could not read with its
     /// size: a line this build cannot read is still a line the file holds.
-    pub(crate) records: u64,
+    pub records: u64,
     /// The greatest [`Placed`] among the records folded, or absent where none
     /// were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) at: Option<Placed>,
+    pub at: Option<Placed>,
     /// The greatest `seq` folded per stream.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) streams: BTreeMap<String, u64>,
+    pub streams: BTreeMap<String, u64>,
     /// **The seal: this marker, over the document it is written in.**
     ///
     /// Every field above says something a reader would otherwise have to take on
@@ -240,11 +240,11 @@ pub(crate) struct Coverage {
     /// Hex, because a persisted 128-bit integer is one a consumer reading JSON
     /// numbers as doubles rounds.
     #[serde(serialize_with = "as_hex", deserialize_with = "of_hex")]
-    pub(crate) digest: u128,
+    pub digest: u128,
 }
 
 /// FNV-1a's 128-bit offset basis: the digest of no bytes at all.
-pub(crate) const NOTHING_DIGESTED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+pub const NOTHING_DIGESTED: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
 
 /// FNV-1a's 128-bit prime, `2^88 + 0x13b`, written as the arithmetic rather than
 /// as a constant nobody can check by eye.
@@ -271,13 +271,13 @@ const FNV_PRIME: u128 = (1 << 88) | 0x13b;
 /// boundary because the journal is the authoritative record and this is a discardable
 /// cache of a prefix of it: the fallback either way is the whole-store fold every
 /// reader did before this document existed.
-pub(crate) fn digested(from: u128, bytes: &[u8]) -> u128 {
+pub fn digested(from: u128, bytes: &[u8]) -> u128 {
     bytes.iter().fold(from, |digest, byte| {
         (digest ^ u128::from(*byte)).wrapping_mul(FNV_PRIME)
     })
 }
 
-pub(crate) fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Error> {
+pub fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Error> {
     writer.serialize_str(&format!("{digest:032x}"))
 }
 
@@ -292,7 +292,7 @@ pub(crate) fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S
 /// it is one nothing on this side wrote — a truncated value most of all, which
 /// `from_str_radix` would otherwise hand back as a smaller number that seals to
 /// nothing.
-pub(crate) fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
+pub fn of_hex<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u128, D::Error> {
     let written = String::deserialize(reader)?;
     let refuse = |why: &str| serde::de::Error::custom(format!("digest '{written}': {why}"));
     let a_digit = |digit: &u8| matches!(digit, b'0'..=b'9' | b'a'..=b'f');
@@ -326,7 +326,7 @@ impl Coverage {
     /// The one comparison the module note's proof rests on, asked in both
     /// directions of the same fact: extending a coverage over a record, and
     /// deciding that a coverage is still corroborated by a store that has grown.
-    pub(crate) fn is_in_front_of(&self, event: &Envelope) -> bool {
+    pub fn is_in_front_of(&self, event: &Envelope) -> bool {
         let placed = placed(event);
         self.at.as_ref().is_none_or(|at| *at <= placed)
             && self
@@ -388,7 +388,7 @@ impl Coverage {
     /// would place it decides nothing either, and holding the later records
     /// against a line with no timestamp of its own would stop a coverage that has
     /// lost no accuracy at all.
-    pub(crate) fn absorb(&mut self, event: Option<&Envelope>, bytes: u64) {
+    pub fn absorb(&mut self, event: Option<&Envelope>, bytes: u64) {
         self.bytes += bytes;
         self.records += 1;
         let Some(event) = event else {
@@ -411,7 +411,7 @@ impl Coverage {
 /// delete.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Checkpoint {
+pub struct Checkpoint {
     /// The document's own version, so a reader can refuse one it does not
     /// understand. See [`CHECKPOINT_SCHEMA_VERSION`].
     #[serde(deserialize_with = "this_version")]
@@ -438,43 +438,43 @@ pub(crate) struct Checkpoint {
 /// ended on, how the run's clock was spent, or which nodes a judge turned down.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Tally {
+pub struct Tally {
     /// The run's clock and usage, a record at a time.
-    pub(crate) aggregate: crate::telemetry::Aggregate,
+    pub aggregate: crate::telemetry::Aggregate,
     /// How many records were folded.
-    pub(crate) events: u64,
+    pub events: u64,
     /// The kind of the record folded last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_event_kind: Option<String>,
+    pub last_event_kind: Option<String>,
     /// The nodes some folded record carries a **failing judge verdict** for. A
     /// verdict is on the settlement that carried it and nothing later withdraws
     /// one, so the set only grows.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub(crate) judged: std::collections::BTreeSet<String>,
+    pub judged: std::collections::BTreeSet<String>,
     /// How many lines read were no record this build can read: a driver that meets
     /// one reports that the graph it drives may be missing an edit.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub(crate) unreadable: u64,
+    pub unreadable: u64,
     /// Every line read that a [`journal::Integrity`] counts as lost, in file order,
     /// each where it is: what a view says of a store's own losses, kept here
     /// because the fold already met every one of them and a view asking again
     /// would read the whole store to be told.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) losses: Vec<LineLost>,
+    pub losses: Vec<LineLost>,
 }
 
 /// One line [`Tally::losses`] holds: [`journal::Lost`], placed by its line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LineLost {
+pub struct LineLost {
     /// Which class it is lost under.
-    pub(crate) kind: journal::LossKind,
+    pub kind: journal::LossKind,
     /// The 1-based line it is on, counted from the journal's first byte.
-    pub(crate) line: u64,
+    pub line: u64,
     /// Where in the file the line begins.
-    pub(crate) offset: u64,
+    pub offset: u64,
     /// How many of its bytes are not a record this build can read.
-    pub(crate) bytes: u64,
+    pub bytes: u64,
 }
 
 fn is_zero(count: &u64) -> bool {
@@ -483,7 +483,7 @@ fn is_zero(count: &u64) -> bool {
 
 impl Tally {
     /// Count one record that belongs at the end of what has been folded.
-    pub(crate) fn take(&mut self, paths: &RunPaths, event: &Envelope) {
+    pub fn take(&mut self, paths: &RunPaths, event: &Envelope) {
         self.aggregate.fold(paths, event);
         self.events += 1;
         self.last_event_kind = Some(event.kind.0.clone());
@@ -495,7 +495,7 @@ impl Tally {
 
 /// Whether a [`Projected`] writes what it folds back to the run's checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Persist {
+pub enum Persist {
     /// Written whenever the marker moves: the reconcile loop, and a reader that
     /// folds once and leaves the next reader what it folded.
     Yes,
@@ -512,7 +512,7 @@ pub(crate) enum Persist {
 /// records that arrived since the last one rather than the run's whole history.
 /// A caller that folds once takes [`into_state`](Self::into_state) and drops it.
 #[derive(Debug)]
-pub(crate) struct Projected {
+pub struct Projected {
     /// The fold of exactly what [`coverage`](Self::coverage) accounts for, which
     /// is the only state the marker may be written beside.
     covered: RunState,
@@ -548,7 +548,7 @@ pub(crate) struct Projected {
     persist: Persist,
     /// What this driver's latest readjustment read, kept for the rest of its trigger.
     /// In memory only: a fresh driver reads again at its first trigger.
-    pub(crate) readjust: crate::readjust::Readjuster,
+    pub readjust: crate::readjust::Readjuster,
 }
 
 impl std::ops::Deref for Projected {
@@ -580,12 +580,12 @@ const REBUILD_WINDOW: u64 = 2 * 1024 * 1024;
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one, and
     /// writing what it folds back.
-    pub(crate) fn open(paths: &RunPaths) -> Self {
+    pub fn open(paths: &RunPaths) -> Self {
         Self::open_with(paths, Persist::Yes)
     }
 
     /// Fold a run, resuming from its checkpoint where there is a usable one.
-    pub(crate) fn open_with(paths: &RunPaths, persist: Persist) -> Self {
+    pub fn open_with(paths: &RunPaths, persist: Persist) -> Self {
         let resumed = readable(paths).filter(|checkpoint| {
             checkpoint.coverage.corroborated_by(
                 &paths.journal(),
@@ -627,7 +627,7 @@ impl Projected {
     /// merge order would have placed in front of a covered one is folded after
     /// what is covered — see the module note. Only a journal **shorter** than the
     /// marker, which no longer holds what was folded, is rebuilt.
-    pub(crate) fn refresh(&mut self, paths: &RunPaths) {
+    pub fn refresh(&mut self, paths: &RunPaths) {
         let journal = paths.journal();
         let mut rebuilt = 0;
         if length_of(&journal) < self.coverage.bytes {
@@ -685,41 +685,41 @@ impl Projected {
         }
     }
 
-    pub(crate) fn into_state(self) -> RunState {
+    pub fn into_state(self) -> RunState {
         self.state
     }
 
     /// The tally over the whole store, as [`Deref`](std::ops::Deref) gives the
     /// state.
-    pub(crate) fn tally(&self) -> &Tally {
+    pub fn tally(&self) -> &Tally {
         &self.tally
     }
 
     /// The byte the marker stops at: everything in front of it is covered.
-    pub(crate) fn covered_bytes(&self) -> u64 {
+    pub fn covered_bytes(&self) -> u64 {
         self.coverage.bytes
     }
 
     /// The byte every record this fold has read ends at.
-    pub(crate) fn read_through(&self) -> u64 {
+    pub fn read_through(&self) -> u64 {
         self.read_through
     }
 
     /// The greatest `seq` any record of `stream` claims, of every record this fold
     /// has read — what a writer opening on the run takes its next one above.
-    pub(crate) fn seq_claimed(&self, stream: &str) -> Option<u64> {
+    pub fn seq_claimed(&self, stream: &str) -> Option<u64> {
         let covered = self.coverage.streams.get(stream).copied();
         let past = self.claimed_past.get(stream).copied();
         covered.max(past)
     }
 
     #[cfg(test)]
-    pub(crate) fn took(&self) -> u64 {
+    pub fn took(&self) -> u64 {
         self.took
     }
 
     #[cfg(test)]
-    pub(crate) fn coverage(&self) -> &Coverage {
+    pub fn coverage(&self) -> &Coverage {
         &self.coverage
     }
 
@@ -861,13 +861,13 @@ fn fold_in_merge_order(
 /// The records of the rare kinds [`RunState::recalled`] keeps, off the run's
 /// checkpoint and what was appended past it — what a driver starting on a run
 /// reads them back from instead of its whole history.
-pub(crate) fn recalled(paths: &RunPaths) -> Vec<Envelope> {
+pub fn recalled(paths: &RunPaths) -> Vec<Envelope> {
     Projected::open_with(paths, Persist::No).state.recalled
 }
 
 /// The greatest `seq` each stream reached across the whole store, off the run's
 /// checkpoint and what was appended past it.
-pub(crate) fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
+pub fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
     let projected = Projected::open_with(paths, Persist::No);
     let mut reached = projected.coverage.streams.clone();
     for (stream, seq) in &projected.claimed_past {
@@ -880,7 +880,7 @@ pub(crate) fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
 /// A run's folded state off its checkpoint and what was appended past it, writing
 /// nothing back: what a reader beside a driver that keeps the run's checkpoint
 /// itself folds — another run's record, or a dependency's — once per question.
-pub(crate) fn current(paths: &RunPaths) -> RunState {
+pub fn current(paths: &RunPaths) -> RunState {
     Projected::open_with(paths, Persist::No).into_state()
 }
 
@@ -892,7 +892,7 @@ pub(crate) fn current(paths: &RunPaths) -> RunState {
 /// has read is accounted for without being read again; what is past that is the
 /// one record a writer may be in the middle of, and the fragments an append healed
 /// out of the file are in the log kept beside it, as they always were.
-pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
+pub fn integrity(paths: &RunPaths) -> journal::Integrity {
     let projected = Projected::open_with(paths, Persist::No);
     let journal = paths.journal();
     let mut integrity =
@@ -922,7 +922,7 @@ pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
 /// Both halves are in the name because a caller gets both: a reader that folded
 /// from a document and wrote none back would leave the next one paying exactly
 /// what this one just paid, which is the whole of what this module is for.
-pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
+pub fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
@@ -932,7 +932,7 @@ pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
 /// What a watch given no cursor, and a driver's attached stream, start their reads
 /// at: everything in front of it is folded, so nothing they decide from is there,
 /// and printing it was a read of the whole history per call.
-pub(crate) fn resume_point(paths: &RunPaths) -> u64 {
+pub fn resume_point(paths: &RunPaths) -> u64 {
     Projected::open(paths).coverage.bytes
 }
 
@@ -947,7 +947,7 @@ pub(crate) fn resume_point(paths: &RunPaths) -> u64 {
 /// costs nothing a reader relies on, and it is what lets `onepipeline host` read an
 /// ended run's final stop and running set off this document without opening the
 /// journal.
-pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
+pub fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
     let mut projected = Projected::open(paths);
     let rest = journal::finished_lines_from(&paths.journal(), projected.coverage.bytes);
     if !rest.is_empty() {
@@ -966,7 +966,7 @@ pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
 /// journal's) is what says the journal has not moved since; a checkpoint whose
 /// counts differ from it is refused, and the caller then folds through
 /// [`fold_ended_and_checkpoint`], as every cold read does.
-pub(crate) fn covering_whole(
+pub fn covering_whole(
     paths: &RunPaths,
     journal_len: u64,
     event_count: u64,

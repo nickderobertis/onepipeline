@@ -30,10 +30,10 @@ use crate::sys;
 
 /// The name this hook is run under: what `ONEPIPELINE_HOOK` says, and the stem
 /// of its log under the run's `hooks/`.
-pub(crate) const HOOK: &str = "dispatch-env";
+pub const HOOK: &str = "dispatch-env";
 
 /// The environment variable naming the node whose dispatch the hook runs for.
-pub(crate) const NODE_ID_ENV: &str = "ONEPIPELINE_NODE_ID";
+pub const NODE_ID_ENV: &str = "ONEPIPELINE_NODE_ID";
 
 /// The one version of the document a hook prints.
 const DOCUMENT_VERSION: u64 = 1;
@@ -58,7 +58,7 @@ const MAX_STDOUT_BYTES: u64 = 1 << 20;
 const STDOUT_GRACE: Duration = Duration::from_secs(2);
 
 /// One launch, as the hook is asked about it.
-pub(crate) struct Launching<'a> {
+pub struct Launching<'a> {
     /// The run the dispatch belongs to.
     pub paths: &'a RunPaths,
     /// That run's launch record, which names the hook and its timeout.
@@ -89,7 +89,7 @@ pub(crate) struct Launching<'a> {
 /// code, `timeout`, `could-not-start` or `malformed` with what was malformed —
 /// or the config file, the harness variant and the `env_from` source that is
 /// still missing. Nothing has been dispatched when it does.
-pub(crate) fn run_and_check(launching: &Launching<'_>) -> Result<Vec<(String, String)>> {
+pub fn run_and_check(launching: &Launching<'_>) -> Result<Vec<(String, String)>> {
     let Some(command) = launching.record.dispatch_env_hook() else {
         return Ok(Vec::new());
     };
@@ -576,7 +576,7 @@ fn config_file(reference: &ConfigRef, graph_dir: Option<&Path>) -> String {
 /// The refusal for a dispatch-env hook timeout of zero, by the spelling that
 /// carried it — one sentence for the flag and the launch-config key, as the
 /// run-end hooks' timeout has one.
-pub(crate) fn refused_zero_timeout(spelling: &str) -> String {
+pub fn refused_zero_timeout(spelling: &str) -> String {
     format!(
         "{spelling} names a {HOOK} hook timeout of zero seconds, which ends the hook before it \
          has begun — give it a positive whole number of seconds, or leave it out to take \

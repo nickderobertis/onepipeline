@@ -40,7 +40,7 @@ use super::{
 use crate::event::{Envelope, Source, ENVELOPE_VERSION};
 
 /// The one stream every host human-item event is written on.
-pub(crate) const STREAM: &str = "human-items";
+pub const STREAM: &str = "human-items";
 /// The read index's own format version; any other is rebuilt. Version 2 keeps
 /// each item's history beside it.
 const INDEX_VERSION: u32 = 2;
@@ -50,7 +50,7 @@ const RUN_TAIL: u64 = 512;
 pub const RUN_ENDED: &str = "the run ended";
 /// The definitive host outages the engine raises an item for, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostCondition {
+pub enum HostCondition {
     /// The human-item journal's filesystem has no space.
     JournalNoSpace,
     /// A dispatch found no space to start in.
@@ -61,7 +61,7 @@ pub(crate) enum HostCondition {
 
 impl HostCondition {
     /// The word its items' dedup keys and probe records name it by.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::JournalNoSpace => "journal-no-space",
             Self::DispatchNoSpace => "dispatch-no-space",
@@ -71,11 +71,11 @@ impl HostCondition {
 }
 
 /// The host condition the journal running out of space raises.
-pub(crate) const JOURNAL_NO_SPACE: HostCondition = HostCondition::JournalNoSpace;
+pub const JOURNAL_NO_SPACE: HostCondition = HostCondition::JournalNoSpace;
 /// The host condition a dispatch refused for want of space raises.
-pub(crate) const DISPATCH_NO_SPACE: HostCondition = HostCondition::DispatchNoSpace;
+pub const DISPATCH_NO_SPACE: HostCondition = HostCondition::DispatchNoSpace;
 /// The host condition every identity of a dispatched side being refused raises.
-pub(crate) const IDENTITIES_REFUSED: HostCondition = HostCondition::IdentitiesRefused;
+pub const IDENTITIES_REFUSED: HostCondition = HostCondition::IdentitiesRefused;
 /// How often an identity outage is probed, at most.
 const IDENTITY_PROBE_EVERY_MS: u64 = 10_000;
 /// The dedup-key prefixes only the engine raises under: a run's human step, a
@@ -88,7 +88,7 @@ pub const TELEMETRY_ENV: &str = "ONEPIPELINE_HUMAN_ITEMS_TELEMETRY";
 
 /// What a completion of a task carrying an approval reference consults: `None`
 /// to complete, a replacement when the document moved on, or a refusal.
-pub(crate) type Approve<'a> =
+pub type Approve<'a> =
     dyn FnMut(&HumanItem, &Actor) -> Result<Option<HumanItemInput>, HumanItemRefusal> + 'a;
 
 fn conflict(reason: impl Into<String>) -> HumanItemRefusal {
@@ -155,7 +155,7 @@ impl Actor {
 /// One node of a run's DAG as the blocked-step derivation reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DagNode {
+pub struct DagNode {
     pub id: String,
     pub title: String,
     pub deps: Vec<String>,
@@ -167,7 +167,7 @@ pub(crate) struct DagNode {
 /// One run's DAG, cached under its journal's position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RunDag {
+pub struct RunDag {
     journal_len: u64,
     tail: String,
     pub plan: String,
@@ -307,7 +307,7 @@ pub struct HumanItems {
 }
 
 /// The state a read or a write works from: every item, and every run DAG.
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub items: BTreeMap<String, HumanItem>,
     events: BTreeMap<String, String>,
     histories: BTreeMap<String, Vec<HumanItemHistoryEntry>>,
@@ -317,7 +317,7 @@ pub(crate) struct Snapshot {
 impl HumanItems {
     /// The store under `root`, the runs root this process reads and writes,
     /// acting under `config` — one the effective loader produced and validated.
-    pub(crate) fn at(root: impl Into<PathBuf>, config: super::config::EffectiveConfig) -> Self {
+    pub fn at(root: impl Into<PathBuf>, config: super::config::EffectiveConfig) -> Self {
         Self {
             root: root.into(),
             config,
@@ -356,7 +356,7 @@ impl HumanItems {
     /// `session` and the runs and plans it owns: every run under this root
     /// whose launch record names it, judged as the run views judge `[mine]`. A
     /// run whose launch record cannot be read is nobody's here, as it is there.
-    pub(crate) fn asker(&self, session: String) -> super::present::Asker {
+    pub fn asker(&self, session: String) -> super::present::Asker {
         let mut asker = super::present::Asker {
             session,
             ..Default::default()
@@ -433,7 +433,7 @@ impl HumanItems {
             .parent()
             .map_or_else(|| self.root.clone(), Path::to_path_buf)
     }
-    pub(crate) fn journal(&self) -> PathBuf {
+    pub fn journal(&self) -> PathBuf {
         self.root.join(JOURNAL_PATH)
     }
     fn index(&self) -> PathBuf {
@@ -545,7 +545,7 @@ impl HumanItems {
     /// reference: it answers `Ok(None)` to complete, `Ok(Some(replacement))` for
     /// changed evidence (the obsolete task is dismissed and the replacement
     /// raised), or a refusal that leaves the item open.
-    pub(crate) fn apply_with(
+    pub fn apply_with(
         &self,
         action: HumanItemAction,
         complete: &mut Approve<'_>,
@@ -598,7 +598,7 @@ impl HumanItems {
 
     /// Raise one urgent host item for a definitive host condition, owned by
     /// `session`, unless one is already open for that condition.
-    pub(crate) fn raise_condition(
+    pub fn raise_condition(
         &self,
         condition: HostCondition,
         session: &str,
@@ -700,13 +700,13 @@ impl HumanItems {
     /// Carry whatever the journal holds and delivery has not reached, under the
     /// journal's lock as a writer carries it: what a driver does when the journal moved,
     /// so an event whose writer died before carrying it still reaches a watched run.
-    pub(crate) fn carry(&self) {
+    pub fn carry(&self) {
         super::delivery::carry(&self.root);
     }
 
     /// Probe every open host condition by the capability that failed; a writer's
     /// open is where each probe is made.
-    pub(crate) fn probe(&self) {
+    pub fn probe(&self) {
         if let Ok(writer) = Writer::open(self) {
             writer.finish();
         }
@@ -714,12 +714,12 @@ impl HumanItems {
 
     /// Every item, caught up with the journal, without reading any run: what a
     /// run's driver asks on its passes.
-    pub(crate) fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
+    pub fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
         Ok(self.read_with(false)?.0.items)
     }
 
     /// Raise an item under one of the engine's own keys: a run's human step.
-    pub(crate) fn raise_engine(
+    pub fn raise_engine(
         &self,
         input: HumanItemInput,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
@@ -730,7 +730,7 @@ impl HumanItems {
     }
 
     /// Resolve one open item automatically with `reason`. Answers whether it was open.
-    pub(crate) fn auto_resolve_item(
+    pub fn auto_resolve_item(
         &self,
         id: &str,
         reason: &str,
@@ -1014,7 +1014,7 @@ fn probes_path(store: &HumanItems) -> PathBuf {
 /// How one open host condition is probed: by the capability that failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "probe", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum Probe {
+pub enum Probe {
     /// A file written in the directory a dispatch could not write.
     Space {
         /// The directory.
@@ -1071,7 +1071,7 @@ fn keep_probes(store: &HumanItems, known: &BTreeMap<String, Probe>) {
 }
 
 /// Append one telemetry line to the file [`TELEMETRY_ENV`] names, if it names one.
-pub(crate) fn record_telemetry(line: &serde_json::Value) {
+pub fn record_telemetry(line: &serde_json::Value) {
     let Some(path) = std::env::var_os(TELEMETRY_ENV).filter(|v| !v.is_empty()) else {
         return;
     };
@@ -1112,14 +1112,14 @@ fn first_line(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
     }
 }
 
-pub(crate) fn event_id(seq: u64) -> String {
+pub fn event_id(seq: u64) -> String {
     format!("{STREAM}:{seq}")
 }
 
 /// The item as the journal first recorded it with a tracker bound: the content
 /// its projection was first written with. Read only when the projection record
 /// that keeps that content is lost.
-pub(crate) fn first_tracked(journal: &Path, id: &str) -> Option<HumanItem> {
+pub fn first_tracked(journal: &Path, id: &str) -> Option<HumanItem> {
     let text = std::fs::read(journal).ok()?;
     text.split(|b| *b == b'\n')
         .filter_map(|line| parse_record(line).ok())
@@ -1128,7 +1128,7 @@ pub(crate) fn first_tracked(journal: &Path, id: &str) -> Option<HumanItem> {
 }
 
 /// One record of the host journal: its sequence and the item event it carries.
-pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
+pub fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
     parse_record_at(line).map(|(seq, _, payload)| (seq, payload))
 }
 
@@ -1138,7 +1138,7 @@ pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), 
 /// asker's own, the session that owns the item. Whose words it was is what the
 /// record says too, and the manager's wherever it says nothing: a raise, an
 /// auto-resolution, and every event of schema version 1.
-pub(crate) fn history_entry(at: String, payload: &HumanItemEventPayload) -> HumanItemHistoryEntry {
+pub fn history_entry(at: String, payload: &HumanItemEventPayload) -> HumanItemHistoryEntry {
     let asker = || {
         (
             format!("session:{}", payload.owner.session),
@@ -1168,7 +1168,7 @@ pub(crate) fn history_entry(at: String, payload: &HumanItemEventPayload) -> Huma
 }
 
 /// [`parse_record`], with the instant the record was journalled at.
-pub(crate) fn parse_record_at(line: &[u8]) -> Result<(u64, String, HumanItemEventPayload), String> {
+pub fn parse_record_at(line: &[u8]) -> Result<(u64, String, HumanItemEventPayload), String> {
     let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
     if envelope.stream != STREAM {
         return Err(format!("it is on stream {:?}", envelope.stream));
@@ -1353,7 +1353,7 @@ fn reopen_of(config: &super::config::EffectiveConfig, item: &HumanItem) -> super
     super::reopen_availability(item, super::approval::undoable(config, item))
 }
 
-pub(crate) fn view(
+pub fn view(
     config: &super::config::EffectiveConfig,
     snapshot: &Snapshot,
     item: &HumanItem,
@@ -1365,7 +1365,7 @@ pub(crate) fn view(
     }
 }
 
-pub(crate) fn detail(
+pub fn detail(
     config: &super::config::EffectiveConfig,
     snapshot: &Snapshot,
     item: &HumanItem,
@@ -1395,7 +1395,7 @@ fn rank(priority: Priority) -> u8 {
 }
 
 /// Whether one item is selected by a filter; state defaults to open.
-pub(crate) fn selected(item: &HumanItem, filter: &HumanItemFilter) -> bool {
+pub fn selected(item: &HumanItem, filter: &HumanItemFilter) -> bool {
     filter.kind.is_none_or(|kind| item.kind == kind)
         && filter
             .blocking
@@ -2227,7 +2227,7 @@ fn already(item: &HumanItem) -> HumanItemRefusal {
     ))
 }
 
-pub(crate) fn state_word(state: HumanItemState) -> &'static str {
+pub fn state_word(state: HumanItemState) -> &'static str {
     match state {
         HumanItemState::Open => "open",
         HumanItemState::Answered => "answered",

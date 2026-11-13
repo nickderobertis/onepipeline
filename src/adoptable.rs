@@ -28,24 +28,24 @@ use crate::plan::{Node, Plan};
 
 /// The `source` a refusal made here carries, beside the loader's `engine` and a
 /// registered check's path: the rule and its reason are onevcs's.
-pub(crate) const SOURCE: &str = "onevcs";
+pub const SOURCE: &str = "onevcs";
 
 /// One rule onevcs says stops one node's adoption of one dependency completing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Refused {
+pub struct Refused {
     /// The consuming node.
-    pub(crate) node: String,
+    pub node: String,
     /// The dependency it waits on the release of.
-    pub(crate) dependency: String,
-    pub(crate) rule: AdoptionRule,
+    pub dependency: String,
+    pub rule: AdoptionRule,
     /// onevcs's reason, verbatim.
-    pub(crate) reason: String,
+    pub reason: String,
 }
 
 impl Refused {
     /// The plan field a planner changes to answer it: the rung for the rule about the
     /// rung, and `consumes` for the one about a named target.
-    pub(crate) fn field(&self) -> &'static str {
+    pub fn field(&self) -> &'static str {
         match self.rule {
             AdoptionRule::PublishedNoTarget => "adoption",
             AdoptionRule::ConsumesUndeclaredTarget => "consumes",
@@ -54,7 +54,7 @@ impl Refused {
 
     /// The dependency, the rule and onevcs's reason — what `plan check` reports as a
     /// refusal's `reason`, its node and field standing beside it.
-    pub(crate) fn detail(&self) -> String {
+    pub fn detail(&self) -> String {
         format!(
             "dependency '{}': {}: {}",
             self.dependency, self.rule, self.reason
@@ -62,7 +62,7 @@ impl Refused {
     }
 
     /// The whole line, as `plan check` prints it and `start` and a refused edit say it.
-    pub(crate) fn line(&self) -> String {
+    pub fn line(&self) -> String {
         format!(
             "{SOURCE}: node '{}': `{}`: {}",
             self.node,
@@ -74,15 +74,15 @@ impl Refused {
 
 /// One adoption onevcs could not answer about, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Unanswered {
-    pub(crate) node: String,
-    pub(crate) dependency: String,
-    pub(crate) reason: String,
+pub struct Unanswered {
+    pub node: String,
+    pub dependency: String,
+    pub reason: String,
 }
 
 impl Unanswered {
     /// The notice it is reported as, on stderr.
-    pub(crate) fn notice(&self) -> String {
+    pub fn notice(&self) -> String {
         format!(
             "onepipeline: node '{}': dependency '{}': {SOURCE} could not say whether this \
              release adoption can complete, so it was not checked: {}",
@@ -94,22 +94,22 @@ impl Unanswered {
 /// What one ask found, its refusals kept apart from its unanswered questions because
 /// only a refusal refuses anything.
 #[derive(Debug, Default)]
-pub(crate) struct Asked {
-    pub(crate) refused: Vec<Refused>,
-    pub(crate) unanswered: Vec<Unanswered>,
+pub struct Asked {
+    pub refused: Vec<Refused>,
+    pub unanswered: Vec<Unanswered>,
 }
 
 impl Asked {
     /// One notice per unanswered adoption, on stderr: stdout is `plan check --json`'s
     /// single object, which a consumer parses without asking which case it met.
-    pub(crate) fn report_unanswered(&self) {
+    pub fn report_unanswered(&self) {
         for unanswered in &self.unanswered {
             eprintln!("{}", unanswered.notice());
         }
     }
 
     /// Every refusal, one line each, or `None` where there is none.
-    pub(crate) fn refusal(&self) -> Option<String> {
+    pub fn refusal(&self) -> Option<String> {
         if self.refused.is_empty() {
             return None;
         }
@@ -130,7 +130,7 @@ impl Asked {
 /// repository is another run's to say — lands in no repository, lands in the node's
 /// own, or reaches it over an export edge is not a release wait, and is not asked about;
 /// nor is one onevcs answers is not `releasing`, whose verdict is set aside.
-pub(crate) fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
+pub fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
     let by_id: BTreeMap<&str, &Node> = plan
         .tasks
         .iter()
@@ -218,7 +218,7 @@ pub(crate) fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
 /// # Errors
 ///
 /// [`Error::Invalid`](crate::error::Error::Invalid) naming each refusal, one per line.
-pub(crate) fn load(plan: &Plan) -> crate::error::Result<()> {
+pub fn load(plan: &Plan) -> crate::error::Result<()> {
     let asked = ask(plan, |_| true);
     asked.report_unanswered();
     match asked.refusal() {

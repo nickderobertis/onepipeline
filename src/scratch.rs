@@ -14,7 +14,7 @@ static TELEMETRY_ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sy
 /// absolute path is refused with a diagnostic and records nothing either, never
 /// writing beside whatever directory the verb happened to start in. Telemetry is
 /// optional, so a refused destination leaves the verb's outcome unchanged.
-pub(crate) fn telemetry_to(value: Option<std::ffi::OsString>) {
+pub fn telemetry_to(value: Option<std::ffi::OsString>) {
     let root = value.filter(|value| !value.is_empty()).and_then(|value| {
         let root = std::path::PathBuf::from(&value);
         if root.is_absolute() {
@@ -348,7 +348,7 @@ impl ScratchTree {
 
 /// A run's scratch root, in the one spelling both the directory a dispatch is handed
 /// and the record naming it are joined onto, so the two are equal on every platform.
-pub(crate) fn root(paths: &RunPaths) -> io::Result<std::path::PathBuf> {
+pub fn root(paths: &RunPaths) -> io::Result<std::path::PathBuf> {
     Ok(root_spelled(fs::canonicalize(&paths.dir)?, cfg!(windows)))
 }
 
@@ -396,7 +396,7 @@ fn directories(paths: &RunPaths) -> io::Result<ScratchTree> {
 /// The directories a `scratch-retained` record for `paths` would name, spelled as it
 /// would spell them.
 #[cfg(test)]
-pub(crate) fn recorded_dirs(paths: &RunPaths) -> io::Result<Vec<std::path::PathBuf>> {
+pub fn recorded_dirs(paths: &RunPaths) -> io::Result<Vec<std::path::PathBuf>> {
     Ok(directories(paths)?.dirs)
 }
 
@@ -487,7 +487,7 @@ fn graph_ending(state: &crate::projection::RunState) -> GraphEnding {
 }
 
 /// The first ending producer records it, under the same gate as reply handover.
-pub(crate) fn at_ending(paths: &RunPaths) {
+pub fn at_ending(paths: &RunPaths) {
     if let Err(error) = ending(paths) {
         eprintln!(
             "onepipeline: scratch of run {} could not be handled: {error}",
@@ -498,7 +498,7 @@ pub(crate) fn at_ending(paths: &RunPaths) {
 
 /// A driver or undriven reply calls this while it still owns the run and holds
 /// the final handover. Its own fold decides the ending; liveness is irrelevant.
-pub(crate) fn at_writer_ending(paths: &RunPaths, state: &crate::projection::RunState) {
+pub fn at_writer_ending(paths: &RunPaths, state: &crate::projection::RunState) {
     if let Err(error) = handle_ending(paths, state, &journal::read(&paths.journal())) {
         eprintln!(
             "onepipeline: scratch of run {} could not be handled: {error}",
@@ -704,7 +704,7 @@ fn telemetry(
 }
 
 #[derive(Debug)]
-pub(crate) struct ScratchRun(String);
+pub struct ScratchRun(String);
 
 impl ScratchRun {
     fn new(run: &str) -> Option<Self> {
@@ -725,7 +725,7 @@ fn no_run(run: &str) -> DiscardOutcome {
 }
 
 #[derive(Debug)]
-pub(crate) enum DiscardOutcome {
+pub enum DiscardOutcome {
     Refused(String),
     Removed {
         run: ScratchRun,
@@ -735,14 +735,14 @@ pub(crate) enum DiscardOutcome {
 }
 
 impl DiscardOutcome {
-    pub(crate) fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> i32 {
         match self {
             Self::Refused(_) => 2,
             Self::Removed { failed, .. } => i32::from(!failed.is_empty()),
         }
     }
 
-    pub(crate) fn stdout(&self) -> String {
+    pub fn stdout(&self) -> String {
         let Self::Removed { run, dirs, .. } = self else {
             return String::new();
         };
@@ -760,7 +760,7 @@ impl DiscardOutcome {
         out
     }
 
-    pub(crate) fn stderr(&self) -> String {
+    pub fn stderr(&self) -> String {
         match self {
             Self::Refused(why) => format!("onepipeline scratch discard: {why}\n"),
             Self::Removed { failed, .. } => failed
@@ -793,7 +793,7 @@ fn not_ended(view: &RunView, run: &str) -> Option<DiscardOutcome> {
     })
 }
 
-pub(crate) fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
+pub fn discard(root: &Path, run: &str) -> crate::Result<DiscardOutcome> {
     let began = Instant::now();
     let Some(identity) = ScratchRun::new(run) else {
         return Ok(no_run(run));
@@ -855,7 +855,7 @@ fn gib(bytes: u64) -> String {
 /// it was written at: a run made live again reads as what it is now, so a kept
 /// notice and its discard instruction, which the verb would refuse, wait for the
 /// next ending.
-pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
+pub fn lines(view: &RunView, cap: Option<usize>) -> String {
     if views::host_shutdown(view) || view.liveness() == views::DriverLiveness::Parked {
         return String::new();
     }

@@ -25,7 +25,7 @@ use crate::event::{Envelope, Labels, Source, ENVELOPE_VERSION, MAX_PAYLOAD_TEXT_
 use crate::ledger::{self, RunPaths};
 use crate::sys;
 
-pub(crate) use crate::event::PipelineKind;
+pub use crate::event::PipelineKind;
 pub use crate::journal_heads::{fetch, RecordHandle, RecordHead};
 pub use crate::journal_selected::{read_selected, SelectedRecords, Selection};
 
@@ -41,7 +41,7 @@ static SEQUENCES: std::sync::Mutex<BTreeMap<std::path::PathBuf, u64>> =
 /// this build cannot read, because a record's readability and its claim on a
 /// sequence number are different questions.
 #[derive(Debug)]
-pub(crate) struct Journal {
+pub struct Journal {
     paths: RunPaths,
     stream: String,
     next_seq: u64,
@@ -95,7 +95,7 @@ impl Journal {
     }
 
     /// Retain evidence under this writer's stream and next event sequence.
-    pub(crate) fn artifact<T: serde::Serialize>(
+    pub fn artifact<T: serde::Serialize>(
         &self,
         kind: &str,
         body: &T,
@@ -126,7 +126,7 @@ impl Journal {
         })
     }
 
-    pub(crate) fn emit_with_artifacts(
+    pub fn emit_with_artifacts(
         &mut self,
         kind: PipelineKind,
         labels: Labels,
@@ -281,7 +281,7 @@ fn over_the_bound(value: &Value) -> bool {
 /// described: there is no field-by-field rule left to honour, and a turn's
 /// opening words are what a reader meeting a cut value is looking for.
 /// Keep a journal text inside the envelope's byte bound, on a UTF-8 boundary.
-pub(crate) fn bounded_text(text: &str) -> String {
+pub fn bounded_text(text: &str) -> String {
     if text.len() > MAX_PAYLOAD_TEXT_BYTES {
         head(text)
     } else {
@@ -301,7 +301,7 @@ fn head(text: &str) -> String {
 ///
 /// No round: execution is continuous, so the reserved `round` key is never
 /// stamped — see [`Labels::round`](crate::event::Labels::round).
-pub(crate) fn labels(run: &str, node: Option<&str>) -> Labels {
+pub fn labels(run: &str, node: Option<&str>) -> Labels {
     Labels {
         run_id: Some(run.to_string()),
         node: node.map(str::to_string),
@@ -310,7 +310,7 @@ pub(crate) fn labels(run: &str, node: Option<&str>) -> Labels {
 }
 
 /// A payload built from key/value pairs, in the order they are given.
-pub(crate) fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
+pub fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
     let mut map = Map::new();
     for (key, value) in fields {
         map.insert((*key).to_string(), value.clone());
@@ -324,7 +324,7 @@ pub(crate) fn payload(fields: &[(&str, Value)]) -> Map<String, Value> {
 ///
 /// [`Error::Invalid`](crate::Error::Invalid) where the document does not serialize as a
 /// mapping, which no payload type of this crate does.
-pub(crate) fn object<T: serde::Serialize>(document: &T) -> crate::Result<Map<String, Value>> {
+pub fn object<T: serde::Serialize>(document: &T) -> crate::Result<Map<String, Value>> {
     match serde_json::to_value(document) {
         Ok(Value::Object(payload)) => Ok(payload),
         Ok(other) => Err(crate::Error::Invalid(format!(
@@ -344,7 +344,7 @@ pub(crate) fn object<T: serde::Serialize>(document: &T) -> crate::Result<Map<Str
 /// the shape a writer that died mid-record used to leave behind — hands back the
 /// whole one: it is a record the store really holds, and losing it was how the
 /// event reporting that writer's death disappeared.
-pub(crate) fn read(path: &Path) -> Vec<Envelope> {
+pub fn read(path: &Path) -> Vec<Envelope> {
     ledger::read_envelope_lines(path, 0)
         .into_iter()
         .filter_map(|line| match reading(line, path) {
@@ -367,7 +367,7 @@ pub(crate) fn read(path: &Path) -> Vec<Envelope> {
 /// of the pairing: a line it could not parse is still a line the file holds, and a
 /// count that skipped it would be short for ever, so every later read of that run
 /// would read the whole store again.
-pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+pub fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let mut grown = Vec::new();
     for line in ledger::read_envelope_lines(path, from) {
         if !line.terminated {
@@ -391,7 +391,7 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
 /// terminator the bus reader asks about, since a run's covered history is exactly
 /// what that reader may no longer assume is there to read. Everything from `from`
 /// to the end of the file as it stands now.
-pub(crate) fn finished_records_from(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+pub fn finished_records_from(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let length = std::fs::metadata(path).map_or(0, |about| about.len());
     finished_records_within(path, from, length.saturating_sub(from))
 }
@@ -399,7 +399,7 @@ pub(crate) fn finished_records_from(path: &Path, from: u64) -> Vec<(Option<Envel
 /// [`finished_records_from`], over at most `len` bytes from `from`: what a rebuild
 /// folds one window at a time. A record the window ends inside is left for the
 /// next one, exactly as a record whose writer has not finished it is.
-pub(crate) fn finished_records_within(
+pub fn finished_records_within(
     path: &Path,
     from: u64,
     len: u64,
@@ -419,19 +419,19 @@ pub(crate) fn finished_records_within(
 /// a reader that wanted it from the fold's own read of those lines would
 /// otherwise have to read the whole store once more to be told it.
 #[derive(Debug, Clone)]
-pub(crate) struct FinishedLine {
+pub struct FinishedLine {
     /// The record, where the line holds one this build reads.
-    pub(crate) record: Option<Envelope>,
+    pub record: Option<Envelope>,
     /// How many bytes of the file the line occupies, its terminator included.
-    pub(crate) bytes: u64,
+    pub bytes: u64,
     /// What of the line is lost, where any of it is.
-    pub(crate) lost: Option<Lost>,
+    pub lost: Option<Lost>,
 }
 
 /// Which of the two classes an [`Integrity`] counts a lost line under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LossKind {
+pub enum LossKind {
     /// A record whose writer did not finish it.
     Truncated,
     /// A whole line this build cannot read.
@@ -441,13 +441,13 @@ pub(crate) enum LossKind {
 /// What of one line an [`Integrity`] counts as lost: which of its two classes, where
 /// in the file the line begins, and how many of its bytes are no record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Lost {
+pub struct Lost {
     /// Which class it is lost under.
-    pub(crate) kind: LossKind,
+    pub kind: LossKind,
     /// Where in the file the line begins.
-    pub(crate) offset: u64,
+    pub offset: u64,
     /// How many of its bytes are not a record this build can read.
-    pub(crate) bytes: u64,
+    pub bytes: u64,
 }
 
 /// What an [`Integrity`] counts lost of one line it read as `reading`: nothing for a
@@ -476,7 +476,7 @@ fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
 
 /// [`finished_records_within`], with what each line lost: the read a fold that
 /// keeps a run's [`Integrity`] beside its state takes.
-pub(crate) fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<FinishedLine> {
+pub fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<FinishedLine> {
     if len == 0 {
         return Vec::new();
     }
@@ -503,7 +503,7 @@ pub(crate) fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<Fin
 
 /// [`finished_lines_within`], over everything from `from` to the end of the file
 /// as it stands now.
-pub(crate) fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
+pub fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
     let length = std::fs::metadata(path).map_or(0, |about| about.len());
     finished_lines_within(path, from, length.saturating_sub(from))
 }
@@ -514,7 +514,7 @@ pub(crate) fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
 ///
 /// What a reader holding the losses of everything in front of `from` already
 /// asks of the rest, trusting the boundary as [`finished_records_from`] does.
-pub(crate) fn losses_from(path: &Path, from: u64, first_line: u64) -> Integrity {
+pub fn losses_from(path: &Path, from: u64, first_line: u64) -> Integrity {
     let length = std::fs::metadata(path).map_or(0, |about| about.len());
     let mut integrity = Integrity::default();
     for line in ledger::read_appended_envelope_lines(path, from, length.saturating_sub(from)) {
@@ -540,7 +540,7 @@ pub(crate) fn losses_from(path: &Path, from: u64, first_line: u64) -> Integrity 
 /// A line this build cannot parse is skipped and still accounted for, exactly as
 /// [`read`] skips it: a record from a schema this build does not know is not a
 /// reason to stop reading the ones after it.
-pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
+pub fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     let mut at = from;
     let mut events = Vec::new();
     for line in ledger::read_envelope_lines(path, from) {
@@ -557,7 +557,7 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
 
 /// Read a retained view's verified append range, without the boundary byte
 /// `Reader::open_at` otherwise checks in the consumed prefix.
-pub(crate) fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>, u64) {
+pub fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>, u64) {
     let mut at = from;
     let mut events = Vec::new();
     for line in ledger::read_appended_envelope_lines(path, from, len) {
@@ -575,7 +575,7 @@ pub(crate) fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>
 /// [`finished_after`], stopping just past the first record `stop` answers
 /// `true` for — so a reader that reports one record at a time resumes from
 /// where it stopped rather than past everything it read.
-pub(crate) fn finished_through_first(
+pub fn finished_through_first(
     path: &Path,
     from: u64,
     stop: impl Fn(&Envelope) -> bool,
@@ -605,7 +605,7 @@ pub(crate) fn finished_through_first(
 /// guesses. Every class of loss counts, a fragment as much as a record from a
 /// schema this build does not know — what strict replay is about is that
 /// *something* the graph may have turned on is not there.
-pub(crate) fn has_unreadable_lines(path: &Path) -> bool {
+pub fn has_unreadable_lines(path: &Path) -> bool {
     ledger::read_envelope_lines(path, 0)
         .into_iter()
         .any(|line| {
@@ -687,7 +687,7 @@ fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
 /// from the same struct, whose first field is `v`, so the needle is the whole of
 /// that opening — searching every `{` instead would try a parse per brace, and a
 /// payload has a brace per field.
-pub(crate) fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
+pub fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
     text.match_indices("{\"v\":")
         .skip_while(|(at, _)| *at == 0)
         .find_map(|(at, _)| {
@@ -700,7 +700,7 @@ pub(crate) fn glued_tail(text: &str) -> Option<(u64, Envelope)> {
 
 /// One record a run's store does not hold whole, and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Loss {
+pub struct Loss {
     /// The 1-based line it is on.
     pub line: usize,
     /// Where in the file that line begins.
@@ -719,7 +719,7 @@ pub(crate) struct Loss {
 /// reader will ever see in the file again and which is the whole reason it is
 /// recorded beside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Integrity {
+pub struct Integrity {
     /// Records whose writer did not finish them.
     pub truncated: Vec<Loss>,
     /// Whole lines this build cannot read.
@@ -730,7 +730,7 @@ pub(crate) struct Integrity {
 
 impl Integrity {
     /// Count what line `line` lost, under the class it lost it as.
-    pub(crate) fn count(&mut self, line: usize, lost: Option<Lost>) {
+    pub fn count(&mut self, line: usize, lost: Option<Lost>) {
         let Some(lost) = lost else {
             return;
         };
@@ -815,7 +815,7 @@ impl Integrity {
 /// checkpoint does not account for; this whole read is the reference the tests
 /// hold that answer to.
 #[cfg(test)]
-pub(crate) fn integrity(path: &Path) -> Integrity {
+pub fn integrity(path: &Path) -> Integrity {
     let mut integrity = Integrity {
         healed: ledger::torn_tails(path),
         ..Integrity::default()
@@ -872,7 +872,7 @@ fn merged_order(events: &[Envelope]) -> Vec<usize> {
 /// Each stream's records in its own order, as indices: the first half of the merge.
 ///
 /// `key` answers one record's `(ts, stream, seq)`.
-pub(crate) fn stream_queues<'a>(
+pub fn stream_queues<'a>(
     records: usize,
     key: impl Fn(usize) -> (&'a str, &'a str, u64),
 ) -> Vec<(&'a str, Vec<usize>)> {
@@ -896,7 +896,7 @@ pub(crate) fn stream_queues<'a>(
 /// A stream's head is its next `seq`, so its own order is never in question; what
 /// this decides is only which stream goes next, and a heap of the heads decides that
 /// in the logarithm of the streams rather than a scan of them per record.
-pub(crate) fn merge_queues<'a>(
+pub fn merge_queues<'a>(
     queues: Vec<(&'a str, Vec<usize>)>,
     key: impl Fn(usize) -> (&'a str, &'a str, u64),
 ) -> Vec<usize> {
@@ -931,7 +931,7 @@ pub(crate) fn merge_queues<'a>(
 /// Named once because `stop` writes it and the projection reads it, and a run
 /// whose two sides disagree about this field reports work as ended that is still
 /// running.
-pub(crate) const STOP_TEARDOWN: &str = "teardown";
+pub const STOP_TEARDOWN: &str = "teardown";
 
 /// What a `run-stopped` record says its teardown established about the run's
 /// processes.
@@ -1000,7 +1000,7 @@ impl StopTeardown {
     /// An exhaustive match rather than a serialization, for the reason
     /// `payload`'s words are matched: a variant added here cannot reach a report
     /// unnamed.
-    pub(crate) const fn word(self) -> &'static str {
+    pub const fn word(self) -> &'static str {
         match self {
             Self::Signalled => "signalled",
             Self::NothingToStop => "nothing-to-stop",
@@ -1020,7 +1020,7 @@ impl StopTeardown {
 /// a run whose two sides disagree about this field is a run that reports work as
 /// landed on the strength of nothing. Absent on a settlement that published no
 /// change of its own — see [`crate::graph::Landing`].
-pub(crate) const SETTLED_LANDING: &str = "landing";
+pub const SETTLED_LANDING: &str = "landing";
 
 /// The `node-settled` payload field naming why a dispatch that ended for a reason
 /// other than the agent's verdict ended.
@@ -1029,7 +1029,7 @@ pub(crate) const SETTLED_LANDING: &str = "landing";
 /// and `projection` reads it back, and two spellings of one field is a run whose
 /// settlement says a cause its own result document does not. The producer's own
 /// word, and absent on every settlement that carries no classification.
-pub(crate) const SETTLED_CAUSE: &str = "cause";
+pub const SETTLED_CAUSE: &str = "cause";
 
 /// The `node-settled` payload field naming the commit the node's branch was left
 /// at.
@@ -1037,7 +1037,7 @@ pub(crate) const SETTLED_CAUSE: &str = "cause";
 /// Named once for the same reason. A lifecycle node writes it once its session
 /// has cut a branch, on success as on failure, and it is absent from a settlement
 /// whose branch never existed.
-pub(crate) const SETTLED_HEAD: &str = "head";
+pub const SETTLED_HEAD: &str = "head";
 
 /// The `node-settled` payload field naming the branch the node's change request
 /// is based on: the root, a stack parent's branch, or the stack base merging its
@@ -1046,18 +1046,18 @@ pub(crate) const SETTLED_HEAD: &str = "head";
 /// Named once for the reason [`SETTLED_LANDING`] is, and absent from a settlement
 /// reached before the node's base was resolved — a lifecycle node refused before
 /// its session opened, and every node that opens none.
-pub(crate) const SETTLED_BASE: &str = "base";
+pub const SETTLED_BASE: &str = "base";
 
 /// The `node-settled` payload field naming the stack a lifecycle node was drafted
 /// on — `{parents: [{node, branch, head}], stack_base}` — present exactly when the
 /// node had stack parents.
-pub(crate) const SETTLED_STACK: &str = "stack";
+pub const SETTLED_STACK: &str = "stack";
 
 /// The `node-settled` payload field naming the releases a node held for them still
 /// awaits — `[{producer, target}]`, in the order its reference rows list them —
 /// present exactly on a `complete-but-held` settlement and on an awaiting-release
 /// `complete-but-draft` one.
-pub(crate) const SETTLED_AWAITING: &str = "awaiting";
+pub const SETTLED_AWAITING: &str = "awaiting";
 
 /// The `node-settled` payload field saying what putting a kept branch on its
 /// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,
@@ -1065,7 +1065,7 @@ pub(crate) const SETTLED_AWAITING: &str = "awaiting";
 ///
 /// Written only by a node settled `preserved`, and absent on every other
 /// settlement — a branch nobody asked to keep has no answer to give here.
-pub(crate) const SETTLED_REMOTE: &str = "remote";
+pub const SETTLED_REMOTE: &str = "remote";
 
 /// The `driver-adopted` payload field naming the dispatches the adoption
 /// cleared, and where each one's work is.
@@ -1076,7 +1076,7 @@ pub(crate) const SETTLED_REMOTE: &str = "remote";
 /// than reading this back, so an adoption an older build recorded still reports
 /// what it abandoned; this is what a person reading the store, or a tool that
 /// does not fold it, finds at the moment it happened.
-pub(crate) const ADOPTED_ABANDONED: &str = "abandoned";
+pub const ADOPTED_ABANDONED: &str = "abandoned";
 
 /// The `run-started` and `driver-adopted` payload field saying the driver that
 /// wrote it holds the run to the closure rule: its launching session owes it
@@ -1086,7 +1086,7 @@ pub(crate) const ADOPTED_ABANDONED: &str = "abandoned";
 /// wrote — which is the whole of its meaning: a run no record of which carries it
 /// was never driven under that rule, and is decided by the rule it was driven
 /// under. Entry 98 of `docs/contract-divergences.md` states both rules.
-pub(crate) const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
+pub const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 
 /// The `driver-adopted` payload field saying the adoption started a new run-end
 /// hook epoch: it found a fired hook's marker standing over a graph that is
@@ -1095,16 +1095,16 @@ pub(crate) const OWED_UNTIL_CLOSED: &str = "owed_until_closed";
 /// `true` wherever it is written, and absent from every other adoption — an
 /// adoption of an ended run, of a run that never fired, and every adoption an
 /// earlier build recorded. `hooks` decides it, and reads it back as the epoch.
-pub(crate) const ADOPTED_HOOK_EPOCH: &str = "hook_epoch";
+pub const ADOPTED_HOOK_EPOCH: &str = "hook_epoch";
 
 /// Whether one `driver-adopted` payload carries [`ADOPTED_HOOK_EPOCH`].
-pub(crate) fn starts_hook_epoch(payload: &Map<String, Value>) -> bool {
+pub fn starts_hook_epoch(payload: &Map<String, Value>) -> bool {
     payload.get(ADOPTED_HOOK_EPOCH).and_then(Value::as_bool) == Some(true)
 }
 
 /// Whether one `run-started` or `driver-adopted` payload carries
 /// [`OWED_UNTIL_CLOSED`].
-pub(crate) fn owed_until_closed(payload: &Map<String, Value>) -> bool {
+pub fn owed_until_closed(payload: &Map<String, Value>) -> bool {
     payload.get(OWED_UNTIL_CLOSED).and_then(Value::as_bool) == Some(true)
 }
 
@@ -1114,10 +1114,10 @@ pub(crate) fn owed_until_closed(payload: &Map<String, Value>) -> bool {
 /// Its own word, so a reader of the run can tell what the harness watched happen
 /// from what a person told it had happened. The settlement's `detail` is the
 /// evidence they gave, which is the reason the node is in that state.
-pub(crate) const SETTLED_FROM_EVIDENCE: &str = "settled-from-evidence";
+pub const SETTLED_FROM_EVIDENCE: &str = "settled-from-evidence";
 
 /// The payload of a `node-settled` event, as the projection folds it.
-pub(crate) fn settled_payload(
+pub fn settled_payload(
     status: &str,
     outcome: Option<&str>,
     detail: Option<&str>,

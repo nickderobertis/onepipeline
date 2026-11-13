@@ -23,7 +23,7 @@ use crate::views::RunPaths;
 
 /// What one valid `withdraw-note` commits, as far as the run's record decides it.
 #[derive(Debug)]
-pub(crate) enum Validated {
+pub enum Validated {
     /// A carried note not yet composed into a dispatch: the one operation that
     /// takes it back, decided by the record alone.
     Carried(Vec<Operation>),
@@ -41,7 +41,7 @@ pub(crate) enum Validated {
 /// [`Error::Refused`] naming why the note cannot be withdrawn: there is no such
 /// envelope or no note at that position; or the note was already answered,
 /// already composed into a dispatch, or already withdrawn.
-pub(crate) fn validate(
+pub fn validate(
     paths: &RunPaths,
     envelope: &str,
     index: u32,
@@ -197,7 +197,7 @@ fn refused_record(journal: &[Envelope], sent: u64, index: u32) -> Option<String>
 /// The refusal of a `withdraw-note` naming a live note whose delivery has
 /// already answered — `disposition` saying what it answered — though the record
 /// does not hold that answer yet.
-pub(crate) fn already_answered(operation: &Operation, disposition: Option<&Reached>) -> Error {
+pub fn already_answered(operation: &Operation, disposition: Option<&Reached>) -> Error {
     let Operation::NoteWithdrawn {
         node,
         envelope,
@@ -228,7 +228,7 @@ pub(crate) fn already_answered(operation: &Operation, disposition: Option<&Reach
 
 /// The refusal of a `withdraw-note` naming a live note that a turn took while
 /// the withdrawal was being decided: `why` is the conversation's own account.
-pub(crate) fn taken_first(operation: &Operation, why: &str) -> Error {
+pub fn taken_first(operation: &Operation, why: &str) -> Error {
     let Operation::NoteWithdrawn {
         node,
         envelope,
@@ -247,7 +247,7 @@ pub(crate) fn taken_first(operation: &Operation, why: &str) -> Error {
 /// The refusal of a `withdraw-note` naming a live note whose delivery a driver
 /// that has ended was making: whether a turn took it cannot be established, and
 /// the driver taking the run over answers it refused.
-pub(crate) fn undriven(operation: &Operation) -> Error {
+pub fn undriven(operation: &Operation) -> Error {
     let Operation::NoteWithdrawn {
         node,
         envelope,
@@ -268,7 +268,7 @@ pub(crate) fn undriven(operation: &Operation) -> Error {
 /// Every command position of envelope `sent` a committed withdrawal took back:
 /// what the envelope's own judgment skips once it is judged, for a note
 /// withdrawn while its envelope was held unjudged.
-pub(crate) fn withdrawn_from(paths: &RunPaths, sent: u64) -> std::collections::BTreeSet<usize> {
+pub fn withdrawn_from(paths: &RunPaths, sent: u64) -> std::collections::BTreeSet<usize> {
     readable(&crate::checkpoint::current(paths).recalled)
         .into_iter()
         .filter_map(|(_, operation)| match operation {
@@ -291,7 +291,7 @@ pub(crate) fn withdrawn_from(paths: &RunPaths, sent: u64) -> std::collections::B
 /// # Errors
 ///
 /// The channel's, where the answer cannot be written.
-pub(crate) fn answer_withdrawn(
+pub fn answer_withdrawn(
     paths: &RunPaths,
     sent: u64,
     index: u32,
@@ -315,7 +315,7 @@ pub(crate) fn answer_withdrawn(
 /// # Errors
 ///
 /// None today; the `Result` is the room the channel write beside it leaves.
-pub(crate) fn as_withdrawn(
+pub fn as_withdrawn(
     paths: &RunPaths,
     mut outcome: CommandOutcome,
 ) -> Result<CommandOutcome> {
@@ -369,7 +369,7 @@ fn refuse_withdrawn(
 /// # Errors
 ///
 /// The channel's, where an answer cannot be written.
-pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
+pub fn answer_owed(paths: &RunPaths) -> Result<()> {
     let channel = ChannelState::new(paths);
     for (by, operation) in readable(&crate::checkpoint::current(paths).recalled) {
         let Operation::NoteWithdrawn {
@@ -412,7 +412,7 @@ fn withdrawn_by_words(by: Option<u64>) -> String {
 /// # Errors
 ///
 /// The channel's, where an answer cannot be written.
-pub(crate) fn answer_each(
+pub fn answer_each(
     paths: &RunPaths,
     operations: &[Operation],
     by: Option<u64>,
@@ -453,7 +453,7 @@ fn withdrawn_by(
 
 /// What the delivery of note `index` of envelope `sent` recorded, if it recorded
 /// anything.
-pub(crate) fn delivered(
+pub fn delivered(
     records: &[(Option<u64>, Operation)],
     sent: u64,
     index: u32,
@@ -479,7 +479,7 @@ pub(crate) fn delivered(
 /// nor an answer it owes is refused for it. A withdrawal hidden in such a record
 /// is one this build cannot act on either way; the `withdraw-note` that would
 /// have to decide against it is what refuses.
-pub(crate) fn readable(journal: &[Envelope]) -> Vec<(Option<u64>, Operation)> {
+pub fn readable(journal: &[Envelope]) -> Vec<(Option<u64>, Operation)> {
     journal
         .iter()
         .filter(|envelope| {
@@ -547,7 +547,7 @@ fn committed(journal: &[Envelope]) -> Result<Vec<(Option<u64>, Operation)>> {
 }
 
 /// How a delivered note's record words its disposition, for a refusal.
-pub(crate) fn disposition(reached: &Reached) -> String {
+pub fn disposition(reached: &Reached) -> String {
     match (reached, reached.turn()) {
         (Reached::JudgedWith { completion_reason }, _) => {
             format!("`judged-with` ({completion_reason})")

@@ -16,8 +16,8 @@ use crate::ledger;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Stamp {
-    pub(crate) len: u64,
+pub struct Stamp {
+    pub len: u64,
     modified: SystemTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created: Option<SystemTime>,
@@ -47,7 +47,7 @@ impl Stamp {
         })
     }
 
-    pub(crate) fn read(path: &Path) -> Option<Self> {
+    pub fn read(path: &Path) -> Option<Self> {
         Self::of(std::fs::metadata(path).ok()?)
     }
 }
@@ -55,7 +55,7 @@ impl Stamp {
 /// Private cache format. A different version is a cache miss, never journal loss.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Receipt {
+pub struct Receipt {
     schema_version: u32,
     epoch: String,
     stamp: Stamp,
@@ -66,19 +66,19 @@ fn receipt_path(journal: &Path) -> PathBuf {
 }
 
 impl Receipt {
-    pub(crate) fn read(journal: &Path, stamp: &Stamp) -> Option<Self> {
+    pub fn read(journal: &Path, stamp: &Stamp) -> Option<Self> {
         let receipt: Self = ledger::read_json_opt(&receipt_path(journal))?;
         (receipt.schema_version == 1 && receipt.stamp == *stamp).then_some(receipt)
     }
 
-    pub(crate) fn continues(&self, previous: &Self) -> bool {
+    pub fn continues(&self, previous: &Self) -> bool {
         self.epoch == previous.epoch && self.stamp.len >= previous.stamp.len
     }
 }
 
 /// Called with the same locked descriptor that will append the next record.
 /// A missing receipt starts a fresh epoch; it never vouches for older readers.
-pub(crate) fn before(path: &Path, file: &File) -> Option<Receipt> {
+pub fn before(path: &Path, file: &File) -> Option<Receipt> {
     if path.file_name()? != "events.jsonl" {
         return None;
     }
@@ -104,7 +104,7 @@ pub(crate) fn before(path: &Path, file: &File) -> Option<Receipt> {
 }
 
 /// Failure to publish only disables the optimization: the journal already won.
-pub(crate) fn after(path: &Path, file: &File, receipt: Option<Receipt>) {
+pub fn after(path: &Path, file: &File, receipt: Option<Receipt>) {
     let Some(mut receipt) = receipt else { return };
     let Some(stamp) = file.metadata().ok().and_then(Stamp::of) else {
         return;

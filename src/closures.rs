@@ -34,7 +34,7 @@ use crate::writeback::FailureClass;
 /// commit and at least one issue, each read as an [`IssueRef`] — so nothing past it can be
 /// handed an empty or unread set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Landing {
+pub struct Landing {
     /// The node whose landing it is, or `None` outside a run.
     node: Option<String>,
     /// The commit the landing reached its base at: what one landing is deduplicated by.
@@ -47,42 +47,42 @@ impl Landing {
     /// The landing a relayed `onevcs` `merge-completed` or `change-merged` reports, labelled
     /// for the node it is about — `None` for any other event, one labelled for no node, one
     /// whose commit cannot be rendered, and one whose `closes` is missing or `[]`.
-    pub(crate) fn of_event(envelope: &Envelope) -> Option<Self> {
+    pub fn of_event(envelope: &Envelope) -> Option<Self> {
         let node = envelope.labels.node.clone()?;
         Self::of(&crossed(envelope)?, Some(node))
     }
 
     /// The same, for a record of a node's own session stream, which the caller names the node
     /// of.
-    pub(crate) fn of_unlabelled(envelope: &Envelope) -> Option<Self> {
+    pub fn of_unlabelled(envelope: &Envelope) -> Option<Self> {
         Self::of(&crossed(envelope)?, None)
     }
 
     /// The landing one of `onevcs`'s own records reports, for no node: what a landing verb's
     /// operation recorded, or what a node's session stream holds before the caller names the
     /// node it is.
-    pub(crate) fn of_operation(envelope: &onevcs::Envelope) -> Option<Self> {
+    pub fn of_operation(envelope: &onevcs::Envelope) -> Option<Self> {
         Self::of(envelope, None)
     }
 
-    pub(crate) fn of_node(self, node: String) -> Self {
+    pub fn of_node(self, node: String) -> Self {
         Self {
             node: Some(node),
             ..self
         }
     }
 
-    pub(crate) fn commit(&self) -> &str {
+    pub fn commit(&self) -> &str {
         &self.commit
     }
 
     /// How many issues the landing closes, which is what a call's deadline is sized by.
-    pub(crate) fn issue_count(&self) -> usize {
+    pub fn issue_count(&self) -> usize {
         self.issues.len()
     }
 
     /// The issues, each spelled `owner/name#N`.
-    pub(crate) fn closes(&self) -> Vec<String> {
+    pub fn closes(&self) -> Vec<String> {
         self.issues.iter().map(ToString::to_string).collect()
     }
 
@@ -138,7 +138,7 @@ fn crossed(envelope: &Envelope) -> Option<onevcs::Envelope> {
 
 /// What one closure call came to.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// No configuration declares a source, so nothing was asked.
     Unconfigured,
     /// The call finished: projected, or failed for good. This is the record.
@@ -157,7 +157,7 @@ pub(crate) enum Answer {
 /// [`Answer`].
 ///
 /// [`Engine::complete_issues`]: onetaskgraph_core::Engine::complete_issues
-pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> Answer {
+pub fn complete(store: &Store, landing: &Landing, within: Duration) -> Answer {
     let failed = |class, reason: String| LandingClosures {
         outcome: ClosureOutcome::Failed,
         class: Some(class),
@@ -286,7 +286,7 @@ fn of_completed(landing: &Landing, completed: &IssuesCompleted) -> Answer {
 /// Whether a record carries a ticket an updated item delivers that the store could not keep in
 /// step: the one failure a retry cannot answer, since `complete_issues` re-evaluates delivered
 /// tickets only as it writes their deliverer, and a retry reads that item back `unchanged`.
-pub(crate) fn carries_delivered_failure(record: &LandingClosures) -> bool {
+pub fn carries_delivered_failure(record: &LandingClosures) -> bool {
     record.items.iter().any(|item| {
         item.get("delivered")
             .and_then(Value::as_array)
@@ -301,7 +301,7 @@ pub(crate) fn carries_delivered_failure(record: &LandingClosures) -> bool {
 /// The record a retried closure ends in: what the last call answered — unless that finished
 /// with nothing failed after an earlier attempt carried a delivered ticket's failure, which the
 /// last call gave no word on. That earlier attempt is kept, failed, its items verbatim.
-pub(crate) fn kept_after_retry(
+pub fn kept_after_retry(
     carried: Option<LandingClosures>,
     finished: LandingClosures,
 ) -> LandingClosures {
@@ -326,7 +326,7 @@ fn record(landing: &Landing) -> LandingClosures {
 }
 
 /// What a record says, as the lines a landing verb prints on standard error.
-pub(crate) fn said(record: &LandingClosures) -> String {
+pub fn said(record: &LandingClosures) -> String {
     let mut lines = vec![format!(
         "onepipeline: the landing at {} closes {}; the store answered:",
         record.commit,
@@ -378,7 +378,7 @@ pub(crate) fn said(record: &LandingClosures) -> String {
 /// landing event on a settled node's session stream) — which reads the session stream of every
 /// node with a recorded landing. A landing a `landing-closures` record already names is never
 /// handed over again, so stopping and adopting a run asks the store nothing new.
-pub(crate) struct Watch {
+pub struct Watch {
     /// How far into the journal this driver has read, once its first pass has taken
     /// what the run's fold already holds: `None` before it.
     read_to: Option<u64>,
@@ -401,7 +401,7 @@ impl Default for Watch {
 
 impl Watch {
     /// A driver's watch, owing a catch-up on its first pass.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             read_to: None,
             recorded: BTreeSet::new(),
@@ -413,7 +413,7 @@ impl Watch {
 
     /// The settled `nodes` whose session streams carry a landing the run did not watch happen:
     /// read each of them on the next pass.
-    pub(crate) fn met_landings(&mut self, nodes: BTreeSet<String>) {
+    pub fn met_landings(&mut self, nodes: BTreeSet<String>) {
         self.met.extend(nodes);
     }
 
@@ -426,7 +426,7 @@ impl Watch {
     /// `folded_through` is the byte that fold reached, which the journal is read past. A
     /// `node-landed` in that history needs nothing of its own, since a first pass catches
     /// up anyway.
-    pub(crate) fn pass(
+    pub fn pass(
         &mut self,
         paths: &crate::ledger::RunPaths,
         state: &crate::projection::RunState,

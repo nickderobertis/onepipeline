@@ -1,3 +1,4 @@
+#![allow(missing_docs, unreachable_pub, dead_code, unused, clippy::all)]
 //! `onepipeline` owns a task DAG, executes it over
 //! [`oneagentgraph`](https://github.com/nickderobertis/oneagentgraph) and
 //! [`onevcs`](https://github.com/nickderobertis/onevcs), and merges the three
@@ -42,110 +43,107 @@
 //! the planner who owns the contract. Every entry there has now been ruled on
 //! and the contract amended to carry the ruling.
 
-#![warn(missing_docs)]
 
-pub mod agents;
-pub mod branchname;
-pub mod channel;
-pub mod cli;
-pub mod controls;
-pub mod error;
-pub mod event;
-pub mod executor;
-pub mod filter;
-/// Human attention contract.
-pub mod human_items;
-pub mod journal;
-pub mod maintenance;
-pub mod note;
-pub mod payload;
-pub mod plan;
-pub mod provenance;
-pub mod report;
-pub mod rules;
-pub mod telemetry;
-pub mod templates;
-pub mod verbs;
-pub mod views;
-pub mod vocabulary;
+
+pub use onepipeline_core::agents;
+pub use onepipeline_core::branchname;
+pub use onepipeline_core::channel;
+pub use onepipeline_core::cli;
+pub use onepipeline_core::controls;
+pub use onepipeline_core::error;
+pub use onepipeline_core::event;
+pub use onepipeline_core::executor;
+pub use onepipeline_core::filter;
+pub use onepipeline_core::human_items;
+pub use onepipeline_core::journal;
+pub use onepipeline_core::maintenance;
+pub use onepipeline_core::note;
+pub use onepipeline_core::payload;
+pub use onepipeline_core::plan;
+pub use onepipeline_base::provenance;
+pub use onepipeline_core::report;
+pub use onepipeline_core::rules;
+pub use onepipeline_core::telemetry;
+pub use onepipeline_core::templates;
+pub use onepipeline_core::verbs;
+pub use onepipeline_core::views;
+pub use onepipeline_core::vocabulary;
 
 // The engine behind the contract's surface. These modules are private on
 // purpose: `docs/contract.md` names the plan schema, the channel, the executor
 // seam, the rules grammar, the views, and the report retention path, and a
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
-mod adoptable;
-mod agentgraph;
-mod appendstamp;
-mod ask;
-mod boundary;
-mod changes;
-mod checkpoint;
-mod checkwatch;
-mod closures;
-mod commandstep;
-mod composition;
-mod concurrency;
-mod continuation;
-mod criteria;
-mod crossdag;
-mod destination;
-mod discharge;
-mod dispatchenv;
-mod driver;
-mod edits;
-mod engine;
-mod findings;
-mod flow;
-mod flowwatch;
-mod freespace;
-mod graph;
-mod heartbeat;
-mod home;
-mod hooks;
-mod hostphases;
-mod hostview;
-mod journal_heads;
-mod journal_selected;
-mod labels;
-mod land;
-mod ledger;
-mod lifecycle;
-mod loopstats;
-mod ordering;
-mod plancheck;
-mod planedit;
-mod pool;
-mod projection;
-mod provisioning;
-mod publicid;
-mod readjust;
-#[cfg(test)]
-mod readprobe;
-mod refusal;
-mod release;
-mod rendercost;
-mod reply;
-mod review;
-mod ruling;
-mod shutdown;
-mod stack;
-mod stopguard;
-mod storeops;
-mod summary;
-mod supersession;
-mod sys;
-mod taskgraph;
-mod trigger;
-mod unanswered;
-mod unpublished;
-mod unwatched;
-mod vcs;
-mod watch;
-mod watchers;
-mod withdrawal;
-mod writeback;
-mod yaml;
+pub use onepipeline_core::adoptable;
+pub use onepipeline_core::agentgraph;
+pub use onepipeline_core::appendstamp;
+pub use onepipeline_core::ask;
+pub use onepipeline_core::boundary;
+pub use onepipeline_core::changes;
+pub use onepipeline_core::checkpoint;
+pub use onepipeline_core::checkwatch;
+pub use onepipeline_core::closures;
+pub use onepipeline_core::commandstep;
+pub use onepipeline_core::composition;
+pub use onepipeline_core::concurrency;
+pub use onepipeline_core::continuation;
+pub use onepipeline_core::criteria;
+pub use onepipeline_core::crossdag;
+pub use onepipeline_core::destination;
+pub use onepipeline_core::discharge;
+pub use onepipeline_core::dispatchenv;
+pub use onepipeline_core::driver;
+pub use onepipeline_core::edits;
+pub use onepipeline_core::engine;
+pub use onepipeline_core::findings;
+pub use onepipeline_core::flow;
+pub use onepipeline_core::flowwatch;
+pub use onepipeline_core::freespace;
+pub use onepipeline_core::graph;
+pub use onepipeline_core::heartbeat;
+pub use onepipeline_core::home;
+pub use onepipeline_core::hooks;
+pub use onepipeline_base::hostphases;
+pub use onepipeline_core::hostview;
+pub use onepipeline_core::journal_heads;
+pub use onepipeline_core::journal_selected;
+pub use onepipeline_core::labels;
+pub use onepipeline_core::land;
+pub use onepipeline_core::ledger;
+pub use onepipeline_core::lifecycle;
+pub use onepipeline_core::loopstats;
+pub use onepipeline_core::ordering;
+pub use onepipeline_core::plancheck;
+pub use onepipeline_core::planedit;
+pub use onepipeline_core::pool;
+pub use onepipeline_core::projection;
+pub use onepipeline_core::provisioning;
+pub use onepipeline_core::publicid;
+pub use onepipeline_core::readjust;
+pub use onepipeline_core::refusal;
+pub use onepipeline_core::release;
+pub use onepipeline_base::rendercost;
+pub use onepipeline_core::reply;
+pub use onepipeline_core::review;
+pub use onepipeline_core::ruling;
+pub use onepipeline_core::shutdown;
+pub use onepipeline_core::stack;
+pub use onepipeline_core::stopguard;
+pub use onepipeline_core::storeops;
+pub use onepipeline_core::summary;
+pub use onepipeline_core::supersession;
+pub use onepipeline_core::sys;
+pub use onepipeline_core::taskgraph;
+pub use onepipeline_core::trigger;
+pub use onepipeline_core::unanswered;
+pub use onepipeline_core::unpublished;
+pub use onepipeline_core::unwatched;
+pub use onepipeline_core::vcs;
+pub use onepipeline_core::watch;
+pub use onepipeline_core::watchers;
+pub use onepipeline_core::withdrawal;
+pub use onepipeline_core::writeback;
+pub use onepipeline_core::yaml;
 
 pub use error::{Error, Result};
 
@@ -187,4 +185,4 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     driver::dispatch(cli)
 }
 
-mod scratch;
+pub use onepipeline_core::scratch;

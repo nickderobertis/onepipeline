@@ -201,7 +201,7 @@ impl<'de> Deserialize<'de> for Reason {
 }
 
 /// Read one project, run every registered check over it, and report.
-pub(crate) fn check(args: &PlanCheckArgs) -> Result<i32> {
+pub fn check(args: &PlanCheckArgs) -> Result<i32> {
     match load_and_check(args) {
         Ok(answered) => Ok(report(args, &answered)),
         // The project could not be read at all — no binary, a store that
@@ -812,7 +812,7 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
 /// One registered check: the program it is spawned as and its arguments, with no shell
 /// between them, and how its refusals name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Registered {
+pub struct Registered {
     /// What is spawned.
     argv: crate::filter::Argv,
     /// The `source` its refusals carry and the `check` its failures name.
@@ -829,7 +829,7 @@ impl Registered {
     /// # Errors
     ///
     /// A path that is blank, which names no program.
-    pub(crate) fn path(path: &Path) -> Result<Self> {
+    pub fn path(path: &Path) -> Result<Self> {
         Ok(Self {
             argv: crate::filter::Argv::new(vec![resolve(path).display().to_string()])?,
             named: path.display().to_string(),
@@ -838,7 +838,7 @@ impl Registered {
 
     /// A check a launch config's `checks` registers: its argv run as the document wrote
     /// it, from the launch directory, and named by its words joined with one space.
-    pub(crate) fn argv(argv: &crate::filter::Argv) -> Self {
+    pub fn argv(argv: &crate::filter::Argv) -> Self {
         Self {
             argv: argv.clone(),
             named: argv.spelled(),
@@ -859,7 +859,7 @@ impl Registered {
 /// # Errors
 ///
 /// The refusal above, before anything of a run exists.
-pub(crate) fn launch(
+pub fn launch(
     read: &crate::taskgraph::Read,
     project: &str,
     checks: &[Registered],

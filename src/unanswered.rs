@@ -49,7 +49,7 @@ use crate::taskgraph::{Cause, QualifiedId, Reread, SourceCause, Store, Unanswere
 pub const WAIT_SURFACE_KIND: &str = "source-wait";
 
 /// The word a `node-held` entry carries for this hold.
-pub(crate) const HOLD_KIND: &str = "source";
+pub const HOLD_KIND: &str = "source";
 
 /// The environment variable setting the interval a source's backoff starts at.
 pub const POLL_ENV: &str = "ONEPIPELINE_SOURCE_POLL_SECONDS";
@@ -62,7 +62,7 @@ pub const DEFAULT_POLL_SECONDS: u64 = 60;
 
 /// How many intervals a source's backoff grows to before it stops doubling: half an hour at
 /// the default interval.
-pub(crate) const BACKOFF_CAP_INTERVALS: u64 = 30;
+pub const BACKOFF_CAP_INTERVALS: u64 = 30;
 
 /// How long after a provider's reset its source is read again, so the read lands after the
 /// reset rather than on it.
@@ -78,7 +78,7 @@ const TICK: Duration = Duration::from_millis(200);
 /// Never neither: a hold names what holds the node, so the one constructor, [`new`](Self::new),
 /// answers no hold at all for a read that asked every source and found nothing missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceHold {
+pub struct SourceHold {
     /// The sources not asked, in name order; empty only where `missing` is not.
     unanswered: Vec<Unanswered>,
     /// The node ids the read resolved a prerequisite to that the node does not depend on in
@@ -89,20 +89,20 @@ pub(crate) struct SourceHold {
 impl SourceHold {
     /// The hold these sources and prerequisites stand for, or `None` where both are empty
     /// and nothing holds the node.
-    pub(crate) fn new(unanswered: Vec<Unanswered>, missing: Vec<String>) -> Option<Self> {
+    pub fn new(unanswered: Vec<Unanswered>, missing: Vec<String>) -> Option<Self> {
         (!unanswered.is_empty() || !missing.is_empty()).then_some(Self {
             unanswered,
             missing,
         })
     }
 
-    pub(crate) fn unanswered(&self) -> &[Unanswered] {
+    pub fn unanswered(&self) -> &[Unanswered] {
         &self.unanswered
     }
 
     /// The `node-held` entry: `missing` only where the read found one, and on each source
     /// its `cause` and, only where the provider gave a reset, `retry_at_ms`.
-    pub(crate) fn payload(&self) -> Value {
+    pub fn payload(&self) -> Value {
         let mut entry = json!({
             "kind": HOLD_KIND,
             "unanswered": self
@@ -129,7 +129,7 @@ impl SourceHold {
     /// One `node-held` entry read back, or `None` for an entry that is not this hold or that
     /// this build cannot read whole — a `cause` it has no word for among them. An entry a
     /// build before `cause` wrote carries neither field, and reads as it was written.
-    pub(crate) fn of_payload(entry: &Value) -> Option<Self> {
+    pub fn of_payload(entry: &Value) -> Option<Self> {
         if entry.get("kind")?.as_str()? != HOLD_KIND {
             return None;
         }
@@ -190,13 +190,13 @@ impl SourceHold {
 
     /// What holds the node, on one line, as a view says it: each source, why it could not
     /// answer, and when it is read again — and that nothing times the hold out.
-    pub(crate) fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         self.describe_scheduled(None)
     }
 
     /// [`describe`](Self::describe), saying of a backing-off source the next read `schedule`
     /// — the driver's [`SCHEDULE_FILE`] — gives it, where it gives one.
-    pub(crate) fn describe_scheduled(&self, schedule: Option<&BTreeMap<String, Due>>) -> String {
+    pub fn describe_scheduled(&self, schedule: Option<&BTreeMap<String, Due>>) -> String {
         let said = self.said(&|unasked| Next::of(schedule, unasked));
         if self
             .unanswered
@@ -239,7 +239,7 @@ impl SourceHold {
     }
 
     /// The sources it names, as a list a person reads.
-    pub(crate) fn sources(&self) -> String {
+    pub fn sources(&self) -> String {
         quoted(
             &self
                 .unanswered
@@ -354,7 +354,7 @@ fn utc(at_ms: u64) -> String {
 
 /// The holds a launch's read of `plan` stands for: each node of it whose dependency read
 /// could not ask a source, held for those sources.
-pub(crate) fn launched(
+pub fn launched(
     plan: &crate::plan::Plan,
     unanswered: &BTreeMap<String, Vec<Unanswered>>,
 ) -> BTreeMap<String, SourceHold> {
@@ -373,7 +373,7 @@ pub(crate) fn launched(
 /// What a launch, and a `plan check`, say on stderr about the nodes `held` holds: one line
 /// per source, naming it, why it did not answer, the nodes it holds, and when it is read
 /// again. `None` where nothing is held.
-pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
+pub fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
     let mut by_source: BTreeMap<String, (Unanswered, Vec<String>)> = BTreeMap::new();
     for (node, hold) in held {
         for unasked in hold.unanswered() {
@@ -424,7 +424,7 @@ pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
 /// What holds a node a re-read of its edges answered, or `None` where nothing does: every
 /// source was asked, and every prerequisite the read found is one of `deps`, the node's
 /// dependencies in the run's graph.
-pub(crate) fn hold_after(deps: &[String], reread: &Reread) -> Option<SourceHold> {
+pub fn hold_after(deps: &[String], reread: &Reread) -> Option<SourceHold> {
     let mut missing: Vec<String> = reread
         .deps
         .iter()
@@ -440,7 +440,7 @@ pub(crate) fn hold_after(deps: &[String], reread: &Reread) -> Option<SourceHold>
 /// [`SCHEDULE_FILE`], by these names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Due {
+pub struct Due {
     /// The epoch milliseconds it is next read at.
     #[serde(rename = "next_read_ms")]
     at_ms: u64,
@@ -455,7 +455,7 @@ pub(crate) struct Due {
 /// The file, in a run's directory, the driver keeps each held source's schedule in: what a
 /// view in another process says a source's next read by, since the journal records a hold's
 /// reset but not its backoff. Telemetry beside the record, not a field of it (entry 131).
-pub(crate) const SCHEDULE_FILE: &str = "source-schedule.json";
+pub const SCHEDULE_FILE: &str = "source-schedule.json";
 
 /// The schema [`SCHEDULE_FILE`] is written at; a file in any other is not read.
 const SCHEDULE_SCHEMA_VERSION: u32 = 1;
@@ -470,7 +470,7 @@ struct ScheduleFile {
 
 /// Each held source's schedule the driver of the run in `run_dir` last wrote, or `None` for a
 /// run no driver of this build has scheduled, and for a file that does not read whole.
-pub(crate) fn schedule_of(run_dir: &std::path::Path) -> Option<BTreeMap<String, Due>> {
+pub fn schedule_of(run_dir: &std::path::Path) -> Option<BTreeMap<String, Due>> {
     let text = std::fs::read_to_string(run_dir.join(SCHEDULE_FILE)).ok()?;
     let file: ScheduleFile = serde_json::from_str(&text).ok()?;
     (file.schema_version == SCHEDULE_SCHEMA_VERSION).then_some(file.sources)
@@ -508,7 +508,7 @@ impl Due {
 
 /// The wait, in seconds, after `backoffs` re-reads in a row a source did not answer: the
 /// interval doubled that many times, and never more than [`BACKOFF_CAP_INTERVALS`] of it.
-pub(crate) fn backoff(backoffs: u32, poll: u64) -> u64 {
+pub fn backoff(backoffs: u32, poll: u64) -> u64 {
     let cap = poll.saturating_mul(BACKOFF_CAP_INTERVALS);
     1u64.checked_shl(backoffs)
         .map_or(cap, |doubled| poll.saturating_mul(doubled))
@@ -544,7 +544,7 @@ struct Reading {
 /// One value for the whole run, threaded through the pass the way the workspace holds are:
 /// the nodes held and why, when each source is next read, the re-read under way, and when
 /// each held node's wait was last surfaced.
-pub(crate) struct SourceHolds {
+pub struct SourceHolds {
     held: BTreeMap<String, SourceHold>,
     /// The store the launch read the plan through, and the project: `None` only for a launch
     /// record naming no qualified project, which nothing re-reads.
@@ -571,7 +571,7 @@ impl SourceHolds {
     /// dispatch every node the launch held. A source whose hold records a reset is read
     /// again a second after it, whichever driver journalled it; any other one interval from
     /// now, its backoff doubling from the re-reads after that one.
-    pub(crate) fn of_run(
+    pub fn of_run(
         holds: &BTreeMap<String, Vec<Value>>,
         dir: &std::path::Path,
         project: &str,
@@ -617,7 +617,7 @@ impl SourceHolds {
     }
 
     /// These holds, keeping their schedule in `run_dir`'s [`SCHEDULE_FILE`] from now on.
-    pub(crate) fn recorded_in(mut self, run_dir: &std::path::Path) -> Self {
+    pub fn recorded_in(mut self, run_dir: &std::path::Path) -> Self {
         self.recorded = Some((run_dir.to_path_buf(), None));
         self.record();
         self
@@ -653,7 +653,7 @@ impl SourceHolds {
 
     /// Forget every node no longer waiting to start: a node an edit dropped, and one that
     /// started or settled, holds nothing.
-    pub(crate) fn retain(&mut self, waiting: impl Fn(&str) -> bool) {
+    pub fn retain(&mut self, waiting: impl Fn(&str) -> bool) {
         self.held.retain(|node, _| waiting(node));
         let named: BTreeSet<String> = self
             .held
@@ -669,7 +669,7 @@ impl SourceHolds {
     ///
     /// `deps` is a node's dependencies in the run's graph as they stand now, so an edit that
     /// gave a held node the prerequisite a read found is what the next read clears it on.
-    pub(crate) fn take_up(&mut self, deps: impl Fn(&str) -> Option<Vec<String>>) -> bool {
+    pub fn take_up(&mut self, deps: impl Fn(&str) -> Option<Vec<String>>) -> bool {
         let Some(reading) = &self.reading else {
             return false;
         };
@@ -871,7 +871,7 @@ impl SourceHolds {
     ///
     /// `nodes` is the run's graph: a held node's prerequisites are resolved against every
     /// node of it.
-    pub(crate) fn read_again(&mut self, nodes: impl FnOnce() -> Vec<Node>) {
+    pub fn read_again(&mut self, nodes: impl FnOnce() -> Vec<Node>) {
         if self.held.is_empty() || self.reading.is_some() {
             return;
         }
@@ -907,7 +907,7 @@ impl SourceHolds {
         });
     }
 
-    pub(crate) fn held(&self) -> &BTreeMap<String, SourceHold> {
+    pub fn held(&self) -> &BTreeMap<String, SourceHold> {
         &self.held
     }
 
@@ -916,7 +916,7 @@ impl SourceHolds {
     /// `Duration::MAX` where nothing is held, so a run whose plan was read whole waits on
     /// the channel alone — and where there is no store to read, which only a launch record
     /// naming no qualified project leaves.
-    pub(crate) fn next_read(&self) -> Duration {
+    pub fn next_read(&self) -> Duration {
         if self.held.is_empty() || self.store.is_none() {
             return Duration::MAX;
         }
@@ -953,7 +953,7 @@ impl SourceHolds {
     /// [`crate::release::Resurfacing`]'s doubling interval. A report rather than a decision:
     /// what clears the hold is the source answering, which nobody answers a surface to bring
     /// about.
-    pub(crate) fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
+    pub fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
         for (node, hold) in &self.held {
             let surface = wait_surface(node, hold, &|unasked| self.wait(unasked));
             if !self.surfaced.due(paths, node, &surface.message) {

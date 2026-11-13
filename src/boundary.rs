@@ -38,7 +38,7 @@ use crate::refusal::Refusal;
 /// Which side of the boundary a node's work is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Clearance {
+pub enum Clearance {
     /// Nothing about it is private.
     Public,
     /// Something about it is: its task, or a repository it names.
@@ -47,12 +47,12 @@ pub(crate) enum Clearance {
 
 /// What a repository spelling resolves to, as far as the boundary is concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Repository {
+pub struct Repository {
     /// Which side its effective visibility puts it on: only a verified public repository
     /// is public.
-    pub(crate) clearance: Clearance,
+    pub clearance: Clearance,
     /// What a term scope names it by.
-    pub(crate) identity: Identity,
+    pub identity: Identity,
 }
 
 /// How a term scope names a repository.
@@ -62,7 +62,7 @@ pub(crate) struct Repository {
 // names neither, because the name may be private. A newtype here could hold no invariant
 // the sibling does not check at the one place the scope is used.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Identity {
+pub enum Identity {
     /// The `onevcs` identity key the host resolved it to.
     Registered(String),
     /// The spelling a node named, which the host could not resolve: a scoped check names
@@ -84,7 +84,7 @@ impl Identity {
 /// Where the boundary learns about repositories and terms.
 ///
 /// The engine asks `onevcs` ([`Onevcs`]); a unit test answers from a table.
-pub(crate) trait Oracle {
+pub trait Oracle {
     /// What `repo` is.
     fn repository(&mut self, repo: &str) -> Repository;
 
@@ -95,7 +95,7 @@ pub(crate) trait Oracle {
 /// The linked `onevcs`: visibility refreshed at the boundary, identity from the
 /// registry, and the one term check every public write is put through.
 #[derive(Debug, Default)]
-pub(crate) struct Onevcs {
+pub struct Onevcs {
     known: BTreeMap<String, Repository>,
 }
 
@@ -179,7 +179,7 @@ fn probed_with(
 }
 
 /// Every repository a node names: its `repo`, then whatever else its record names.
-pub(crate) fn repositories_of(node: &Node) -> Vec<&str> {
+pub fn repositories_of(node: &Node) -> Vec<&str> {
     let mut named: Vec<&str> = node.repo.as_deref().into_iter().collect();
     for repository in node
         .task_record
@@ -200,19 +200,19 @@ pub(crate) fn repositories_of(node: &Node) -> Vec<&str> {
 // why is a string; a newtype on these alone would disagree with every map it is read
 // beside and convert at each read, which `src/AGENTS.md` names as drift.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Resolved {
+pub struct Resolved {
     /// Every node's clearance, by id.
-    pub(crate) clearances: BTreeMap<String, Clearance>,
+    pub clearances: BTreeMap<String, Clearance>,
     /// The nodes that name a repository and are public: somewhere public work lands.
-    pub(crate) public_destinations: BTreeSet<String>,
+    pub public_destinations: BTreeSet<String>,
     /// The run's term scope: the identity of every private repository a node names.
-    pub(crate) scope: Vec<String>,
+    pub scope: Vec<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Resolved {
     /// Whether the plan holds both a private node and a public destination.
-    pub(crate) fn mixed(&self) -> bool {
+    pub fn mixed(&self) -> bool {
         !self.public_destinations.is_empty()
             && self
                 .clearances
@@ -221,7 +221,7 @@ impl Resolved {
     }
 
     /// One node's clearance; a node this resolution never saw is private.
-    pub(crate) fn clearance(&self, node: &str) -> Clearance {
+    pub fn clearance(&self, node: &str) -> Clearance {
         self.clearances
             .get(node)
             .copied()
@@ -229,13 +229,13 @@ impl Resolved {
     }
 
     /// The term scope as `onevcs` takes it.
-    pub(crate) fn term_scope(&self) -> onevcs::TermScope {
+    pub fn term_scope(&self) -> onevcs::TermScope {
         onevcs::TermScope::Identities(self.scope.clone())
     }
 }
 
 /// Resolve every node's clearance and the run's term scope.
-pub(crate) fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
+pub fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
     let edges: BTreeSet<(&str, &str)> = plan
         .export_edges
         .iter()
@@ -318,7 +318,7 @@ pub(crate) fn resolve(plan: &Plan, oracle: &mut dyn Oracle) -> Resolved {
 
 /// The plan a run stands at now: its live graph, written with the launch plan's fields
 /// and its export edges following every retry.
-pub(crate) fn plan_now(state: &crate::projection::RunState) -> Plan {
+pub fn plan_now(state: &crate::projection::RunState) -> Plan {
     let launched = state.plan.clone().unwrap_or_else(|| Plan {
         schema_version: crate::plan::PLAN_SCHEMA_VERSION,
         goal: None,
@@ -382,7 +382,7 @@ const RESOLVED_KEPT: usize = 8;
 // a visibility its rules file states, and a declared visibility is never asked of the host.
 // Recomputation on a changed shape is
 // `publication_boundary::a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_store_writes`.
-pub(crate) fn of_run(plan: &Plan) -> Resolved {
+pub fn of_run(plan: &Plan) -> Resolved {
     let key = shape(plan);
     if let Ok(cached) = RESOLVED.lock() {
         if let Some((_, resolved)) = cached.iter().find(|(shape, _)| *shape == key) {
@@ -404,7 +404,7 @@ pub(crate) fn of_run(plan: &Plan) -> Resolved {
 /// verdict is read through the store's own command adapter, so writes made by the engine
 /// and the store's command line are refused in the same words.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct WritePolicy;
+pub struct WritePolicy;
 
 impl WritePolicy {
     /// The verdict `input` earns, as the store reads one.
@@ -541,7 +541,7 @@ impl onetaskgraph_core::boundary::WritePolicy for WritePolicy {
 }
 
 /// Whether `dep` → `node` is an export edge of the run as it stands now.
-pub(crate) fn is_export_edge(state: &crate::projection::RunState, dep: &str, node: &str) -> bool {
+pub fn is_export_edge(state: &crate::projection::RunState, dep: &str, node: &str) -> bool {
     state.plan.as_ref().is_some_and(|plan| {
         edges_now(&plan.export_edges, &state.superseded)
             .iter()
@@ -554,10 +554,10 @@ pub(crate) fn is_export_edge(state: &crate::projection::RunState, dep: &str, nod
 /// Outside a mixed plan it is the run's term scope and nothing else, so a
 /// single-visibility plan's dispatch is composed exactly as it always was.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Dispatching {
+pub struct Dispatching {
     /// The run's term scope, which every check this dispatch's closeout asks derives
     /// its terms from.
-    pub(crate) term_scope: onevcs::TermScope,
+    pub term_scope: onevcs::TermScope,
     /// Its side of the boundary, in a mixed plan, and nothing in any other.
     side: Option<Side>,
 }
@@ -597,7 +597,7 @@ enum Side {
 
 impl Dispatching {
     /// The section appended to the task, in a mixed plan.
-    pub(crate) fn section(&self) -> Option<&str> {
+    pub fn section(&self) -> Option<&str> {
         self.side.as_ref().map(|side| match side {
             Side::Private { section }
             | Side::Producer { section, .. }
@@ -606,7 +606,7 @@ impl Dispatching {
     }
 
     /// The neutral branch name proposed for a session this node cuts, where it has one.
-    pub(crate) fn branch_name(&self) -> Option<&str> {
+    pub fn branch_name(&self) -> Option<&str> {
         match self.side.as_ref()? {
             Side::Private { .. } => None,
             Side::Producer { branch_name, .. } => Some(branch_name),
@@ -615,7 +615,7 @@ impl Dispatching {
     }
 
     /// The export this consumer's session starts from.
-    pub(crate) fn export(&self) -> Option<&Export> {
+    pub fn export(&self) -> Option<&Export> {
         match self.side.as_ref()? {
             Side::Public { export, .. } => export.as_deref(),
             Side::Private { .. } | Side::Producer { .. } => None,
@@ -624,7 +624,7 @@ impl Dispatching {
 
     /// Whether this node is public in a mixed plan, so what is rendered for it names
     /// nothing of the run beyond the node itself.
-    pub(crate) fn is_public(&self) -> bool {
+    pub fn is_public(&self) -> bool {
         matches!(self.side, Some(Side::Public { .. }))
     }
 }
@@ -670,33 +670,33 @@ struct Context {
 // export exists to keep out of public output. A newtype here would refuse on
 // construction, and would have to say what it refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Export {
+pub struct Export {
     /// The producer's node id, which only the private record names.
-    pub(crate) producer: String,
+    pub producer: String,
     /// The consumer's node id as the plan launched it — its lineage root, which a retry's
     /// replacement keeps — so a record is one edge's whoever is dispatched for it.
-    pub(crate) consumer: String,
+    pub consumer: String,
     /// The producer's repository.
-    pub(crate) from: String,
+    pub from: String,
     /// The producer's kept branch.
-    pub(crate) branch: String,
+    pub branch: String,
     /// The commit that branch was kept at, where the settlement recorded one.
-    pub(crate) head: Option<String>,
+    pub head: Option<String>,
     /// The directory exported.
-    pub(crate) source_directory: String,
+    pub source_directory: String,
     /// The consumer's repository.
-    pub(crate) to: String,
+    pub to: String,
     /// Where the directory lands there.
-    pub(crate) target_directory: String,
+    pub target_directory: String,
     /// The consumer's position in the plan, from one, which its branch is named by.
-    pub(crate) ordinal: usize,
+    pub ordinal: usize,
     /// Opaque content accepted by the launch plan, retained only privately.
-    pub(crate) accepted_opaque: Vec<String>,
+    pub accepted_opaque: Vec<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The heading of the boundary section a mixed plan's task carries.
-pub(crate) const SECTION_HEADING: &str = "## Repository boundary";
+pub const SECTION_HEADING: &str = "## Repository boundary";
 
 /// A fresh opaque id: twelve hex characters that say nothing about the run, the plan or
 /// the node they name a branch for.
@@ -731,7 +731,7 @@ fn opaque() -> String {
 /// The section's words never depend on the kept branch; only whether the dispatch can start
 /// does, which is [`dispatching`]'s to refuse. So the plan-edit hook is shown the section the
 /// node's dispatch is told even while the producer it waits on is still running.
-pub(crate) fn section(resolved: &Resolved, plan: &Plan, node: &Node) -> Option<String> {
+pub fn section(resolved: &Resolved, plan: &Plan, node: &Node) -> Option<String> {
     resolved.mixed().then(|| {
         told(
             resolved.clearance(&node.id),
@@ -807,7 +807,7 @@ fn told(
 /// Refused — the node settles as an infrastructure failure, before anything is
 /// dispatched — where it consumes an export whose producer recorded no kept branch: its
 /// session starts from the export or not at all, and never from the default base.
-pub(crate) fn dispatching(
+pub fn dispatching(
     resolved: &Resolved,
     plan: &Plan,
     node: &Node,
@@ -890,7 +890,7 @@ pub(crate) fn dispatching(
 }
 
 /// A task with the boundary section appended, where there is one.
-pub(crate) fn with_section(task: String, section: Option<&str>) -> String {
+pub fn with_section(task: String, section: Option<&str>) -> String {
     match section {
         Some(section) => format!("{}\n\n{section}", task.trim_end()),
         None => task,
@@ -985,7 +985,7 @@ fn recorded(paths: &crate::ledger::RunPaths) -> Result<Vec<Recorded>, String> {
 
 /// Whether `branch` is an export of `export`'s own edge this run recorded — the one
 /// branch that edge's consumer may be pinned to.
-pub(crate) fn pinned_to_its_export(
+pub fn pinned_to_its_export(
     paths: &crate::ledger::RunPaths,
     export: &Export,
     branch: &str,
@@ -1002,7 +1002,7 @@ pub(crate) fn pinned_to_its_export(
 ///
 /// The refusal is the export's own neutral sentence; what it found is kept privately by
 /// `onevcs`.
-pub(crate) fn ensure_export(
+pub fn ensure_export(
     paths: &crate::ledger::RunPaths,
     export: &Export,
     term_scope: &onevcs::TermScope,
@@ -1104,7 +1104,7 @@ pub(crate) fn ensure_export(
 
 /// What the boundary decided about one envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Judged {
+pub enum Judged {
     /// Nothing in it reaches a public node carrying a private term.
     Pass,
     /// Something in it would, and it must not be appended or delivered.
@@ -1118,7 +1118,7 @@ impl Judged {
     /// hook protocol's `0` for a pass — the document printed back, a keep — and `1` for
     /// a refusal, and anything else — here `2` — for a check that could not decide, which
     /// the bus never sends.
-    pub(crate) fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> i32 {
         match self {
             Self::Pass => 0,
             Self::Refuse(_) => 1,
@@ -1127,7 +1127,7 @@ impl Judged {
     }
 
     /// The neutral sentence it is reported in, where it is not a pass.
-    pub(crate) fn reason(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Pass => None,
             Self::Refuse(reason) | Self::Unavailable(reason) => Some(reason),
@@ -1243,7 +1243,7 @@ fn with_graph_edits(
 /// What a command naming a node the run does not hold — or one the engine would not
 /// apply — is, to the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Unknown {
+pub enum Unknown {
     /// Unavailable: the bus validator, which nothing judges after, cannot pass a command
     /// it has no clearance to judge by.
     Unavailable,
@@ -1253,12 +1253,12 @@ pub(crate) enum Unknown {
 }
 
 /// A live payload cannot change the approved export declarations.
-pub(crate) const LAUNCH_EXPORT_ONLY: &str =
+pub const LAUNCH_EXPORT_ONLY: &str =
     "export declarations are read from the launch plan only";
 
 /// Launch-only export declarations are forbidden anywhere in a live payload. Walk
 /// mapping keys so prose discussing them remains ordinary text.
-pub(crate) fn launch_export_declaration(document: &serde_json::Value) -> bool {
+pub fn launch_export_declaration(document: &serde_json::Value) -> bool {
     match document {
         serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
             matches!(key.as_str(), "export_edges" | "accepted_opaque")
@@ -1278,7 +1278,7 @@ pub(crate) fn launch_export_declaration(document: &serde_json::Value) -> bool {
 /// one addressed to a private node passes; and text addressed to no node is checked as
 /// public. A command naming a node the run does not hold, or one the engine would not
 /// apply, has no clearance to judge it by, and is what `unknown` says.
-pub(crate) fn judge(
+pub fn judge(
     state: &crate::projection::RunState,
     document: &serde_json::Value,
     oracle: &mut dyn Oracle,
@@ -1391,7 +1391,7 @@ pub(crate) fn judge(
 /// one a dead driver had claimed — so a caller that never meets the bus meets the same
 /// rule. A command naming a node the run does not hold, or one that would not apply, is
 /// left to the engine's own refusal of it.
-pub(crate) fn guard(
+pub fn guard(
     state: &crate::projection::RunState,
     document: &serde_json::Value,
 ) -> crate::Result<()> {
@@ -1406,7 +1406,7 @@ pub(crate) fn guard(
 /// `onepipeline boundary validate-envelope --run RUN`: judge the document on `stdin`
 /// against the run's current plan, answering the bus validator protocol's exit code and
 /// the neutral reason to print.
-pub(crate) fn validate_envelope(
+pub fn validate_envelope(
     paths: &crate::ledger::RunPaths,
     stdin: &str,
 ) -> crate::Result<Judged> {
@@ -1505,7 +1505,7 @@ fn fields_of<T: schemars::JsonSchema>() -> Vec<String> {
 /// phrase is a different key, so a payload cached as passing is judged again rather than
 /// passed on its bytes — and a phrase the host withdraws is not honoured by a pass cached
 /// while it stood.
-pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<String> {
+pub fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<String> {
     use sha2::Digest;
     let view = crate::views::RunView::open(paths)?;
     let plan = plan_now(&view.state);
@@ -1539,35 +1539,35 @@ pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<Stri
 /// every refusal this module makes, printed by `onepipeline boundary guidance`, and
 /// read by the host's planner injection and plan check, so no host restates the rule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Guidance {
+pub struct Guidance {
     /// The version of this shape.
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     /// The steps, in order: generalize, preserve, export, consume.
-    pub(crate) steps: Vec<GuidanceStep>,
+    pub steps: Vec<GuidanceStep>,
     /// What a generalize producer is held to so its export is not refused.
-    pub(crate) producer: Vec<String>,
+    pub producer: Vec<String>,
     /// How the plan carrying both sides is coordinated: one private canonical graph, each
     /// task's own visibility, and the neutral public projection of a public task.
-    pub(crate) coordination: Vec<String>,
+    pub coordination: Vec<String>,
     /// The shape of such a plan, with synthetic names only.
-    pub(crate) example: GuidanceExample,
+    pub example: GuidanceExample,
     /// The sentence a refusal carries, which is the steps in one line.
-    pub(crate) summary: String,
+    pub summary: String,
 }
 
 /// One step of [`Guidance`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GuidanceStep {
+pub struct GuidanceStep {
     /// Which step it is.
-    pub(crate) step: Step,
+    pub step: Step,
     /// What it asks.
-    pub(crate) text: &'static str,
+    pub text: &'static str,
 }
 
 /// The four steps of crossing the boundary, in the order they happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Step {
+pub enum Step {
     /// The private work is written as a generic example in one directory.
     Generalize,
     /// The engine keeps the producer's branch.
@@ -1592,42 +1592,42 @@ impl Step {
 
 /// A private coordinating plan of one producer and one consumer, as [`Guidance`] shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GuidanceExample {
+pub struct GuidanceExample {
     /// The private producer, then the public consumer.
-    pub(crate) tasks: Vec<ExampleTask>,
+    pub tasks: Vec<ExampleTask>,
     /// The project's `onepipeline.export_edges`, which joins them.
-    pub(crate) export_edges: Vec<ExportEdge>,
+    pub export_edges: Vec<ExportEdge>,
     /// What the public consumer's public projection carries.
-    pub(crate) projection: ExampleProjection,
+    pub projection: ExampleProjection,
 }
 
 /// One task of [`GuidanceExample`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ExampleTask {
+pub struct ExampleTask {
     /// Its node id.
-    pub(crate) id: &'static str,
+    pub id: &'static str,
     /// Its own visibility, which nothing about the plan sets.
-    pub(crate) visibility: Classification,
+    pub visibility: Classification,
     /// How it publishes, where that is not the default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) publish: Option<Publish>,
+    pub publish: Option<Publish>,
 }
 
 /// The public consumer's projection in [`GuidanceExample`]: its own task and nothing private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ExampleProjection {
+pub struct ExampleProjection {
     /// The task it is a view of.
-    pub(crate) task: &'static str,
+    pub task: &'static str,
     /// Its visibility, which is that task's own.
-    pub(crate) visibility: Classification,
+    pub visibility: Classification,
     /// The dependencies it shows: none on anything private.
-    pub(crate) dependencies: Vec<&'static str>,
+    pub dependencies: Vec<&'static str>,
     /// The links back it carries: none.
-    pub(crate) backlinks: Vec<&'static str>,
+    pub backlinks: Vec<&'static str>,
 }
 
 /// The version [`Guidance`] is written at. Version 2 adds `coordination` and `example`.
-pub(crate) const GUIDANCE_VERSION: u32 = 2;
+pub const GUIDANCE_VERSION: u32 = 2;
 
 /// The steps of [`Guidance`], in order.
 const STEPS: [(Step, &str); 4] = [
@@ -1677,7 +1677,7 @@ const COORDINATION: [&str; 4] = [
 ];
 
 /// The guidance, as every reader of it gets it.
-pub(crate) fn guidance() -> Guidance {
+pub fn guidance() -> Guidance {
     Guidance {
         schema_version: GUIDANCE_VERSION,
         steps: STEPS
@@ -1731,7 +1731,7 @@ fn example() -> GuidanceExample {
 /// The guidance as `onepipeline boundary guidance` prints it: one JSON object, or the
 /// summary a refusal carries followed by how the plan is coordinated, its example, and what
 /// a producer is held to.
-pub(crate) fn render_guidance(json: bool) -> crate::Result<String> {
+pub fn render_guidance(json: bool) -> crate::Result<String> {
     let guidance = guidance();
     if json {
         return serde_json::to_string_pretty(&guidance)
@@ -1802,7 +1802,7 @@ fn position(plan: &Plan, id: &str) -> usize {
 
 /// Whether `directory` is a relative, normalized path: no root, no `.` or `..`, no
 /// empty segment, no `.git`, and no backslash — the rule `onevcs export` holds it to.
-pub(crate) fn normalized(directory: &str) -> bool {
+pub fn normalized(directory: &str) -> bool {
     !directory.is_empty()
         && !directory.starts_with('/')
         && !directory.contains('\\')
@@ -1827,7 +1827,7 @@ fn lineage_root(id: &str, superseded: &BTreeMap<String, String>) -> String {
 
 /// The export edges as they stand after the run's supersessions: an edge naming a node
 /// a `retry` replaced names its replacement, through any number of retries.
-pub(crate) fn edges_now(
+pub fn edges_now(
     edges: &[ExportEdge],
     superseded: &BTreeMap<String, String>,
 ) -> Vec<ExportEdge> {
@@ -1853,12 +1853,12 @@ pub(crate) fn edges_now(
 }
 
 /// The export edge a node consumes, where it consumes one.
-pub(crate) fn consumed_by<'a>(plan: &'a Plan, node: &str) -> Option<&'a ExportEdge> {
+pub fn consumed_by<'a>(plan: &'a Plan, node: &str) -> Option<&'a ExportEdge> {
     plan.export_edges.iter().find(|edge| edge.to == node)
 }
 
 /// Whether `dep` → `node` is an export edge of `plan`.
-pub(crate) fn is_export(plan: &Plan, dep: &str, node: &str) -> bool {
+pub fn is_export(plan: &Plan, dep: &str, node: &str) -> bool {
     plan.export_edges
         .iter()
         .any(|edge| edge.from == dep && edge.to == node)
@@ -1868,7 +1868,7 @@ pub(crate) fn is_export(plan: &Plan, dep: &str, node: &str) -> bool {
 /// no edge is declared twice, no consumer has two, both directories are normalized, and
 /// every edge is a dependency its consumer states. Asked by the graph's own rules, before
 /// any other dependency rule, so a refusal about an edge is about the edge.
-pub(crate) fn check_edges(plan: &Plan) -> Result<(), Refusal> {
+pub fn check_edges(plan: &Plan) -> Result<(), Refusal> {
     let ids: BTreeSet<&str> = plan.tasks.iter().map(|node| node.id.as_str()).collect();
     let mut seen: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     let mut consumers: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1933,7 +1933,7 @@ pub(crate) fn check_edges(plan: &Plan) -> Result<(), Refusal> {
 
 /// Where a plan is judged: as a document is loaded, or as a live edit leaves the graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub enum Stage {
     /// `start`, `plan check` and `adopt`, over what a planner wrote.
     Load,
     /// Every accepted live edit, over a graph the engine has also pinned branches on.
@@ -1944,7 +1944,7 @@ pub(crate) enum Stage {
 /// and whether a consumer's public fields are neutral.
 ///
 /// A single-visibility plan with no export edges is accepted at once.
-pub(crate) fn check(
+pub fn check(
     plan: &Plan,
     stage: Stage,
     oracle: &mut dyn Oracle,

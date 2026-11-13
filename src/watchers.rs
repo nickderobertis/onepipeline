@@ -249,7 +249,7 @@ fn a_session<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<Strin
 /// admits; the arithmetic after it reads fields that check has already bounded.
 /// The fraction is truncated to the millisecond, the precision everything this
 /// crate writes carries.
-pub(crate) fn instant_millis(text: &str) -> Option<i128> {
+pub fn instant_millis(text: &str) -> Option<i128> {
     if !is_rfc3339(text) {
         return None;
     }
@@ -316,7 +316,7 @@ fn an_instant<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<String, D::
 ///
 /// Kept here rather than reached for from a dependency because it is the only place
 /// this crate parses an instant at all: every other timestamp it holds it *writes*.
-pub(crate) fn is_rfc3339(text: &str) -> bool {
+pub fn is_rfc3339(text: &str) -> bool {
     let Some((date, rest)) = text.split_once(['T', 't']) else {
         return false;
     };
@@ -498,7 +498,7 @@ impl WatchStanding {
     /// [`Unproven`](Self::Unproven) is the case this distinction exists for — a
     /// live watcher whose start this host would not report, whose record a sweep
     /// would otherwise erase for ever.
-    pub(crate) fn proved_gone(self) -> bool {
+    pub fn proved_gone(self) -> bool {
         matches!(
             self,
             Self::ProcessGone | Self::AwaitingItsParent | Self::NotThatProcess
@@ -574,16 +574,16 @@ impl Watchers {
 /// terms are what `unwatched` and `stop-guard` decide a budget from, and they are
 /// read from the same walk, so a lease and its terms are the ones one reading
 /// found together.
-pub(crate) struct Leases {
+pub struct Leases {
     /// The leases, exactly as [`Watchers::of`] answers them.
-    pub(crate) watchers: Watchers,
+    pub watchers: Watchers,
     /// The terms recorded beside each of [`Watchers::watches`], index for index.
-    pub(crate) terms: Vec<TermsRead>,
+    pub terms: Vec<TermsRead>,
 }
 
 /// What sits beside one lease in `watch-terms/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TermsRead {
+pub enum TermsRead {
     /// Nothing: the lease an engine before the terms record leaves.
     Absent,
     /// A document this build refused, with the reason.
@@ -594,7 +594,7 @@ pub(crate) enum TermsRead {
 
 /// What a wake budget makes of one live lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Wake {
+pub enum Wake {
     /// Its terms are this lease's, name the asking session, give up within the
     /// budget and return on a surface: it will wake the session in time.
     Within,
@@ -607,7 +607,7 @@ pub(crate) enum Wake {
 impl Leases {
     /// Read every lease on one run and the terms beside each, deciding each lease
     /// against this host now.
-    pub(crate) fn of(paths: &RunPaths) -> Self {
+    pub fn of(paths: &RunPaths) -> Self {
         let mut watchers = Watchers::default();
         let mut terms = Vec::new();
         for (path, read) in records(paths) {
@@ -625,7 +625,7 @@ impl Leases {
 
     /// What `budget_ms` makes of each **live** lease, in file-name order, for a
     /// session asking at `now_ms`.
-    pub(crate) fn wakes(&self, session: &str, budget_ms: i128, now_ms: i128) -> Vec<Wake> {
+    pub fn wakes(&self, session: &str, budget_ms: i128, now_ms: i128) -> Vec<Wake> {
         self.judged(session, &Latest::By(now_ms + budget_ms))
     }
 
@@ -634,7 +634,7 @@ impl Leases {
     /// of the instant it armed — the budget less the wake reserve — so a watch
     /// armed with a timeout equal to the budget never counts, however long it
     /// has been waiting.
-    pub(crate) fn flow_wakes(&self, session: &str, span_ms: i128, reserve: u64) -> Vec<Wake> {
+    pub fn flow_wakes(&self, session: &str, span_ms: i128, reserve: u64) -> Vec<Wake> {
         self.judged(
             session,
             &Latest::AfterArming {
@@ -852,7 +852,7 @@ fn standing_of(record: &WatcherRecord, run: &str) -> WatchStanding {
 ///
 /// Shared with the flow record, whose holder is live on exactly the rule a
 /// watch lease is.
-pub(crate) fn holder_standing(host: &str, pid: NonZeroU32, started: &str) -> WatchStanding {
+pub fn holder_standing(host: &str, pid: NonZeroU32, started: &str) -> WatchStanding {
     if host != sys::hostname() {
         return WatchStanding::AnotherHost;
     }
@@ -900,7 +900,7 @@ fn token_standing(read: Option<&sys::StartToken>, recorded: &str) -> WatchStandi
 /// nothing depends on it: a watch killed, crashed, or left on a closed terminal
 /// runs no destructor, which is exactly why liveness is decided by reading the
 /// host rather than by the record's presence.
-pub(crate) struct Armed {
+pub struct Armed {
     /// The document this watch wrote, or nothing where it could not write one.
     path: Option<PathBuf>,
     /// The terms written beside it, or nothing where they could not be.
@@ -924,7 +924,7 @@ impl Armed {
     /// cannot be judged — an unknown, which makes the guard warn under a budget
     /// and counts as watching without one — rather than as no watch at all; `wake_budget::a_watch_whose_terms_cannot_be_written_is_an_unknown`
     /// drives that through the binary.
-    pub(crate) fn arm(
+    pub fn arm(
         paths: &RunPaths,
         timeout: crate::cli::WatchTimeout,
         until: &[crate::cli::WatchUntil],
@@ -1068,7 +1068,7 @@ const LATEST_INSTANT_MS: u64 = 253_402_300_799_999;
 ///
 /// Staleness is never decided by a name. What this buys is only that two live
 /// records are two files.
-pub(crate) fn nonce() -> String {
+pub fn nonce() -> String {
     static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     minted(

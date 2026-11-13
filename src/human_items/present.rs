@@ -15,11 +15,11 @@ use super::{
 
 /// The longest description a compact entry prints, in characters, before it is
 /// cut with an ellipsis.
-pub(crate) const DESCRIPTION_CHARS: usize = 80;
+pub const DESCRIPTION_CHARS: usize = 80;
 
 /// The session a reader acts for, and the runs and plans it owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Asker {
+pub struct Asker {
     // llmlint: ignore-block[invalid_states_unrepresentable] session, run and plan here are compared only against `HumanItemOwner`, `HumanItemBlock` and `LaunchRecord`, which spell all three as `String`; an `Asker` is built only by `HumanItems::asker` from a resolved session and the launch records it reads, and a newtype here would be unwrapped at every comparison.
     /// The asking session.
     pub session: String,
@@ -60,7 +60,7 @@ impl Asker {
 
 /// Which items a human-readable read prints.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Reach {
+pub enum Reach {
     /// An explicit filter, which selects across the whole host as it always has.
     Filtered,
     /// `--all`: every item on the host.
@@ -72,7 +72,7 @@ pub(crate) enum Reach {
 }
 
 /// The items `reach` shows, and the line that says what was left out.
-pub(crate) fn narrowed(
+pub fn narrowed(
     views: Vec<HumanItemView>,
     reach: &Reach,
 ) -> (Vec<HumanItemView>, Option<String>) {
@@ -101,7 +101,7 @@ pub(crate) fn narrowed(
 }
 
 /// Where an item came from: plan and run, plan, run, manager session or host.
-pub(crate) fn source(item: &HumanItem) -> String {
+pub fn source(item: &HumanItem) -> String {
     if item.block == HumanItemBlock::Host {
         return "host".into();
     }
@@ -114,7 +114,7 @@ pub(crate) fn source(item: &HumanItem) -> String {
 }
 
 /// What an open item holds, in the contract's wording; empty when it holds nothing.
-pub(crate) fn blocking(item: &HumanItem, blocked: &super::HumanItemBlocked) -> String {
+pub fn blocking(item: &HumanItem, blocked: &super::HumanItemBlocked) -> String {
     if !item.is_blocking() {
         return String::new();
     }
@@ -133,7 +133,7 @@ pub(crate) fn blocking(item: &HumanItem, blocked: &super::HumanItemBlocked) -> S
 
 /// The start of a body as one line of at most [`DESCRIPTION_CHARS`]
 /// characters, ending in an ellipsis whenever anything of the body was cut.
-pub(crate) fn description(body: &str) -> String {
+pub fn description(body: &str) -> String {
     let body = body.trim();
     let first = body.lines().next().unwrap_or_default().trim_end();
     let cut = first.len() < body.len() || first.chars().count() > DESCRIPTION_CHARS;
@@ -146,7 +146,7 @@ pub(crate) fn description(body: &str) -> String {
 }
 
 /// An answered question's answer: its choice by title and id, and its text.
-pub(crate) fn answer(item: &HumanItem) -> Option<String> {
+pub fn answer(item: &HumanItem) -> Option<String> {
     let resolution = item
         .resolution
         .as_ref()
@@ -167,7 +167,7 @@ pub(crate) fn answer(item: &HumanItem) -> Option<String> {
 
 /// One item as a compact entry: title and id, then priority, kind, what it
 /// blocks and its source, then a one-line description and any answer.
-pub(crate) fn compact(view: &HumanItemView) -> String {
+pub fn compact(view: &HumanItemView) -> String {
     let item = &view.item;
     let kind = match item.kind {
         HumanItemKind::Task => "task",

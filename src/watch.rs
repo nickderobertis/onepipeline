@@ -56,7 +56,7 @@ const MEANINGFUL: [PipelineKind; 9] = [
 ];
 
 /// The longest a watch with a deadline goes without checking it.
-pub(crate) const DEADLINE_CHECK: Duration =
+pub const DEADLINE_CHECK: Duration =
     Duration::from_millis(crate::cli::DEADLINE_CHECK_MILLIS);
 
 /// Why a watch returned: a closed set with a code each, so a caller branches on
@@ -222,10 +222,10 @@ pub struct Outcome {
     // llmlint: ignore[invalid_states_unrepresentable] the token as the binary prints it and a later watch or `monitor` reads it back — `WatchOutcome { ending, cursor }` in the contract — spelled by the private `Cursor` here and read by `resolve_cursor` against the run it names; what a consumer does with it is hand it back, and a type it could inspect would be a second reading of a token whose one reading is that resolution.
     pub cursor: String,
     /// Whether a blocking surface is among those that ended the wait.
-    pub(crate) blocking: bool,
+    pub blocking: bool,
     /// What the run did while the wait ran out: present on
     /// [`Ending::Elapsed`] and on nothing else.
-    pub(crate) summary: Option<Summary>,
+    pub summary: Option<Summary>,
 }
 
 impl Outcome {
@@ -246,7 +246,7 @@ impl Outcome {
 /// Every frame goes to `sink` as it happens, and a sink that refuses one ends
 /// the wait with its refusal: the binary's sink is a pipe, and a pipe that has
 /// closed is the end of what a watch can report.
-pub(crate) fn watch(
+pub fn watch(
     paths: &RunPaths,
     request: &Request,
     sink: &mut dyn FnMut(Frame<'_>) -> Result<()>,
@@ -493,7 +493,7 @@ fn newest_surface(paths: &RunPaths) -> Option<u64> {
 /// built are all outside it — so what one of these means for a given supervisor
 /// is that supervisor's to interpret.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct Summary {
+pub struct Summary {
     /// Every settlement past the cursor the watch started from.
     settled_since_cursor: Vec<SettledSince>,
     /// How many planner surfaces were queued after the watch armed.
@@ -617,7 +617,7 @@ fn read_run(paths: &RunPaths, cursor: &mut Cursor) -> Result<(RunView, Vec<Envel
 /// A wait with a deadline blocks no longer than [`DEADLINE_CHECK`] at a time,
 /// whatever its heartbeat says, so its exit after the deadline is late by at
 /// most that.
-pub(crate) fn wake_within(
+pub fn wake_within(
     deadline: Option<Instant>,
     tick: Duration,
     quiet_since: Instant,
@@ -926,7 +926,7 @@ impl Transport for RunChanges {
 /// never reaches that arithmetic at all — it is the absence of a deadline rather
 /// than one far away, which is what keeps `0`'s published meaning, read once and
 /// return, the value it always was.
-pub(crate) fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
+pub fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
     let WatchTimeout::Bounded(seconds) = timeout else {
         return Ok(None);
     };
@@ -954,7 +954,7 @@ pub(crate) fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
 ///
 /// Every refusal is made before anything is read, so a cursor this run cannot
 /// place hands back no events at all.
-pub(crate) fn monitored(
+pub fn monitored(
     paths: &RunPaths,
     view: RunView,
     filter: &EventFilter,
@@ -990,7 +990,7 @@ pub struct Monitored {
 
 impl Monitored {
     /// The document one `monitor` pass prints, resume line and all.
-    pub(crate) fn render(&self) -> String {
+    pub fn render(&self) -> String {
         format!(
             "{}-- cursor {}",
             views::monitor_shown(&self.view, &self.events),
@@ -999,7 +999,7 @@ impl Monitored {
     }
 }
 
-pub(crate) fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
+pub fn tail(paths: &RunPaths, cursor: &mut Cursor) -> Vec<Envelope> {
     let (mut fresh, at) = journal::finished_after(&paths.journal(), cursor.at);
     cursor.at = at;
     journal::merge_order(&mut fresh);
@@ -1187,7 +1187,7 @@ fn named<'a>(ids: impl Iterator<Item = &'a String>) -> String {
 /// Asked of the source and the kind together, for the reason [`meaningful`]
 /// gives: a sibling that one day spells `node-settled` the way this one does
 /// would otherwise end a wait over a node that settled nothing.
-pub(crate) fn settlement_of(event: &Envelope) -> Option<&str> {
+pub fn settlement_of(event: &Envelope) -> Option<&str> {
     (meaningful(event) && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::NodeSettled))
         .then_some(event.labels.node.as_deref())
         .flatten()
@@ -1303,7 +1303,7 @@ fn concluded(
 ///
 /// The watch consumes nothing: every surface it reports is still there for
 /// `next`.
-pub(crate) fn surface_waiting(paths: &RunPaths) -> Option<bool> {
+pub fn surface_waiting(paths: &RunPaths) -> Option<bool> {
     let queue = crate::channel::ChannelState::new(paths).queue();
     let unanswered = || views::blocking_surface(paths);
     match queue.waiting.is_empty() {
@@ -1319,13 +1319,13 @@ pub(crate) fn surface_waiting(paths: &RunPaths) -> Option<bool> {
 /// is a place in every journal there is, so without the run a cursor pasted
 /// against the wrong one resumes rather than being refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Cursor {
+pub struct Cursor {
     run: String,
-    pub(crate) at: u64,
+    pub at: u64,
 }
 
 impl Cursor {
-    pub(crate) fn start(run: &str) -> Self {
+    pub fn start(run: &str) -> Self {
         Self {
             run: run.to_string(),
             at: 0,
@@ -1355,7 +1355,7 @@ impl serde::Serialize for Cursor {
 /// The last is a boundary check and not a second length check — every record here
 /// ends in a newline, so a byte in range but mid-record would resume by handing
 /// the caller a fragment as though it were an event.
-pub(crate) fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
+pub fn resolve_cursor(paths: &RunPaths, token: &str) -> Result<Cursor> {
     let Cursor { run, at } = parse_cursor(token)?;
     if run != paths.run {
         return Err(Error::Invalid(format!(
@@ -1627,7 +1627,7 @@ impl Lines {
     ///
     /// [`Error::Invalid`] when the machine record cannot be rendered, which no
     /// frame this crate builds reaches.
-    pub(crate) fn of(frame: &Frame<'_>) -> Result<Self> {
+    pub fn of(frame: &Frame<'_>) -> Result<Self> {
         let rendered = |record: &Record<'_>| {
             serde_json::to_string(record)
                 .map_err(|e| Error::Invalid(format!("the watch could not render a record: {e}")))
@@ -1703,7 +1703,7 @@ impl Lines {
 /// verb promises, would read a settled run off a watch that refused.
 ///
 /// [`EXIT_REFUSED`]: crate::error::EXIT_REFUSED
-pub(crate) fn say(lines: &Lines) -> Result<()> {
+pub fn say(lines: &Lines) -> Result<()> {
     say_to(lines, &mut std::io::stderr(), "standard error")
 }
 
@@ -1712,7 +1712,7 @@ pub(crate) fn say(lines: &Lines) -> Result<()> {
 /// file here. The machine record still goes to standard output, last, for the
 /// reason [`say`] gives, and a human line that cannot be written refuses exactly
 /// as a broken standard error does.
-pub(crate) fn say_to(lines: &Lines, human: &mut dyn Write, called: &str) -> Result<()> {
+pub fn say_to(lines: &Lines, human: &mut dyn Write, called: &str) -> Result<()> {
     let broken = |what: &str, error: std::io::Error| {
         Error::Invalid(format!("the watch could not write to {what}: {error}"))
     };
@@ -1731,7 +1731,7 @@ pub(crate) fn say_to(lines: &Lines, human: &mut dyn Write, called: &str) -> Resu
 ///
 /// [`Error::Invalid`] naming the path, when it cannot be opened for appending —
 /// which the binary reports before the wait starts.
-pub(crate) fn open_log(path: &Path) -> Result<std::fs::File> {
+pub fn open_log(path: &Path) -> Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1748,7 +1748,7 @@ pub(crate) fn open_log(path: &Path) -> Result<std::fs::File> {
 ///
 /// A zero is said out loud rather than left out: "nothing is waiting" and "this
 /// line does not mention what is waiting" are otherwise the same line.
-pub(crate) fn unread_phrase(unread: &Unread) -> String {
+pub fn unread_phrase(unread: &Unread) -> String {
     match unread.count {
         0 => "0 unread planner surfaces".to_string(),
         count => format!("{count} unread planner surface(s): {}", unread.phrase()),

@@ -11,7 +11,7 @@ use crate::{
 
 /// Which explicit trigger a verb asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Asked {
+pub enum Asked {
     /// `onepipeline review`: a readjustment, then discovery.
     Review,
     /// `onepipeline readjust`: the readjustment alone.
@@ -37,7 +37,7 @@ impl Asked {
 /// What an explicit trigger answered: performed, with a host read's failure and the
 /// drafts whose verdict is still owed, or requested of a driver that has not answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Answered {
+pub enum Answered {
     Performed {
         error: Option<String>,
         // llmlint: ignore[invalid_states_unrepresentable] these are node ids read off the folded `RunState`'s own keys, which come from the validated graph and are `String` throughout this crate, which has no node-identity type; they are only printed, never parsed or executed, and no external input reaches this field.
@@ -46,7 +46,7 @@ pub(crate) enum Answered {
     Requested(u64),
 }
 
-pub(crate) fn requested(
+pub fn requested(
     paths: &RunPaths,
     session: &str,
     timeout: std::time::Duration,

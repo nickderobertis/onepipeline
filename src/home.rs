@@ -23,7 +23,7 @@ use crate::writeback::FailureClass;
 
 /// What one call came to.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// The call finished: written, or failed for good. This is the record.
     Finished(HomeStatus),
     /// The call failed in a way a wait can change, asked again on the caller's schedule;
@@ -36,7 +36,7 @@ pub(crate) enum Answer {
 /// The store configuration is the one `store` discovers, which for a run is its launch
 /// directory's. Never panics and never fails: every way the call can go wrong is an
 /// [`Answer`].
-pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> Answer {
+pub fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> Answer {
     let failed = |class, reason: String| record(home, Err((class, reason)));
     let built = match store.engine(&Layer::default()) {
         Ok(built) => built,
@@ -91,7 +91,7 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
 /// The record of a home left as it was, asked nothing, because the store refused the run's last
 /// projection — `refusal` its words for that — so the board does not show every node's
 /// settlement: a refusal, which no retry of the home's call changes.
-pub(crate) fn withheld(home: &QualifiedId, refusal: &str) -> HomeStatus {
+pub fn withheld(home: &QualifiedId, refusal: &str) -> HomeStatus {
     record(
         home,
         Err((
@@ -132,7 +132,7 @@ fn record(
 /// Whether `run`'s journal already holds a `home-status` record: a run that has one writes
 /// its home nothing more, whatever endings follow. Asked of the records the run's fold keeps
 /// whole, among them every `home-status`, so a driver closing out reads none of its history.
-pub(crate) fn recorded(paths: &crate::ledger::RunPaths) -> bool {
+pub fn recorded(paths: &crate::ledger::RunPaths) -> bool {
     crate::checkpoint::current(paths)
         .recalled
         .iter()
@@ -140,7 +140,7 @@ pub(crate) fn recorded(paths: &crate::ledger::RunPaths) -> bool {
 }
 
 /// What `results` says of the run's `home-status` record, or nothing where it holds none.
-pub(crate) fn results_line(events: &[crate::event::Envelope]) -> String {
+pub fn results_line(events: &[crate::event::Envelope]) -> String {
     let Some(record) = events
         .iter()
         .find(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::HomeStatus))

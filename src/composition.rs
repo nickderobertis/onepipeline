@@ -19,7 +19,7 @@ use crate::plan::{CrossRepoReference, Node, NodeKind, Step};
 use crate::projection::RunState;
 
 /// The task a direct node's dispatch is given.
-pub(crate) fn direct(
+pub fn direct(
     node: &Node,
     references: &[CrossRepoReference],
     boundary: Option<&str>,
@@ -30,7 +30,7 @@ pub(crate) fn direct(
 /// The task one step of a lifecycle node is given: the step's own prose with the node's
 /// amendment, note and references, the notes a resumed attempt carries, the Stack section
 /// where the node is drafted on stack parents, and the boundary section last.
-pub(crate) fn step(
+pub fn step(
     step: &Step,
     node: &Node,
     references: &[CrossRepoReference],
@@ -47,15 +47,15 @@ pub(crate) fn step(
 }
 
 /// Everything beside the node a dispatch composes its task from, as the run stands now.
-pub(crate) struct Inputs {
+pub struct Inputs {
     /// The node as the dispatch composes it: a resumed attempt's own, where one is pending.
-    pub(crate) node: Node,
-    pub(crate) references: Vec<CrossRepoReference>,
-    pub(crate) notes: Vec<crate::note::RecordedNote>,
-    pub(crate) stack: Option<crate::stack::Stack>,
-    pub(crate) boundary: Option<String>,
+    pub node: Node,
+    pub references: Vec<CrossRepoReference>,
+    pub notes: Vec<crate::note::RecordedNote>,
+    pub stack: Option<crate::stack::Stack>,
+    pub boundary: Option<String>,
     /// The steps a resumed attempt has already finished, which its dispatch skips.
-    pub(crate) completed: Vec<String>,
+    pub completed: Vec<String>,
 }
 
 impl Inputs {
@@ -69,7 +69,7 @@ impl Inputs {
     /// # Errors
     ///
     /// A note record this build cannot read, as the dispatch itself would meet it.
-    pub(crate) fn now(
+    pub fn now(
         paths: &RunPaths,
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
@@ -120,7 +120,7 @@ impl Inputs {
 
     /// The task the node's next dispatch is given: a direct node's own, or the first agent
     /// step of a lifecycle node its attempt has not finished — the step that dispatch is.
-    pub(crate) fn next_task(&self) -> String {
+    pub fn next_task(&self) -> String {
         let node = &self.node;
         if node.repo.is_none() {
             return direct(node, &self.references, self.boundary.as_deref());
@@ -155,7 +155,7 @@ impl Inputs {
 /// # Errors
 ///
 /// A note record this build cannot read, as the dispatch itself would meet it.
-pub(crate) fn of_a_fresh_driver(
+pub fn of_a_fresh_driver(
     paths: &RunPaths,
     state: &RunState,
     node: &Node,

@@ -35,7 +35,7 @@ use crate::Result;
 /// byte-for-byte by builds that know nothing of this — and what an engine is
 /// waiting to see committed is the engine's own bookkeeping, not part of what a
 /// planner reads.
-pub(crate) const REQUESTS_FILE: &str = "finding-requests.json";
+pub const REQUESTS_FILE: &str = "finding-requests.json";
 
 /// A finding that asks the planner for a graph edit, by what it is about.
 ///
@@ -50,7 +50,7 @@ pub(crate) const REQUESTS_FILE: &str = "finding-requests.json";
 /// would take the attempt beside it, and
 /// `the_key_is_derived_from_what_the_contract_states_it_is` is what would notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FindingKind {
+pub enum FindingKind {
     /// A conflict between the node's branch and its base that the node's
     /// dispatches were handed and did not conclude before its publication budget
     /// was spent. Answered by a `retry` of that node.
@@ -64,17 +64,17 @@ impl FindingKind {
     /// raise names its own — so a listing compiled into the binary would be a
     /// table nothing consults.
     #[cfg(test)]
-    pub(crate) const ALL: [FindingKind; 1] = [FindingKind::SessionConflict];
+    pub const ALL: [FindingKind; 1] = [FindingKind::SessionConflict];
 
     /// The word the key carries for it.
-    pub(crate) const fn word(self) -> &'static str {
+    pub const fn word(self) -> &'static str {
         match self {
             FindingKind::SessionConflict => "session-conflict",
         }
     }
 
     /// The op a finding of this kind asks the planner to commit.
-    pub(crate) const fn asks_for(self) -> Op {
+    pub const fn asks_for(self) -> Op {
         match self {
             FindingKind::SessionConflict => Op::Retry,
         }
@@ -94,7 +94,7 @@ const DIGEST_BYTES: usize = 12;
 /// The graph edit one finding asks the planner to commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RequestedEdit {
+pub struct RequestedEdit {
     /// The op it asks for, written and read as the word the reply envelope
     /// spells it with.
     ///
@@ -149,7 +149,7 @@ mod op_word {
 /// blocking, and answered by a reply rather than by an edit — because a key that
 /// could not be built is not a reason to end the loop that is reporting a
 /// conflict.
-pub(crate) fn correlation(kind: FindingKind, node: &str) -> Option<Correlation> {
+pub fn correlation(kind: FindingKind, node: &str) -> Option<Correlation> {
     let kind = kind.word();
     let mut digest = Sha256::new();
     digest.update(kind.as_bytes());
@@ -185,7 +185,7 @@ pub(crate) fn correlation(kind: FindingKind, node: &str) -> Option<Correlation> 
 /// # Errors
 ///
 /// The reason the run's own directory could not be written.
-pub(crate) fn requests(
+pub fn requests(
     paths: &RunPaths,
     correlation: &Correlation,
     op: Op,
@@ -217,7 +217,7 @@ pub(crate) fn requests(
 /// # Errors
 ///
 /// The reason the run's channel could not be written.
-pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]) -> Result<()> {
+pub fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]) -> Result<()> {
     let recorded = recorded(paths);
     if recorded.is_empty() {
         return Ok(());
@@ -266,7 +266,7 @@ pub(crate) fn answer_requested(paths: &RunPaths, operations: &[edits::Operation]
 // suppression on the same grounds. It is held by
 // `the_exception_is_this_envelopes_own_edit_and_nothing_else` below, which drives that state
 // directly.
-pub(crate) fn answered_alongside(
+pub fn answered_alongside(
     paths: &RunPaths,
     correlation: &Correlation,
     commands: &[Command],

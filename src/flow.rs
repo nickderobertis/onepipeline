@@ -34,10 +34,10 @@ use crate::ledger::{self, RecordedBusConfig, RunPaths};
 use crate::sys;
 
 /// The directory under the runs root every flow is kept in.
-pub(crate) const FLOWS_DIR: &str = ".flows";
+pub const FLOWS_DIR: &str = ".flows";
 
 /// The schema version of every document a flow keeps, read closed.
-pub(crate) const FLOW_SCHEMA_VERSION: u32 = 1;
+pub const FLOW_SCHEMA_VERSION: u32 = 1;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<u32, D::Error> {
@@ -82,30 +82,30 @@ fn an_instant<'de, D: serde::Deserializer<'de>>(
 // through `sys::StartToken::matches`. The id is checked against the directory it sits in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FlowRecord {
+pub struct FlowRecord {
     /// The record's own version. See [`FLOW_SCHEMA_VERSION`].
     #[serde(deserialize_with = "this_version")]
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     /// The flow's id, as `flow run` printed it.
-    pub(crate) flow_id: String,
+    pub flow_id: String,
     /// The session that owns the flow.
     #[serde(deserialize_with = "said")]
-    pub(crate) session: String,
+    pub session: String,
     /// The program and its arguments, as text, for a person reading the record.
-    pub(crate) program: Vec<String>,
+    pub program: Vec<String>,
     /// The holder: the `flow run` process waiting for the program.
-    pub(crate) pid: NonZeroU32,
+    pub pid: NonZeroU32,
     /// The host that pid means something on.
-    pub(crate) host: String,
+    pub host: String,
     /// The holder's start token, empty where this host would not say.
-    pub(crate) started: String,
+    pub started: String,
     /// When the flow was registered.
     #[serde(deserialize_with = "an_instant")]
-    pub(crate) began_at: String,
+    pub began_at: String,
     /// The bus configuration the flow's channel is kept under, where the flow
     /// was registered with one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) bus_config: Option<RecordedBusConfig>,
+    pub bus_config: Option<RecordedBusConfig>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -113,7 +113,7 @@ pub(crate) struct FlowRecord {
 // llmlint: ignore-block[invalid_states_unrepresentable] the id and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FlowEnding {
+pub struct FlowEnding {
     #[serde(deserialize_with = "this_version")]
     schema_version: u32,
     flow_id: String,
@@ -130,7 +130,7 @@ pub(crate) struct FlowEnding {
 // llmlint: ignore-block[invalid_states_unrepresentable] the id, the session and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FlowAcknowledgement {
+pub struct FlowAcknowledgement {
     #[serde(deserialize_with = "this_version")]
     schema_version: u32,
     flow_id: String,
@@ -145,7 +145,7 @@ pub(crate) struct FlowAcknowledgement {
 
 impl FlowAcknowledgement {
     /// The line the binary prints for a recorded acknowledgement.
-    pub(crate) fn line(&self) -> String {
+    pub fn line(&self) -> String {
         format!(
             "flow {}: acknowledged for session {} — {}\n",
             self.flow_id, self.session, self.reason
@@ -168,12 +168,12 @@ struct Member {
 
 /// The directory under a flow every manager landing it owns is kept in, one
 /// directory per landing, named by its id.
-pub(crate) const LANDINGS_DIR: &str = "landings";
+pub const LANDINGS_DIR: &str = "landings";
 
 /// The engine verb a manager landing forwards to the linked `onevcs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum LandingOperation {
+pub enum LandingOperation {
     /// `onepipeline publish-branch`, over `onevcs publish-branch`.
     PublishBranch,
     /// `onepipeline repo-recover`, over `onevcs recover`.
@@ -184,7 +184,7 @@ pub(crate) enum LandingOperation {
 
 impl LandingOperation {
     /// The word the sidecar and every payload spell it with.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::PublishBranch => "publish-branch",
             Self::RepoRecover => "repo-recover",
@@ -276,13 +276,13 @@ fn unique_runs<'de, D: serde::Deserializer<'de>>(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandingSubject {
+pub struct LandingSubject {
     /// The `onevcs` identity key the branch belongs to.
     #[serde(deserialize_with = "an_identity")]
-    pub(crate) identity: String,
+    pub identity: String,
     /// The branch.
     #[serde(deserialize_with = "said")]
-    pub(crate) branch: String,
+    pub branch: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -295,38 +295,38 @@ pub(crate) struct LandingSubject {
 // llmlint: ignore-block[invalid_states_unrepresentable] the ids, the session, the host and the two stamps are `String`s for `FlowRecord`'s reason, and checked where they are read: the version, the ids against the directories they sit in, a session that says something, `began_at` as an instant, the runs as unique run ids, and `started` only ever compared through `sys::StartToken::matches`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandingRequest {
+pub struct LandingRequest {
     /// The sidecar's version. See [`FLOW_SCHEMA_VERSION`].
     #[serde(deserialize_with = "this_version")]
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     /// The landing's id, unique within its flow: its directory's name.
     #[serde(deserialize_with = "an_id")]
-    pub(crate) landing_id: String,
+    pub landing_id: String,
     /// The flow that holds it.
     #[serde(deserialize_with = "an_id")]
-    pub(crate) flow_id: String,
+    pub flow_id: String,
     /// The session that owns it: the flow's own.
     #[serde(deserialize_with = "said")]
-    pub(crate) session: String,
+    pub session: String,
     /// The verb it forwards.
-    pub(crate) operation: LandingOperation,
+    pub operation: LandingOperation,
     /// Every branch it can advance, resolved before any side effect — a whole
     /// integration train, not only the member being landed.
     #[serde(deserialize_with = "some_subjects")]
-    pub(crate) subjects: Vec<LandingSubject>,
+    pub subjects: Vec<LandingSubject>,
     /// Every originating run whose own record names one of the subjects.
     #[serde(deserialize_with = "unique_runs")]
-    pub(crate) runs: Vec<String>,
+    pub runs: Vec<String>,
     /// The process doing the landing.
-    pub(crate) pid: NonZeroU32,
+    pub pid: NonZeroU32,
     /// The host that pid means something on.
     #[serde(deserialize_with = "said")]
-    pub(crate) host: String,
+    pub host: String,
     /// That process's start token, empty where this host would not say.
-    pub(crate) started: String,
+    pub started: String,
     /// When it registered.
     #[serde(deserialize_with = "an_instant")]
-    pub(crate) began_at: String,
+    pub began_at: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -336,15 +336,15 @@ pub(crate) struct LandingRequest {
 // llmlint: ignore-block[invalid_states_unrepresentable] the id and the instant are `String`s for `FlowRecord`'s reason, and checked where they are read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandingEnding {
+pub struct LandingEnding {
     #[serde(deserialize_with = "this_version")]
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     #[serde(deserialize_with = "an_id")]
-    pub(crate) landing_id: String,
+    pub landing_id: String,
     /// The forwarded command's exit status.
-    pub(crate) status: i32,
+    pub status: i32,
     #[serde(deserialize_with = "an_instant")]
-    pub(crate) at: String,
+    pub at: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -355,39 +355,39 @@ pub(crate) struct LandingEnding {
 // llmlint: ignore-block[invalid_states_unrepresentable] the operation id is `onevcs`'s opaque handle, a `String` because `OperationHandle::open` takes one and is the check: an id it cannot open is refused there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandingOperationRecord {
+pub struct LandingOperationRecord {
     #[serde(deserialize_with = "this_version")]
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     #[serde(deserialize_with = "said")]
-    pub(crate) operation_id: String,
+    pub operation_id: String,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// What every landing transition's payload carries.
 // llmlint: ignore-block[invalid_states_unrepresentable] the ids and the message are text a reader is shown, `String`s as the approved payload declares them; the ids are the sidecar's own, checked there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub(crate) struct LandingTransition {
+pub struct LandingTransition {
     /// The landing.
-    pub(crate) landing_id: String,
+    pub landing_id: String,
     /// The flow that holds it.
-    pub(crate) flow_id: String,
+    pub flow_id: String,
     /// The verb it forwards.
-    pub(crate) operation: LandingOperation,
+    pub operation: LandingOperation,
     /// Every branch it can advance.
-    pub(crate) subjects: Vec<LandingSubject>,
+    pub subjects: Vec<LandingSubject>,
     /// What happened, for a person.
-    pub(crate) message: String,
+    pub message: String,
 }
 
 /// A terminal transition's payload: the transition, and the forwarded
 /// command's exit status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub(crate) struct LandingTerminal {
+pub struct LandingTerminal {
     /// The transition.
     #[serde(flatten)]
-    pub(crate) transition: LandingTransition,
+    pub transition: LandingTransition,
     /// The forwarded command's exit status.
-    pub(crate) status: i32,
+    pub status: i32,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -395,7 +395,7 @@ pub(crate) struct LandingTerminal {
 /// registration, drafting and the start are progress, the finish is the final
 /// result's milestone, and a refusal or a death is a blocker. `None` for any
 /// kind that is not a landing transition.
-pub(crate) const fn landing_significance(
+pub const fn landing_significance(
     kind: crate::event::PipelineKind,
 ) -> Option<onevcs::Significance> {
     use crate::event::PipelineKind;
@@ -413,7 +413,7 @@ pub(crate) const fn landing_significance(
 
 /// Whether a kind ends a landing: its finish, its refusal, or its death — the
 /// three a death reader will not write over and a holder's flow ending reports.
-pub(crate) fn is_terminal_landing_kind(kind: &str) -> bool {
+pub fn is_terminal_landing_kind(kind: &str) -> bool {
     use crate::event::PipelineKind;
     [
         PipelineKind::LandingFinished,
@@ -426,27 +426,27 @@ pub(crate) fn is_terminal_landing_kind(kind: &str) -> bool {
 
 /// One manager landing a flow holds: where it is, and what it registered.
 #[derive(Debug, Clone)]
-pub(crate) struct Landing {
+pub struct Landing {
     /// `landings/<landing_id>` under its flow.
-    pub(crate) dir: PathBuf,
+    pub dir: PathBuf,
     /// What it registered.
-    pub(crate) request: LandingRequest,
+    pub request: LandingRequest,
 }
 
 impl Landing {
     /// Its own journal: every transition, and every `onevcs` operation event
     /// relayed from its handle.
-    pub(crate) fn journal(&self) -> PathBuf {
+    pub fn journal(&self) -> PathBuf {
         self.dir.join("events.jsonl")
     }
 
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.request.landing_id
     }
 
     /// The status its process recorded, nothing where it recorded none, or why
     /// the record cannot be read.
-    pub(crate) fn ending(&self) -> std::result::Result<Option<i32>, String> {
+    pub fn ending(&self) -> std::result::Result<Option<i32>, String> {
         let path = self.dir.join("ending.json");
         let unreadable = |why: String| {
             format!(
@@ -475,7 +475,7 @@ impl Landing {
 
     /// The `onevcs` operation id it prepared, nothing for legacy coarse-only
     /// work, or why the record cannot be read.
-    pub(crate) fn operation_id(&self) -> std::result::Result<Option<String>, String> {
+    pub fn operation_id(&self) -> std::result::Result<Option<String>, String> {
         let path = self.dir.join("operation.json");
         match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<LandingOperationRecord>(&text)
@@ -502,7 +502,7 @@ impl Landing {
     /// # Errors
     ///
     /// An ending that is there and cannot be read.
-    pub(crate) fn standing(&self) -> std::result::Result<Standing, String> {
+    pub fn standing(&self) -> std::result::Result<Standing, String> {
         if let Some(status) = self.ending()? {
             return Ok(Standing::Ended(status));
         }
@@ -523,21 +523,21 @@ impl Landing {
 
     /// Whether the landing is live: an ending that cannot be read is no
     /// evidence it ended, so such a landing is still owed supervision.
-    pub(crate) fn is_live(&self) -> bool {
+    pub fn is_live(&self) -> bool {
         !matches!(self.standing(), Ok(Standing::Ended(_) | Standing::Died))
     }
 
     /// Whether this landing's process is its flow's own holder — the flow was
     /// registered for this landing alone — rather than one landing inside a
     /// longer flow.
-    pub(crate) fn holds(&self, flow: &Flow) -> bool {
+    pub fn holds(&self, flow: &Flow) -> bool {
         self.request.pid == flow.record.pid
             && self.request.host == flow.record.host
             && self.request.started == flow.record.started
     }
 
     /// Whether a subject of this landing is `branch` of `identity`.
-    pub(crate) fn names(&self, identity: &str, branch: &str) -> bool {
+    pub fn names(&self, identity: &str, branch: &str) -> bool {
         self.request
             .subjects
             .iter()
@@ -551,7 +551,7 @@ impl Landing {
 ///
 /// Any flow's landing state that cannot be read: whether that landing is live
 /// cannot be said, and a caller deciding an acknowledgement refuses on it.
-pub(crate) fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landing)>, String> {
+pub fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landing)>, String> {
     let dir = root.join(FLOWS_DIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -610,7 +610,7 @@ pub(crate) fn every_landing(root: &Path) -> std::result::Result<Vec<(Flow, Landi
 /// Held by another process, it is waited for — and that wait is said on stderr
 /// before it begins, so a caller blocked behind another registration or
 /// acknowledgement is told why it has not moved, on every platform alike.
-pub(crate) fn registration_lock(root: &Path) -> Result<std::fs::File> {
+pub fn registration_lock(root: &Path) -> Result<std::fs::File> {
     let flows = root.join(FLOWS_DIR);
     std::fs::create_dir_all(&flows).map_err(|source| Error::Ledger {
         path: flows.clone(),
@@ -636,7 +636,7 @@ pub(crate) fn registration_lock(root: &Path) -> Result<std::fs::File> {
 ///
 /// External input on every verb that takes `--flow`, and joined onto the runs
 /// root, so it is held to the alphabet rather than merely to one segment.
-pub(crate) fn is_valid_flow_id(id: &str) -> bool {
+pub fn is_valid_flow_id(id: &str) -> bool {
     !id.is_empty()
         && !id.chars().all(|c| c == '.')
         && id
@@ -645,7 +645,7 @@ pub(crate) fn is_valid_flow_id(id: &str) -> bool {
 }
 
 /// Where the flow `id` under `root` keeps its state, laid out as a run's.
-pub(crate) fn paths(root: &Path, id: &str) -> RunPaths {
+pub fn paths(root: &Path, id: &str) -> RunPaths {
     RunPaths::under(&root.join(FLOWS_DIR), id)
 }
 
@@ -663,7 +663,7 @@ fn members_dir(paths: &RunPaths) -> PathBuf {
 
 /// Where a flow stands now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Standing {
+pub enum Standing {
     /// Its holder is alive — or nothing here can prove it is not, which is read
     /// as alive, because a flow read as gone is a session let go.
     Live,
@@ -675,11 +675,11 @@ pub(crate) enum Standing {
 
 /// One registered flow: where it is, and what its holder recorded.
 #[derive(Debug, Clone)]
-pub(crate) struct Flow {
+pub struct Flow {
     /// Its state, laid out as a run's.
-    pub(crate) paths: RunPaths,
+    pub paths: RunPaths,
     /// What its holder recorded.
-    pub(crate) record: FlowRecord,
+    pub record: FlowRecord,
 }
 
 impl Flow {
@@ -689,7 +689,7 @@ impl Flow {
     ///
     /// An id that is not one, a flow that is not there, and a record this build
     /// cannot read — each naming the flow.
-    pub(crate) fn open(root: &Path, id: &str) -> Result<Self> {
+    pub fn open(root: &Path, id: &str) -> Result<Self> {
         if !is_valid_flow_id(id) {
             return Err(Error::Invalid(format!(
                 "'{id}' is not a flow id: a flow id is letters, digits, `.`, `_` and `-`, as \
@@ -725,13 +725,13 @@ impl Flow {
     }
 
     /// The flow's id.
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.paths.run
     }
 
     /// The id, typed: [`Flow::open`] admitted it before reading the flow, and
     /// registration minted it from a `--name` already admitted.
-    pub(crate) fn flow_id(&self) -> FlowId {
+    pub fn flow_id(&self) -> FlowId {
         FlowId(self.paths.run.clone())
     }
 
@@ -741,7 +741,7 @@ impl Flow {
     ///
     /// An ending that is there and cannot be read, which says neither that the
     /// flow ended nor that it did not.
-    pub(crate) fn standing(&self) -> std::result::Result<Standing, String> {
+    pub fn standing(&self) -> std::result::Result<Standing, String> {
         let held = self.holder_standing()?;
         if held == Standing::Live {
             return Ok(held);
@@ -786,7 +786,7 @@ impl Flow {
     ///
     /// A landing directory, or its request, that cannot be read or does not name
     /// this landing of this flow: whether it is live cannot be said.
-    pub(crate) fn landings(&self) -> std::result::Result<Vec<Landing>, String> {
+    pub fn landings(&self) -> std::result::Result<Vec<Landing>, String> {
         let dir = self.paths.dir.join(LANDINGS_DIR);
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -856,7 +856,7 @@ impl Flow {
     /// Whether the flow is live now: its standing, with an ending that cannot be
     /// read taken as no evidence it ended — so such a flow is still owed a watch
     /// rather than closed, and `unwatched` names the ending it could not read.
-    pub(crate) fn is_live(&self) -> bool {
+    pub fn is_live(&self) -> bool {
         !matches!(self.standing(), Ok(Standing::Ended(_) | Standing::Died))
     }
 
@@ -888,13 +888,13 @@ impl Flow {
     }
 
     /// The flow's own channel, under the configuration it was registered with.
-    pub(crate) fn channel(&self) -> ChannelState {
+    pub fn channel(&self) -> ChannelState {
         ChannelState::configured(&self.paths, self.record.bus_config.as_ref())
     }
 
     /// The bus configuration the flow's channel is kept under, where it names
     /// one.
-    pub(crate) fn bus_config(&self) -> Option<&onemessagebus::Config> {
+    pub fn bus_config(&self) -> Option<&onemessagebus::Config> {
         self.record
             .bus_config
             .as_ref()
@@ -912,7 +912,7 @@ impl Flow {
     ///
     /// A membership directory that is there and cannot be read: a watch that
     /// went on without it could never see a run join, so it is said instead.
-    pub(crate) fn members(&self) -> Result<Vec<String>> {
+    pub fn members(&self) -> Result<Vec<String>> {
         let dir = members_dir(&self.paths);
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -948,7 +948,7 @@ impl Flow {
     ///
     /// An acknowledgement that cannot be read, where none other closes it: it
     /// may be the word that would have.
-    pub(crate) fn acknowledged_by(&self, session: &str) -> std::result::Result<bool, String> {
+    pub fn acknowledged_by(&self, session: &str) -> std::result::Result<bool, String> {
         let dir = self.paths.acknowledgements();
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -1000,7 +1000,7 @@ impl Flow {
     ///
     /// A blank reason, a flow another session owns, a flow still live — which a
     /// watch is owed, not a closure — and a record that could not be written.
-    pub(crate) fn acknowledge(&self, session: &str, reason: &str) -> Result<FlowAcknowledgement> {
+    pub fn acknowledge(&self, session: &str, reason: &str) -> Result<FlowAcknowledgement> {
         if reason.trim().is_empty() {
             return Err(Error::Invalid(
                 "an acknowledgement needs a reason that says something: `--reason` is blank, \
@@ -1051,7 +1051,7 @@ impl Flow {
 /// A flows directory that exists and cannot be read — the question cannot be
 /// asked, and answering it as "nothing is owed" is the silence the question
 /// exists to end.
-pub(crate) fn of_session(root: &Path, session: &str) -> Result<Vec<Flow>> {
+pub fn of_session(root: &Path, session: &str) -> Result<Vec<Flow>> {
     let dir = root.join(FLOWS_DIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -1079,16 +1079,16 @@ static INHERITED: OnceLock<Option<OsString>> = OnceLock::new();
 /// A flow id: one that names a flow under the runs root and nothing else, in
 /// the alphabet a minted one is spelled in. See [`is_valid_flow_id`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct FlowId(String);
+pub struct FlowId(String);
 
 impl FlowId {
     /// `text` as a flow id, or nothing where it is not one.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
+    pub fn parse(text: &str) -> Option<Self> {
         is_valid_flow_id(text).then(|| Self(text.to_owned()))
     }
 
     /// The id, as `flow run` printed it.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -1099,7 +1099,7 @@ impl FlowId {
 /// Called by the binary's entry before anything could spawn, so nothing this
 /// process starts inherits it — a node dispatch above all — and the one child
 /// that has to carry it, a flow's program, is handed it by [`run`] explicitly.
-pub(crate) fn take_inherited() {
+pub fn take_inherited() {
     if INHERITED
         .get_or_init(|| std::env::var_os(FLOW_ENV))
         .is_some()
@@ -1118,7 +1118,7 @@ fn inherited_as_started() -> Option<&'static OsString> {
 
 /// The flow this process was started in, where `ONEPIPELINE_FLOW` named one: a
 /// value that is not a flow id names none.
-pub(crate) fn inherited() -> Option<FlowId> {
+pub fn inherited() -> Option<FlowId> {
     FlowId::parse(inherited_as_started()?.to_str()?)
 }
 
@@ -1128,7 +1128,7 @@ pub(crate) fn inherited() -> Option<FlowId> {
 ///
 /// A flow of another session, of another runs root, or not live is none — a
 /// run launched there belongs to no flow, and is owed its own watch.
-pub(crate) fn launching_in(root: &Path, session: &str) -> Option<Flow> {
+pub fn launching_in(root: &Path, session: &str) -> Option<Flow> {
     let id = inherited()?;
     let flow = Flow::open(root, id.as_str()).ok()?;
     (flow.record.session == session && flow.is_live()).then_some(flow)
@@ -1140,7 +1140,7 @@ pub(crate) fn launching_in(root: &Path, session: &str) -> Option<Flow> {
 /// A membership that cannot be written is said on standard error and leaves the
 /// run in no flow: a run a flow watch cannot see must not be counted as watched
 /// by it, and judged on its own it is owed a watch of its own.
-pub(crate) fn join(root: &Path, run: &str, session: &str) -> Option<FlowId> {
+pub fn join(root: &Path, run: &str, session: &str) -> Option<FlowId> {
     let flow = launching_in(root, session)?;
     let member = Member {
         schema_version: FLOW_SCHEMA_VERSION,
@@ -1173,7 +1173,7 @@ pub(crate) fn join(root: &Path, run: &str, session: &str) -> Option<FlowId> {
 ///
 /// A `--name` outside the id alphabet, a `--bus-config` this build refuses, and
 /// a flow that could not be registered — each before the program starts.
-pub(crate) fn run(root: &Path, args: &FlowRunArgs) -> Result<i32> {
+pub fn run(root: &Path, args: &FlowRunArgs) -> Result<i32> {
     let Some((program, arguments)) = args.program.split_first() else {
         return Err(Error::Invalid(
             "`flow run` needs a program to run, after `--`".to_owned(),
@@ -1260,7 +1260,7 @@ fn name_of(program: &OsString) -> String {
 
 /// Mint the flow's id — the first free of `name`, `name-2`, ... — by creating
 /// its directory, and write its record.
-pub(crate) fn register(
+pub fn register(
     root: &Path,
     name: &str,
     session: &str,
@@ -1370,7 +1370,7 @@ fn supervise(
 
 /// Record that `flow`'s program ended with `status`, saying on standard error
 /// where it could not be.
-pub(crate) fn record_ending(flow: &Flow, status: i32) {
+pub fn record_ending(flow: &Flow, status: i32) {
     let ending = FlowEnding {
         schema_version: FLOW_SCHEMA_VERSION,
         flow_id: flow.id().to_owned(),
@@ -1416,7 +1416,7 @@ fn status_of(status: std::process::ExitStatus) -> i32 {
 ///
 /// A message with nothing in it once trimmed, and a channel that refuses the
 /// push.
-pub(crate) fn surface(
+pub fn surface(
     flow: &Flow,
     kind: SurfaceKind,
     message: String,
@@ -1459,7 +1459,7 @@ pub(crate) fn surface(
 /// # Errors
 ///
 /// A channel that refuses the claim.
-pub(crate) fn next(
+pub fn next(
     root: &Path,
     flow: &Flow,
     filter: &crate::filter::EventFilter,
@@ -1491,7 +1491,7 @@ pub(crate) fn next(
 /// A malformed envelope, one carrying commands or no verdict, an author or a
 /// completion the configuration does not allow, and every refusal the channel
 /// makes.
-pub(crate) fn reply(
+pub fn reply(
     flow: &Flow,
     correlation: Option<&onemessagebus::Correlation>,
     envelope_json: &str,

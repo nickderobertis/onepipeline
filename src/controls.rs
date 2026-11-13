@@ -39,14 +39,14 @@ use crate::plan::{Node, Step};
 /// The shipped `graphs/node-scope.yaml` names it, and a graph a plan substitutes
 /// with `agent_graph` is expected to name its worker the same — which is the
 /// assumption the persona override has always made.
-pub(crate) const WORKER_MEMBER: &str = "worker";
+pub const WORKER_MEMBER: &str = "worker";
 
 /// What a plan declaring a turn budget of zero is told.
 ///
 /// Its own sentence rather than an inline string, because two conversions
 /// produce it — a node's and a step's — and one wording is what makes the answer
 /// the same wherever a planner wrote the zero.
-pub(crate) const ZERO_TURNS: &str =
+pub const ZERO_TURNS: &str =
     "`max_turns: 0` lets the dispatch take no turn at all; omit it to run under the agent \
      graph's own ceiling";
 

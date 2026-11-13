@@ -41,20 +41,20 @@ const DEFAULT_UNTIL: [WatchUntil; 4] = [
 
 /// What a flow watch is asked for.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Request {
+pub struct Request {
     /// How long to wait before giving up.
-    pub(crate) timeout: WatchTimeout,
+    pub timeout: WatchTimeout,
     /// How long a silence may last before the stream says it is still there.
     /// Zero turns the heartbeat off.
-    pub(crate) tick: Duration,
+    pub tick: Duration,
     /// A cursor an earlier flow watch printed, to resume from.
     // llmlint: ignore[invalid_states_unrepresentable] a cursor token is external input, placed against the flow and each member's journal by `resume`, which is the check no type can make — the same reason `watch::Request::cursor` gives.
-    pub(crate) cursor: Option<String>,
+    pub cursor: Option<String>,
     /// What ends the wait beside the flow's ending: empty is all four.
-    pub(crate) until: Vec<WatchUntil>,
+    pub until: Vec<WatchUntil>,
     /// The profile a landing's events are judged through before one wakes the
     /// watch: the shipped `planner` profile unless the caller named another.
-    pub(crate) filter: crate::filter::EventFilter,
+    pub filter: crate::filter::EventFilter,
 }
 
 /// Why a flow watch returned.
@@ -332,7 +332,7 @@ enum Unnamed {
 ///
 /// A condition a flow watch does not return on, a cursor this flow cannot
 /// place, a deadline past what the clock can name, and a `say` that refused.
-pub(crate) fn watch(
+pub fn watch(
     root: &std::path::Path,
     flow: &Flow,
     request: &Request,
@@ -857,7 +857,7 @@ fn heartbeat_lines(flow: &Flow, unread: usize) -> Result<Lines> {
 /// # Errors
 ///
 /// Landing state that cannot be read, or a death that could not be written.
-pub(crate) fn events(
+pub fn events(
     root: &std::path::Path,
     flow: &Flow,
     filter: &crate::filter::EventFilter,
@@ -898,7 +898,7 @@ pub(crate) fn events(
 /// # Errors
 ///
 /// See [`events`].
-pub(crate) fn monitor(
+pub fn monitor(
     root: &std::path::Path,
     flow: &Flow,
     filter: &crate::filter::EventFilter,

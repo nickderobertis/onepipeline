@@ -310,19 +310,19 @@ fn pace() -> Duration {
 /// The executor's own report, read the way `start_ready` reads it before a
 /// dispatch — cores less the load, or what [`crate::executor::LOAD1_ENV`]
 /// states for a host whose load average is not this process's measure.
-pub(crate) fn host_has_room() -> bool {
+pub fn host_has_room() -> bool {
     crate::executor::Executor::capacity(&crate::executor::LocalExecutor).slots_free > 0
 }
 
 /// One identity, as one sweep left it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Maintained {
+pub struct Maintained {
     /// The identity key.
-    pub(crate) identity: String,
+    pub identity: String,
     /// The cadence it was maintained on.
-    pub(crate) every: Span,
+    pub every: Span,
     /// What the sibling answered, or why it could not be asked.
-    pub(crate) outcome: std::result::Result<IdentityOutcome, String>,
+    pub outcome: std::result::Result<IdentityOutcome, String>,
 }
 
 impl Maintained {
@@ -369,13 +369,13 @@ impl Maintained {
 /// One branch a live node of this run names, which the sweep's retirement pass is
 /// told to leave alone.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Named {
+pub struct Named {
     /// The repository the node names, as it names it; `None` for a node naming a
     /// branch and no repository, which is left alone in every identity.
-    pub(crate) repo: Option<String>,
+    pub repo: Option<String>,
     /// The branch name as the node, its `resume` or its session carries it, which
     /// `onevcs` compares an exclusion by exactly.
-    pub(crate) branch: String,
+    pub branch: String,
 }
 
 /// Every branch a node of this run in a live state names: its `branch`, its
@@ -388,7 +388,7 @@ pub(crate) struct Named {
 /// draft awaiting review that a `rework` continues and a restack moves, so the
 /// branch it settled on is named too. Every other settled node's branch is
 /// `onevcs`'s to judge like any other.
-pub(crate) fn live_branches(
+pub fn live_branches(
     state: &RunState,
     statuses: &std::collections::BTreeMap<String, NodeStatus>,
 ) -> Vec<Named> {
@@ -448,14 +448,14 @@ pub(crate) fn live_branches(
 /// Folded from every identity's `retire_finished` answer, and journalled as one
 /// `branches-retired` only where it holds a retirement or a failure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Retirements {
-    pub(crate) retired: Vec<RetiredBranch>,
+pub struct Retirements {
+    pub retired: Vec<RetiredBranch>,
     /// Every identity whose pass failed, and every branch whose deletion did not
     /// finish.
-    pub(crate) failed: Vec<UnretiredIdentity>,
+    pub failed: Vec<UnretiredIdentity>,
     /// Every identity the pass never began because the driver was closing out,
     /// in visiting order; empty for a pass that reached them all.
-    pub(crate) unreached: Vec<String>,
+    pub unreached: Vec<String>,
 }
 
 impl Retirements {
@@ -600,18 +600,18 @@ fn resolved(
 /// What one sweep's maintenance did: every identity it visited, and how the
 /// enumeration went. The sweep's retirement pass reports apart, as [`Retirements`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PoolsMaintained {
+pub struct PoolsMaintained {
     /// When the sweep started, RFC3339, stamped by `sys::now_rfc3339` and carried
     /// to the record as the record's own document spells it.
     // llmlint: ignore[invalid_states_unrepresentable] the instant is a `String` on every record this crate writes — `LaunchRecord::started_at`, the envelope's `ts` — and on the sibling's `SlotStatus::last_maintained` beside it; the one writer is `sys::now_rfc3339`, and `payload::PoolMaintenance` declares the same shape.
-    pub(crate) started_at: String,
+    pub started_at: String,
     /// Every identity it visited, in sorted order; or why the identities could
     /// not be enumerated at all, where they could not.
-    pub(crate) identities: std::result::Result<Vec<Maintained>, String>,
+    pub identities: std::result::Result<Vec<Maintained>, String>,
     /// Every identity the pass never began because the driver was closing out,
     /// in visiting order; empty for a pass that reached them all, and for one
     /// that could not enumerate them.
-    pub(crate) unreached: Vec<String>,
+    pub unreached: Vec<String>,
 }
 
 impl PoolsMaintained {
@@ -835,7 +835,7 @@ fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
 ///
 /// While it is live the run root carries a marker, which is what lets `status`
 /// — another process — say a maintenance is in progress.
-pub(crate) struct Sweep {
+pub struct Sweep {
     handle: Option<JoinHandle<()>>,
     paths: RunPaths,
     /// Raised when the driver stops waiting on the sweep; read by the thread
@@ -940,7 +940,7 @@ impl Drop for Sweep {
 /// only while something is driving the run: a marker a dead driver left names
 /// a sweep nothing is running, and the driver that next adopts the run takes it
 /// back before its first pass.
-pub(crate) fn status_line(view: &crate::views::RunView) -> String {
+pub fn status_line(view: &crate::views::RunView) -> String {
     if view.liveness() == crate::views::DriverLiveness::Driving {
         if let Some(marker) = crate::ledger::read_json_opt::<Value>(&view.paths.maintenance()) {
             let since = marker["started_at"]
@@ -961,7 +961,7 @@ pub(crate) fn status_line(view: &crate::views::RunView) -> String {
 /// sibling's type, so what a slot's ending is called here is what `onevcs pool
 /// maintain` calls it. Under the graph, because maintenance is the host's
 /// rather than any node's.
-pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
+pub fn results_lines(view: &crate::views::RunView) -> String {
     let Some(record) = view.events.iter().rev().find(|event| {
         crate::journal::PipelineKind::from_wire(&event.kind)
             == Some(crate::journal::PipelineKind::PoolMaintenance)
@@ -1200,7 +1200,7 @@ fn slot_phrase(outcome: &SlotOutcome) -> String {
 /// starts with no last sweep and asks on its first idle pass, which is exactly
 /// right: what stops it maintaining a slot twice is the slot's own stamp, and
 /// never anything remembered here.
-pub(crate) struct Maintenance {
+pub struct Maintenance {
     config: Option<MaintenanceConfig>,
     pace: Duration,
     last_started: Option<Instant>,
@@ -1209,7 +1209,7 @@ pub(crate) struct Maintenance {
 
 impl Maintenance {
     /// The schedule the launch record names, or none.
-    pub(crate) fn of_launch(config: Option<MaintenanceConfig>, paths: &RunPaths) -> Self {
+    pub fn of_launch(config: Option<MaintenanceConfig>, paths: &RunPaths) -> Self {
         // A marker a driver that died left behind names a sweep nothing is
         // running: taken back here, before this driver's own first pass, so a
         // `status` between the two does not report the dead driver's.
@@ -1238,7 +1238,7 @@ impl Maintenance {
     /// What the run names, which the sweep's retirement pass leaves alone, the
     /// pass asks of the loop over `tx` as it reaches each identity — see
     /// [`Message::Naming`].
-    pub(crate) fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
+    pub fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
         let Some(config) = &self.config else {
             return;
         };
@@ -1256,7 +1256,7 @@ impl Maintenance {
     /// itself. A pace already due is re-asked on [`RECHECK`] rather than at
     /// once, because a pass that reached here with the pace due was not idle,
     /// and asking again on the next pass would be asking forty times a second.
-    pub(crate) fn next_due(&self) -> Duration {
+    pub fn next_due(&self) -> Duration {
         if !self.is_scheduled() || self.sweep.is_some() {
             return Duration::MAX;
         }
@@ -1277,7 +1277,7 @@ impl Maintenance {
     /// # Errors
     ///
     /// The reason the run's journal could not be written.
-    pub(crate) fn record(
+    pub fn record(
         &mut self,
         paths: &RunPaths,
         journal: &mut crate::journal::Journal,
@@ -1302,7 +1302,7 @@ impl Maintenance {
     /// # Errors
     ///
     /// The reason the run's journal could not be written.
-    pub(crate) fn retired(
+    pub fn retired(
         &mut self,
         paths: &RunPaths,
         journal: &mut crate::journal::Journal,
@@ -1335,7 +1335,7 @@ impl Maintenance {
     /// # Errors
     ///
     /// The reason the run's journal could not be written.
-    pub(crate) fn close(
+    pub fn close(
         mut self,
         paths: &RunPaths,
         journal: &mut crate::journal::Journal,
@@ -1395,7 +1395,7 @@ impl Maintenance {
 
     /// Whether a sweep of this driver's is running now.
     #[cfg(test)]
-    pub(crate) fn is_sweeping(&self) -> bool {
+    pub fn is_sweeping(&self) -> bool {
         self.sweep.is_some()
     }
 }

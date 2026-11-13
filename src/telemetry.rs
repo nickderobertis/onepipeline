@@ -437,7 +437,7 @@ fn side_of(event: &Envelope) -> Option<Role> {
 // llmlint: ignore[changed_behavior_has_e2e] how a late record's span is attributed is a consequence of where the checkpoint folds it, which `journal_scaling::a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered` drives; a timing assertion on it would hold a wall-clock figure, which this repository's journeys do not.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Aggregate {
+pub struct Aggregate {
     /// The first stamped record, which the wall clock is measured from. `None`
     /// until one arrives: a store with nothing stamped in it has no clock, which
     /// is not the same fact as a clock that measured zero.
@@ -464,7 +464,7 @@ pub(crate) struct Aggregate {
 
 impl Aggregate {
     /// Take one record of the merged store into the aggregate.
-    pub(crate) fn fold(&mut self, paths: &RunPaths, event: &Envelope) {
+    pub fn fold(&mut self, paths: &RunPaths, event: &Envelope) {
         self.fold_usage(paths, event);
         // A record this build cannot date measures no span: the wall clock is
         // read off the stamps, and a record carrying none says nothing about
@@ -603,7 +603,7 @@ impl Aggregate {
     /// the counts below are the graph's rather than the clock's, and folding a
     /// second copy of the journal to reach them is the cost this whole seam
     /// exists to remove.
-    pub(crate) fn finish(&self, run: &str, state: &projection::RunState) -> RunTelemetry {
+    pub fn finish(&self, run: &str, state: &projection::RunState) -> RunTelemetry {
         let first = self.first.unwrap_or(0);
         let wall_ms = self.last.saturating_sub(first);
         let measured = |name: BucketName| match name {

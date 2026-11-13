@@ -123,12 +123,12 @@ impl Author {
     }
 
     /// Whether this is the default, so serialization can omit it.
-    pub(crate) fn is_planner(&self) -> bool {
+    pub fn is_planner(&self) -> bool {
         self.as_str() == "planner"
     }
 
     /// The bus's open author this one is, as an allowlist names it.
-    pub(crate) fn word(&self) -> onemessagebus::Author {
+    pub fn word(&self) -> onemessagebus::Author {
         onemessagebus::Author::from(self.as_str())
     }
 }
@@ -186,7 +186,7 @@ pub fn allows_completion(author: Author, completion: Option<bool>) -> crate::Res
 }
 
 /// [`allows_completion`], under an allowlist a run's configuration narrowed.
-pub(crate) fn completion_allowed_by(
+pub fn completion_allowed_by(
     allowlist: &Allowlist<OpWord>,
     author: Author,
     completion: Option<bool>,
@@ -207,7 +207,7 @@ pub fn allows(author: Author, command: &Command) -> crate::Result<()> {
 }
 
 /// [`allows`], under an allowlist a run's configuration narrowed.
-pub(crate) fn allowed_by(
+pub fn allowed_by(
     allowlist: &Allowlist<OpWord>,
     author: Author,
     command: &Command,
@@ -336,7 +336,7 @@ impl Reply {
     /// much a ruling as a `completion` is. Any of the three present is a reply
     /// a pending surface can be answered with, and a reader waiting for a
     /// ruling can read.
-    pub(crate) fn carries_verdict(&self) -> bool {
+    pub fn carries_verdict(&self) -> bool {
         self.completion.is_some() || self.message.is_some() || self.reason.is_some()
     }
 }
@@ -1095,7 +1095,7 @@ pub const DEFAULT_REPLY_TIMEOUT_SECONDS: u64 = 30;
 /// session carrying it would match, and one that is **not Unicode**, which
 /// collapses onto every other such value when it is read — are the words this
 /// crate refused them with, named by where the value came from.
-pub(crate) use onemessagebus::Asker;
+pub use onemessagebus::Asker;
 
 /// The durable channel state for one run.
 ///
@@ -1109,7 +1109,7 @@ pub(crate) use onemessagebus::Asker;
 /// queue, and only an operation that routes, asks, binds or judges an offer
 /// resolves the whole bus, whose registry is the expensive part.
 #[derive(Clone)]
-pub(crate) struct ChannelState {
+pub struct ChannelState {
     paths: crate::ledger::RunPaths,
     /// The configuration the run's launch named, checked at the launch.
     config: Option<Arc<Config>>,
@@ -1142,7 +1142,7 @@ impl std::fmt::Debug for ChannelState {
 
 /// What the channel made of one surface offered to it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SurfaceOffer {
+pub enum SurfaceOffer {
     /// Queued, as the hooks left it. Boxed: a surface is the one large variant,
     /// and a declined ruling's record rides on it.
     Queued(Box<Surface>),
@@ -1167,18 +1167,18 @@ pub(crate) enum SurfaceOffer {
 /// Decided once, by [`ChannelState::offer_reply`]: everything after that applies
 /// this, so a hook runs once per reply however many queues the reply reaches.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OfferedReply {
+pub struct OfferedReply {
     /// The envelope as the hooks left it: what is compiled, journalled and
     /// applied.
-    pub(crate) envelope: Reply,
+    pub envelope: Reply,
     /// Whether a hook changed or rerouted any part of it.
-    pub(crate) changed: bool,
+    pub changed: bool,
     /// Whether a hook dropped a commands half the planner sent.
-    pub(crate) commands_dropped: bool,
+    pub commands_dropped: bool,
     /// Whether a hook dropped a verdict half the planner sent.
-    pub(crate) verdict_dropped: bool,
+    pub verdict_dropped: bool,
     /// Whether hooks dropped the whole envelope.
-    pub(crate) whole_drop: bool,
+    pub whole_drop: bool,
     /// The command queue's record, where a hook decided it.
     commands_record: Option<RawRecord>,
     /// The reply queue's framed record, where the envelope carries one.
@@ -1340,7 +1340,7 @@ fn unreadable_to_this_build<T: serde::de::DeserializeOwned>(
 /// with its log, which is where `docs/queues.md` says how — and never a record
 /// of it: what a reader decides from, and nothing any writer writes back.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct Queue {
+pub struct Queue {
     /// The surfaces nobody has read yet, oldest first.
     pub waiting: Vec<Surface>,
     /// The surface a planner consumed and has not answered, abandoned or not.
@@ -1386,23 +1386,23 @@ pub struct QueuedCommands {
 
 /// What the command queue holds that a reconciler has not claimed yet.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct Claimable {
+pub struct Claimable {
     /// The records that decode as this build's envelope, in queue order.
-    pub(crate) envelopes: Vec<QueuedCommands>,
+    pub envelopes: Vec<QueuedCommands>,
     /// How many records do not, each of which is owed a refusal.
-    pub(crate) undecodable: usize,
+    pub undecodable: usize,
 }
 
 impl Claimable {
     /// Whether a reconciler would find nothing at all to answer.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.envelopes.is_empty() && self.undecodable == 0
     }
 }
 
 /// One record claimed from the command queue.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Claimed {
+pub enum Claimed {
     /// An envelope of this build's commands, for the reconciler to judge.
     Envelope(QueuedCommands),
     /// A record that does not decode as one, for the reconciler to refuse whole.
@@ -1434,23 +1434,23 @@ impl Claimed {
 /// A claimed record that does not decode as this build's envelope, as much of it
 /// as its refusal needs.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Undecodable {
+pub struct Undecodable {
     /// The record's `id` where it is an unsigned integer, else `0`.
-    pub(crate) id: u64,
+    pub id: u64,
     /// Whether that `id` is the record's own rather than the `0` it is answered
     /// under for want of one: only then does a record of its refusal name it.
-    pub(crate) carries_id: bool,
+    pub carries_id: bool,
     /// The record's `author` where it is one this build reads, else the planner.
-    pub(crate) author: Author,
+    pub author: Author,
     /// Each command the record carried, exactly as sent — one that is not an
     /// object carried inside an `unreadable` placeholder, because what is
     /// journalled of a command is one — or, for a record with no readable
     /// `commands` array, the one placeholder that carries the record. An empty
     /// list carried no command, so it has none.
-    pub(crate) commands: Vec<Value>,
+    pub commands: Vec<Value>,
     /// What the submitter is told: the decoder's own message, after the words
     /// that say the whole envelope was refused.
-    pub(crate) reason: String,
+    pub reason: String,
 }
 
 impl Undecodable {
@@ -1506,7 +1506,7 @@ fn planner_channel() -> Layouts {
 /// # Errors
 ///
 /// [`crate::Error::Invalid`], naming the file, the key and the value read.
-pub(crate) fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config> {
+pub fn launch_bus_config(path: &std::path::Path) -> crate::Result<Config> {
     let named =
         |why: String| crate::Error::Invalid(format!("--bus-config {}: {why}", path.display()));
     let mut config = Config::load(path).map_err(|failure| named(failure.to_string()))?;
@@ -1638,7 +1638,7 @@ const ECHOED_TOKEN_PREFIX: &str = "ask-manager-token:";
 /// stays readable; it takes nothing new. Its meaning is a contract (the manager's
 /// ruling, recorded in `docs/contract-divergences.md`): it names validators, says
 /// this engine no longer runs them, and says to let the run settle or stop it.
-pub(crate) const LAUNCHED_WITH_VALIDATORS: &str =
+pub const LAUNCHED_WITH_VALIDATORS: &str =
     "this run was launched with onemessagebus validators, which this engine no longer runs, so \
      nothing offered to its channel can be judged as the run requires and nothing was appended; \
      let the run settle, or stop it with `onepipeline stop`";
@@ -1677,7 +1677,7 @@ impl ChannelState {
     /// Every writer that authors, judges or waits on the channel opens it this
     /// way, so the grants, hooks and reply window a run enforces are the ones it
     /// was launched under wherever it is written from.
-    pub(crate) fn of_run(
+    pub fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
     ) -> Self {
@@ -1687,7 +1687,7 @@ impl ChannelState {
     /// The channel kept in `paths`' channel directory under `recorded` — or the
     /// profile as declared, where it names none — for a channel no launch record
     /// carries the configuration of: a flow's own.
-    pub(crate) fn configured(
+    pub fn configured(
         paths: &crate::ledger::RunPaths,
         recorded: Option<&crate::ledger::RecordedBusConfig>,
     ) -> Self {
@@ -1714,7 +1714,7 @@ impl ChannelState {
     /// # Errors
     ///
     /// A launch record that exists and cannot be read.
-    pub(crate) fn of_paths(paths: &crate::ledger::RunPaths) -> crate::Result<Self> {
+    pub fn of_paths(paths: &crate::ledger::RunPaths) -> crate::Result<Self> {
         if !paths.launch().is_file() {
             return Ok(Self::new(paths));
         }
@@ -1809,14 +1809,14 @@ impl ChannelState {
 
     /// Whether `author` may issue `command` on this run, under the grants its
     /// configuration narrowed.
-    pub(crate) fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
+    pub fn allows(&self, author: Author, command: &Command) -> crate::Result<()> {
         match &self.config {
             None => allowed_by(layout_allowlist(), author, command),
             Some(_) => allowed_by(self.bus()?.allowlist(), author, command),
         }
     }
 
-    pub(crate) fn declares(&self, author: &Author) -> crate::Result<()> {
+    pub fn declares(&self, author: &Author) -> crate::Result<()> {
         let configured;
         let allowlist = match &self.config {
             None => layout_allowlist(),
@@ -1842,7 +1842,7 @@ impl ChannelState {
 
     /// Whether `author` may declare this run finished through a verdict, under
     /// the grants its configuration narrowed.
-    pub(crate) fn allows_completion(
+    pub fn allows_completion(
         &self,
         author: Author,
         completion: Option<bool>,
@@ -1860,7 +1860,7 @@ impl ChannelState {
     /// Compared, never read. A queue the transport could not look at is left
     /// out, so a channel that could not be looked at at all differs from every
     /// one that could, and the moment it can be the loop wakes.
-    pub(crate) fn fingerprint(&self) -> Vec<Fingerprint> {
+    pub fn fingerprint(&self) -> Vec<Fingerprint> {
         let Ok(transport) = self.transport() else {
             return Vec::new();
         };
@@ -1921,13 +1921,13 @@ impl ChannelState {
     /// no id could follow is refused rather than handed out. Exactly one
     /// check-in is ever waiting: the layout supersedes a waiting check-in with
     /// the next, so being ignored makes the harness louder rather than quieter.
-    pub(crate) fn push(&self, surface: Surface) -> crate::Result<SurfaceOffer> {
+    pub fn push(&self, surface: Surface) -> crate::Result<SurfaceOffer> {
         self.push_checked(surface, |_| Ok(()))
     }
 
     /// [`push`](Self::push), holding what a hook changed the surface into to
     /// `check` before anything of it is appended.
-    pub(crate) fn push_checked(
+    pub fn push_checked(
         &self,
         surface: Surface,
         check: impl FnOnce(&Value) -> crate::Result<()>,
@@ -2094,7 +2094,7 @@ impl ChannelState {
     /// name, exactly as it was not before: it is refused naming it, with nothing
     /// appended. [`answer_alongside`](Self::answer_alongside) is the one caller
     /// that does not come through here, and it states why.
-    pub(crate) fn answer_bound(
+    pub fn answer_bound(
         &self,
         reply: &Reply,
         named: Option<&Correlation>,
@@ -2108,7 +2108,7 @@ impl ChannelState {
     /// they made of it, for the caller to apply. A hook's refusal or unjudged
     /// answer is refused here, in its own words, and any reply to a run launched
     /// with validators is refused with [`LAUNCHED_WITH_VALIDATORS`].
-    pub(crate) fn offer_reply(&self, reply: &Reply) -> crate::Result<OfferedReply> {
+    pub fn offer_reply(&self, reply: &Reply) -> crate::Result<OfferedReply> {
         self.judgeable()?;
         if !self.judges() {
             return Ok(OfferedReply::undecided(reply));
@@ -2129,7 +2129,7 @@ impl ChannelState {
 
     /// Record an offer's drops, and append what it left on neither half's queue:
     /// called once, where the envelope stops being refusable.
-    pub(crate) fn record_offer(&self, offered: &OfferedReply) -> crate::Result<()> {
+    pub fn record_offer(&self, offered: &OfferedReply) -> crate::Result<()> {
         if offered.rest.records.is_empty() && offered.rest.dropped.is_empty() {
             return Ok(());
         }
@@ -2157,7 +2157,7 @@ impl ChannelState {
     /// Deliver the verdict half of an envelope the hooks already decided, as
     /// [`answer`](Self::answer) binds one, and answer the reply's id. An envelope
     /// left with no verdict half delivers nothing, and the pending slot stands.
-    pub(crate) fn answer_offered(
+    pub fn answer_offered(
         &self,
         offered: &OfferedReply,
         named: Option<&Correlation>,
@@ -2212,7 +2212,7 @@ impl ChannelState {
     /// # Errors
     ///
     /// The reason the reply queue refused or could not take the record.
-    pub(crate) fn answer_alongside(
+    pub fn answer_alongside(
         &self,
         reply: &Reply,
         correlation: &Correlation,
@@ -2229,7 +2229,7 @@ impl ChannelState {
     /// # Errors
     ///
     /// The reason the reply queue refused or could not take the record.
-    pub(crate) fn answer_offered_alongside(
+    pub fn answer_offered_alongside(
         &self,
         offered: &OfferedReply,
         correlation: &Correlation,
@@ -2316,7 +2316,7 @@ impl ChannelState {
     /// [`views::blocking_surface`](crate::views::blocking_surface), which is
     /// what keeps an answered question from being reported as a decision the run
     /// is still held on.
-    pub(crate) fn answered(&self) -> BTreeSet<Correlation> {
+    pub fn answered(&self) -> BTreeSet<Correlation> {
         self.replies()
             .into_iter()
             .filter_map(|queued| queued.correlation)
@@ -2328,7 +2328,7 @@ impl ChannelState {
     /// Read by [`discharge::answered_alongside`](crate::discharge::answered_alongside),
     /// which needs the node a question was about after the answer has taken it
     /// off the queue.
-    pub(crate) fn raised_under(&self, correlation: &Correlation) -> Option<Surface> {
+    pub fn raised_under(&self, correlation: &Correlation) -> Option<Surface> {
         self.surfaces()
             .ok()?
             .raw()
@@ -2400,7 +2400,7 @@ impl ChannelState {
     /// where the reply cursor has not got past it, the replies up to it are
     /// claimed — which leaves the cursor just past it, where 0.28.2's listener,
     /// claiming it, left the cursor. A cursor already past it stays where it is.
-    pub(crate) fn delivered(&self, reply: &QueuedReply) -> crate::Result<()> {
+    pub fn delivered(&self, reply: &QueuedReply) -> crate::Result<()> {
         let behind = self
             .plain(REPLIES)?
             .waiting()
@@ -2423,7 +2423,7 @@ impl ChannelState {
     /// Stamped by the bus with its correlation, its blocking flag, its asker
     /// and what it is `about` — which the layout records as the surface's
     /// `workstream` — and decided, validated and appended as any surface is.
-    pub(crate) fn ask(
+    pub fn ask(
         &self,
         question: Surface,
         about: Option<onemessagebus::Address>,
@@ -2442,7 +2442,7 @@ impl ChannelState {
     /// Listen again for the question `correlation` names, raising nothing: a
     /// listener of the asker that question carries takes it back, and any other
     /// attends nothing.
-    pub(crate) fn listen(
+    pub fn listen(
         &self,
         correlation: &Correlation,
         asker: Option<&Asker>,
@@ -2464,7 +2464,7 @@ impl ChannelState {
     /// blocked on; and a verdict queued while no question was outstanding is
     /// taken by whichever listener reads next, as every verdict was then. A
     /// ruling on another asker's question is never one of them.
-    pub(crate) fn owed(&self, asker: Option<&Asker>) -> crate::Result<Option<QueuedReply>> {
+    pub fn owed(&self, asker: Option<&Asker>) -> crate::Result<Option<QueuedReply>> {
         let raised: BTreeSet<Correlation> = match asker {
             Some(asker) => self
                 .surfaces()?
@@ -2494,7 +2494,7 @@ impl ChannelState {
     }
 
     /// The transport's change token for the reply queue.
-    pub(crate) fn replies_mark(&self) -> crate::Result<Fingerprint> {
+    pub fn replies_mark(&self) -> crate::Result<Fingerprint> {
         self.transport()?
             .fingerprint(&queue_name(REPLIES))
             .map_err(|failure| crate::Error::Refused(failure.to_string()))
@@ -2502,7 +2502,7 @@ impl ChannelState {
 
     /// Wait up to `timeout` for the reply queue to move from `since`: the
     /// transport's own wait, which is the only wait a listener makes.
-    pub(crate) fn wait_for_replies(
+    pub fn wait_for_replies(
         &self,
         since: &Fingerprint,
         timeout: std::time::Duration,
@@ -2524,7 +2524,7 @@ impl ChannelState {
     /// [`submit`](Self::submit), recording whose words the commands are. The
     /// manager's own is written as no key at all, so its record is the one
     /// [`submit`](Self::submit) always wrote.
-    pub(crate) fn submit_as(
+    pub fn submit_as(
         &self,
         author: Author,
         provenance: Provenance,
@@ -2546,7 +2546,7 @@ impl ChannelState {
 
     /// Append the command queue's record of an envelope the hooks already
     /// decided, or, where nothing decided one, the envelope as it stands.
-    pub(crate) fn submit_offered(&self, offered: &OfferedReply) -> crate::Result<u64> {
+    pub fn submit_offered(&self, offered: &OfferedReply) -> crate::Result<u64> {
         match &offered.commands_record {
             Some(record) => self.append_decided(&self.bus()?, COMMANDS, record),
             None => self.submit_as(
@@ -2570,7 +2570,7 @@ impl ChannelState {
     /// reconciler applies it again. The caller holds the run's ownership lock and
     /// the handover gate, which keeps a submission from landing between the append
     /// and the claim.
-    pub(crate) fn record_applying(&self, offered: &OfferedReply) -> crate::Result<u64> {
+    pub fn record_applying(&self, offered: &OfferedReply) -> crate::Result<u64> {
         let id = self.submit_offered(offered)?;
         let waiting = self.claimable_commands();
         if waiting.undecodable == 0
@@ -2589,7 +2589,7 @@ impl ChannelState {
     /// off the queue this process is not going to apply. A record this build
     /// cannot decode is work as well — it is owed its refusal — so it is counted,
     /// and a writer that found one stays to answer it.
-    pub(crate) fn claimable_commands(&self) -> Claimable {
+    pub fn claimable_commands(&self) -> Claimable {
         let Ok(commands) = self.plain(COMMANDS) else {
             return Claimable::default();
         };
@@ -2651,7 +2651,7 @@ impl ChannelState {
     /// the caller or by nobody. An envelope already answered is claimed and passed
     /// over: the run's writer applied it itself — see
     /// [`record_applying`](Self::record_applying) — and its answer is written.
-    pub(crate) fn claim_commands_answering(&self) -> crate::Result<Vec<Claimed>> {
+    pub fn claim_commands_answering(&self) -> crate::Result<Vec<Claimed>> {
         let commands = self.plain(COMMANDS)?;
         let mut records = Vec::new();
         crate::loopstats::queue_claimed();
@@ -2684,7 +2684,7 @@ impl ChannelState {
     /// committed, so the claim after a non-empty one runs once and finds the
     /// queue drained. A claim that finds nothing commits nothing, so the token
     /// then stays put until something is queued.
-    pub(crate) fn claim_commands_moved(
+    pub fn claim_commands_moved(
         &self,
         seen: &mut Option<Fingerprint>,
     ) -> crate::Result<Vec<Claimed>> {
@@ -2767,7 +2767,7 @@ impl ChannelState {
     /// When the surface queued under `id` was queued, as the log's own
     /// `queued` record for it says — not as a later record about it restates
     /// it — or `None` for an id the log holds no such record for.
-    pub(crate) fn queued_at(&self, id: u64) -> Option<u64> {
+    pub fn queued_at(&self, id: u64) -> Option<u64> {
         if !self.paths.channel_dir().is_dir() {
             return None;
         }
@@ -2805,7 +2805,7 @@ impl ChannelState {
     /// What a writer applying an envelope itself, with nothing driving the run,
     /// names the rulings it delivers by before it appends the envelope — it holds
     /// the run's ownership lock, so the envelope it appends next is the next one.
-    pub(crate) fn next_command_id(&self) -> u64 {
+    pub fn next_command_id(&self) -> u64 {
         self.plain(COMMANDS)
             .ok()
             .and_then(|commands| commands.log(None).ok())
@@ -2814,7 +2814,7 @@ impl ChannelState {
 
     /// The commands envelope `id` was sent with, as the command queue holds it,
     /// or `None` for an id it holds no envelope under.
-    pub(crate) fn commands_of(&self, id: u64) -> Option<QueuedCommands> {
+    pub fn commands_of(&self, id: u64) -> Option<QueuedCommands> {
         self.plain(COMMANDS)
             .ok()?
             .log(None)
@@ -2826,7 +2826,7 @@ impl ChannelState {
 
     /// How many outcome lines the reconciler has written so far: the mark a
     /// driver takes as it starts, so the lines after it are the ones it wrote.
-    pub(crate) fn outcomes_mark(&self) -> usize {
+    pub fn outcomes_mark(&self) -> usize {
         self.outcome_lines().map_or(0, |lines| lines.len())
     }
 
@@ -2835,7 +2835,7 @@ impl ChannelState {
     ///
     /// What a driver holding the run's ownership lock since `mark` answered:
     /// nothing else writes an outcome line while it holds the lock.
-    pub(crate) fn highest_answered_after(&self, mark: usize) -> Option<u64> {
+    pub fn highest_answered_after(&self, mark: usize) -> Option<u64> {
         self.outcome_lines()?
             .iter()
             .skip(mark)
@@ -2853,7 +2853,7 @@ impl ChannelState {
     /// [`claimed_unanswered_records`](Self::claimed_unanswered_records). Read leniently, as every view of the channel is: a
     /// channel this reader cannot open names nothing, and neither does one whose
     /// outcome log it cannot read — that would name every envelope ever answered.
-    pub(crate) fn claimed_unanswered(&self) -> Vec<u64> {
+    pub fn claimed_unanswered(&self) -> Vec<u64> {
         self.unanswered_claims()
             .iter()
             .filter_map(|record| record.get("id").and_then(Value::as_u64))
@@ -2867,7 +2867,7 @@ impl ChannelState {
     /// Read no more strictly than that list, for the same reason: an outcome log
     /// this reader cannot read names nothing, rather than every envelope ever
     /// answered — which a driver would then apply a second time.
-    pub(crate) fn claimed_unanswered_records(&self) -> Vec<Claimed> {
+    pub fn claimed_unanswered_records(&self) -> Vec<Claimed> {
         self.unanswered_claims()
             .into_iter()
             .map(Claimed::of)

@@ -62,7 +62,7 @@ use crate::refusal::Refusal;
 /// read this one as a setting called `bin` and refuse every command. [`environment`]
 /// leaves it out of what the store is handed, exactly as the engine once took it out of
 /// the child's environment. `docs/contract-divergences.md` entry 43 records the collision.
-pub(crate) const RETIRED_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
+pub const RETIRED_BINARY_ENV: &str = "ONETASKGRAPH_BIN";
 
 /// The store's name, as every refusal about something it answered names it.
 const STORE: &str = "onetaskgraph";
@@ -81,55 +81,55 @@ const ID_KEY: &str = "onepipeline.id";
 ///
 /// It shares the consumer's reserved namespace but is not a plan field: relaunching a
 /// project that a previous run updated must read the same node definition it launched.
-pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
+pub const SETTLEMENT_KEY: &str = "onepipeline.settlement";
 
 /// Projection-only metadata naming the word the engine last projected onto a settled task's
 /// status, beside [`SETTLEMENT_KEY`]: the one record of whether the engine closed the task, a
 /// park's `parked` and a stop's `cancelled` both settling `cancelled`. Entry 137 of
 /// `docs/contract-divergences.md` names it.
-pub(crate) const PROJECTED_STATUS_KEY: &str = "onepipeline.projected_status";
+pub const PROJECTED_STATUS_KEY: &str = "onepipeline.projected_status";
 
 /// Projection-only metadata naming the lineage head a destination item carries — the
 /// attempt whose fields it renders — beside [`SUPERSEDES_KEY`]; entry 80 of
 /// `docs/contract-divergences.md` names both.
-pub(crate) const NODE_KEY: &str = "onepipeline.node";
+pub const NODE_KEY: &str = "onepipeline.node";
 
 /// Projection-only metadata listing the ids a lineage's head superseded, root first,
 /// written only where the head is not the root.
-pub(crate) const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
+pub const SUPERSEDES_KEY: &str = "onepipeline.supersedes";
 
 /// Projection-only metadata on a rework's replacement: the node it replaces, the
 /// reason, the instruction and each review comment it answers, so any host knows
 /// which comments a rework is answering.
-pub(crate) const REWORK_KEY: &str = "onepipeline.rework";
+pub const REWORK_KEY: &str = "onepipeline.rework";
 /// Projection-only metadata saying whether the change a node published reached its base.
-pub(crate) const LANDING_KEY: &str = "onepipeline.landing";
+pub const LANDING_KEY: &str = "onepipeline.landing";
 /// Projection-only metadata naming the commit a landed change reached its base at.
-pub(crate) const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
+pub const LANDING_COMMIT_KEY: &str = "onepipeline.landing_commit";
 /// Projection-only metadata naming where a person reads the change a node published.
-pub(crate) const CHANGE_URL_KEY: &str = "onepipeline.change_url";
+pub const CHANGE_URL_KEY: &str = "onepipeline.change_url";
 /// Projection-only metadata naming the evidence tier a stated landing rests on.
-pub(crate) const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
+pub const LANDING_EVIDENCE_KEY: &str = "onepipeline.landing_evidence";
 
 /// Projection-only metadata naming the branch, base and opening time of a node's dispatch
 /// whose session is open and which has not settled yet: written when the session opens and
 /// removed when the node settles, so a host holding none of the run's state can pin an
 /// in-flight node to its branch. Entry 119 of `docs/contract-divergences.md` names it.
-pub(crate) const DISPATCH_KEY: &str = "onepipeline.dispatch";
+pub const DISPATCH_KEY: &str = "onepipeline.dispatch";
 
 /// Projection-only **project** metadata naming the driver that claims the project: its run,
 /// host, launching session, pid and when it claimed. Best effort and not atomic — entry 119
 /// of `docs/contract-divergences.md` says what it does and does not prevent. A release
 /// writes it `null`, because the store has no removal of a project key, and every reader
 /// reads `null` exactly as it reads the key absent.
-pub(crate) const DRIVER_KEY: &str = "onepipeline.driver";
+pub const DRIVER_KEY: &str = "onepipeline.driver";
 
 /// Projection-only **project** metadata naming the publications a driver has under way: its
 /// run and host, the nodes publishing and when it wrote them. Written — and landed — before
 /// any publication starts, and cleared once those publications have settled, so a run
 /// taking the project over can tell whether one may still be under way. Entry 128 of
 /// `docs/contract-divergences.md` names it; `null` reads as absent, as for the claim.
-pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
+pub const PUBLISHING_KEY: &str = "onepipeline.publishing";
 
 /// The reserved keys the write-back owns and no node field answers to.
 ///
@@ -236,7 +236,7 @@ impl Store {
 
     /// The store a configuration discovered from `dir` describes: the write-back's, which
     /// is the launch record's directory rather than whichever one the driver is in.
-    pub(crate) fn at(dir: impl Into<PathBuf>) -> Self {
+    pub fn at(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
             environment: environment(),
@@ -247,7 +247,7 @@ impl Store {
     /// but the empty one under `dir`: for a test whose claim is about every source the
     /// store builds, which the host's own `~/.config/onetaskgraph` would otherwise add to.
     #[cfg(test)]
-    pub(crate) fn isolated(dir: impl Into<PathBuf>) -> Self {
+    pub fn isolated(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let home = dir.to_string_lossy().into_owned();
         Self {
@@ -262,7 +262,7 @@ impl Store {
     /// Whether this store's configuration declares `source` `visibility: private` — the
     /// declaration the store's own boundary reads. A configuration that cannot be read, and
     /// a source it does not configure, declare nothing private.
-    pub(crate) fn source_declared_private(&self, source: &str) -> bool {
+    pub fn source_declared_private(&self, source: &str) -> bool {
         let Ok(name) = onetaskgraph_plugin_api::SourceName::new(source) else {
             return false;
         };
@@ -278,7 +278,7 @@ impl Store {
     ///
     /// `flags` is what a command line's `--set` was to the store's CLI: the write-back
     /// declares its shadow source there, beside whatever the operator configured.
-    pub(crate) fn engine(&self, flags: &Layer) -> std::result::Result<Built, ConfigError> {
+    pub fn engine(&self, flags: &Layer) -> std::result::Result<Built, ConfigError> {
         let Loaded {
             config, secrets, ..
         } = config::load(&self.dir, &self.environment, flags)?;
@@ -290,7 +290,7 @@ impl Store {
     }
 
     /// Resolve the configuration before deciding whether a write-back store can be reused.
-    pub(crate) fn validate(
+    pub fn validate(
         &self,
         flags: &Layer,
     ) -> std::result::Result<onetaskgraph_core::Config, ConfigError> {
@@ -310,7 +310,7 @@ impl Store {
     /// above drops because no plan field answers to them — and each task exactly as
     /// the store answered it. A consumer's check reads keys this engine does not, and
     /// the launch seeds the write-back's landed baseline from the tasks.
-    pub(crate) fn read_plan(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
+    pub fn read_plan(&self, project: &QualifiedId) -> std::result::Result<Read, Load> {
         self.load(project)
     }
 
@@ -320,7 +320,7 @@ impl Store {
     ///
     /// [`Error::Sibling`] for a configuration that does not load or a store that
     /// cannot answer, and for an id naming nothing.
-    pub(crate) fn item(&self, id: &QualifiedId, kind: StoredKind) -> Result<StoredItem> {
+    pub fn item(&self, id: &QualifiedId, kind: StoredKind) -> Result<StoredItem> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -378,7 +378,7 @@ impl Store {
     ///
     /// [`Error::Sibling`] for a configuration that does not load, a store that cannot
     /// answer, and a project the store does not hold.
-    pub(crate) fn plan_reach(&self, project: &QualifiedId) -> Result<PlanReach> {
+    pub fn plan_reach(&self, project: &QualifiedId) -> Result<PlanReach> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -424,7 +424,7 @@ impl Store {
     ///
     /// [`Error::Sibling`] for a configuration that does not load, a store that cannot answer
     /// or does not answer in time, and a project the store does not hold.
-    pub(crate) fn project_metadata_within(
+    pub fn project_metadata_within(
         &self,
         id: &QualifiedId,
         within: std::time::Duration,
@@ -439,7 +439,7 @@ impl Store {
     /// # Errors
     ///
     /// As [`project_metadata_within`](Self::project_metadata_within).
-    pub(crate) fn project_metadata_asking(
+    pub fn project_metadata_asking(
         &self,
         id: &QualifiedId,
         within: std::time::Duration,
@@ -487,7 +487,7 @@ impl Store {
     /// # Errors
     ///
     /// As [`project_metadata_within`](Self::project_metadata_within).
-    pub(crate) fn set_project_metadata_within(
+    pub fn set_project_metadata_within(
         &self,
         id: &QualifiedId,
         key: &str,
@@ -555,7 +555,7 @@ impl Store {
     ///
     /// [`Error::Sibling`] for a configuration that does not load or a read the store fails
     /// outright, and a refusal for an edge whose far end this graph cannot name.
-    pub(crate) fn reread(
+    pub fn reread(
         &self,
         project: &QualifiedId,
         nodes: &[Node],
@@ -632,7 +632,7 @@ impl Store {
 
 /// One engine, built from configuration for one logical command, and the page size that
 /// configuration reads its pages at.
-pub(crate) struct Built {
+pub struct Built {
     pub engine: Engine,
     pub page: NonZeroU32,
     pub config: onetaskgraph_core::Config,
@@ -643,7 +643,7 @@ pub(crate) struct Built {
 /// Read whole rather than filtered to the store's prefix, because it is also where a
 /// source's credential comes from — a `github-projects` source's token is read from the
 /// variable its configuration names — and where `secrets.env` is found.
-pub(crate) fn environment() -> Environment {
+pub fn environment() -> Environment {
     Environment::from_os_pairs(
         std::env::vars_os().filter(|(name, _)| name.as_os_str() != RETIRED_BINARY_ENV),
     )
@@ -653,7 +653,7 @@ pub(crate) fn environment() -> Environment {
 ///
 /// The store's plugin traits are async. Read commands own a current-thread runtime;
 /// the write-back worker retains one alongside its engine for the worker's lifetime.
-pub(crate) fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+pub fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1366,9 +1366,9 @@ impl Reader {
 /// A store read that was not answered, with how long its source asked to be left alone
 /// first: `None` where it named no wait.
 #[derive(Debug)]
-pub(crate) struct ReadRefused {
-    pub(crate) error: Error,
-    pub(crate) wait: Option<std::time::Duration>,
+pub struct ReadRefused {
+    pub error: Error,
+    pub wait: Option<std::time::Duration>,
 }
 
 impl From<Error> for ReadRefused {
@@ -1442,7 +1442,7 @@ fn stranger(
 /// parses: a list of qualified project ids, none in the home's source and at most one per
 /// source. A list that breaks it is refused naming the home and why, because a plan read as
 /// though it had fewer members than it does would leave a member's tasks out silently.
-pub(crate) fn members_of(
+pub fn members_of(
     home: &GlobalId,
     metadata: &BTreeMap<String, Value>,
 ) -> std::result::Result<Vec<GlobalId>, String> {
@@ -1562,7 +1562,7 @@ fn node_id(metadata: &BTreeMap<String, Value>) -> std::result::Result<String, St
 /// own budget, say) is unreachable without it. A graph document read once its
 /// overrides are applied is read through it for the same reason: it no longer
 /// carries the line a key was written on.
-pub(crate) fn read<T: serde::de::DeserializeOwned>(
+pub fn read<T: serde::de::DeserializeOwned>(
     document: Value,
 ) -> std::result::Result<T, String> {
     serde_path_to_error::deserialize(document).map_err(|error| match error.path().to_string() {
@@ -1586,7 +1586,7 @@ fn refused_plan(id: &str, what: String) -> Refusal {
 }
 
 /// One project, read.
-pub(crate) struct Read {
+pub struct Read {
     /// The plan the engine loaded, every default resolved.
     pub plan: Plan,
     /// Each task's own metadata map, verbatim, by node id.
@@ -1612,7 +1612,7 @@ pub(crate) struct Read {
 /// text: the hold record's `cause` and, for a rate limit naming its reset, the instant the
 /// source may be asked again are what the run decides when to read it again by.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Unanswered {
+pub struct Unanswered {
     /// Who could not be asked, and what kind of not answering it was.
     pub who: Unasked,
     /// Why it did not answer, in the store's own words.
@@ -1621,7 +1621,7 @@ pub(crate) struct Unanswered {
 
 /// Who a dependency read could not ask, each with only the account its kind can carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Unasked {
+pub enum Unasked {
     /// A configured source, and why it could not be asked.
     Source {
         source: SourceName,
@@ -1636,7 +1636,7 @@ pub(crate) enum Unasked {
 
 /// Why a configured source could not be asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceCause {
+pub enum SourceCause {
     /// It asked the reader to slow down, naming — where it did — the epoch milliseconds it may
     /// be asked again at: the read's instant plus its `retry_after_seconds`.
     RateLimited { retry_at_ms: Option<u64> },
@@ -1648,7 +1648,7 @@ pub(crate) enum SourceCause {
 
 /// Why something could not be asked, as a `node-held` record's `cause` spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Cause {
+pub enum Cause {
     /// It asked the reader to slow down.
     RateLimited,
     /// Its credential was absent, malformed or refused.
@@ -1661,7 +1661,7 @@ pub(crate) enum Cause {
 
 impl Cause {
     /// Every cause, in the order the record's vocabulary lists them.
-    pub(crate) const ALL: [Self; 4] = [
+    pub const ALL: [Self; 4] = [
         Self::RateLimited,
         Self::Auth,
         Self::Unavailable,
@@ -1669,7 +1669,7 @@ impl Cause {
     ];
 
     /// The word the record carries.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::RateLimited => "rate-limited",
             Self::Auth => "auth",
@@ -1679,7 +1679,7 @@ impl Cause {
     }
 
     /// The cause a recorded word names, or `None` for a word this build does not know.
-    pub(crate) fn of_word(word: &str) -> Option<Self> {
+    pub fn of_word(word: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|cause| cause.as_str() == word)
     }
 }
@@ -1717,7 +1717,7 @@ impl Unanswered {
     /// walked several pages meets the same source on each, and the first account of it
     /// stands. A rate limit naming how long to wait is stamped with the instant that ends,
     /// counted from `now_ms`.
-    pub(crate) fn of(unanswered: &[onetaskgraph_core::Unanswered], now_ms: u64) -> Vec<Self> {
+    pub fn of(unanswered: &[onetaskgraph_core::Unanswered], now_ms: u64) -> Vec<Self> {
         let mut named: BTreeMap<String, Self> = BTreeMap::new();
         for entry in unanswered {
             let read = match entry {
@@ -1740,7 +1740,7 @@ impl Unanswered {
 
     /// What the record's `source` names it by: the source's configured name, or the
     /// designator of a tracker no configured source is.
-    pub(crate) fn name(&self) -> String {
+    pub fn name(&self) -> String {
         match &self.who {
             Unasked::Source { source, .. } | Unasked::Recorded(source) => source.to_string(),
             Unasked::Tracker(designator) => designator.to_string(),
@@ -1748,7 +1748,7 @@ impl Unanswered {
     }
 
     /// The record's `cause`, or `None` for a hold journalled before it was recorded.
-    pub(crate) fn cause(&self) -> Option<Cause> {
+    pub fn cause(&self) -> Option<Cause> {
         match &self.who {
             Unasked::Source { cause, .. } => Some(match cause {
                 SourceCause::RateLimited { .. } => Cause::RateLimited,
@@ -1761,7 +1761,7 @@ impl Unanswered {
     }
 
     /// The reset a rate-limited source named, as the epoch milliseconds it falls at.
-    pub(crate) fn retry_at_ms(&self) -> Option<u64> {
+    pub fn retry_at_ms(&self) -> Option<u64> {
         match &self.who {
             Unasked::Source {
                 cause: SourceCause::RateLimited { retry_at_ms },
@@ -1775,28 +1775,28 @@ impl Unanswered {
 /// One node's dependency edges, read again: the node ids they point at, and the sources
 /// declared private that still could not be asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reread {
+pub struct Reread {
     /// The node ids this read resolved the task's edges to.
     pub deps: Vec<String>,
     /// The sources it could not ask; empty for a read that asked every one.
     pub unanswered: Vec<Unanswered>,
 }
 
-pub(crate) struct StoredTask {
+pub struct StoredTask {
     pub qualified: QualifiedId,
     /// Byte for byte; empty where the task has none.
     pub content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoredKind {
+pub enum StoredKind {
     Task,
     Document,
     Project,
 }
 
 /// Where a plan reaches, as [`Store::plan_reach`] reads it.
-pub(crate) struct PlanReach {
+pub struct PlanReach {
     /// The address the plan's project answers at, where its source gives one an absolute
     /// HTTPS address with no credentials in it — the only kind a reader is handed as a link.
     pub url: Option<onetaskgraph_core::task_projection::TrackerUrl>,
@@ -1804,7 +1804,7 @@ pub(crate) struct PlanReach {
     pub repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }
 
-pub(crate) struct StoredItem {
+pub struct StoredItem {
     pub content: String,
     pub metadata: BTreeMap<String, Value>,
 }
@@ -1817,7 +1817,7 @@ pub(crate) struct StoredItem {
 /// that names nothing. A caller
 /// that collapsed them would report a store outage as a plan its author has to
 /// fix.
-pub(crate) enum Load {
+pub enum Load {
     /// The schema refused it, and this is what about.
     Refused(Refusal),
     /// It could not be read.
@@ -1880,7 +1880,7 @@ impl QualifiedId {
     /// Infallible, because the two agree on what a qualified id is: a source name the
     /// store's own [`SourceName`] parser accepted where this id was parsed, and a native id
     /// that is not empty.
-    pub(crate) fn global(&self) -> GlobalId {
+    pub fn global(&self) -> GlobalId {
         GlobalId::new(
             SourceName::new(self.source())
                 .expect("a qualified id's source is a source name the store accepts"),

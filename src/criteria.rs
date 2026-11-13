@@ -38,11 +38,11 @@ use crate::plan::Node;
 ///
 /// Every field is private and there is no constructor but [`parse`], so a value
 /// of this type has been through it: the file is a [`BranchPath`] and the
-/// literal is not empty. A struct with `pub(crate)` fields would let any module
+/// literal is not empty. A struct with `pub` fields would let any module
 /// in the crate assemble a criterion this module would never have recognised and
 /// then have it read off a branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Checkable {
+pub struct Checkable {
     /// The criterion as the plan wrote it, so a finding quotes the bar rather
     /// than this module's reading of it.
     criterion: String,
@@ -53,15 +53,15 @@ pub(crate) struct Checkable {
 }
 
 impl Checkable {
-    pub(crate) fn criterion(&self) -> &str {
+    pub fn criterion(&self) -> &str {
         &self.criterion
     }
 
-    pub(crate) fn file(&self) -> &str {
+    pub fn file(&self) -> &str {
         self.file.as_str()
     }
 
-    pub(crate) fn literal(&self) -> &str {
+    pub fn literal(&self) -> &str {
         &self.literal
     }
 }
@@ -80,7 +80,7 @@ impl Checkable {
 /// branch resolves it to is the other half and is checked where it is opened —
 /// see [`answer`], which refuses a symlink out of the worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BranchPath(String);
+pub struct BranchPath(String);
 
 impl BranchPath {
     /// The path a backticked span names on the branch, or `None` where the span
@@ -120,7 +120,7 @@ impl BranchPath {
     }
 
     /// The path as the criterion wrote it, for a payload and a finding to quote.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -134,7 +134,7 @@ impl BranchPath {
 /// what the file has where the criterion's own value is not there, which is what
 /// makes a finding worth reading without opening the branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Answer {
+pub enum Answer {
     Match,
     Mismatch { holds: String },
     Unread { reason: String },
@@ -142,7 +142,7 @@ pub(crate) enum Answer {
 
 impl Answer {
     /// The word the run's own record carries this answer under.
-    pub(crate) const fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Match => "match",
             Self::Mismatch { .. } => "mismatch",
@@ -188,7 +188,7 @@ const CRITERIA_HEADING: &str = crate::plan::CRITERIA_HEADING;
 /// judge no longer holds the node to must not be one the engine still raises.
 ///
 /// [`plan::amendment_clauses`]: crate::plan::amendment_clauses
-pub(crate) fn checkable_of(node: &Node) -> Vec<Checkable> {
+pub fn checkable_of(node: &Node) -> Vec<Checkable> {
     let amended: Vec<Checkable> = node
         .amendment
         .as_deref()
@@ -233,7 +233,7 @@ pub(crate) fn checkable_of(node: &Node) -> Vec<Checkable> {
 ///
 /// Only the `## Acceptance criteria` section: what a task says elsewhere is
 /// context, and a `## What` narrating the change is not a bar anybody agreed to.
-pub(crate) fn checkable(task: &str) -> Vec<Checkable> {
+pub fn checkable(task: &str) -> Vec<Checkable> {
     criteria_in(task)
         .into_iter()
         .filter_map(|criterion| parse(&criterion))
@@ -250,7 +250,7 @@ pub(crate) fn checkable(task: &str) -> Vec<Checkable> {
 /// lexical rule there is. Both the root and the resolved path are canonicalized
 /// and the second must be under the first; anything else is the check declining
 /// to answer, which is what it does with every other file it cannot read.
-pub(crate) fn answer(root: &Path, check: &Checkable) -> Answer {
+pub fn answer(root: &Path, check: &Checkable) -> Answer {
     let declined = |reason: String| Answer::Unread { reason };
     let (root, path) = match (root.canonicalize(), root.join(check.file()).canonicalize()) {
         (Ok(root), Ok(path)) => (root, path),

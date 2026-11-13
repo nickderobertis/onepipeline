@@ -50,30 +50,30 @@ const MAX_TAIL_BYTES: u64 = 64 * 1024;
 ///
 /// Shared with the dispatch-env hook's wait, which is the same wait without the
 /// relay.
-pub(crate) const POLL: Duration = Duration::from_millis(50);
+pub const POLL: Duration = Duration::from_millis(50);
 
 /// The environment variable naming which hook is running.
 ///
 /// Every hook this crate runs — the two run-end hooks and the dispatch-env hook
 /// — is told which under this one name.
-pub(crate) const HOOK_ENV: &str = "ONEPIPELINE_HOOK";
+pub const HOOK_ENV: &str = "ONEPIPELINE_HOOK";
 
 /// The environment variable naming the run a hook fired for.
-pub(crate) const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
+pub const RUN_ID_ENV: &str = "ONEPIPELINE_RUN_ID";
 
 /// The environment variable naming that run's own directory, absolute.
-pub(crate) const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
+pub const RUN_ROOT_ENV: &str = "ONEPIPELINE_RUN_ROOT";
 
 /// The settlement a driver lets go at when the run is paused rather than ended.
 ///
 /// The word `start` and `adopt` print on their settlement line for the same
 /// state, which is what a withheld hook's record carries so the two read alike.
-pub(crate) const PAUSED: &str = "awaiting-planner";
+pub const PAUSED: &str = "awaiting-planner";
 
 /// One of the two run-end hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Hook {
+pub enum Hook {
     /// Every node settled `done`.
     Success,
     /// The run ended any other way.
@@ -113,7 +113,7 @@ impl std::fmt::Display for Hook {
 /// Why the failure hook fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ReasonKind {
+pub enum ReasonKind {
     /// The graph holds a `failed` or `skipped` node.
     Nodes,
     /// The graph holds a node that is not `done`, none failed or skipped, and no
@@ -126,7 +126,7 @@ pub(crate) enum ReasonKind {
 impl ReasonKind {
     /// The ending a view reads a run that fired the failure hook for this reason
     /// as — the one place the hook's word and the view's are paired.
-    pub(crate) fn ending(self) -> EndingKind {
+    pub fn ending(self) -> EndingKind {
         match self {
             Self::Nodes => EndingKind::Failed,
             Self::Unfinished => EndingKind::Unfinished,
@@ -137,7 +137,7 @@ impl ReasonKind {
 
 /// Why the failure hook fired, and every node not `done` when it was judged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Reason {
+pub struct Reason {
     kind: ReasonKind,
     nodes: Vec<EndedNode>,
 }
@@ -145,7 +145,7 @@ pub(crate) struct Reason {
 /// Which hook fires, and why: a success carries no reason and a failure always
 /// carries one, so neither can be recorded or handed over the other way round.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Firing {
+pub enum Firing {
     /// Every node settled `done`.
     Success,
     /// The run ended any other way, for this reason.
@@ -207,7 +207,7 @@ enum Ending {
 
 /// What a driver letting go of a run owes it.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Judged {
+pub enum Judged {
     /// The run has ended, and this is the hook it ended under.
     Fire(Firing),
     /// A decision is outstanding: the run is paused, not ended.
@@ -219,7 +219,7 @@ pub(crate) enum Judged {
 
 /// Whether an attached driver repeats a hook's output on its own stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Relay {
+pub enum Relay {
     /// An attached driver: somebody is watching this process's stderr.
     Stderr,
     /// A detached driver, or a verb that is not a driver: the log is the record.
@@ -232,7 +232,7 @@ pub(crate) enum Relay {
 /// hook it names when a driver lets go, and `views` reads the same answer as the
 /// run's ending — so a run cannot fire one hook and read as another ending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// The graph has not begun, or a `complete-but-draft` node is waiting on a
     /// release: the run has not ended, and it is not paused on a decision either.
     NotEnded,
@@ -254,7 +254,7 @@ pub(crate) enum Verdict {
 /// all the rule reads, and it is what both a fold and a run's bounded summary
 /// document hold. `decision_outstanding` is asked only once the graph is known
 /// not to be complete, so a finished run reads no channel for it.
-pub(crate) fn verdict(
+pub fn verdict(
     present: &BTreeSet<NodeStatus>,
     decision_outstanding: impl FnOnce() -> bool,
 ) -> Verdict {
@@ -280,7 +280,7 @@ pub(crate) fn verdict(
 
 /// Judge a run a driver has let go of, on the graph as it now stands: the
 /// [`verdict`], with the nodes a failure is handed.
-pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
+pub fn judge(state: &RunState, paths: &RunPaths) -> Judged {
     let statuses = state.statuses();
     let present = statuses.values().copied().collect();
     match verdict(&present, || views::decision_outstanding(state, paths)) {
@@ -297,7 +297,7 @@ pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
 /// Whether a graph standing at `statuses` has reached the success ending — the
 /// [`verdict`] a success hook fires on and a view prints `SETTLED` for — which is
 /// what marks the run's home `done` (`crate::home`).
-pub(crate) fn succeeded(statuses: &BTreeMap<String, NodeStatus>) -> bool {
+pub fn succeeded(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     let present = statuses.values().copied().collect();
     // Success is decided before any decision is asked about, so none is.
     verdict(&present, || false) == Verdict::Success
@@ -305,7 +305,7 @@ pub(crate) fn succeeded(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 
 /// Every node not `done`, in plan order, as a hook is handed it — and as a
 /// view lists an ended run's.
-pub(crate) fn unsettled(
+pub fn unsettled(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
 ) -> Vec<EndedNode> {
@@ -331,7 +331,7 @@ pub(crate) fn unsettled(
 ///
 /// Called only once the ownership lock is released, so the hook runs while the
 /// run reads as free — and never by a driver that left the run claimed.
-pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
+pub fn at_let_go(paths: &RunPaths, relay: Relay) {
     let Some(view) = judged_view(paths) else {
         return;
     };
@@ -347,7 +347,7 @@ pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
 /// The stop verb's own, after it journals `run-stopped`. It is not the run's
 /// driver — the driver is what it ended — so it journals the way the stop itself
 /// did, from outside the lock.
-pub(crate) fn at_stop(paths: &RunPaths) {
+pub fn at_stop(paths: &RunPaths) {
     crate::scratch::at_ending(paths);
     let Some(view) = judged_view(paths) else {
         return;
@@ -544,7 +544,7 @@ fn fired(paths: &RunPaths) -> bool {
 /// upstream arriving is the contract's own example — and liveness alone is not
 /// an epoch. A fold that has lost a record retires nothing, for the reason
 /// [`fired`] gives an edit beside one.
-pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
+pub fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
     if !state.strict || state.hook_marker != Some(FiredOver::Live) {
         return false;
     }
@@ -570,7 +570,7 @@ struct Epochs {
 /// [`adoption_starts_epoch`] asks of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum FiredOver {
+pub enum FiredOver {
     /// Work was left that could still move: the hook fired over a run that had
     /// not ended, which only an adoption then carries on.
     Live,
@@ -604,7 +604,7 @@ fn epochs(events: &[Envelope]) -> Epochs {
 /// The run-end hook's marker across one record a fold takes: what the graph's
 /// ending was in front of it, taken before the record is folded, and the marker
 /// the record leaves standing, decided once it is.
-pub(crate) struct Marked {
+pub struct Marked {
     /// The ending in front of an edit arriving while a marker stands, and nothing
     /// otherwise: an edit that found the run live changed no ending, whatever it
     /// left behind.
@@ -613,7 +613,7 @@ pub(crate) struct Marked {
 
 impl Marked {
     /// What the marker rule needs of `state` before `event` is folded into it.
-    pub(crate) fn before(state: &RunState, event: &Envelope) -> Self {
+    pub fn before(state: &RunState, event: &Envelope) -> Self {
         // Its spelling compared rather than looked up: this is asked of every record.
         let edit = event.kind.0 == PipelineKind::EditCommitted.as_str();
         Self {
@@ -624,7 +624,7 @@ impl Marked {
     }
 
     /// Leave on `state`, now holding `event`, the marker the record leaves standing.
-    pub(crate) fn after(self, state: &mut RunState, event: &Envelope) {
+    pub fn after(self, state: &mut RunState, event: &Envelope) {
         // Compared by spelling, as `before` does, rather than looked up for every record.
         let is = |kind: PipelineKind| event.kind.0 == kind.as_str();
         // An adoption that started an epoch says so on its own record: it was
@@ -801,12 +801,12 @@ fn log_path(paths: &RunPaths, hook: Hook) -> PathBuf {
 /// Where the output of the hook called `name` is kept: `hooks/<name>.log` under
 /// the run's own directory, absolute. One spelling for every hook this crate
 /// runs.
-pub(crate) fn hook_log(paths: &RunPaths, name: &str) -> PathBuf {
+pub fn hook_log(paths: &RunPaths, name: &str) -> PathBuf {
     run_root(paths).join("hooks").join(format!("{name}.log"))
 }
 
 /// The run's own directory, absolute, as a hook is told it.
-pub(crate) fn run_root(paths: &RunPaths) -> PathBuf {
+pub fn run_root(paths: &RunPaths) -> PathBuf {
     std::path::absolute(&paths.dir).unwrap_or_else(|_| paths.dir.clone())
 }
 
@@ -967,7 +967,7 @@ fn run(
 /// A timeout is any positive whole number of seconds, so one can name an instant
 /// no `Instant` holds. That is a timeout no hook can outlive, and it is waited
 /// without a bound rather than panicking on a value the launch accepted.
-pub(crate) fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
+pub fn deadline_after(timeout: NonZeroU64) -> Option<Instant> {
     Instant::now().checked_add(Duration::from_secs(timeout.get()))
 }
 
@@ -1001,7 +1001,7 @@ fn relay_from(log: &Path, from: u64) -> u64 {
 ///
 /// Read from the run's own journal, which is where every one of these records is
 /// written and the only store [`fired`] reads.
-pub(crate) fn results_lines(paths: &RunPaths, events: &[Envelope]) -> String {
+pub fn results_lines(paths: &RunPaths, events: &[Envelope]) -> String {
     let epochs = epochs(events);
     // The edit that ended the epoch the record at `at` is in, where one has.
     let superseded_by = |at: usize| {
@@ -1178,7 +1178,7 @@ fn tail(log: &Path) -> std::io::Result<Vec<String>> {
 /// fall-through to the rung below. Not resolved against the launch directory — a
 /// command may as legitimately be a name on `PATH` as a path, and it runs in that
 /// directory anyway.
-pub(crate) fn named(flag: Option<&str>, config: Option<&str>) -> Option<String> {
+pub fn named(flag: Option<&str>, config: Option<&str>) -> Option<String> {
     flag.or(config)
         .map(str::trim)
         .filter(|command| !command.is_empty())
@@ -1190,7 +1190,7 @@ pub(crate) fn named(flag: Option<&str>, config: Option<&str>) -> Option<String> 
 /// One sentence for the flag and the launch-config key, as the write-back's
 /// budget has one: a timeout of zero ends every hook before it has begun, so a
 /// launch that wrote it asked for something it would not get.
-pub(crate) fn refused_zero_timeout(spelling: &str) -> String {
+pub fn refused_zero_timeout(spelling: &str) -> String {
     format!(
         "{spelling} names a hook timeout of zero seconds, which ends every hook before it has \
          begun — give it a positive whole number of seconds, or leave it out to take \

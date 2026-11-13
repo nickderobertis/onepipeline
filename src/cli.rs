@@ -811,7 +811,7 @@ pub struct AdoptArgs {
 ///
 /// Named here, beside the argument it parses, because the launcher spells it on
 /// a command line: a spelling only one side of that knew could drift.
-pub(crate) const ADOPT_FLAG: &str = "adopt";
+pub const ADOPT_FLAG: &str = "adopt";
 
 /// `onepipeline drive-run` — the retained driver of a detached launch.
 ///

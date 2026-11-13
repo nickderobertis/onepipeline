@@ -39,7 +39,7 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// a workspaces root the linked sibling could not resolve: silence is the one
 /// answer a reading of the resource whose exhaustion stops everything may not
 /// give.
-pub(crate) fn lines(runs_root: &Path) -> String {
+pub fn lines(runs_root: &Path) -> String {
     render(&readings(runs_root))
 }
 
@@ -96,7 +96,7 @@ impl Role {
 }
 
 /// One reading per distinct filesystem among the runs root and the workspaces root.
-pub(crate) fn readings(runs_root: &Path) -> Vec<FreeSpace> {
+pub fn readings(runs_root: &Path) -> Vec<FreeSpace> {
     let mut asked: Vec<(Role, PathBuf)> = vec![(Role::RunsRoot, runs_root.to_path_buf())];
     let unresolved = match workspaces_root() {
         Ok(root) => {
@@ -184,7 +184,7 @@ fn lines_of(asked: &[(&str, PathBuf)]) -> String {
 }
 
 /// The `free space:` lines, each with its terminator.
-pub(crate) fn render(readings: &[FreeSpace]) -> String {
+pub fn render(readings: &[FreeSpace]) -> String {
     let mut out = String::new();
     for reading in readings {
         let roots: Vec<String> = reading.roots.iter().map(named).collect();
@@ -292,7 +292,7 @@ impl Filesystem {
 }
 
 /// Allocated byte counts use the same one-decimal GiB form in scratch and free-space notices.
-pub(crate) fn gib(bytes: u64) -> String {
+pub fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB)
 }
 

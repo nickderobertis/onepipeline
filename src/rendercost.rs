@@ -29,7 +29,7 @@ use serde_json::json;
 /// It names a **file**, which every render in the process appends a line to, so
 /// a caller measuring one command points it at a path of that command's own.
 /// Absent, nothing is opened and nothing is written.
-pub(crate) const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
+pub const RENDER_COST_ENV: &str = "ONEPIPELINE_RENDER_COST";
 
 thread_local! {
     /// The render this thread is inside, and the node whose landing it is
@@ -48,7 +48,7 @@ thread_local! {
 /// a caller can spell. `tests/e2e/landing.rs` and `tests/e2e/watch.rs` read them
 /// off the record by these words, so they are the wire as well as the vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rendered {
+pub enum Rendered {
     /// `onepipeline results` — the per-node lines.
     Results,
     /// The run summary's count of what has not landed.
@@ -159,13 +159,13 @@ fn record(act: Act, detail: serde_json::Value) {
 /// nested scopes would attribute the summary's reads to a render nobody ran. The
 /// outermost scope is the render, and an inner one records nothing and restores
 /// nothing.
-pub(crate) struct Render {
+pub struct Render {
     /// Whether this scope is the one that opened the render — an inner scope
     /// leaves the outer one exactly as it found it.
     outermost: bool,
 }
 
-pub(crate) fn rendering(view: Rendered, run: &str) -> Render {
+pub fn rendering(view: Rendered, run: &str) -> Render {
     let outermost = INSIDE.with_borrow_mut(|inside| {
         if inside.is_some() {
             return false;
@@ -189,7 +189,7 @@ impl Render {
     /// Read by [`crate::views`], which empties its per-render memo of landing
     /// reads when a render opens: emptying it on a nested scope would ask every
     /// node a second time half-way through one render.
-    pub(crate) fn outermost(&self) -> bool {
+    pub fn outermost(&self) -> bool {
         self.outermost
     }
 
@@ -198,7 +198,7 @@ impl Render {
     /// The set every landing read is held against: a read for a node this render
     /// never reported on is a read nobody is shown, which is the one shape of
     /// waste the bound rules out by name.
-    pub(crate) fn reported(&self, node: &str) {
+    pub fn reported(&self, node: &str) {
         record(Act::Reported, json!({ "node": node }));
     }
 }
@@ -213,10 +213,10 @@ impl Drop for Render {
 
 /// The render a thread is inside, taken so that work it hands to other threads is
 /// counted against that render as if it had done the work itself.
-pub(crate) struct Within(Option<Inside>);
+pub struct Within(Option<Inside>);
 
 /// The render this thread is inside, if any — see [`Within::adopted`].
-pub(crate) fn within() -> Within {
+pub fn within() -> Within {
     Within(INSIDE.with_borrow(|inside| {
         inside.as_ref().map(|inside| Inside {
             node: None,
@@ -230,7 +230,7 @@ impl Within {
     /// inside, until the scope is dropped. Nothing on a thread already inside a
     /// render — the one that took it, among others — and nothing where it was
     /// taken outside one, so a read nobody is rendering stays uncounted.
-    pub(crate) fn adopted(&self) -> Adopted {
+    pub fn adopted(&self) -> Adopted {
         let adopted = INSIDE.with_borrow_mut(|inside| match (&*inside, &self.0) {
             (None, Some(within)) => {
                 *inside = Some(within.clone());
@@ -243,7 +243,7 @@ impl Within {
 }
 
 /// A thread counting against a render another thread is inside.
-pub(crate) struct Adopted {
+pub struct Adopted {
     /// Whether this scope set the render, so it is the one that clears it.
     adopted: bool,
 }
@@ -257,7 +257,7 @@ impl Drop for Adopted {
 }
 
 /// The scope in which one node's landing is decided.
-pub(crate) struct Deciding {
+pub struct Deciding {
     /// Whether this scope set the node, so an inner one cannot clear it.
     outermost: bool,
 }
@@ -267,7 +267,7 @@ pub(crate) struct Deciding {
 /// Not re-entrant, like [`rendering`]: the innermost decision is the one whose
 /// acts would be miscounted, and a nested scope naming a second node would move
 /// the first one's remaining acts onto it.
-pub(crate) fn deciding(node: &str) -> Deciding {
+pub fn deciding(node: &str) -> Deciding {
     let outermost = INSIDE.with_borrow_mut(|inside| match inside.as_mut() {
         Some(inside) if inside.node.is_none() => {
             inside.node = Some(node.to_owned());
@@ -297,11 +297,11 @@ impl Drop for Deciding {
 /// repository from scratch every time, and whether it got as far as resolving or
 /// opening one is inside an answer this does not read. What it counts is
 /// therefore exactly the cost [`crate::vcs::landing_now`] cannot collapse.
-pub(crate) fn repository_asked(repo: Option<&str>) {
+pub fn repository_asked(repo: Option<&str>) {
     record(Act::RepositoryAsked, json!({ "repo": repo }));
 }
 
-pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
+pub fn landing_read_taken(reference: &str, repo: Option<&str>) {
     record(
         Act::LandingRead,
         json!({ "reference": reference, "repo": repo }),
@@ -314,7 +314,7 @@ pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
 /// Nothing is recorded outside such a scope: reading the journal once for the
 /// whole render is what a view has always done, and the bound is about a read
 /// that happens once *per node*.
-pub(crate) fn store_read(bytes: u64) {
+pub fn store_read(bytes: u64) {
     if inside_a_decision() {
         record(Act::StoreRead, json!({ "bytes": bytes }));
     }
@@ -326,7 +326,7 @@ pub(crate) fn store_read(bytes: u64) {
 /// a landing decided by walking a base's history — or by asking a host over the
 /// network, which from here is a `gh` — is counted rather than merely forbidden
 /// in prose.
-pub(crate) fn process_spawned(program: &str) {
+pub fn process_spawned(program: &str) {
     if inside_a_decision() {
         record(Act::ProcessSpawn, json!({ "program": program }));
     }
@@ -339,8 +339,8 @@ fn inside_a_decision() -> bool {
 /// One lock over every unit test that sets or clears [`RENDER_COST_ENV`], because
 /// the variable is process-wide: each would otherwise turn another's recording off
 /// half-way through it.
-#[cfg(test)]
-pub(crate) static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-support"))]
+pub static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {

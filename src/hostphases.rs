@@ -26,7 +26,7 @@ use std::time::Instant;
 
 /// The environment variable asking `onepipeline host` to record its phases: it
 /// names the file the line is appended to.
-pub(crate) const HOST_PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
+pub const HOST_PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
 
 /// Where the line goes; unset or empty records nothing.
 fn target() -> Option<&'static PathBuf> {
@@ -86,12 +86,12 @@ fn sample() -> Sample {
 }
 
 /// One phase, timed until dropped. A phase inside another is counted in both.
-pub(crate) struct Phase {
+pub struct Phase {
     name: &'static str,
     began: Option<Sample>,
 }
 
-pub(crate) fn phase(name: &'static str) -> Phase {
+pub fn phase(name: &'static str) -> Phase {
     Phase {
         name,
         began: target().map(|_| sample()),
@@ -115,7 +115,7 @@ impl Drop for Phase {
     }
 }
 
-pub(crate) fn add(name: &'static str, amount: u64) {
+pub fn add(name: &'static str, amount: u64) {
     if target().is_some() {
         QUANTITIES.with_borrow_mut(|quantities| {
             *quantities.entry(name).or_default() += amount;
@@ -131,7 +131,7 @@ fn read_bytes(rchar: Option<u128>) -> Option<u64> {
 /// Note the wall clock (Unix epoch nanoseconds) at a named point, so a caller that
 /// noted when it spawned the process can split the process's own wall clock into
 /// what came before the command's work and what came after it.
-pub(crate) fn mark(name: &'static str) {
+pub fn mark(name: &'static str) {
     if target().is_some() {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -142,7 +142,7 @@ pub(crate) fn mark(name: &'static str) {
 
 /// Append the line, if one was asked for. Best-effort: a line that cannot be
 /// written costs the measurement, never the read.
-pub(crate) fn flush() {
+pub fn flush() {
     let Some(target) = target() else { return };
     let whole = sample();
     let phases: serde_json::Map<String, serde_json::Value> = TOTALS.with_borrow(|totals| {

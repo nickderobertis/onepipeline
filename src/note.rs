@@ -137,7 +137,7 @@ pub enum Reached {
 /// `note-withdrawn` record carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum WithdrawnFrom {
+pub enum WithdrawnFrom {
     /// Live and untaken: waiting in its conversation's inbox, queued behind an
     /// earlier note to the same node, or in an envelope held unjudged behind one.
     Live,
@@ -189,14 +189,14 @@ impl Reached {
     /// The disposition of a note no running turn took, for no reason the run
     /// knows beyond that.
     #[must_use]
-    pub(crate) fn carried() -> Self {
+    pub fn carried() -> Self {
         Self::Carried { reason: None }
     }
 
     /// How the turn that took it took it, where a live turn did and the record
     /// says.
     #[must_use]
-    pub(crate) fn turn(&self) -> Option<NoteTurn> {
+    pub fn turn(&self) -> Option<NoteTurn> {
         match self {
             Self::Worker { turn } | Self::Supervisor { turn } => *turn,
             Self::Queued | Self::JudgedWith { .. } | Self::Carried { .. } => None,
@@ -365,7 +365,7 @@ pub fn deliver_with(
 /// composed note carries — so nothing downstream of the boundary that refuses it
 /// can be handed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reach {
+pub enum Reach {
     /// `deliver: live` or `turn-end` with `persist: false`: the running turn and
     /// nothing else, so a note no turn took is refused.
     LiveOnly(Live),
@@ -382,12 +382,12 @@ pub(crate) enum Reach {
 /// How a live attempt reaches the running turn: the delivery mode the composed
 /// note is offered with, and how long it may wait for a turn to take it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Live {
+pub struct Live {
     /// Interrupt the running turn, or wait for it to end.
-    pub(crate) delivery: Delivery,
+    pub delivery: Delivery,
     /// How long the note may wait for a turn to take it, measured from the
     /// offer; `None` for as long as the dispatch runs.
-    pub(crate) deadline: Option<std::time::Duration>,
+    pub deadline: Option<std::time::Duration>,
 }
 
 impl Reach {
@@ -409,7 +409,7 @@ impl Reach {
     /// [`Error::Refused`] for `deliver: next` with `persist: false`, which
     /// attempts no live delivery and composes the note into no dispatch, and for
     /// a deadline [`deadline_of`] refuses.
-    pub(crate) fn of(
+    pub fn of(
         node: &str,
         deliver: Deliver,
         persist: bool,
@@ -432,7 +432,7 @@ impl Reach {
     }
 
     /// How the running turn is attempted, where it is.
-    pub(crate) fn live(self) -> Option<Live> {
+    pub fn live(self) -> Option<Live> {
         match self {
             Self::LiveOnly(live) | Self::LiveThenNext(live) => Some(live),
             Self::NextOnly => None,
@@ -440,13 +440,13 @@ impl Reach {
     }
 
     /// Whether the node's running turn is attempted at all.
-    pub(crate) fn attempts_a_live_turn(self) -> bool {
+    pub fn attempts_a_live_turn(self) -> bool {
         self.live().is_some()
     }
 
     /// Whether a note no running turn took is composed into the node's next
     /// dispatch.
-    pub(crate) fn composes_forward(self) -> bool {
+    pub fn composes_forward(self) -> bool {
         !matches!(self, Self::LiveOnly(_))
     }
 }
@@ -487,7 +487,7 @@ fn deadline_of(
 /// The latest instant this run can name, in epoch milliseconds:
 /// `9999-12-31T23:59:59.999Z`, past which RFC 3339 — what `status` and the
 /// live-delivery reading write a deadline as — has no year to write.
-pub(crate) const LATEST_NAMEABLE_MILLIS: u64 = 253_402_300_799_999;
+pub const LATEST_NAMEABLE_MILLIS: u64 = 253_402_300_799_999;
 
 /// How long a note offered at `offered_at`, in epoch milliseconds, waits under a
 /// `delivery_timeout_seconds` of `deadline`: that long, or — for one that would
@@ -497,7 +497,7 @@ pub(crate) const LATEST_NAMEABLE_MILLIS: u64 = 253_402_300_799_999;
 /// performs and the deadline it reports one instant: bounded either way, never
 /// an unbounded wait, and never a deadline the run's own reading cannot read
 /// back.
-pub(crate) fn bounded_deadline(
+pub fn bounded_deadline(
     deadline: std::time::Duration,
     offered_at: u64,
 ) -> std::time::Duration {
@@ -514,7 +514,7 @@ pub(crate) fn bounded_deadline(
 /// and the largest are further ahead than a clock represents. Such a wait stays
 /// bounded, at the latest instant there is, rather than becoming one with no
 /// deadline at all or panicking on the overflow.
-pub(crate) fn deadline_instant(
+pub fn deadline_instant(
     from: std::time::Instant,
     deadline: std::time::Duration,
 ) -> std::time::Instant {
@@ -535,7 +535,7 @@ pub(crate) fn deadline_instant(
 
 /// The reason a note whose deadline passed untaken is recorded with, carried or
 /// refused alike.
-pub(crate) fn expired(deadline: std::time::Duration) -> String {
+pub fn expired(deadline: std::time::Duration) -> String {
     format!(
         "no turn took it within its `delivery_timeout_seconds: {}`, so it was withdrawn untaken",
         deadline.as_secs()
@@ -549,7 +549,7 @@ pub(crate) fn expired(deadline: std::time::Duration) -> String {
 /// node is owed reaches its next dispatch's `## Planner context`. Each is one
 /// entry, set off from the one before it by a blank line — see [`entry_of`] for
 /// how a note's own blank lines are kept from reading as that separator.
-pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
+pub fn with_carried(context: Option<&str>, text: &str) -> String {
     let entry = entry_of(text);
     match context.filter(|context| !context.trim().is_empty()) {
         Some(context) => format!("{context}{CARRIED_SEPARATOR}{entry}"),
@@ -568,7 +568,7 @@ pub(crate) fn with_carried(context: Option<&str>, text: &str) -> String {
 /// entries reading the same come after the withdrawn one, so counting back from
 /// the latest finds exactly it. `None` where nothing is left; a context holding
 /// no such entry is returned unchanged.
-pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Option<String> {
+pub fn without_carried(context: &str, text: &str, alike_after: u32) -> Option<String> {
     let entry = entry_of(text);
     let mut entries: Vec<&str> = context.split(CARRIED_SEPARATOR).collect();
     let alike: Vec<usize> = entries
@@ -593,7 +593,7 @@ pub(crate) fn without_carried(context: &str, text: &str, alike_after: u32) -> Op
 
 /// A planner context with each carried entry's attribution taken off, leaving
 /// the notes as they were written, in order.
-pub(crate) fn without_attributions(context: &str) -> String {
+pub fn without_attributions(context: &str) -> String {
     context
         .split(CARRIED_SEPARATOR)
         .map(|entry| crate::ruling::split_attribution(entry).1)
@@ -605,7 +605,7 @@ pub(crate) fn without_attributions(context: &str) -> String {
 /// context, which is what [`without_carried`] matches and what a withdrawal's
 /// `alike_after` counts: notes whose texts differ only where [`entry_of`] writes
 /// a blank line read alike there.
-pub(crate) fn reads_alike(one: &str, other: &str) -> bool {
+pub fn reads_alike(one: &str, other: &str) -> bool {
     entry_of(one) == entry_of(other)
 }
 
@@ -628,11 +628,11 @@ fn entry_of(text: &str) -> String {
 /// record that commits the withdrawal or anywhere it is read back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub(crate) struct WithdrawalReason(String);
+pub struct WithdrawalReason(String);
 
 impl WithdrawalReason {
     /// The reason's text.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -665,7 +665,7 @@ const CARRIED_SEPARATOR: &str = "\n\n";
 /// It is composed here so that the two places it can be decided cannot come to
 /// word it differently: the envelope, where `deliver` and `persist` decide it
 /// between them, and the delivery, where only the run can.
-pub(crate) fn reaches_nobody(node: &str, why: &str) -> Error {
+pub fn reaches_nobody(node: &str, why: &str) -> Error {
     Error::Refused(format!("note: node '{node}': {why}"))
 }
 
@@ -675,7 +675,7 @@ pub(crate) fn reaches_nobody(node: &str, why: &str) -> Error {
 /// wire shape a planner types is this crate's to declare — but the *value* it
 /// becomes is built here, through constructors that re-check text and criterion, so
 /// no path assembles a note the conversation would have refused.
-pub(crate) fn of(
+pub fn of(
     addressee: Addressee,
     text: &str,
     criterion: Option<&Criterion>,
@@ -703,7 +703,7 @@ pub(crate) fn of(
 /// by [`of_delivery`](Self::of_delivery) and nowhere else, and this module's
 /// tests hold the two shapes field for field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RecordedNote {
+pub struct RecordedNote {
     /// Whose task it said it was updating.
     pub addressee: Addressee,
     /// What the note says.
@@ -731,7 +731,7 @@ pub(crate) struct RecordedNote {
 
 impl RecordedNote {
     /// Where it came from, as its attribution names it.
-    pub(crate) fn origin(&self) -> crate::ruling::Origin {
+    pub fn origin(&self) -> crate::ruling::Origin {
         crate::ruling::Origin {
             provenance: self.provenance,
             reference: self.ruling,
@@ -741,7 +741,7 @@ impl RecordedNote {
 
 impl RecordedNote {
     /// The note a committed delivery carried, or `None` for any other operation.
-    pub(crate) fn of_delivery(operation: &crate::edits::Operation) -> Option<Self> {
+    pub fn of_delivery(operation: &crate::edits::Operation) -> Option<Self> {
         let crate::edits::Operation::NoteDelivered {
             addressee,
             text,
@@ -769,7 +769,7 @@ impl RecordedNote {
 /// The payload key under which a `node-dispatched` names the notes the dispatch
 /// it announces was **composed with**: each was read by an earlier dispatch of
 /// the node, or carried to this one, and this dispatch's task carries it.
-pub(crate) const CARRIED_KEY: &str = "notes_carried";
+pub const CARRIED_KEY: &str = "notes_carried";
 
 /// The payload key under which a `node-dispatched` names the notes an earlier
 /// dispatch of the node read that this dispatch was **not** composed with.
@@ -780,17 +780,17 @@ pub(crate) const CARRIED_KEY: &str = "notes_carried";
 /// looks like success; this is the record that says the ruling did not survive
 /// the dispatch it was issued during, so the manager knows to re-issue it rather
 /// than believe the receipt.
-pub(crate) const SPENT_KEY: &str = "notes_spent";
+pub const SPENT_KEY: &str = "notes_spent";
 
 /// The value a `node-dispatched` carries a list of notes as.
-pub(crate) fn payload_of(notes: &[RecordedNote]) -> Value {
+pub fn payload_of(notes: &[RecordedNote]) -> Value {
     serde_json::to_value(notes).unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 /// Where one standing note sits relative to the node's current dispatch, which
 /// decides whether that dispatch's conversation has read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Placement {
+pub enum Placement {
     /// Composed into the current dispatch's task, so read by both of its parties
     /// whatever the disposition it was first delivered under.
     ComposedIntoIt,
@@ -802,7 +802,7 @@ pub(crate) enum Placement {
 /// One standing note and where it sits — exactly one place, so a note cannot be
 /// both composed into the dispatch and delivered after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Held {
+pub struct Held {
     pub note: RecordedNote,
     pub placement: Placement,
     /// The envelope and command position it was sent at, where the record names
@@ -829,20 +829,20 @@ impl Held {
 /// composing the node's next attempt, and the reconcile loop about to announce a
 /// dispatch that was composed without them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Standing {
+pub struct Standing {
     /// Every note, in the order the run recorded them.
     pub held: Vec<Held>,
 }
 
 impl Standing {
     /// Every note, as the node's next dispatch is composed with all of them.
-    pub(crate) fn notes(&self) -> Vec<RecordedNote> {
+    pub fn notes(&self) -> Vec<RecordedNote> {
         self.held.iter().map(|held| held.note.clone()).collect()
     }
 
     /// The notes delivered since the current dispatch was composed that **no**
     /// turn took, and which are therefore owed to the node's next dispatch.
-    pub(crate) fn carried(&self) -> Vec<RecordedNote> {
+    pub fn carried(&self) -> Vec<RecordedNote> {
         self.held
             .iter()
             .filter(|held| !held.read())
@@ -851,7 +851,7 @@ impl Standing {
     }
 
     /// The notes a conversation of the node's current dispatch has read.
-    pub(crate) fn read(&self) -> Vec<RecordedNote> {
+    pub fn read(&self) -> Vec<RecordedNote> {
         self.held
             .iter()
             .filter(|held| held.read())
@@ -876,7 +876,7 @@ impl Standing {
 ///
 /// [`Error::Invalid`] naming the record that could not be read as what its kind
 /// says it is.
-pub(crate) fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
+pub fn standing(journal: &[Envelope], node: &str) -> Result<Standing> {
     let mut standing = Standing::default();
     for envelope in journal {
         // A dispatch is stamped with its node; a committed edit is not — it may
@@ -974,7 +974,7 @@ fn unreadable_record(envelope: &Envelope, field: &str, error: &serde_json::Error
 /// # Errors
 ///
 /// [`standing`]'s.
-pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
+pub fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     // llmlint: ignore-block[boundary_inputs_validated] the records are the ones the
     // projection that decides the run's whole state folded, through the crate's one
     // reader of its own journal, and a line it drops — blank, truncated, unparseable —
@@ -995,7 +995,7 @@ pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
 
 /// The directory under a run that holds one carry store per node a note was
 /// carried to.
-pub(crate) const CARRY_DIR: &str = "notes";
+pub const CARRY_DIR: &str = "notes";
 
 /// Where the notes carried to `node` wait for its next dispatch: an
 /// `onemessagebus` carry store of its own.
@@ -1003,7 +1003,7 @@ pub(crate) const CARRY_DIR: &str = "notes";
 /// A node id is plan input and may hold anything, so every byte outside
 /// `[A-Za-z0-9_-]` is written as `%XX`: the name stays one segment under
 /// [`CARRY_DIR`], and two ids never share a store.
-pub(crate) fn carry_store(paths: &RunPaths, node: &str) -> PathBuf {
+pub fn carry_store(paths: &RunPaths, node: &str) -> PathBuf {
     let name: String = node
         .bytes()
         .map(|byte| match byte {
@@ -1028,7 +1028,7 @@ pub(crate) fn carry_store(paths: &RunPaths, node: &str) -> PathBuf {
 /// [`Error::Ledger`] when the store's directory cannot be made, and
 /// [`Error::Invalid`] naming the store when the note cannot be built or the bus
 /// cannot carry it there.
-pub(crate) fn carry(
+pub fn carry(
     paths: &RunPaths,
     node: &str,
     addressee: Addressee,
@@ -1071,7 +1071,7 @@ pub(crate) fn carry(
 ///
 /// [`Error::Invalid`] naming the store when it is not one this build can read,
 /// which ends the dispatch as an unreadable journal record does.
-pub(crate) fn drain_carried(paths: &RunPaths, node: &str, standing: Standing) -> Result<Standing> {
+pub fn drain_carried(paths: &RunPaths, node: &str, standing: Standing) -> Result<Standing> {
     let store = carry_store(paths, node);
     let inbox = onemessagebus::Inbox::<Note, Accepted>::new();
     inbox.adopt_carried(&store).map_err(|why| {
@@ -1139,7 +1139,7 @@ enum Routing {
 /// knows whether the producer said so or this crate read it off the words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Evidence {
+pub enum Evidence {
     /// The producer stamped the worker's turn `origin: delivered`.
     DeliveredOrigin,
     /// The worker's opening turn carried the task the note was composed into.
@@ -1322,7 +1322,7 @@ struct Routed {
 
 /// One presentation the stream showed happening.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Shown {
+pub struct Shown {
     /// The turn that opened carrying it.
     pub turn: u64,
     /// What the presentation was decided from, which says who was shown it:
@@ -1339,7 +1339,7 @@ pub(crate) struct Shown {
 
 impl Shown {
     /// The payload a `note-shown` carries.
-    pub(crate) fn payload(&self) -> serde_json::Map<String, Value> {
+    pub fn payload(&self) -> serde_json::Map<String, Value> {
         let mut payload = match serde_json::to_value(&self.note) {
             Ok(Value::Object(note)) => note,
             _ => serde_json::Map::new(),
@@ -1383,7 +1383,7 @@ impl Shown {
 /// nothing, and a turn that then opens on the note's whole text is a
 /// presentation that happened with no receipt anywhere else.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Presentations {
+pub struct Presentations {
     routed: Vec<Routed>,
 }
 
@@ -1395,7 +1395,7 @@ impl Presentations {
     ///
     /// `envelope` is the command envelope that delivered it, which each
     /// `note-shown` it leads to names.
-    pub(crate) fn delivered_while_live(
+    pub fn delivered_while_live(
         &mut self,
         note: RecordedNote,
         at: u64,
@@ -1417,13 +1417,13 @@ impl Presentations {
     /// What a watch built for one note joins the dispatch's own watch with, once
     /// it has read what the stream relayed while that note's delivery was
     /// outstanding.
-    pub(crate) fn absorb(&mut self, other: Self) {
+    pub fn absorb(&mut self, other: Self) {
         self.routed.extend(other.routed);
     }
 
     /// A note composed into the dispatch's own task, which its opening worker
     /// turn carries and every supervisor turn after that reads.
-    pub(crate) fn composed_into_the_task(&mut self, note: RecordedNote, at: u64) {
+    pub fn composed_into_the_task(&mut self, note: RecordedNote, at: u64) {
         self.routed.push(Routed {
             note,
             routing: Routing::ComposedIntoTheTask(WorkerThenJudge::AwaitingWorker),
@@ -1443,7 +1443,7 @@ impl Presentations {
     /// and answers none. It is not refused further up, because the envelope
     /// itself was already relayed whole and a producer newer than this build is
     /// held to its floor in `src/agentgraph.rs` rather than here.
-    pub(crate) fn observe(&mut self, envelope: &Envelope) -> Vec<Shown> {
+    pub fn observe(&mut self, envelope: &Envelope) -> Vec<Shown> {
         if self.routed.is_empty()
             || envelope.source != crate::event::Source::Agentgraph
             || envelope.kind.0 != oneagentgraph::event::EventKind::TurnStarted.as_str()

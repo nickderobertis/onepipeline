@@ -110,7 +110,7 @@ impl WakeBudget {
 
     /// The `--wake-budget` a person asking by hand passes to meet this budget,
     /// leading space included, or nothing where the environment already says it.
-    pub(crate) fn flag(budget: Option<Self>) -> String {
+    pub fn flag(budget: Option<Self>) -> String {
         match budget {
             Some(budget) if budget.said == Said::Flag => {
                 format!(" --wake-budget {}", budget.seconds())
@@ -315,7 +315,7 @@ pub struct UnwatchedRun {
 
 impl UnwatchedRun {
     /// The line the binary prints for this run, terminator included.
-    pub(crate) fn line(&self) -> String {
+    pub fn line(&self) -> String {
         format!(
             "{:<24} {:<12} {} — {}\n",
             self.run, self.standing, self.why_not_watched, self.remedy
@@ -345,18 +345,18 @@ impl Unwatched {
 /// A runs root that exists and cannot be read — the question this verb cannot
 /// ask, and answering it as "nothing is unwatched" would be the silence the
 /// whole verb exists to end.
-pub(crate) fn unwatched(root: &Path, session: &str) -> Result<Unwatched> {
+pub fn unwatched(root: &Path, session: &str) -> Result<Unwatched> {
     Unwatched::within(root, session, None)
 }
 
 /// What one question answered: the verb's own answer, and which of its
 /// unresolved runs are **unknowns** — a run whose watch or closure this build
 /// could not judge, which a guard warns on rather than passing in silence.
-pub(crate) struct Answer {
+pub struct Answer {
     /// The verb's answer, every unknown among its unresolved lines.
-    pub(crate) unwatched: Unwatched,
+    pub unwatched: Unwatched,
     /// The unknowns, worded as their unresolved lines are.
-    pub(crate) unknown: Vec<String>,
+    pub unknown: Vec<String>,
 }
 
 /// Ask the question, keeping the unknowns apart.
@@ -364,7 +364,7 @@ pub(crate) struct Answer {
 /// # Errors
 ///
 /// See [`unwatched`].
-pub(crate) fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> Result<Answer> {
+pub fn asked(root: &Path, session: &str, budget: Option<WakeBudget>) -> Result<Answer> {
     let mut reported: Vec<UnwatchedRun> = Vec::new();
     let owned = discover_owned_runs(root, session)?;
     let mut unresolved: Vec<String> = owned.unresolved;
@@ -651,7 +651,7 @@ fn owed_by_flow(flow: &crate::flow::Flow, session: &str, budget: Option<WakeBudg
 ///
 /// A flow that is not there or cannot be read, and every refusal
 /// [`crate::flow::Flow::acknowledge`] makes.
-pub(crate) fn acknowledge_flow(
+pub fn acknowledge_flow(
     root: &Path,
     id: &str,
     session: &str,
@@ -704,7 +704,7 @@ fn remedy(run: &str, summary: &RunSummary, budget: Option<WakeBudget>) -> String
 // value is used. What can be made unrepresentable is what this function does: the absence
 // this verb refuses is a `Result` rather than a blank string handed on, so no caller can
 // ask about a session nobody named.
-pub(crate) fn session(args: &UnwatchedArgs) -> Result<String> {
+pub fn session(args: &UnwatchedArgs) -> Result<String> {
     args.session
         .clone()
         .or_else(|| std::env::var(sys::LAUNCHER_SESSION_ENV).ok())
@@ -1098,7 +1098,7 @@ fn stamped(paths: &RunPaths, summary: &RunSummary) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use crate::error::EXIT_REFUSED;
     use crate::watchers::{WatchStanding, WatcherRecord, WATCHER_SCHEMA_VERSION};
@@ -1112,7 +1112,7 @@ pub(crate) mod tests {
     /// their own: a field the record grows and the entry does not name is surface
     /// nobody ruled on, and a name the entry keeps after the code dropped it is a
     /// promise to a person deciding about something that is not there.
-    pub(crate) fn divergence_entry() -> String {
+    pub fn divergence_entry() -> String {
         let record = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("docs")
@@ -1130,7 +1130,7 @@ pub(crate) mod tests {
     }
 
     /// The block the entry states its inventory in, as a value.
-    pub(crate) fn block() -> serde_json::Value {
+    pub fn block() -> serde_json::Value {
         let entry = divergence_entry();
         let block = entry
             .split_once("```json")
@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
 
     /// Entry 98, which proposes the terms record, the wake budget, the closure
     /// rule and the acknowledgement, as its JSON block.
-    pub(crate) fn budget_block() -> serde_json::Value {
+    pub fn budget_block() -> serde_json::Value {
         let record = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("docs")

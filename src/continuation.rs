@@ -43,20 +43,20 @@ use crate::taskgraph::{
 // llmlint: ignore-block[invalid_states_unrepresentable] The store’s existing onepipeline.rework contract uses string identities. This boundary DTO rejects unknown fields; rework_provenance validates its values before continuation or baseline preservation uses them. Changing the serialized fields belongs to the shared contract’s owner.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoredRework {
-    pub(crate) replaces: String,
-    pub(crate) reason: String,
-    pub(crate) instruction: String,
-    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+pub struct StoredRework {
+    pub replaces: String,
+    pub reason: String,
+    pub instruction: String,
+    pub comments: Vec<crate::channel::ReworkComment>,
     /// The superseded node's settled head, absent from a record written before it
     /// was carried (entry 130).
     #[serde(default)]
-    pub(crate) replaces_head: Option<String>,
+    pub replaces_head: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Parse the store's existing rework provenance at either read boundary.
-pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
+pub fn rework_provenance(value: &Value) -> Result<StoredRework> {
     let stored: StoredRework = serde_json::from_value(value.clone())
         .map_err(|error| Error::Invalid(format!("rework provenance: {error}")))?;
     if stored.reason.trim().is_empty()
@@ -90,30 +90,30 @@ pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
 /// The claim interval's default. It paces the one read of the claim still made on a timer —
 /// a takeover's, while it waits — and is stated in each claim's `lease` for a build that
 /// still sizes a takeover's wait by it.
-pub(crate) const CLAIM_INTERVAL: Duration = Duration::from_secs(300);
+pub const CLAIM_INTERVAL: Duration = Duration::from_secs(300);
 
 /// The longest claim interval the setting may name, and a claim's `lease` may state: a day.
 /// A build that still sizes a takeover's wait by a claim's interval would wait days on a
 /// longer one, and arithmetic on the instants it is added to has to stay representable.
-pub(crate) const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
+pub const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 
 /// The setting naming the claim interval, in whole seconds.
 ///
 /// Each host is given its own, and its claim states it. It governs only how often a
 /// takeover reads the claim while it waits; no running driver reads its claim on a timer.
-pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+pub const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The longest one read of the claim may take before the driver goes on without its answer
 /// — a publication waiting on it waits for the next: a reconcile pass that waited on a store
 /// for longer would hold every settlement behind a board.
-pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
+pub const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 
 /// What [`takeover_wait`] adds to the displaced host's cancel grace.
 const TAKEOVER_SLACK: Duration = Duration::from_secs(10);
 
 /// How long a superseded driver waits, once, for what it settled to land on the store
 /// before it goes on passing and says the settlement has not reached it.
-pub(crate) const SETTLEMENT_LANDING_WAIT: Duration = Duration::from_secs(20);
+pub const SETTLEMENT_LANDING_WAIT: Duration = Duration::from_secs(20);
 
 /// A takeover reads the claim every this-many-th of an interval while it waits, bounded by
 /// [`TAKEOVER_POLL_MIN`] and [`TAKEOVER_POLL_MAX`].
@@ -151,7 +151,7 @@ const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE";
 
 /// Met at the moment a dispatch of `node` would start: [`BEGIN_GATE_ENV`]'s failpoint, where
 /// [`BEGIN_GATE_NODE_ENV`] names `node`, and nothing otherwise.
-pub(crate) fn before_dispatch(node: &str) {
+pub fn before_dispatch(node: &str) {
     if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
         let _ = crate::ordering::meet(BEGIN_GATE_ENV);
     }
@@ -159,7 +159,7 @@ pub(crate) fn before_dispatch(node: &str) {
 
 /// The key a displaced driver's acknowledgement is written under, inside the claim it
 /// acknowledges.
-pub(crate) const ACKNOWLEDGED_KEY: &str = "acknowledged";
+pub const ACKNOWLEDGED_KEY: &str = "acknowledged";
 
 /// The keys a claim carries, and the only ones: the store's copy is external input. A
 /// claim a displaced driver acknowledged carries [`ACKNOWLEDGED_KEY`] beside them.
@@ -171,7 +171,7 @@ const LEASE_KEYS: [&str; 2] = ["interval_seconds", "cancel_grace_seconds"];
 /// The terms this host's claim states: the claim interval and the cancel grace it was given,
 /// both at least a second, as [`claim_interval`] and the grace's own setting read them. A run
 /// taking the project over waits out the grace these state rather than its own.
-pub(crate) fn lease_terms() -> ClaimLease {
+pub fn lease_terms() -> ClaimLease {
     let positive =
         |seconds: u64| std::num::NonZeroU64::new(seconds).unwrap_or(std::num::NonZeroU64::MIN);
     ClaimLease {
@@ -183,25 +183,25 @@ pub(crate) fn lease_terms() -> ClaimLease {
 /// A driver's publications under way, as the project's [`PUBLISHING_KEY`] holds them.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Publishing {
+pub struct Publishing {
     // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as the
     // claim beside them spells them: a run, a host, node ids and an RFC 3339 instant are
     // strings on the store, and `publishing_of` refuses one that is not each.
     /// The run publishing.
-    pub(crate) run: String,
+    pub run: String,
     /// The host it is driven on.
-    pub(crate) host: String,
+    pub host: String,
     /// The nodes whose publications are under way.
-    pub(crate) nodes: Vec<String>,
+    pub nodes: Vec<String>,
     /// When this was written, RFC 3339.
-    pub(crate) at: String,
+    pub at: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// The project's publications under way, out of its metadata: `None` where the key is
 /// absent or `null`, and a refusal where it holds anything that is not a driver's
 /// publications.
-pub(crate) fn publishing_of(
+pub fn publishing_of(
     project: &str,
     metadata: &BTreeMap<String, Value>,
 ) -> Result<Option<Publishing>> {
@@ -240,23 +240,23 @@ pub(crate) fn publishing_of(
 /// starting dispatches and publications, and none of its own is in progress.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Acknowledgement {
+pub struct Acknowledgement {
     // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as the
     // claim beside them spells them: a run, a host and an RFC 3339 instant are strings on the
     // store, and `stored_claim_of` refuses one that is not each.
     /// The run that was displaced.
-    pub(crate) run: String,
+    pub run: String,
     /// The host it was driven on.
-    pub(crate) host: String,
+    pub host: String,
     /// When it acknowledged, RFC 3339.
-    pub(crate) at: String,
+    pub at: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// The project's claim, out of its metadata: `None` where the key is absent or `null` —
 /// the two read the same, because a release writes `null` — and a refusal naming the key
 /// where it holds anything that is not a claim.
-pub(crate) fn claim_of(
+pub fn claim_of(
     project: &str,
     metadata: &BTreeMap<String, Value>,
 ) -> Result<Option<DriverClaim>> {
@@ -267,7 +267,7 @@ pub(crate) fn claim_of(
 /// of its own in progress, finds another run's claim on it that nothing has acknowledged:
 /// that claim, acknowledged by this run. `None` where the claim is this run's, already
 /// acknowledged, absent or not a claim.
-pub(crate) fn acknowledgement_over(
+pub fn acknowledgement_over(
     project: &str,
     metadata: &BTreeMap<String, Value>,
     run: &str,
@@ -371,22 +371,22 @@ fn stored_claim_of(
 /// against, and when it opened. The one shape the write-back writes and a launch reads.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoredDispatch {
+pub struct StoredDispatch {
     // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as entry
     // 119 spells them: a branch, a base and an RFC 3339 instant are strings on the store, as on
     // every settlement beside them, and `dispatch_of` refuses one that is not each.
     /// The branch the session works on.
-    pub(crate) branch: String,
+    pub branch: String,
     /// The base it opened against.
-    pub(crate) base: String,
+    pub base: String,
     /// When it opened, RFC 3339.
-    pub(crate) opened_at: String,
+    pub opened_at: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One node's stored dispatch, read at the store boundary: `None` where the task carries
 /// none, and a refusal naming the node where it carries anything that is not one.
-pub(crate) fn dispatch_of(
+pub fn dispatch_of(
     node: &str,
     metadata: &Map<String, Value>,
 ) -> Result<Option<StoredDispatch>> {
@@ -532,7 +532,7 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
 /// a park, a stopped dispatch or a superseded attempt, each of which a continuing launch
 /// resumes. `false` where the task carries none, and a refusal where it carries anything that
 /// is not a settlement.
-pub(crate) fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>) -> Result<bool> {
+pub fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>) -> Result<bool> {
     Ok(settlement_of(task, Some(metadata))?
         .is_some_and(|settlement| settlement.status == crate::payload::Status::Cancelled))
 }
@@ -566,7 +566,7 @@ impl Stored {
 /// Every claim, this host's own included: a run of this host is the one to `adopt`, live or
 /// not, rather than to start a second run beside — and a live one is driving the project
 /// now. The refusal says which, out of the host it names.
-pub(crate) fn admit(claim: Option<&DriverClaim>, take_over: bool) -> Result<()> {
+pub fn admit(claim: Option<&DriverClaim>, take_over: bool) -> Result<()> {
     match claim {
         Some(claim) if !take_over => Err(Error::ProjectDriven {
             run: claim.run.clone(),
@@ -580,7 +580,7 @@ pub(crate) fn admit(claim: Option<&DriverClaim>, take_over: bool) -> Result<()> 
 /// Refuse a `--fresh` launch while a lifecycle node's settlement holds a change request
 /// nothing has landed, naming each: running the node again would open a second one beside
 /// the one its reviewers are reading.
-pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<()> {
+pub fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<()> {
     let unlanded: Vec<String> = read
         .plan
         .tasks
@@ -611,16 +611,16 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
 
 /// What a launch continues from its project's store.
 #[derive(Debug, Default, PartialEq)]
-pub(crate) struct Continuation {
+pub struct Continuation {
     // llmlint: ignore-block[invalid_states_unrepresentable] a node id is the plain `String` the
     // plan's own `Node::id` is, which every map of `RunState` keys by and `graph::validate`
     // checked before any of these is read; each is copied from that plan, and a node-id newtype
     // on these two fields alone would disagree with all of them and convert at every use. The
     // halves read off the store are the typed ones: `Continued` and `BranchName`.
     /// Each node continued `done`, in plan order, with the settlement it journals.
-    pub(crate) settled: Vec<(String, Continued)>,
+    pub settled: Vec<(String, Continued)>,
     /// Each node pinned to the branch it left, in plan order.
-    pub(crate) pinned: Vec<(String, crate::vcs::BranchName)>,
+    pub pinned: Vec<(String, crate::vcs::BranchName)>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -630,10 +630,10 @@ pub(crate) struct Continuation {
 /// Built only by [`continuation_of`], from a settlement [`settlement_of`] read through the
 /// registered document and its own key set, so a payload of this type is always one.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Continued(Map<String, Value>);
+pub struct Continued(Map<String, Value>);
 
 impl Continued {
-    pub(crate) fn payload(&self) -> Map<String, Value> {
+    pub fn payload(&self) -> Map<String, Value> {
         self.0.clone()
     }
 }
@@ -644,7 +644,7 @@ impl Continued {
 /// here, its head's settlement — because those are the nodes the launched plan holds.
 /// `claim` is what the read found, named on each continued settlement as the run it is
 /// continued from.
-pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Result<Continuation> {
+pub fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Result<Continuation> {
     let mut continued = Continuation::default();
     let from = json!({"source": "store", "run": claim.map(|claim| claim.run.clone())});
     for node in &read.plan.tasks {
@@ -716,7 +716,7 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
 /// never before a dispatch. A project changes driver only where somebody says so with
 /// `--take-over`, so a driver reading its claim on a clock would spend the board's quota
 /// confirming that nothing changed; and a read that cannot be answered ends nothing.
-pub(crate) struct ClaimWatch {
+pub struct ClaimWatch {
     store: Store,
     project: QualifiedId,
     // llmlint: ignore-block[invalid_states_unrepresentable] a run id is `RunPaths::run`'s own
@@ -765,7 +765,7 @@ enum Standing {
 
 /// What the read immediately before a publication lets the driver do.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BeforePublishing {
+pub enum BeforePublishing {
     /// The read found the project this driver's — its own claim, the one it took over, or
     /// none: the publications go ahead.
     Publish,
@@ -782,7 +782,7 @@ impl ClaimWatch {
     /// A launch's driver starts on the read that let it launch — its own, or the one its
     /// takeover made once the driver it displaced had let go — and reads nothing more until
     /// a publication. An adoption's first pass reads.
-    pub(crate) fn of_run(
+    pub fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
         term_scope: Vec<String>,
@@ -814,7 +814,7 @@ impl ClaimWatch {
 
     /// The claim this driver writes: this run, this host, the session that launched it,
     /// this process, from `claimed_at`.
-    pub(crate) fn claim(&self, session: &str, claimed_at: &str) -> DriverClaim {
+    pub fn claim(&self, session: &str, claimed_at: &str) -> DriverClaim {
         DriverClaim {
             run: self.run.clone(),
             host: self.host.clone(),
@@ -828,7 +828,7 @@ impl ClaimWatch {
 
     /// How long until the adoption's first read is due: now, where it is still to be made
     /// and the store has asked for no wait, and `Duration::MAX` once it has been made.
-    pub(crate) fn until_adoption_read(&self) -> Duration {
+    pub fn until_adoption_read(&self) -> Duration {
         if self.standing != Standing::AdoptionReadDue {
             return Duration::MAX;
         }
@@ -841,7 +841,7 @@ impl ClaimWatch {
     ///
     /// A read the store fails is said on standard error and answers nothing: a claim is best
     /// effort, and a store that cannot be read has not said anybody else drives.
-    pub(crate) fn adoption_read(&mut self) -> Option<DriverClaim> {
+    pub fn adoption_read(&mut self) -> Option<DriverClaim> {
         if self.standing != Standing::AdoptionReadDue {
             return None;
         }
@@ -883,7 +883,7 @@ impl ClaimWatch {
     /// A read finding no claim publishes: the claim may never have reached the board, and a
     /// run that took the project over and finished it has nothing left this driver could
     /// publish beside.
-    pub(crate) fn before_publishing(&mut self) -> BeforePublishing {
+    pub fn before_publishing(&mut self) -> BeforePublishing {
         if self.read_unanswered.is_none() {
             let _ = crate::ordering::meet(BEFORE_PUBLICATION_GATE_ENV);
         }
@@ -961,7 +961,7 @@ impl ClaimWatch {
     /// How long until a write of this driver's publications the store refused, a read
     /// before a publication it did not answer, or the clearing of a fence left naming a
     /// settled publication, is due again.
-    pub(crate) fn until_fence_retry(&self) -> Duration {
+    pub fn until_fence_retry(&self) -> Duration {
         [
             self.fence_refused.map(|at| at + FENCE_RETRY),
             self.read_unanswered.map(|at| at + FENCE_RETRY),
@@ -977,7 +977,7 @@ impl ClaimWatch {
     /// [`ClaimWatch::fence`], except that a driver still driving whose fence would go from
     /// naming publications to naming none leaves it standing for [`FENCE_LINGER`] first: a
     /// fence naming a publication that has settled only holds a takeover a little longer.
-    pub(crate) fn fence_lingering(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+    pub fn fence_lingering(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         let standing = self
             .fenced
             .as_ref()
@@ -997,7 +997,7 @@ impl ClaimWatch {
     }
 
     /// Clear a fence left naming a settled publication now, where one is: no pass follows.
-    pub(crate) fn clear_lingering(&mut self) {
+    pub fn clear_lingering(&mut self) {
         if self.lingering.is_some() {
             self.fence(&std::collections::BTreeSet::new());
         }
@@ -1032,7 +1032,7 @@ impl ClaimWatch {
     /// publication under way and some that have settled holds a takeover exactly as long
     /// as the exact one would, since it is empty only when that is, and each settlement
     /// that is not a write is a write the driver's cost no longer pays per pass.
-    pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+    pub fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         let covered = self.fenced.as_ref() == Some(nodes)
             || (self.standing == Standing::Driving
                 && !nodes.is_empty()
@@ -1122,7 +1122,7 @@ impl ClaimWatch {
     /// best effort, over the claim exactly as it was read, with the acknowledgement beside
     /// it. What could not be written is said on standard error, and the adopter then waits
     /// out [`takeover_wait`] instead.
-    pub(crate) fn acknowledge(&self, by: &DriverClaim) {
+    pub fn acknowledge(&self, by: &DriverClaim) {
         let written = serde_json::to_value(by).map(|mut claim| {
             claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
                 run: self.run.clone(),
@@ -1171,7 +1171,7 @@ impl ClaimWatch {
 /// How a `--take-over` came to start: on the displaced driver's acknowledgement, or once
 /// the wait for one had passed with none of its publications under way.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HandedOver {
+pub enum HandedOver {
     /// The displaced driver wrote that it had stopped.
     Acknowledged(Acknowledgement),
     /// Nothing answered within [`takeover_wait`], and the project named none of the
@@ -1204,7 +1204,7 @@ pub(crate) enum HandedOver {
 ///
 /// [`Error::Refused`] where the claim cannot be written, and [`Error::ProjectDriven`] where
 /// another launch's claim replaces this one while it waits.
-pub(crate) fn hand_over(
+pub fn hand_over(
     store: &Store,
     project: &QualifiedId,
     mine: &DriverClaim,
@@ -1371,7 +1371,7 @@ pub(crate) fn hand_over(
 /// Read first, as every release is, and written `null` only where the stored claim still
 /// names this run on this host; each call bounded by [`CLAIM_READ_DEADLINE`]. Best effort:
 /// what could not be done is said on standard error.
-pub(crate) fn release_left_standing(
+pub fn release_left_standing(
     paths: &crate::ledger::RunPaths,
     launch: &crate::ledger::LaunchRecord,
     term_scope: &[String],
@@ -1439,7 +1439,7 @@ fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
 }
 
 /// The claim interval: [`CLAIM_INTERVAL_ENV`]'s whole seconds, or [`CLAIM_INTERVAL`].
-pub(crate) fn claim_interval() -> Duration {
+pub fn claim_interval() -> Duration {
     claim_interval_of(std::env::var(CLAIM_INTERVAL_ENV).ok().as_deref())
 }
 
@@ -1472,7 +1472,7 @@ fn takeover_poll(interval: Duration) -> Duration {
 /// gives a live one the moment to answer, and the fence is what keeps the two drivers'
 /// publications apart. Saturating: the grace is an operator's setting no smaller bound
 /// holds, and a wait that could not be represented is one no takeover outlives anyway.
-pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
+pub fn takeover_wait(terms: ClaimLease) -> Duration {
     Duration::from_secs(terms.cancel_grace_seconds.get()).saturating_add(TAKEOVER_SLACK)
 }
 

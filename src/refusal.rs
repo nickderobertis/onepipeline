@@ -22,7 +22,7 @@ use crate::error::Error;
 // reason a *consumer's* check states does arrive from outside, and that one is validated
 // in its own type — `plancheck::Reason`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Refusal {
+pub struct Refusal {
     /// The node it is about, where it is about one. A task carrying no node id
     /// is named by the store id of the task instead — that is the only name it
     /// has, and both ends of the mistake are the author's to fix.
@@ -35,7 +35,7 @@ pub(crate) struct Refusal {
 
 impl Refusal {
     /// A refusal about the plan as a whole.
-    pub(crate) fn plain(message: impl Into<String>) -> Self {
+    pub fn plain(message: impl Into<String>) -> Self {
         Self {
             node: None,
             field: None,
@@ -44,7 +44,7 @@ impl Refusal {
     }
 
     /// A refusal about one node, whose sentence names the node itself.
-    pub(crate) fn about(node: &str, message: impl Into<String>) -> Self {
+    pub fn about(node: &str, message: impl Into<String>) -> Self {
         Self {
             node: Some(node.to_owned()),
             field: None,
@@ -54,13 +54,13 @@ impl Refusal {
 
     /// A refusal about one node, rendered `node '<id>': <what>` — the sentence
     /// this crate has always printed for one.
-    pub(crate) fn node(id: &str, what: impl AsRef<str>) -> Self {
+    pub fn node(id: &str, what: impl AsRef<str>) -> Self {
         Self::about(id, format!("node '{id}': {}", what.as_ref()))
     }
 
     /// Name the field that has to change.
     #[must_use]
-    pub(crate) fn field(mut self, field: &str) -> Self {
+    pub fn field(mut self, field: &str) -> Self {
         self.field = Some(field.to_owned());
         self
     }
