@@ -89,6 +89,7 @@ const FETCH_NEXT =
   "re-run the same command; a read GitHub answered oddly is fetched again only if its file is removed";
 
 /** `gh api rate_limit --jq '.resources.<r> | {remaining, reset}'`'s answer. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function rateLimit(doc, resource) {
   need(
     isObject(doc) && isCount(doc.remaining) && isCount(doc.reset) && doc.reset > 0,
@@ -99,6 +100,7 @@ export function rateLimit(doc, resource) {
 }
 
 /** `gh pr list --json number,title,mergedAt,...`'s answer. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function mergedList(list) {
   need(
     Array.isArray(list) &&
@@ -129,6 +131,7 @@ export function population(doc) {
 }
 
 /** The rollup GraphQL answer for one pull request: its last commit's check suites. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function rollup(doc, pr) {
   const commit = doc?.data?.repository?.pullRequest?.commits?.nodes?.[0]?.commit;
   const again = `remove rollup/${pr}.json and re-run`;
@@ -184,6 +187,7 @@ export function finishedJob(job, pr) {
 }
 
 /** A run's artifact listing. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function artifacts(doc, run) {
   need(
     Array.isArray(doc?.artifacts) &&
@@ -198,6 +202,7 @@ export function artifacts(doc, run) {
 }
 
 /** One page of the Actions cache listing. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function cachePage(doc, page) {
   need(
     Array.isArray(doc?.actions_caches) &&
@@ -340,6 +345,7 @@ export function namedInputs(doc, where) {
 }
 
 /** A GitHub jobs listing saved by a demonstration's reader. */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is GitHub's API, which no offline test can reach; this check is itself the drift gate, refusing at every read a response in any other shape with its next action, and tests/reuse_harness/reuse-drift.test.mjs holds it to real responses captured by this harness.
 export function jobsListing(doc, run) {
   const again = `read the run's jobs again: gh api repos/OWNER/NAME/actions/runs/${run}/jobs > ${run}.jobs.json`;
   need(

@@ -1,0 +1,155 @@
+{
+ "data": {
+  "repository": {
+   "pullRequest": {
+    "number": 1543,
+    "headRefOid": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28",
+    "commits": {
+     "nodes": [
+      {
+       "commit": {
+        "oid": "1a51f8471301b40e7e1f3d8bfecfbd1d68833f28",
+        "checkSuites": {
+         "nodes": [
+          {
+           "workflowRun": null,
+           "conclusion": null,
+           "checkRuns": {
+            "nodes": []
+           }
+          },
+          {
+           "workflowRun": {
+            "databaseId": 43308636421,
+            "runNumber": 2393,
+            "event": "pull_request",
+            "workflow": {
+             "name": "CI"
+            },
+            "createdAt": "2026-11-12T21:16:36Z",
+            "updatedAt": "2026-11-13T03:45:37Z"
+           },
+           "conclusion": "SUCCESS",
+           "checkRuns": {
+            "nodes": [
+             {
+              "name": "test-windows",
+              "databaseId": 131609726504,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-13T00:58:50Z",
+              "completedAt": "2026-11-13T03:44:53Z"
+             },
+             {
+              "name": "lint",
+              "databaseId": 131609728409,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-12T21:16:39Z",
+              "completedAt": "2026-11-12T21:26:47Z"
+             },
+             {
+              "name": "test-linux",
+              "databaseId": 131609728908,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-12T21:16:39Z",
+              "completedAt": "2026-11-12T23:51:39Z"
+             },
+             {
+              "name": "test-macos",
+              "databaseId": 131609765644,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-12T21:16:40Z",
+              "completedAt": "2026-11-12T23:57:12Z"
+             },
+             {
+              "name": "budgets",
+              "databaseId": 131674179550,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-13T03:44:55Z",
+              "completedAt": "2026-11-13T03:45:36Z"
+             }
+            ]
+           }
+          },
+          {
+           "workflowRun": {
+            "databaseId": 43361588157,
+            "runNumber": 1740,
+            "event": "pull_request",
+            "workflow": {
+             "name": "Visual docs"
+            },
+            "createdAt": "2026-11-13T03:50:23Z",
+            "updatedAt": "2026-11-13T03:50:39Z"
+           },
+           "conclusion": "SUCCESS",
+           "checkRuns": {
+            "nodes": [
+             {
+              "name": "visual-docs / pages-preflight",
+              "databaseId": 131676114737,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-13T03:50:27Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / cleanup-preview",
+              "databaseId": 131676158118,
+              "conclusion": "SUCCESS",
+              "startedAt": "2026-11-13T03:50:33Z",
+              "completedAt": "2026-11-13T03:50:38Z"
+             },
+             {
+              "name": "visual-docs / prune-history",
+              "databaseId": 131676159662,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:31Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / capture",
+              "databaseId": 131676159868,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:31Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / arches",
+              "databaseId": 131676160023,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:31Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / report",
+              "databaseId": 131676160229,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:31Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / aggregate-comment",
+              "databaseId": 131676161077,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:32Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             },
+             {
+              "name": "visual-docs / deploy-pages",
+              "databaseId": 131676161408,
+              "conclusion": "SKIPPED",
+              "startedAt": "2026-11-13T03:50:32Z",
+              "completedAt": "2026-11-13T03:50:31Z"
+             }
+            ]
+           }
+          }
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ }
+}

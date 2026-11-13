@@ -1,0 +1,32 @@
+{
+ "total_count": 6,
+ "jobs": [
+  {
+   "id": 131811368187,
+   "run_id": 43403322259,
+   "workflow_name": "CI",
+   "head_branch": "nick/ci-test-speed-2026-11-12/spike-onepipeline-reuse-demo-c2",
+   "run_url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/runs/43403322259",
+   "run_attempt": 1,
+   "node_id": "CR_kwDOTx8aUc8AAAAesJHc-w",
+   "head_sha": "bcff2387d4a22a19fe479de8a51c49c1e4125e19",
+   "url": "https://api.github.com/repos/nickderobertis/onepipeline/actions/jobs/131811368187",
+   "html_url": "https://github.com/nickderobertis/onepipeline/actions/runs/43403322259/job/131811368187",
+   "status": "queued",
+   "conclusion": null,
+   "created_at": "2026-11-13T09:40:48Z",
+   "started_at": "2026-11-13T09:40:48Z",
+   "completed_at": null,
+   "name": "measure-macos (2)",
+   "steps": [],
+   "check_run_url": "https://api.github.com/repos/nickderobertis/onepipeline/check-runs/131811368187",
+   "labels": [
+    "macos-latest"
+   ],
+   "runner_id": 0,
+   "runner_name": "",
+   "runner_group_id": 0,
+   "runner_group_name": ""
+  }
+ ]
+}

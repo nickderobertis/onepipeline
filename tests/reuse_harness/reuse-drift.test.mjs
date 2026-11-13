@@ -17,7 +17,16 @@ import {
   REST_TASK,
   restTierExclusions,
 } from "../../scripts/crate-split/observed.mjs";
-import { executions, NX_CACHE_KEY } from "../../scripts/crate-split/validate.mjs";
+import {
+  artifacts,
+  cachePage,
+  executions,
+  jobsListing,
+  mergedList,
+  NX_CACHE_KEY,
+  rateLimit,
+  rollup,
+} from "../../scripts/crate-split/validate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ci = parse(readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8"));
@@ -293,4 +302,17 @@ test("the cache key spelling the inventory reads is the pinned sidecar's, which 
   for (const uses of starts) assert.equal(uses, NX_CACHE_KEY.producer, "ci.yml pins another sidecar: read its key spelling again");
   // nx-remote-cache.mjs records against the same pin.
   assert.match(readFileSync(join(root, "scripts", "nx-remote-cache.mjs"), "utf8"), new RegExp(`OP_NX_COMMIT = '${NX_CACHE_KEY.producer.split("@")[1]}'`));
+});
+
+test("the GitHub response checks pass GitHub's own answers, as this harness captured them", () => {
+  // Captured from nickderobertis/onepipeline by fetch-evidence.mjs and demo-runs' reads
+  // on 2026-11-13: a rate-limit answer, merged pull requests, #1543's check suites, run
+  // 43308636421's artifacts, a page of the cache listing and run 43403322259's jobs.
+  const fixture = (name) => JSON.parse(readFileSync(join(root, "tests", "reuse_harness", "fixtures", "github", name), "utf8"));
+  assert.ok(rateLimit(fixture("rate-limit-core.json"), "core").reset > 0);
+  assert.equal(mergedList(fixture("pr-list.json")).length, 2);
+  assert.match(rollup(fixture("rollup-1543.json"), 1543).oid, /^[0-9a-f]{40}$/);
+  assert.equal(artifacts(fixture("artifacts-43308636421.json"), 43308636421).length, 3);
+  assert.equal(cachePage(fixture("caches-page.json"), 1).length, 3);
+  assert.equal(jobsListing(fixture("jobs-43403322259.json"), 43403322259).length, 1);
 });
