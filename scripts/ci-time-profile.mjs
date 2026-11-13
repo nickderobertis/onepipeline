@@ -404,15 +404,14 @@ function readRecords(files) {
     if (recordProblem(record)) continue;
     records.push(record);
   }
-  // One record per (binary, test): the last attempt of the run with the most records.
-  const byRun = new Map();
-  for (const r of records) byRun.set(r.run_id, (byRun.get(r.run_id) ?? 0) + 1);
-  const run = [...byRun.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  // A CI artifact holds one record file per test, and each tier is a nextest run of its own,
+  // so every record is kept; a test seen twice keeps its later attempt.
   const kept = new Map();
-  for (const r of records.filter((r) => r.run_id === run)) {
+  for (const r of records) {
     const key = `${r.binary}::${r.test}`;
     const prev = kept.get(key);
-    if (!prev || (r.attempt ?? 0) > (prev.attempt ?? 0)) kept.set(key, r);
+    if (!prev || (r.attempt ?? 0) > (prev.attempt ?? 0) || r.started_at > prev.started_at)
+      kept.set(key, r);
   }
   return [...kept.values()].map((r) => ({
     ...r,
