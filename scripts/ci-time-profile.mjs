@@ -70,6 +70,8 @@ const check = (ok, what) => {
     );
 };
 const finite = (...values) => values.every((v) => Number.isFinite(v));
+// A number written as one: an empty or non-numeric field is NaN, never Number("")'s zero.
+const num = (text) => (/^\d+(\.\d+)?$/.test(String(text ?? "").trim()) ? Number(text) : Number.NaN);
 // What the measurement could not read and went on without, each with what to do about it:
 // reported in the report and counted on the printed line, never dropped silently.
 const NOTES = [];
@@ -160,7 +162,13 @@ class Gh {
   // `gh api rate_limit` itself is not counted against the allowance, so it is kept apart.
   guard() {
     this.rateChecks++;
-    const remaining = Number(this.gh(["api", "rate_limit", "--jq", ".resources.core.remaining"]));
+    const answer = this.gh(["api", "rate_limit", "--jq", ".resources.core.remaining"]);
+    if (!/^\d+$/.test(answer))
+      refuse(
+        `gh api rate_limit answered ${JSON.stringify(answer)}, not a count of requests`,
+        "check `gh auth status` and that `gh api rate_limit` prints the core allowance",
+      );
+    const remaining = Number(answer);
     if (!(remaining >= this.floor))
       refuse(
         `GitHub reports ${remaining} core requests remaining, under the floor of ${this.floor}; nothing more is read`,
@@ -356,18 +364,20 @@ function sampleLine(line) {
   const [head, load, net] = line.split(" | ");
   if (net === undefined) return null;
   const parts = head.trim().split(/\s+/);
-  const t = Number(parts[0]) * 1000;
-  const [rx, tx] = net.trim().split(/\s+/).map(Number);
+  const t = num(parts[0]) * 1000;
+  const counters = net.trim().split(/\s+/);
+  if (counters.length !== 2) return null;
+  const [rx, tx] = counters.map(num);
   if (!finite(t, rx, tx) || rx < 0 || tx < 0) return null;
   let cpu = null;
   if (parts[1] === "cpu") {
     // /proc/stat's first line: user nice system idle iowait ...
-    const v = parts.slice(2).map(Number);
+    const v = parts.slice(2).map(num);
     if (v.length < 4 || !finite(...v) || v.some((x) => x < 0)) return null;
     cpu = { idle: v[3] + (v[4] || 0), total: v.reduce((a, b) => a + b, 0) };
   } else {
     // iostat: us sy id
-    const [us, sy, id] = parts.slice(1, 4).map(Number);
+    const [us, sy, id] = parts.slice(1, 4).map(num);
     // Whole percentages of one interval: each 0-100, together 100 give or take rounding.
     const total = us + sy + id;
     if (!finite(us, sy, id) || [us, sy, id].some((x) => x < 0 || x > 100)) return null;
@@ -381,13 +391,13 @@ function rustcLine(line) {
   const f = line.split("\t");
   if (f.length < 7) return null;
   const r = {
-    start: Number(f[0]) * 1000,
-    end: Number(f[1]) * 1000,
+    start: num(f[0]) * 1000,
+    end: num(f[1]) * 1000,
     crate: f[2],
     types: f[3],
     instrumented: f[4] === "1",
     outDir: f[5],
-    code: Number(f[6]),
+    code: num(f[6]),
     compiler: f[7] ?? "",
   };
   const valid =

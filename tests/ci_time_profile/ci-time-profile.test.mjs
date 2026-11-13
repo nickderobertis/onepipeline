@@ -239,6 +239,12 @@ test("the generated sampler writes timestamped CPU, load and network lines", (t)
   const lines = readFileSync(join(dir, "samples.txt"), "utf8").trim().split("\n");
   assert.ok(lines.length >= 2, lines.join("\n"));
   for (const line of lines) assert.match(line, /^\d{10} \S.* \| \S.* \| \d+ \d+$/);
+  // The macOS branch runs only on macOS, which this target does not: its commands are held
+  // here, and the lines it wrote on a hosted macOS runner are the fixture's macOS samples.
+  const mac = SAMPLER.slice(SAMPLER.indexOf("else"));
+  assert.match(mac, /iostat -n 0 -c 2 -w 1 \| tail -1/);
+  assert.match(mac, /sysctl -n vm\.loadavg/);
+  assert.match(mac, /netstat -ibn \| awk '\$3 ~ \/\^<Link\/ && \$1 !~ \/\^lo\//);
 });
 
 const REPO = "example/onepipeline";
@@ -510,20 +516,28 @@ function oneRun(
     `Nx planned 3 tasks\n${JSON.stringify({ tasks: { dependencies: { "demo-version:smoke": ["demo-e2e:test"], "demo-e2e:test": [], "demo:build": [] } } })}`,
   );
   // Three samples, 2 s apart, while both tasks run: 60% of the CPU busy, 1 MB in a second.
-  // macOS's sampler writes iostat's percentages (us sy id) instead of /proc/stat's counters:
-  // 30% busy, and a fourth sample whose network counter fell, as a reset leaves it.
+  // macOS's sampler writes iostat's percentages (us sy id) and load averages instead of
+  // /proc/stat's counters. Its lines here are four the macOS sampler wrote on a hosted runner
+  // (run 43400483794), at this fixture's times, then a fifth whose network counter fell.
   const at = (i) => (T0 + (400 + 2 * i) * 1000) / 1000;
+  const macLines = [
+    " 34  2 64  1.80 7.20 17.92 |  1.80 7.20 17.92  | 1667506687 6889586",
+    " 44 30 25  1.80 7.20 17.92 |  1.80 7.20 17.92  | 1667506687 6889586",
+    " 33  1 65  1.74 7.09 17.82 |  1.74 7.09 17.82  | 1667506687 6889586",
+    " 34  3 63  1.74 7.09 17.82 |  1.74 7.09 17.82  | 1667506687 6889586",
+    " 34  3 63  1.74 7.09 17.82 |  1.74 7.09 17.82  | 1 6889586",
+  ];
   writeFileSync(
     join(measure, "samples.txt"),
-    (macSamples
-      ? [0, 1, 2, 3].map(
-          (i) => `${at(i)} 10 20 70 | 1.20 1.10 1.00 | ${i < 3 ? 2_000_000 * i : 0} 0`,
-        )
-      : [0, 1, 2].map(
-          (i) => `${at(i)} cpu ${600 * i} 0 0 ${400 * i} 0 0 0 | 3/200 | ${2_000_000 * i} 0`,
-        )
-    ).join("\n"),
+    `${(
+      macSamples
+        ? macLines.map((line, i) => `${at(i)}${line}`)
+        : [0, 1, 2].map(
+            (i) => `${at(i)} cpu ${600 * i} 0 0 ${400 * i} 0 0 0 | 3/200 | ${2_000_000 * i} 0`,
+          )
+    ).join("\n")}\n`,
   );
+
   // The overhead partition's one test, 25% slower instrumented than plain.
   const overhead = join(measure, "overhead");
   for (const [label, wall] of [
@@ -746,6 +760,12 @@ test("a measurement file not in its writer's shape refuses, naming the file and 
       (old) => `${(T0 + 30000) / 1000} 80 80 0 | 1 1 1 | 0 0\n${old}`,
       /samples\.txt line 1 is malformed\nnext: /,
     ],
+    // A sample with no timestamp, whose empty field must not read as zero.
+    [
+      "samples.txt",
+      (old) => ` cpu 1 0 0 1 0 0 0 | 1/1 | 0 0\n${old}`,
+      /samples\.txt line 1 is malformed\nnext: /,
+    ],
     // An overhead run with no exit status.
     [
       "overhead/times.txt",
@@ -838,8 +858,9 @@ test("macOS's iostat samples are read as CPU percentages, and a counter that fal
   const json = join(dir, "out.json");
   assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
   const r = JSON.parse(readFileSync(json, "utf8"));
-  assert.ok(Math.abs(r.samples.cpu_busy_fraction - 0.3) < 1e-9);
-  assert.equal(r.samples.network_bytes, 4_000_000);
+  // Each interval is the later sample's busy share: 74%, 34% and 37%.
+  assert.ok(Math.abs(r.samples.cpu_busy_fraction - (0.74 + 0.34 + 0.37) / 3) < 1e-9);
+  assert.equal(r.samples.network_bytes, 0);
   assert.equal(r.samples.counter_resets, 1);
   assert.ok(
     r.notes.some((n) => /^1 sampling interval\(s\) saw a CPU or network counter fall/.test(n)),
@@ -883,6 +904,23 @@ test("under the rate floor nothing is read, and the refusal says when to come ba
   ]);
   assert.deepEqual(readdirSync(join(cache, "api")), []);
   assert.ok(!existsSync(join(dir, "r.md")));
+});
+
+test("a rate check that answers no count refuses rather than reading", (t) => {
+  const dir = scratch(t);
+  const gh = standInGh(dir, oneRun(dir));
+  const result = run(
+    profileScript,
+    job(join(dir, "cache"), join(dir, "r.md"), ["--min-remaining", "0"]),
+    {
+      env: gh.env(""),
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /gh api rate_limit answered "", not a count of requests\nnext: /);
+  assert.deepEqual(readFileSync(gh.log, "utf8").trim().split("\n"), [
+    "api rate_limit --jq .resources.core.remaining",
+  ]);
 });
 
 test("an unfinished run is refused and not kept, so it is read again once it finishes", (t) => {
