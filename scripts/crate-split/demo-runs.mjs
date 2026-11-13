@@ -35,6 +35,7 @@ export function readJob(job, log) {
   const tree = text.match(/GITHUB_SHA=(\w+) head=(\w+) tree=(\w+)/);
   const restore =
     text.match(/Cache restored from key: (\S+)/)?.[1] ??
+    text.match(/Cache hit for: (\S+)/)?.[1] ??
     (text.match(/Cache hit for restore-key: (\S+)/)
       ? `restore-key ${text.match(/Cache hit for restore-key: (\S+)/)[1]}`
       : null);
