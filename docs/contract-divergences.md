@@ -13435,7 +13435,7 @@ ruling leaves the approved text verbatim, so it records the passages this entry
 supersedes rather than amending them, and each of them is superseded by this entry
 wherever it still describes the built-in reset:
 
-- `docs/contract.md:532`, the channel contract's closing sentences from *Surface
+- `docs/contract.md:534`, the channel contract's closing sentences from *Surface
   consumption restarts the check-in clock of every member the run's recorded observer
   graph declares `resettable`* through *That is the whole check-in reset contract.*,
   including its `oneagentgraph reset-timer RUN MEMBER` invocation; and
@@ -13589,3 +13589,42 @@ pipeline payloads.
   "bundle_versions": {"events": "2.2.0", "planner_channel": "3.0.0"}
 }
 ```
+
+## 158. Release adoptions onevcs says can never complete are refused at load — RESOLVED
+
+**Ruled by the planner who owns `docs/contract.md`, in the task of node
+`op-link-libraries`**, which directs the behaviour and that it be documented beside the
+loader's other refusals. The approved text is left verbatim and the amendment paragraph
+*Release adoptions onevcs says can never complete are refused at load*, after `plan
+check`'s, states it.
+
+What it adds to the approved text:
+
+- `plan check`'s refusals carry a third `source`, `"onevcs"`, beside `"engine"` and a
+  registered check's path, and the loader may now report several refusals — one per
+  rule — where before it reported one. `--json`'s shape is unchanged.
+- `start`, and the live `add`, `retry`, `requeue` and `reparent` that change a node's
+  adoption, are refused on the same verdict; `adopt` raises the surface kind
+  `adoption-never-completes` instead and refuses nothing.
+- The rules are those of the linked `onevcs` (0.66.0: `published-no-target` and
+  `consumes-undeclared-target`). The engine states none of them, so a later `onevcs` that
+  adds or drops one moves what is refused without a change here.
+
+The manager of `op-link-libraries` ruled that an unregistered producer is shown answered
+with a notice through `plan check` alone, because `start` already refuses a plan naming an
+unregistered repository through the session-holder interlock, unchanged; a launch on an
+`unanswered` verdict is shown with a registered producer whose `release-targets.toml` does
+not read.
+
+A verdict onevcs answers with `releasing: false` is set aside: a producer that declares
+no release targets is no release wait to the engine's release watch, which has never held
+a node on it, so the plan loads exactly as before.
+
+`tests/e2e/adoption_check.rs` holds every clause through the real binary against onevcs's
+own `release check-adoption` for the same pair.
+
+**Ruling:** the planner's task for `op-link-libraries` directs the refusal and its
+documentation beside the loader's refusals. Its manager ruled the unregistered-producer
+substitution above, and ruled that a `releasing: false` verdict is set aside, as the engine
+reads no rule of its own beyond that field. `docs/contract.md` is left unedited above the
+amendment paragraph.

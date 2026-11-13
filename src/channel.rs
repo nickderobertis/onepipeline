@@ -1039,6 +1039,11 @@ impl SurfaceKind {
     /// A session whose `post-checkout` provisioning failed, raised non-blocking
     /// once per failed session.
     pub const PROVISIONING_FAILED: &'static str = "provisioning-failed";
+    /// A node of a run `adopt` took over whose release adoption the linked onevcs says
+    /// can never complete, raised non-blocking once per rule at adoption: the run is
+    /// driven on, and the node, the dependency and onevcs's rule and reason say what to
+    /// change.
+    pub const ADOPTION_NEVER_COMPLETES: &'static str = "adoption-never-completes";
     /// A manager ruling a dispatch declined, with its reason, through
     /// `onepipeline decline-ruling`: raised non-blocking, carrying the typed
     /// [`DeclinedRuling`] record.

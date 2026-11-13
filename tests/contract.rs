@@ -7490,8 +7490,8 @@ fn the_removed_reset_names_every_approved_passage_it_supersedes() {
         .is_some_and(|heading| heading.ends_with("— ACCEPTED")));
     let lines: Vec<&str> = CONTRACT.lines().collect();
     for (line, superseded) in [
-        (532, "`oneagentgraph reset-timer RUN MEMBER` for each"),
-        (532, "That is the whole check-in reset contract."),
+        (534, "`oneagentgraph reset-timer RUN MEMBER` for each"),
+        (534, "That is the whole check-in reset contract."),
         (296, "beside a resettable-cron `check-in` member"),
     ] {
         assert!(
@@ -7980,6 +7980,12 @@ const RULINGS: &[(&str, &str)] = &[
     // The heads read heads a writers'-form line of an unparsed kind by its opening, even
     // where the complete reader refuses its middle.
     ("156.", "which is headed by its opening"),
+    // The loader gains a third refusal source, carrying onevcs's verdict rather than a rule
+    // of the engine's own.
+    (
+        "158.",
+        "Release adoptions onevcs says can never complete are refused at load",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

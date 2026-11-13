@@ -1671,6 +1671,11 @@ fn start(args: &StartArgs) -> Result<i32> {
     };
     crate::templates::check_plan(&templates, &read, &launch_dir)?;
 
+    // Whether each release adoption the plan states can ever complete, as the linked onevcs
+    // answers it: a plan onevcs says can never complete is refused here, before any run
+    // exists, with onevcs's rule and reason; one it could not answer about is a notice.
+    crate::adoptable::load(&read.plan)?;
+
     // The checks this launch registered — the config's, then each `--check` — offered the
     // loaded plan exactly as `plan check --check` offers it, after the engine's own loader
     // and before any run exists: a refusal, or a check that could not be run, refuses the
@@ -3608,7 +3613,79 @@ fn report_and_journal_adoption(
         journal::PipelineKind::DriverAdopted,
         journal::labels(&paths.run, None),
         journal::payload(&adopted),
-    )
+    )?;
+    raise_adoptions_that_never_complete(paths, &mut journal, &view.state)
+}
+
+/// Ask the linked onevcs whether each unsettled lifecycle node's release adoption can
+/// still complete, and raise each rule that says it cannot as a non-blocking surface.
+///
+/// An adoption **refuses nothing**: the run is already under way, and refusing it would
+/// strand every node of it because the host's configuration moved after launch. So the
+/// planner is told — the node, the dependency, and onevcs's rule and reason — and the
+/// run is driven exactly as before. An adoption onevcs could not answer about is a
+/// notice on stderr.
+fn raise_adoptions_that_never_complete(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    state: &crate::projection::RunState,
+) -> Result<()> {
+    let statuses = state.statuses();
+    let source = state.plan.clone().unwrap_or_else(|| Plan {
+        schema_version: crate::plan::PLAN_SCHEMA_VERSION,
+        goal: None,
+        name: None,
+        concurrency: state.graph.concurrency,
+        tasks: Vec::new(),
+        export_edges: Vec::new(),
+    });
+    let plan = state.graph.to_plan(&source);
+    let asked = crate::adoptable::ask(&plan, |node| {
+        // Every node the loop has not finished with for good: a held or drafted
+        // completion still waits on its release, and a parked or blocked node can
+        // still be released to run.
+        statuses.get(&node.id).is_some_and(|status| {
+            !matches!(
+                status,
+                graph::NodeStatus::Done
+                    | graph::NodeStatus::Failed
+                    | graph::NodeStatus::Skipped
+                    | graph::NodeStatus::Cancelled
+            )
+        })
+    });
+    asked.report_unanswered();
+    for refused in &asked.refused {
+        eprintln!("onepipeline: run '{}': {}", paths.run, refused.line());
+        engine::raise(
+            paths,
+            journal,
+            crate::channel::Surface {
+                id: 0,
+                kind: crate::channel::SurfaceKind::ADOPTION_NEVER_COMPLETES.into(),
+                message: format!(
+                    "node '{node}' waits on the release of its dependency '{dependency}', and \
+                     onevcs says that adoption can never complete ({rule}): {reason}\n\
+                     The run is driven on as it was; change the node's `{field}` (or what \
+                     onevcs names above) with a `requeue` or a `retry` for it to complete.",
+                    node = refused.node,
+                    dependency = refused.dependency,
+                    rule = refused.rule,
+                    reason = refused.reason,
+                    field = refused.field(),
+                ),
+                source: crate::channel::source::RECONCILER.into(),
+                blocking: false,
+                queued_at: sys::now_millis(),
+                abandoned: false,
+                asker: None,
+                workstream: Some(refused.node.clone()),
+                correlation: None,
+                declined_ruling: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// End a driver that holds a run nothing is driving, and wait for it to go.

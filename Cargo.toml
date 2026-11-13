@@ -945,7 +945,13 @@ oneagentgraph = "0.13.0"
 # (onevcs-host-reads-warm, onevcs #667): on a copy of this host's home that took
 # the read `src/unpublished.rs` delegates from about 20 s to 0.63 s.
 # onevcs-testing 0.21.3 pins it exactly.
-onevcs = "0.65.2"
+# 0.66.0 is the floor because it carries `adoption_check` without the
+# fast-no-change-request and consumes-without-change-request rules
+# (vcs-adoption-check): `src/adoptable.rs` asks it of every cross-repository edge
+# a plan loads, and below it a `fast` or `consumes` local-direct consumer the
+# engine has always held complete-but-held is refused. onevcs-testing 0.21.4
+# pins it exactly.
+onevcs = "0.66.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1234,7 +1240,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.3"
+onevcs-testing = "0.21.4"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1441,14 +1447,17 @@ onevcs-testing = "0.21.3"
 # **0.14.12 writes an expandable block in each destination's own form on copy**
 # (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
 # as its collapsible section as well as GitHub as the HTML element.
-onetaskgraph-core = "=0.14.12"
-onetaskgraph-plugin-api = "=0.14.12"
-onetaskgraph-local-md = "=0.14.12"
+# **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
+# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes, and it is
+# the store release ai-orchestrator's own store CLI pin is held to, so it must be the one linked.
+onetaskgraph-core = "=0.14.14"
+onetaskgraph-plugin-api = "=0.14.14"
+onetaskgraph-local-md = "=0.14.14"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.12"
+onetaskgraph-linear = "=0.14.14"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
