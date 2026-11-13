@@ -414,7 +414,10 @@ fn published_under_the_rules_default(
         );
     };
     git(&world, &["init", "--bare", "-q", "origin.git"]);
-    git(&world, &["clone", "-q", &origin.to_string_lossy(), "service"]);
+    git(
+        &world,
+        &["clone", "-q", &origin.to_string_lossy(), "service"],
+    );
     std::fs::write(checkout.join("README"), "the repository under test\n").expect("a file");
     if let Some(declaration) = declaration {
         std::fs::write(checkout.join("onevcs.toml"), declaration).expect("the declaration");
@@ -473,7 +476,10 @@ fn published_under_the_rules_default(
         .expect("the real seam opens a session");
     std::fs::write(session.worktree.join("feature"), "the node's change\n").expect("a change");
     git(&session.worktree, &["add", "-A"]);
-    git(&session.worktree, &["commit", "-q", "-m", "feat: the node's change"]);
+    git(
+        &session.worktree,
+        &["commit", "-q", "-m", "feat: the node's change"],
+    );
     onevcs::publish(
         &providers,
         &session.token,
