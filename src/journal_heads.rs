@@ -72,7 +72,7 @@ pub struct RecordHead {
 /// records of a long run, and none of them decides a node's status, reason, awaits or
 /// result, the run's summary or its tallies. Their records are folded by their heads.
 /// [`RunView::heads`](crate::views::RunView::heads) states them to its readers.
-pub(crate) const HEADED_KINDS: [&str; 5] = [
+pub const HEADED_KINDS: [&str; 5] = [
     "member-heartbeat",
     "turn-activity",
     "turn-message",
@@ -83,15 +83,15 @@ pub(crate) const HEADED_KINDS: [&str; 5] = [
 /// What a heads read hands the view it folded for: every record's head, and what the
 /// records cover.
 #[derive(Debug, Default)]
-pub(crate) struct Heads {
+pub struct Heads {
     /// Every record's head, in merged order.
-    pub(crate) heads: Vec<RecordHead>,
+    pub heads: Vec<RecordHead>,
     /// What the records cover, as absorbing each of them in turn would leave it.
-    pub(crate) coverage: Coverage,
+    pub coverage: Coverage,
     /// The merged store's length.
-    pub(crate) store_len: usize,
+    pub store_len: usize,
     /// The highest `seq` in the whole journal.
-    pub(crate) last_seq: u64,
+    pub last_seq: u64,
 }
 
 /// What a record's head carries that its folded record does not.
@@ -273,7 +273,7 @@ const PIPELINED: usize = 2048;
 /// complete read follows. Each line is read once, by [`taken`], and the journal is never
 /// read through a second time. Each record's strings are built once, and `fold` reads
 /// them before they are moved into its head.
-pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope, Option<u64>)) -> Heads {
+pub fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope, Option<u64>)) -> Heads {
     let Some(bytes) = whole_file(journal) else {
         return Heads::default();
     };

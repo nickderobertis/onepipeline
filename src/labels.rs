@@ -162,7 +162,7 @@ pub struct LabelAuthor {
     pub session: String,
 }
 
-pub(crate) fn parse(values: &[String]) -> Result<BTreeMap<LabelKey, LabelValue>> {
+pub fn parse(values: &[String]) -> Result<BTreeMap<LabelKey, LabelValue>> {
     let mut labels = BTreeMap::new();
     for entry in values {
         let (name, value) = entry.split_once('=').ok_or_else(|| {
@@ -178,27 +178,27 @@ pub(crate) fn parse(values: &[String]) -> Result<BTreeMap<LabelKey, LabelValue>>
     Ok(labels)
 }
 
-pub(crate) fn raw(labels: &BTreeMap<LabelKey, LabelValue>) -> BTreeMap<String, String> {
+pub fn raw(labels: &BTreeMap<LabelKey, LabelValue>) -> BTreeMap<String, String> {
     labels
         .iter()
         .map(|(key, value)| (key.0.clone(), value.0.clone()))
         .collect()
 }
 
-pub(crate) fn group(value: Option<&str>) -> Result<Option<RunGroup>> {
+pub fn group(value: Option<&str>) -> Result<Option<RunGroup>> {
     value
         .map(|value| RunGroup::try_from(value.to_owned()).map_err(Error::Refused))
         .transpose()
 }
 
-pub(crate) fn effective(
+pub fn effective(
     paths: &RunPaths,
     launch: &LaunchRecord,
 ) -> Result<(BTreeMap<String, String>, Option<String>)> {
     apply(paths, launch.labels.clone(), resolved_group(launch))
 }
 
-pub(crate) fn resolved_group(launch: &LaunchRecord) -> Option<String> {
+pub fn resolved_group(launch: &LaunchRecord) -> Option<String> {
     launch
         .group
         .clone()
@@ -206,7 +206,7 @@ pub(crate) fn resolved_group(launch: &LaunchRecord) -> Option<String> {
         .or_else(|| (!launch.project.is_empty()).then(|| launch.project.clone()))
 }
 
-pub(crate) fn apply(
+pub fn apply(
     paths: &RunPaths,
     mut labels: BTreeMap<String, String>,
     mut group: Option<String>,
@@ -233,7 +233,7 @@ pub(crate) fn apply(
     Ok((labels, group))
 }
 
-pub(crate) fn replace(
+pub fn replace(
     paths: &RunPaths,
     request: crate::verbs::LabelRequest<'_>,
 ) -> Result<LabelOverlay> {
@@ -281,19 +281,19 @@ pub(crate) fn replace(
     Ok(overlay)
 }
 
-pub(crate) fn launch_labels<'de, D: serde::Deserializer<'de>>(
+pub fn launch_labels<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<BTreeMap<String, String>, D::Error> {
     BTreeMap::<LabelKey, LabelValue>::deserialize(reader).map(|labels| raw(&labels))
 }
 
-pub(crate) fn launch_group<'de, D: serde::Deserializer<'de>>(
+pub fn launch_group<'de, D: serde::Deserializer<'de>>(
     reader: D,
 ) -> std::result::Result<Option<String>, D::Error> {
     Option::<RunGroup>::deserialize(reader).map(|group| group.map(|value| value.0))
 }
 
-pub(crate) fn origin(metadata: &BTreeMap<String, serde_json::Value>) -> Result<Option<String>> {
+pub fn origin(metadata: &BTreeMap<String, serde_json::Value>) -> Result<Option<String>> {
     match metadata.get("onetaskgraph.origin") {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(value)) => group(Some(value))

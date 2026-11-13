@@ -53,7 +53,7 @@ const SOURCE_ANSWER_LIMIT: u64 = 1024 * 1024;
 /// the guard asks about, keys a memory by, or names in a warning is one that
 /// was checked at the boundary it arrived over.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Session(String);
+pub struct Session(String);
 
 impl Session {
     /// `text` as a session, or nothing when it names nobody.
@@ -69,7 +69,7 @@ impl Session {
 /// Which stop this is: the first of a turn, or one following a block this guard
 /// made — the one case the memory is consulted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stop {
+pub enum Stop {
     /// A stop nothing has refused yet.
     First,
     /// A stop following a block this guard made.
@@ -88,7 +88,7 @@ impl Stop {
 
 /// What this verb was asked: whose stop, and which stop it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Asked {
+pub struct Asked {
     pub session: Session,
     pub stop: Stop,
 }
@@ -126,7 +126,7 @@ struct HookInput {
 
 /// What the guard decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// Refuse the stop; the reason is the report — `unwatched`'s own lines.
     Block(String),
     /// Let the stop through and put one sentence in front of the person: what
@@ -139,7 +139,7 @@ pub(crate) enum Verdict {
 impl Verdict {
     /// The verdict as a caller reads it: one object under `format`, or nothing
     /// at all for a harness whose "proceed" is silence.
-    pub(crate) fn render(&self, format: Format) -> String {
+    pub fn render(&self, format: Format) -> String {
         let object = match (format, self) {
             (Format::Neutral, Self::Block(reason)) => json!({"verdict": "block", "reason": reason}),
             (Format::Neutral, Self::Warn(message)) => {
@@ -174,7 +174,7 @@ impl Verdict {
 /// carries the launching session of whatever process runs the hook, which for a
 /// dispatched worker is its manager's — the one session this verb must never
 /// answer about unasked.
-pub(crate) fn asked(args: &StopGuardArgs) -> Option<Asked> {
+pub fn asked(args: &StopGuardArgs) -> Option<Asked> {
     if let Some(session) = &args.session {
         return named(session.clone(), args.continuation);
     }
@@ -220,7 +220,7 @@ fn named(session: String, continuation: bool) -> Option<Asked> {
 /// `unresolved` is what the ordinary verb would have written on standard error
 /// for the same question, handed back so the caller writes exactly that and
 /// nothing else there.
-pub(crate) fn guard(
+pub fn guard(
     root: &Path,
     asked: &Asked,
     budget: std::result::Result<Option<WakeBudget>, String>,
@@ -400,7 +400,7 @@ fn own(
 /// What the stop guard's unpublished decision reads beside the session: the
 /// acknowledgements directory and the drafting graph its landing commands name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Unpublishing {
+pub struct Unpublishing {
     pub acknowledgements: PathBuf,
     pub graph: Option<PathBuf>,
 }
@@ -947,7 +947,7 @@ fn memory_named(name: &str) -> Result<PathBuf, String> {
 /// The state root: `XDG_STATE_HOME` when it is absolute, else `~/.local/state`.
 /// [`memory_named`] says why a relative one is ignored; the unpublished
 /// acknowledgements live under the same root for the same reason.
-pub(crate) fn state_root() -> Result<PathBuf, String> {
+pub fn state_root() -> Result<PathBuf, String> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute());

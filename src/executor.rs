@@ -454,7 +454,7 @@ impl Executor for LocalExecutor {
 /// Divergence 48 in
 /// [the divergence record](../../../docs/contract-divergences.md) is why, and the
 /// proposal this answers.
-pub(crate) const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
+pub const NODE_SCRATCH_DIR_ENV: &str = "ONEPIPELINE_NODE_SCRATCH_DIR";
 
 /// The sessions this executor opened, by the worktree each handed back.
 ///
@@ -486,7 +486,7 @@ fn opened_worktrees() -> std::sync::MutexGuard<'static, std::collections::BTreeM
 /// # Errors
 ///
 /// The launch record that could not be read, or `onevcs`'s refusal of the open.
-pub(crate) fn open_session(request: &SessionRequest, labels: &Labels) -> Result<onevcs::Session> {
+pub fn open_session(request: &SessionRequest, labels: &Labels) -> Result<onevcs::Session> {
     let launched = launched_with(labels)?;
     let request = SessionRequest {
         labels: session_labels(&request.labels, labels, launched.as_ref()),

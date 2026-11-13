@@ -25,15 +25,15 @@ use crate::lifecycle::{Drafted, Undrafted, PR_AUTHOR_PERSONA};
 
 /// The flag naming the graph a body is drafted by — the spelling `start` gives
 /// the same graph.
-pub(crate) const PR_AUTHOR_GRAPH_FLAG: &str = "--pr-author-graph";
+pub const PR_AUTHOR_GRAPH_FLAG: &str = "--pr-author-graph";
 
 /// The flag that lands with no drafting turn spent, for a bulk landing that would
 /// otherwise pay one agent turn per branch.
-pub(crate) const NO_DRAFT_FLAG: &str = "--no-draft";
+pub const NO_DRAFT_FLAG: &str = "--no-draft";
 
 /// Which `onevcs` verb a landing forwards to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verb {
+pub enum Verb {
     /// `onevcs publish-branch`, which `onepipeline publish-branch` fronts.
     PublishBranch,
     /// `onevcs recover`, which `onepipeline repo-recover` fronts.
@@ -93,7 +93,7 @@ enum Drafting {
 /// registered with a flow before anything is drafted or forwarded, and a
 /// registration that fails starts no work. With no session it runs unowned, as
 /// it always did, and says so.
-pub(crate) fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
+pub fn land(verb: Verb, args: Vec<OsString>) -> Result<i32> {
     let split = match verb {
         // Every argument of `integrate` is the sibling's: nothing to take out.
         Verb::Integrate => Split {
@@ -1390,7 +1390,7 @@ fn git_in<'a>(
 
 /// A manager landing this process registered and is doing: the flow that holds
 /// it, its own record, and the journals its progress goes to.
-pub(crate) struct Supervision {
+pub struct Supervision {
     flow: Flow,
     /// Whose flow it is: one registered for this landing alone, which ends when
     /// the landing does, or a longer one it is a step of.
@@ -1860,7 +1860,7 @@ const RELAY_READ_ATTEMPTS: u32 = 50;
 /// associated run's, each appended through the store's locked writer and never
 /// twice for one record of the operation.
 // llmlint: ignore-block[invalid_states_unrepresentable] the ids are the labels every relayed record carries, as JSON strings on the wire, and each was checked where it was read: the landing and flow ids against the directories their request sits in, the run ids by `LandingRequest`'s own run-id rule, and the operation id by `onevcs::OperationHandle::open`, which refuses one it cannot open. A newtype per id would be a conversion back to the same string at the one place each is used.
-pub(crate) struct Relay {
+pub struct Relay {
     landing_id: String,
     flow_id: String,
     /// The operation the landing prepared, once it has.
@@ -2137,7 +2137,7 @@ fn associated_runs(
 /// # Errors
 ///
 /// A journal that could not be read or written.
-pub(crate) fn settle_death(root: &Path, flow: &Flow, landing: &Registered) -> Result<()> {
+pub fn settle_death(root: &Path, flow: &Flow, landing: &Registered) -> Result<()> {
     if !matches!(landing.standing(), Ok(crate::flow::Standing::Died)) {
         return Ok(());
     }

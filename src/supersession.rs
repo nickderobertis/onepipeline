@@ -26,49 +26,49 @@ const BY_LABEL: &str = "superseded_by_node";
 
 /// One earlier attempt of a landed lineage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) struct Attempt {
+pub struct Attempt {
     /// The node id the retry edge names, which is the `node` label `onevcs` is
     /// given.
-    pub(crate) node: String,
+    pub node: String,
     /// Its settlement's branch, else its `session-opened`'s: what `onevcs` is told
     /// was superseded.
-    pub(crate) branch: String,
+    pub branch: String,
 }
 
 /// One earlier attempt `onevcs` would not record, and what it answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Unrecorded {
+pub struct Unrecorded {
     #[serde(flatten)]
-    pub(crate) attempt: Attempt,
+    pub attempt: Attempt,
     /// What `onevcs` answered.
-    pub(crate) error: String,
+    pub error: String,
 }
 
 /// A lineage whose head landed, and the earlier attempts on other branches it
 /// superseded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Lineage {
+pub struct Lineage {
     /// The node that landed: the lineage's head.
-    pub(crate) node: String,
+    pub node: String,
     /// The branch it landed from.
-    pub(crate) branch: String,
+    pub branch: String,
     /// The repository its work lands in, as the node names it.
-    pub(crate) repo: String,
+    pub repo: String,
     /// Where it landed: the commit, or the change request's URL where no commit
     /// is recorded.
-    pub(crate) landing: StatedLanding,
+    pub landing: StatedLanding,
     /// Every earlier attempt, root first, whose branch is not the one that landed.
     /// An attempt on the landed branch is `onevcs`'s own to chain and is not here.
-    pub(crate) superseded: Vec<Attempt>,
+    pub superseded: Vec<Attempt>,
 }
 
 /// What one landed lineage's recording did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Recorded {
+pub struct Recorded {
     /// The attempts recorded as superseded.
-    pub(crate) recorded: Vec<Attempt>,
+    pub recorded: Vec<Attempt>,
     /// The attempts `onevcs` refused, and why.
-    pub(crate) failed: Vec<Unrecorded>,
+    pub failed: Vec<Unrecorded>,
 }
 
 /// Every landed lineage that has earlier attempts, in head order.
@@ -76,7 +76,7 @@ pub(crate) struct Recorded {
 /// A lineage whose head's branch or landing the run never recorded is left out:
 /// `onevcs` is asked for a supersession by the branch that superseded and where it
 /// landed, and there is no answer to give it.
-pub(crate) fn lineages(state: &RunState) -> Vec<Lineage> {
+pub fn lineages(state: &RunState) -> Vec<Lineage> {
     let predecessor: BTreeMap<&str, &str> = state
         .superseded
         .iter()
@@ -174,7 +174,7 @@ fn landing_of(state: &RunState, node: &str) -> Option<StatedLanding> {
 /// Keyed by the node that landed and its landing, so a record counts only for the
 /// lineage and the landing it was written for: an attempt a record names under
 /// another head, or at a landing the lineage no longer states, is asked again.
-pub(crate) type RecordedPair = (String, String, Attempt);
+pub type RecordedPair = (String, String, Attempt);
 
 /// Every attempt a `branches-superseded` record says `onevcs` recorded, under the
 /// landed node that record was written for.
@@ -182,7 +182,7 @@ pub(crate) type RecordedPair = (String, String, Attempt);
 /// A record that does not read as one is said so on stderr and counts for
 /// nothing, so its pairs are asked of `onevcs` again — which records a
 /// supersession once however often it is told.
-pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
+pub fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
     events
         .iter()
         .filter(|event| {
@@ -225,7 +225,7 @@ pub(crate) fn recorded_in(events: &[Envelope]) -> BTreeSet<RecordedPair> {
 
 /// Record each of `attempts` as superseded by `lineage`'s landing, and say what
 /// `onevcs` answered for each.
-pub(crate) fn record(run: &str, lineage: &Lineage, attempts: &[Attempt]) -> Recorded {
+pub fn record(run: &str, lineage: &Lineage, attempts: &[Attempt]) -> Recorded {
     let mut recorded = Vec::new();
     let mut failed = Vec::new();
     for attempt in attempts {
@@ -252,7 +252,7 @@ pub(crate) fn record(run: &str, lineage: &Lineage, attempts: &[Attempt]) -> Reco
 }
 
 /// Journal what one lineage's recording did, as `branches-superseded`.
-pub(crate) fn journal(
+pub fn journal(
     paths: &RunPaths,
     journal: &mut Journal,
     lineage: &Lineage,
@@ -299,14 +299,14 @@ pub(crate) fn journal(
 /// refusal is on the record, and `onepipeline supersessions --record` is what asks
 /// again.
 #[derive(Debug, Default)]
-pub(crate) struct Watch {
+pub struct Watch {
     recorded: BTreeSet<RecordedPair>,
     answered: BTreeSet<String>,
 }
 
 impl Watch {
     /// The pairs this run's journal already records.
-    pub(crate) fn of_run(paths: &RunPaths) -> Self {
+    pub fn of_run(paths: &RunPaths) -> Self {
         Self {
             // Off the run's checkpoint, which keeps every `branches-superseded`
             // record as written, rather than off a read of the run's history.
@@ -320,7 +320,7 @@ impl Watch {
     /// # Errors
     ///
     /// The reason the run's journal could not be written.
-    pub(crate) fn pass(
+    pub fn pass(
         &mut self,
         paths: &RunPaths,
         journal: &mut Journal,
@@ -374,7 +374,7 @@ fn unrecorded(lineage: &Lineage, recorded: &BTreeSet<RecordedPair>) -> Vec<Attem
 /// # Errors
 ///
 /// The reason the run's journal could not be written.
-pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<()> {
+pub fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<()> {
     let events = journal::read(&paths.journal());
     let state = crate::projection::fold(&events);
     Watch {
@@ -387,7 +387,7 @@ pub(crate) fn record_landed(paths: &RunPaths, journal: &mut Journal) -> Result<(
 /// What `onepipeline supersessions` is asked to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Mode {
+pub enum Mode {
     /// Record nothing.
     Answer,
     /// Record each pair the journal does not already.
@@ -402,34 +402,34 @@ const RECORD_VERB: &str = "supersessions --record";
 /// landed retries were on a branch other than the one that landed, and what
 /// became of recording them with `onevcs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct Supersessions {
+pub struct Supersessions {
     /// The run id the verb was given, as it resolved.
-    pub(crate) run: String,
-    pub(crate) mode: Mode,
+    pub run: String,
+    pub mode: Mode,
     /// Every landed lineage with earlier attempts, in head order.
-    pub(crate) lineages: Vec<SupersededLineage>,
+    pub lineages: Vec<SupersededLineage>,
 }
 
 /// One landed lineage of [`Supersessions`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct SupersededLineage {
+pub struct SupersededLineage {
     /// The head that landed, and every earlier attempt on another branch.
     #[serde(flatten)]
-    pub(crate) lineage: Lineage,
+    pub lineage: Lineage,
     /// The attempts the run's journal did not yet record: what this call
     /// records, or would.
-    pub(crate) to_record: Vec<Attempt>,
+    pub to_record: Vec<Attempt>,
     /// The attempts this call recorded.
-    pub(crate) recorded: Vec<Attempt>,
+    pub recorded: Vec<Attempt>,
     /// The attempts `onevcs` refused this call, and why.
-    pub(crate) failed: Vec<Unrecorded>,
+    pub failed: Vec<Unrecorded>,
 }
 
 impl Supersessions {
     /// The status the binary exits with: [`EXIT_SUCCESS`](crate::error::EXIT_SUCCESS) when it answered or
     /// recorded, nothing to record included, and `1` when `onevcs` refused a
     /// record — the contract's code for work left unfinished.
-    pub(crate) fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> i32 {
         if self
             .lineages
             .iter()
@@ -460,7 +460,7 @@ impl Supersessions {
 /// A run with no directory under the runs root, one whose journal cannot be read
 /// or holds no record this build reads, one whose ownership lock another process
 /// holds where `record` is asked, or one whose journal cannot be written.
-pub(crate) fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
+pub fn supersessions(paths: &RunPaths, mode: Mode) -> Result<Supersessions> {
     if !paths.exists() {
         return Err(crate::Error::NoSuchRun {
             run: paths.run.clone(),
@@ -540,7 +540,7 @@ fn journal_of(paths: &RunPaths) -> Result<Vec<Envelope>> {
 
 /// The lines `onepipeline supersessions RUN` prints on stdout. What `onevcs`
 /// answered for a record it refused is [`render_refusals`]'s, for stderr.
-pub(crate) fn render(answered: &Supersessions) -> String {
+pub fn render(answered: &Supersessions) -> String {
     if answered.lineages.is_empty() {
         return format!(
             "run {}: no retry that landed has an earlier attempt, so there is nothing to \
@@ -589,7 +589,7 @@ pub(crate) fn render(answered: &Supersessions) -> String {
 /// What `onepipeline supersessions RUN --record` prints on stderr when `onevcs`
 /// refused a record: each refused branch with its answer, and what to run once
 /// that is fixed. Nothing when every record was taken.
-pub(crate) fn render_refusals(answered: &Supersessions) -> String {
+pub fn render_refusals(answered: &Supersessions) -> String {
     let failed: Vec<&Unrecorded> = answered
         .lineages
         .iter()
@@ -612,14 +612,14 @@ pub(crate) fn render_refusals(answered: &Supersessions) -> String {
     out
 }
 
-pub(crate) fn render_json(answered: &Supersessions) -> String {
+pub fn render_json(answered: &Supersessions) -> String {
     serde_json::to_string(answered).expect("the answer serializes")
 }
 
 /// Entry 92's block in `docs/contract-divergences.md`: the proposal this module
 /// and `maintenance`'s retirement pass are held to.
 #[cfg(test)]
-pub(crate) fn proposal() -> serde_json::Value {
+pub fn proposal() -> serde_json::Value {
     let record = include_str!("../docs/contract-divergences.md");
     let entry = record
         .split("\n## ")
@@ -635,14 +635,14 @@ pub(crate) fn proposal() -> serde_json::Value {
 
 /// The words a list of `proposal()` names.
 #[cfg(test)]
-pub(crate) fn proposed(key: &str) -> BTreeSet<String> {
+pub fn proposed(key: &str) -> BTreeSet<String> {
     serde_json::from_value(proposal()[key].clone())
         .unwrap_or_else(|error| panic!("entry 92's {key} is a list of words: {error}"))
 }
 
 /// The top-level properties the payload document generated from `T` declares.
 #[cfg(test)]
-pub(crate) fn declared<T: schemars::JsonSchema>() -> BTreeSet<String> {
+pub fn declared<T: schemars::JsonSchema>() -> BTreeSet<String> {
     schemars::schema_for!(T).as_value()["properties"]
         .as_object()
         .expect("a payload document declares its properties")

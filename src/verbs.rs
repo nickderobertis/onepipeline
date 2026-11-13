@@ -88,7 +88,7 @@ pub use crate::watch::{
 /// A run id that navigates is refused before it is joined onto anything: it is
 /// not a run this root holds, and reporting it as merely missing would leave a
 /// caller believing the path they typed was looked for where they meant.
-pub(crate) fn resolved(root: &Path, run: &str) -> Result<RunPaths> {
+pub fn resolved(root: &Path, run: &str) -> Result<RunPaths> {
     if !ledger::is_valid_run_id(run) {
         return Err(Error::Invalid(format!(
             "'{run}' is not a run id: a run id names one directory under the runs root, \
@@ -1165,7 +1165,7 @@ pub fn reply_as(
 /// `envelope_json` with its `provenance` set to `provenance`, or the refusal for
 /// an envelope that states the other one. Text that is not a JSON object is
 /// returned as it came, so the caller's own parse refuses it in its own words.
-pub(crate) fn stated_as(
+pub fn stated_as(
     envelope_json: &str,
     provenance: crate::provenance::Provenance,
 ) -> Result<String> {
@@ -1372,7 +1372,7 @@ impl SurfaceState {
 
 /// What a surface offer becomes for the two verbs that print it: a hook's refusal
 /// is the verb's, and what was dropped or rerouted names no id.
-pub(crate) fn surfaced_of(offer: crate::channel::SurfaceOffer) -> Result<Surfaced> {
+pub fn surfaced_of(offer: crate::channel::SurfaceOffer) -> Result<Surfaced> {
     use crate::channel::SurfaceOffer;
     match offer {
         SurfaceOffer::Queued(queued) => Ok(Surfaced {
@@ -1668,7 +1668,7 @@ impl Stopped {
 /// Each teardown says something different because it leaves the operator in a
 /// different place: a host that gave no answer is a stop to run again, and a
 /// tree that refused this user's signal is one to end as the user that owns it.
-pub(crate) fn teardown_refusal(run: &str, teardown: StopTeardown) -> Option<String> {
+pub fn teardown_refusal(run: &str, teardown: StopTeardown) -> Option<String> {
     match teardown {
         StopTeardown::NotAttempted => Some(format!(
             "run '{run}' was not stopped: this host gave no answer its tree could be \
@@ -2117,7 +2117,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
 /// The removal or conservative refusal of `onepipeline scratch discard RUN`.
 #[derive(Debug)]
 pub struct ScratchDiscard {
-    pub(crate) outcome: crate::scratch::DiscardOutcome,
+    pub outcome: crate::scratch::DiscardOutcome,
 }
 
 impl ScratchDiscard {

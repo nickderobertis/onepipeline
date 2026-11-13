@@ -12,29 +12,29 @@ use crate::channel::{Surface, SurfaceKind};
 use crate::event::Envelope;
 
 /// The heading of the section a failed provisioning composes into a task.
-pub(crate) const HEADING: &str = "## Worktree provisioning failed";
+pub const HEADING: &str = "## Worktree provisioning failed";
 
 /// How many of the output's last lines a `provisioning-failed` surface carries.
 const SURFACE_OUTPUT_LINES: usize = 20;
 
 /// The `onevcs` label naming the session a stream record belongs to.
-pub(crate) const SESSION_LABEL: &str = "session";
+pub const SESSION_LABEL: &str = "session";
 
 /// One session's failed `post-checkout`, as a node's record keeps it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Failure {
+pub struct Failure {
     /// The session whose stream recorded it.
     // llmlint: ignore[invalid_states_unrepresentable] the token exactly as `onevcs` labelled the record, read back rather than parsed; `results --json` publishes it as this plain string.
-    pub(crate) session: String,
+    pub session: String,
     /// What `onevcs` recorded, under its own keys.
     #[serde(flatten)]
-    pub(crate) provision: onevcs::WorktreeProvision,
+    pub provision: onevcs::WorktreeProvision,
 }
 
 impl Failure {
     /// The failure a `worktree-provision-failed` record states, and `None` for any
     /// other record or one that does not read as `onevcs`'s own payload.
-    pub(crate) fn of(envelope: &Envelope) -> Option<Self> {
+    pub fn of(envelope: &Envelope) -> Option<Self> {
         let provision = crate::vcs::provision_failure(envelope)?;
         let session = envelope.labels.extra.get(SESSION_LABEL)?.as_str()?;
         Some(Self {
@@ -44,7 +44,7 @@ impl Failure {
     }
 
     /// How the hook ended, as a clause: `exited with status 3`.
-    pub(crate) fn ended(&self) -> String {
+    pub fn ended(&self) -> String {
         let provision = &self.provision;
         if provision.timed_out {
             return "timed out".to_owned();
@@ -65,7 +65,7 @@ impl Failure {
     }
 
     /// The one line `results` and `status` print for this failure.
-    pub(crate) fn line(&self) -> String {
+    pub fn line(&self) -> String {
         format!(
             "provisioning failed in session {}: {} {}; rerun in {}: {}",
             self.session,
@@ -100,7 +100,7 @@ impl Failure {
     }
 
     /// The non-blocking surface that tells the manager, once per failed session.
-    pub(crate) fn surface(&self, node: &str) -> Surface {
+    pub fn surface(&self, node: &str) -> Surface {
         let provision = &self.provision;
         let lines: Vec<&str> = provision.output.trim_matches('\n').lines().collect();
         let last = &lines[lines.len().saturating_sub(SURFACE_OUTPUT_LINES)..];
@@ -148,7 +148,7 @@ fn fence_for(output: &str) -> String {
 }
 
 /// The task with the failure's section above its operational notes.
-pub(crate) fn with_section(task: &str, failure: &Failure) -> String {
+pub fn with_section(task: &str, failure: &Failure) -> String {
     crate::plan::above_notes(task, &failure.section())
 }
 

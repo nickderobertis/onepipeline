@@ -528,7 +528,7 @@ pub fn changes_of_run(paths: &crate::ledger::RunPaths, events: &[Envelope]) -> C
 }
 
 /// The same, over a fold the caller already holds.
-pub(crate) fn changes(run: &str, state: &RunState, events: &[Envelope]) -> ChangeTelemetry {
+pub fn changes(run: &str, state: &RunState, events: &[Envelope]) -> ChangeTelemetry {
     let lineages = lineages(state, events);
     let mut owner: BTreeMap<&str, usize> = BTreeMap::new();
     for (index, lineage) in lineages.iter().enumerate() {

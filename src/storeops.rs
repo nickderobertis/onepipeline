@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 
 /// The file, in a run's directory, each operation is appended to.
-pub(crate) const FILE: &str = "store-operations.jsonl";
+pub const FILE: &str = "store-operations.jsonl";
 
 /// How many lines a process holds before it knows its run; past it the oldest are dropped,
 /// so a process that never attaches cannot grow without bound.
@@ -31,7 +31,7 @@ const HELD: usize = 10_000;
 
 /// One kind of call into the store's API, named for the call and not for any backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Operation {
+pub enum Operation {
     /// One page of a task's dependency edges.
     Dependencies,
     /// One task, by its id.
@@ -60,7 +60,7 @@ pub(crate) enum Operation {
 
 impl Operation {
     /// The word a line carries.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Dependencies => "task-dependencies",
             Self::Task => "task",
@@ -120,7 +120,7 @@ static SINK: Mutex<Sink> = Mutex::new(Sink::new());
 /// What one stretch of work asks the store for operations for: the phase, and the node or the
 /// item the operations concern, where they concern one.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Scope<'a> {
+pub enum Scope<'a> {
     /// The launch's read of the plan.
     Launch,
     /// A re-read of `node`'s edges, held on the sources `held_on` names.
@@ -213,7 +213,7 @@ thread_local! {
 
 /// Send this process's operations to the run whose directory is `dir`, the ones it asked for
 /// before it knew its run first.
-pub(crate) fn attach(dir: &Path) {
+pub fn attach(dir: &Path) {
     SINK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .attach(dir);
@@ -221,7 +221,7 @@ pub(crate) fn attach(dir: &Path) {
 
 /// Run `within` with every operation it asks for on this thread said to be for `scope`, an
 /// inner scope's fields standing over the outer ones' for its length.
-pub(crate) fn about<T>(scope: Scope<'_>, within: impl FnOnce() -> T) -> T {
+pub fn about<T>(scope: Scope<'_>, within: impl FnOnce() -> T) -> T {
     let outer = ABOUT.with(|current| {
         let mut current = current.borrow_mut();
         let inner = Context::within(current.as_ref(), scope);
@@ -234,7 +234,7 @@ pub(crate) fn about<T>(scope: Scope<'_>, within: impl FnOnce() -> T) -> T {
 
 /// Count one operation as it is asked for, before its future is driven: one that never
 /// answers, or is cancelled at its deadline, was still asked of the store and is counted.
-pub(crate) fn record(operation: Operation) {
+pub fn record(operation: Operation) {
     let line = line(operation).to_string();
     SINK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

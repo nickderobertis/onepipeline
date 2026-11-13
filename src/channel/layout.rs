@@ -279,7 +279,7 @@ pub struct Surface {
 /// # Errors
 ///
 /// What breaks it, worded for the refusal the writer answers with.
-pub(crate) fn declined_ruling_holds(surface: &Value) -> Result<(), String> {
+pub fn declined_ruling_holds(surface: &Value) -> Result<(), String> {
     let kind = surface
         .get("kind")
         .and_then(Value::as_str)

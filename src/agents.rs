@@ -228,7 +228,7 @@ impl Stamp<'_> {
 /// [`Error::Refused`] naming the variable where it is set to something that is
 /// not Unicode: a value the merge cannot read is not an absent one, and reading
 /// it as absent would drop every label the repository stamped.
-pub(crate) fn inherited_labels() -> Result<Option<String>> {
+pub fn inherited_labels() -> Result<Option<String>> {
     match std::env::var_os(LABELS_ENV) {
         None => Ok(None),
         Some(value) => value.into_string().map(Some).map_err(|value| {
@@ -257,7 +257,7 @@ pub(crate) fn inherited_labels() -> Result<Option<String>> {
 /// missing `env_from` source refuses it — and where the inherited value is not
 /// a label set at all. [`Error::Ledger`] where the pointer file's path cannot
 /// be made absolute.
-pub(crate) fn overlay(
+pub fn overlay(
     paths: &RunPaths,
     inherited: Option<&str>,
     stamp: &Stamp<'_>,
@@ -434,7 +434,7 @@ impl Agents {
     /// Fold one run's pointer file into this listing: the lines `scope` keeps,
     /// and every line the reader could not read, whatever the scope — a torn
     /// tail is a fact about the file, not about the node asked for.
-    pub(crate) fn absorb(&mut self, pointer_file: &Path, scope: AgentScope<'_>) -> Result<()> {
+    pub fn absorb(&mut self, pointer_file: &Path, scope: AgentScope<'_>) -> Result<()> {
         let read = read_pointers(pointer_file).map_err(|error| {
             Error::Invalid(format!(
                 "cannot read the run's pointer file {}: {error}",

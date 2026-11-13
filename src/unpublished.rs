@@ -587,7 +587,7 @@ fn shaped(
 /// nothing, so no journey over real Git can stage a row carrying any other verb:
 /// the passthrough of `integrate` and `reclaim` is held by this module's unit
 /// test, and the two drafted verbs by the journeys that run the printed command.
-pub(crate) fn land_command(recover: &[String], graph: Option<&Path>) -> Vec<String> {
+pub fn land_command(recover: &[String], graph: Option<&Path>) -> Vec<String> {
     let [program, verb, rest @ ..] = recover else {
         return recover.to_vec();
     };
@@ -791,7 +791,7 @@ fn file_bytes(meta: &std::fs::Metadata) -> u64 {
 ///
 /// One line of text a person reads: something visible in it, and no character
 /// that is not visible text on one line — a newline among them.
-pub(crate) fn reason_fault(reason: &str) -> Option<String> {
+pub fn reason_fault(reason: &str) -> Option<String> {
     // Only surrounding spaces are forgiven: a newline or a tab at either end is the
     // second line or the control character this rule refuses anywhere else.
     let trimmed = reason.trim_matches(' ');

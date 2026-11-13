@@ -46,7 +46,7 @@ use crate::projection::{self, RunState};
 /// The schema version of `liveness.json`, refused where it is not this one: a
 /// document a reader does not understand is read as no document, which is what an
 /// absent one says.
-pub(crate) const LIVENESS_SCHEMA_VERSION: u32 = 1;
+pub const LIVENESS_SCHEMA_VERSION: u32 = 1;
 
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
     let found = u32::deserialize(reader)?;
@@ -61,11 +61,11 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 /// `<run>/liveness.json`: the one type its writer and every reader share.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Liveness {
+pub struct Liveness {
     #[serde(deserialize_with = "this_version")]
     schema_version: u32,
     /// One entry per member of a dispatch still in flight.
-    pub(crate) members: Vec<MemberBeat>,
+    pub members: Vec<MemberBeat>,
 }
 
 impl Default for Liveness {
@@ -80,26 +80,26 @@ impl Default for Liveness {
 /// One member's latest heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MemberBeat {
+pub struct MemberBeat {
     /// The node whose dispatch the member belongs to.
-    pub(crate) node: String,
+    pub node: String,
     /// The `oneagentgraph` run the member is part of.
-    pub(crate) graph_run: String,
+    pub graph_run: String,
     /// The member's name in that graph.
-    pub(crate) member: String,
+    pub member: String,
     /// When it last heartbeat: RFC 3339, UTC, to the millisecond.
-    pub(crate) last_heartbeat_at: String,
+    pub last_heartbeat_at: String,
 }
 
 impl Liveness {
     /// The run's liveness as its file holds it: nothing, where there is no file
     /// or one this build cannot read.
-    pub(crate) fn read(paths: &RunPaths) -> Self {
+    pub fn read(paths: &RunPaths) -> Self {
         ledger::read_json_opt(&paths.liveness()).unwrap_or_default()
     }
 
     /// The latest heartbeat any member sent, in milliseconds.
-    pub(crate) fn latest(&self) -> Option<u64> {
+    pub fn latest(&self) -> Option<u64> {
         self.members
             .iter()
             .filter_map(|beat| projection::millis_of(&beat.last_heartbeat_at))
@@ -113,7 +113,7 @@ impl Liveness {
 static WRITING: Mutex<()> = Mutex::new(());
 
 /// Whether `event` is a member's heartbeat.
-pub(crate) fn is_heartbeat(event: &Envelope) -> bool {
+pub fn is_heartbeat(event: &Envelope) -> bool {
     event.source == crate::event::Source::Agentgraph
         && event.kind.0 == oneagentgraph::event::EventKind::MemberHeartbeat.as_str()
 }
@@ -121,7 +121,7 @@ pub(crate) fn is_heartbeat(event: &Envelope) -> bool {
 /// Record a heartbeat a dispatch's member sent, where it advances that member's
 /// entry. A beat naming no node — an observer's — is not a dispatch member's, and
 /// is not kept.
-pub(crate) fn beat(paths: &RunPaths, event: &Envelope) {
+pub fn beat(paths: &RunPaths, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
@@ -161,7 +161,7 @@ pub(crate) fn beat(paths: &RunPaths, event: &Envelope) {
 }
 
 /// Drop every entry of `node`'s members: its dispatch has settled.
-pub(crate) fn settled(paths: &RunPaths, node: &str) {
+pub fn settled(paths: &RunPaths, node: &str) {
     let _writing = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -176,7 +176,7 @@ pub(crate) fn settled(paths: &RunPaths, node: &str) {
 /// Drop every entry: a driver taking the run over has ended every dispatch the
 /// driver before it left in flight.
 // llmlint: ignore[changed_behavior_has_e2e] every journey's driver passes this at its start, and the entries it drops are a dead driver's, which a reader would otherwise read as beats older than any the new driver's members send — so no reading differs either way; what a reader does with the file is driven by the `journal_scaling` liveness journeys.
-pub(crate) fn clear(paths: &RunPaths) {
+pub fn clear(paths: &RunPaths) {
     let _writing = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -194,7 +194,7 @@ fn write(paths: &RunPaths, liveness: &Liveness) {
 /// later of the fold's and the file's, and so is the run's last write — a live
 /// member's heartbeat is activity a quiet run is judged by, as a journalled one
 /// was.
-pub(crate) fn apply(paths: &RunPaths, state: &mut RunState) {
+pub fn apply(paths: &RunPaths, state: &mut RunState) {
     let liveness = Liveness::read(paths);
     for beat in &liveness.members {
         let Some(at) = projection::millis_of(&beat.last_heartbeat_at) else {
@@ -209,7 +209,7 @@ pub(crate) fn apply(paths: &RunPaths, state: &mut RunState) {
 }
 
 /// The run's last write, with its members' heartbeats counted as writes.
-pub(crate) fn last_write_with_beats(paths: &RunPaths, last_write_at: Option<u64>) -> Option<u64> {
+pub fn last_write_with_beats(paths: &RunPaths, last_write_at: Option<u64>) -> Option<u64> {
     match Liveness::read(paths).latest() {
         Some(latest) => Some(last_write_at.map_or(latest, |was| was.max(latest))),
         None => last_write_at,

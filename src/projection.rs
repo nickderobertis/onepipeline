@@ -58,7 +58,7 @@ pub struct RunState {
     /// Journal-only rework provenance restored by continuation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] src/AGENTS.md keeps engine-only representations private, and Snapshot’s adjacent node-map suppressions document the String-key convention. These checkpoint keys are graph-validated node ids copied by the fold and joined to the existing String-keyed graph, status and supersession maps; this field retains that serialized identity shape.
-    pub(crate) continued_reworks: BTreeMap<String, crate::payload::ContinuedRework>,
+    pub continued_reworks: BTreeMap<String, crate::payload::ContinuedRework>,
     /// The desired graph the loop is converging toward, with every committed
     /// edit applied.
     pub graph: Graph,
@@ -178,7 +178,7 @@ pub struct RunState {
     /// its entry, since that placement had none. Omitted when empty, which is
     /// every run whose nodes were never drafted on unlanded work.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) stacks: BTreeMap<String, crate::payload::SettledStack>,
+    pub stacks: BTreeMap<String, crate::payload::SettledStack>,
     /// What each `rework` asked of the node it superseded, keyed by that node:
     /// its replacement, reason, instruction and the review comments it answers.
     ///
@@ -187,7 +187,7 @@ pub struct RunState {
     /// — and the two read opposite ways: a retried node failed, a reworked one
     /// finished and is being changed in review. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) reworks: BTreeMap<String, ReworkRecord>,
+    pub reworks: BTreeMap<String, ReworkRecord>,
     /// The commit each branch a node of this run published last stands at, as the
     /// run saw it: off a relayed `push` of the branch while its publication runs,
     /// and off the settlement that names it.
@@ -197,30 +197,30 @@ pub struct RunState {
     /// push and never for its checks. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] a branch and a commit are the plain strings `branches` and `heads` beside this carry them as, each checked by `vcs::usable` where it enters, which is the only thing that writes this map.
-    pub(crate) branch_heads: BTreeMap<String, String>,
+    pub branch_heads: BTreeMap<String, String>,
     /// The restacks running now, by node, with the heads each brings its node onto.
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) restacking: BTreeMap<String, crate::payload::Onto>,
+    pub restacking: BTreeMap<String, crate::payload::Onto>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) restacks: BTreeMap<String, RestackRecord>,
+    pub restacks: BTreeMap<String, RestackRecord>,
     /// Each node whose rework left its change request's title unverified, and
     /// why — until a `retitle` or another publication retitles it. Omitted when
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    pub titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
     /// Each node's sessions whose provisioning failed, oldest first, one entry per
     /// session; a later session's success removes nothing. Omitted when empty.
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the plain node id every map on this struct is keyed by, which the graph validated; a node-id type for one field would not change what the struct can hold.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
+    pub provisioning_failures: BTreeMap<String, Vec<crate::provisioning::Failure>>,
     /// The sessions whose `provisioning-failed` surface is on the journal, so each
     /// raises one. Kept apart from the failures because the relay can journal a
     /// failure, and a refresh fold it, before the loop reaches it. Omitted when empty.
     // llmlint: ignore[invalid_states_unrepresentable] each is the token exactly as `onevcs` labelled its own record, compared and never parsed, as `provisioning::Failure::session` carries it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub(crate) provisioning_surfaced: BTreeSet<String>,
+    pub provisioning_surfaced: BTreeSet<String>,
     // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
     // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
     // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
@@ -229,35 +229,35 @@ pub struct RunState {
     /// Each draft whose change request was merged into another node's branch, and that
     /// node. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) absorbed: BTreeMap<String, String>,
+    pub absorbed: BTreeMap<String, String>,
     /// Each draft whose change request was closed without merging, until it is reopened.
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub(crate) closed_changes: BTreeSet<String>,
+    pub closed_changes: BTreeSet<String>,
     /// Each draft a readjustment still owes, with the landed or absorbed nodes that made
     /// it owed. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) readjust_owed: BTreeMap<String, BTreeSet<String>>,
+    pub readjust_owed: BTreeMap<String, BTreeSet<String>>,
     /// How each node found landed by a readjustment was found. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) landed_how: BTreeMap<String, crate::payload::NodeLanded>,
+    pub landed_how: BTreeMap<String, crate::payload::NodeLanded>,
     /// The last readjustment of each draft. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) readjusted: BTreeMap<String, crate::payload::NodeReadjusted>,
+    pub readjusted: BTreeMap<String, crate::payload::NodeReadjusted>,
     /// The head each draft's check verdict was last read for. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) checks_read: BTreeMap<String, String>,
+    pub checks_read: BTreeMap<String, String>,
     /// Each reopened draft's restored base, until its retarget deletes it again.
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) reopened: BTreeMap<String, String>,
+    pub reopened: BTreeMap<String, String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The branch prefix `onevcs` reported putting in front of the branches it cut
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     // llmlint: ignore[invalid_states_unrepresentable] the prefix is the plain string `onevcs` reports and every branch beside it in this struct is, checked where it enters by `vcs::usable` — the only thing that writes it, apart from the empty string a cut under no prefix is — and `onevcs` itself holds no newtype for it to borrow.
-    pub(crate) branch_prefix: Option<String>,
+    pub branch_prefix: Option<String>,
     /// The branches an idle pass of this run's driver retired as holding no work
     /// beyond their base, folded from its `branches-retired`.
     ///
@@ -357,71 +357,71 @@ pub struct RunState {
     /// history for it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed as `holds` beside it is: by the graph-validated node id the record carries, and by the kind's own wire word.
-    pub(crate) held_since: BTreeMap<String, BTreeMap<String, u64>>,
+    pub held_since: BTreeMap<String, BTreeMap<String, u64>>,
     /// The stamp of the latest node dispatch or settlement: what an elapsed watch
     /// reports as the run's last progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_progress_at: Option<u64>,
+    pub last_progress_at: Option<u64>,
     /// Every record of the few rare kinds a driver reads back whole when it starts
     /// — a release a node adopted or that arrived for it, and the attempts a
     /// landing superseded — kept as written and in the order folded, so their
     /// readers decide from them exactly as they did from the journal without
     /// reading the run's history for them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) recalled: Vec<Envelope>,
+    pub recalled: Vec<Envelope>,
     /// The nodes a note was delivered to or withdrawn from, by any commit folded:
     /// whose dispatches [`recalled`](Self::recalled) keeps, so a fold of a node's
     /// notes over those records resets where a fold over the whole journal does.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] by the node id each note record carries, as `held_since` is keyed.
-    pub(crate) noted: BTreeSet<String>,
+    pub noted: BTreeSet<String>,
     /// Where the latest `oneagentgraph` record of each node said its turn was:
     /// what a note to a node with no turn in flight is addressed to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed as `held_since` beside it is, by the node id the record carries.
-    pub(crate) last_turns: BTreeMap<String, crate::agentgraph::TurnAddress>,
+    pub last_turns: BTreeMap<String, crate::agentgraph::TurnAddress>,
     /// Every node a `node-dispatched` of this crate's named, whatever became of it
     /// since: what `status` counts a run's own dispatches by.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-dispatched` records carry, which the graph validated when it dispatched them, as `held_since` is keyed.
-    pub(crate) dispatched_nodes: BTreeSet<String>,
+    pub dispatched_nodes: BTreeSet<String>,
     /// The `detail` each node's newest `node-settled` carried, where it carried one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the settlement's own prose, quoted and never parsed.
-    pub(crate) settled_details: BTreeMap<String, String>,
+    pub settled_details: BTreeMap<String, String>,
     /// The releases each node's newest `node-settled` said it still awaits, where it
     /// named any this build can read: what `status --json` lists for a node held
     /// for a release, read off the fold rather than the run's history.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `settled_details` beside it is.
-    pub(crate) settled_awaiting: BTreeMap<String, Vec<crate::views::AwaitedRelease>>,
+    pub settled_awaiting: BTreeMap<String, Vec<crate::views::AwaitedRelease>>,
     /// The first record of each node's latest session `onevcs` opened: what the
     /// write-back pins a dispatch in flight to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is.
-    pub(crate) sessions_opened: BTreeMap<String, SessionOpened>,
+    pub sessions_opened: BTreeMap<String, SessionOpened>,
     /// Every node an `edit-committed` added, as the newest addition wrote it —
     /// removed nodes included, which the graph no longer holds.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the id of the node it holds, which the graph validated when the edit was committed.
-    pub(crate) nodes_added: BTreeMap<String, crate::plan::Node>,
+    pub nodes_added: BTreeMap<String, crate::plan::Node>,
     /// Each node's settlement as the write-back board holds it: the newest
     /// `node-settled`'s payload, less a clean restack's or readjustment's that left
     /// the draft where it was.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the producer's own payload, kept as written for the reason `holds` keeps its reasons so.
-    pub(crate) board_settlements: BTreeMap<String, serde_json::Map<String, Value>>,
+    pub board_settlements: BTreeMap<String, serde_json::Map<String, Value>>,
     /// The nodes whose next settlement ends a restack or readjustment no agent turn
     /// was spent on. See [`board_settlements`](Self::board_settlements).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-settled` records carry, as `board_settlements` beside it is keyed.
-    pub(crate) settled_clean: BTreeSet<String>,
+    pub settled_clean: BTreeSet<String>,
     /// The run-end hook's marker the epoch the run is now in carries, if it carries
     /// one: what [`crate::hooks::adoption_starts_epoch`] asks, folded as each
     /// record arrives by the one rule [`crate::hooks`] reads a journal by, so an
     /// adoption decides it without walking the run's history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) hook_marker: Option<crate::hooks::FiredOver>,
+    pub hook_marker: Option<crate::hooks::FiredOver>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -459,7 +459,7 @@ pub struct RunState {
     /// Omitted when empty, so a fold of a run no driver of that release drove is
     /// written as it always was.
     #[serde(default, skip_serializing_if = "Closure::is_empty")]
-    pub(crate) closure: Closure,
+    pub closure: Closure,
     /// Whether the fold met a line it could not read. Strict replay reports
     /// rather than silently folding an incomplete graph.
     pub strict: bool,
@@ -600,19 +600,19 @@ impl Recorded {
 // `rework-requested` operation this is folded from, which `compile_rework` judged —
 // a node id, and prose refused blank there — held as the `String`s that operation
 // carries them as.
-pub(crate) struct ReworkRecord {
+pub struct ReworkRecord {
     /// The replacement it was reworked under.
-    pub(crate) replacement: String,
+    pub replacement: String,
     /// Why.
-    pub(crate) reason: String,
+    pub reason: String,
     /// What it changes.
-    pub(crate) instruction: String,
+    pub instruction: String,
     /// The review comments it answers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    pub comments: Vec<crate::channel::ReworkComment>,
     /// The title the op stated, where it stated one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) title: Option<String>,
+    pub title: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -620,11 +620,11 @@ pub(crate) struct ReworkRecord {
 /// `node-restack-started` before it recorded it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RestackRecord {
+pub struct RestackRecord {
     /// Each stack parent's branch and the head it was brought onto.
-    pub(crate) onto: crate::payload::Onto,
+    pub onto: crate::payload::Onto,
     /// What the restack left the node's branch at, and how it published.
-    pub(crate) restacked: crate::payload::NodeRestacked,
+    pub restacked: crate::payload::NodeRestacked,
 }
 
 /// A decision point a driver reported as holding dependents back and has not
@@ -747,7 +747,7 @@ impl Progress {
     /// arrivals are left out of the count as well, because there is nowhere to
     /// hold them that does not also assert a moment — a count standing alone is
     /// the half of this pair a view renders as an age.
-    pub(crate) fn first(at: Option<u64>) -> Option<Self> {
+    pub fn first(at: Option<u64>) -> Option<Self> {
         Some(Self {
             events: NonZeroU64::MIN,
             last_at: at?,
@@ -759,7 +759,7 @@ impl Progress {
     /// One whose stamp this build cannot read still counts — it happened — and
     /// leaves the age standing at the last arrival that could be placed, which is
     /// the only thing there is to age it by.
-    pub(crate) fn and(self, at: Option<u64>) -> Self {
+    pub fn and(self, at: Option<u64>) -> Self {
         Self {
             events: self.events.saturating_add(1),
             last_at: at.unwrap_or(self.last_at),
@@ -889,7 +889,7 @@ const TURN_ACTIVITY: &str = "turn-activity";
 ///
 /// The spelling is read off the producing library's enum, so a rename there is
 /// a compile error rather than a clock that silently stops reading.
-pub(crate) fn evidences_progress(event: &Envelope) -> bool {
+pub fn evidences_progress(event: &Envelope) -> bool {
     event.kind.0 != oneagentgraph::event::EventKind::MemberHeartbeat.as_str()
 }
 
@@ -941,7 +941,7 @@ impl TryFrom<ClaimAsWritten> for DriverClaim {
 
 impl DriverClaim {
     /// The driver a journal stream names, when it names one.
-    pub(crate) fn of_stream(stream: &str) -> Option<Self> {
+    pub fn of_stream(stream: &str) -> Option<Self> {
         let (host, pid) = stream.rsplit_once('-')?;
         let pid = pid.parse().ok()?;
         (!host.is_empty()).then(|| Self {
@@ -951,7 +951,7 @@ impl DriverClaim {
     }
 
     /// Whether this is the driver a launch record's claim names.
-    pub(crate) fn is(&self, host: Option<&str>, pid: Option<std::num::NonZeroU32>) -> bool {
+    pub fn is(&self, host: Option<&str>, pid: Option<std::num::NonZeroU32>) -> bool {
         host == Some(self.host.as_str()) && pid == Some(self.pid)
     }
 }
@@ -984,23 +984,23 @@ fn change_requests_only<'de, D: serde::Deserializer<'de>>(
 /// where both are in hand.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Closure {
+pub struct Closure {
     /// Whether a driver of the release that wrote the closure rule has driven
     /// the run: some `run-started` or `driver-adopted` carried
     /// [`journal::OWED_UNTIL_CLOSED`]. Never cleared, because a run held to the
     /// rule once is held to it for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) owed_until_closed: Option<crate::payload::Owed>,
+    pub owed_until_closed: Option<crate::payload::Owed>,
     /// Whether a `completion-requested` has been recorded since the run last
     /// re-opened.
     // llmlint: ignore[invalid_states_unrepresentable] a two-state fact with no invalid combination: it is set by a `completion-requested` and cleared by a re-opening, on a run held to the closure rule or not, and it is copied as-is into the public `RunSummary::completion_requested: bool` the run-summary v8 golden pins, so a narrower type here would only be converted back at that one read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) completion_requested: bool,
+    pub completion_requested: bool,
     /// When the run last re-opened — its latest `driver-adopted` or
     /// `edit-committed` — in epoch milliseconds. An acknowledgement made before
     /// it closes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reopened_at: Option<u64>,
+    pub reopened_at: Option<u64>,
 }
 
 impl Closure {
@@ -1049,7 +1049,7 @@ impl RunState {
     /// settle may state, because each is read out of a journal or a checkpoint —
     /// files another build wrote and a person can edit — and what it becomes is a
     /// reference `onevcs` is asked about and a word printed onto a command line.
-    pub(crate) fn known_change_url(&self, node: &str) -> Option<String> {
+    pub fn known_change_url(&self, node: &str) -> Option<String> {
         self.stated_change_urls
             .get(node)
             .cloned()
@@ -1168,7 +1168,7 @@ impl RunState {
     /// every key is the identity of a node this graph carries: the derivation
     /// reads it by node, and a settlement recorded for an id the graph no longer
     /// has is one nothing here could ask about anyway.
-    pub(crate) fn settled(&self) -> SettledFacts {
+    pub fn settled(&self) -> SettledFacts {
         self.graph
             .iter()
             .filter_map(|node| {
@@ -1280,20 +1280,20 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 /// The state a fold starts from, before [`fold_one`] takes its first record.
-pub(crate) fn unfolded() -> RunState {
+pub fn unfolded() -> RunState {
     RunState {
         strict: true,
         ..RunState::default()
     }
 }
 
-pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+pub fn fold_one(state: &mut RunState, event: &Envelope) {
     fold_one_at(state, event, millis_of(&event.ts));
 }
 
 /// [`fold_one`], where the reader has already read `at`, [`millis_of`] the record's
 /// `ts`, on a thread of its own.
-pub(crate) fn fold_one_at(state: &mut RunState, event: &Envelope, at: Option<u64>) {
+pub fn fold_one_at(state: &mut RunState, event: &Envelope, at: Option<u64>) {
     let marked = crate::hooks::Marked::before(state, event);
     fold_record(state, event, at);
     marked.after(state, event);
@@ -2048,15 +2048,15 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
 /// [`RunState::sessions_opened`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionOpened {
+pub struct SessionOpened {
     /// The session's token, where the record named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) token: Option<onevcs::SessionToken>,
+    pub token: Option<onevcs::SessionToken>,
     /// The base it opened against.
-    pub(crate) base: crate::vcs::BranchName,
+    pub base: crate::vcs::BranchName,
     /// The record's own `ts`.
     // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
-    pub(crate) at: String,
+    pub at: String,
 }
 
 /// A session's failed provisioning, recorded once under the node that opened it.
@@ -2245,7 +2245,7 @@ fn fold_board_settlement(state: &mut RunState, event: &Envelope) {
 
 /// The hold kind [`RunState::held_since`] dates a release hold under: a reason
 /// awaiting a dependency's release.
-pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
+pub const RELEASE_AWAITED: &str = "release-awaited";
 
 /// Fold what a reader dates a node's holds and a run's progress by, off one of
 /// this crate's own records: [`RunState::held_since`] and
@@ -2668,7 +2668,7 @@ fn end_the_park(state: &mut RunState, node: &str) {
 /// `at` is when the record was stamped, which only the park needs — a cancel of
 /// a *running* node leaves a dispatch out there, and how long it has been
 /// converging is measured from here.
-pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at: Option<u64>) {
+pub fn fold_operations(state: &mut RunState, operations: &[Operation], at: Option<u64>) {
     for operation in operations {
         edits::apply(&mut state.graph, operation);
         match operation {

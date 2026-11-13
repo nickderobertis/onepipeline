@@ -26,10 +26,10 @@ use serde::{Deserialize, Serialize};
 use crate::views::RunPaths;
 
 /// The sidecar's file name, inside the run's channel directory.
-pub(crate) const DELIVERIES_FILE: &str = "deliveries.json";
+pub const DELIVERIES_FILE: &str = "deliveries.json";
 
 /// The version of the sidecar document.
-pub(crate) const DELIVERIES_SCHEMA_VERSION: u32 = 1;
+pub const DELIVERIES_SCHEMA_VERSION: u32 = 1;
 
 /// Where one claimed, unanswered envelope's live note stands, as the run's live
 /// driver last wrote it.
@@ -145,7 +145,7 @@ pub enum InboxDelivery {
 impl Delivery {
     /// The note this delivery holds in an inbox, or `None` where it is not
     /// `queued` there.
-    pub(crate) fn into_inbox(self) -> Option<InboxDelivery> {
+    pub fn into_inbox(self) -> Option<InboxDelivery> {
         match self {
             Self::Queued {
                 node,
@@ -165,34 +165,34 @@ impl Delivery {
 /// delivery stands. An envelope with notes to several receivers has one entry
 /// per receiver still outstanding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub(crate) struct LiveDelivery {
+pub struct LiveDelivery {
     /// The channel envelope id — a decimal string on the wire.
     #[serde(with = "envelope_id")]
     #[schemars(with = "String")]
-    pub(crate) envelope: u64,
+    pub envelope: u64,
     /// Where it stands.
     #[serde(flatten)]
-    pub(crate) delivery: Delivery,
+    pub delivery: Delivery,
 }
 
 /// The whole sidecar document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub(crate) struct LiveDeliveries {
+pub struct LiveDeliveries {
     /// [`DELIVERIES_SCHEMA_VERSION`].
-    pub(crate) schema_version: u32,
+    pub schema_version: u32,
     /// Every outstanding and held delivery, outstanding ones first.
-    pub(crate) deliveries: Vec<LiveDelivery>,
+    pub deliveries: Vec<LiveDelivery>,
 }
 
 /// A channel envelope id, written as the decimal string the document states.
-pub(crate) mod envelope_id {
+pub mod envelope_id {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(id: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(id: &u64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&id.to_string())
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
         let text = String::deserialize(deserializer)?;
         text.parse()
             .map_err(|_| serde::de::Error::custom(format!("{text:?} is not a channel envelope id")))
@@ -203,11 +203,11 @@ pub(crate) mod envelope_id {
 mod instant {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(crate) fn serialize<S: Serializer>(at: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(at: &u64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&crate::sys::rfc3339_from_millis(*at))
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
         let text = String::deserialize(deserializer)?;
         crate::projection::millis_of(&text)
             .ok_or_else(|| serde::de::Error::custom(format!("{text:?} is not an RFC 3339 instant")))
@@ -221,7 +221,7 @@ mod optional_instant {
     // serde hands a `skip_serializing_if` field to its serializer only when it
     // is present.
     #[allow(clippy::ref_option, reason = "the signature serde's `with` requires")]
-    pub(crate) fn serialize<S: Serializer>(
+    pub fn serialize<S: Serializer>(
         at: &Option<u64>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -231,7 +231,7 @@ mod optional_instant {
         }
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+    pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<u64>, D::Error> {
         match Option::<String>::deserialize(deserializer)? {
@@ -257,7 +257,7 @@ fn node_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, 
 }
 
 impl LiveDeliveries {
-    pub(crate) fn of(deliveries: Vec<LiveDelivery>) -> Self {
+    pub fn of(deliveries: Vec<LiveDelivery>) -> Self {
         Self {
             schema_version: DELIVERIES_SCHEMA_VERSION,
             deliveries,
@@ -265,7 +265,7 @@ impl LiveDeliveries {
     }
 
     /// Write it, atomically, into the run's channel directory.
-    pub(crate) fn write(&self, paths: &RunPaths) -> crate::Result<()> {
+    pub fn write(&self, paths: &RunPaths) -> crate::Result<()> {
         crate::ledger::write_json(&paths.channel(DELIVERIES_FILE), self)
     }
 
@@ -273,7 +273,7 @@ impl LiveDeliveries {
     /// absent, unreadable, of a version this build does not read, or carrying an
     /// entry that is not an envelope id, a node id and an RFC 3339 instant — each
     /// of which is no live delivery information.
-    pub(crate) fn read(paths: &RunPaths) -> Option<Self> {
+    pub fn read(paths: &RunPaths) -> Option<Self> {
         let text = std::fs::read_to_string(paths.channel(DELIVERIES_FILE)).ok()?;
         serde_json::from_str::<Self>(&text)
             .ok()
@@ -281,7 +281,7 @@ impl LiveDeliveries {
     }
 
     /// Every entry for channel envelope `id`, in the order written.
-    pub(crate) fn of_envelope(&self, id: u64) -> impl Iterator<Item = &Delivery> {
+    pub fn of_envelope(&self, id: u64) -> impl Iterator<Item = &Delivery> {
         self.deliveries
             .iter()
             .filter(move |entry| entry.envelope == id)

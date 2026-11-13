@@ -69,7 +69,7 @@ pub const ENVELOPE_VERSIONS_READ: &[u32] = EVENT_ENVELOPE_READS;
 /// does with that is report rather than guess — it marks the run as one it could
 /// not read whole, and a driver says so before it converges.
 #[must_use]
-pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
+pub fn written_at_a_known_version(envelope: &Envelope) -> bool {
     static READ_AT: OnceLock<Vec<u32>> = OnceLock::new();
     READ_AT
         .get_or_init(|| {
@@ -94,7 +94,7 @@ pub(crate) fn written_at_a_known_version(envelope: &Envelope) -> bool {
 /// Built once per process, on first use; `main` asks for it before anything
 /// else so a build whose own payload documents do not register fails at start
 /// rather than on the first record it folds.
-pub(crate) fn registry() -> &'static Registry {
+pub fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(crate::payload::registry)
 }

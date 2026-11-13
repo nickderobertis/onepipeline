@@ -109,7 +109,7 @@ pub const MAX_REPORT_BYTES: u64 = 32 * 1024 * 1024;
 /// Crate-visible: `docs/contract.md` names the retention path and the views
 /// rendered from it, not the shape this crate assembles a view out of.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Evidence {
+pub struct Evidence {
     /// The node whose dispatch produced it, when the envelope named one.
     pub node: Option<String>,
     /// The member within that dispatch, when the producer stamped one.
@@ -259,7 +259,7 @@ pub fn retain(paths: &RunPaths, event: &Envelope) {
 /// The guarantee is the open's, not a check's: a path tested and then opened is
 /// two different files on a bad day, and the whole point of refusing a symlink
 /// is that the name and the file disagree.
-pub(crate) fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+pub fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -310,7 +310,7 @@ fn create_new_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
 /// What comes back names *both* paths and opens neither. The copy's name is
 /// derived from the settlement's own stream and sequence, so a reader reaches
 /// this run's storage whatever the journal line says the producer's path was.
-pub(crate) fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
+pub fn evidence(paths: &RunPaths, events: &[Envelope]) -> Vec<Evidence> {
     events
         .iter()
         .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
@@ -350,7 +350,7 @@ const VERDICT: &str = "verdict";
 /// Crate-visible, like everything else here that is not the retention path: what
 /// a view renders out of a settlement is a rendering rather than a promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FailedVerdict {
+pub struct FailedVerdict {
     /// The criterion that was scored, when the record named one.
     pub criterion: Option<String>,
     /// The judge's own justification, when the record carried one.
@@ -388,7 +388,7 @@ const _: fn(onejudge::TelemetryRole) -> oneagentgraph::event::Role =
 /// that reading: it hands the one record to `failed_verdicts` as a slice of one,
 /// so a record this answers for is one that returns a verdict for it, and a
 /// record it passes over is one that returns none.
-pub(crate) fn a_judge_failed(event: &Envelope) -> Option<&str> {
+pub fn a_judge_failed(event: &Envelope) -> Option<&str> {
     let node = event.labels.node.as_deref()?;
     (!failed_verdicts(std::slice::from_ref(event), node).is_empty()).then_some(node)
 }
@@ -414,7 +414,7 @@ pub(crate) fn a_judge_failed(event: &Envelope) -> Option<&str> {
 /// than mined for whatever fields happen to be present: an attribution assembled
 /// out of the remains would put a sentence nobody wrote under a criterion nobody
 /// scored, which is the invented attribution these lines exist to replace.
-pub(crate) fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
+pub fn failed_verdicts(events: &[Envelope], node: &str) -> Vec<FailedVerdict> {
     events
         .iter()
         .filter(|event| event.source == Source::Agentgraph && event.kind.0 == MEMBER_SETTLED)
@@ -454,7 +454,7 @@ fn text_of(text: &str) -> Option<String> {
 /// at ingest, ran on another machine, or was swept has no copy here, and the
 /// caller says so on its own line. A copy that *is* there and is not a plain
 /// file is not ordinary, and is said out loud.
-pub(crate) fn read(kept: &Path) -> Option<Value> {
+pub fn read(kept: &Path) -> Option<Value> {
     let refuse = |why: &str| {
         eprintln!(
             "onepipeline: not reading the retained report at {}: {why}",
@@ -519,7 +519,7 @@ pub(crate) fn read(kept: &Path) -> Option<Value> {
 // llmlint: ignore-block[boundary_inputs_validated] the leniency above is the
 // decision, and it is the same one the onejudge arm has always made; `read` is the
 // boundary this document is validated at.
-pub(crate) fn turns(document: &Value) -> Vec<Turn> {
+pub fn turns(document: &Value) -> Vec<Turn> {
     if let Some(messages) = document
         .get("transcript")
         .and_then(|transcript| transcript.get("messages"))
@@ -543,7 +543,7 @@ fn results(document: &Value) -> impl Iterator<Item = &Value> {
 /// What a reply drafting's retained reports answered: the first result that
 /// conformed to its schema, as it is held at `results[].structured`, or whether a
 /// schema refused every answer. A result the schema refused is never read.
-pub(crate) fn structured(reports: &[Value]) -> std::result::Result<Value, &'static str> {
+pub fn structured(reports: &[Value]) -> std::result::Result<Value, &'static str> {
     let mut refused = false;
     for result in reports.iter().flat_map(results) {
         match result.get("schema_valid").and_then(Value::as_bool) {
@@ -576,7 +576,7 @@ pub(crate) fn structured(reports: &[Value]) -> std::result::Result<Value, &'stat
 /// rendered from it, and what this crate reads out of a retained report to
 /// decide a publication is a reading, not a promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Drafted {
+pub enum Drafted {
     /// The validated answer's `body` — the prose the change request opens with.
     Body(String),
     /// A schema was asked for an answer, refused one, and accepted none.
@@ -609,7 +609,7 @@ pub(crate) enum Drafted {
 /// conformed: a chain whose next candidate the schema accepted has answered the
 /// question the schema was asked, and calling that `SchemaRefused` would send a
 /// reader to correct a schema that is working.
-pub(crate) fn drafted(reports: &[Value]) -> Drafted {
+pub fn drafted(reports: &[Value]) -> Drafted {
     let mut refused = false;
     let mut conformed = false;
     for result in reports.iter().flat_map(results) {
@@ -651,7 +651,7 @@ pub(crate) fn drafted(reports: &[Value]) -> Drafted {
 /// The value is handed back as the drafter wrote it; what it has to be is the
 /// caller's question, since only a rework's publication asks it.
 // llmlint: ignore[changed_behavior_has_e2e] the double answers each drafting dispatch with one candidate that ran, so no journey puts two conforming bodies beside two verdicts; `a_title_check_is_read_off_the_result_that_drafted_the_body` holds the pairing over reports of that shape, and every verdict journey in `tests/e2e/rework.rs` reads one through this.
-pub(crate) fn title_check(reports: &[Value]) -> Option<Value> {
+pub fn title_check(reports: &[Value]) -> Option<Value> {
     reports
         .iter()
         .flat_map(results)
@@ -670,7 +670,7 @@ pub(crate) fn title_check(reports: &[Value]) -> Option<Value> {
 
 /// One turn of a retained transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Turn {
+pub struct Turn {
     /// Who produced it, as the report names them.
     pub role: String,
     /// What they said.
@@ -729,7 +729,7 @@ impl Turn {
 /// only the asks is reading half a turn; and the agent's words beside them,
 /// because they are what says *why* it reached for the tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Activity {
+pub struct Activity {
     /// `tool_call`, `tool_result`, `message` or `reasoning`, as the report names
     /// it.
     pub kind: String,
@@ -751,7 +751,7 @@ impl Activity {
 }
 
 /// The kind a producer gives the half of an exchange that carries an output.
-pub(crate) const TOOL_RESULT: &str = "tool_result";
+pub const TOOL_RESULT: &str = "tool_result";
 
 /// An event's own text: what a call acted on, what the result answering it
 /// returned, or what the agent itself said or thought.
@@ -760,7 +760,7 @@ pub(crate) const TOOL_RESULT: &str = "tool_result";
 /// state no producer emits, and one that leaves a renderer choosing between
 /// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ActivityText {
+pub enum ActivityText {
     /// What a call acted on, rendered compactly. Empty where the producer
     /// stated nothing.
     Acted(String),
@@ -795,7 +795,7 @@ pub(crate) enum ActivityText {
 /// relays both as `turn-activity` under their own kind; neither names a tool,
 /// so read as one each would be a call to nothing with a blank column beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Voice {
+pub enum Voice {
     /// `message` — what the agent said.
     Message,
     /// `reasoning` — what it thought on the way.
@@ -805,7 +805,7 @@ pub(crate) enum Voice {
 impl Voice {
     /// The voice an event of this `kind` speaks in, or `None` for every kind
     /// that is not the agent's own words.
-    pub(crate) fn of(kind: &str) -> Option<Self> {
+    pub fn of(kind: &str) -> Option<Self> {
         match kind {
             MESSAGE => Some(Self::Message),
             REASONING => Some(Self::Reasoning),
@@ -828,7 +828,7 @@ impl Voice {
     /// Drawn through that library's `render_event` rather than a copy of its
     /// marks, so a person reading a run here and one reading the same turn off
     /// `oneharness run` read the same line.
-    pub(crate) fn block(self, text: &str) -> Option<String> {
+    pub fn block(self, text: &str) -> Option<String> {
         oneharness_core::domain::render::render_event(
             &oneharness_core::domain::events::ActionEvent {
                 kind: self.kind().to_string(),
@@ -848,7 +848,7 @@ impl Voice {
 
     /// [`block`](Self::block) on one line, at the bound a relayed tool detail is
     /// held to — what a one-line readout of a live node has room for.
-    pub(crate) fn line(self, text: &str) -> Option<String> {
+    pub fn line(self, text: &str) -> Option<String> {
         self.block(&onemessagebus::bound_detail(text).0)
     }
 }
@@ -871,7 +871,7 @@ impl ActivityText {
     /// relayed summary spells a call's input `detail` where a report spells it
     /// `input`. That divergence is read in this one place, so the two sources
     /// cannot come to disagree about what a tool did.
-    pub(crate) fn of<'a>(kind: &str, field: impl Fn(&str) -> Option<&'a Value>) -> Self {
+    pub fn of<'a>(kind: &str, field: impl Fn(&str) -> Option<&'a Value>) -> Self {
         if let Some(voice) = Voice::of(kind) {
             return Self::Spoken {
                 voice,
@@ -892,7 +892,7 @@ impl ActivityText {
     /// [`crate::views::transcript::resolve`]: the whole of it out of the
     /// history file a reference names, or the bounded copy a record without
     /// one carries, read exactly as [`of`](Self::of) reads it.
-    pub(crate) fn relayed(payload: &serde_json::Map<String, Value>) -> Self {
+    pub fn relayed(payload: &serde_json::Map<String, Value>) -> Self {
         use crate::views::transcript::{of_record, Text, ToolKind};
         let kind = payload
             .get("kind")
@@ -944,7 +944,7 @@ impl ActivityText {
 /// and a retained report's event spell this field the same way, and two readings
 /// of one field is how they come to disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Truncation {
+pub enum Truncation {
     /// The producer said nothing, or said `false`. A producer that states
     /// nothing states that it cut nothing.
     Whole,
@@ -954,7 +954,7 @@ pub(crate) enum Truncation {
 }
 
 impl Truncation {
-    pub(crate) fn of(value: Option<&Value>) -> Self {
+    pub fn of(value: Option<&Value>) -> Self {
         match value {
             None | Some(Value::Null) => Self::Whole,
             Some(Value::Bool(true)) => Self::Cut,

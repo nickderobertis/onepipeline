@@ -175,7 +175,7 @@ pub enum EndingKind {
 
 impl EndingKind {
     /// The word a view prints for a run that ended this way.
-    pub(crate) fn word(self) -> &'static str {
+    pub fn word(self) -> &'static str {
         match self {
             Self::Complete => "SETTLED",
             Self::Failed => "ENDED failed",
@@ -718,7 +718,7 @@ struct HostShutdown {
 }
 
 /// Whether this run is still awaiting adoption after a host shutdown.
-pub(crate) fn host_shutdown(view: &RunView) -> bool {
+pub fn host_shutdown(view: &RunView) -> bool {
     HostShutdown::of(view).is_some()
 }
 
@@ -1020,7 +1020,7 @@ pub fn decision_outstanding(state: &RunState, paths: &RunPaths) -> bool {
 /// exactly that case. Counting it would report a decision the run is held on
 /// after the thing it asked for is on the graph, which is what
 /// `watch --until surface` returned on for the rest of the run.
-pub(crate) fn blocking_surface(paths: &RunPaths) -> bool {
+pub fn blocking_surface(paths: &RunPaths) -> bool {
     let channel = crate::channel::ChannelState::new(paths);
     let queue = channel.queue();
     let standing = || {
@@ -1098,7 +1098,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 /// nothing driving it, and an adoption made on that word is refused by the lock
 /// it cannot take — or a fault arranged on the lock is removed by the release
 /// that follows. Only once the lock no longer names that driver has it let go.
-pub(crate) fn let_go(
+pub fn let_go(
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
     let_go_by: Option<&crate::projection::DriverClaim>,
@@ -1165,7 +1165,7 @@ fn driver_liveness(
 /// A pid recorded on another host means nothing here, so it is never over.
 /// Apart from [`driver_liveness`] because a watch asks it between reads: a
 /// driver ending moves no file, so what a wait watches for has to ask the host.
-pub(crate) fn driver_claim_is_over(
+pub fn driver_claim_is_over(
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
     started: Option<&str>,
@@ -1177,7 +1177,7 @@ pub(crate) fn driver_claim_is_over(
 /// Whether a run last written at `last_write_at` has been quiet past
 /// [`parked_after_seconds`] — the other half of a liveness that moves with the
 /// clock rather than with a file.
-pub(crate) fn quiet_past_parked(last_write_at: Option<u64>) -> bool {
+pub fn quiet_past_parked(last_write_at: Option<u64>) -> bool {
     last_write_at
         .is_some_and(|last| sys::now_millis().saturating_sub(last) / 1_000 > parked_after_seconds())
 }
@@ -1194,7 +1194,7 @@ pub(crate) fn quiet_past_parked(last_write_at: Option<u64>) -> bool {
 /// is older than the journal beside it, and a run still going has one — but a
 /// base does not stop carrying what it carries, so taking the later answer in
 /// that direction alone cannot un-land anything.
-pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
+pub fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
     // Read leniently: a report this build cannot parse — one a newer build
     // wrote, at a version this one refuses — leaves the view exactly as the
     // journal left it, which is the answer it always had.
@@ -1281,7 +1281,7 @@ enum Renders {
 /// seconds is a merge somebody else performs going unreported for no longer than
 /// a person takes to look up from it; the stream's own records end the reuse
 /// sooner, and its last render carries none of it.
-pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+pub const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One landing read a render holds, and when it was taken.
 struct Carried {
@@ -1304,11 +1304,11 @@ impl Carried {
 /// which is what lets that run's close-out hand it its reads — see [`closed_out`].
 //
 // llmlint: ignore[invalid_states_unrepresentable] a run id is the plain string this whole crate spells it as, for the reason the suppression on `READ_THIS_RENDER` records.
-pub(crate) struct StreamReads(String);
+pub struct StreamReads(String);
 
 impl StreamReads {
     /// Begin carrying reads across this thread's renders of `run`.
-    pub(crate) fn begin(run: &str) -> Self {
+    pub fn begin(run: &str) -> Self {
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
         RENDERING.set(Renders::AsOneStream);
         *handoff().streamed.entry(run.to_owned()).or_default() += 1;
@@ -1323,7 +1323,7 @@ impl StreamReads {
     /// exit, which is the last one where nothing is left to print after it; before
     /// them, a node's read is carried only until the stream records something that
     /// moves it.
-    pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
+    pub fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
         // First, so a close-out read the run moved past is not what its last render
         // takes up, whichever of the two branches below that render is.
         let mut handed = handoff();
@@ -1428,7 +1428,7 @@ fn moved_by(event: &Envelope) -> Option<&str> {
 /// Each read comes with when it was asked, which for one the close-out took up
 /// from the stream — see [`streamed_for_close_out`] — is when the stream asked it,
 /// so handing it back never stretches its window.
-pub(crate) fn closed_out(run: &str, reads: &[(String, LandingRead, std::time::Instant)]) {
+pub fn closed_out(run: &str, reads: &[(String, LandingRead, std::time::Instant)]) {
     let mut handed = handoff();
     handed.let_go_of_lapsed(std::time::Instant::now());
     if !handed.streamed.contains_key(run) {
@@ -1459,7 +1459,7 @@ pub(crate) fn closed_out(run: &str, reads: &[(String, LandingRead, std::time::In
 /// after it was asked — see [`recorded`] — which is every record that does: while
 /// the driver holds the run it is the one writer of a node's settlement and
 /// restack, and it relays the records of the sessions it opened.
-pub(crate) fn streamed_for_close_out(
+pub fn streamed_for_close_out(
     run: &str,
     nodes: &[&String],
 ) -> BTreeMap<String, (LandingRead, std::time::Instant)> {
@@ -1481,7 +1481,7 @@ pub(crate) fn streamed_for_close_out(
 ///
 /// Called by [`crate::journal::Journal`] once the record is in the file, so a read
 /// asked after this is asked of a store that holds it.
-pub(crate) fn recorded(run: &str, envelope: &Envelope) {
+pub fn recorded(run: &str, envelope: &Envelope) {
     let Some(node) = moved_by(envelope) else {
         return;
     };
@@ -1975,7 +1975,7 @@ impl RunView {
     /// never handed to a reader of the store: those open the run with
     /// [`open`](Self::open). A [`refresh`](Self::refresh) of one re-reads the run
     /// whole, as `open` does.
-    pub(crate) fn open_current(paths: &RunPaths) -> crate::Result<Self> {
+    pub fn open_current(paths: &RunPaths) -> crate::Result<Self> {
         if !paths.exists() {
             return Err(crate::Error::NoSuchRun {
                 run: paths.run.clone(),
@@ -1988,7 +1988,7 @@ impl RunView {
     /// A view of a run at `state`, a fold of its journal the caller already holds,
     /// with no event of its store: what [`open_current`](Self::open_current) reads
     /// the run as, for a caller keeping its own fold current.
-    pub(crate) fn of_state(paths: &RunPaths, mut state: RunState) -> crate::Result<Self> {
+    pub fn of_state(paths: &RunPaths, mut state: RunState) -> crate::Result<Self> {
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
         landings_the_run_re_read(&mut state, paths);
@@ -2292,7 +2292,7 @@ impl RunView {
     /// Crate-visible and behind the pair above: the count and the staleness are
     /// what the contract names, and which kinds are waiting is a rendering — see
     /// [`Unread`] for why the line carries it.
-    pub(crate) fn unread(&self) -> Unread {
+    pub fn unread(&self) -> Unread {
         Unread::of(&crate::channel::ChannelState::new(&self.paths).queue())
     }
 
@@ -2356,21 +2356,21 @@ fn tally(done: usize, total: usize, skipped: usize, outstanding: &Outstanding) -
 /// of routine observer updates against a handful of questions a bare count read
 /// the same either way.
 #[derive(Debug, Default)]
-pub(crate) struct Unread {
-    pub(crate) count: usize,
+pub struct Unread {
+    pub count: usize,
     /// Absent when nothing is waiting, rather than a zero that reads as a queue
     /// somebody has just emptied.
-    pub(crate) oldest_seconds: Option<u64>,
+    pub oldest_seconds: Option<u64>,
     /// Blocking kinds first — that is what the run is held on — then rarest
     /// first, since a rare kind behind a common one is the burial this repairs;
     /// then by name, so the line is stable to read.
-    pub(crate) kinds: Vec<(String, usize)>,
+    pub kinds: Vec<(String, usize)>,
     /// How many surfaces are in the queue that nobody is waiting on: their
     /// reader exited without an answer. Counted apart from [`count`](Self::count)
     /// rather than inside it — the count above is the one line a supervisor may
     /// not filter, and an entry nothing will ever answer degrades it — and
     /// reported all the same, because their text is still there to read.
-    pub(crate) abandoned: usize,
+    pub abandoned: usize,
 }
 
 /// How many kinds a line names before it summarises the rest.
@@ -2380,7 +2380,7 @@ pub(crate) struct Unread {
 const MAX_NAMED_KINDS: usize = 4;
 
 impl Unread {
-    pub(crate) fn of(queue: &crate::channel::Queue) -> Self {
+    pub fn of(queue: &crate::channel::Queue) -> Self {
         let mut counts: BTreeMap<String, (bool, usize)> = BTreeMap::new();
         let unread = || queue.waiting.iter().filter(|surface| !surface.abandoned);
         for surface in unread() {
@@ -2419,7 +2419,7 @@ impl Unread {
 
     /// The kinds, bounded: past [`MAX_NAMED_KINDS`] the line says how many it
     /// left out rather than ending where a reader cannot tell it was cut.
-    pub(crate) fn phrase(&self) -> String {
+    pub fn phrase(&self) -> String {
         let named: Vec<String> = self
             .kinds
             .iter()
@@ -2528,7 +2528,7 @@ const MAX_NAMED_SKIPS: usize = 3;
 /// line each is what buried the answer, because a third of the roots on a host
 /// can be unreadable and the live verdict is what a reader opened the view
 /// for.
-pub(crate) fn skipped_lines(skipped: &[Skipped]) -> String {
+pub fn skipped_lines(skipped: &[Skipped]) -> String {
     if skipped.is_empty() {
         return String::new();
     }
@@ -2901,7 +2901,7 @@ pub fn liveness_word(view: &RunView) -> &'static str {
 /// standing to keep true. Reading it costs what a row costs — the host's answer
 /// about the recorded driver and the run's own channel — and no part of the run's
 /// merged event store.
-pub(crate) fn summary_standing_word(root: &Path, summary: &RunSummary) -> &'static str {
+pub fn summary_standing_word(root: &Path, summary: &RunSummary) -> &'static str {
     Standing::of_row(&Row::of(root, summary)).word()
 }
 
@@ -2925,7 +2925,7 @@ pub(crate) fn summary_standing_word(root: &Path, summary: &RunSummary) -> &'stat
 /// Crate-visible: what the contract names here is what a view *renders*, and this
 /// is a reading the channel's own refusal shares with them rather than a promise
 /// to a consumer.
-pub(crate) fn has_settled(view: &RunView) -> bool {
+pub fn has_settled(view: &RunView) -> bool {
     Standing::of(view).convergence == Convergence::Settled
 }
 
@@ -3306,7 +3306,7 @@ pub fn runs(root: &Path, mine_only: bool, session: &str) -> String {
 ///
 /// One row renderer behind both layouts, so a run's lines inside a group are
 /// byte for byte the lines the flat listing renders for it.
-pub(crate) fn runs_of(projects: &Projects, grouping: Grouping, session: &str) -> String {
+pub fn runs_of(projects: &Projects, grouping: Grouping, session: &str) -> String {
     let mut out = String::new();
     match grouping {
         Grouping::Flat => {
@@ -3521,7 +3521,7 @@ fn status_run_lines(
 ///
 /// Grouped by project, under a header line each, with the run-level lines
 /// beneath it exactly as the flat listing renders them.
-pub(crate) fn status_listed(projects: &Projects) -> String {
+pub fn status_listed(projects: &Projects) -> String {
     let mut out = String::new();
     for group in projects
         .groups
@@ -3574,13 +3574,13 @@ pub fn status(survey: &Survey) -> String {
 /// `onepipeline status <RUN>`: one run's **detail** read, its run-level lines
 /// and the block under them saying what each of its nodes is doing. The host's
 /// providers are not asked: `--providers` is what asks them.
-pub(crate) fn status_of(view: &RunView) -> String {
+pub fn status_of(view: &RunView) -> String {
     status_reporting(view, Providers::Omitted)
 }
 
 /// Whether a `status` view ends with the host's provider report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Providers {
+pub enum Providers {
     /// `--providers`: the report is asked for and printed.
     Reported,
     /// The default: the report is neither asked for nor written, and nothing
@@ -3589,7 +3589,7 @@ pub(crate) enum Providers {
 }
 
 /// [`status_of`], with the provider report said or left out.
-pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
+pub fn status_reporting(view: &RunView, providers: Providers) -> String {
     let mut out = String::new();
     {
         // Opened before anything under it renders, so the summary this line
@@ -4583,7 +4583,7 @@ fn held_for_source(view: &RunView, id: &str) -> Option<String> {
 /// records and an elapsed watch's summary both spell them with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum HoldKind {
+pub enum HoldKind {
     /// Held until its dependencies settle `done`.
     Dependencies,
     /// Held because the run has reached its concurrency.
@@ -4600,7 +4600,7 @@ pub(crate) enum HoldKind {
 
 impl HoldKind {
     /// The word the summary writes for this hold.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Dependencies => "dependencies",
             Self::Concurrency => "concurrency",
@@ -4616,7 +4616,7 @@ impl HoldKind {
 /// verdict [`observer_liveness`] reaches, in the summary's own four words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ObserverState {
+pub enum ObserverState {
     /// The launch named an observer graph and nothing says its run has ended.
     Running,
     /// This host can prove the observer's graph run is over.
@@ -4634,7 +4634,7 @@ pub(crate) enum ObserverState {
 /// whole is not reported as some other kind; the start is `None` for a record
 /// whose stamp this build cannot read.
 // llmlint: ignore[invalid_states_unrepresentable] the node id is the key of `RunState::holds`, read out of the run's own `node-held` label and handed straight to an elapsed watch's summary to write back out; the crate spells a node id `String` everywhere it reads one off a record, for the reason `watch::Ending::NodeSettled` gives.
-pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
+pub fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
     view.state
         .holds
         .iter()
@@ -4660,7 +4660,7 @@ pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
 
 /// The run's observer graph as an elapsed watch's summary names it. The
 /// verdict is [`observer_liveness`]'s, which every view reads.
-pub(crate) fn observer_state(launch: &LaunchRecord) -> ObserverState {
+pub fn observer_state(launch: &LaunchRecord) -> ObserverState {
     match observer_liveness(launch) {
         ObserverLiveness::Watching => ObserverState::Running,
         ObserverLiveness::ObserverDead => ObserverState::Dead,
@@ -4781,7 +4781,7 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
 /// answer this host does not have, and collapsing it into either is how a
 /// registry row outlives the process it describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Proof {
+pub enum Proof {
     /// The dispatch's own registry entry names a live pid, and that pid started
     /// when the entry says it did.
     ///
@@ -4812,7 +4812,7 @@ pub(crate) enum Proof {
 // this crate is, for the reason `src/error.rs`'s file-level suppression states. The value
 // is not this reader's to check either: it comes back from `ledger::dispatches_of`, which
 // is the boundary that refuses an entry nothing may be acted on.
-pub(crate) enum Registry {
+pub enum Registry {
     /// What the registry holds, by the node each entry names.
     Read(BTreeMap<String, Vec<ledger::DispatchRecord>>),
     /// The registry could not be read, and this is why.
@@ -4828,7 +4828,7 @@ impl Registry {
     /// Whether any entry names a process that may still be its dispatch: one
     /// whose pid and start token hold, or a live pid this host cannot decide.
     /// Only an entry proved stale is not.
-    pub(crate) fn has_live_entry(&self) -> bool {
+    pub fn has_live_entry(&self) -> bool {
         match self {
             Self::Unreadable(_) => false,
             Self::Read(by_node) => by_node
@@ -4839,7 +4839,7 @@ impl Registry {
     }
 
     /// Read one run's registry, keeping the refusal where there is one.
-    pub(crate) fn of(paths: &RunPaths) -> Self {
+    pub fn of(paths: &RunPaths) -> Self {
         match ledger::dispatches_of(paths) {
             Ok(records) => {
                 let mut by_node: BTreeMap<String, Vec<ledger::DispatchRecord>> = BTreeMap::new();
@@ -4859,7 +4859,7 @@ impl Registry {
     /// attempt's record behind until the process it named is collected — so a
     /// stale entry beside a live one says the older attempt ended, never that the
     /// node has nothing running.
-    pub(crate) fn proves(&self, node: &str) -> Proof {
+    pub fn proves(&self, node: &str) -> Proof {
         let by_node = match self {
             Self::Unreadable(why) => {
                 return Proof::Unproven(format!(
@@ -4900,7 +4900,7 @@ impl Registry {
 /// Its pid says which process, and its start token says the pid is still that
 /// process — a pid alone is what a two-day-old entry has, and a reused one
 /// answers a liveness probe as alive.
-pub(crate) fn proof_of(record: &ledger::DispatchRecord) -> Proof {
+pub fn proof_of(record: &ledger::DispatchRecord) -> Proof {
     if record.host != sys::hostname() {
         return Proof::Unproven(format!(
             "its dispatch runs on {}, and a pid means nothing across machines",
@@ -5042,14 +5042,14 @@ pub fn monitor(view: &RunView, filter: &EventFilter) -> String {
 /// the one read that byte was taken from — [`RunView::open`]'s own read is a
 /// different moment, and a record appended between the two would be one the
 /// cursor stepped past without it ever being rendered.
-pub(crate) fn monitor_of(view: &RunView, events: &[Envelope], filter: &EventFilter) -> String {
+pub fn monitor_of(view: &RunView, events: &[Envelope], filter: &EventFilter) -> String {
     monitor_shown(view, events.iter().filter(|event| filter.matches(event)))
 }
 
 /// The same pass over events a caller has **already shaped**: what a typed
 /// read hands its renderer, where the profile was applied when the events were
 /// read rather than when they are printed.
-pub(crate) fn monitor_shown<'a>(
+pub fn monitor_shown<'a>(
     view: &RunView,
     events: impl IntoIterator<Item = &'a Envelope>,
 ) -> String {
@@ -5080,7 +5080,7 @@ pub(crate) fn monitor_shown<'a>(
 /// one pass over the store, and `watch` writes one as each record arrives. A
 /// second spelling of the line would let a supervisor's live view and their
 /// replay of the same run disagree about what happened.
-pub(crate) fn event_line(view: &RunView, event: &Envelope) -> String {
+pub fn event_line(view: &RunView, event: &Envelope) -> String {
     let id = match event.source {
         Source::Pipeline => format!("graph:{}", event.labels.node.as_deref().unwrap_or("-")),
         Source::Agentgraph => format!("agent:{}", event.stream),
@@ -5216,7 +5216,7 @@ fn summarize(event: &Envelope) -> String {
 /// The one line describing a turn record that references its history — the
 /// resolver's description, or `transcript unavailable: <path>: <why>` — and
 /// `None` for every record that carries no reference.
-pub(crate) fn described(event: &Envelope) -> Option<String> {
+pub fn described(event: &Envelope) -> Option<String> {
     if event.source != Source::Agentgraph || !event.payload.contains_key("transcript") {
         return None;
     }
@@ -6306,7 +6306,7 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
 /// Crate-visible: `docs/contract.md` names the views, not the parts one is
 /// assembled from, and a public item the contract does not name is a promise
 /// this crate did not make.
-pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Vec<String> {
+pub fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Vec<String> {
     let mut nodes: Vec<String> = view
         .events
         .iter()
@@ -6483,7 +6483,7 @@ fn activity_text(text: &ActivityText, ceiling: usize) -> String {
 /// Shared with the settlements this crate *composes* out of a sibling's values —
 /// `crate::lifecycle` names the ref a publication compared against — so the rule
 /// is one rule rather than one per place a sibling's text reaches a line.
-pub(crate) fn one_line(text: &str) -> String {
+pub fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
@@ -6510,7 +6510,7 @@ pub fn goals(survey: &Survey) -> String {
 /// which header and in what order. A run the survey read that the grouping does
 /// not place, or the other way about, is a run that appeared or went between the
 /// two reads, and it is left to the next listing rather than invented here.
-pub(crate) fn goals_grouped(survey: &Survey, projects: &Projects) -> String {
+pub fn goals_grouped(survey: &Survey, projects: &Projects) -> String {
     let mut out = String::new();
     for group in projects
         .groups

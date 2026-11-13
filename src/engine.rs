@@ -217,7 +217,7 @@ const CHANNEL_POLL: Duration = Duration::from_millis(200);
 /// **fresh** the answer must be rather than how often to fetch it. Half a second
 /// sits inside the second the contract promises a consumer whose upstream settles
 /// elsewhere. A graph naming no cross-DAG edge reads nothing at all.
-pub(crate) const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
+pub const UPSTREAM_EVERY: Duration = Duration::from_millis(500);
 
 /// The schema version a run result is written as.
 ///
@@ -500,26 +500,26 @@ pub struct Settlement {
     pub base: Option<String>,
     /// The stack a lifecycle node was drafted on, where it had stack parents.
     /// Boxed, because only a stacked node's settlement carries one.
-    pub(crate) stack: Option<Box<crate::payload::SettledStack>>,
+    pub stack: Option<Box<crate::payload::SettledStack>>,
     /// What a restack of the node did, on the settlement that ends one: the
     /// `node-restacked` the loop records ahead of it.
-    pub(crate) restacked: Option<Restacked>,
+    pub restacked: Option<Restacked>,
     /// What a readjusted draft's retarget after its push answered, on the settlement
     /// that ends one: the word its `node-readjusted` records, or why it was not moved.
-    pub(crate) readjusted: Option<std::result::Result<crate::payload::RetargetWord, String>>,
+    pub readjusted: Option<std::result::Result<crate::payload::RetargetWord, String>>,
     /// The releases a node held for them still awaits, on a `complete-but-held`
     /// settlement and an awaiting-release `complete-but-draft` one, and empty on
     /// every other — which is what keeps `node-settled`'s `awaiting` off them.
-    pub(crate) awaiting: Vec<crate::payload::Awaited>,
+    pub awaiting: Vec<crate::payload::Awaited>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// What one restack did beyond its publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Restacked {
+pub struct Restacked {
     /// Whether an agent was dispatched to conclude a conflict — the node's own
     /// merge, or its stack base's.
-    pub(crate) agent_dispatched: bool,
+    pub agent_dispatched: bool,
 }
 
 impl Settlement {
@@ -548,7 +548,7 @@ impl Settlement {
 }
 
 /// What a dispatch thread sends back to the single writer.
-pub(crate) enum Message {
+pub enum Message {
     /// One envelope, relayed from wherever the dispatch ran.
     Event(Box<Envelope>),
     /// One envelope the relay has already put in the run's journal — or, for a
@@ -612,7 +612,7 @@ pub(crate) enum Message {
 
 /// A rework's title nothing verified, on its way to the record and the planner:
 /// the record's own payload, and the change request a person reads it on.
-pub(crate) struct UnverifiedTitle {
+pub struct UnverifiedTitle {
     /// What `title-unverified` records.
     pub unverified: crate::payload::TitleUnverified,
     /// Where a person reads the change request it is the title of, as the host
@@ -653,17 +653,17 @@ fn title_unverified_surface(title: &UnverifiedTitle) -> Surface {
 }
 
 /// One publication waiting on a pass to say whether it may start.
-pub(crate) struct PublicationDue {
+pub struct PublicationDue {
     /// The node publishing, which the lease's watchdog stops holding to its lapse once it
     /// is cleared: a publication under way is finished, not cut off.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` the loop's `in_flight` map keys by, from the graph-validated node the dispatch was started for.
-    pub(crate) node: String,
-    pub(crate) answer: Sender<PublicationVerdict>,
+    pub node: String,
+    pub answer: Sender<PublicationVerdict>,
 }
 
 /// What a pass answers a publication waiting on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PublicationVerdict {
+pub enum PublicationVerdict {
     /// The project is still this run's: publish.
     Publish,
     /// Another run has taken the project over: keep the work, publish nothing.
@@ -671,19 +671,19 @@ pub(crate) enum PublicationVerdict {
 }
 
 /// One rework republication waiting on the next pass's standings read.
-pub(crate) struct ReworkDue {
+pub struct ReworkDue {
     // llmlint: ignore-block[invalid_states_unrepresentable] the node and the change request
     // are the run's own strings — a graph-validated id and the URL `known_change_url` parsed
     // — and are only compared against the record the read folds.
-    pub(crate) node: String,
-    pub(crate) change: String,
+    pub node: String,
+    pub change: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
-    pub(crate) answer: Sender<ReworkVerdict>,
+    pub answer: Sender<ReworkVerdict>,
 }
 
 /// What the read continuing a rework's trigger answers its republication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReworkVerdict {
+pub enum ReworkVerdict {
     /// The change request is still open: publish onto it.
     Republish,
     /// A person merged it after the rework was dispatched: publish nothing.
@@ -697,7 +697,7 @@ pub(crate) enum ReworkVerdict {
 /// reads once for every republication ready in it, readjusts on what that read reports,
 /// and answers each. A loop that has gone answers nothing that could refuse, so the
 /// republication goes ahead.
-pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &str) -> bool {
+pub fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &str) -> bool {
     let (answer, answered) = mpsc::channel();
     // llmlint: ignore-block[changed_behavior_has_e2e] a send the loop refuses and an answer it
     // drops are each a loop that has already gone, which no journey can arrange while a dispatch
@@ -724,7 +724,7 @@ pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &st
 /// read where the read was not answered. A loop that has gone without
 /// answering answers nothing that could refuse, so the publication goes ahead as it did
 /// before a claim existed.
-pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
+pub fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     let (answer, answered) = mpsc::channel();
     // llmlint: ignore-block[changed_behavior_has_e2e] neither failure has an invocation behind
     // it: the loop owns its receiver for as long as any dispatch it started is in flight — it
@@ -837,7 +837,7 @@ enum Drove {
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
-pub(crate) const DRIVER_SUPERSEDED: &str = "driver-superseded";
+pub const DRIVER_SUPERSEDED: &str = "driver-superseded";
 
 /// A node's settlement, and the thread that is waiting to hear it was recorded.
 ///
@@ -846,7 +846,7 @@ pub(crate) const DRIVER_SUPERSEDED: &str = "driver-superseded";
 /// has been signalled, which the loop does after `node-settled` is on the
 /// journal. Nothing else is asked of the loop: a thread whose loop has gone
 /// finds the sender dropped and lets go then.
-pub(crate) struct Settled {
+pub struct Settled {
     pub settlement: Settlement,
     /// Signalled once the settlement is on the record; dropped unsignalled where
     /// the loop ended before it could be.
@@ -871,17 +871,17 @@ pub(crate) struct Settled {
 /// and counts it, and a `stop` finds nothing live behind it. The handle cannot
 /// cross to the loop instead — the seam's `DispatchHandle` is not `Send` — so
 /// the thread that owns it waits for the loop's word.
-pub(crate) struct EndedDispatches(std::cell::RefCell<Vec<Box<dyn DispatchHandle>>>);
+pub struct EndedDispatches(std::cell::RefCell<Vec<Box<dyn DispatchHandle>>>);
 
 impl EndedDispatches {
     /// One per dispatch thread, made before its first dispatch: the holder
     /// belongs to the thread that will end the dispatches, not to any of them.
-    pub(crate) fn none() -> Self {
+    pub fn none() -> Self {
         Self(std::cell::RefCell::new(Vec::new()))
     }
 
     /// Keep one ended dispatch, and its registry entry, until the node settles.
-    pub(crate) fn keep(&self, handle: Box<dyn DispatchHandle>) {
+    pub fn keep(&self, handle: Box<dyn DispatchHandle>) {
         self.0.borrow_mut().push(handle);
     }
 }
@@ -895,7 +895,7 @@ impl EndedDispatches {
 /// decided by its dispatches and its publication exactly as it was before this
 /// check existed, and what a mismatch buys a reader is a finding beside that
 /// settlement rather than a different one.
-pub(crate) struct CriterionChecked {
+pub struct CriterionChecked {
     /// The node whose branch was read.
     ///
     /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, because this
@@ -923,7 +923,7 @@ pub(crate) struct CriterionChecked {
 /// catch. The ending travels as the drafting side's own type for the same
 /// reason — the wire name and the sentence are read off it here, so an ending
 /// this build does not have is not a value this message can carry.
-pub(crate) struct UndraftedBody {
+pub struct UndraftedBody {
     /// The node whose change request opened without one.
     pub node: String,
     /// Which ending it was.
@@ -935,7 +935,7 @@ pub(crate) struct UndraftedBody {
 /// Sent rather than written, because the thread that cancels a dispatch is not
 /// the run's single writer: the loop is, and it is what turns this into a
 /// surface the planner reads.
-pub(crate) struct Cancelling {
+pub struct Cancelling {
     /// The node whose dispatch it is.
     pub node: String,
     /// Which transition this is.
@@ -952,7 +952,7 @@ pub(crate) struct Cancelling {
 /// was, and whatever it had not committed is gone. A run that reported only "the
 /// node was cancelled" left a supervisor unable to tell which had happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CancelPhase {
+pub enum CancelPhase {
     /// The interrupt was asked for, and this is what the delivery said.
     Interrupted,
     /// The grace period expired and the teardown reaped the dispatch.
@@ -970,7 +970,7 @@ impl CancelPhase {
 }
 
 /// One re-asked dispatch, as the journal records it.
-pub(crate) struct Redispatch {
+pub struct Redispatch {
     /// The node being asked again.
     pub node: String,
     /// Which attempt this is, counting from one — so never zero, which is an
@@ -1100,7 +1100,7 @@ pub fn drive_holding(
 
 /// [`drive_holding`], for an explicit trigger that already made its readjustment's read
 /// under the lock: the loop starts from what that read kept rather than reading again.
-pub(crate) fn drive_after_readjust(
+pub fn drive_after_readjust(
     paths: &RunPaths,
     lock: OwnershipLock,
     readjuster: crate::readjust::Readjuster,
@@ -1356,7 +1356,7 @@ pub enum Departure {
 }
 
 /// What a writer that tried to let go of a run found on its way out.
-pub(crate) enum LettingGo {
+pub enum LettingGo {
     /// The queue was empty under the handover, and the run is released.
     Released,
     /// The queue moved instead, so the run is **still held** — here it is back.
@@ -1391,7 +1391,7 @@ pub(crate) enum LettingGo {
 /// gate already dropped.
 /// `last` runs inside the section once the queue is found empty and before the
 /// release — the one moment a writer knows it is letting go and still holds the run.
-pub(crate) fn let_go_of_saying(
+pub fn let_go_of_saying(
     paths: &RunPaths,
     lock: OwnershipLock,
     last: impl FnOnce(),
@@ -1421,7 +1421,7 @@ fn letting_go_under_the_handover(
 }
 
 /// Where a submitter's commands went.
-pub(crate) enum Accepted {
+pub enum Accepted {
     /// Onto the run's durable queue, behind whatever is driving it, under this
     /// id.
     Queued(u64),
@@ -1439,7 +1439,7 @@ pub(crate) enum Accepted {
 ///
 /// Whether a reconciler is running is asked by *taking the run's lock*, which is
 /// the same question and the only answer that cannot be raced.
-pub(crate) fn accept(
+pub fn accept(
     paths: &RunPaths,
     channel: &ChannelState,
     offered: &crate::channel::OfferedReply,
@@ -1453,7 +1453,7 @@ pub(crate) fn accept(
 }
 
 /// Coordinate a submission with driver closeout under the handover gate.
-pub(crate) fn accept_as(
+pub fn accept_as(
     paths: &RunPaths,
     channel: &ChannelState,
     author: crate::channel::Author,
@@ -1474,7 +1474,7 @@ pub(crate) fn accept_as(
 /// [`accept`]'s own question with nothing to submit: asked under the same gate,
 /// by taking the same lock, so a caller writing to a run nothing drives is that
 /// run's single writer for as long as it holds what this returns.
-pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>> {
+pub fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>> {
     let handover = ledger::Handover::hold(paths)?;
     let taken = match OwnershipLock::acquire(paths, ledger::REPLY_VERB) {
         Ok(lock) => Ok(Some(lock)),
@@ -1489,7 +1489,7 @@ pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>
 
 /// [`ChannelState::record_applying`], for a writer that took the run through
 /// [`accept`], under the same handover gate a submission takes.
-pub(crate) fn record_applying(
+pub fn record_applying(
     paths: &RunPaths,
     channel: &ChannelState,
     offered: &crate::channel::OfferedReply,
@@ -1503,7 +1503,7 @@ pub(crate) fn record_applying(
 /// The answer an envelope the run's writer applied itself is given, once each of
 /// its commands committed `applied[index]`: `applied`, as a reconciler answers an
 /// envelope it applied, each note's result naming the live turn that took it.
-pub(crate) fn applied_here(
+pub fn applied_here(
     id: u64,
     commands: &[Command],
     applied: &[Vec<edits::Operation>],
@@ -1542,7 +1542,7 @@ fn accepting_under_the_handover(
 /// Answers nothing: **what** the queue held is read off the queue's own answers,
 /// which is where the caller's envelope is named and where every other envelope
 /// it reconciled is named too.
-pub(crate) fn reconcile_queued(paths: &RunPaths) -> Result<()> {
+pub fn reconcile_queued(paths: &RunPaths) -> Result<()> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     let mut journal = Journal::open(paths);
     let mut state = Projected::open(paths);
@@ -3060,7 +3060,7 @@ fn close_out_and_drain(
 }
 
 /// `None` is due now, which is what makes the first pass do everything once.
-pub(crate) fn due(last: Option<Instant>, every: Duration) -> bool {
+pub fn due(last: Option<Instant>, every: Duration) -> bool {
     last.is_none_or(|last| last.elapsed() >= every)
 }
 
@@ -3128,7 +3128,7 @@ fn statuses_of(
 /// - **Between passes it stands down**: the loop is waiting then, and its wait
 ///   ends on the queue moving, so the loop claims itself.
 #[derive(Debug, Default)]
-pub(crate) struct InPass {
+pub struct InPass {
     shared: std::sync::Mutex<InPassState>,
     claiming: std::sync::Mutex<()>,
 }
@@ -3666,7 +3666,7 @@ impl HoldReason {
 
 /// What kind of hold one `node-held` entry is, read by the same reader a driver
 /// restores its holds with: `None` for one this build cannot read whole.
-pub(crate) fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
+pub fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
     use crate::views::HoldKind;
     Some(match HoldReason::of_payload(entry)? {
         HoldReason::Dependencies { .. } => HoldKind::Dependencies,
@@ -3681,7 +3681,7 @@ pub(crate) fn hold_kind(entry: &Value) -> Option<crate::views::HoldKind> {
 /// The workspace hold one `node-held` entry carries, read by the same reader a
 /// driver restores its holds with: `None` for an entry that is not one, and for
 /// one this build cannot read whole.
-pub(crate) fn workspace_held(entry: &Value) -> Option<crate::pool::WorkspaceHold> {
+pub fn workspace_held(entry: &Value) -> Option<crate::pool::WorkspaceHold> {
     match HoldReason::of_payload(entry)? {
         HoldReason::Workspace(hold) => Some(hold),
         _ => None,
@@ -3691,7 +3691,7 @@ pub(crate) fn workspace_held(entry: &Value) -> Option<crate::pool::WorkspaceHold
 /// The source hold one `node-held` entry carries, read by the same reader a driver
 /// restores its holds with: `None` for an entry that is not one, and for one this build
 /// cannot read whole.
-pub(crate) fn source_held(entry: &Value) -> Option<crate::unanswered::SourceHold> {
+pub fn source_held(entry: &Value) -> Option<crate::unanswered::SourceHold> {
     match HoldReason::of_payload(entry)? {
         HoldReason::Source(hold) => Some(hold),
         _ => None,
@@ -3701,7 +3701,7 @@ pub(crate) fn source_held(entry: &Value) -> Option<crate::unanswered::SourceHold
 /// The dependencies one `node-held` entry awaits the releases of, read by the
 /// same reader a driver restores its holds with: `None` for an entry that is not
 /// a release hold, and for one this build cannot read whole.
-pub(crate) fn release_awaited(entry: &Value) -> Option<Vec<String>> {
+pub fn release_awaited(entry: &Value) -> Option<Vec<String>> {
     match HoldReason::of_payload(entry)? {
         HoldReason::Release { awaiting } => Some(awaiting),
         _ => None,
@@ -4205,7 +4205,7 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 /// would leave it — the plan-edit hook's view of it. The loop's own reads its release watch
 /// and the attempts it holds to resume; every other writer composes as a driver starting on
 /// the run would ([`crate::composition::of_a_fresh_driver`]).
-pub(crate) type Composer<'a> = dyn FnMut(&RunState, &Node) -> Result<String> + 'a;
+pub type Composer<'a> = dyn FnMut(&RunState, &Node) -> Result<String> + 'a;
 
 /// The composer of a writer with no loop: a driver starting on the run now.
 fn fresh_composer(paths: &RunPaths) -> impl FnMut(&RunState, &Node) -> Result<String> + '_ {
@@ -4581,7 +4581,7 @@ fn recover_queued(paths: &RunPaths, journal: &mut Journal, channel: &ChannelStat
 /// than judged — so one that got as far as its effects never lands ahead of an
 /// earlier one that did not.
 #[derive(Debug, Default)]
-pub(crate) struct Recovered {
+pub struct Recovered {
     envelopes: std::collections::VecDeque<crate::channel::QueuedCommands>,
     evidence: BTreeMap<u64, Effect>,
 }
@@ -5956,7 +5956,7 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
 /// command envelope it came in: what a driver taking the run over reads to
 /// tell a note already delivered from one it still owes, and what a
 /// `withdraw-note` names a carried note by.
-pub(crate) fn from_envelope(
+pub fn from_envelope(
     operations: &[edits::Operation],
     envelope: u64,
     index: usize,
@@ -6013,7 +6013,7 @@ fn all_or_each_ruling<T>(
 /// text is the one [`Error::Rejected`] gives it — the text [`record_rejection`] journals
 /// beside it — and otherwise the reason recorded.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum RecordedRefusal {
+pub enum RecordedRefusal {
     /// Refused for a reason no kind names, in the words recorded.
     Text(String),
     /// Refused for a reason the reconciler names by kind.
@@ -6047,7 +6047,7 @@ impl std::fmt::Display for RecordedRefusal {
 
 /// A refusal an outcome answers a command with: its text, and its kind where it
 /// names one.
-pub(crate) trait Refused: std::fmt::Display {
+pub trait Refused: std::fmt::Display {
     /// The refusal by kind, where this is one.
     fn refusal(&self) -> Option<crate::channel::Refusal>;
 }
@@ -6147,7 +6147,7 @@ fn refused_envelope<T: Unapplied, E: Refused>(
 /// as the *validated ask* rather than as operations. That is what makes the
 /// validation phase side-effect-free: there is no way to spell a delivered note
 /// in this type.
-pub(crate) enum Staged {
+pub enum Staged {
     /// Everything this command does is already compiled — including a note whose
     /// whole disposition validation could settle, because no live attempt will be
     /// made for it.
@@ -6181,7 +6181,7 @@ pub(crate) enum Staged {
 /// offer's `NoteWithdrawer`, which refuses once a turn took the note; the
 /// second is marked so its thread never offers it; and the third, with no
 /// `seat`, is skipped when its envelope is judged — see [`reconcile_envelope`].
-pub(crate) struct TakeBack {
+pub struct TakeBack {
     /// The `note-withdrawn` it commits, from `live`.
     operation: [edits::Operation; 1],
     /// The receiver's delivery thread holding the note, with its position among
@@ -6300,7 +6300,7 @@ fn reached_of(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
 ///
 /// Built only by [`staged_retitle`], from a compile that produced exactly one
 /// `retitled`, so the operation a delivery reads is always that one.
-pub(crate) struct ValidatedRetitle {
+pub struct ValidatedRetitle {
     /// What the compile staged — the title moving on the graph — held as the
     /// one-element slice later commands of the envelope are validated against.
     compiled: [edits::Operation; 1],
@@ -6313,7 +6313,7 @@ pub(crate) struct ValidatedRetitle {
 /// Stage a compiled `retitle` for the delivery phase, addressed through the
 /// session the node's last dispatch opened. A compile that produced anything but
 /// one `retitled` — none of this build's — is staged as compiled, writing nothing.
-pub(crate) fn staged_retitle(
+pub fn staged_retitle(
     compiled: Vec<edits::Operation>,
     session: Option<&crate::vcs::DispatchSession>,
     term_scope: onevcs::TermScope,
@@ -6402,7 +6402,7 @@ impl Staged {
     /// whose disposition validation *did* settle is a [`Compiled`](Self::Compiled)
     /// like any other, and stages the record it commits — which is what a carried
     /// note owes the node's next dispatch.
-    pub(crate) fn staged(&self) -> std::borrow::Cow<'_, [edits::Operation]> {
+    pub fn staged(&self) -> std::borrow::Cow<'_, [edits::Operation]> {
         match self {
             Self::Compiled(operations) => operations.into(),
             Self::Note(_) => (&[] as &[edits::Operation]).into(),
@@ -6430,7 +6430,7 @@ impl Staged {
 /// produce, and each is a write outside the run that cannot be taken back once a
 /// later command of the envelope refuses — see [`deliver_envelope`] for that
 /// residue, which a retitle shares with a note.
-pub(crate) fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
+pub fn commits_of(step: Staged) -> Result<Vec<edits::Operation>> {
     match step {
         Staged::Compiled(operations) => Ok(operations),
         Staged::Note(note) => deliver_manager_note(&note),
@@ -6696,7 +6696,7 @@ fn withdrawn_unrecorded(node: &str) -> Error {
 /// the thread, with what each committed — the conversation has read them — and
 /// whether it is waiting on its conversation now.
 #[derive(Debug, Default)]
-pub(crate) struct Progress {
+pub struct Progress {
     /// What each note the thread has finished committed, by its position among
     /// the receiver's notes: a note withdrawn, refused or never offered has none.
     finished: BTreeMap<usize, Vec<edits::Operation>>,
@@ -6733,7 +6733,7 @@ struct Offering {
 /// Spelled once, for the emitter and for the payload document that admits it:
 /// a note delivered into the running turn is `live`, and one deferred to the
 /// node's next dispatch is `next`.
-pub(crate) fn adoption_delivery(delivery: edits::Delivery) -> &'static str {
+pub fn adoption_delivery(delivery: edits::Delivery) -> &'static str {
     match delivery {
         edits::Delivery::Live => "live",
         edits::Delivery::Deferred => "next",
@@ -6784,7 +6784,7 @@ impl Delivery {
 /// Built in place where the phase ran inline — a writer with no loop. Where it
 /// runs on delivery threads, each receiver answers on its own as a
 /// [`LaneAnswer`] instead.
-pub(crate) struct NoteAnswer {
+pub struct NoteAnswer {
     envelope: crate::channel::QueuedCommands,
     /// The instant before its first note was offered — see [`reconcile_edits`].
     offered_at: u64,
@@ -6795,7 +6795,7 @@ pub(crate) struct NoteAnswer {
 /// One receiver's notes of a handed envelope, answered by its conversation: what
 /// [`NoteDeliveries::record_lane`] journals, carried back to the writer as
 /// [`Message::NoteAnswered`].
-pub(crate) struct LaneAnswer {
+pub struct LaneAnswer {
     /// The envelope the notes came in.
     envelope: u64,
     /// The receiver.
@@ -6827,7 +6827,7 @@ struct Handed {
 /// an earlier envelope's note to the same receiver is still outstanding waits
 /// here, unoffered, until that one is answered — see [`NoteDeliveries::hand`].
 /// Nothing else waits on a note.
-pub(crate) struct NoteDeliveries {
+pub struct NoteDeliveries {
     /// The claimer answering envelopes beside this driver's passes, where it runs
     /// one. See [`InPass`].
     in_pass: Option<std::sync::Arc<InPass>>,
@@ -6929,7 +6929,7 @@ struct Lane {
 /// loop's own turn to write it. Long enough for a loop busy with a pass, and
 /// bounded so a delivery thread that never answers costs a re-dispatch this
 /// much and no more.
-pub(crate) const DELIVERY_RECORD_PATIENCE: Duration = Duration::from_secs(30);
+pub const DELIVERY_RECORD_PATIENCE: Duration = Duration::from_secs(30);
 
 /// The nodes a note delivery is outstanding for, shared between the loop that
 /// alone adds and removes them and the dispatch threads that compose a
@@ -6940,7 +6940,7 @@ pub(crate) const DELIVERY_RECORD_PATIENCE: Duration = Duration::from_secs(30);
 /// else orders the two, and a re-dispatch composed first starts without a note
 /// the worker had already read.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct DeliveriesInFlight(std::sync::Arc<InFlight>);
+pub struct DeliveriesInFlight(std::sync::Arc<InFlight>);
 
 /// Each node with a delivery outstanding — how many, and since when — and the
 /// signal a waiting re-dispatch is woken by when one ends.
@@ -6959,7 +6959,7 @@ impl DeliveriesInFlight {
     }
 
     /// Mark `nodes` outstanding until the answer this returns is dropped.
-    pub(crate) fn begin(&self, nodes: &BTreeSet<String>) -> PendingDelivery {
+    pub fn begin(&self, nodes: &BTreeSet<String>) -> PendingDelivery {
         let mut held = self.held();
         for node in nodes {
             held.entry(node.clone()).or_insert((0, Instant::now())).0 += 1;
@@ -6971,13 +6971,13 @@ impl DeliveriesInFlight {
     }
 
     /// Since when a delivery to `node` has been outstanding, if one is.
-    pub(crate) fn outstanding_since(&self, node: &str) -> Option<Instant> {
+    pub fn outstanding_since(&self, node: &str) -> Option<Instant> {
         self.held().get(node).map(|(_, since)| *since)
     }
 
     /// Wait until no delivery to `node` is outstanding, for at most `patience`:
     /// `true` once none is, `false` where one still was when it ran out.
-    pub(crate) fn recorded_for(&self, node: &str, patience: Duration) -> bool {
+    pub fn recorded_for(&self, node: &str, patience: Duration) -> bool {
         let (held, _) = self
             .0
             .ended
@@ -6989,7 +6989,7 @@ impl DeliveriesInFlight {
 
 /// One delivery's nodes, outstanding until this is dropped.
 #[derive(Debug)]
-pub(crate) struct PendingDelivery {
+pub struct PendingDelivery {
     in_flight: DeliveriesInFlight,
     nodes: BTreeSet<String>,
 }
@@ -7913,7 +7913,7 @@ struct Presented {
 /// `payload` with whose words its command carried, where they are the user's:
 /// a record of the manager's own carries no key, so it is the record a build
 /// before the field wrote, and reads back as the manager's.
-pub(crate) fn with_provenance(
+pub fn with_provenance(
     mut payload: serde_json::Map<String, Value>,
     provenance: crate::provenance::Provenance,
 ) -> serde_json::Map<String, Value> {
@@ -7938,7 +7938,7 @@ pub(crate) fn with_provenance(
 ///
 /// Nothing is lost by the split, in either direction: what a reader reads off
 /// this record is the operation list, and both kinds carry the same one.
-pub(crate) fn journalled_as(operations: &[edits::Operation]) -> journal::PipelineKind {
+pub fn journalled_as(operations: &[edits::Operation]) -> journal::PipelineKind {
     if operations.iter().any(edits::Operation::commits_a_change) {
         journal::PipelineKind::EditCommitted
     } else {
@@ -7953,7 +7953,7 @@ pub(crate) fn journalled_as(operations: &[edits::Operation]) -> journal::Pipelin
 /// produced it, or the operation list, or knowing which ops each op-word can
 /// compile to. Written on both kinds, because a reader that has to know which
 /// kind carries the field is back to keying on the kind.
-pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
+pub fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
     operations.iter().map(edits::Operation::kind).collect()
 }
 
@@ -7971,7 +7971,7 @@ pub(crate) fn operation_kinds(operations: &[edits::Operation]) -> Vec<String> {
 /// # Errors
 ///
 /// The reason the run's own journal or channel could not be written.
-pub(crate) fn record_rejection(
+pub fn record_rejection(
     paths: &RunPaths,
     journal: &mut Journal,
     author: crate::channel::Author,
@@ -8090,7 +8090,7 @@ fn refused_undecodable(record: &Undecodable, command: &Value) -> serde_json::Map
 /// [`Command::Note`](crate::channel::Command::Note), which is where what each of
 /// them decides is declared, and [`crate::note::Reach`], which is the pair they
 /// make once the envelope has refused the combination that lands nowhere.
-pub(crate) struct Offered<'a> {
+pub struct Offered<'a> {
     /// Whose words the note is, and the reference it is declined by: what the
     /// attribution the conversation is handed it under says.
     pub origin: crate::ruling::Origin,
@@ -8142,7 +8142,7 @@ pub(crate) struct Offered<'a> {
 /// It owns what it carries rather than borrowing the command, because it outlives
 /// the validation pass: the whole envelope is validated before any of it is
 /// delivered.
-pub(crate) struct ValidatedNote {
+pub struct ValidatedNote {
     /// The node whose conversation it is for.
     node: String,
     /// Whose task it says it is updating.
@@ -8205,7 +8205,7 @@ impl ValidatedNote {
 ///
 /// [`Error::Refused`] for a note this run cannot compose, and for one whose reach
 /// leaves it nowhere to go whatever a conversation would have said.
-pub(crate) fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
+pub fn validate_manager_note(offered: &Offered<'_>) -> Result<Staged> {
     let Offered {
         origin,
         id,
@@ -8359,7 +8359,7 @@ fn unreached(node: &str, why: &str, reach: crate::note::Reach, dispatchable: boo
 /// own sentence where the conversation is what answered. The reconciler journals
 /// that refusal and surfaces it, so a non-delivery is in the run's record and not
 /// only in the caller's exit code.
-pub(crate) fn deliver_manager_note(validated: &ValidatedNote) -> Result<Vec<edits::Operation>> {
+pub fn deliver_manager_note(validated: &ValidatedNote) -> Result<Vec<edits::Operation>> {
     let admitted = match offer_manager_note(validated) {
         Ok(admitted) => admitted,
         Err(untaken) => return untaken,
@@ -8509,7 +8509,7 @@ fn nowhere_to_carry(id: &str) -> Error {
 /// each node's latest address as [`RunState::last_turns`]: a note is answered per
 /// envelope, and reading the run's whole history backwards for it made every note
 /// to a long run cost that run's length.
-pub(crate) fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
+pub fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
     crate::checkpoint::current(paths).last_turns.remove(node)
 }
 
@@ -8698,7 +8698,7 @@ struct PlacementShape {
 /// landing node's dependency: a spelling `onevcs` cannot resolve names no
 /// repository this run can place anything on, so it is answered `false` and the
 /// dependency only orders the node.
-pub(crate) fn same_identity(mine: &str, other: &str) -> bool {
+pub fn same_identity(mine: &str, other: &str) -> bool {
     let identity = |repo: &str| onevcs::release_targets(repo).map(|repository| repository.identity);
     matches!((identity(mine), identity(other)), (Ok(mine), Ok(other)) if mine == other)
 }
@@ -10278,7 +10278,7 @@ fn execute_direct(
 /// is not a settlement at all: nothing is written against the node's status, and
 /// a reader of the run's record sees a `node-requeued` where a `node-settled`
 /// would have been.
-pub(crate) enum Ending {
+pub enum Ending {
     /// The node settled, and this is how. Boxed, because it is much the larger
     /// of the two.
     Settled(Box<Settlement>),
@@ -10289,7 +10289,7 @@ pub(crate) enum Ending {
 }
 
 /// One attempt's ending: drained, or handed back before anything began.
-pub(crate) enum Attempted {
+pub enum Attempted {
     /// It ran, or failed to, and this is how the node settles on it. Boxed,
     /// because it is much the larger of the two.
     Drained(Box<Drained>),
@@ -10307,7 +10307,7 @@ pub(crate) enum Attempted {
 /// [`SessionConflict`]'s reason: the loop owns this crate's own stream and the
 /// set of nodes in flight, and a dispatch thread writing into either beside it
 /// is a second writer.
-pub(crate) struct WorkspaceRefusal {
+pub struct WorkspaceRefusal {
     /// The node whose session was refused, as a [`NodeRef`](crate::graph::NodeRef)
     /// for [`SessionConflict::node`]'s reason.
     pub node: crate::graph::NodeRef,
@@ -10327,7 +10327,7 @@ pub(crate) struct WorkspaceRefusal {
 /// spoke without starting is not a state, and a retry decision made from two
 /// independent bools has to keep proving that it never happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reached {
+pub enum Reached {
     /// The dispatch could not be started at all. Nothing about this failure is
     /// the agent's, so asking again unchanged spends the next budget the same
     /// way.
@@ -10341,7 +10341,7 @@ pub(crate) enum Reached {
 }
 
 /// One dispatch, drained: how it settled, and what it left behind.
-pub(crate) struct Drained {
+pub struct Drained {
     /// How the node settled on this attempt.
     pub settlement: Settlement,
     /// How far the attempt got, which is what decides whether asking again
@@ -10373,7 +10373,7 @@ pub(crate) struct Drained {
 /// publication attempt a lifecycle node is on when its steps are asked again.
 /// Every boundary re-ask after it runs as the number the `Redispatched` below
 /// announced for it.
-pub(crate) fn attempt(
+pub fn attempt(
     executor: &dyn Executor,
     node: &Node,
     cancel: &CancellationToken,
@@ -10529,7 +10529,7 @@ pub(crate) fn attempt(
 /// [`UndraftedBody`]'s reason: the loop owns this crate's own stream and the
 /// planner's queue, and a dispatch thread reporting into either beside it is a
 /// second writer.
-pub(crate) struct SessionConflict {
+pub struct SessionConflict {
     /// The node that settled on it.
     ///
     /// A [`NodeRef`](crate::graph::NodeRef) and not a `String`, for
@@ -10617,7 +10617,7 @@ fn session_conflict_surface(conflict: &SessionConflict) -> Surface {
 /// cancelled dispatch is asked, through the lever `oneagentgraph` already
 /// exposes, to commit what it has and end its turn, and is torn down if it has
 /// not exited by the deadline.
-pub(crate) fn drain(
+pub fn drain(
     handle: &mut dyn DispatchHandle,
     tx: &Sender<Message>,
     node: &str,
@@ -11053,7 +11053,7 @@ struct MemberDeath {
 /// the identity that selects it again, oneharness's own failure kind for it —
 /// `None` where oneharness could not classify one — and what it said.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AttemptedCandidate {
+pub struct AttemptedCandidate {
     pub identity: String,
     pub failure_kind: Option<String>,
     pub detail: String,
@@ -11131,7 +11131,7 @@ const UNREAD_CANDIDATE: &str = "(unreadable candidate)";
 /// The candidates an exhausted chain attempted, as one line: each identity with
 /// its failure kind in brackets — `unclassified` where oneharness named none —
 /// and its own detail, in attempt order.
-pub(crate) fn attempted_line(attempted: &[AttemptedCandidate]) -> String {
+pub fn attempted_line(attempted: &[AttemptedCandidate]) -> String {
     attempted
         .iter()
         .map(|candidate| {
@@ -11245,7 +11245,7 @@ impl MemberDeath {
 /// new graph run on a new stream, and its members' chains owe nothing to the
 /// ones the graph before it ran.
 #[derive(Debug, Default)]
-pub(crate) struct ChainRecords {
+pub struct ChainRecords {
     chains: BTreeMap<(String, String), MemberChains>,
 }
 
@@ -11275,7 +11275,7 @@ struct Chain {
 
 impl ChainRecords {
     /// Fold one relayed envelope in, where it says something about a chain.
-    pub(crate) fn read(&mut self, envelope: &Envelope) {
+    pub fn read(&mut self, envelope: &Envelope) {
         if envelope.source != crate::event::Source::Agentgraph {
             return;
         }
@@ -11316,7 +11316,7 @@ impl ChainRecords {
     ///
     /// `node` is the dispatch's node where the stream is a node's, and `None`
     /// for the run's observer, whose members belong to none.
-    pub(crate) fn stopped_by(
+    pub fn stopped_by(
         &self,
         envelope: &Envelope,
         node: Option<&str>,
@@ -11363,7 +11363,7 @@ fn side_of(role: oneagentgraph::event::Role) -> String {
 /// reason: the reader is a relay thread, and the run's single writer is where a
 /// surface is queued and journalled.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChainStopped {
+pub struct ChainStopped {
     /// The node whose dispatch the chain belonged to; `None` for the observer.
     pub node: Option<String>,
     /// The member whose chain it was, as the producer labelled it.
@@ -11391,7 +11391,7 @@ pub(crate) struct ChainStopped {
 /// stopped at is one to keep in the chain — with the three things the stream
 /// could say about it: which candidate, what it stepped past to get there, and
 /// what the candidate said.
-pub(crate) fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
+pub fn chain_stopped_finding(stopped: &ChainStopped) -> Surface {
     let whose = match &stopped.node {
         Some(node) => format!("node '{node}'"),
         None => "the run's observer graph".to_owned(),
@@ -11698,7 +11698,7 @@ fn delimited(detail: &str, open: char, close: char) -> Option<(usize, String)> {
 /// clause a producer wrote in prose from being read as one. What it *says* is not
 /// checked and must not be, because the words are the harness's and the set grows
 /// there.
-pub(crate) fn is_a_classification(word: &str) -> bool {
+pub fn is_a_classification(word: &str) -> bool {
     !word.is_empty()
         && word.len() <= CLASSIFICATION_LIMIT
         && !word.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -11793,7 +11793,7 @@ fn failed_task(
 }
 
 /// [`cancel_grace_seconds`], as a duration: what a claim states, and a takeover waits out.
-pub(crate) fn cancel_grace() -> Duration {
+pub fn cancel_grace() -> Duration {
     Duration::from_secs(cancel_grace_seconds())
 }
 
@@ -11831,7 +11831,7 @@ fn boundary_attempts() -> NonZeroU32 {
 /// having never dispatched it. That is what the [`NonZeroU32`] parse is: the
 /// trust boundary this value crosses, so nothing downstream carries a budget it
 /// has to re-check.
-pub(crate) fn publication_attempts() -> NonZeroU32 {
+pub fn publication_attempts() -> NonZeroU32 {
     std::env::var(PUBLICATION_ATTEMPTS_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -11842,7 +11842,7 @@ pub(crate) fn publication_attempts() -> NonZeroU32 {
 ///
 /// A [`NonZeroU32`] for the reason [`publication_attempts`] gives, and the parse
 /// *is* the `> 0` filter: a zero here would settle a node on a read nobody made.
-pub(crate) fn merge_path_reads() -> NonZeroU32 {
+pub fn merge_path_reads() -> NonZeroU32 {
     std::env::var(MERGE_PATH_READS_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -11860,7 +11860,7 @@ pub(crate) fn merge_path_reads() -> NonZeroU32 {
 /// host that had gone dark as fast as the process could ask it, so the
 /// [`NonZeroU64`] parse falls it back to the default for the reason
 /// [`merge_path_reads`] gives about its own zero.
-pub(crate) fn merge_path_backoff() -> Duration {
+pub fn merge_path_backoff() -> Duration {
     Duration::from_secs(
         std::env::var(MERGE_PATH_BACKOFF_ENV)
             .ok()
@@ -11877,7 +11877,7 @@ pub(crate) fn merge_path_backoff() -> Duration {
 }
 
 /// The next backoff after one, doubled to the ceiling every wait here shares.
-pub(crate) fn doubled(backoff: Duration) -> Duration {
+pub fn doubled(backoff: Duration) -> Duration {
     // llmlint: ignore[changed_behavior_has_e2e] the same ceiling as the one on the way in,
     // and the same reason there is no journey: its only effect is to make a wait *shorter*,
     // so a journey observing it is a journey that waits two minutes per read to prove it
@@ -11899,7 +11899,7 @@ fn failed(node: &str, outcome: &str) -> Settlement {
 }
 
 /// A reason bounded to what an envelope payload may carry.
-pub(crate) fn bounded(reason: &str) -> String {
+pub fn bounded(reason: &str) -> String {
     reason
         .chars()
         .take(crate::event::MAX_PAYLOAD_TEXT_BYTES / 4)
@@ -11907,7 +11907,7 @@ pub(crate) fn bounded(reason: &str) -> String {
 }
 
 /// The labels a dispatch is stamped with. The reserved keys, and nothing else.
-pub(crate) fn dispatch_labels(
+pub fn dispatch_labels(
     run: &str,
     node: &str,
     step: Option<&str>,
@@ -11926,7 +11926,7 @@ pub(crate) fn dispatch_labels(
 }
 
 /// The node-scope agent graph a dispatch runs under.
-pub(crate) fn node_graph(
+pub fn node_graph(
     override_ref: Option<&oneagentgraph::config::ConfigRef>,
     default_graph: &str,
 ) -> oneagentgraph::config::ConfigRef {
@@ -11935,7 +11935,7 @@ pub(crate) fn node_graph(
         .unwrap_or_else(|| oneagentgraph::config::ConfigRef(default_graph.to_string()))
 }
 
-pub(crate) fn configured_node_graph() -> String {
+pub fn configured_node_graph() -> String {
     std::env::var(NODE_GRAPH_ENV)
         .ok()
         .filter(|value| !value.is_empty())
@@ -11960,7 +11960,7 @@ pub(crate) fn configured_node_graph() -> String {
 // llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` because
 // that is what an environment holds and what `LaunchRecord`'s schema declares; the one
 // invariant a newtype could carry is applied by the caller, for all three rungs at once.
-pub(crate) fn configured_node_validator() -> Result<Option<String>> {
+pub fn configured_node_validator() -> Result<Option<String>> {
     match std::env::var(NODE_VALIDATOR_ENV) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -11981,7 +11981,7 @@ pub(crate) fn configured_node_validator() -> Result<Option<String>> {
 ///
 /// [`Error::Invalid`] for a value this build cannot read as text.
 // llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` for the reason `configured_envelope_reviewer` gives, and the one invariant a newtype could carry is applied by the caller for all three rungs at once.
-pub(crate) fn configured_envelope_reviewer_bar() -> Result<Option<String>> {
+pub fn configured_envelope_reviewer_bar() -> Result<Option<String>> {
     match std::env::var(ENVELOPE_REVIEWER_BAR_ENV) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -12008,7 +12008,7 @@ pub(crate) fn configured_envelope_reviewer_bar() -> Result<Option<String>> {
 // llmlint: ignore-block[invalid_states_unrepresentable] the value is a `String` because
 // that is what an environment holds and what `LaunchRecord`'s schema declares; the one
 // invariant a newtype could carry is applied by the caller, for all three rungs at once.
-pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
+pub fn configured_envelope_reviewer() -> Result<Option<String>> {
     match std::env::var(ENVELOPE_REVIEWER_ENV) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -12037,7 +12037,7 @@ pub(crate) fn configured_envelope_reviewer() -> Result<Option<String>> {
 /// and for one this build cannot read as text.
 ///
 /// [`cli::WRITEBACK_ITEM_BUDGET_ENV`]: crate::cli::WRITEBACK_ITEM_BUDGET_ENV
-pub(crate) fn configured_writeback_item_budget() -> Result<Option<NonZeroU64>> {
+pub fn configured_writeback_item_budget() -> Result<Option<NonZeroU64>> {
     use crate::cli::WRITEBACK_ITEM_BUDGET_ENV;
     let value = match std::env::var(WRITEBACK_ITEM_BUDGET_ENV) {
         Ok(value) => value,
@@ -12100,7 +12100,7 @@ fn executor_rules() -> Result<ExecutorRules> {
 /// # Errors
 ///
 /// The reason the run's own journal or channel could not be written.
-pub(crate) fn record_operation_facts(
+pub fn record_operation_facts(
     paths: &RunPaths,
     journal: &mut Journal,
     author: crate::channel::Author,
@@ -12217,7 +12217,7 @@ pub(crate) fn record_operation_facts(
 /// object, is refused rather than written as a record carrying no payload: the
 /// record's document requires its fields, and an empty payload in their place
 /// would be a record nothing could read back as what it says.
-pub(crate) fn payload_of<T: Serialize>(declared: &T) -> Result<serde_json::Map<String, Value>> {
+pub fn payload_of<T: Serialize>(declared: &T) -> Result<serde_json::Map<String, Value>> {
     match serde_json::to_value(declared) {
         Ok(Value::Object(payload)) => Ok(payload),
         Ok(other) => Err(Error::Invalid(format!(
@@ -12289,7 +12289,7 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
 /// to the planner: it compiles to the surface the planner reads, so reporting it
 /// a second time as an edit that author made would put two entries on the queue
 /// for one thing said once — the multiplication this op exists to end.
-pub(crate) fn non_planner_edit(
+pub fn non_planner_edit(
     author: &crate::channel::Author,
     command: &Command,
 ) -> Option<Surface> {
@@ -12322,7 +12322,7 @@ pub(crate) fn non_planner_edit(
 /// check-in update from advice.
 ///
 /// [`source`]: crate::channel::source
-pub(crate) fn finding_surface(
+pub fn finding_surface(
     author: crate::channel::Author,
     node: Option<String>,
     message: &str,
@@ -12593,7 +12593,7 @@ fn unprojected_surface(failure: &crate::writeback::Unprojected) -> Surface {
 }
 
 /// Surface something to the planner, recording that it was *sent*.
-pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
+pub fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<()> {
     raised(paths, journal, surface).map(|_| ())
 }
 
@@ -12603,7 +12603,7 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 /// hook dropped or refused answers the surface as offered, id `0`, and is the run's
 /// record rather than the run's failure: a filter a host wrote to quieten the
 /// channel must not stop the run raising it.
-pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
+pub fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
     queue_surface(paths, journal, surface, &[])
 }
 
@@ -12655,7 +12655,7 @@ fn queue_surface(
 /// Offer `surface` to `channel`, journalling what kept it off: the surface as
 /// queued, or `None` where a hook dropped, rerouted or refused it, which is the
 /// run's record rather than the run's failure.
-pub(crate) fn offer_surface(
+pub fn offer_surface(
     paths: &RunPaths,
     journal: &mut Journal,
     channel: &ChannelState,
@@ -12674,7 +12674,7 @@ pub(crate) fn offer_surface(
 }
 
 /// Journal a surface a hook kept off the channel.
-pub(crate) fn record_surface_dropped(
+pub fn record_surface_dropped(
     paths: &RunPaths,
     journal: &mut Journal,
     surface: &Surface,

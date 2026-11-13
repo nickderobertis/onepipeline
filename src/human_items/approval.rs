@@ -86,14 +86,14 @@ fn request(stored: &HumanItemApproval, actor: &Actor) -> Result<Vec<u8>, HumanIt
 }
 
 /// Whether reopening `item` could take its approval back: its adapter declares an undo.
-pub(crate) fn undoable(config: &EffectiveConfig, item: &HumanItem) -> bool {
+pub fn undoable(config: &EffectiveConfig, item: &HumanItem) -> bool {
     adapter_of(config, item).is_some_and(|adapter| adapter.undo.is_some())
 }
 
 /// Run the configured undo of a completed task's approval. Only `{board_copy,key}`
 /// naming the stored version means undone; anything else refuses with what the script
 /// said on standard error, and the task stays completed.
-pub(crate) fn undo(
+pub fn undo(
     config: &EffectiveConfig,
     item: &HumanItem,
     actor: &Actor,
@@ -145,7 +145,7 @@ pub(crate) fn undo(
 /// Answers `Ok(None)` when it recorded the approval of the stored version, and
 /// `Ok(Some(replacement))` when the document moved on: the replacement is the
 /// same task against the version the authority reported.
-pub(crate) fn complete(
+pub fn complete(
     config: &EffectiveConfig,
     item: &HumanItem,
     actor: &Actor,

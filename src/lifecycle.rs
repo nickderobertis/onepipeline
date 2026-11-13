@@ -57,20 +57,20 @@ pub struct Launch {
     pub branch_naming: Option<crate::branchname::RunNaming>,
     /// The note deliveries the loop has handed off and not yet recorded, which
     /// a re-dispatch waits for before it reads the notes it is composed with.
-    pub(crate) notes_in_flight: engine::DeliveriesInFlight,
+    pub notes_in_flight: engine::DeliveriesInFlight,
     /// Whether a publication waits for the loop's claim check before it is made: every run
     /// launched from a store, whose project a driver claims, and none an older record names
     /// no project for.
-    pub(crate) publication_gated: bool,
+    pub publication_gated: bool,
     /// The change request a republication adopts without watching its checks.
-    pub(crate) review_change: Option<String>,
+    pub review_change: Option<String>,
     /// Where a readjusted draft's change request is moved after its push, with the Stack
     /// block it then carries.
-    pub(crate) readjusting: Option<Box<crate::readjust::Retarget>>,
+    pub readjusting: Option<Box<crate::readjust::Retarget>>,
     /// What the publication boundary tells and gives this node's dispatches: the run's
     /// term scope, which every check its closeout asks derives its terms from, and in a
     /// mixed plan its side of the boundary.
-    pub(crate) boundary: crate::boundary::Dispatching,
+    pub boundary: crate::boundary::Dispatching,
 }
 
 /// Run one lifecycle node to settlement, re-dispatching it while its
@@ -481,7 +481,7 @@ fn carried_into_redispatch(
 /// What the resumed attempt is composed with is re-read at the resume — the
 /// notes are the one thing that can change while the node waits — and the rest
 /// is carried as it was.
-pub(crate) struct Continuation {
+pub struct Continuation {
     /// The node as the refused attempt composed it: pinned to the preserved
     /// branch and carrying the diagnosis.
     pub node: Node,
@@ -504,7 +504,7 @@ impl Continuation {
     /// The re-dispatch a red verdict read after a deferred republication owes: the
     /// node's next attempt on its same branch, carrying the failed checks as its
     /// refusal exactly as a `checks-failed` publication's re-dispatch carries them.
-    pub(crate) fn red_verdict(node: &Node, branch: &str, head: &str, failed: &[String]) -> Self {
+    pub fn red_verdict(node: &Node, branch: &str, head: &str, failed: &[String]) -> Self {
         let attempts = engine::publication_attempts();
         let attempt = std::num::NonZeroU32::MIN.saturating_add(1).min(attempts);
         let preserved = Preserved {
@@ -537,13 +537,13 @@ impl Continuation {
     }
 
     /// The preserved branch the resumed attempt is pinned to.
-    pub(crate) fn branch(&self) -> &str {
+    pub fn branch(&self) -> &str {
         &self.preserved.branch
     }
 
     /// The re-dispatch this continuation makes again, as the record names one:
     /// the same attempt of the same budget answering the same failure.
-    pub(crate) fn redispatch(&self) -> engine::Redispatch {
+    pub fn redispatch(&self) -> engine::Redispatch {
         engine::Redispatch {
             node: self.node.id.clone(),
             attempt: self.attempt,
@@ -1111,7 +1111,7 @@ fn attempt_once(
 
 /// What a lifecycle node's execution is, beyond its own task.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Course<'a> {
+pub enum Course<'a> {
     /// Its work, dispatched as the plan states it.
     Work,
     /// A rework's replacement: its work, published onto the change request
@@ -3543,7 +3543,7 @@ const WORKER_TRANSCRIPT_HEADING: &str = "## Worker transcript";
 
 /// What a lifecycle node's publication drafts.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Closeout<'a> {
+pub enum Closeout<'a> {
     /// A first publication, or a republication whose content changed: drafted
     /// as every publication is.
     Drafted,
@@ -3556,9 +3556,9 @@ pub(crate) enum Closeout<'a> {
 
 /// What a rework's publication knows of the rework it publishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reworking {
+pub struct Reworking {
     /// Whether the op stated the title, which then outranks the drafter's.
-    pub(crate) title_stated: bool,
+    pub title_stated: bool,
 }
 
 /// What a rework's drafting dispatch is shown beside the task.
@@ -3832,7 +3832,7 @@ fn drafting_task(
 /// mattered, because a drafter told to source `## Why` from the task would
 /// otherwise invent one. There is no `## Change request` section and no `##
 /// Worker transcript` section: there is no session and no run to read either from.
-pub(crate) fn out_of_band_drafting_task(branch: &str, base: &str, commits: &str) -> String {
+pub fn out_of_band_drafting_task(branch: &str, base: &str, commits: &str) -> String {
     let mut task = format!(
         "{DRAFTING_TASK}\n\n\
          This branch is `{branch}`, and its base is `{base}`. It is being drafted out of band, \
@@ -3865,7 +3865,7 @@ pub(crate) fn out_of_band_drafting_task(branch: &str, base: &str, commits: &str)
 /// A body or an ending that is not one, because **every** ending here leaves the
 /// publication to proceed with no body: the two are what a change request opens
 /// with, not whether it opens.
-pub(crate) enum Drafted {
+pub enum Drafted {
     /// It drafted the change request's body, and the `title_check` it answered
     /// beside it where it answered one.
     Body(String, Option<serde_json::Value>),
@@ -3880,7 +3880,7 @@ pub(crate) enum Drafted {
 /// whose answers the schema refuses, and one that answers inside the schema with
 /// nothing in it. A run that had just wired a drafter could tell none of them
 /// from a launch that had wired no drafter at all.
-pub(crate) enum Undrafted {
+pub enum Undrafted {
     /// It could not be run, or it ran and did not succeed — in its own words.
     ///
     /// One ending rather than three: a dispatch that never started, one that
@@ -3904,7 +3904,7 @@ pub(crate) enum Undrafted {
 
 impl Undrafted {
     /// The ending, as the event names it.
-    pub(crate) fn ending(&self) -> &'static str {
+    pub fn ending(&self) -> &'static str {
         match self {
             Self::Dispatch(_) => "dispatch-failed",
             Self::SchemaRefused => "schema-refused",
@@ -3914,7 +3914,7 @@ impl Undrafted {
 
     /// Why the change request opened with no body, in the words a planner reads
     /// off `results`.
-    pub(crate) fn why(&self) -> String {
+    pub fn why(&self) -> String {
         match self {
             Self::Dispatch(reason) => {
                 format!("the change request's body was not drafted: {reason}")
@@ -4057,7 +4057,7 @@ fn drafted(
 ///
 /// The handle comes back — `None` only where the dispatch never started — so a
 /// caller whose run registered it can keep it until its node settles.
-pub(crate) fn draft(
+pub fn draft(
     executor: &dyn Executor,
     request: DispatchRequest,
     paths: &RunPaths,
@@ -4172,7 +4172,7 @@ fn relay_into(tx: &Sender<Message>, node: Labels) -> Box<dyn Fn(Envelope) + Send
 /// so every per-node view reads it as work that happened to nobody.
 ///
 /// An enricher, so it never rewrites: a key the producer stamped stands.
-pub(crate) fn stamp(labels: &mut Labels, known: &Labels) {
+pub fn stamp(labels: &mut Labels, known: &Labels) {
     labels.run_id = labels.run_id.take().or_else(|| known.run_id.clone());
     labels.node = labels.node.take().or_else(|| known.node.clone());
     labels.persona = labels.persona.take().or_else(|| known.persona.clone());

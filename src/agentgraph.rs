@@ -213,7 +213,7 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// An unusable value falls back to the default rather than to zero: a `0` would
 /// make every launch time out before its graph could answer, which fails every
 /// run rather than the one the operator was configuring.
-pub(crate) fn startup_timeout() -> Duration {
+pub fn startup_timeout() -> Duration {
     let seconds = std::env::var(STARTUP_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -409,7 +409,7 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
 /// Give a library observer's members time to cancel before its host is ended.
 /// A blocked command provider needs the graph's reaper, not just a signal to
 /// the hosting process. Executable overrides retain their process-tree teardown.
-pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Result<bool> {
+pub fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Result<bool> {
     if recorded.trim().is_empty() || std::env::var_os(BINARY_ENV).is_some() {
         return Ok(false);
     }
@@ -2203,7 +2203,7 @@ impl TurnAddress {
 
     /// Make this the address [`of`](Self::of) reads `run` and `member` as, reusing what
     /// it holds; where they are not one, leave it as it was and answer `false`.
-    pub(crate) fn set(&mut self, run: &str, member: &str) -> bool {
+    pub fn set(&mut self, run: &str, member: &str) -> bool {
         let (run, member) = (run.trim(), member.trim());
         if run.is_empty() || !oneagentgraph::config::is_member_name(member) {
             return false;

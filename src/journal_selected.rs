@@ -47,7 +47,7 @@ const MOST_WORKERS: usize = 8;
 
 /// The threads a read of many items works across: the host's parallelism, up to
 /// [`MOST_WORKERS`], and the four spike-first-screen measured at where it cannot say.
-pub(crate) fn workers() -> usize {
+pub fn workers() -> usize {
     std::thread::available_parallelism().map_or(4, |cores| cores.get().min(MOST_WORKERS))
 }
 
@@ -119,23 +119,23 @@ fn instant_of(ts: &str) -> Option<u64> {
 
 /// One line of a journal, as far as a selection needs it.
 #[derive(Debug)]
-pub(crate) struct Skim<'a> {
-    pub(crate) line: &'a [u8],
+pub struct Skim<'a> {
+    pub line: &'a [u8],
     ts: Cow<'a, str>,
-    pub(crate) stream: Cow<'a, str>,
-    pub(crate) seq: u64,
-    pub(crate) kind: Cow<'a, str>,
+    pub stream: Cow<'a, str>,
+    pub seq: u64,
+    pub kind: Cow<'a, str>,
     node: Option<Cow<'a, str>>,
-    pub(crate) evidence: bool,
+    pub evidence: bool,
     /// Its `ts` as [`instant_of`] reads it.
     instant: Option<u64>,
     /// The record, where reading this line already parsed it.
-    pub(crate) parsed: Option<Box<Envelope>>,
+    pub parsed: Option<Box<Envelope>>,
 }
 
 /// The bytes from the start of `line` up to the closing quote of a string with no
 /// escape in it, and what follows that quote.
-pub(crate) fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
+pub fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let end = memchr::memchr2(b'"', b'\\', line)?;
     if line[end] != b'"' {
         return None;
@@ -144,14 +144,14 @@ pub(crate) fn bytes_of(line: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// [`bytes_of`], where what is wanted is the text.
-pub(crate) fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
+pub fn string_of(line: &[u8]) -> Option<(&str, &[u8])> {
     let (text, rest) = bytes_of(line)?;
     Some((std::str::from_utf8(text).ok()?, rest))
 }
 
 /// The decimal number at the start of `line`, as an envelope's serializer writes
 /// one, and what follows it.
-pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
+pub fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     let digits = line.iter().position(|byte| !byte.is_ascii_digit())?;
     if digits == 0 || (digits > 1 && line[0] == b'0') {
         return None;
@@ -226,20 +226,20 @@ fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
 
 /// The fields a merge needs off the opening of a line in the writers' form, with nothing
 /// past `labels` looked at. What a reader asks whose answer is the source alone.
-pub(crate) struct Opening<'a> {
-    pub(crate) v: u32,
-    pub(crate) ts: &'a str,
-    pub(crate) stream: &'a str,
-    pub(crate) seq: u64,
-    pub(crate) source: Source,
-    pub(crate) kind: &'a str,
-    pub(crate) phase: Option<Phase>,
+pub struct Opening<'a> {
+    pub v: u32,
+    pub ts: &'a str,
+    pub stream: &'a str,
+    pub seq: u64,
+    pub source: Source,
+    pub kind: &'a str,
+    pub phase: Option<Phase>,
     node: Option<&'a str>,
     /// The line from just inside its `labels` object's opening brace.
-    pub(crate) labels: &'a [u8],
+    pub labels: &'a [u8],
 }
 
-pub(crate) fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
+pub fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
     let (v, rest) = number_of(line.strip_prefix(b"{\"v\":")?)?;
     let v = u32::try_from(v).ok()?;
     let (ts, rest) = string_of(rest.strip_prefix(b",\"ts\":\"")?)?;
@@ -312,12 +312,12 @@ static SEARCHERS: std::sync::LazyLock<(
 // line in the form whose middle a complete reader refuses is still headed by its opening, the
 // one departure the planner ruled for that cost, which
 // `a_headed_line_malformed_in_its_middle_is_headed_by_its_opening_and_never_fetched` holds.
-pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
+pub fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
     skimmed_opening(line).map(|(skim, _)| skim)
 }
 
 /// [`skimmed_line`], with the opening it read the line's skim off.
-pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
+pub fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
     let (opens, artifacts) = &*SEARCHERS;
@@ -344,7 +344,7 @@ pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
 ///
 /// The one place this read, the heads read and [`fetch`](crate::journal::fetch) hand a
 /// line to the JSON parser whole, so a test counting what they parse counts it here.
-pub(crate) fn whole_record(line: &[u8]) -> Option<Envelope> {
+pub fn whole_record(line: &[u8]) -> Option<Envelope> {
     let parsed = std::str::from_utf8(line)
         .ok()
         .and_then(|text| serde_json::from_str::<Envelope>(text).ok());
@@ -360,7 +360,7 @@ pub(crate) fn whole_record(line: &[u8]) -> Option<Envelope> {
 /// What the tests of these reads count: every record [`whole_record`] parsed, on
 /// whichever of a read's threads it parsed it.
 #[cfg(test)]
-pub(crate) mod whole_parses {
+pub mod whole_parses {
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
 
@@ -368,14 +368,14 @@ pub(crate) mod whole_parses {
 
     /// One record parsed whole.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Parsed {
-        pub(crate) stream: String,
-        pub(crate) seq: u64,
-        pub(crate) kind: String,
+    pub struct Parsed {
+        pub stream: String,
+        pub seq: u64,
+        pub kind: String,
         /// The line's bytes, all of which went to the parser.
-        pub(crate) line_bytes: usize,
+        pub line_bytes: usize,
         /// Its payload's, as the writers serialize it.
-        pub(crate) payload_bytes: usize,
+        pub payload_bytes: usize,
     }
 
     type Sink = Arc<Mutex<Vec<Parsed>>>;
@@ -385,12 +385,12 @@ pub(crate) mod whole_parses {
     }
 
     /// Count from here on, on this thread and the workers its reads start.
-    pub(crate) fn start() {
+    pub fn start() {
         SINK.with_borrow_mut(|sink| *sink = Some(Sink::default()));
     }
 
     /// What was counted since [`start`], which stops counting.
-    pub(crate) fn finish() -> Vec<Parsed> {
+    pub fn finish() -> Vec<Parsed> {
         let sink = SINK
             .with_borrow_mut(Option::take)
             .expect("counting was started");
@@ -427,7 +427,7 @@ pub(crate) mod whole_parses {
 
 /// A finished line read as the complete reader reads it: a whole record, or the
 /// whole record after a fragment, or nothing.
-pub(crate) fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
+pub fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
     let event = whole_record(line)?;
     Some(Skim {
         line,
@@ -443,7 +443,7 @@ pub(crate) fn parsed_line(line: &[u8]) -> Option<Skim<'_>> {
 }
 
 /// Every finished line of `bytes`, up to where a final unfinished one begins.
-pub(crate) fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let mut start = 0;
     memchr::memchr_iter(b'\n', bytes).map(move |end| {
         let line = &bytes[start..end];
@@ -453,7 +453,7 @@ pub(crate) fn finished_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 /// `work` over each of `items`, in their order, across threads where there are many.
-pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     if items.len() < WORKED_ALONE {
         return items.iter().map(work).collect();
     }
@@ -463,7 +463,7 @@ pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + S
 }
 
 /// How many of `len` items one worker takes: all of them where they are few.
-pub(crate) fn run_size(len: usize) -> usize {
+pub fn run_size(len: usize) -> usize {
     if len < WORKED_ALONE {
         len.max(1)
     } else {
@@ -472,7 +472,7 @@ pub(crate) fn run_size(len: usize) -> usize {
 }
 
 /// The runs of `parts`, one after another.
-pub(crate) fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
+pub fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
     let mut done = Vec::with_capacity(len);
     for part in parts {
         done.extend(part);
@@ -482,7 +482,7 @@ pub(crate) fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
 
 /// `work` over each of `parts`, each on a thread of its own where there are several,
 /// the answers in `parts`' order: what every parallel step of these reads is made of.
-pub(crate) fn on_threads<P: Send, R: Send>(parts: Vec<P>, work: impl Fn(P) -> R + Sync) -> Vec<R> {
+pub fn on_threads<P: Send, R: Send>(parts: Vec<P>, work: impl Fn(P) -> R + Sync) -> Vec<R> {
     if parts.len() < 2 {
         return parts.into_iter().map(work).collect();
     }
@@ -516,7 +516,7 @@ const SKIMMED_ALONE: usize = 1 << 20;
 /// works across, each run ending where a line does: what [`finished_lines`] yields of
 /// each run, one run after another, is what it yields of `bytes`, and no thread waits on
 /// another to find where its lines start.
-pub(crate) fn line_runs(bytes: &[u8]) -> Vec<&[u8]> {
+pub fn line_runs(bytes: &[u8]) -> Vec<&[u8]> {
     let finished = &bytes[..memchr::memrchr(b'\n', bytes).map_or(0, |end| end + 1)];
     if finished.len() < SKIMMED_ALONE {
         return vec![finished];
@@ -547,20 +547,20 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 /// Where every line's `ts` is in the writers' form the heads are compared as numbers,
 /// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
 /// streams, which orders them as their text does; otherwise as the text itself.
-pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
+pub fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
     merged_in(lines, None)
 }
 
 /// Each line's stream as a number: `of[line]` names the stream `names` holds at that
 /// number. Every number is some line's, and no two name the same stream.
-pub(crate) struct Numbered<'n> {
-    pub(crate) of: Vec<usize>,
-    pub(crate) names: Vec<&'n str>,
+pub struct Numbered<'n> {
+    pub of: Vec<usize>,
+    pub names: Vec<&'n str>,
 }
 
 /// [`merged`], with each line's stream already numbered where the reader did that on its
 /// own workers, so the merge hashes no line's stream itself.
-pub(crate) fn merged_in(
+pub fn merged_in(
     lines: &[Skim<'_>],
     numbered: Option<Numbered<'_>>,
 ) -> (Vec<Vec<usize>>, Vec<usize>) {
@@ -630,7 +630,7 @@ pub(crate) fn merged_in(
 /// Read off [`merged`]'s `queues`, each a stream's lines in `seq` order, so no record is
 /// hashed for it, and where two lines' `ts` are both in the writers' form they are
 /// compared as the numbers [`instant_of`] reads, which order as their text does.
-pub(crate) fn covered(lines: &[Skim<'_>], queues: &[Vec<usize>]) -> crate::checkpoint::Coverage {
+pub fn covered(lines: &[Skim<'_>], queues: &[Vec<usize>]) -> crate::checkpoint::Coverage {
     let placed_order = |left: &Skim<'_>, right: &Skim<'_>| match (left.instant, right.instant) {
         (Some(left), Some(right)) if left != right => left.cmp(&right),
         _ => (left.ts.as_ref(), left.stream.as_ref())
@@ -794,7 +794,7 @@ const READ_ALONE: usize = 8 << 20;
 /// across threads, since one thread's copy out of the page cache is most of what a
 /// 100 MB first screen used to wait on. A file that came up shorter than its length
 /// was read again whole, which is what a reader of an append-only file never meets.
-pub(crate) fn whole_file(path: &Path) -> Option<Vec<u8>> {
+pub fn whole_file(path: &Path) -> Option<Vec<u8>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
@@ -844,7 +844,7 @@ pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecor
 /// Every record this crate's own writers put in a journal, in the order it was
 /// appended, with no other record parsed: what a reader whose answer no relayed record
 /// decides reads, since on a long run those are nearly all of its bytes.
-pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
+pub fn pipeline_records(journal: &Path) -> Vec<Envelope> {
     let Ok(bytes) = std::fs::read(journal) else {
         return Vec::new();
     };
@@ -870,7 +870,7 @@ pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
 /// that chose them is exactly the tail no held `seq` reaches, and a final unfinished
 /// line is no part of it. Read from the end, so a read that lost no race costs one
 /// tail of the file.
-pub(crate) fn covered_bytes(
+pub fn covered_bytes(
     journal: &Path,
     len: u64,
     reached: &std::collections::BTreeMap<String, u64>,

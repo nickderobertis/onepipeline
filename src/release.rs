@@ -220,17 +220,17 @@ fn failing(check: &onevcs::Check) -> bool {
 /// same three [`views`](crate::views) reads the hold's span off — each named so a
 /// reader is told which one it was rather than only that the wait is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WaitCleared {
+pub struct WaitCleared {
     /// The record's kind: `node-unheld`, `release-adopted` or `node-dispatched`.
-    pub(crate) kind: &'static str,
+    pub kind: &'static str,
     /// When it was recorded, as the envelope stamps it.
-    pub(crate) at: String,
+    pub at: String,
 }
 
 impl WaitCleared {
     /// One line saying what ended the hold, for the reader the surface was
     /// withheld from.
-    pub(crate) fn said(&self, node: &str) -> String {
+    pub fn said(&self, node: &str) -> String {
         let what = match self.kind {
             "node-unheld" => "its hold cleared",
             "release-adopted" => "the releases it awaited were adopted",
@@ -272,7 +272,7 @@ const WAIT_CLEARED_BY: [journal::PipelineKind; 3] = [
 /// an earlier hold of the same node — a requeue, or a fresh driver re-asking —
 /// and says nothing about this one. A record whose stamp this build cannot read
 /// is no evidence either way, and a surface of any other kind is never withheld.
-pub(crate) fn wait_outlived(
+pub fn wait_outlived(
     events: &[crate::event::Envelope],
     surface: &Surface,
 ) -> Option<WaitCleared> {
@@ -324,7 +324,7 @@ type Answered = (Vec<Key>, Answer);
 /// reachable without naming a repository — see `docs/contract-divergences.md`
 /// entry 40 — so such a node falls to the floor, which is what the global rung
 /// answers on any host that has not configured otherwise.
-pub(crate) fn adoption_of(node: &Node) -> Adoption {
+pub fn adoption_of(node: &Node) -> Adoption {
     if let Some(declared) = node.adoption {
         return declared;
     }
@@ -345,7 +345,7 @@ pub(crate) fn adoption_of(node: &Node) -> Adoption {
 /// probe. And "not answered" is never recorded as "not released" anywhere: not in
 /// the scheduler, not in an event payload, and not in a rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// A release carrying the dependency's work is out, at this version. The one
     /// answer that releases a hold.
     Released {
@@ -376,7 +376,7 @@ const NO_ANSWER_YET: &str = "no-answer-yet";
 
 impl Answer {
     /// The word an event payload and a rendering name this answer with.
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Released { .. } => "released",
             Self::NotReleased => "not-released",
@@ -431,7 +431,7 @@ impl Answer {
 /// targets — there is no release to wait for, which is every repository on a host
 /// that has configured none.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Dependency {
+pub struct Dependency {
     /// The dependency as the plan names it: a node id, or a cross-DAG
     /// `run:<id>#<node>` reference.
     pub dep: String,
@@ -742,7 +742,7 @@ fn ask_until_dropped(asked: &Receiver<Vec<Question>>, answered: &Sender<Answered
 }
 
 /// The releases this run is waiting on, and what it has already said about them.
-pub(crate) struct Watch {
+pub struct Watch {
     repositories: Repositories,
     /// The out-of-repository dependencies of each node, once the run could name
     /// them.
@@ -833,7 +833,7 @@ impl Watch {
     /// nothing is ever looked up under it; what a lax reading would cost is a
     /// record with an *empty* node or dep, which is a key a real one could
     /// collide with.
-    pub(crate) fn of_run(paths: &RunPaths) -> Self {
+    pub fn of_run(paths: &RunPaths) -> Self {
         let mut adopted = BTreeSet::new();
         let mut arrived = BTreeSet::new();
         // Off the run's checkpoint rather than its history: the fold keeps every
@@ -893,7 +893,7 @@ impl Watch {
 
     /// Whether this watch has described `node`'s dependencies yet: a node it has not is one
     /// its next refresh describes before the node is dispatched.
-    pub(crate) fn describes(&self, node: &str) -> bool {
+    pub fn describes(&self, node: &str) -> bool {
         self.dependencies.contains_key(node)
     }
 
@@ -906,7 +906,7 @@ impl Watch {
     /// versions it is building against, and this is the **only** place that node
     /// ever sees one, since nothing sends it an arrival note it never needed.
     /// Which of the two the block says of itself is decided by the rows.
-    pub(crate) fn references(&self, node: &Node) -> Vec<CrossRepoReference> {
+    pub fn references(&self, node: &Node) -> Vec<CrossRepoReference> {
         self.dependencies
             .get(&node.id)
             .map(|dependencies| {
@@ -935,7 +935,7 @@ impl Watch {
     /// two intervals, held to a minute — which is the bound this loop promises
     /// for an arriving release, and the ceiling a host that configures neither
     /// falls back to.
-    pub(crate) fn take_up_every(&self) -> Duration {
+    pub fn take_up_every(&self) -> Duration {
         self.surfaced
             .base()
             .min(self.relay_every)
@@ -954,7 +954,7 @@ impl Watch {
     /// own pace, so an answer arrives without anything about this run changing —
     /// and this is how it wakes the loop, rather than the loop going back and
     /// asking on a timer of its own.
-    pub(crate) fn take_up_answers(&mut self) -> bool {
+    pub fn take_up_answers(&mut self) -> bool {
         let mut arrived = false;
         for (keys, answer) in self.asker.answered() {
             arrived = true;
@@ -1068,7 +1068,7 @@ impl Watch {
     /// interval above — which is most runs. A run that names one goes on waking
     /// for it after the answer has arrived, because the answer this holds is a
     /// cache of a thing another process writes.
-    pub(crate) fn names_a_release_dependency(&self) -> bool {
+    pub fn names_a_release_dependency(&self) -> bool {
         !self.unresolved.is_empty() || self.dependencies.values().any(|of| !of.is_empty())
     }
 
@@ -1078,7 +1078,7 @@ impl Watch {
     /// asked of the run: a repository declaring no release target has nothing
     /// recorded about it, so there is nothing to go and read. Answered off the
     /// per-driver cache, so asking again costs nothing.
-    pub(crate) fn relays_anything(&mut self, state: &RunState) -> bool {
+    pub fn relays_anything(&mut self, state: &RunState) -> bool {
         // And a settled draft that may yet land, whose stream the pass reads for that landing
         // wherever its repository releases nothing.
         if state
@@ -1111,7 +1111,7 @@ impl Watch {
     /// node is the release it may be waiting on, and that it could not yet be
     /// asked about is the wait's account of itself rather than a reason to name
     /// nothing.
-    pub(crate) fn awaited_deps(&self, node: &str) -> Vec<String> {
+    pub fn awaited_deps(&self, node: &str) -> Vec<String> {
         self.dependencies
             .get(node)
             .map(Vec::as_slice)
@@ -1140,7 +1140,7 @@ impl Watch {
     /// `watching` is the nodes whose releases matter this pass: every node that
     /// is ready to start, and every fast-adoption node still running. Neither
     /// blocks on anything.
-    pub(crate) fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
+    pub fn refresh(&mut self, paths: &RunPaths, state: &RunState, watching: &[Node]) {
         self.take_up_answers();
         let now = crate::sys::now_millis();
         let re_read = self.landings_are_due();
@@ -1202,7 +1202,7 @@ impl Watch {
     /// The rung is asked last, of a node something would hold: it resolves the
     /// node's repository through `onevcs`, git processes and all, and this is
     /// asked of every watched node on every pass.
-    pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
+    pub fn held(&self, watching: &[Node]) -> BTreeSet<String> {
         watching
             .iter()
             .filter(|node| {
@@ -1224,7 +1224,7 @@ impl Watch {
     ///
     /// The wait is surfaced when it begins and again on its own interval, so it
     /// cannot go silent; the arrival of one release is reported once.
-    pub(crate) fn report(
+    pub fn report(
         &mut self,
         paths: &RunPaths,
         journal: &mut Journal,
@@ -1357,7 +1357,7 @@ impl Watch {
     // llmlint: ignore-block[changed_behavior_has_e2e] the two failures this reaches are
     // not decided here: an unreadable stream is [`crate::vcs::events`]'s own answer and
     // an unwritable journal is [`Journal::relay`]'s, each held where it lives.
-    pub(crate) fn relay_releases(
+    pub fn relay_releases(
         &mut self,
         paths: &RunPaths,
         journal: &mut Journal,
@@ -1627,7 +1627,7 @@ impl Watch {
     /// worker's own publication then does.
     ///
     /// The rung is asked last, for [`held`](Self::held)'s reason.
-    pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
+    pub fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
         told.iter()
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
@@ -1666,7 +1666,7 @@ impl Watch {
     }
 
     /// Record that one node has been told, so it is told exactly once.
-    pub(crate) fn adopted(&mut self, node: &str) {
+    pub fn adopted(&mut self, node: &str) {
         self.adopted.insert(node.to_owned());
     }
 
@@ -2011,7 +2011,7 @@ enum Resolution {
 
 /// One release a node was waiting on, as the note and the event name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Released {
+pub struct Released {
     /// The dependency, as the plan names it.
     pub dep: String,
     /// The repository identity that released it.
@@ -2037,7 +2037,7 @@ impl Released {
     /// commit, or an instruction writes the record it always wrote, and a build
     /// that predates them reads one that carries them exactly as it read one that
     /// did not.
-    pub(crate) fn payload(&self) -> Value {
+    pub fn payload(&self) -> Value {
         let mut entry = json!({
             "identity": self.identity,
             "target": self.target,
@@ -2057,7 +2057,7 @@ impl Released {
         entry
     }
 
-    pub(crate) fn row(&self) -> CrossRepoReference {
+    pub fn row(&self) -> CrossRepoReference {
         CrossRepoReference {
             dependency: self.dep.clone(),
             repository: self.identity.clone(),
@@ -2078,7 +2078,7 @@ impl Released {
     /// cannot read. What is at stake is the rendering: all three land in a
     /// worker's own task, and one carrying a control character forges a line
     /// there.
-    pub(crate) fn of_payload(payload: &Value) -> Vec<Self> {
+    pub fn of_payload(payload: &Value) -> Vec<Self> {
         payload
             .as_array()
             .map(Vec::as_slice)
@@ -2173,7 +2173,7 @@ fn renderable(value: &str) -> Option<String> {
 /// release itself; no baseline is derived from when the work was committed or
 /// from what a probe answers now, because neither proves what was public when the
 /// work landed.
-pub(crate) fn acknowledge_stated_releases(commands: &[crate::channel::Command]) -> Result<()> {
+pub fn acknowledge_stated_releases(commands: &[crate::channel::Command]) -> Result<()> {
     for command in commands {
         let crate::channel::Command::Settle {
             id,
@@ -2230,7 +2230,7 @@ const NO_BASELINE: &str = "no baseline was captured";
 /// that did not answer this time — says nothing, because none of them is a hold the
 /// next answer cannot lift. Nothing here infers a baseline; `onevcs` is asked exactly
 /// what the release watch asks it.
-pub(crate) fn hold_warnings_for_stated_landings(
+pub fn hold_warnings_for_stated_landings(
     state: &RunState,
     commands: &[crate::channel::Command],
 ) -> Vec<String> {
@@ -2411,16 +2411,16 @@ fn shell_word(word: &str) -> String {
 /// What one fast-adoption node is still waiting on at its publication: the reason
 /// its publication is held, and every release it awaits.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Awaiting {
+pub struct Awaiting {
     /// The reason handed to `onevcs` for a draft: always
     /// [`onevcs::DraftReason::AwaitingRelease`], naming [`first`](Self::first).
-    pub(crate) reason: onevcs::DraftReason,
+    pub reason: onevcs::DraftReason,
     /// The first release still awaited — the one the reason names, and the one a
     /// held node's detail names.
-    pub(crate) first: crate::payload::Awaited,
+    pub first: crate::payload::Awaited,
     /// One entry per release still awaited, in the order the node's reference rows
     /// list them — what `node-settled`'s `awaiting` carries for a view to read.
-    pub(crate) releases: Vec<crate::payload::Awaited>,
+    pub releases: Vec<crate::payload::Awaited>,
 }
 
 /// Why one fast-adoption node's change request is opened as a **draft** — or,
@@ -2438,7 +2438,7 @@ pub(crate) struct Awaiting {
 /// A row this run cannot put a question about is **not** drafted against — the
 /// judgement [`Dependency::askable`] already makes for the hold — because a draft
 /// nothing can ever lift is a change request nobody can finish.
-pub(crate) fn awaiting(references: &[CrossRepoReference]) -> Option<Awaiting> {
+pub fn awaiting(references: &[CrossRepoReference]) -> Option<Awaiting> {
     // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
     // half of `askable`: a row is only composed for a dependency that settled `done`
     // in a repository declaring release targets, so it has the branch or the landing
@@ -2504,7 +2504,7 @@ pub(crate) fn awaiting(references: &[CrossRepoReference]) -> Option<Awaiting> {
 /// already said the node is a draft. A draft the **plan** asked for has no
 /// release to name and says only that it is one, and whose to lift. Rendered here
 /// rather than in `src/lifecycle.rs` so there is one spelling of each.
-pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
+pub fn drafted_detail(reason: &onevcs::DraftReason) -> String {
     match reason {
         onevcs::DraftReason::AwaitingRelease {
             target,
@@ -2529,7 +2529,7 @@ pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
 /// waits for. `kept` is what putting the branch on the origin answered, said in
 /// words — `pushed`, `already on origin`, or `no origin` — on a line written for a
 /// person rather than as [`crate::vcs::preservation_word`]'s journal word.
-pub(crate) fn held_detail(
+pub fn held_detail(
     awaited: &crate::payload::Awaited,
     branch: &str,
     commit: &str,
@@ -2562,7 +2562,7 @@ pub(crate) fn held_detail(
 /// the change request and the two have to agree about the words: a person reads
 /// this to learn why a `done` node's change did not land, and the answer is that
 /// the plan said so and that lifting it is theirs.
-pub(crate) const HELD_DETAIL: &str =
+pub const HELD_DETAIL: &str =
     "complete, and left as a draft as the plan asked, for a person to mark ready for review";
 
 /// Why a change request the plan asked to leave as a draft is one, in the words
@@ -2571,7 +2571,7 @@ pub(crate) const HELD_DETAIL: &str =
 /// The sentence a person reads off `change-drafted`, so it says whose decision
 /// the draft is: the plan's, and not a release's. Composed here beside the other
 /// reason this crate hands that library so both are spelled in one module.
-pub(crate) fn held_reason(node: &str) -> onevcs::DraftReason {
+pub fn held_reason(node: &str) -> onevcs::DraftReason {
     onevcs::DraftReason::Held {
         because: format!(
             "node '{node}' is declared `draft: true`, so its change request is left as a draft \
@@ -2623,7 +2623,7 @@ fn released_already(reference: &str, target: &TargetName) -> bool {
 /// delivery is folded back, so a note replayed from the record is the note that
 /// was sent — which is why the record carries what the template is rendered
 /// against and not only the rendering.
-pub(crate) fn arrival_note(released: &[Released]) -> String {
+pub fn arrival_note(released: &[Released]) -> String {
     crate::plan::arrival_note(&released.iter().map(Released::row).collect::<Vec<_>>())
 }
 
@@ -2692,7 +2692,7 @@ fn questions_of(waits: &[(Key, Dependency)]) -> Vec<Question> {
 /// still being watched for. The third is the one that matters after a node has
 /// stopped running: a draft nobody goes on asking about is a change request that
 /// never becomes ready.
-pub(crate) fn watching(
+pub fn watching(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     running: &BTreeSet<String>,
@@ -2865,7 +2865,7 @@ fn retire(
 }
 
 /// The interval an unchanged held wait is first re-surfaced after.
-pub(crate) fn surface_every_seconds() -> u64 {
+pub fn surface_every_seconds() -> u64 {
     std::env::var(SURFACE_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -2892,7 +2892,7 @@ pub(crate) fn surface_every_seconds() -> u64 {
 /// it is also what lets a journey prove a four-hour ceiling through the
 /// compiled binary by backdating that record, with nothing about the cadence
 /// configurable.
-pub(crate) struct Resurfacing {
+pub struct Resurfacing {
     base: Duration,
     last: BTreeMap<String, Surfaced>,
     /// The run's channel, kept so an unchanged queue is re-read as one
@@ -2918,7 +2918,7 @@ struct Surfaced {
 }
 
 impl Resurfacing {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             base: Duration::from_secs(surface_every_seconds()),
             last: BTreeMap::new(),
@@ -2927,7 +2927,7 @@ impl Resurfacing {
     }
 
     /// The interval an unchanged wait is first queued again after.
-    pub(crate) fn base(&self) -> Duration {
+    pub fn base(&self) -> Duration {
         self.base
     }
 
@@ -2938,7 +2938,7 @@ impl Resurfacing {
     /// while it has not moved — and once it has been read, the stamp the
     /// interval counts from is the log's `queued` record of it, read again at
     /// most once a second.
-    pub(crate) fn due(&mut self, paths: &RunPaths, node: &str, content: &str) -> bool {
+    pub fn due(&mut self, paths: &RunPaths, node: &str, content: &str) -> bool {
         let Some(last) = self.last.get(node) else {
             return true;
         };
@@ -2972,7 +2972,7 @@ impl Resurfacing {
     }
 
     /// Record that `node`'s wait, saying `content`, was queued as `queued`.
-    pub(crate) fn queued(&mut self, node: &str, content: String, queued: &Surface) {
+    pub fn queued(&mut self, node: &str, content: String, queued: &Surface) {
         let ceiling = Duration::from_secs(SURFACE_CEILING_SECONDS);
         let every = match self.last.get(node) {
             Some(last) if last.content == content => match last.every >= ceiling {
@@ -2995,7 +2995,7 @@ impl Resurfacing {
 
     /// Forget every node `held` no longer says is held, so a hold that ends and
     /// begins again is surfaced as the new hold it is.
-    pub(crate) fn retain(&mut self, held: impl Fn(&str) -> bool) {
+    pub fn retain(&mut self, held: impl Fn(&str) -> bool) {
         self.last.retain(|node, _| held(node));
     }
 }

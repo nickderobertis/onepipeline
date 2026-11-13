@@ -55,7 +55,7 @@ pub const PLAN_SCHEMA_VERSIONS_READ: [u32; 3] = [PLAN_SCHEMA_VERSION, 2, 1];
 /// The node and the field, because both are what its author has to act on: a
 /// plan may carry many lifecycle nodes and only one of them be missing its
 /// subject.
-pub(crate) const TITLE_IS_REQUIRED: &str = "a lifecycle node states the title its change request \
+pub const TITLE_IS_REQUIRED: &str = "a lifecycle node states the title its change request \
      opens under, and this one names no `title`";
 
 /// What a plan below [`PLAN_SCHEMA_VERSION`] naming `body` is told.
@@ -64,7 +64,7 @@ pub(crate) const TITLE_IS_REQUIRED: &str = "a lifecycle node states the title it
 /// by the field's own name — rather than a value silently dropped: a planner who
 /// wrote a change request body and had it ignored would find that out from the
 /// published change request.
-pub(crate) fn body_is_newer(declared: u32) -> String {
+pub fn body_is_newer(declared: u32) -> String {
     format!(
         "`body` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
          {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
@@ -74,7 +74,7 @@ pub(crate) fn body_is_newer(declared: u32) -> String {
 /// What a plan below [`PLAN_SCHEMA_VERSION`] naming `draft` is told, for
 /// [`body_is_newer`]'s reason: a planner who asked for a draft and had the ask
 /// ignored would find that out from a change request that landed.
-pub(crate) fn draft_is_newer(declared: u32) -> String {
+pub fn draft_is_newer(declared: u32) -> String {
     format!(
         "`draft` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares schema_version \
          {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
@@ -83,12 +83,12 @@ pub(crate) fn draft_is_newer(declared: u32) -> String {
 
 /// What a lifecycle node stating `publish: "preserve"` beside `draft: true` is
 /// told: a draft is a state of a change request, and a kept branch opens none.
-pub(crate) const PRESERVE_BESIDE_DRAFT: &str = "`publish: \"preserve\"` keeps the branch and \
+pub const PRESERVE_BESIDE_DRAFT: &str = "`publish: \"preserve\"` keeps the branch and \
      opens no change request, so there is nothing for `draft: true` to leave as a draft — drop \
      one of the two";
 
 /// What a node that keeps nothing is told when it states `publish: "preserve"`.
-pub(crate) fn preserve_needs_a_branch(what: &str) -> String {
+pub fn preserve_needs_a_branch(what: &str) -> String {
     format!(
         "`publish: \"preserve\"` keeps a lifecycle node's branch, and {what} leaves no branch to \
          keep"
@@ -96,7 +96,7 @@ pub(crate) fn preserve_needs_a_branch(what: &str) -> String {
 }
 
 /// What a node depending on a `publish: "preserve"` node is told.
-pub(crate) fn depends_on_preserved(node: &str, dep: &str) -> String {
+pub fn depends_on_preserved(node: &str, dep: &str) -> String {
     format!(
         "node '{node}' depends on '{dep}', which states `publish: \"preserve\"`: its work is kept \
          on a branch and never reaches a base, so nothing built on it could land"
@@ -104,18 +104,18 @@ pub(crate) fn depends_on_preserved(node: &str, dep: &str) -> String {
 }
 
 /// Why independent kept branches cannot supply one session base.
-pub(crate) fn preserved_fan_in(node: &str, candidates: &[&str]) -> String {
+pub fn preserved_fan_in(node: &str, candidates: &[&str]) -> String {
     format!("node '{node}' has preserve dependencies [{}] on separate stacking chains: a session starts from one kept branch and merging kept branches is not supported", candidates.join(", "))
 }
 
 /// Why explicit placement and inherited kept work cannot both select a base.
-pub(crate) fn preserved_base_conflict(node: &str) -> String {
+pub fn preserved_base_conflict(node: &str) -> String {
     format!("node '{node}' states base_branch and has a same-repository preserve dependency: those are two answers to where its session starts")
 }
 
 /// Name a node field that this plan schema introduced, so an older document's
 /// request cannot be accepted and silently ignored.
-pub(crate) fn node_field_is_newer(field: &str, declared: u32) -> String {
+pub fn node_field_is_newer(field: &str, declared: u32) -> String {
     format!(
         "`{field}` is a schema {PLAN_SCHEMA_VERSION} field and this plan declares \
          schema_version {declared} — set `schema_version: {PLAN_SCHEMA_VERSION}`"
@@ -211,7 +211,7 @@ const NOTES_PRECEDENCE: &str =
 /// Where an amendment is rendered into, and the one section `criteria` reads a
 /// bar off — so the two readers of a node's bar, its judge and the engine's own
 /// check, are reading the same section.
-pub(crate) const CRITERIA_HEADING: &str = "## Acceptance criteria";
+pub const CRITERIA_HEADING: &str = "## Acceptance criteria";
 
 /// The heading the notes an earlier dispatch of the node read are rendered under.
 ///
@@ -221,7 +221,7 @@ pub(crate) const CRITERIA_HEADING: &str = "## Acceptance criteria";
 /// when the engine opens a fresh conversation for the same node — a publication
 /// failed and the node is continued on its branch — what that conversation read
 /// is composed back in as the ruling it was, and not as observed state.
-pub(crate) const MANAGER_NOTES_HEADING: &str = "## Manager notes";
+pub const MANAGER_NOTES_HEADING: &str = "## Manager notes";
 
 /// What the manager-notes section tells its reader about itself.
 ///
@@ -339,7 +339,7 @@ pub const ADOPTION_INSTRUCTION_VARIABLES: [&str; 6] = [
 /// written before this schema change carries one. So the refusal names the field
 /// and says where the bar goes instead — wherever the field reaches this crate,
 /// including as `onepipeline.done_when` on a task of the store.
-pub(crate) const DONE_WHEN_RETIRED: &str =
+pub const DONE_WHEN_RETIRED: &str =
     "`done_when` is no longer a plan field. A node's review bar is the \
      `## Acceptance criteria` section of its own task, which the judge is handed \
      verbatim; a bar broader than one node belongs in the onejudge base config the \
@@ -358,7 +358,7 @@ pub(crate) const DONE_WHEN_RETIRED: &str =
 /// A flag saying "use CI as the
 /// verification" beside a policy that already does would be a second way to ask
 /// for one behaviour, and the one nothing honoured.
-pub(crate) const VERIFY_VIA_CI_RETIRED: &str =
+pub const VERIFY_VIA_CI_RETIRED: &str =
     "`verify_via_ci` is no longer a plan field, and nothing ever read it. The \
      host's own required checks are the merge-path verification of a node whose \
      `merge_policy` is `change-auto`, which watches them to their conclusion; a \
@@ -388,7 +388,7 @@ const VERIFY_VIA_CI: &str = "verify_via_ci";
 /// the task the dag-scope graph is launched with — because a run with no goal
 /// reads the same either way, and two spellings of it would drift apart.
 /// Crate-private: it is a rendering, not part of the published surface.
-pub(crate) const NO_GOAL: &str = "(no goal stated)";
+pub const NO_GOAL: &str = "(no goal stated)";
 
 /// One plan: the task DAG a run executes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -456,7 +456,7 @@ fn default_concurrency() -> u32 {
 /// three is one answer a planner can act on. Only mapping *keys* are read, so
 /// prose that discusses the field is not mistaken for a document that declares
 /// it.
-pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<String> {
+pub fn retired_field_refusal(document: &serde_json::Value) -> Option<String> {
     match document {
         serde_json::Value::Object(map) => {
             if let Some((_, retired)) = RETIRED_FIELDS
@@ -562,7 +562,7 @@ impl Step {
     /// [`MANAGER_NOTES_HEADING`], so the ruling the worker obeyed is read by the
     /// judge that rules on the worker. An empty slice renders exactly what
     /// [`rendered_task_for`](Self::rendered_task_for) renders.
-    pub(crate) fn rendered_task_carrying(
+    pub fn rendered_task_carrying(
         &self,
         node: &Node,
         references: &[CrossRepoReference],
@@ -779,7 +779,7 @@ fn amended(task: &str, amendment: &str) -> String {
 /// * a heading — an amendment written as a task states one over its own bar —
 ///   is kept as a bold label rather than as a heading, because a heading inside
 ///   the criteria section would end it, and the section is the point.
-pub(crate) fn amendment_clauses(amendment: &str) -> String {
+pub fn amendment_clauses(amendment: &str) -> String {
     // The attribution is who the ruling is from, never one of its clauses.
     let (_, amendment) = crate::ruling::split_attribution(amendment);
     let mut lines: Vec<String> = Vec::new();
@@ -888,7 +888,7 @@ fn criteria_section_end(task: &str) -> Option<usize> {
 
 /// Whether a line opens a task section: a level-two heading, and not a deeper
 /// one.
-pub(crate) fn is_section_heading(line: &str) -> bool {
+pub fn is_section_heading(line: &str) -> bool {
     line.starts_with("##") && !line.starts_with("###")
 }
 
@@ -1015,7 +1015,7 @@ fn with_notes(task: &str, notes: &[crate::note::RecordedNote]) -> String {
 /// [`OpenConflict`](onevcs::OpenConflict); what this adds is the two names the
 /// worker reads it by and the base's commits that made the conflict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MergeInProgress {
+pub struct MergeInProgress {
     /// The base's name, which the merge brought in.
     pub base_name: String,
     /// The session's branch, which the merge is into.
@@ -1032,7 +1032,7 @@ pub(crate) struct MergeInProgress {
 
 /// How many of the base's commits a conflicted dispatch is shown, so a base
 /// that moved a long way cannot swallow the task it is composed into.
-pub(crate) const MERGE_COMMITS_LISTED: usize = 20;
+pub const MERGE_COMMITS_LISTED: usize = 20;
 
 /// One task with the merge its session opened with composed into it: the
 /// conflict as observed state under [`PLANNER_CONTEXT_HEADING`], and
@@ -1042,14 +1042,14 @@ pub(crate) const MERGE_COMMITS_LISTED: usize = 20;
 /// the conflict exists only once the session is open, and the session is opened
 /// where the dispatch runs — after the task was composed. Every other section is
 /// left exactly as it was rendered, a re-dispatch's diagnosis included.
-pub(crate) fn with_merge_in_progress(task: &str, merge: &MergeInProgress) -> String {
+pub fn with_merge_in_progress(task: &str, merge: &MergeInProgress) -> String {
     with_merge_context(&with_merge_resolution(task, merge), merge)
 }
 
 /// The rendered task with `section` above its operational notes: above
 /// `## Additional info`, or above the first section the rendering appended where
 /// the task states none, and otherwise at its end.
-pub(crate) fn above_notes(task: &str, section: &str) -> String {
+pub fn above_notes(task: &str, section: &str) -> String {
     let above = additional_info_at(task).or_else(|| {
         [
             PLANNER_CONTEXT_HEADING,
@@ -1067,7 +1067,7 @@ pub(crate) fn above_notes(task: &str, section: &str) -> String {
 }
 
 /// The criterion the judge of a conflicted dispatch reads, filled in.
-pub(crate) fn merge_resolution_criterion(merge: &MergeInProgress) -> String {
+pub fn merge_resolution_criterion(merge: &MergeInProgress) -> String {
     MERGE_RESOLUTION_CRITERION
         .replace("{base_commit}", &merge.conflict.base_commit)
         .replace("{branch}", &merge.branch_name)

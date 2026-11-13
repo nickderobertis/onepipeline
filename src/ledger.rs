@@ -97,7 +97,7 @@ use crate::sys;
 /// measuring a delta wants the reads it performed, not the ones a test beside it
 /// performed at the same time.
 #[cfg(test)]
-pub(crate) fn bytes_read() -> u64 {
+pub fn bytes_read() -> u64 {
     crate::loopstats::store_bytes()
 }
 
@@ -246,7 +246,7 @@ impl RunPaths {
     /// so `status` — another process — can say a maintenance is in progress
     /// without the driver having to be asked. A derived record of the run's
     /// own, kept where its state is kept, for the checkpoint's reason.
-    pub(crate) fn maintenance(&self) -> PathBuf {
+    pub fn maintenance(&self) -> PathBuf {
         self.dir.join("maintenance.json")
     }
 
@@ -261,14 +261,14 @@ impl RunPaths {
     /// members of this type and says nothing else on it is contracted, and this
     /// document is read and written by one private module — so publishing the
     /// path would be a promise nobody asked for about a cache.
-    pub(crate) fn checkpoint(&self) -> PathBuf {
+    pub fn checkpoint(&self) -> PathBuf {
         self.dir.join("checkpoint.json")
     }
 
     /// The run's **member liveness**: each in-flight dispatch member's latest
     /// heartbeat, overwritten in place rather than journalled. See
     /// [`crate::heartbeat`].
-    pub(crate) fn liveness(&self) -> PathBuf {
+    pub fn liveness(&self) -> PathBuf {
         self.dir.join("liveness.json")
     }
 
@@ -286,7 +286,7 @@ impl RunPaths {
     /// [`views::Watchers::of`](crate::views::Watchers::of) rather than by
     /// composing a path — so publishing the directory would be a second promise
     /// about the same documents.
-    pub(crate) fn watchers(&self) -> PathBuf {
+    pub fn watchers(&self) -> PathBuf {
         self.dir.join("watchers")
     }
 
@@ -299,7 +299,7 @@ impl RunPaths {
     /// kernel has handed round again is not its predecessor, so a name that were
     /// only a pid would let a new watch land on an old record — which is why
     /// staleness is decided by a record's *content* and never by its name.
-    pub(crate) fn watcher(&self, pid: u32, nonce: &str) -> PathBuf {
+    pub fn watcher(&self, pid: u32, nonce: &str) -> PathBuf {
         self.watchers().join(format!("{pid}-{nonce}.json"))
     }
 
@@ -310,13 +310,13 @@ impl RunPaths {
     /// record reads every file in that directory closed as a lease, and a second
     /// shape there would read to it as a record it cannot parse. Private for the
     /// reason [`watchers`](Self::watchers) is.
-    pub(crate) fn watch_terms(&self) -> PathBuf {
+    pub fn watch_terms(&self) -> PathBuf {
         self.dir.join("watch-terms")
     }
 
     /// The directory the launching session's acknowledgements of this run are
     /// kept in, one document each.
-    pub(crate) fn acknowledgements(&self) -> PathBuf {
+    pub fn acknowledgements(&self) -> PathBuf {
         self.dir.join("acknowledgements")
     }
 
@@ -411,7 +411,7 @@ impl RunPaths {
 
     /// Every process a teardown of this run signalled and then saw end. See
     /// [`ended_by_teardown`].
-    pub(crate) fn ended(&self) -> PathBuf {
+    pub fn ended(&self) -> PathBuf {
         self.dir.join("ended.jsonl")
     }
 }
@@ -617,7 +617,7 @@ impl RecordedBusConfig {
 
     /// Whether the recorded document declares validators: a run launched under
     /// a bus that judged its offers with them, which this engine no longer runs.
-    pub(crate) fn launched_with_validators(&self) -> bool {
+    pub fn launched_with_validators(&self) -> bool {
         self.launched_with_validators
     }
 }
@@ -1400,7 +1400,7 @@ fn is_zero(value: &u64) -> bool {
 /// and what a launcher that wrote a blank one recorded. Reading them apart would
 /// make a run written before the key existed *ownable* by whichever reader also
 /// had no session.
-pub(crate) fn attributed(recorded: &str) -> bool {
+pub fn attributed(recorded: &str) -> bool {
     !recorded.is_empty() && recorded != sys::UNKNOWN_LAUNCHER
 }
 
@@ -1410,7 +1410,7 @@ pub(crate) fn attributed(recorded: &str) -> bool {
 /// recorded session — the launch record, and the summary document a listing
 /// reads instead of it — and one reading over both is what keeps a run from
 /// being this session's on one view and nobody's on the other.
-pub(crate) fn owned_by(recorded: &str, reader: &str) -> bool {
+pub fn owned_by(recorded: &str, reader: &str) -> bool {
     attributed(recorded) && recorded == reader
 }
 
@@ -1418,7 +1418,7 @@ pub(crate) fn owned_by(recorded: &str, reader: &str) -> bool {
 ///
 /// The counterpart of [`owned_by`], shared by both documents for the same
 /// reason.
-pub(crate) fn owner_label(launcher: &str, recorded: &str, reader: &str) -> String {
+pub fn owner_label(launcher: &str, recorded: &str, reader: &str) -> String {
     if !attributed(recorded) {
         "[unknown]".to_string()
     } else if recorded == reader {
@@ -1617,13 +1617,13 @@ fn publish(
 }
 
 /// Record host calls in unit tests; production calls the filesystem directly.
-pub(crate) mod disk {
+pub mod disk {
     #[cfg(test)]
     use std::cell::RefCell;
     use std::{fs, io, path::Path};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum Step {
+    pub enum Step {
         Contents,
         Publish,
         Entry,
@@ -1710,7 +1710,7 @@ pub(crate) mod disk {
     }
 
     #[cfg(test)]
-    pub(crate) struct Watch;
+    pub struct Watch;
 
     /// Watch this thread's writes and reads, refusing every occurrence of the selected step.
     ///
@@ -1718,7 +1718,7 @@ pub(crate) mod disk {
     /// it: the steps read back would be a mix of two writes, which is a test
     /// passing on somebody else's evidence.
     #[cfg(test)]
-    pub(crate) fn watching(refusing: Option<Step>) -> Watch {
+    pub fn watching(refusing: Option<Step>) -> Watch {
         refusing_times(refusing, usize::MAX)
     }
 
@@ -1726,7 +1726,7 @@ pub(crate) mod disk {
     /// occurrences of `step` — a refusal the host stops giving, as Windows stops
     /// refusing a destination once the rename replacing it is done.
     #[cfg(test)]
-    pub(crate) fn refusing(step: Step, times: usize) -> Watch {
+    pub fn refusing(step: Step, times: usize) -> Watch {
         refusing_times(Some(step), times)
     }
 
@@ -1748,7 +1748,7 @@ pub(crate) mod disk {
 
     #[cfg(test)]
     impl Watch {
-        pub(crate) fn asked(&self) -> Vec<Step> {
+        pub fn asked(&self) -> Vec<Step> {
             WATCHED.with_borrow(|watched| {
                 watched
                     .as_ref()
@@ -1931,7 +1931,7 @@ fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>)
 /// [`open_healed`] for a caller that holds the handle across a read and its
 /// append — the human-item writer, which judges an action against the journal
 /// it is about to extend — reporting what it healed as every appender does.
-pub(crate) fn open_healed_for_append(path: &Path) -> Result<fs::File> {
+pub fn open_healed_for_append(path: &Path) -> Result<fs::File> {
     let (healed, opened) = open_healed(path);
     if let Some(torn) = &healed {
         report_torn_tail(path, torn);
@@ -2150,18 +2150,18 @@ fn records_of(bytes: &[u8], base: u64) -> Vec<Record> {
 /// The journal's envelope lines are decoded by that reader and by nothing here:
 /// a line it read whole carries the envelope, and any other line carries only its
 /// place, for a caller deciding what a line that is not an envelope is.
-pub(crate) struct EnvelopeLine {
+pub struct EnvelopeLine {
     /// The 1-based line number, counted from where the read began.
-    pub(crate) line: usize,
+    pub line: usize,
     /// Where the line begins in the file.
-    pub(crate) offset: u64,
+    pub offset: u64,
     /// How many bytes of the file the line is, without its terminator.
-    pub(crate) bytes: u64,
+    pub bytes: u64,
     /// Whether a newline ended it: the reader's own torn report is the one line
     /// that is `false`.
-    pub(crate) terminated: bool,
+    pub terminated: bool,
     /// The envelope, where the reader read the line as a whole one.
-    pub(crate) envelope: Option<crate::event::Envelope>,
+    pub envelope: Option<crate::event::Envelope>,
 }
 
 impl EnvelopeLine {
@@ -2172,7 +2172,7 @@ impl EnvelopeLine {
     /// or a refused line — which is rare, so it is read again from the file
     /// rather than held for every line of every read. A reread that fails is not
     /// an empty line: the reader refused bytes that were there.
-    pub(crate) fn text(&self, path: &Path) -> Option<String> {
+    pub fn text(&self, path: &Path) -> Option<String> {
         read_range(path, self.offset, self.bytes).map(|bytes| {
             String::from_utf8_lossy(&bytes)
                 .trim_end_matches('\r')
@@ -2189,7 +2189,7 @@ impl EnvelopeLine {
 /// probe. `from` is a record boundary; a file that does not exist, cannot be opened,
 /// or is shorter than `from` reads as holding nothing past it, which is the rule
 /// every ledger reader here follows.
-pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
+pub fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
     // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
     // ledger reader here follows, stated on `read_records` above: a file this process
     // cannot open reads as one that is not there.
@@ -2244,7 +2244,7 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
 /// view. Unlike `Reader::open_at`, this does not read the byte before `from`:
 /// the append receipt establishes continuity and the cursor supplies the boundary.
 /// Envelope validation still belongs to the vocabulary's serde implementation.
-pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> Vec<EnvelopeLine> {
+pub fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> Vec<EnvelopeLine> {
     let Some(bytes) = read_range(path, from, len) else {
         return Vec::new();
     };
@@ -2278,7 +2278,7 @@ pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> 
 /// the journal cannot corroborate gets.
 ///
 /// Counted like every other read here — see the note at the head of this file.
-pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
+pub fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).ok()?;
     file.seek(SeekFrom::Start(from)).ok()?;
@@ -2461,7 +2461,7 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
 /// process has released the run: a lock this build cannot read, and one the
 /// filesystem will not open, are each a claim it cannot rule out. Only a lock
 /// that is gone, or one naming another holder, says the process holds nothing.
-pub(crate) fn lock_may_be_held_by(paths: &RunPaths, host: &str, pid: u32) -> bool {
+pub fn lock_may_be_held_by(paths: &RunPaths, host: &str, pid: u32) -> bool {
     match read_lock_file(&paths.lock()) {
         Ok(LockFile::Absent) => false,
         Ok(LockFile::Record(held)) => held.host == host && held.pid == pid,
@@ -2754,7 +2754,7 @@ fn unsettled_claim(entry: &Path, run: &str, taking_over: &LockRecord) -> Error {
 /// Whether `error` refused a claim over a run no process can be named as holding
 /// — a lock nobody can read, or one a live process is part-way through taking
 /// over. Either is still a claim on the run, and answered as one.
-pub(crate) fn is_unnamed_claim(error: &Error) -> bool {
+pub fn is_unnamed_claim(error: &Error) -> bool {
     is_unreadable_lock(error)
         || matches!(
             error,
@@ -2765,7 +2765,7 @@ pub(crate) fn is_unnamed_claim(error: &Error) -> bool {
 
 /// Whether `error` refused a claim over a lock nobody can be named as holding —
 /// which is still a claim on the run, and answered as one.
-pub(crate) fn is_unreadable_lock(error: &Error) -> bool {
+pub fn is_unreadable_lock(error: &Error) -> bool {
     matches!(
         error,
         Error::Ledger { source, .. }
@@ -2817,7 +2817,7 @@ pub(crate) fn is_unreadable_lock(error: &Error) -> bool {
 /// is worse still: two parties picking one number then create two different
 /// paths, and the filesystem is never asked to arbitrate at all.
 #[derive(Debug)]
-pub(crate) struct Handover {
+pub struct Handover {
     /// The entry this process created, which nothing else ever removes.
     entry: PathBuf,
 }
@@ -2832,10 +2832,10 @@ fn handover_entries(paths: &RunPaths) -> PathBuf {
 ///
 /// Read as well as written: it is how one reply taking a run over tells itself
 /// from a driver driving it, and the two answer differently.
-pub(crate) const REPLY_VERB: &str = "reply";
+pub const REPLY_VERB: &str = "reply";
 
 /// The verb a driver writes into a run's ownership lock while it drives it.
-pub(crate) const DRIVE_VERB: &str = "drive";
+pub const DRIVE_VERB: &str = "drive";
 
 /// How long a party waits for a **live holder** before refusing.
 ///
@@ -2863,13 +2863,13 @@ const NUMBERS_TRIED: usize = 1_000;
 // `engine::tests::a_submission_either_reaches_the_departing_owners_queue_or_finds_the_run_free`.
 impl Handover {
     /// Hold the gate for this run, or report that this process is not inside it.
-    pub(crate) fn hold(paths: &RunPaths) -> Result<Self> {
+    pub fn hold(paths: &RunPaths) -> Result<Self> {
         Self::hold_within(paths, HANDOVER_PATIENCE)
     }
 
     /// The same, with the patience stated — which is how a test drives a
     /// contention that outlasts it without waiting out the shipped bound.
-    pub(crate) fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
+    pub fn hold_within(paths: &RunPaths, patience: std::time::Duration) -> Result<Self> {
         let dir = handover_entries(paths);
         fs::create_dir_all(&dir).map_err(|e| not_taken(&paths.run, &e.to_string()))?;
         let host = sys::hostname();
@@ -3099,7 +3099,7 @@ impl OwnershipLock {
     /// then names a process that is about to end, which the next writer reclaims
     /// on the spot — so the run is recovered by the same path that recovers one
     /// whose driver died, rather than by nothing.
-    pub(crate) fn abandon(mut self) {
+    pub fn abandon(mut self) {
         self.held = false;
     }
 
@@ -3337,15 +3337,15 @@ pub fn dispatches_of(paths: &RunPaths) -> Result<Vec<DispatchRecord>> {
 /// nothing about any process — the same reading the registry gives one.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub(crate) struct Stamp(String);
+pub struct Stamp(String);
 
 impl Stamp {
     /// The stamp a record carried, where it carried one.
-    pub(crate) fn of(recorded: &str) -> Option<Self> {
+    pub fn of(recorded: &str) -> Option<Self> {
         (!recorded.trim().is_empty()).then(|| Self(recorded.to_string()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -3376,7 +3376,7 @@ impl From<Stamp> for String {
 /// name the same process.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum ClaimedBy {
+pub enum ClaimedBy {
     /// The launch record, naming its driver.
     LaunchRecord { pid: u32 },
     /// The ownership lock, naming its holder.
@@ -3402,7 +3402,7 @@ pub(crate) enum ClaimedBy {
 /// left does not parse; [`ended_by_teardown`] says what that costs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Ended {
+pub struct Ended {
     pub claim: ClaimedBy,
     pub started: Stamp,
 }
@@ -3418,7 +3418,7 @@ pub(crate) struct Ended {
 /// claim it cannot place. This is the something else: *this run ended that
 /// process*, which is what makes a later stranger on its pid a reissue rather
 /// than a record gone wrong.
-pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
+pub fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
     for one in ended {
         let line = serde_json::to_string(one)
             .map_err(|e| Error::Invalid(format!("{}: {e}", paths.ended().display())))?;
@@ -3439,7 +3439,7 @@ pub(crate) fn record_ended(paths: &RunPaths, ended: &[Ended]) -> Result<()> {
 /// claim to be judged on its stamp alone, which is exactly what a teardown did
 /// before this record existed. So a read that fails is said on stderr and costs
 /// only the difference this record makes.
-pub(crate) fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<Ended> {
+pub fn ended_by_teardown(paths: &RunPaths) -> std::collections::BTreeSet<Ended> {
     let path = paths.ended();
     match fs::read_to_string(&path) {
         Ok(text) => text

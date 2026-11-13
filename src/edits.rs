@@ -498,7 +498,7 @@ impl Operation {
 /// exhaustive on its own.
 #[cfg(test)]
 #[must_use]
-pub(crate) fn every_operation_kind() -> Vec<String> {
+pub fn every_operation_kind() -> Vec<String> {
     [
         "finding-raised",
         "completion-requested",
@@ -707,7 +707,7 @@ impl Park {
     ///
     /// The single constructor, so the normalization happens once rather than at
     /// each of the places a park is folded or judged.
-    pub(crate) fn of(by: Author, reason: Option<&str>) -> Self {
+    pub fn of(by: Author, reason: Option<&str>) -> Self {
         Self {
             by,
             reason: reason
@@ -1249,7 +1249,7 @@ fn offer_to_validator(validator: Option<&str>, command: &Command, node: &Node) -
 
 /// The directory under a run's own root an envelope reviewer's passes are
 /// recorded in.
-pub(crate) const VALIDATOR_PASSES: &str = "validator-passes";
+pub const VALIDATOR_PASSES: &str = "validator-passes";
 
 /// One node an envelope introduces or changes, as the reviewer is handed it.
 ///
@@ -1371,7 +1371,7 @@ fn node_the_command_changes<'a>(command: &Command, graph: &'a Graph) -> Option<&
 // the rungs rather than a state to be made unrepresentable — `driver::start` applies it
 // once for all three, `LaunchConfig::load` refuses a blank key outright, and this filter is
 // the last of the three rather than a reinterpretation of a value that got past them.
-pub(crate) struct EnvelopeReview {
+pub struct EnvelopeReview {
     /// The command, as the launch named it.
     reviewer: String,
     /// The bus's external hook runner, running that command.
@@ -1391,7 +1391,7 @@ impl EnvelopeReview {
     ///
     /// The graph it is handed is the one the envelope leaves behind, and the
     /// plan it came from is where the run's goal is stated.
-    pub(crate) fn of(
+    pub fn of(
         reviewer: Option<&str>,
         commands: &[Command],
         edited: &Graph,
@@ -1447,7 +1447,7 @@ impl EnvelopeReview {
     /// A bar that prints no fingerprint — the command fails, or prints nothing —
     /// keys nothing: this envelope is reviewed uncached, nothing is recorded, and
     /// that is said on stderr rather than a pass being kept under an empty key.
-    pub(crate) fn recording_passes(self, bar: &str, dir: &std::path::Path) -> Result<Self> {
+    pub fn recording_passes(self, bar: &str, dir: &std::path::Path) -> Result<Self> {
         // llmlint: ignore[changed_behavior_has_e2e] that a pass recorded by the previous protocol reads as a keep is `HookCache`'s own promise, proven in onemessagebus's journeys; `a_pass_is_kept_under_the_bar_and_a_moved_bar_runs_the_reviewer_again` proves this crate's use of it end to end.
         let cache = HookCache::new(dir, [bar])
             .map_err(|e| refuse(format!("the envelope reviewer's bar names no command: {e}")))?;
@@ -1468,7 +1468,7 @@ impl EnvelopeReview {
     ///
     /// A reviewer judges a document it does not own, so it passes by printing it
     /// back byte for byte; a change, a reroute or a drop of it is no verdict.
-    pub(crate) fn run(&self) -> Result<()> {
+    pub fn run(&self) -> Result<()> {
         let context = HookContext::new(offered_on(crate::channel::layout::REPLIES));
         match self.hook.run(&self.document, &context) {
             HookOutcome::Keep => Ok(()),
@@ -2428,7 +2428,7 @@ impl StatedLanding {
     /// can edit. What a value that is neither spelling costs is the same
     /// everywhere: a release question `onevcs` cannot be asked, about work nothing
     /// can read, printed onto a line it would forge.
-    pub(crate) fn parse(landing: &str) -> Option<Self> {
+    pub fn parse(landing: &str) -> Option<Self> {
         let usable = crate::vcs::usable(landing)?;
         if landing_is_an_object_name(&usable) {
             return Some(Self::Commit(usable));
@@ -2536,7 +2536,7 @@ fn stated_landing(id: &str, named: &str) -> Result<StatedLanding> {
 ///
 /// Exhaustive over the outcome the wire carries, so a fourth word cannot arrive
 /// here as a status this build had to guess at.
-pub(crate) fn settled_status(outcome: SettleOutcome) -> NodeStatus {
+pub fn settled_status(outcome: SettleOutcome) -> NodeStatus {
     match outcome {
         SettleOutcome::Done => NodeStatus::Done,
         SettleOutcome::Failed => NodeStatus::Failed,
@@ -2803,7 +2803,7 @@ struct Rework<'a> {
 }
 
 /// The heading the section a rework appends to its replacement's task opens with.
-pub(crate) const REWORK_HEADING: &str = "## Rework";
+pub const REWORK_HEADING: &str = "## Rework";
 
 /// Validate one `rework` and compile the supersession it is.
 ///

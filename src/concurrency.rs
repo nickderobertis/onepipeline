@@ -23,14 +23,14 @@ use crate::plan::{Node, Plan};
 /// A pid alone cannot answer it, which is why the sibling reports it rather
 /// than leaving a caller to derive one from [`Holder::owner_pid`]; re-deriving
 /// it here would be a second liveness rule for the same question.
-pub(crate) use onevcs::Liveness;
+pub use onevcs::Liveness;
 
 /// Where a holder's session is in its life. Named `State` here because that is
 /// what this crate's interlock calls the distinction it makes.
-pub(crate) use onevcs::Lifecycle as State;
+pub use onevcs::Lifecycle as State;
 
 /// One session holding a repository's workspace.
-pub(crate) use onevcs::SessionHolder as Holder;
+pub use onevcs::SessionHolder as Holder;
 
 /// The one sentence that says which way forward fits, in the refusal's close.
 /// `--acknowledge-concurrent`'s own `--help` says the same.

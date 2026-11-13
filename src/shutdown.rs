@@ -83,7 +83,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// by [`as_str`](Self::as_str), and `payload::InterruptWord` is built from this
 /// through an exhaustive `From` — so the words have one source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// There was no controllable turn to redirect. A fact about the lever
     /// rather than a failure. Ranked lowest: it is what a dispatch that named
     /// several members answers only when none of them answered anything else.
@@ -101,7 +101,7 @@ pub(crate) enum Answer {
 
 impl Answer {
     /// The word this answer travels as, on the record and on the seam.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Delivered => "delivered",
             Self::NoTurn => "no-turn",
@@ -129,7 +129,7 @@ pub enum ShutdownScope {
 
 impl ShutdownScope {
     /// The word this scope travels as on a `host-shutdown` record.
-    pub(crate) const fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Run(_) => "run",
             Self::Mine => "mine",
@@ -183,7 +183,7 @@ pub enum DispatchEnding {
 
 impl DispatchEnding {
     /// The word this ending travels as on a `dispatch-stopped` record.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Graceful => "graceful",
             Self::Killed => "killed",
@@ -207,7 +207,7 @@ pub enum Preserved {
 
 impl Preserved {
     /// The word this outcome travels as on a `host-shutdown` record.
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pushed => "pushed",
             Self::AlreadyOnOrigin => "already-on-origin",
@@ -346,7 +346,7 @@ impl Shutdown {
 /// cannot be read is taken as standing: dispatching into a run that may be
 /// shutting down is the one mistake the hold exists to prevent, and an `adopt`
 /// is what lifts it either way.
-pub(crate) fn begun(paths: &RunPaths) -> bool {
+pub fn begun(paths: &RunPaths) -> bool {
     marker(paths).try_exists().unwrap_or(true)
 }
 
@@ -361,7 +361,7 @@ pub(crate) fn begun(paths: &RunPaths) -> bool {
 /// A hold that is there and could not be removed. Refused rather than ignored:
 /// an adoption that went ahead would drive a run that goes on dispatching
 /// nothing, and report having adopted it.
-pub(crate) fn adopted(paths: &RunPaths) -> Result<()> {
+pub fn adopted(paths: &RunPaths) -> Result<()> {
     let path = marker(paths);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),

@@ -160,7 +160,7 @@ fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::E
 /// that knows things this one does not, and this one has no reading of it at all,
 /// not even that negative one. It stays what every other reader here makes of it:
 /// refused, and reported as a document that could not be read.
-pub(crate) fn version_this_build_moved_past(text: &str) -> Option<u32> {
+pub fn version_this_build_moved_past(text: &str) -> Option<u32> {
     /// The version field on its own, read **open** — every other key ignored,
     /// because the whole point is to read a document whose other keys are another
     /// build's to mean.
@@ -490,7 +490,7 @@ fn plan_name(paths: &RunPaths) -> Option<String> {
 /// A journal that is not there stamps as `(0, 0)`: a run with no store yet is a
 /// real state — a directory and a launch record, written before the first record
 /// — and it is one a summary describes exactly as well as any other.
-pub(crate) fn journal_stamp(paths: &RunPaths) -> (u64, u64) {
+pub fn journal_stamp(paths: &RunPaths) -> (u64, u64) {
     let Ok(about) = std::fs::metadata(paths.journal()) else {
         return (0, 0);
     };
@@ -863,7 +863,7 @@ impl Folded {
 /// checkpoint's module note says why no writer goes back over the history it has
 /// folded, and why that moves nothing a settlement turns on.
 #[derive(Debug)]
-pub(crate) struct Maintainer {
+pub struct Maintainer {
     paths: RunPaths,
     /// The plan's name, read once: `plan.json` is the run's launch record and is
     /// never rewritten, so what it said when this writer opened is what it says.
@@ -878,13 +878,13 @@ pub(crate) struct Maintainer {
 impl Maintainer {
     /// Build the state of a run's store as it stands, from its checkpoint and the
     /// records past it.
-    pub(crate) fn of(paths: &RunPaths) -> Self {
+    pub fn of(paths: &RunPaths) -> Self {
         Self::opened(paths, crate::checkpoint::Persist::No).0
     }
 
     /// [`of`](Self::of), with the greatest `seq` `stream` claims among the records
     /// it read — what a journal writer opening on this run takes its own above.
-    pub(crate) fn opened_for(paths: &RunPaths, stream: &str) -> (Self, Option<u64>) {
+    pub fn opened_for(paths: &RunPaths, stream: &str) -> (Self, Option<u64>) {
         let (maintainer, projected) = Self::opened(paths, crate::checkpoint::Persist::No);
         let claimed = projected.seq_claimed(stream);
         (maintainer, claimed)
@@ -924,7 +924,7 @@ impl Maintainer {
     /// shorter than the count plus this record is not the store this state was
     /// holding, and is opened again rather than folded from an offset nothing can
     /// place.
-    pub(crate) fn appended(&mut self, event: &Envelope, bytes: u64) {
+    pub fn appended(&mut self, event: &Envelope, bytes: u64) {
         let len = journal_stamp(&self.paths).0;
         if len == self.accounted + bytes {
             // Ours alone: the file grew by exactly this record, so what is folded
@@ -1077,7 +1077,7 @@ impl Maintainer {
 // below. The only untested branch is the write failing, which is not new: `seal` inherits
 // [`Maintainer::write`]'s discard-on-failure, whose recovery a reader re-folds and which
 // inducing needs host sabotage rather than a user journey.
-pub(crate) fn seal(paths: &RunPaths) {
+pub fn seal(paths: &RunPaths) {
     Maintainer::of(paths).write();
 }
 

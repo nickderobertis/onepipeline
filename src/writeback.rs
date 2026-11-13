@@ -249,7 +249,7 @@ impl Deadline {
 ///
 /// One sentence for the flag, the variable and the config key, each naming the spelling
 /// that carried it: zero is no budget at all, and leaves the floor as the whole deadline.
-pub(crate) fn refused_zero_budget(spelling: &str) -> String {
+pub fn refused_zero_budget(spelling: &str) -> String {
     format!(
         "{spelling} names a write-back budget of zero seconds per item, which is no budget \
          at all — give it a positive whole number of seconds, or leave it out to take \
@@ -463,7 +463,7 @@ impl Lineages {
 /// thread of its own and the journal has one writer, so what it produces is this
 /// record and the reconcile loop raises the surface.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Unprojected {
+pub struct Unprojected {
     /// The onetaskgraph project the projection could not reach.
     pub project: QualifiedId,
     /// The items it was carrying, by the plan node id each is the shadow of — a lineage's
@@ -522,7 +522,7 @@ impl From<onetaskgraph_core::FailureClass> for FailureClass {
 
 /// What the store said about one failed attempt: its class, and the kind of failure it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Classified {
+pub struct Classified {
     pub class: FailureClass,
     // llmlint: ignore[invalid_states_unrepresentable] the store's `kind` is open by its own
     // contract — a source error's kind is its own wire tag, and a plugin a release newer than
@@ -533,7 +533,7 @@ pub(crate) struct Classified {
 
 impl Classified {
     /// The class and kind, as the line and the surface each name them.
-    pub(crate) fn said(&self) -> String {
+    pub fn said(&self) -> String {
         format!("class: {}, kind: {}", self.class.as_str(), self.kind)
     }
 
@@ -626,7 +626,7 @@ impl Classified {
 
 /// The class of an engine error, as every failure this worker reports is classed: by the
 /// source error it wraps, or refused where the engine decided it on its own.
-pub(crate) fn class_of_engine(error: &EngineError) -> FailureClass {
+pub fn class_of_engine(error: &EngineError) -> FailureClass {
     Classified::of_engine(error).class
 }
 
@@ -1194,7 +1194,7 @@ impl Writeback {
 
     /// Write `claim` on the project from this driver's next projection on, wherever what
     /// landed is not it.
-    pub(crate) fn hold(&self, claim: &crate::payload::DriverClaim) {
+    pub fn hold(&self, claim: &crate::payload::DriverClaim) {
         if let Ok(mut held) = self.held.lock() {
             *held = Some(claim.clone());
         }
@@ -1202,7 +1202,7 @@ impl Writeback {
 
     /// Write nothing more to the project: another run has taken it over, and what this
     /// driver projected after that would be written over that run's own.
-    pub(crate) fn retire(&self, by: &crate::payload::DriverClaim) {
+    pub fn retire(&self, by: &crate::payload::DriverClaim) {
         if let Ok(mut board) = self.board.lock() {
             if !matches!(*board, Board::Retired(_)) {
                 *board = Board::Retired(by.clone());
@@ -1218,7 +1218,7 @@ impl Writeback {
     /// Another run has taken the project over and starts on what this driver leaves on the
     /// board: go on projecting what this driver settles, but never its claim — the queued
     /// projection included — and no closeout's release.
-    pub(crate) fn hand_over(&self) {
+    pub fn hand_over(&self) {
         if let Ok(mut board) = self.board.lock() {
             if *board == Board::Driving {
                 *board = Board::HandingOver;
@@ -1239,7 +1239,7 @@ impl Writeback {
     }
 
     /// Wait, at most `within`, for every projection this driver handed the worker to land.
-    pub(crate) fn wait_until_landed(&self, within: Duration) {
+    pub fn wait_until_landed(&self, within: Duration) {
         let deadline = Instant::now() + within;
         while self.still_landing() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
@@ -1248,14 +1248,14 @@ impl Writeback {
 
     /// Whether a projection this driver handed the worker has yet to land — taken, and still
     /// being attempted, or queued behind one: what a closeout that has spent its window asks.
-    pub(crate) fn still_landing(&self) -> bool {
+    pub fn still_landing(&self) -> bool {
         let (lock, _) = &*self.pending;
         lock.lock().is_ok_and(|pending| pending.unlanded())
     }
 
     /// Whether a projection carrying `node`'s settlement has landed on the store: every later
     /// one carries it too, so the newest that landed answers.
-    pub(crate) fn has_landed_settlement(&self, node: &str) -> bool {
+    pub fn has_landed_settlement(&self, node: &str) -> bool {
         let (lock, _) = &*self.pending;
         lock.lock().is_ok_and(|pending| {
             pending
@@ -1266,7 +1266,7 @@ impl Writeback {
     }
 
     /// Whether another run took the project over, so this driver writes nothing more to it.
-    pub(crate) fn is_retired(&self) -> bool {
+    pub fn is_retired(&self) -> bool {
         self.board
             .lock()
             .is_ok_and(|board| matches!(*board, Board::Retired(_)))
@@ -1579,7 +1579,7 @@ impl Writeback {
     /// Owe the closures of one landing, unless this driver already owes or has made them.
     ///
     /// Answers whether it was queued. Never waits: the call is the closure thread's.
-    pub(crate) fn close_landing(&self, landing: crate::closures::Landing) -> bool {
+    pub fn close_landing(&self, landing: crate::closures::Landing) -> bool {
         let fresh = self
             .closures_owed
             .lock()
@@ -1598,7 +1598,7 @@ impl Writeback {
     /// Owe the run's home its `done`, unless this driver already owes or has made it.
     ///
     /// Answers whether it was queued. Never waits: the call is the closure thread's.
-    pub(crate) fn settle_home(&self, home: QualifiedId) -> bool {
+    pub fn settle_home(&self, home: QualifiedId) -> bool {
         if self
             .home_owed
             .swap(true, std::sync::atomic::Ordering::AcqRel)
@@ -1615,7 +1615,7 @@ impl Writeback {
 
     /// Whether a closure call, or the home's, has finished whose record the loop has not
     /// journalled: what the reconcile loop's wait is woken by, as it is by a failed projection.
-    pub(crate) fn has_closed(&self) -> bool {
+    pub fn has_closed(&self) -> bool {
         let (lock, _) = &*self.pending;
         lock.lock().is_ok_and(|pending| {
             !pending.closed.is_empty() || matches!(pending.home, HomeWork::Answered(_))
@@ -1623,7 +1623,7 @@ impl Writeback {
     }
 
     /// Take the record of the home's call, once it has finished.
-    pub(crate) fn take_homed(&self) -> Option<crate::payload::HomeStatus> {
+    pub fn take_homed(&self) -> Option<crate::payload::HomeStatus> {
         let (lock, _) = &*self.pending;
         lock.lock()
             .ok()
@@ -1637,7 +1637,7 @@ impl Writeback {
     }
 
     /// Take the records of the closure calls that finished since this was last asked.
-    pub(crate) fn take_closed(&self) -> Vec<crate::payload::LandingClosures> {
+    pub fn take_closed(&self) -> Vec<crate::payload::LandingClosures> {
         let (lock, _) = &*self.pending;
         lock.lock()
             .map(|mut pending| std::mem::take(&mut pending.closed))
@@ -1758,7 +1758,7 @@ fn landing_lock(run_dir: &Path) -> std::io::Result<std::fs::File> {
 /// attempt carrying every lineage of the run is allowed, and said on standard error while it
 /// lasts; past it, or where the lock cannot be taken at all, the stop goes on unheld, as a
 /// stop did before the lock existed, and says so. `None` is that: nothing is held.
-pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<std::fs::File> {
+pub fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<std::fs::File> {
     // A launch naming no project has no write-back to wait for.
     if launch.project.parse::<QualifiedId>().is_err() {
         return None;
@@ -1831,7 +1831,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
 /// projection: bounded by the same command deadlines, appended to the same record, and a
 /// failure is said on this process's standard error and changes nothing about the stop. A
 /// driver that adopts the run claims those nodes again before its first dispatch.
-pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
+pub fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // A launch naming no project has nothing on any store to release.
     if launch.project.parse::<QualifiedId>().is_err() {
         return;
@@ -2435,7 +2435,7 @@ fn retry_after(failures: u32) -> Duration {
 }
 
 /// The wait the source behind an engine failure asked for, where it named one.
-pub(crate) fn engine_wait(error: &EngineError) -> Option<Duration> {
+pub fn engine_wait(error: &EngineError) -> Option<Duration> {
     if let EngineError::CreateInProgress {
         by: onetaskgraph_core::CreateHolder::Lease { until },
         ..
@@ -2455,7 +2455,7 @@ pub(crate) fn engine_wait(error: &EngineError) -> Option<Duration> {
 
 /// The longest wait any source of a partial answer asked for: asking sooner asks one that
 /// said not yet.
-pub(crate) fn failures_wait(errors: &[SourceFailure]) -> Option<Duration> {
+pub fn failures_wait(errors: &[SourceFailure]) -> Option<Duration> {
     errors
         .iter()
         .filter_map(|failure| asked_to_wait(&failure.error))
@@ -2464,7 +2464,7 @@ pub(crate) fn failures_wait(errors: &[SourceFailure]) -> Option<Duration> {
 
 /// Keep a wait the store asked a read outside write-back for, so that neither this driver's
 /// next read nor its write-back asks the store anything before it has passed.
-pub(crate) fn record_store_wait(run_dir: &Path, wait: Duration) {
+pub fn record_store_wait(run_dir: &Path, wait: Duration) {
     AskedWait::record(run_dir, wait);
 }
 
@@ -2569,7 +2569,7 @@ enum Kept {
 
 /// The driver claim this run last landed on its project, off its landed baseline: `None`
 /// where the baseline cannot be read or holds none.
-pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
+pub fn landed_claim(run_dir: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(run_dir.join(WRITEBACK_LANDED_FILE)).ok()?;
     serde_json::from_str::<LandedBaseline>(&text)
         .ok()?
@@ -2579,13 +2579,13 @@ pub(crate) fn landed_claim(run_dir: &Path) -> Option<Value> {
 
 /// Whether the run's store has asked to be left alone for a while yet — or holds a wait this
 /// build cannot read, which may be one — so a read of it would be asked inside the wait.
-pub(crate) fn store_asked_to_wait(run_dir: &Path) -> bool {
+pub fn store_asked_to_wait(run_dir: &Path) -> bool {
     !matches!(AskedWait::kept(run_dir), Kept::Nothing)
 }
 
 /// How long the wait the run's store asked for has left: `None` where it asked for none, and
 /// the recheck of a kept wait this build cannot read where that is what is kept.
-pub(crate) fn store_wait_left(run_dir: &Path) -> Option<Duration> {
+pub fn store_wait_left(run_dir: &Path) -> Option<Duration> {
     match AskedWait::kept(run_dir) {
         Kept::Nothing => None,
         Kept::Left(left) => Some(left),
@@ -4171,7 +4171,7 @@ impl Baseline {
 /// first projection: every task's destination id, title, content, engine-owned metadata,
 /// `delivers` and edges, as the store answered them, and no status — the one thing this
 /// engine did not write itself.
-pub(crate) fn seed_landed(run_dir: &Path, project: &QualifiedId, read: &crate::taskgraph::Read) {
+pub fn seed_landed(run_dir: &Path, project: &QualifiedId, read: &crate::taskgraph::Read) {
     let mut landed = LandedBaseline::empty(project);
     landed.project_metadata = owned(&read.project_metadata);
     for node in &read.plan.tasks {
@@ -4203,7 +4203,7 @@ pub(crate) fn seed_landed(run_dir: &Path, project: &QualifiedId, read: &crate::t
 /// metadata and no project title or description.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandedBaseline {
+pub struct LandedBaseline {
     pub schema_version: u32,
     // llmlint: ignore-block[invalid_states_unrepresentable] the stored shape is JSON strings
     // by contract — a qualified project id, and node ids keying the items — each checked where
@@ -4218,7 +4218,7 @@ pub(crate) struct LandedBaseline {
 /// One lineage as it last landed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LandedItem {
+pub struct LandedItem {
     // llmlint: ignore-block[invalid_states_unrepresentable] the stored shape is JSON strings by
     // contract; `LandedBaseline::checked` refuses a destination that is not a qualified id and
     // a digest that is not lowercase SHA-256 hex, and node ids are the plain string every
@@ -4979,7 +4979,7 @@ fn document(path: &Path, front: &Value, body: &str) -> Result<(), String> {
 /// vocabulary has none of. `docs/contract-divergences.md` records what that costs
 /// and why it is the cheaper of the two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ProjectedStatus {
+pub enum ProjectedStatus {
     #[serde(rename = "in progress")]
     InProgress,
     #[serde(rename = "done")]
@@ -5002,7 +5002,7 @@ pub(crate) enum ProjectedStatus {
 
 impl ProjectedStatus {
     /// The word itself, as the record and the board spell it.
-    pub(crate) fn word(self) -> &'static str {
+    pub fn word(self) -> &'static str {
         match self {
             Self::InProgress => "in progress",
             Self::Done => "done",

@@ -23,12 +23,12 @@ use crate::views::RunPaths;
 /// The opening every attribution sentence starts with, which is how an
 /// attribution rendered into a stored string — a carried note, an amendment —
 /// is told apart from the ruling's own text.
-pub(crate) const ATTRIBUTION_OPENING: &str = "Ruling from the ";
+pub const ATTRIBUTION_OPENING: &str = "Ruling from the ";
 
 /// Where one ruling came from: the command of an envelope, or the reply that
 /// answered a question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reference {
+pub enum Reference {
     /// Command `index` of command envelope `envelope`: a note or an amendment.
     Command { envelope: u64, index: u32 },
     /// Reply `reply`, answering a question a dispatch asked.
@@ -74,16 +74,16 @@ impl std::str::FromStr for Reference {
 /// dispatch: whose words it is, and the reference it is declined by where the
 /// run's record names one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct Origin {
+pub struct Origin {
     /// Whose words it is.
-    pub(crate) provenance: Provenance,
+    pub provenance: Provenance,
     /// The reference it is declined by, where one names it.
-    pub(crate) reference: Option<Reference>,
+    pub reference: Option<Reference>,
 }
 
 impl Origin {
     /// Command `index` of envelope `envelope`, sent as `provenance`'s words.
-    pub(crate) fn of_command(provenance: Provenance, envelope: u64, index: usize) -> Self {
+    pub fn of_command(provenance: Provenance, envelope: u64, index: usize) -> Self {
         Self {
             provenance,
             reference: u32::try_from(index)
@@ -93,7 +93,7 @@ impl Origin {
     }
 
     /// Command `index` of `envelope`, where the record names both.
-    pub(crate) fn of_record(
+    pub fn of_record(
         provenance: Provenance,
         envelope: Option<u64>,
         index: Option<u32>,
@@ -107,7 +107,7 @@ impl Origin {
     }
 
     /// `text` with this origin's attribution as its first line.
-    pub(crate) fn attributed(&self, text: &str) -> String {
+    pub fn attributed(&self, text: &str) -> String {
         attributed(self.provenance, self.reference.as_ref(), text)
     }
 
@@ -115,7 +115,7 @@ impl Origin {
     /// attribution where the run's record says whose it is — a reference names
     /// it, or it is the user's — and as written for a record from before
     /// either, which a dispatch reads exactly as it read then.
-    pub(crate) fn stored(&self, text: &str) -> String {
+    pub fn stored(&self, text: &str) -> String {
         if self.reference.is_none() && self.provenance.is_manager() {
             return text.to_owned();
         }
@@ -151,7 +151,7 @@ impl<'de> serde::Deserialize<'de> for Reference {
 /// manager's ruling with no reference is one the run's record names no envelope
 /// for — a record written before references existed — and says the same
 /// authority without a way to decline it by reference.
-pub(crate) fn attribution(provenance: Provenance, reference: Option<&Reference>) -> String {
+pub fn attribution(provenance: Provenance, reference: Option<&Reference>) -> String {
     match (provenance, reference) {
         (Provenance::User, _) => format!(
             "{ATTRIBUTION_OPENING}user, relayed by the manager: it binds. Follow it as \
@@ -171,7 +171,7 @@ pub(crate) fn attribution(provenance: Provenance, reference: Option<&Reference>)
 }
 
 /// `text` with its attribution as its first line.
-pub(crate) fn attributed(
+pub fn attributed(
     provenance: Provenance,
     reference: Option<&Reference>,
     text: &str,
@@ -183,7 +183,7 @@ pub(crate) fn attributed(
 /// one [`attribution`] writes: the user's sentence, the manager's with no
 /// reference, or the manager's naming a reference this engine mints. A line
 /// that only resembles one is the ruling's own text, never an attribution.
-pub(crate) fn origin_of(line: &str) -> Option<Origin> {
+pub fn origin_of(line: &str) -> Option<Origin> {
     if line == attribution(Provenance::User, None) {
         return Some(Origin {
             provenance: Provenance::User,
@@ -208,7 +208,7 @@ pub(crate) fn origin_of(line: &str) -> Option<Origin> {
 // llmlint: ignore-block[invalid_states_unrepresentable] the task this was built for leaves how a carried note and an amendment keep their attribution to this node — "a structured list or an attribution rendered into the stored string" — and the rendered string is what survives a checkpoint and an adoption with no change to the checkpoint's or the plan's shape; what keeps it from being prose anyone could forge is `origin_of` above, which reads a line as an attribution only where it is byte for byte one `attribution` writes, its reference a token this engine mints.
 /// A stored string split into the attribution its first line carries, where it
 /// carries one exactly as [`attribution`] writes it, and the ruling's own text.
-pub(crate) fn split_attribution(text: &str) -> (Option<Origin>, &str) {
+pub fn split_attribution(text: &str) -> (Option<Origin>, &str) {
     let trimmed = text.trim_start();
     let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
     match origin_of(first) {
@@ -220,18 +220,18 @@ pub(crate) fn split_attribution(text: &str) -> (Option<Origin>, &str) {
 
 /// What one ruling reference resolves to on a run's channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Resolved {
+pub struct Resolved {
     /// The node it was addressed to.
     // llmlint: ignore[invalid_states_unrepresentable] a node id is the `String` every record and command of this crate spells one with (the note's and the amendment's own `id`, a surface's `workstream`), and `DeclinedRuling::node`, which the contract fixes as a string, is built from this; a private newtype would be converted back at the one place it is read.
-    pub(crate) node: String,
+    pub node: String,
     /// Whose words it is.
-    pub(crate) provenance: Provenance,
+    pub provenance: Provenance,
     /// What kind of ruling it is.
-    pub(crate) kind: RulingKind,
+    pub kind: RulingKind,
     /// The id the reply that carried it was answered with.
-    pub(crate) reply: u64,
+    pub reply: u64,
     /// Its text.
-    pub(crate) text: String,
+    pub text: String,
 }
 
 /// The ruling `reference` names on run `paths`, read off the run's own channel.
@@ -242,7 +242,7 @@ pub(crate) struct Resolved {
 /// under: not a reference this engine mints, an envelope or command the channel
 /// does not hold, a command that is no note or amendment or that the run did not
 /// apply, or a reply that answered no question.
-pub(crate) fn resolve(paths: &RunPaths, reference: &str) -> Result<Resolved> {
+pub fn resolve(paths: &RunPaths, reference: &str) -> Result<Resolved> {
     let unknown = |why: &str| {
         Error::Refused(format!(
             "ruling reference `{reference}` names no ruling of run '{}': {why}; nothing was \

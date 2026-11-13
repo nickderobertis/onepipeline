@@ -28,7 +28,7 @@ use crate::Result;
 /// # Errors
 ///
 /// The reason the run's channel could not be written.
-pub(crate) fn answer_removed(paths: &RunPaths, operations: &[edits::Operation]) -> Result<()> {
+pub fn answer_removed(paths: &RunPaths, operations: &[edits::Operation]) -> Result<()> {
     let removed = removed_by(operations);
     if removed.is_empty() {
         return Ok(());
@@ -81,7 +81,7 @@ pub(crate) fn answer_removed(paths: &RunPaths, operations: &[edits::Operation]) 
 /// the answer: C's only answer has to be the one this envelope's own edit
 /// produced, so a question an earlier reply answered is refused as it always
 /// was, whatever the later reply carries.
-pub(crate) fn answered_alongside(
+pub fn answered_alongside(
     paths: &RunPaths,
     correlation: &Correlation,
     commands: &[Command],

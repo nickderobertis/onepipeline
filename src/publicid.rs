@@ -27,20 +27,20 @@ use crate::ledger::LaunchRecord;
 /// form of one, or the one a launch recorded — so a run id nothing checked is never handed
 /// where a public id is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PublicId(String);
+pub struct PublicId(String);
 
 impl PublicId {
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn into_string(self) -> String {
+    pub fn into_string(self) -> String {
         self.0
     }
 }
 
 /// `run-` and the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
-pub(crate) fn hashed(run: &str) -> PublicId {
+pub fn hashed(run: &str) -> PublicId {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(run.as_bytes());
     let hex: String = digest
@@ -63,7 +63,7 @@ fn is_hashed(id: &str) -> bool {
 
 /// Whether `term` may be named on a public destination, as the linked `onevcs` answers over
 /// every private identity registered on this host: `Err` carrying why where it cannot say.
-pub(crate) fn passes(term: &str) -> std::result::Result<bool, String> {
+pub fn passes(term: &str) -> std::result::Result<bool, String> {
     passes_with(term, onevcs::check_public_output)
 }
 
@@ -90,7 +90,7 @@ fn passes_with(
 
 /// Whether a plan's own name may be named where the destination is not private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanName {
+pub enum PlanName {
     /// The check passed it, or the plan has none: it is written as it is.
     Named,
     /// The check refused it or could not answer: the public id is written in its place.
@@ -99,11 +99,11 @@ pub(crate) enum PlanName {
 
 /// What a launch records about how its run is named publicly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Decided {
+pub struct Decided {
     /// The run's public id.
-    pub(crate) id: PublicId,
+    pub id: PublicId,
     /// Whether the plan's own name may be named where the destination is not private.
-    pub(crate) plan_name: PlanName,
+    pub plan_name: PlanName,
 }
 
 /// Decide `run`'s public id, and whether `name` — the plan's — may be named publicly.
@@ -111,11 +111,11 @@ pub(crate) struct Decided {
 /// Only a pass names either: where the check refuses or cannot answer, the id is the hashed
 /// form and the name is withheld, so nothing that may be private is guessed onto a public
 /// destination, and the launch is never refused for it.
-pub(crate) fn decide(run: &str, name: Option<&str>) -> Decided {
+pub fn decide(run: &str, name: Option<&str>) -> Decided {
     decide_with(run, name, passes)
 }
 
-pub(crate) fn decide_with(
+pub fn decide_with(
     run: &str,
     name: Option<&str>,
     mut passes: impl FnMut(&str) -> std::result::Result<bool, String>,
@@ -146,7 +146,7 @@ fn recorded(run: &str, id: &str) -> Option<PublicId> {
 /// `launch`'s public id: the one its launch recorded, or — for a record holding none, or one
 /// [`decide`] could not have made — the same derivation over its id, asked afresh. A read must
 /// answer, so where the check cannot, such a record reads the hashed form, which names nothing.
-pub(crate) fn of_record(launch: &LaunchRecord) -> PublicId {
+pub fn of_record(launch: &LaunchRecord) -> PublicId {
     if let Some(id) = recorded(&launch.run_id, &launch.public_id) {
         return id;
     }
@@ -171,7 +171,7 @@ fn home_declared_private(launch: &LaunchRecord) -> bool {
 
 /// What `launch`'s run is named by on its own plan store: its public id where the store does
 /// not declare the project's source private, and its run id where it does.
-pub(crate) fn on_store(launch: &LaunchRecord) -> String {
+pub fn on_store(launch: &LaunchRecord) -> String {
     if home_declared_private(launch) {
         launch.run_id.clone()
     } else {
@@ -182,7 +182,7 @@ pub(crate) fn on_store(launch: &LaunchRecord) -> String {
 /// What `launch`'s plan is named by on its own plan store, given its name: the public id where
 /// the launch found the name fails the check and the store does not declare the project's
 /// source private, and the name itself otherwise.
-pub(crate) fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
+pub fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
     if launch.name_withheld && !home_declared_private(launch) {
         of_record(launch).into_string()
     } else {
@@ -197,7 +197,7 @@ pub(crate) fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
 /// that record names that directory as its run: a record is read as a run's own only there.
 /// A name that is not one run directory under `root` names no run, since the store's claim is
 /// external input and is joined onto `root`.
-pub(crate) fn run_named(root: &std::path::Path, named: &str) -> Option<String> {
+pub fn run_named(root: &std::path::Path, named: &str) -> Option<String> {
     if !crate::ledger::is_valid_run_id(named) {
         return None;
     }

@@ -25,14 +25,14 @@ use crate::plan::NodeKind;
 use crate::projection::RunState;
 
 /// The dedup key of the item a run's human node gets: its run/node identity.
-pub(crate) fn node_key(run: &str, node: &str) -> String {
+pub fn node_key(run: &str, node: &str) -> String {
     format!("run:{run}#{node}")
 }
 
 /// The run and node a human node's item stands for: an item under the engine's
 /// `run:` key whose work block names that same run and node, the run a valid id.
 /// Anything else — a key no engine minted — stands for no step.
-pub(crate) fn node_of(item: &HumanItem) -> Option<(&str, &str)> {
+pub fn node_of(item: &HumanItem) -> Option<(&str, &str)> {
     let (run, node) = item.dedup_key.strip_prefix("run:")?.split_once('#')?;
     let bound =
         matches!(&item.block, HumanItemBlock::Work { run: r, node: n } if r == run && n == node);
@@ -49,7 +49,7 @@ static DRIVING: std::sync::Mutex<Option<(HumanItems, String)>> = std::sync::Mute
 /// session, probed afterwards by the directory that could not be written.
 /// Anything else — and any refusal not definitively a full filesystem — raises
 /// nothing.
-pub(crate) fn dispatch_refused(error: &crate::error::Error) {
+pub fn dispatch_refused(error: &crate::error::Error) {
     let crate::error::Error::Ledger { path, source } = error else {
         return;
     };
@@ -106,7 +106,7 @@ fn definitive(kind: &str) -> bool {
 /// raises the host's one identity item; one candidate refused, a mix that
 /// includes a transient or unclassified failure, or a chain that stopped at one
 /// candidate raises nothing.
-pub(crate) fn chain_exhausted(
+pub fn chain_exhausted(
     store: &HumanItems,
     session: &str,
     cwd: &std::path::Path,
@@ -156,7 +156,7 @@ pub(crate) fn chain_exhausted(
 
 /// Whether every one of `identities` reports headroom, read by the harness's own
 /// zero-turn usage probe — what `oneharness usage` answers, in process.
-pub(crate) fn identities_have_headroom(
+pub fn identities_have_headroom(
     identities: &[String],
     cwd: Option<std::path::PathBuf>,
 ) -> bool {
@@ -196,7 +196,7 @@ const GRACE: Duration = Duration::from_secs(10);
 
 /// A run driver's view of the human items that concern its run.
 // llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is.
-pub(crate) struct Gate {
+pub struct Gate {
     store: HumanItems,
     run: String,
     session: String,
@@ -217,7 +217,7 @@ pub(crate) struct Gate {
 
 impl Gate {
     /// The gate for a launch whose effective configuration enables human items.
-    pub(crate) fn for_launch(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
+    pub fn for_launch(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
         let store = store_for(paths, launch)?;
         *DRIVING
             .lock()
@@ -240,7 +240,7 @@ impl Gate {
 
     /// Raise the item of every eligible human node that has none, and answer
     /// every node an open block holds.
-    pub(crate) fn pass(
+    pub fn pass(
         &mut self,
         paths: &RunPaths,
         state: &RunState,
@@ -386,7 +386,7 @@ impl Gate {
     /// step still waits, onto the run's own command queue, which this driver's
     /// first pass applies: a resolver that could not release it — or died first —
     /// leaves it here. Called with the run held, before the loop starts.
-    pub(crate) fn queue_owed(
+    pub fn queue_owed(
         &mut self,
         channel: &crate::channel::ChannelState,
         state: &RunState,
@@ -433,12 +433,12 @@ impl Gate {
 
     /// Whether the host journal moved since the last pass read it: one `stat`,
     /// which is what the loop's idle wait can afford to ask.
-    pub(crate) fn moved(&self) -> bool {
+    pub fn moved(&self) -> bool {
         self.length() != self.seen || self.due.is_some_and(|due| crate::sys::now_millis() >= due)
     }
 
     /// An exhausted identity chain one of this run's dispatches met.
-    pub(crate) fn chain_exhausted(
+    pub fn chain_exhausted(
         &self,
         cwd: &std::path::Path,
         stopped: &crate::engine::ChainStopped,
@@ -447,7 +447,7 @@ impl Gate {
     }
 
     /// Retire every open item holding this run's work, because the run ended.
-    pub(crate) fn run_ended(&self) {
+    pub fn run_ended(&self) {
         ended(&self.store, &self.run);
     }
 }
@@ -487,7 +487,7 @@ fn ended(store: &HumanItems, run: &str) {
 /// Retire the open items holding a run's work because the run ended, where its
 /// configuration enables human items. For the paths that end a run without a
 /// driver's gate: a stop.
-pub(crate) fn run_ended(paths: &RunPaths) {
+pub fn run_ended(paths: &RunPaths) {
     let Ok(launch) = crate::ledger::read_json::<LaunchRecord>(&paths.launch()) else {
         return;
     };
@@ -540,7 +540,7 @@ fn held(
 
 /// Apply a resolved human node item to its node through the run's own
 /// commands, as the person who resolved it would.
-pub(crate) fn release(root: &std::path::Path, item: &HumanItem) -> Result<(), String> {
+pub fn release(root: &std::path::Path, item: &HumanItem) -> Result<(), String> {
     let Some((run, _)) = node_of(item) else {
         return Ok(());
     };

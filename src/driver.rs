@@ -62,7 +62,7 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The file in the run's directory a `stop` holds locked for the whole of its
 /// teardown, and a driver's observer watch holds across each restart.
@@ -1072,7 +1072,7 @@ fn recorded_dir(record: &LaunchRecord) -> Result<PathBuf> {
 // oneagentgraph's transparent ConfigRef are already string-valued. A second newtype would
 // duplicate the sibling type without adding an invariant: relative references are made
 // absolute here, and the nonempty launch-record invariant is checked before every run.
-pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
+pub fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
     // Refused before anything is joined or opened, because a blank reference
     // resolves to `base` itself — the launch directory — and what happens next
     // is whatever the host's file API answers for opening a directory, which is
@@ -1108,14 +1108,14 @@ pub(crate) fn resolve_graph(reference: &str, base: &Path) -> Result<String> {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-pub(crate) fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
+pub fn resolve_plan_graphs(plan: &mut Plan, base: &Path) -> Result<()> {
     for node in &mut plan.tasks {
         resolve_node_graphs(node, base)?;
     }
     Ok(())
 }
 
-pub(crate) fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
+pub fn resolve_node_graphs(node: &mut Node, base: &Path) -> Result<()> {
     if let Some(reference) = &mut node.agent_graph {
         reference.0 = resolve_graph(&reference.0, base)?;
     }
@@ -2342,7 +2342,7 @@ fn driver_said(paths: &RunPaths) -> String {
 /// One shape for both detaching verbs — a launch and an adoption leave the same
 /// thing behind, so an operator reads the same record either way, and
 /// `--detach` means on `adopt` exactly what it means on `start`.
-pub(crate) fn announce_launch(run: &str, pid: u32) -> String {
+pub fn announce_launch(run: &str, pid: u32) -> String {
     json!({
         "run_id": run,
         "pid": pid,
@@ -2382,7 +2382,7 @@ pub enum Retained {
 /// What the binary retains is *itself*: the run is then driven by the same
 /// engine an attached launch would have run in-process. An embedding program
 /// carrying a hidden driver verb of its own names that instead.
-pub(crate) fn retain_this_executable(
+pub fn retain_this_executable(
     paths: &RunPaths,
     retained: Retained,
 ) -> Result<crate::verbs::Retain> {
@@ -2405,7 +2405,7 @@ pub(crate) fn retain_this_executable(
 /// detaching verb must not be holding the pipe a driver writes to. And in a
 /// process group of its own, so it outlives the process that started it and the
 /// `SIGINT` that process's terminal sends: see [`sys::in_own_process_group`].
-pub(crate) fn retain_driver(
+pub fn retain_driver(
     paths: &RunPaths,
     retain: &crate::verbs::Retain,
 ) -> Result<std::process::Child> {
@@ -2447,7 +2447,7 @@ pub(crate) fn retain_driver(
 /// written once, below, with the observer up and this process's pid on it —
 /// so a detaching launcher's wait ends on a driver that is running, and no
 /// reader ever sees the run naming a process that is not driving it.
-pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
+pub fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     let paths = paths.clone();
     // The lock before the claim: a driver that wrote its pid into the record and
     // then lost the race for the lock would leave the run naming a process that
@@ -3092,7 +3092,7 @@ impl Settlement {
     }
 
     /// The line an attached launch or adoption prints once the run has settled.
-    pub(crate) fn line(self, run: &str) -> String {
+    pub fn line(self, run: &str) -> String {
         json!({"run_id": run, "settlement": self.as_str()}).to_string()
     }
 }
@@ -3367,7 +3367,7 @@ fn attach(
 /// Asked by the driver itself, of the state it holds, as it lets go: the word an
 /// attached launch prints and the word its `driver-exited` record carries are
 /// this one answer.
-pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> Settlement {
+pub fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> Settlement {
     let statuses = state.statuses();
     if !statuses.is_empty() && graph::state_of(&statuses) == GraphState::Complete {
         return Settlement::Complete;
@@ -3390,7 +3390,7 @@ pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> 
 /// instead be publishing its own pid for a run it is about to walk away from.
 ///
 /// Answers the retained driver's pid once it has claimed the run.
-pub(crate) fn adopt_detached(
+pub fn adopt_detached(
     paths: &RunPaths,
     retain: &crate::verbs::Retain,
     budget: Option<u64>,
@@ -3414,7 +3414,7 @@ pub(crate) fn adopt_detached(
 /// Adoption keeps the run id, journal, and ledger. An explicit budget replaces
 /// the recorded allowance before this driver projects anything. `said` is told
 /// the settlement as [`attach`] says it.
-pub(crate) fn adopt_attached(
+pub fn adopt_attached(
     paths: &RunPaths,
     budget: Option<u64>,
     said: &mut dyn FnMut(Settlement),
@@ -3729,7 +3729,7 @@ fn displace_the_undriven_driver(record: &LaunchRecord) {
 /// **clean** — a run whose processes were not all reached is still running, and
 /// [`verbs::Stopped::refusal`](crate::verbs::Stopped::refusal) is what the
 /// binary says about that instead of a stop.
-pub(crate) fn stop_run(
+pub fn stop_run(
     paths: &RunPaths,
     session: &str,
     force: bool,
@@ -3817,7 +3817,7 @@ pub(crate) fn stop_run(
 /// the host shutdown, whose `host-shutdown` carries the word `run-stopped`
 /// already carries. One mapping or two to drift, and a drifted one would have a
 /// reader call the same outcome by two names.
-pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeardown {
+pub fn established(teardown: Option<sys::Teardown>) -> journal::StopTeardown {
     match teardown {
         None => journal::StopTeardown::Elsewhere,
         Some(sys::Teardown::Signalled) => journal::StopTeardown::Signalled,
@@ -3866,7 +3866,7 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // `a_stop_ends_an_observer_restart_asked_after_its_signals_listing`; a hold that cannot be taken
 // is the refusal `a_stop_that_cannot_hold_its_runs_observer_restarts_refuses_and_signals_nothing`
 // and `a_stop_that_outwaits_its_bound_for_a_restart_refuses_and_signals_nothing` drive.
-pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+pub fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let mut aim = roots_to_stop(paths, record)?;
     // Held until this teardown has answered, so the driver it ends starts no
     // observer after the one below is cancelled.
@@ -4260,7 +4260,7 @@ fn surface_message(message: Option<&String>, file: Option<&PathBuf>) -> Result<S
 /// more states — a local apply with nothing compiled, a reconciled one carrying
 /// operations — that no path can reach and every reader would still have to
 /// answer for.
-pub(crate) enum Submitted {
+pub enum Submitted {
     /// Hooks dropped the whole envelope: nothing was queued, applied or delivered.
     Dropped,
     /// A commandless verdict, queued for whichever reader the run owes one.
@@ -4306,7 +4306,7 @@ pub(crate) enum Submitted {
 ///
 /// [`Error::Refused`] for a note that was not delivered, in the conversation's own
 /// words; or the reason the ask was not one this run could act on.
-pub(crate) fn deliver_note_envelope(
+pub fn deliver_note_envelope(
     paths: &RunPaths,
     envelope: &Reply,
 ) -> Result<crate::note::Delivered> {
@@ -4552,7 +4552,7 @@ fn deliver_verdict_half(
 /// The author's op allowlist is enforced here, before anything is queued: an
 /// author that asks for an op it may not issue is refused with the reason, and
 /// nothing durable is written on its behalf.
-pub(crate) fn submit_envelope(
+pub fn submit_envelope(
     paths: &RunPaths,
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
@@ -4562,7 +4562,7 @@ pub(crate) fn submit_envelope(
 
 /// [`submit_envelope`], answering what the hooks made of the envelope beside what
 /// became of it: the receipt describes the envelope as it was queued.
-pub(crate) fn submit_offered(
+pub fn submit_offered(
     paths: &RunPaths,
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,

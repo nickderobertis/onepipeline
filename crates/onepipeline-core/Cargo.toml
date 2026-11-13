@@ -1,0 +1,179 @@
+[package]
+name = "onepipeline-core"
+version = "0.110.1"
+edition = "2021"
+publish = false
+
+[features]
+test-support = []
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+onepipeline-base = { path = "../onepipeline-base" }
+# The selective journal read (`src/journal_selected.rs`) walks every line of a 100 MB
+# journal and a whole first screen waits on it; already in the tree through serde_json.
+memchr = "2"
+clap = { version = "4.6", features = ["derive"] }
+# A release target's adoption instructions are a minijinja template the producer
+# wrote, which `onevcs` carries through the three layers and parses but never
+# renders — where a template renders, and against what, is the consumer's. This
+# is that renderer, at the pin the sibling already resolves so the build carries
+# one copy of it.
+minijinja = "2.24"
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
+# envelope or reply carries its payload's fields in the order they arrived —
+# what the contract's deterministic rendering promise needs.
+#
+# `float_roundtrip` is what makes a number this crate wrote the number it reads
+# back. The default parser is allowed to land one bit away, and every document
+# here is written by this crate and read again by it: a run's telemetry is
+# `cost_usd`, and a cost read back that is not the cost recorded makes two
+# accounts of one run disagree over a measurement neither of them took twice.
+# Measured rather than assumed — `0.12000000000000001` is written out in full and
+# read back as `0.12` without it.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+# Plan files are JSON; the executor-rules file and the agent-graph configs are
+# YAML, read and written through the reader the sibling crates use — see
+# `[workspace.dependencies]`.
+serde-saphyr = { workspace = true }
+# A plan is one project of a store, assembled out of reserved metadata keys, and
+# the refusal it earns has to name the key a person has to fix. `serde_json`'s
+# own error says the type it wanted and not where it wanted it, which for a
+# nested `steps` entry is a sentence nobody can act on; this carries the path.
+serde_path_to_error = "0.1"
+thiserror = "2"
+# The digest the stop guard keys its per-session memory by and remembers a
+# block under — a name a stranger's session id is never joined onto a path as,
+# and a fingerprint of the report a continuation is compared against. Already in
+# the graph through `onemessagebus`, so it adds nothing to what this build
+# resolves; the same crate the session-reuse journey spells a lease name with.
+# llmlint: ignore-block[new_command_or_client_gets_its_own_project] a dependency of two verbs
+# of this one binary, not a new command or client: both read the engine's own run store and
+# channel through this crate's private modules and ship in its one artifact.
+sha2 = { workspace = true }
+# llmlint: ignore-end[new_command_or_client_gets_its_own_project]
+
+# The siblings this crate composes, at the workspace's own pins. See
+# `[workspace.dependencies]` for what each pin's floor is a requirement of, and
+# why both are registry releases.
+oneagentgraph = { workspace = true }
+onevcs = { workspace = true }
+# Read-only vocabulary, not a composed sibling — see `[workspace.dependencies]`.
+onejudge = { workspace = true }
+# Read-only too, and nothing here launches it: the dispatch-env hook's check
+# reads each oneharness config a launch is about to read through that library's
+# own parser, so which `env_from` sources a variant names is never restated
+# here. Already in the graph — `onejudge` and `oneagentgraph` build it — so it
+# adds nothing to what this build resolves.
+oneharness-core = { workspace = true }
+# The wire core this crate declares its own vocabulary over — see
+# `[workspace.dependencies]`. `src/vocabulary.rs` is that declaration.
+onemessagebus = { workspace = true }
+# Each payload this crate emits is a registered bus `Message`, whose document is
+# generated from its type; `preserve_order` is the feature the bus builds it
+# with, so the one copy in the graph is the one the registry compiled against.
+schemars = { version = "1", features = ["preserve_order"] }
+
+# The store, linked — see `[workspace.dependencies]` for why it is exact. The two
+# features are every hosted plugin the store's own CLI offers, so a source an operator's
+# `onetaskgraph.yaml` names is one this build can read; `local-md`, `in-memory` and
+# `subprocess` come with the core.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] plugins of the linked store library, not a command or client of this repository; required in this package so the bill of materials declares them.
+onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
+onetaskgraph-plugin-api = { workspace = true }
+# The shadow store writes assets through its public source API.
+onetaskgraph-local-md = { workspace = true }
+# The store's plugin traits are async, so each call into it runs on a runtime this crate
+# builds for that one logical command — a plan read, a write-back attempt — and drops
+# with it: a current-thread runtime, because what the store needs is several sources
+# waiting on I/O at once, which one thread interleaves. `time` is what bounds a copy by
+# its deadline (divergence entry 71). Already in the graph through the store's network
+# plugins, so it adds nothing to what this build resolves.
+tokio = { workspace = true, features = ["rt", "time"] }
+# The store's `WritePolicy` is an async trait declared through this macro, and the
+# engine implements it over the linked `onevcs` (`src/boundary.rs`). Already in the
+# graph through the store itself, so it adds nothing to what this build resolves.
+async-trait = "0.1"
+
+# Process liveness is the one host fact this crate cannot get from `std` on the
+# MSRV floor, and every `DRIVER DEAD` / `PARKED` verdict rests on it. Both are
+# already in the dependency graph transitively; naming them here makes the
+# platform call explicit rather than incidental.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+] }
+
+# Five dev-dependencies, and none is a test framework. The e2e suite drives the
+# compiled binary as a subprocess with `std::process` and reads what it wrote, so
+# it needs no command-assertion crate — `tests/e2e/harness.rs` is the whole of it.
+#
+# `onepipeline-testfakes` is here for its **library** only: the doubles' binaries
+# come from the workspace member, which `tests/e2e/harness.rs` builds on demand,
+# because a dev-dep builds a crate's library and not its binaries. What the
+# library carries is the vocabulary the two sides share — the environment keys a
+# double reads its scenario out of — so the writer and the reader of each key have
+# one spelling instead of two that drift apart in silence.
+#
+# `onevcs-testing` is the sibling's own implementations of the two interfaces it
+# is built around, which is what `tests/onevcs_seam.rs` drives to hold every
+# operation `src/vcs.rs` performs to the seam it performs it on — in code rather
+# than in prose, with no git, no host, and no process. Both are dev-dependencies
+# and must stay so: what they implement must never be reachable from a release
+# binary.
+#
+# `fs4` is one journey's tool, not a second implementation of anything:
+# `tests/e2e/session_reuse.rs` has to make a run root *occupied* — taken
+# exclusively, which is the one answer that stops `onevcs` reusing a session —
+# and no verb of that sibling's holds an occupancy lease past its own exit,
+# because the lease is deliberately one the OS releases with the process. So
+# that journey takes the advisory lock itself, on the file the sibling names the
+# lease after: `fs4` is the lock (the same crate, and the same lock, `onevcs`
+# uses), and `sha2` — a regular dependency above, for the stop guard — spells the
+# name. Already in the graph through the siblings, so it adds nothing to what
+# this build resolves.
+#
+# `oneharness-core` is a regular dependency, below, for its config reader; the
+# suite also reads it for its **types**: `tests/e2e/dispatch.rs` reads the
+# history record a dispatch's `oneharness-session` points at through that
+# library's own reader, and holds `observed_model`, the `model_mismatch` kind and
+# the `model-mismatch` reason to that library's own spellings rather than to
+# strings restated here.
+[dev-dependencies]
+onepipeline-base = { path = "../onepipeline-base", features = ["test-support"] }
+url = "2"
+fs4 = "0.13"
+onepipeline-testfakes = { path = "../../crates/testfakes" }
+# The store's Linear plugin, at the release `onetaskgraph-core` links — see
+# `[workspace.dependencies]`.
+onetaskgraph-linear = { workspace = true }
+# What `tests/e2e/linear_loopback.rs` encodes a record's editor state with, as Linear's own are:
+# the release the Linear plugin above decodes it with. Its base64 wrapping is written in that
+# file instead, so no direct dependency lands in `Cargo.lock`'s onepipeline entry between
+# `async-trait` and `clap`: see `standard_base64` there.
+yrs = "0.28"
+onevcs-testing = { workspace = true }
+# `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
+# allow-git list, and what it compares are pins — so both sides are parsed as the
+# TOML they are rather than scanned for a substring that might not be one.
+toml = "1"
+# `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
+# checker's own library; the pin is in `[workspace.dependencies]`.
+onebudgetspec-core = { workspace = true }
+# `tests/e2e/public_id.rs` validates what `status --json` prints against
+# `schemas/run-reading.schema.json` itself; the release the lock already resolves for a
+# sibling, with no remote reference resolution.
+jsonschema = { version = "0.56", default-features = false }
+

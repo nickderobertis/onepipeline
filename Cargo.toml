@@ -4,7 +4,7 @@
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
 # llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions`, `boundary` and `integrate` are verbs of the existing `onepipeline` CLI, not new binaries.
-members = [".", "crates/testfakes"]
+members = [".", "crates/testfakes", "crates/onepipeline-base", "crates/onepipeline-core"]
 resolver = "2"
 
 # The siblings this crate composes, pinned once for the whole workspace so both
@@ -1554,6 +1554,8 @@ name = "onepipeline"
 path = "src/lib.rs"
 
 [dependencies]
+onepipeline-core = { path = "crates/onepipeline-core" }
+onepipeline-base = { path = "crates/onepipeline-base" }
 # The selective journal read (`src/journal_selected.rs`) walks every line of a 100 MB
 # journal and a whole first screen waits on it; already in the tree through serde_json.
 memchr = "2"
@@ -1693,6 +1695,8 @@ windows-sys = { workspace = true, features = [
 # the `model-mismatch` reason to that library's own spellings rather than to
 # strings restated here.
 [dev-dependencies]
+onepipeline-core = { path = "crates/onepipeline-core", features = ["test-support"] }
+onepipeline-base = { path = "crates/onepipeline-base", features = ["test-support"] }
 url = "2"
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }

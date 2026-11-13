@@ -77,7 +77,7 @@ const NO_ADDRESS: &str = "the host reported no address for this check";
 /// A duration read from `name` in seconds, fractions allowed; `default` for an unset
 /// value and for one that is not a positive number a `Duration` can hold — one so
 /// small it rounds to zero included, since a zero interval is no interval.
-pub(crate) fn seconds_env(name: &str, default: f64) -> Duration {
+pub fn seconds_env(name: &str, default: f64) -> Duration {
     std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
@@ -89,13 +89,13 @@ pub(crate) fn seconds_env(name: &str, default: f64) -> Duration {
 
 /// One `change-check` record's reading of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reading {
-    pub(crate) name: String,
-    pub(crate) state: String,
-    pub(crate) conclusion: Option<String>,
-    pub(crate) required: bool,
-    pub(crate) url: Option<String>,
-    pub(crate) settled: bool,
+pub struct Reading {
+    pub name: String,
+    pub state: String,
+    pub conclusion: Option<String>,
+    pub required: bool,
+    pub url: Option<String>,
+    pub settled: bool,
 }
 
 impl Reading {
@@ -109,7 +109,7 @@ impl Reading {
     // a stream another build or a person edited. The refusals are held by this module's
     // `a_change_check_that_does_not_say_what_it_read_is_no_reading`; every well-formed reading
     // is driven end to end by `tests/e2e/check_visibility.rs`.
-    pub(crate) fn of(event: &Envelope) -> Option<Self> {
+    pub fn of(event: &Envelope) -> Option<Self> {
         if event.source != Source::Vcs || event.kind.0 != "change-check" {
             return None;
         }
@@ -171,7 +171,7 @@ impl Reading {
 ///
 /// `change-check '<check>' <state> (<requirement label>) [<significance>] log: <url>`,
 /// ending at the label's closing bracket when the record carries no address.
-pub(crate) fn change_check_line(event: &Envelope) -> Option<String> {
+pub fn change_check_line(event: &Envelope) -> Option<String> {
     let reading = Reading::of(event)?;
     let significance = event
         .labels
@@ -416,7 +416,7 @@ type Answered = (
 );
 
 /// What a check-visibility pass knows and has said.
-pub(crate) struct CheckWatch {
+pub struct CheckWatch {
     /// Each (change request, head, check) a `check-failed` was raised for, seeded from
     /// the run's own records.
     raised: BTreeSet<(String, String, String)>,
@@ -443,7 +443,7 @@ pub(crate) struct CheckWatch {
 
 impl CheckWatch {
     /// Start watching one run, taking up what a previous driver raised.
-    pub(crate) fn of_run(paths: &RunPaths) -> Self {
+    pub fn of_run(paths: &RunPaths) -> Self {
         let mut raised = BTreeSet::new();
         let mut unfollowed = BTreeSet::new();
         for event in crate::checkpoint::recalled(paths) {
@@ -502,7 +502,7 @@ impl CheckWatch {
     /// # Errors
     ///
     /// Where the channel or the journal cannot be written.
-    pub(crate) fn observe(
+    pub fn observe(
         &mut self,
         paths: &RunPaths,
         journal: &mut Journal,
@@ -573,7 +573,7 @@ impl CheckWatch {
 
     /// Take up whatever follow reads have answered, and say whether any did. Never
     /// blocks: what the loop's wait is woken by.
-    pub(crate) fn take_up_answers(&mut self) -> bool {
+    pub fn take_up_answers(&mut self) -> bool {
         let before = self.taken.len();
         self.taken.extend(self.answers.try_iter());
         self.taken.len() > before
@@ -581,7 +581,7 @@ impl CheckWatch {
 
     /// How long the loop may go before this watch is due again: never while nothing
     /// is followed.
-    pub(crate) fn next_due(&self) -> Duration {
+    pub fn next_due(&self) -> Duration {
         if self.followed.is_empty() {
             return Duration::MAX;
         }
@@ -610,7 +610,7 @@ impl CheckWatch {
     /// # Errors
     ///
     /// Where the channel or the journal cannot be written.
-    pub(crate) fn pass(
+    pub fn pass(
         &mut self,
         paths: &RunPaths,
         journal: &mut Journal,
@@ -917,7 +917,7 @@ impl CheckWatch {
 ///
 /// Read from the run's own record rather than off a driver's memory, which is what
 /// an adopting driver resumes from too, so the two cannot disagree.
-pub(crate) fn ending(
+pub fn ending(
     paths: &RunPaths,
 ) -> (
     Vec<crate::payload::EndingCheck>,
@@ -1002,7 +1002,7 @@ pub(crate) fn ending(
 
 /// The two sections `results` and `status` print about a run's checks at its end,
 /// read off its latest `driver-exited`; empty when it names neither.
-pub(crate) fn ending_sections(exited: Option<&Envelope>) -> String {
+pub fn ending_sections(exited: Option<&Envelope>) -> String {
     let Some(exited) = exited else {
         return String::new();
     };

@@ -12,7 +12,7 @@ use serde::Serialize;
 
 /// Read one YAML document as `T`, refused with the parser's own message: what failed, and the
 /// line and column it failed at.
-pub(crate) fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+pub fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, String> {
     let options = serde_saphyr::options! {
         strict_booleans: true,
         merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
@@ -25,7 +25,7 @@ pub(crate) fn from_str<T: DeserializeOwned>(text: &str) -> Result<T, String> {
 ///
 /// A long string stays on its one line rather than folding to `>-`: a reader that edits the
 /// document in place reads it the same either way, and a person reading it reads one line.
-pub(crate) fn to_string<T: Serialize>(value: &T) -> Result<String, String> {
+pub fn to_string<T: Serialize>(value: &T) -> Result<String, String> {
     let options = serde_saphyr::ser_options! {
         folded_wrap_chars: usize::MAX,
     };

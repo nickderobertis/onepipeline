@@ -49,14 +49,14 @@ pub const WAIT_SURFACE_KIND: &str = "workspace-wait";
 pub const EXHAUSTED_REASON: &str = "workspace-exhausted";
 
 /// The word a `node-held` entry carries for this hold.
-pub(crate) const HOLD_KIND: &str = "workspace";
+pub const HOLD_KIND: &str = "workspace";
 
 /// The `node-requeued` a refused open is recorded as, in the shape the
 /// divergence record fixes: the reason, the sibling's own account bounded as
 /// every payload text is, and — for a re-dispatch that keeps its pin through
 /// the queue — the branch the wait is against and the attempt it interrupted.
 /// A first attempt has no pin and its record carries neither.
-pub(crate) fn requeue_payload(
+pub fn requeue_payload(
     because: &str,
     pinned: Option<(&str, std::num::NonZeroU32)>,
 ) -> serde_json::Map<String, Value> {
@@ -93,7 +93,7 @@ pub const DEFAULT_POLL_SECONDS: u64 = 60;
 /// three that are, and `slots`, already say it; the holders themselves are the
 /// sibling's to name, which the surface says how to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceHold {
+pub struct WorkspaceHold {
     /// The identity key the request resolved to.
     pub identity: String,
     /// The pool size the request resolves to.
@@ -113,7 +113,7 @@ pub(crate) struct WorkspaceHold {
 
 impl WorkspaceHold {
     /// The hold one capacity reading stands for.
-    pub(crate) fn of(capacity: &WorkspaceCapacity) -> Self {
+    pub fn of(capacity: &WorkspaceCapacity) -> Self {
         Self {
             identity: capacity.identity.clone(),
             pool: capacity.pool,
@@ -127,7 +127,7 @@ impl WorkspaceHold {
 
     /// The `node-held` entry, as the divergence record fixes it: the bound is
     /// the sibling's own spelling, `"unlimited"` or the number.
-    pub(crate) fn payload(&self) -> Value {
+    pub fn payload(&self) -> Value {
         json!({
             "kind": HOLD_KIND,
             "identity": self.identity,
@@ -142,7 +142,7 @@ impl WorkspaceHold {
 
     /// One `node-held` entry read back, or `None` for an entry that is not
     /// this hold or that this build cannot read whole.
-    pub(crate) fn of_payload(entry: &Value) -> Option<Self> {
+    pub fn of_payload(entry: &Value) -> Option<Self> {
         if entry.get("kind")?.as_str()? != HOLD_KIND {
             return None;
         }
@@ -159,7 +159,7 @@ impl WorkspaceHold {
     }
 
     /// The numbers, on one line, as a view and the surface both say them.
-    pub(crate) fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         format!(
             "pool {} ({} slot(s): {} idle, {} maintaining), overflow {} with {} in use",
             self.pool, self.slots, self.idle, self.maintaining, self.overflow, self.overflow_in_use
@@ -175,14 +175,14 @@ impl WorkspaceHold {
 /// against the entry it wrote: what the slots add is said in the `workspace-wait` text,
 /// where the numbers already are.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reading {
+pub struct Reading {
     pub hold: WorkspaceHold,
     /// Every slot nobody is in that `hold.idle` does not count, which only the text says.
     pub ineligible: Vec<IneligibleSlot>,
 }
 
 impl Reading {
-    pub(crate) fn of(capacity: &WorkspaceCapacity) -> Self {
+    pub fn of(capacity: &WorkspaceCapacity) -> Self {
         Self {
             hold: WorkspaceHold::of(capacity),
             ineligible: capacity.ineligible.clone(),
@@ -236,7 +236,7 @@ fn unusable(ineligible: &[IneligibleSlot]) -> Option<String> {
 
 /// Whether one node's session would be placed now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Admission {
+pub enum Admission {
     /// It would: the dispatch goes ahead, and this pass has counted it.
     Admitted,
     /// It would not, on this reading: the node is held under it, and
@@ -261,7 +261,7 @@ pub(crate) enum Admission {
 /// watch is: the per-pass count of dispatches per identity, the nodes held and
 /// why, the refusals still standing, and when each held node's wait was last
 /// surfaced.
-pub(crate) struct Workspaces {
+pub struct Workspaces {
     /// The nodes dispatched onto each identity whose session has not been seen
     /// to open yet, by node.
     ///
@@ -307,7 +307,7 @@ pub(crate) struct Workspaces {
 }
 
 impl Workspaces {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             placing: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -323,7 +323,7 @@ impl Workspaces {
     /// Open a pass: forget the last pass's holds, and every placement whose
     /// node is no longer in flight. What is held this pass is decided by the
     /// reads this pass makes.
-    pub(crate) fn begin_pass(&mut self, in_flight: impl Fn(&str) -> bool) {
+    pub fn begin_pass(&mut self, in_flight: impl Fn(&str) -> bool) {
         self.held.clear();
         self.unusable.clear();
         self.placing.retain(|node, _| in_flight(node));
@@ -331,7 +331,7 @@ impl Workspaces {
 
     /// The session `node`'s dispatch opened has been seen: it is on the
     /// identity's own records now, so a reading counts it.
-    pub(crate) fn placed(&mut self, node: &str) {
+    pub fn placed(&mut self, node: &str) {
         self.placing.remove(node);
     }
 
@@ -340,7 +340,7 @@ impl Workspaces {
     /// Reads the identity fresh for every node asked — the pass is the unit of
     /// freshness, and a node held on a stale reading is a node held a pass too
     /// long — then applies this pass's own dispatches over the reading.
-    pub(crate) fn admit(&mut self, node: &str, request: &SessionRequest) -> Admission {
+    pub fn admit(&mut self, node: &str, request: &SessionRequest) -> Admission {
         // A refusal the identity made stands until the paced re-read.
         if let Some((at, reading)) = self.refused.get(node) {
             if at.elapsed() < self.every {
@@ -397,7 +397,7 @@ impl Workspaces {
     /// refusal until the next paced read — where there is one; a read that
     /// failed holds nothing, and the node is queued again — and keep where it
     /// stood, for the dispatch that resumes it.
-    pub(crate) fn refused(
+    pub fn refused(
         &mut self,
         node: &str,
         reading: Option<Reading>,
@@ -415,19 +415,19 @@ impl Workspaces {
 
     /// Where `node` would resume from, left in place: what its next dispatch is composed
     /// from, for a reader that is not that dispatch — the plan-edit hook.
-    pub(crate) fn pending(&self, node: &str) -> Option<&crate::lifecycle::Continuation> {
+    pub fn pending(&self, node: &str) -> Option<&crate::lifecycle::Continuation> {
         self.resuming.get(node).map(std::convert::AsRef::as_ref)
     }
 
     /// Where `node` resumes from, taken for the dispatch about to leave on it:
     /// `None` for a node that starts from the plan's own node.
-    pub(crate) fn resuming(&mut self, node: &str) -> Option<Box<crate::lifecycle::Continuation>> {
+    pub fn resuming(&mut self, node: &str) -> Option<Box<crate::lifecycle::Continuation>> {
         self.resuming.remove(node)
     }
 
     /// The dispatch did not leave after all — the node was held — so what it
     /// would have resumed from is kept for the pass it does.
-    pub(crate) fn keep_resuming(
+    pub fn keep_resuming(
         &mut self,
         node: &str,
         resume: Option<Box<crate::lifecycle::Continuation>>,
@@ -438,7 +438,7 @@ impl Workspaces {
     }
 
     /// The nodes held this pass, and the reading each is held on.
-    pub(crate) fn held(&self) -> &BTreeMap<String, WorkspaceHold> {
+    pub fn held(&self) -> &BTreeMap<String, WorkspaceHold> {
         &self.held
     }
 
@@ -446,7 +446,7 @@ impl Workspaces {
     ///
     /// `Duration::MAX` where nothing is held, so a run with no pool business
     /// waits on the channel alone.
-    pub(crate) fn next_read(&self) -> Duration {
+    pub fn next_read(&self) -> Duration {
         if self.held.is_empty() && self.refused.is_empty() {
             return Duration::MAX;
         }
@@ -469,7 +469,7 @@ impl Workspaces {
     /// answer before the run can move. This one is a report — the decision it
     /// informs is whether to keep waiting, close a session somewhere, or resize
     /// the identity.
-    pub(crate) fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
+    pub fn surface_waits(&mut self, paths: &RunPaths, journal: &mut Journal) -> Result<()> {
         for (node, hold) in &self.held {
             let content = format!("{}\u{1f}{}", hold.identity, hold.describe());
             if !self.surfaced.due(paths, node, &content) {

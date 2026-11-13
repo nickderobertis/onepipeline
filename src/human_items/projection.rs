@@ -92,7 +92,7 @@ fn dismissal_reason(item: &HumanItem) -> Option<&str> {
 }
 
 /// The tasks whose projection is owed.
-pub(crate) fn pending<'a>(
+pub fn pending<'a>(
     journal: &Path,
     items: impl Iterator<Item = &'a HumanItem>,
 ) -> Vec<HumanItem> {
@@ -179,14 +179,14 @@ fn with_plan_link(body: &str, plan: &str, url: Option<&str>) -> String {
 }
 
 /// A task's tracker binding, and the record that it was projected.
-pub(crate) struct Bound {
-    pub(crate) tracker: HumanItemTracker,
+pub struct Bound {
+    pub tracker: HumanItemTracker,
     record: Record,
 }
 
 /// Project one task into `source`, as the store configured from `dir` places it.
 /// Answers its tracker binding.
-pub(crate) fn project(
+pub fn project(
     dir: &Path,
     journal: &Path,
     source: &str,
@@ -261,7 +261,7 @@ pub(crate) fn project(
 }
 
 /// Record that `item` has been projected as `bound` says.
-pub(crate) fn record(journal: &Path, item: &HumanItem, bound: Bound) {
+pub fn record(journal: &Path, item: &HumanItem, bound: Bound) {
     let mut done = projected(journal);
     done.insert(item.id.clone(), bound.record);
     if let Err(why) = crate::ledger::write_atomic(

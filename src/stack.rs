@@ -29,10 +29,10 @@ use crate::plan::Node;
 use crate::projection::RunState;
 
 /// The line that opens the Stack block in a change request's description.
-pub(crate) const BLOCK_OPEN: &str = "<!-- onepipeline:stack -->";
+pub const BLOCK_OPEN: &str = "<!-- onepipeline:stack -->";
 
 /// The line that closes it.
-pub(crate) const BLOCK_CLOSE: &str = "<!-- /onepipeline:stack -->";
+pub const BLOCK_CLOSE: &str = "<!-- /onepipeline:stack -->";
 
 /// The path segment that opens the stack-base namespace, which is `onevcs`'s
 /// own: a branch is a stack base by its name, `<prefix>stack-base/<plan>/<node>`.
@@ -40,26 +40,26 @@ const STACK_BASE_NAMESPACE: &str = "stack-base";
 
 /// One stack parent, as the record held it when the node was placed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Parent {
+pub struct Parent {
     // llmlint: ignore-block[invalid_states_unrepresentable] the parent's own settlement,
     // as `RunState` folded it: a node id, a branch, a commit and a URL are the strings
     // every neighbouring map of that state carries them as, each checked where it was
     // folded by `vcs::usable`, and the wire record this becomes is the stacked drafts
     // contract's own `{node, branch, head}` of strings.
     /// The parent node.
-    pub(crate) node: String,
+    pub node: String,
     /// The branch its settlement recorded.
-    pub(crate) branch: String,
+    pub branch: String,
     /// The commit its settlement recorded that branch at.
-    pub(crate) head: String,
+    pub head: String,
     /// Its change request, where its settlement named one.
-    pub(crate) change_url: Option<String>,
+    pub change_url: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Where a node with stack parents is placed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Stack {
+pub enum Stack {
     /// On its one stack parent's branch.
     OnParent(Parent),
     /// On a stack base `onevcs` assembles from `root` and each parent, in order.
@@ -82,11 +82,11 @@ pub(crate) enum Stack {
 /// Two or more stack parents: what a stack base merges, and the only way one is
 /// held, so a stack base of fewer is not a value this crate can make.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Several(Vec<Parent>);
+pub struct Several(Vec<Parent>);
 
 impl Several {
     /// `parents`, where there are at least two of them, and them back otherwise.
-    pub(crate) fn of(parents: Vec<Parent>) -> Result<Self, Vec<Parent>> {
+    pub fn of(parents: Vec<Parent>) -> Result<Self, Vec<Parent>> {
         if parents.len() >= 2 {
             Ok(Self(parents))
         } else {
@@ -95,7 +95,7 @@ impl Several {
     }
 
     /// The parents, in order.
-    pub(crate) fn as_slice(&self) -> &[Parent] {
+    pub fn as_slice(&self) -> &[Parent] {
         &self.0
     }
 }
@@ -103,7 +103,7 @@ impl Several {
 impl Stack {
     /// The branch the node's session is cut from and its change request is based
     /// on: the one parent's branch, or the stack base.
-    pub(crate) fn base(&self) -> &str {
+    pub fn base(&self) -> &str {
         match self {
             Self::OnParent(parent) => &parent.branch,
             Self::OnStackBase { branch, .. } => branch,
@@ -111,7 +111,7 @@ impl Stack {
     }
 
     /// The stack parents, in the node's declared dependency order.
-    pub(crate) fn parents(&self) -> &[Parent] {
+    pub fn parents(&self) -> &[Parent] {
         match self {
             Self::OnParent(parent) => std::slice::from_ref(parent),
             Self::OnStackBase { parents, .. } => parents.as_slice(),
@@ -121,7 +121,7 @@ impl Stack {
     /// The record its settlement carries, with each parent's head as `heads`
     /// names it by branch — the stack base's assembly reads them off the origin —
     /// and as the parent's own settlement recorded it otherwise.
-    pub(crate) fn settled(&self, heads: &BTreeMap<String, String>) -> SettledStack {
+    pub fn settled(&self, heads: &BTreeMap<String, String>) -> SettledStack {
         SettledStack {
             parents: self
                 .parents()
@@ -172,7 +172,7 @@ impl Stack {
 
     /// The Stack block the engine writes into the node's change request
     /// description, markers included.
-    pub(crate) fn block(&self) -> String {
+    pub fn block(&self) -> String {
         format!(
             "{BLOCK_OPEN}\n## Stack\n\n{}\n{BLOCK_CLOSE}",
             self.drafted_against()
@@ -181,7 +181,7 @@ impl Stack {
 
     /// The section a dispatched worker's task carries: each stack parent's node,
     /// branch and change request, and the base the node is drafted against.
-    pub(crate) fn task_section(&self) -> String {
+    pub fn task_section(&self) -> String {
         let mut section = format!(
             "{TASK_HEADING}\n\nThis node's work is drafted on top of changes still in review. \
              Its branch is cut from `{base}`, and its change request is opened against \
@@ -210,7 +210,7 @@ impl Stack {
 
     /// The section the change request's body drafter reads: the block, as the
     /// engine writes it after the body, for the drafter to know and leave alone.
-    pub(crate) fn drafting_section(&self) -> String {
+    pub fn drafting_section(&self) -> String {
         format!(
             "{TASK_HEADING}\n\nThis change request is drafted against unlanded changes. After \
              your body is written, the engine itself appends the block below to the \
@@ -222,7 +222,7 @@ impl Stack {
 }
 
 /// The heading both task sections open with.
-pub(crate) const TASK_HEADING: &str = "## Stack";
+pub const TASK_HEADING: &str = "## Stack";
 
 fn url_or_none(url: Option<&str>) -> &str {
     url.unwrap_or("(no change request on the record)")
@@ -237,7 +237,7 @@ fn url_or_none(url: Option<&str>) -> &str {
 /// A description holding an opening marker with no closing one after it is read
 /// as holding no block, and the block is appended: replacing to the end of the
 /// description would delete whatever a person wrote after a stray marker.
-pub(crate) fn splice(description: &str, block: &str) -> String {
+pub fn splice(description: &str, block: &str) -> String {
     // llmlint: ignore-block[changed_behavior_has_e2e] `tests/e2e/stacked_drafts.rs` drives the
     // descriptions a publication meets — empty, a drafted body, one already holding the block
     // a reviewer wrote around, and one a reviewer rewrote without it, ending in whitespace —
@@ -262,7 +262,7 @@ pub(crate) fn splice(description: &str, block: &str) -> String {
 }
 
 /// The stack base a node with several stack parents is placed on.
-pub(crate) fn stack_base_branch(prefix: &str, plan: &str, node: &str) -> String {
+pub fn stack_base_branch(prefix: &str, plan: &str, node: &str) -> String {
     format!("{prefix}{STACK_BASE_NAMESPACE}/{plan}/{node}")
 }
 
@@ -278,7 +278,7 @@ pub(crate) fn stack_base_branch(prefix: &str, plan: &str, node: &str) -> String 
 /// stack parent's branch and no commit for it, or several stack parents and no
 /// root to assemble their stack base on: placing the node anyway would draft it
 /// against work the run cannot name.
-pub(crate) fn placement(
+pub fn placement(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     node: &Node,
@@ -386,26 +386,26 @@ pub(crate) fn placement(
 /// A draft a restack owes: a node settled on a stack one of whose parents'
 /// branches the run has since seen move.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Owed {
+pub struct Owed {
     // llmlint: ignore-block[invalid_states_unrepresentable] the node and the branch are
     // `RunState`'s own, as `Parent`'s are above: a node id the graph holds and a branch its
     // settlement recorded, each checked where it was folded by `vcs::usable`, and handed on
     // as the `String`s the session request and the journal record take them as.
     /// The node.
-    pub(crate) node: String,
+    pub node: String,
     /// The branch its settlement recorded, which the restack continues.
-    pub(crate) branch: String,
+    pub branch: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Where it is restacked: its recorded stack, each parent named by its
     /// lineage's newest node and at the head its branch stands at now.
-    pub(crate) stack: Stack,
+    pub stack: Stack,
     /// Why.
-    pub(crate) cause: crate::payload::RestackCause,
+    pub cause: crate::payload::RestackCause,
 }
 
 impl Owed {
     /// Each stack parent's branch and the head the restack brings the node onto.
-    pub(crate) fn onto(&self) -> crate::payload::Onto {
+    pub fn onto(&self) -> crate::payload::Onto {
         let onto: Vec<crate::payload::RestackOnto> = self
             .stack
             .parents()
@@ -436,7 +436,7 @@ impl Owed {
 /// Read from the run's own record alone, so it asks no host. A recorded stack
 /// base whose root the record cannot name owes nothing here: assembling it again
 /// would assemble it on a guess.
-pub(crate) fn restacks_owed(
+pub fn restacks_owed(
     state: &RunState,
     statuses: &BTreeMap<String, NodeStatus>,
     busy: &dyn Fn(&str) -> bool,
@@ -545,7 +545,7 @@ fn newest_of(state: &RunState, id: &str) -> String {
 
 /// The root a settled node's work stands on: its own `base_branch`, the root of
 /// the stack it was drafted on, or the base its session opened on.
-pub(crate) fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
+pub fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
     if !seen.insert(id.to_owned()) {
         return None;
     }

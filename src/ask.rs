@@ -25,10 +25,10 @@ use crate::error::{Error, Result, EXIT_QUEUED, EXIT_SUCCESS};
 use crate::ledger::{self, LaunchRecord, RecordedBusConfig, RunPaths};
 
 /// The kind every question this verb raises carries.
-pub(crate) const QUESTION_KIND: &str = "planner-question";
+pub const QUESTION_KIND: &str = "planner-question";
 
 /// The environment variable naming the run whose channel is asked on.
-pub(crate) const RUN_ID_ENV: &str = crate::agentgraph::RUN_ID_ENV;
+pub const RUN_ID_ENV: &str = crate::agentgraph::RUN_ID_ENV;
 
 /// Where the question came from, for a refusal that names the form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl Form {
 /// carry. Built only by [`question`], so a [`Request`] holds one that was
 /// checked at the boundary it arrived over.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Text(String);
+pub struct Text(String);
 
 impl Text {
     fn into_inner(self) -> String {
@@ -69,7 +69,7 @@ impl Text {
 /// A blank question, one carrying a NUL byte — which no frame can carry — and
 /// a file that cannot be read, each named with the form it came in, and
 /// refused before anything is raised.
-pub(crate) fn question(args: &AskArgs) -> Result<Text> {
+pub fn question(args: &AskArgs) -> Result<Text> {
     let (form, text) = match (&args.file, args.text.is_empty()) {
         (Some(path), _) => (Form::File, read_file(path)?),
         (None, false) => (Form::Arguments, args.text.join(" ")),
@@ -116,17 +116,17 @@ fn read_file(path: &PathBuf) -> Result<String> {
 /// only by [`run_id`]; whether a run by that name exists is the resolver's to
 /// say.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RunId(String);
+pub struct RunId(String);
 
 impl RunId {
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 /// The run `ONEPIPELINE_RUN_ID` names, where it names one: present and not
 /// blank. Absent and blank are the one answer, a question naming no run.
-pub(crate) fn named_run() -> Option<RunId> {
+pub fn named_run() -> Option<RunId> {
     std::env::var(RUN_ID_ENV)
         .ok()
         .filter(|run| !run.trim().is_empty())
@@ -135,7 +135,7 @@ pub(crate) fn named_run() -> Option<RunId> {
 
 /// The refusal of a question that names no run and runs in no flow: absent or
 /// blank, `ONEPIPELINE_RUN_ID` is named, and nothing is raised.
-pub(crate) fn no_run() -> Error {
+pub fn no_run() -> Error {
     Error::Invalid(format!(
         "{RUN_ID_ENV} is not set, so there is no run whose channel to ask on; run this from \
          inside a dispatch, which exports it, or export the run id yourself"
@@ -149,7 +149,7 @@ pub(crate) fn no_run() -> Error {
 ///
 /// A blank value: unset means nobody, but a value that is there and blank is a
 /// caller that meant to name an asker and did not.
-pub(crate) fn asker() -> Result<Option<Asker>> {
+pub fn asker() -> Result<Option<Asker>> {
     match std::env::var_os(crate::channel::ASKER_ENV) {
         None => Ok(None),
         Some(word) => Asker::named(&word, crate::channel::ASKER_ENV)
@@ -172,7 +172,7 @@ pub(crate) fn asker() -> Result<Option<Asker>> {
 /// raised. Omitted, the node `dispatched` names — the dispatch's own,
 /// `ONEPIPELINE_NODE_ID`, read in the binary's arm — so a ruling answering a
 /// dispatch's question is addressed to the node that asked it.
-pub(crate) fn about(args: &AskArgs, dispatched: Option<&str>) -> Result<Option<Address>> {
+pub fn about(args: &AskArgs, dispatched: Option<&str>) -> Result<Option<Address>> {
     args.about
         .as_deref()
         .or(dispatched.filter(|node| !node.trim().is_empty()))
@@ -185,7 +185,7 @@ pub(crate) fn about(args: &AskArgs, dispatched: Option<&str>) -> Result<Option<A
 
 /// One question: its text, and what rides beside it.
 #[derive(Debug)]
-pub(crate) struct Request {
+pub struct Request {
     pub message: Text,
     pub asker: Option<Asker>,
     pub about: Option<Address>,
@@ -194,7 +194,7 @@ pub(crate) struct Request {
 
 /// A question raised on the channel, waiting for its answer — or one the bus
 /// refused to raise.
-pub(crate) enum Question {
+pub enum Question {
     /// Raised, with the handle its answer arrives on and the window it waits.
     Pending {
         /// The bus's handle, boxed: it is two queues and their transport, and
@@ -215,7 +215,7 @@ pub(crate) enum Question {
 
 /// Whose channel a question is raised on: a run's, or — where the asker names no
 /// run and runs in a flow — the flow's own.
-pub(crate) enum On {
+pub enum On {
     /// The run `ONEPIPELINE_RUN_ID` names.
     Run(RunPaths),
     /// The flow `ONEPIPELINE_FLOW` names, boxed: its record carries a bus
@@ -226,7 +226,7 @@ pub(crate) enum On {
 impl On {
     /// What `onepipeline reply` is told to answer this channel by: the run, or
     /// `--flow` and the flow.
-    pub(crate) fn reply_to(&self) -> String {
+    pub fn reply_to(&self) -> String {
         match self {
             Self::Run(paths) => paths.run.clone(),
             Self::Flow(flow) => format!("--flow {}", flow.id()),
@@ -246,7 +246,7 @@ impl Question {
     /// # Errors
     ///
     /// A launch record that cannot be read.
-    pub(crate) fn raise_on(on: &On, request: Request) -> Result<Self> {
+    pub fn raise_on(on: &On, request: Request) -> Result<Self> {
         let (config, channel) = match on {
             On::Run(paths) => {
                 let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
@@ -309,7 +309,7 @@ impl Question {
 
     /// How long the wait is: the resolved window, or none for a question that
     /// was never raised.
-    pub(crate) fn window(&self) -> Duration {
+    pub fn window(&self) -> Duration {
         match self {
             Self::Pending { window, .. } => *window,
             Self::Refused(_) | Self::Dropped { .. } => Duration::ZERO,
@@ -317,7 +317,7 @@ impl Question {
     }
 
     /// The correlation the answer echoes, once the question is raised.
-    pub(crate) fn correlation(&self) -> Option<&Correlation> {
+    pub fn correlation(&self) -> Option<&Correlation> {
         match self {
             Self::Pending { pending, .. } => Some(pending.correlation()),
             Self::Refused(_) | Self::Dropped { .. } => None,
@@ -330,7 +330,7 @@ impl Question {
     /// abandoned**, exactly as the bus's own command line does: nothing is
     /// listening for the answer now, and a later listener of the same asker
     /// takes it back. An elapsed wait is never a ruling.
-    pub(crate) fn answer(self) -> Asked {
+    pub fn answer(self) -> Asked {
         match self {
             Self::Refused(reason) => Asked {
                 wire: Wire::Refused {
@@ -400,14 +400,14 @@ fn reply_window(config: Option<&onemessagebus::Config>) -> Option<Duration> {
 /// it could not: said on standard error, and never in the answer, which is the
 /// bus's word for what happened to the wait.
 #[derive(Debug)]
-pub(crate) struct Asked {
+pub struct Asked {
     wire: Wire,
     unmarked: Option<String>,
 }
 
 impl Asked {
     /// `0` for a reply; `1` for a timeout, an abandoned listener, or a refusal.
-    pub(crate) const fn exit_code(&self) -> i32 {
+    pub const fn exit_code(&self) -> i32 {
         match self.wire {
             Wire::Reply { .. } => EXIT_SUCCESS,
             Wire::Timeout { .. }
@@ -420,7 +420,7 @@ impl Asked {
     /// The bus's one-line answer: `{"answer":"reply","correlation":…,"reply":…}`,
     /// or `timeout`, `abandoned` and `refused` naming the correlation where
     /// there is one and the reason where there is one.
-    pub(crate) fn render(&self) -> String {
+    pub fn render(&self) -> String {
         serde_json::to_string(&self.wire).unwrap_or_else(|error| {
             // Unreachable for a type of strings and JSON values; said as a
             // refusal in the bus's own shape rather than as nothing.
@@ -435,7 +435,7 @@ impl Asked {
     /// beside, and, for the manager's, the `ruling` reference
     /// `onepipeline decline-ruling` takes. Any other answer is no ruling and is
     /// left as the bus gave it.
-    pub(crate) fn attributed(mut self) -> Self {
+    pub fn attributed(mut self) -> Self {
         if let Wire::Reply { reply, .. } = &mut self.wire {
             let provenance = reply
                 .get("reply")
@@ -466,7 +466,7 @@ impl Asked {
     ///
     /// `run` is what `onepipeline reply` is told to answer the channel by: a run
     /// id, or `--flow` and a flow's.
-    pub(crate) fn advice(&self, run: &str, window: Duration) -> Option<String> {
+    pub fn advice(&self, run: &str, window: Duration) -> Option<String> {
         match &self.wire {
             Wire::Reply { .. } => None,
             Wire::Timeout { correlation } => Some(format!(

@@ -21,20 +21,20 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// The reserved persona a reply drafting runs as.
-pub(crate) const PERSONA: &str = "review-reply";
+pub const PERSONA: &str = "review-reply";
 
 /// The longest reply body the engine posts, in characters.
-pub(crate) const BODY_LIMIT: usize = 500;
+pub const BODY_LIMIT: usize = 500;
 
 /// The label a declined comment's reply carries in its marker.
-pub(crate) const DECLINED: &str = "declined";
+pub const DECLINED: &str = "declined";
 
 /// What `## Worker transcript` says where this host's journal holds no transcript.
-pub(crate) const NO_TRANSCRIPT: &str =
+pub const NO_TRANSCRIPT: &str =
     "No worker transcript is available on this host; draft from the sections above.";
 
 /// The fixed opening of every reply drafting's task.
-pub(crate) const PREAMBLE: &str = "Draft one terse reply to each review comment below, as \
+pub const PREAMBLE: &str = "Draft one terse reply to each review comment below, as \
 the author of the change request answering its reviewer in their own thread. For a comment \
 the commits under `## Commits` answer, say in a line or two what changed and link at least \
 one of those commits by its URL, with disposition `answered`. For a comment the change leaves \
@@ -43,32 +43,32 @@ as it is, say in a line why, link no commit, with disposition `declined`. Each b
 
 /// One commit a rework added: its sha, its subject and where a person reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Commit {
+pub struct Commit {
     // llmlint: ignore-block[invalid_states_unrepresentable] git's own answer about a branch on the origin, read off `git log` of the run's commit cache and printed into a drafting task and a view; nothing parses them back into a decision.
-    pub(crate) sha: String,
-    pub(crate) subject: String,
-    pub(crate) url: String,
+    pub sha: String,
+    pub subject: String,
+    pub url: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// When it was committed, in seconds since the epoch.
-    pub(crate) at: i64,
+    pub at: i64,
 }
 
 /// Everything one reply drafting is handed: the change request, the comments, the
 /// commits a rework added (none for a decline), the reason, and where the worker's
 /// transcript is, where this host's journal holds one.
 #[derive(Debug, Clone)]
-pub(crate) struct Drafting {
+pub struct Drafting {
     // llmlint: ignore-block[invalid_states_unrepresentable] the change request URL is the one the run's record holds for the node, and the reason is the prose the op carried; both are printed into a task and never executed.
-    pub(crate) change_url: String,
-    pub(crate) reason: String,
+    pub change_url: String,
+    pub reason: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
-    pub(crate) comments: Vec<ReviewComment>,
-    pub(crate) answering: Answering,
+    pub comments: Vec<ReviewComment>,
+    pub answering: Answering,
 }
 
 /// What a drafting answers the comments with.
 #[derive(Debug, Clone)]
-pub(crate) enum Answering {
+pub enum Answering {
     /// A rework's replies: the commits it added, and where its worker's transcript is on
     /// this host, where the journal holds one.
     Rework {
@@ -81,7 +81,7 @@ pub(crate) enum Answering {
 }
 
 /// Where a comment sits on its change request, as the task names it.
-pub(crate) fn location(comment: &ReviewComment) -> String {
+pub fn location(comment: &ReviewComment) -> String {
     match &comment.kind {
         CommentKind::ReviewThread { path, line, .. } => {
             line.map_or_else(|| path.clone(), |line| format!("{path}:{line}"))
@@ -95,7 +95,7 @@ pub(crate) fn location(comment: &ReviewComment) -> String {
 impl Drafting {
     /// The drafter's task: the preamble, then `## Change request`, `## Comments`,
     /// `## Commits`, `## Reason` and `## Worker transcript`.
-    pub(crate) fn task(&self) -> String {
+    pub fn task(&self) -> String {
         let mut task = format!(
             "{PREAMBLE}\n\n## Change request\n\n{}\n\n## Comments\n",
             self.change_url
@@ -132,19 +132,19 @@ impl Drafting {
     }
 
     /// The commits a rework added; none for a decline.
-    pub(crate) fn commits(&self) -> &[Commit] {
+    pub fn commits(&self) -> &[Commit] {
         match &self.answering {
             Answering::Rework { commits, .. } => commits,
             Answering::Decline => &[],
         }
     }
 
-    pub(crate) fn is_decline(&self) -> bool {
+    pub fn is_decline(&self) -> bool {
         matches!(self.answering, Answering::Decline)
     }
 
     /// The comments' ids, in the order the task names them.
-    pub(crate) fn comment_ids(&self) -> Vec<String> {
+    pub fn comment_ids(&self) -> Vec<String> {
         self.comments
             .iter()
             .map(|comment| comment.id.0.clone())
@@ -154,11 +154,11 @@ impl Drafting {
 
 /// One reply the drafter answered, held to the rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Drafted {
+pub struct Drafted {
     // llmlint: ignore-block[invalid_states_unrepresentable] a comment id the drafting named and a body `validated` held to its length and links; `reply_to_comment` holds both to the host's shape again before anything is posted.
-    pub(crate) comment: String,
-    pub(crate) disposition: ReplyDisposition,
-    pub(crate) body: String,
+    pub comment: String,
+    pub disposition: ReplyDisposition,
+    pub body: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -166,7 +166,7 @@ pub(crate) struct Drafted {
 /// `commits/<sha>`, by its sha — whichever commits the drafting was handed. Read with its
 /// percent-escapes decoded, as the host resolves the link, so a path that spells a
 /// character of either as an escape still names its commit.
-pub(crate) fn linked_commits(body: &str) -> Vec<String> {
+pub fn linked_commits(body: &str) -> Vec<String> {
     let body = percent_decoded(body);
     let mut found = Vec::new();
     for marker in ["/commit/", "/commits/"] {
@@ -212,7 +212,7 @@ fn percent_decoded(text: &str) -> String {
 /// before the end of the body, whitespace, or punctuation closing a sentence or a bracket
 /// — rather than one inside a longer URL that carries it in its path, or extends it with
 /// more of a path, a query or a fragment.
-pub(crate) fn links(body: &str, url: &str) -> bool {
+pub fn links(body: &str, url: &str) -> bool {
     let mut from = 0;
     while let Some(at) = body[from..].find(url) {
         let start = from + at;
@@ -262,7 +262,7 @@ struct AnsweredReply {
 /// [`BODY_LIMIT`] characters, an `answered` body carrying at least one supplied
 /// commit URL, and a `declined` one carrying no commit URL at all — and, for a
 /// decline, every reply `declined`.
-pub(crate) fn validated(
+pub fn validated(
     drafting: &Drafting,
     answer: &Value,
 ) -> std::result::Result<Vec<Drafted>, String> {
@@ -345,10 +345,10 @@ pub(crate) fn validated(
 
 /// Why a reply drafting answered nothing to post.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NotDrafted {
-    pub(crate) ending: ReplyNotDraftedEnding,
+pub struct NotDrafted {
+    pub ending: ReplyNotDraftedEnding,
     // llmlint: ignore[invalid_states_unrepresentable] the drafter's or the engine's own words, journalled and surfaced as they are.
-    pub(crate) detail: String,
+    pub detail: String,
 }
 
 impl NotDrafted {
@@ -360,7 +360,7 @@ impl NotDrafted {
     }
 
     /// No reply drafter is configured for the run.
-    pub(crate) fn unconfigured() -> Self {
+    pub fn unconfigured() -> Self {
         Self {
             ending: ReplyNotDraftedEnding::Unconfigured,
             detail: "no reply drafter is configured: start the run with --review-reply-graph, \
@@ -377,7 +377,7 @@ impl NotDrafted {
 /// node's — and labelled with the node whose draft carries the comments. Every
 /// envelope it relays is ingested, its report retained under the run, and then
 /// handed to `relay`.
-pub(crate) fn draft(
+pub fn draft(
     paths: &RunPaths,
     graph: &str,
     node: &str,
@@ -452,7 +452,7 @@ pub(crate) fn draft(
 /// Post one reply with `onevcs`'s `reply_to_comment`: one POST, with no read of the
 /// thread first, because the read that decided it was owed has just shown no reply
 /// carrying `key`.
-pub(crate) fn post(
+pub fn post(
     change_url: &str,
     comment: &str,
     body: &str,
@@ -484,7 +484,7 @@ fn commit_url(change_url: &str, sha: &str) -> String {
 /// into a commit cache of the run's own so no checkout anybody works in is moved.
 /// `from` absent is a rework recorded before its superseded head was: the store can
 /// show only the replacement's head, so that one commit is all that is read.
-pub(crate) fn commits(
+pub fn commits(
     paths: &RunPaths,
     repo: &str,
     branch: &str,
@@ -576,13 +576,13 @@ fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
 }
 
 /// The test-only crash seam, shared with discovery's: see [`crate::review::failpoint`].
-pub(crate) fn failpoint(stage: &str) -> Result<()> {
+pub fn failpoint(stage: &str) -> Result<()> {
     crate::review::failpoint(stage)
 }
 
 /// What a drafting that could not post anything tells the journal: `ending` and
 /// `detail` beside the node and the comments it named.
-pub(crate) fn not_drafted(
+pub fn not_drafted(
     node: &str,
     comments: Vec<String>,
     why: &NotDrafted,
@@ -597,29 +597,29 @@ pub(crate) fn not_drafted(
 
 /// The superseded node's settled head, as the run's record holds it: where the
 /// commits a rework of it added begin.
-pub(crate) fn replaces_head(state: &crate::projection::RunState, replaces: &str) -> Option<String> {
+pub fn replaces_head(state: &crate::projection::RunState, replaces: &str) -> Option<String> {
     state.heads.get(replaces).cloned()
 }
 
 /// What a lineage head's rework asked, read off the run's own record on the host
 /// that applied it and off the store's `onepipeline.rework` on any other.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Provenance {
+pub struct Provenance {
     // llmlint: ignore-block[invalid_states_unrepresentable] the `rework-requested` operation's own fields, or the store's provenance `continuation::rework_provenance` validated, as the run's record holds them.
     /// The replacement the rework was applied as.
-    pub(crate) rework: String,
+    pub rework: String,
     /// Its reason and instruction, byte-for-byte.
-    pub(crate) reason: String,
-    pub(crate) instruction: String,
+    pub reason: String,
+    pub instruction: String,
     /// The comments it answers, by id.
-    pub(crate) comments: Vec<String>,
+    pub comments: Vec<String>,
     /// The superseded node's settled head, where the record holds it.
-    pub(crate) replaces_head: Option<String>,
+    pub replaces_head: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// The rework `node` — a lineage head — was applied as, where it is one.
-pub(crate) fn provenance(state: &crate::projection::RunState, node: &str) -> Option<Provenance> {
+pub fn provenance(state: &crate::projection::RunState, node: &str) -> Option<Provenance> {
     if let Some((replaces, rework)) = state
         .reworks
         .iter()
@@ -656,7 +656,7 @@ pub(crate) fn provenance(state: &crate::projection::RunState, node: &str) -> Opt
 impl Provenance {
     /// `## Reason` of a rework's drafting: its reason and its instruction, each as the
     /// record holds it.
-    pub(crate) fn reason_section(&self) -> String {
+    pub fn reason_section(&self) -> String {
         format!("{}\n\n{}", self.reason, self.instruction)
     }
 }
@@ -665,7 +665,7 @@ impl Provenance {
 /// an optional fraction of digits and `Z` — or `None` for anything else: a field of
 /// the wrong width or not all digits, a component too many, or a date or a time of day
 /// the calendar and the clock do not have.
-pub(crate) fn epoch_seconds(at: &str) -> Option<i64> {
+pub fn epoch_seconds(at: &str) -> Option<i64> {
     let (date, time) = at.strip_suffix('Z')?.split_once('T')?;
     let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
     if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -714,14 +714,14 @@ pub(crate) fn epoch_seconds(at: &str) -> Option<i64> {
 /// One owed drafting: a rework replacement's draft, the comments of it the rework
 /// names that no marked reply answers, and what the drafter is handed.
 #[derive(Debug, Clone)]
-pub(crate) struct Owed {
+pub struct Owed {
     // llmlint: ignore[invalid_states_unrepresentable] the lineage root `review::root` walked to, as the run's record holds it.
-    pub(crate) root: String,
-    pub(crate) drafting: Drafting,
+    pub root: String,
+    pub drafting: Drafting,
 }
 
 /// What a reply's key and posting need of one comment of an owed drafting.
-pub(crate) fn key_of(owed_root: &str, comment: &ReviewComment) -> String {
+pub fn key_of(owed_root: &str, comment: &ReviewComment) -> String {
     crate::review::key(owed_root, comment)
 }
 
@@ -734,7 +734,7 @@ pub(crate) fn key_of(owed_root: &str, comment: &ReviewComment) -> String {
 /// # Errors
 ///
 /// The commits the rework added could not be read off its branch.
-pub(crate) fn owed(
+pub fn owed(
     paths: &RunPaths,
     state: &crate::projection::RunState,
     node: &str,
@@ -846,7 +846,7 @@ fn transcript(paths: &RunPaths, rework: &str) -> Option<std::path::PathBuf> {
 /// A `decline`, judged against the run's record and not yet posted: the node, the
 /// comments and the reason its one `decline-applied` names, and what posting its
 /// replies needs.
-pub(crate) struct ValidatedDecline {
+pub struct ValidatedDecline {
     comments: Vec<crate::channel::ReworkComment>,
     paths: RunPaths,
     // llmlint: ignore-block[invalid_states_unrepresentable] the plan node id the engine's edit validator resolved, the op's reason held non-blank by `staged_decline`, the launch record's resolved graph reference, the run's own change request URL and the lineage root `review::root` walked to.
@@ -862,7 +862,7 @@ pub(crate) struct ValidatedDecline {
 impl ValidatedDecline {
     /// The `decline-applied` the commands after this one are validated against: its
     /// replies are not posted yet, so it names none.
-    pub(crate) fn staged(&self) -> crate::edits::Operation {
+    pub fn staged(&self) -> crate::edits::Operation {
         crate::edits::Operation::DeclineApplied {
             node: self.node.clone(),
             comments: self.comments.clone(),
@@ -905,7 +905,7 @@ fn read_for(paths: &RunPaths, state: &crate::projection::RunState, node: &str) -
 ///
 /// [`Refusal::CommentNotRead`](crate::channel::Refusal::CommentNotRead) for the
 /// first comment no read found.
-pub(crate) fn staged_decline(
+pub fn staged_decline(
     paths: &RunPaths,
     state: &crate::projection::RunState,
     graph: Option<&str>,
@@ -963,7 +963,7 @@ pub(crate) fn staged_decline(
 /// [`Refusal::DeclineNotPosted`](crate::channel::Refusal::DeclineNotPosted) where no
 /// drafter is configured, the read, the drafting or a post failed — any reply posted
 /// before the failure staying on the host.
-pub(crate) fn decline(validated: &ValidatedDecline) -> Result<Vec<crate::edits::Operation>> {
+pub fn decline(validated: &ValidatedDecline) -> Result<Vec<crate::edits::Operation>> {
     let ValidatedDecline {
         node,
         comments,

@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use super::HumanItemRefusal;
 
 /// How much space the reserve holds back for the records that report a full disk.
-pub(crate) const RESERVE_BYTES: usize = 256 * 1024;
+pub const RESERVE_BYTES: usize = 256 * 1024;
 
 /// How an append reached the disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Appended {
+pub enum Appended {
     /// Into space the filesystem had.
     Normally,
     /// Into the space the reserve was holding: the filesystem had none.
@@ -27,7 +27,7 @@ pub(crate) enum Appended {
 }
 
 /// Whether an error is the filesystem having no room for the write.
-pub(crate) fn is_no_space(error: &std::io::Error) -> bool {
+pub fn is_no_space(error: &std::io::Error) -> bool {
     // llmlint: ignore[changed_behavior_has_e2e] a full filesystem (ENOSPC) and a file past its size limit (EFBIG) are each driven for real by `tests/human_items_live.rs`; a disk quota (EDQUOT) needs quotas enabled on a mounted filesystem, which no unprivileged journey can arrange, and it is the same refusal of the same write.
     if error.kind() == std::io::ErrorKind::StorageFull
         || error.kind() == std::io::ErrorKind::QuotaExceeded
@@ -49,13 +49,13 @@ pub(crate) fn is_no_space(error: &std::io::Error) -> bool {
 }
 
 /// The reserve beside a journal.
-pub(crate) fn reserve_of(journal: &Path) -> PathBuf {
+pub fn reserve_of(journal: &Path) -> PathBuf {
     journal.with_file_name("reserve")
 }
 
 /// Allocate the reserve if it is not held, answering whether the filesystem had
 /// room for it. A partial reserve is removed rather than kept.
-pub(crate) fn ensure_reserve(journal: &Path) -> std::io::Result<()> {
+pub fn ensure_reserve(journal: &Path) -> std::io::Result<()> {
     let path = reserve_of(journal);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() == RESERVE_BYTES as u64) {
         return Ok(());
@@ -86,7 +86,7 @@ fn write_synced(file: &mut std::fs::File, line: &str) -> std::io::Result<()> {
 /// Append one record durably, releasing the reserve for it when the filesystem
 /// has no room. Refuses, acknowledging nothing, when the record could not be
 /// made durable either way.
-pub(crate) fn append(
+pub fn append(
     path: &Path,
     file: &mut std::fs::File,
     line: &str,

@@ -230,7 +230,7 @@ impl Argv {
     /// own working directory is resolved against the parent's on one platform and the
     /// child's on another: a command or hook a launch names beside itself is the file beside
     /// that launch, wherever the process starting it stands.
-    pub(crate) fn program_from(&self, dir: &std::path::Path) -> std::path::PathBuf {
+    pub fn program_from(&self, dir: &std::path::Path) -> std::path::PathBuf {
         let program = std::path::Path::new(&self.program);
         let names_a_file = self.program.contains('/') || self.program.contains('\\');
         if program.is_relative() && names_a_file && !dir.as_os_str().is_empty() {
@@ -241,7 +241,7 @@ impl Argv {
     }
 
     /// Every word, the program first, joined by one space: how a refusal names it.
-    pub(crate) fn spelled(&self) -> String {
+    pub fn spelled(&self) -> String {
         std::iter::once(self.program.as_str())
             .chain(self.arguments.iter().map(String::as_str))
             .collect::<Vec<_>>()
@@ -346,7 +346,7 @@ fn plan_edit_hook_timeout<'de, D: serde::Deserializer<'de>>(
 
 /// The launch-config key naming the reply drafter's graph, spelled once for the
 /// readers that refuse and resolve by it.
-pub(crate) const REVIEW_REPLY_GRAPH_KEY: &str = "review_reply_graph";
+pub const REVIEW_REPLY_GRAPH_KEY: &str = "review_reply_graph";
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
 /// for the two readers that refuse by it.

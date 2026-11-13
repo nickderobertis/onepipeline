@@ -48,7 +48,7 @@ fn bus_dir(root: &Path) -> PathBuf {
 }
 
 /// The queue one owning session's events are carried on.
-pub(crate) fn queue_of(session: &str) -> QueueName {
+pub fn queue_of(session: &str) -> QueueName {
     let digest = super::live::item_id_for(session);
     QueueName::try_from(format!("owner-{}", &digest[3..]).as_str())
         .unwrap_or_else(|_| unreachable!("a hex digest is a queue name"))
@@ -347,7 +347,7 @@ struct Watched {
 /// Carry every journal record past what delivery has reached onto its owner's
 /// queue. Called with the journal's append lock held, after an append; a
 /// failure is said on standard error and left for the next carrier.
-pub(crate) fn deliver(root: &Path, _just: &Envelope) {
+pub fn deliver(root: &Path, _just: &Envelope) {
     if let Err(error) = catch_up(root) {
         eprintln!(
             "onepipeline: a human-item event is recorded and not yet delivered to its owner's \
@@ -358,7 +358,7 @@ pub(crate) fn deliver(root: &Path, _just: &Envelope) {
 
 /// Carry everything recorded and not yet delivered, taking the journal's lock as a
 /// writer holds it; a failure is said and left for the next carrier.
-pub(crate) fn carry(root: &Path) {
+pub fn carry(root: &Path) {
     let journal = root.join(super::JOURNAL_PATH);
     let held = crate::ledger::open_healed_for_append(&journal).map_err(|e| e.to_string());
     if let Err(error) = held.and_then(|_lock| catch_up(root).map_err(|e| e.to_string())) {
@@ -384,7 +384,7 @@ fn journal_error(journal: &Path, error: impl std::fmt::Display) -> TransportErro
 
 /// Carry everything recorded and not yet delivered. Answers how many records
 /// were carried.
-pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
+pub fn catch_up(root: &Path) -> Result<u64, TransportError> {
     let dir = bus_dir(root);
     let transport = LocalTransport::open(&dir)?;
     let control: QueueName = name(DELIVERY);
@@ -546,7 +546,7 @@ fn carry_group(
 /// up to `within` for one when there is none. The cursor is committed only
 /// once `print` has taken every event, so a watch that dies printing them
 /// hands them to the next watch rather than losing them.
-pub(crate) fn watch(
+pub fn watch(
     root: &Path,
     session: &str,
     within: Duration,

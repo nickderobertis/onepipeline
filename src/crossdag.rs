@@ -407,7 +407,7 @@ impl Observer {
 
     /// When the last [`resolve`](Self::resolve) began reading, which is what the
     /// loop's next read is paced from.
-    pub(crate) fn resolved_at(&self) -> Option<Instant> {
+    pub fn resolved_at(&self) -> Option<Instant> {
         self.resolved_at
     }
 }
@@ -429,7 +429,7 @@ pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatu
 
 /// A retained view must notice upstream changes before calling itself unchanged.
 /// Refresh the quiet readers' cache too, so a subsequent `RunView::open` agrees.
-pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+pub fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
     resolve_with(root, graph, settled_status)
 }
 
@@ -440,7 +440,7 @@ pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String
 /// a dependency: see `graph::derive`. So an edge all of whose consumers are such
 /// nodes changes nothing a reader of this run is told, whatever its upstream later
 /// does, and reading it would be another run's whole ledger for no answer.
-pub(crate) fn resolve_open(root: &Path, state: &RunState) -> BTreeMap<String, NodeStatus> {
+pub fn resolve_open(root: &Path, state: &RunState) -> BTreeMap<String, NodeStatus> {
     open_edges(state)
         .into_iter()
         .filter_map(|dependency| {
@@ -452,7 +452,7 @@ pub(crate) fn resolve_open(root: &Path, state: &RunState) -> BTreeMap<String, No
 }
 
 /// The dependencies [`resolve_open`] reads for `state`.
-pub(crate) fn open_edges(state: &RunState) -> Vec<String> {
+pub fn open_edges(state: &RunState) -> Vec<String> {
     let settled = state.settled();
     edges(&state.graph)
         .into_iter()
@@ -473,7 +473,7 @@ pub(crate) fn open_edges(state: &RunState) -> Vec<String> {
 /// Never label a cached answer with the metadata of a newer journal. A retained
 /// view can then keep an unchanged answer after the shared cache expires,
 /// without re-reading either journal merely because time passed.
-pub(crate) fn resolution_stamps(
+pub fn resolution_stamps(
     root: &Path,
     graph: &Graph,
     held: &BTreeMap<String, NodeStatus>,
@@ -482,7 +482,7 @@ pub(crate) fn resolution_stamps(
 }
 
 /// [`resolution_stamps`], over `dependencies` alone.
-pub(crate) fn stamps_of_answers(
+pub fn stamps_of_answers(
     root: &Path,
     dependencies: impl IntoIterator<Item = String>,
     held: &BTreeMap<String, NodeStatus>,

@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // llmlint: ignore-block[invalid_states_unrepresentable] These serialized view DTOs preserve entry 122’s agreed string-valued identities, URLs and timestamps. Node identities come from the validated graph; host values and marked replies come from onevcs review_comments, the sibling-owned trust boundary. The engine does not execute these output-only values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) enum State {
+pub enum State {
     Pending,
     BeingReworked {
         rework: String,
@@ -38,22 +38,22 @@ pub(crate) enum State {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Comment {
-    pub(crate) id: onevcs::CommentId,
-    pub(crate) author: String,
-    pub(crate) url: String,
-    pub(crate) updated_at: String,
+pub struct Comment {
+    pub id: onevcs::CommentId,
+    pub author: String,
+    pub url: String,
+    pub updated_at: String,
     #[serde(flatten)]
-    pub(crate) state: State,
+    pub state: State,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-pub(crate) fn key(root: &str, comment: &ReviewComment) -> String {
+pub fn key(root: &str, comment: &ReviewComment) -> String {
     let bytes = Sha256::digest(format!("{root}:{}:{}", comment.id.0, comment.updated_at));
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub(crate) fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
+pub fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
     let mut current = node;
     let mut seen = BTreeSet::new();
     while seen.insert(current) {
@@ -69,7 +69,7 @@ pub(crate) fn root<'a>(state: &'a RunState, node: &'a str) -> &'a str {
     current
 }
 
-pub(crate) fn derive(
+pub fn derive(
     state: &RunState,
     node: &str,
     comment: &ReviewComment,
@@ -181,7 +181,7 @@ fn drafts(state: &RunState) -> impl Iterator<Item = (&str, String)> {
     })
 }
 
-pub(crate) fn read(state: &RunState) -> Result<BTreeMap<String, Vec<Comment>>> {
+pub fn read(state: &RunState) -> Result<BTreeMap<String, Vec<Comment>>> {
     let mut found = BTreeMap::new();
     for (node, url) in drafts(state) {
         let read = crate::vcs::review_comments(&url)?;
@@ -236,7 +236,7 @@ fn location(comment: &ReviewComment) -> String {
 /// The pass `onepipeline review`: a readjustment first, whose one batched read per
 /// repository and root carries every draft's review feedback, and then discovery from
 /// those reads.
-pub(crate) fn pass(
+pub fn pass(
     paths: &RunPaths,
     projected: &mut crate::checkpoint::Projected,
     journal: &mut Journal,
@@ -543,7 +543,7 @@ fn not_drafted(
     record_surface(paths, journal, &surface)
 }
 
-pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
+pub fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
     let mut text = String::new();
     for (node, comments) in comments {
         for comment in comments {
@@ -578,7 +578,7 @@ pub(crate) fn lines(comments: &BTreeMap<String, Vec<Comment>>) -> String {
 }
 
 /// Test-only crash seam compiled into the debug binary driven by the journeys.
-pub(crate) fn failpoint(stage: &str) -> Result<()> {
+pub fn failpoint(stage: &str) -> Result<()> {
     #[cfg(debug_assertions)]
     if let Some(directory) = std::env::var_os("ONEPIPELINE_REVIEW_FAILPOINT") {
         let directory = std::path::PathBuf::from(directory);
@@ -601,7 +601,7 @@ pub(crate) fn failpoint(stage: &str) -> Result<()> {
 /// Test-only failure seam beside [`failpoint`], compiled into the debug binary
 /// the journeys drive: where the failpoint directory holds a file named `stage`,
 /// the step fails with an error naming it rather than pausing.
-pub(crate) fn failing(stage: &str) -> Result<()> {
+pub fn failing(stage: &str) -> Result<()> {
     #[cfg(debug_assertions)]
     if let Some(directory) = std::env::var_os("ONEPIPELINE_REVIEW_FAILPOINT") {
         if std::path::Path::new(&directory).join(stage).is_file() {
@@ -637,28 +637,28 @@ fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) ->
 /// node carries its settlement's `detail` — a failed command's exit status and stderr
 /// tail among them. Each is omitted where empty, so an older reader reads every newer
 /// document's other fields.
-pub(crate) const RESULTS_SCHEMA_VERSION: u32 = 4;
+pub const RESULTS_SCHEMA_VERSION: u32 = 4;
 
 /// The JSON results view; comment lists are absent when empty.
 #[derive(Serialize)]
-pub(crate) struct ResultsDocument<'a> {
-    pub(crate) schema_version: u32,
-    pub(crate) run: &'a str,
-    pub(crate) nodes: Vec<ResultNode<'a>>,
+pub struct ResultsDocument<'a> {
+    pub schema_version: u32,
+    pub run: &'a str,
+    pub nodes: Vec<ResultNode<'a>>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct ResultNode<'a> {
-    pub(crate) id: &'a str,
-    pub(crate) status: crate::graph::NodeStatus,
+pub struct ResultNode<'a> {
+    pub id: &'a str,
+    pub status: crate::graph::NodeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) outcome: Option<&'a str>,
+    pub outcome: Option<&'a str>,
     /// What its standing settlement said beyond its outcome; absent for a node with none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) detail: Option<&'a str>,
+    pub detail: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) comments: Vec<Comment>,
+    pub comments: Vec<Comment>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    pub(crate) provisioning_failures: &'a [crate::provisioning::Failure],
+    pub provisioning_failures: &'a [crate::provisioning::Failure],
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]

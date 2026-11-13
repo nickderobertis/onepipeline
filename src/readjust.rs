@@ -31,46 +31,46 @@ use crate::payload::{ChecksVerdictWord, LandingDetection, ReadjustTrigger};
 use crate::projection::RunState;
 
 /// The surface naming a draft closed without merging.
-pub(crate) const CHANGE_CLOSED: &str = "change-closed";
+pub const CHANGE_CLOSED: &str = "change-closed";
 /// The surface naming a draft merged into its parent's branch.
-pub(crate) const STACK_MERGED_OUT_OF_ORDER: &str = "stack-merged-out-of-order";
+pub const STACK_MERGED_OUT_OF_ORDER: &str = "stack-merged-out-of-order";
 /// The surface naming a draft merged into the root with unlanded ancestors' work.
-pub(crate) const STACK_LANDED_OUT_OF_ORDER: &str = "stack-landed-out-of-order";
+pub const STACK_LANDED_OUT_OF_ORDER: &str = "stack-landed-out-of-order";
 /// The surface naming a failed or parked draft retargeted with no merge.
-pub(crate) const READJUST_PENDING: &str = "readjust-pending";
+pub const READJUST_PENDING: &str = "readjust-pending";
 /// The surface naming a draft a person moved off its computed base.
-pub(crate) const CHANGE_BASE_OVERRIDDEN: &str = "change-base-overridden";
+pub const CHANGE_BASE_OVERRIDDEN: &str = "change-base-overridden";
 /// The blocking surface naming a draft merged into a branch this run does not know.
-pub(crate) const CHANGE_MERGED_ELSEWHERE: &str = "change-merged-elsewhere";
+pub const CHANGE_MERGED_ELSEWHERE: &str = "change-merged-elsewhere";
 /// The surface naming a node whose change request merged while its rework ran.
-pub(crate) const MERGED_DURING_REWORK: &str = "merged-during-rework";
+pub const MERGED_DURING_REWORK: &str = "merged-during-rework";
 
 /// The outcome a rework replacement settles `failed` under when its node's change
 /// request merged while it ran.
-pub(crate) const MERGED_DURING_REWORK_OUTCOME: &str = "merged-during-rework";
+pub const MERGED_DURING_REWORK_OUTCOME: &str = "merged-during-rework";
 
 /// One draft of the run: a lineage head on a repository, with the change request its
 /// lineage opened, not recorded landed, absorbed or closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Draft {
+pub struct Draft {
     // llmlint: ignore-block[invalid_states_unrepresentable] the node, change request, repo
     // and root are `RunState`'s own strings — a graph-validated id, a URL `known_change_url`
     // already parsed, the plan's `repo` and a branch `vcs::usable` checked — handed straight
     // to `onevcs`'s request types, which take them as these same strings.
     /// The lineage head.
-    pub(crate) node: String,
+    pub node: String,
     /// Its lineage's change request.
-    pub(crate) url: String,
+    pub url: String,
     /// Its repository, as the plan names it.
-    pub(crate) repo: String,
+    pub repo: String,
     /// The root its stack stands on.
-    pub(crate) root: Option<String>,
+    pub root: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// The lineage head `node` belongs to: the newest node every supersession since it
 /// names.
-pub(crate) fn head_of(state: &RunState, node: &str) -> String {
+pub fn head_of(state: &RunState, node: &str) -> String {
     let mut at = node.to_owned();
     let mut seen = BTreeSet::new();
     while let Some(next) = state.superseded.get(&at) {
@@ -84,7 +84,7 @@ pub(crate) fn head_of(state: &RunState, node: &str) -> String {
 
 /// The change request `node`'s lineage opened: its own, or the newest one a node it
 /// superseded recorded.
-pub(crate) fn lineage_change(state: &RunState, node: &str) -> Option<String> {
+pub fn lineage_change(state: &RunState, node: &str) -> Option<String> {
     let mut at = node.to_owned();
     let mut seen = BTreeSet::new();
     loop {
@@ -125,7 +125,7 @@ fn root_of(state: &RunState, node: &str) -> Option<String> {
 }
 
 /// Every draft of the run, in graph order.
-pub(crate) fn drafts(state: &RunState) -> Vec<Draft> {
+pub fn drafts(state: &RunState) -> Vec<Draft> {
     state
         .graph
         .iter()
@@ -149,7 +149,7 @@ pub(crate) fn drafts(state: &RunState) -> Vec<Draft> {
 ///
 /// What a landing or an absorption makes owed: a draft above it moves, and a sibling
 /// that is a stack parent of a moved draft is brought up to date with it.
-pub(crate) fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
+pub fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
     let Some(repo) = state.graph.get(node).and_then(|node| node.repo.clone()) else {
         return BTreeSet::new();
     };
@@ -198,45 +198,45 @@ pub(crate) fn connected(state: &RunState, node: &str) -> BTreeSet<String> {
 // the host's own answers — the `onevcs` types it parsed, and the repository, base and check
 // names it reported — as the plain strings `RunState` and the request types carry them; this
 // lives for one trigger and is read only to journal and to place.
-pub(crate) struct Detection {
+pub struct Detection {
     /// Each draft's standing, by node.
-    pub(crate) standings: BTreeMap<String, onevcs::ChangeStanding>,
+    pub standings: BTreeMap<String, onevcs::ChangeStanding>,
     /// Each draft's review read, in a review pass.
-    pub(crate) reviews: Vec<(String, String, Result<onevcs::ReviewRead>)>,
+    pub reviews: Vec<(String, String, Result<onevcs::ReviewRead>)>,
     /// Each repository whose read failed, and why.
-    pub(crate) failures: Vec<(String, String)>,
+    pub failures: Vec<(String, String)>,
     /// Each open draft a person moved off its recorded base, and the base it targets.
-    pub(crate) overridden: BTreeMap<String, String>,
+    pub overridden: BTreeMap<String, String>,
     /// Each draft whose deferred verdict was read red: the head it is about, and the
     /// checks that failed.
-    pub(crate) red: BTreeMap<String, Red>,
+    pub red: BTreeMap<String, Red>,
     /// Each closed draft whose recovery the host refused: still closed, so nothing of
     /// this trigger moves it, and the next trigger's read tries again.
-    pub(crate) unrecovered: BTreeSet<String>,
+    pub unrecovered: BTreeSet<String>,
     /// Each draft merged into a branch neither the root nor any node's: nothing is left
     /// on its change request to republish.
-    pub(crate) merged_elsewhere: BTreeSet<String>,
+    pub merged_elsewhere: BTreeSet<String>,
     /// Each draft whose standing this trigger could not read: left exactly as it was, so
     /// nothing of this trigger moves it, and the next trigger's read decides.
-    pub(crate) unread: BTreeSet<String>,
+    pub unread: BTreeSet<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A red verdict a trigger read: the head it is about, and the checks that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Red {
+pub struct Red {
     // llmlint: ignore-block[invalid_states_unrepresentable] the host's own words, read off the
     // standing `onevcs` parsed: the head it reports and the check names it says failed.
     /// The head the checks ran on.
-    pub(crate) head: String,
+    pub head: String,
     /// The required checks that failed.
-    pub(crate) failed: Vec<String>,
+    pub failed: Vec<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 impl Detection {
     /// Whether any repository's read failed.
-    pub(crate) fn failed(&self) -> Option<String> {
+    pub fn failed(&self) -> Option<String> {
         (!self.failures.is_empty()).then(|| {
             self.failures
                 .iter()
@@ -316,7 +316,7 @@ fn grouped(
 /// then discovers from; every other trigger reads `change_standings`. A repository whose
 /// read failed is journalled `readjust-read-failed` and contributes nothing. A verdict
 /// on a head in `deferred` is not read: see [`Readjuster::deferred`].
-pub(crate) fn detect(
+pub fn detect(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &RunState,
@@ -846,7 +846,7 @@ fn elsewhere_correlation(url: &str, commit: &str) -> onemessagebus::Correlation 
 /// The nodes held by an unanswered merged-elsewhere question, and every node depending
 /// on them: each question still waiting or pending on the planner's queue, as the loop's
 /// decision points read it.
-pub(crate) fn held_elsewhere(paths: &RunPaths, state: &RunState) -> BTreeSet<String> {
+pub fn held_elsewhere(paths: &RunPaths, state: &RunState) -> BTreeSet<String> {
     let queue = crate::channel::ChannelState::new(paths).queue();
     let held: Vec<String> = queue
         .waiting
@@ -863,7 +863,7 @@ pub(crate) fn held_elsewhere(paths: &RunPaths, state: &RunState) -> BTreeSet<Str
 }
 
 /// Every node depending on `id`, directly or not.
-pub(crate) fn descendants(graph: &crate::graph::Graph, id: &str) -> BTreeSet<String> {
+pub fn descendants(graph: &crate::graph::Graph, id: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let mut pending = graph.dependents_of(id);
     while let Some(next) = pending.pop() {
@@ -1008,7 +1008,7 @@ fn emit<T: serde::Serialize>(
 }
 
 /// Raise a non-blocking report to the planner about `node`.
-pub(crate) fn notify(
+pub fn notify(
     paths: &RunPaths,
     journal: &mut Journal,
     kind: &str,
@@ -1043,7 +1043,7 @@ fn quoted(nodes: &[String]) -> String {
 }
 
 /// The Stack block a draft placed on its root carries: there is nothing under it.
-pub(crate) fn root_block(root: &str) -> String {
+pub fn root_block(root: &str) -> String {
     format!(
         "{}\n## Stack\n\nDrafted against `{root}`, the root: every change it was stacked on has \
          landed.\n{}",
@@ -1058,28 +1058,28 @@ pub(crate) fn root_block(root: &str) -> String {
 // the host's descriptions and bases, and the keys a placement read is remembered under, as the
 // plain strings `RunState` and the records it folds carry them — each read off a record or an
 // answer this crate already checked, and none written anywhere.
-pub(crate) struct Readjuster {
+pub struct Readjuster {
     /// A trigger whose readjustment the next pass runs.
-    pub(crate) due: Option<ReadjustTrigger>,
+    pub due: Option<ReadjustTrigger>,
     /// Whether this pass already read, so every placement in it reuses that read.
-    pub(crate) read_this_pass: bool,
+    pub read_this_pass: bool,
     /// Each draft's description as the latest read returned it.
-    pub(crate) bodies: BTreeMap<String, String>,
+    pub bodies: BTreeMap<String, String>,
     /// Each draft a person moved off its computed base, and the base it targets.
-    pub(crate) overridden: BTreeMap<String, String>,
+    pub overridden: BTreeMap<String, String>,
     /// The base each open draft's change request targets on the host, as the latest read
     /// found it.
-    pub(crate) host_bases: BTreeMap<String, String>,
+    pub host_bases: BTreeMap<String, String>,
     /// Each draft whose deferred verdict was read red, and what it is about.
-    pub(crate) red: BTreeMap<String, Red>,
+    pub red: BTreeMap<String, Red>,
     /// Each readjustment in flight: where it moves its draft from and to, and why.
-    pub(crate) plans: BTreeMap<String, Plan>,
+    pub plans: BTreeMap<String, Plan>,
     /// Each draft whose readjustment this driver started since its last read, which
     /// is not started again until a trigger reads again.
-    pub(crate) tried: BTreeSet<String>,
+    pub tried: BTreeSet<String>,
     /// Each node a placement read was made for, so a node held across passes is not
     /// read for again.
-    pub(crate) placed: BTreeSet<String>,
+    pub placed: BTreeSet<String>,
     /// The heads every restack owed when this pass's placement read was claimed brings
     /// its draft onto, which that read leaves the verdict of to the next trigger.
     ///
@@ -1088,26 +1088,26 @@ pub(crate) struct Readjuster {
     /// next one. Without this, whether that restack's read records the parent's verdict
     /// would depend only on whether the driver's first pass after the relayed push ran
     /// before or after the parent's settlement was folded.
-    pub(crate) deferred: BTreeSet<String>,
+    pub deferred: BTreeSet<String>,
     /// Each draft the latest read found merged into a branch this run does not know.
-    pub(crate) merged_elsewhere: BTreeSet<String>,
+    pub merged_elsewhere: BTreeSet<String>,
 }
 
 /// One readjustment in flight.
 #[derive(Debug, Clone)]
-pub(crate) struct Plan {
+pub struct Plan {
     /// Where its draft was placed.
-    pub(crate) from: crate::payload::Placement,
+    pub from: crate::payload::Placement,
     /// Where it is placed now.
-    pub(crate) to: crate::payload::Placement,
+    pub to: crate::payload::Placement,
     /// The landed or absorbed nodes that moved it.
-    pub(crate) cause: Vec<String>,
+    pub cause: Vec<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Readjuster {
     /// Keep what `detection` read for the rest of this trigger.
-    pub(crate) fn absorb(&mut self, detection: &Detection) {
+    pub fn absorb(&mut self, detection: &Detection) {
         self.read_this_pass = true;
         self.tried.clear();
         self.tried.extend(detection.unrecovered.iter().cloned());
@@ -1132,7 +1132,7 @@ impl Readjuster {
 
 /// Run one trigger's readjustment read over the run's folded state, keep what it read,
 /// and fold what it journalled.
-pub(crate) fn run(
+pub fn run(
     paths: &RunPaths,
     journal: &mut Journal,
     state: &mut crate::checkpoint::Projected,
@@ -1147,7 +1147,7 @@ pub(crate) fn run(
 
 /// Whether the record owes a readjustment something a driver has to do: a draft to
 /// restack or retarget, or a red verdict to repair.
-pub(crate) fn owes_work(state: &crate::checkpoint::Projected) -> bool {
+pub fn owes_work(state: &crate::checkpoint::Projected) -> bool {
     state
         .readjust_owed
         .keys()
@@ -1160,7 +1160,7 @@ pub(crate) fn owes_work(state: &crate::checkpoint::Projected) -> bool {
 /// restack, a retarget or a repair, drive the run under the lock already held until
 /// those settle — with what the trigger read, so it is not read again — and answer the
 /// drafts whose verdict the record still owes.
-pub(crate) fn finish_undriven(
+pub fn finish_undriven(
     paths: &RunPaths,
     lock: crate::ledger::OwnershipLock,
     mut state: crate::checkpoint::Projected,
@@ -1177,7 +1177,7 @@ pub(crate) fn finish_undriven(
 
 /// Where a readjusted draft's change request is moved after its push.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Retarget {
+pub struct Retarget {
     // llmlint: ignore-block[invalid_states_unrepresentable] each is the field
     // `onevcs::RetargetRequest` takes it as — its `String`s read off the run's own record:
     // the plan's `repo`, a change request `known_change_url` parsed, a branch the placement
@@ -1185,18 +1185,18 @@ pub(crate) struct Retarget {
     // no reopen restored — held by that call to the repository, a URL and git's grammar
     // before anything is written.
     /// The repository, as the plan names it.
-    pub(crate) repo: String,
+    pub repo: String,
     /// The change request.
-    pub(crate) change: String,
+    pub change: String,
     /// The base it is moved onto.
-    pub(crate) base: String,
+    pub base: String,
     /// The Stack block it carries there.
-    pub(crate) block: String,
+    pub block: String,
     /// Its description as the batched read of this driver returned it; a draft no such
     /// read answered has none, and is not moved.
-    pub(crate) body: Option<String>,
+    pub body: Option<String>,
     /// Whether the base it leaves is one a reopen restored, which the move deletes.
-    pub(crate) remove_restored_base: bool,
+    pub remove_restored_base: bool,
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
@@ -1206,7 +1206,7 @@ pub(crate) struct Retarget {
 /// The block is spliced into the description this driver's batched read returned, so
 /// nothing a person wrote outside its markers moves; a draft no such read answered is
 /// refused, and stays owed until the next trigger's read.
-pub(crate) fn retarget(retarget: &Retarget) -> Result<crate::payload::RetargetWord> {
+pub fn retarget(retarget: &Retarget) -> Result<crate::payload::RetargetWord> {
     let change = retarget
         .change
         .parse::<onevcs::Url>()
@@ -1233,7 +1233,7 @@ pub(crate) fn retarget(retarget: &Retarget) -> Result<crate::payload::RetargetWo
 }
 
 /// The drafts whose verdict the record still owes, for the views and the verbs.
-pub(crate) fn outstanding(state: &RunState) -> Vec<String> {
+pub fn outstanding(state: &RunState) -> Vec<String> {
     state
         .graph
         .iter()

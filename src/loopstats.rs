@@ -25,9 +25,9 @@ use serde_json::json;
 /// file per run rather than one file they overwrite in turn. Absent, which is
 /// every run outside this repository's own journeys, nothing is written and
 /// nothing is opened.
-pub(crate) const STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
+pub const STATS_ENV: &str = "ONEPIPELINE_LOOP_STATS";
 
-pub(crate) const STATS_FILE: &str = "loop-stats.json";
+pub const STATS_FILE: &str = "loop-stats.json";
 
 /// Scheduling passes: iterations of the reconcile body.
 ///
@@ -70,49 +70,49 @@ static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
 /// loop.
 static RECORDS_FOLDED: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn pass() {
+pub fn pass() {
     PASSES.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn statuses_derived() {
+pub fn statuses_derived() {
     STATUSES.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn published() {
+pub fn published() {
     PUBLICATIONS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn upstream_read() {
+pub fn upstream_read() {
     UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn early_upstream_read() {
+pub fn early_upstream_read() {
     EARLY_UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// What the early-read count stands at, for the check that the observer counts one.
 #[cfg(test)]
-pub(crate) fn early_upstream_reads() -> u64 {
+pub fn early_upstream_reads() -> u64 {
     EARLY_UPSTREAM_READS.load(Ordering::Relaxed)
 }
 
-pub(crate) fn release_asked() {
+pub fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn maintenance_sweep_started() {
+pub fn maintenance_sweep_started() {
     MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The name the claim reads are reported under, which entry 128 of
 /// `docs/contract-divergences.md` names.
-pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
+pub const CLAIM_READS_KEY: &str = "claim_reads";
 
-pub(crate) fn claim_read() {
+pub fn claim_read() {
     CLAIM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn queue_claimed() {
+pub fn queue_claimed() {
     QUEUE_CLAIMS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -131,19 +131,19 @@ thread_local! {
     static THREAD_STORE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-pub(crate) fn store_read(bytes: u64) {
+pub fn store_read(bytes: u64) {
     STORE_BYTES.fetch_add(bytes, Ordering::Relaxed);
     #[cfg(test)]
     THREAD_STORE_BYTES.with(|counted| counted.set(counted.get() + bytes));
 }
 
-pub(crate) fn records_folded(records: u64) {
+pub fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }
 
 /// How many journal records this process has folded so far: what the human-item
 /// read index reports as the run events a rebuild replayed.
-pub(crate) fn records_folded_total() -> u64 {
+pub fn records_folded_total() -> u64 {
     RECORDS_FOLDED.load(Ordering::Relaxed)
 }
 
@@ -158,7 +158,7 @@ pub(crate) fn records_folded_total() -> u64 {
 /// Every process reports, the verbs as well as a driver, and appends rather than
 /// rewrites, so the several processes one journey starts share the file. Absent,
 /// which is every run outside this repository's own journeys, nothing is opened.
-pub(crate) const JOURNAL_READS_ENV: &str = "ONEPIPELINE_JOURNAL_READS";
+pub const JOURNAL_READS_ENV: &str = "ONEPIPELINE_JOURNAL_READS";
 
 /// Where this process reports its journal reads, read once.
 fn journal_reads_file() -> Option<&'static Path> {
@@ -183,7 +183,7 @@ thread_local! {
 }
 
 /// How many bytes of runs' journals this thread has read so far.
-pub(crate) fn journal_bytes_read() -> u64 {
+pub fn journal_bytes_read() -> u64 {
     THREAD_JOURNAL_BYTES.with(std::cell::Cell::get)
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn journal_bytes_read() -> u64 {
 /// A line that cannot be written is said on standard error rather than handed
 /// back: the read it reports has already happened and succeeded, and the journey
 /// that asked counts lines, so a missing one fails it there.
-pub(crate) fn journal_read(path: &Path, offset: u64, bytes: u64) {
+pub fn journal_read(path: &Path, offset: u64, bytes: u64) {
     if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
         return;
     }
@@ -230,7 +230,7 @@ pub(crate) fn journal_read(path: &Path, offset: u64, bytes: u64) {
 /// measuring across this one is still measuring the number the host is told —
 /// only without the reads no test of it performed.
 #[cfg(test)]
-pub(crate) fn store_bytes() -> u64 {
+pub fn store_bytes() -> u64 {
     THREAD_STORE_BYTES.with(std::cell::Cell::get)
 }
 
@@ -249,7 +249,7 @@ fn asked() -> bool {
 /// nothing anywhere saying why. The error names the path and what the filesystem
 /// said, and the driver hands it back the way it hands back any other write into
 /// the run's own directory.
-pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()> {
+pub fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()> {
     if !asked() {
         return Ok(());
     }
