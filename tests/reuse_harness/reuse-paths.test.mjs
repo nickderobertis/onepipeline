@@ -1713,7 +1713,7 @@ test("a demonstration whose archive nextest refused still shows cargo's build ti
   assert.equal(run.status, 0, run.stderr);
   assert.match(
     readFileSync(join(dir, "t.md"), "utf8"),
-    /\| coverage \(archive failed after the build\) \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
+    /\| coverage, archive refused: compile-only figure \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
   );
 });
 

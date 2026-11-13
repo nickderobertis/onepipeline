@@ -142,9 +142,12 @@ function main(argv) {
       const r = readJob(job, readFileSync(path, "utf8"));
       saves += r.saves;
       const code = (v) => (v ? `\`${v.slice(0, 12)}\`` : "-");
+      // When nextest refuses the archive after cargo finished, the row's one figure is
+      // cargo's compile and link of the test binaries: it measures no archive.
+      const refused = "archive refused: compile-only figure";
       const archive =
-        (r.mode && `${r.mode}${r.archived ? "" : " (archive failed after the build)"}`) ??
-        (r.cargoSeconds === null ? "no measurement" : "failed after the build");
+        (r.mode && (r.archived ? r.mode : `${r.mode}, ${refused}`)) ??
+        (r.cargoSeconds === null ? "no measurement" : refused);
       lines.push(
         `| ${run} | ${r.job} | ${r.id} | ${code(r.sha)} | ${code(r.head)} | ${code(r.workflowBlob)} | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${archive} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
       );
