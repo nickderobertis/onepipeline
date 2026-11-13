@@ -255,7 +255,7 @@ test("a floor that is not a whole number is refused before anything is read", ()
     "lots",
   ]);
   assert.equal(run.status, 1);
-  assert.match(run.stderr, /--floor is not a whole number/);
+  assert.match(run.stderr, /--floor lots is not a whole number/);
   assert.deepEqual(calls, []);
 });
 

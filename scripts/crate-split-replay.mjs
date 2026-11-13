@@ -64,7 +64,8 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { observe, renderObserved } from "./crate-split/observed.mjs";
+import { observe, renderObserved, repositoryRestExclusions } from "./crate-split/observed.mjs";
+import { observedResult } from "./crate-split/validate.mjs";
 import { loadRecords, moduleOf, Refusal, selectRun } from "./test-profile-report.mjs";
 
 /** A glob over repository-relative paths: `**` crosses directories, `*` and `?` do not. */
@@ -686,12 +687,7 @@ export function observedChanges(path, release) {
       "give --changes the file an --observed replay wrote with --json",
     );
   }
-  if (!Array.isArray(observed?.prs) || !observed.weights) {
-    throw new Refusal(
-      `--changes ${path} is not an --observed replay's JSON`,
-      "give --changes the file an --observed replay wrote with --json",
-    );
-  }
+  observedResult(observed, `--changes ${path}`);
   const changes = observed.prs
     .filter((pr) => !pr.unread && pr.release === release)
     .map((pr) => ({
@@ -707,14 +703,14 @@ export function parseBuildDelta(text) {
   if (text === undefined) return {};
   const out = {};
   for (const part of text.split(",")) {
-    const [platform, value] = part.split("=");
-    if (!PLATFORMS.includes(platform) || !Number.isFinite(Number(value)) || value === "") {
+    const m = part.match(/^(linux|darwin|win32)=(-?\d+(?:\.\d+)?)$/);
+    if (!m || m[1] in out) {
       throw new Refusal(
         `--build-delta ${text} is not platform=minutes pairs`,
-        "give e.g. --build-delta linux=1.5,darwin=2,win32=3",
+        "give each of linux, darwin and win32 at most once, e.g. --build-delta linux=1.5,darwin=2,win32=-0.5",
       );
     }
-    out[platform] = Number(value);
+    out[m[1]] = Number(m[2]);
   }
   return out;
 }
@@ -726,8 +722,10 @@ function mainObserved(dir, options, json) {
       "git clone --no-checkout . CLONE && git -C CLONE fetch origin '+refs/pull/*/head:refs/spike/pr/*'",
     );
   }
+  const root = join(import.meta.dirname, "..");
   const result = observe(dir, options.clone, {
-    nodeModules: join(import.meta.dirname, "..", "node_modules"),
+    nodeModules: join(root, "node_modules"),
+    restExcluded: repositoryRestExclusions(root),
   });
   writeOut(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : renderObserved(result));
   const ran = result.prs.flatMap((pr) => (pr.jobs ?? []).flatMap((job) => job.ran));

@@ -22,14 +22,57 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync }
 import { join, resolve } from "node:path";
 import { globToRegExp } from "../crate-split-replay.mjs";
 import { loadRecords, moduleOf, Refusal, selectRun } from "../test-profile-report.mjs";
+import * as check from "./validate.mjs";
 
-export const NX_JOBS = ["lint", "test-linux", "test-windows", "test-macos"];
-const OS_OF = {
+/**
+ * ci.yml's jobs that run Nx (`scripts/ci-job.sh`'s jobs) and the platform each runs on:
+ * the harness's one statement of them, which `npm/test/reuse-replay.test.mjs` holds
+ * equal to ci-job.sh's and ci.yml's.
+ */
+export const JOB_PLATFORM = {
   lint: "linux",
   "test-linux": "linux",
   "test-windows": "win32",
   "test-macos": "darwin",
 };
+export const NX_JOBS = Object.keys(JOB_PLATFORM);
+const OS_OF = JOB_PLATFORM;
+
+/**
+ * The binaries the justfile's `rest-tier` filter leaves to tiers of their own, read from
+ * the filter itself (`not binary(<name>)`), so the rest tier's records are told apart
+ * by the same rule nextest runs.
+ */
+export function restTierExclusions(filter) {
+  check.need(
+    typeof filter === "string" && filter.includes("binary("),
+    "the rest-tier filter names no binary",
+    "give the justfile's `just --evaluate rest-tier`",
+  );
+  return new Set([...filter.matchAll(/not binary\((\w+)\)/g)].map((m) => m[1]));
+}
+
+/** The repository's own rest-tier exclusions, from `just --evaluate rest-tier` at `root`. */
+export function repositoryRestExclusions(root) {
+  let filter;
+  try {
+    filter = execFileSync("just", ["--evaluate", "rest-tier"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    throw new Refusal(
+      `just --evaluate rest-tier failed in ${root}: ${
+        String(error.stderr ?? error.message)
+          .trim()
+          .split("\n")[0]
+      }`,
+      "install just (`just bootstrap` names the version) and run from the repository's checkout",
+    );
+  }
+  return restTierExclusions(filter);
+}
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: an Actions log's colour codes are ESC sequences.
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -111,11 +154,28 @@ export function mergeCommit(clone, base, head) {
   ).trim();
 }
 
-/** Nx's hash plan of `tasks` at `commit`, read once and kept under `cache`. */
-export function planAt(clone, commit, tasks, cache, nodeModules) {
+/**
+ * Nx's hash plan of `tasks` at `commit`, kept under `cache` and read again only when a
+ * task it does not hold is asked for. Reading one force-checks-out `commit` in `clone`
+ * and removes everything untracked there but `node_modules`: the clone is the replay's
+ * own scratch copy, never a working tree anyone edits.
+ */
+export function checkOutAndPlan(clone, commit, tasks, cache, nodeModules) {
   const out = join(cache, `${commit}.json`);
+  const read = () => {
+    let doc;
+    try {
+      doc = JSON.parse(readFileSync(out, "utf8"));
+    } catch (error) {
+      throw new Refusal(
+        `${out} is not JSON: ${error.message}`,
+        `remove ${out}; the next replay reads the plan again`,
+      );
+    }
+    return check.plan(doc, out);
+  };
   if (existsSync(out)) {
-    const held = JSON.parse(readFileSync(out, "utf8"));
+    const held = read();
     const known = new Set([...Object.keys(held.plans), ...held.missing]);
     if (tasks.every((task) => known.has(task))) return held;
   }
@@ -125,12 +185,22 @@ export function planAt(clone, commit, tasks, cache, nodeModules) {
   if (!existsSync(join(clone, "node_modules")))
     symlinkSync(nodeModules, join(clone, "node_modules"));
   rmSync(join(clone, ".nx"), { recursive: true, force: true });
-  execFileSync(process.execPath, [resolve(import.meta.dirname, "hash-plan.cjs"), out, ...tasks], {
-    cwd: clone,
-    stdio: ["ignore", "ignore", "pipe"],
-    env: { ...process.env, NX_DAEMON: "false", NX_NO_CLOUD: "true", NX_TUI: "false" },
-  });
-  return JSON.parse(readFileSync(out, "utf8"));
+  try {
+    execFileSync(process.execPath, [resolve(import.meta.dirname, "hash-plan.cjs"), out, ...tasks], {
+      cwd: clone,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, NX_DAEMON: "false", NX_NO_CLOUD: "true", NX_TUI: "false" },
+    });
+  } catch (error) {
+    throw new Refusal(
+      `Nx could not plan ${commit}'s tasks: ${String(error.stderr ?? error.message)
+        .trim()
+        .split("\n")
+        .at(-1)}`,
+      `run node scripts/crate-split/hash-plan.cjs OUT TASK in a checkout of ${commit} with node_modules linked, and fix what it says`,
+    );
+  }
+  return read();
 }
 
 /**
@@ -217,14 +287,23 @@ const minutes = (t) => (Date.parse(t.finished_at) - Date.parse(t.started_at)) / 
 
 /** Read the evidence directory into one record per pull request and job. */
 export function loadEvidence(dir) {
-  const read = (path) => JSON.parse(readFileSync(join(dir, path), "utf8"));
+  const read = (path) => {
+    try {
+      return JSON.parse(readFileSync(join(dir, path), "utf8"));
+    } catch (error) {
+      throw new Refusal(
+        `${join(dir, path)} is not JSON: ${error.message}`,
+        "remove it and re-run fetch-evidence.mjs",
+      );
+    }
+  };
   if (!existsSync(join(dir, "population.json"))) {
     throw new Refusal(
       `${dir} holds no population.json`,
       "run scripts/crate-split/fetch-evidence.mjs --out DIR first",
     );
   }
-  const pop = read("population.json");
+  const pop = check.population(read("population.json"));
   const prs = [
     ...pop.non_release.map((pr) => ({ ...pr, release: false })),
     ...pop.release.map((pr) => ({ ...pr, release: true })),
@@ -235,24 +314,25 @@ export function loadEvidence(dir) {
       out.push({ pr, run: null, jobs: [], unread: "no check suites fetched" });
       continue;
     }
-    const commit = read(join("rollup", `${pr.number}.json`)).data.repository.pullRequest.commits
-      .nodes[0].commit;
+    const commit = check.rollup(read(join("rollup", `${pr.number}.json`)), pr.number);
     const suite = commit.checkSuites.nodes
       .filter((s) => s.workflowRun?.workflow?.name === "CI")
       .sort((a, b) => a.workflowRun.createdAt.localeCompare(b.workflowRun.createdAt))
       .at(-1);
     const jobs = [];
-    for (const check of suite?.checkRuns.nodes ?? []) {
-      if (!NX_JOBS.includes(check.name)) continue;
-      const logPath = join(dir, "logs", `${check.databaseId}.log`);
-      const execPath = join(dir, "executions", `${check.databaseId}.json`);
+    for (const checkRun of suite?.checkRuns.nodes ?? []) {
+      if (!NX_JOBS.includes(checkRun.name)) continue;
+      const logPath = join(dir, "logs", `${checkRun.databaseId}.log`);
+      const execPath = join(dir, "executions", `${checkRun.databaseId}.json`);
       jobs.push({
-        name: check.name,
-        id: check.databaseId,
-        os: OS_OF[check.name],
-        minutes: (Date.parse(check.completedAt) - Date.parse(check.startedAt)) / 60000,
+        name: checkRun.name,
+        id: checkRun.databaseId,
+        os: OS_OF[checkRun.name],
+        minutes: (Date.parse(checkRun.completedAt) - Date.parse(checkRun.startedAt)) / 60000,
         log: existsSync(logPath) ? parseLog(readFileSync(logPath, "utf8")) : null,
-        executions: existsSync(execPath) ? JSON.parse(readFileSync(execPath, "utf8")) : null,
+        executions: existsSync(execPath)
+          ? check.executions(read(join("executions", `${checkRun.databaseId}.json`)), execPath)
+          : null,
       });
     }
     out.push({ pr, run: suite?.workflowRun.databaseId ?? null, head: commit.oid, jobs });
@@ -261,7 +341,7 @@ export function loadEvidence(dir) {
 }
 
 /** The observed replay over the evidence: per pull request, per job, per task. */
-export function observe(dir, clone, { nodeModules }) {
+export function observe(dir, clone, { nodeModules, restExcluded }) {
   const evidence = loadEvidence(dir);
   // Every key any run stored, so a later miss on it can be told from a key never made.
   const stored = new Map();
@@ -313,10 +393,19 @@ export function observe(dir, clone, { nodeModules }) {
       .split("\0")
       .filter(Boolean);
     record.changed = diff;
-    const basePlan = planAt(clone, merge.base, tasks, plans, nodeModules);
-    const mergePlan = planAt(clone, tested, tasks, plans, nodeModules);
+    const basePlan = checkOutAndPlan(clone, merge.base, tasks, plans, nodeModules);
+    const mergePlan = checkOutAndPlan(clone, tested, tasks, plans, nodeModules);
     record.moved = movedInputs(basePlan, mergePlan);
-    const nxJson = JSON.parse(git(clone, ["show", `${tested}:nx.json`]));
+    let nxJson;
+    try {
+      nxJson = JSON.parse(git(clone, ["show", `${tested}:nx.json`]));
+    } catch (error) {
+      throw new Refusal(
+        `${tested}'s nx.json cannot be read: ${error.message.split("\n")[0]}`,
+        "replay a commit whose nx.json Nx itself reads",
+      );
+    }
+    check.namedInputs(nxJson.namedInputs ?? {}, `${tested}'s nx.json`);
     for (const job of entry.jobs) {
       const out = {
         job: job.name,
@@ -385,24 +474,17 @@ export function observe(dir, clone, { nodeModules }) {
     evidence: dir,
     prs: perPr,
     totals: totals(perPr),
-    weights: weigh(perPr, join(dir, "profiles")),
+    weights: weigh(perPr, join(dir, "profiles"), restExcluded),
   };
 }
 
-const PLATFORM_OF = {
-  "test-linux": "linux",
-  "test-windows": "win32",
-  "test-macos": "darwin",
-  lint: "lint",
-};
+// The platform a job's minutes weigh on; lint's tasks are none of the test platforms'.
+const PLATFORM_OF = { ...JOB_PLATFORM, lint: "lint" };
 const REST_TASK = {
   linux: "onepipeline:test-rest",
   darwin: "onepipeline:test-quick",
   win32: "onepipeline:test-quick",
 };
-// The test binaries a tier of their own runs; every other binary is the rest tier's.
-const OWN_TIER_BINARIES =
-  /^(e2e|contract|pooled_slot|narrow_write|note|codex_server|smoke|release_channel|stop_verdict|package_bundle|\w+_workload)$/;
 const E2E_TASK = {
   linux: "onepipeline-e2e:test",
   darwin: "onepipeline-e2e:test-quick",
@@ -420,9 +502,10 @@ const median = (values) => {
  * executed minutes less the shared test archive's build when it was the task that built
  * it; that build's median per platform; and each e2e module's share of the e2e tier's
  * test minutes, in proportion to its test-seconds in the newest profile records each
- * platform's job uploaded (`DIR/profiles/<run>/<job>/`).
+ * platform's job uploaded (`DIR/profiles/<run>/<job>/`). The rest tier's records are those
+ * of the binaries `restExcluded` (the rest-tier filter's exclusions) does not name.
  */
-export function weigh(perPr, profilesDir) {
+export function weigh(perPr, profilesDir, restExcluded = new Set()) {
   const samples = {};
   const builds = {};
   for (const pr of perPr) {
@@ -481,7 +564,7 @@ export function weigh(perPr, profilesDir) {
       const restTask = REST_TASK[platform];
       const rest = tasks[restTask]?.[platform]?.minutes;
       const all = selectRun(loadRecords(join(profilesDir, run, job))).records;
-      const restRecords = all.filter((r) => !OWN_TIER_BINARIES.test(r.binary));
+      const restRecords = all.filter((r) => !restExcluded.has(r.binary));
       const restTotal = restRecords.reduce((sum, r) => sum + (r.wall_s ?? 0), 0);
       if (rest && restTotal === 0) {
         // No record of the tier's own tests (the recorder times only the harness's
