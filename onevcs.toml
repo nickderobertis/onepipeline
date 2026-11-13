@@ -1,4 +1,4 @@
-# This repository's own pool maintenance, declared to onevcs.
+# This repository's own pool maintenance and publication policy, declared to onevcs.
 #
 # onevcs reads this file from this repository's publication checkout on its base
 # branch, never from a session's branch, and runs `command` in each idle
@@ -12,7 +12,16 @@
 # and `incremental/` that are older than 2 days, and keeps each unit's newest build
 # plus every build modified within those 2 days, so the next build stays warm. The
 # recipe is where the window and the target directories are stated.
-schema_version = 1
+schema_version = 2
+
+# The publication policy this repository's work lands under wherever the host's
+# rules file carries no rule for it; a matching host rule overrides it per field.
+[policy]
+publication = "change-auto"
+approvals = "none"
+
+[policy.checks]
+wait_seconds = 14700 # recorded max 11709 s (run 42823350718) + 25% margin
 
 [pool.maintain]
 command = ["just", "pool-maintenance"]

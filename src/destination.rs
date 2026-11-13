@@ -681,6 +681,25 @@ mod tests {
         );
     }
 
+    /// A policy the repository's own `onevcs.toml` declared is reported with that
+    /// document as its source, and a `declaration:` line beside `matched:` — and it
+    /// is read as the policy like any rule's, never mistaken for a reworded report.
+    #[test]
+    fn a_policy_the_repository_declares_is_read_off_its_line() {
+        let reported = "repo: github.com/owner/service\n\
+             identity: github.com/owner/service\n\
+             checkout: /abs/path\n\
+             rules: /tmp/home/rules.yml\n\
+             matched: none\n\
+             declaration: /abs/path/onevcs.toml\n\
+             publication: change-auto (from the repository declaration /abs/path/onevcs.toml)\n\
+             approvals: none (from the repository declaration /abs/path/onevcs.toml)\n";
+        assert_eq!(
+            publication("service", reported).expect("the declared policy is read"),
+            MergePolicy::ChangeAuto
+        );
+    }
+
     /// A refusal that carries somebody else's output inline carries one line of
     /// it, and says so where there was none.
     #[test]

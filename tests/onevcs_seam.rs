@@ -341,7 +341,163 @@ fn every_operation_this_crate_performs_is_served_by_the_provider_seam() {
     //    provider numbers its sessions from one.
     the_draft_lifecycle_answers_what_a_node_settles_on(&root);
 
+    // 8. `src/vcs.rs::publish` with no per-run policy, over the real `Git` and this
+    //    simulated host: the policy a node publishes under is the one its
+    //    repository declares in `onevcs.toml` on its publication checkout's base,
+    //    wherever no host rule matches it — and the rules file's default only where
+    //    it declares nothing.
+    a_repository_declared_policy_decides_where_no_host_rule_matches(&root);
+
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The declaration this test's repository commits on its base.
+const DECLARED: &str = "schema_version = 2\n\n[policy]\npublication = \"change-auto\"\n\
+                        approvals = \"none\"\n";
+
+fn a_repository_declared_policy_decides_where_no_host_rule_matches(root: &std::path::Path) {
+    let declared = published_under_the_rules_default(root, "declared", Some(DECLARED));
+    assert_eq!(
+        declared.policy,
+        MergePolicy::ChangeAuto,
+        "the repository's declaration did not decide the policy: {:?}",
+        declared.outcome
+    );
+    assert!(
+        matches!(declared.outcome, PublishOutcome::Merged(_)),
+        "a change-auto publication with nothing to wait for ended as {:?}",
+        declared.outcome
+    );
+
+    let undeclared = published_under_the_rules_default(root, "undeclared", None);
+    assert_eq!(undeclared.policy, MergePolicy::ChangeOpen);
+    assert!(
+        matches!(undeclared.outcome, PublishOutcome::ChangeOpen(_)),
+        "the rules default's change-open left nothing open: {:?}",
+        undeclared.outcome
+    );
+}
+
+/// One node's change published through the real `Git` and a [`MemoryHost`], for a
+/// repository whose base commits `declaration` as its `onevcs.toml` (or none), on a
+/// host whose rules file matches some other owner and defaults to `change-open`.
+fn published_under_the_rules_default(
+    root: &std::path::Path,
+    name: &str,
+    declaration: Option<&str>,
+) -> onevcs::Publication {
+    use clap::Parser;
+    let world = root.join(name);
+    let home = world.join("home");
+    let origin = world.join("origin.git");
+    let checkout = world.join("service");
+    std::fs::create_dir_all(&home).expect("a scratch state root");
+    let gitconfig = world.join("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        "[user]\n\tname = Seam\n\temail = seam@example.invalid\n[init]\n\tdefaultBranch = main\n",
+    )
+    .expect("a git config");
+    std::env::set_var("ONEVCS_HOME", &home);
+    std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+    // Registering asks the real `gh` whether `owner/service` is public, and with no
+    // token that lookup autolaunches a session bus that outlives the test; the e2e
+    // harness's `NO_SESSION_BUS` is the same guard.
+    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let ran = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            ran.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    };
+    git(&world, &["init", "--bare", "-q", "origin.git"]);
+    git(
+        &world,
+        &["clone", "-q", &origin.to_string_lossy(), "service"],
+    );
+    std::fs::write(checkout.join("README"), "the repository under test\n").expect("a file");
+    if let Some(declaration) = declaration {
+        std::fs::write(checkout.join("onevcs.toml"), declaration).expect("the declaration");
+    }
+    git(&checkout, &["add", "-A"]);
+    git(&checkout, &["commit", "-q", "-m", "chore: seed"]);
+    git(&checkout, &["push", "-q", "origin", "main"]);
+
+    // A rule for another owner only, so nothing matches this identity and every
+    // field it does not declare comes from `default:`.
+    std::fs::write(
+        home.join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: somebody-else}\n    publication: local-direct\n\
+         default:\n  publication: change-open\n  approvals: none\n",
+    )
+    .expect("the rules file");
+    let registered = onevcs::run(&onevcs::cli::Cli::parse_from([
+        "onevcs",
+        "register",
+        &checkout.to_string_lossy(),
+        "--origin",
+        "https://github.com/owner/service.git",
+    ]));
+    assert_eq!(registered, 0, "onevcs refused to register the checkout");
+
+    // One required check that passed on the change request this host opens first, so
+    // the host's own merge has something vouching for it: a `change-auto` change with
+    // no required check is never green, and the watch would hold it queued until the
+    // checks bound elapsed rather than settling.
+    let host = MemoryHost::seeded(HostState {
+        checks: [(
+            onevcs::ChangeId("1".to_owned()),
+            vec![check("lint", "success", "ready")],
+        )]
+        .into(),
+        ..HostState::default()
+    });
+    let providers = Providers {
+        vcs: &onevcs::Git,
+        hosting: &host,
+    };
+    let session = onevcs::Git
+        .open_session(SessionRequest {
+            repo: "service".to_owned(),
+            branch: Some(name.to_owned()),
+            branch_name: None,
+            branch_prefix: None,
+            base: Some("main".to_owned()),
+            execution_checkout: None,
+            pool: None,
+            overflow: None,
+            labels: Default::default(),
+            refuse_conflicts: false,
+            caller_merges_base: false,
+        })
+        .expect("the real seam opens a session");
+    std::fs::write(session.worktree.join("feature"), "the node's change\n").expect("a change");
+    git(&session.worktree, &["add", "-A"]);
+    git(
+        &session.worktree,
+        &["commit", "-q", "-m", "feat: the node's change"],
+    );
+    onevcs::publish(
+        &providers,
+        &session.token,
+        &PublishRequest {
+            policy: None,
+            title: Some("feat: land it".parse().expect("a usable subject")),
+            body: None,
+            draft: None,
+            term_scope: TermScope::default(),
+            defer_checks: false,
+            adopt: None,
+        },
+    )
+    .expect("the real seam publishes the node's change")
 }
 
 /// One reasonless publication of a fresh session, on its own state root.
