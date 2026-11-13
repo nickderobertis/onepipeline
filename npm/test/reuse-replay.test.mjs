@@ -838,10 +838,11 @@ test("the reuse spike's one command replays today's tiers and every option over 
   ]) {
     assert.match(tables.stdout, new RegExp(`^### ${section}$`, "m"));
   }
-  // #11 changed engine source only: its class, its run and its jobs' replays.
+  // #11 changed engine source only: its class, its run and its jobs' replays. Without
+  // --clone nothing is told apart as run before the caching change.
   assert.match(
     tables.stdout,
-    /^\| #11 \| before #1493 \| engine source, no tests \| 1 \| \[110\]\(https:\/\/github\.com\/nickderobertis\/onepipeline\/actions\/runs\/110\) \| - \| 1101 \(0 of 5 replayed\) \| - \| - \|$/m,
+    /^\| #11 \| non-release \| engine source, no tests \| 1 \| \[110\]\(https:\/\/github\.com\/nickderobertis\/onepipeline\/actions\/runs\/110\) \| - \| 1101 \(0 of 5 replayed\) \| - \| - \|$/m,
   );
   assert.match(
     tables.stdout,

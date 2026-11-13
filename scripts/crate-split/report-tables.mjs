@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // The reuse spike report's tables, from what `reuse-spike.mjs` wrote and the evidence.
 //
-//   node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR --clone DIR
+//   node scripts/crate-split/report-tables.mjs --spike OUT --evidence DIR [--clone DIR]
+//
+// With --clone, a pull request is "before #1493" when its run's base does not hold
+// #1493's merge (the change that made the Linux tiers cacheable); without it, none is.
 //
 // Prints Markdown: the population with each pull request's CI run and changed-file
 // class; each platform job's Nx tasks replayed and run, the ran ones grouped by the key
@@ -16,7 +19,10 @@ import { join } from "node:path";
 
 const PLATFORM = { "test-linux": "linux", "test-macos": "darwin", "test-windows": "win32" };
 const JOBS = ["lint", "test-linux", "test-macos", "test-windows"];
-const CACHING_CHANGE = 1493;
+// #1493's squash merge, "ci: cache each test tier's coverage run": a run whose base
+// holds it ran the Linux tiers cacheable; one whose base does not, uncacheable.
+const CACHING_CHANGE = "9f7e895194c30b5c1177150f00908465e0e2a746";
+let afterCaching = () => true;
 
 /** The changed-file class a pull request falls in: what defines a typical one. */
 export function changeClass(files) {
@@ -54,7 +60,7 @@ function population(observed) {
     "| --- | --- | --- | ---: | --- | --- | --- | --- | --- |",
   ];
   for (const pr of observed.prs) {
-    const kind = pr.release ? "release" : pr.pr < CACHING_CHANGE ? "before #1493" : "non-release";
+    const kind = pr.release ? "release" : afterCaching(pr) ? "non-release" : "before #1493";
     const job = (name) => {
       const j = (pr.jobs ?? []).find((x) => x.job === name);
       return j
@@ -137,8 +143,8 @@ function e2e(observed) {
     "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const [label, pick] of [
-    ["non-release before #1493", (p) => !p.release && p.pr < CACHING_CHANGE],
-    ["non-release from #1493", (p) => !p.release && p.pr >= CACHING_CHANGE],
+    ["non-release before #1493", (p) => !p.release && !afterCaching(p)],
+    ["non-release from #1493", (p) => !p.release && afterCaching(p)],
     ["release", (p) => p.release],
   ]) {
     for (const job of ["test-linux", "test-macos", "test-windows"]) {
@@ -341,6 +347,23 @@ function main(argv) {
   for (let i = 0; i < argv.length; i += 2) options_[argv[i].replace(/^--/, "")] = argv[i + 1];
   for (const k of ["spike", "evidence"]) if (!options_[k]) throw new Error(`--${k} is required`);
   const observed = load(options_.spike, "observed");
+  if (options_.clone) {
+    afterCaching = (pr) => {
+      if (!pr.base) return false;
+      try {
+        execFileSync(
+          "git",
+          ["-C", options_.clone, "merge-base", "--is-ancestor", CACHING_CHANGE, pr.base],
+          {
+            stdio: "ignore",
+          },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+  }
   const a = agreement(options_.spike, observed);
   const c = caches(options_.evidence, observed);
   const sections = [
@@ -359,8 +382,6 @@ function main(argv) {
     ],
     ["Tasks replayed and run, per pull request and job", perJob(observed)],
   ];
-  if (options_.clone)
-    execFileSync("git", ["-C", options_.clone, "rev-parse", "--git-dir"], { stdio: "ignore" });
   for (const [title, body] of sections) console.log(`### ${title}\n\n${body}\n`);
 }
 
