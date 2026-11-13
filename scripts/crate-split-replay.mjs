@@ -5,6 +5,14 @@
 //   node scripts/crate-split-replay.mjs (--mapping FILE | --today) --out FILE [--repo DIR]
 //        [--ref REF] [--since DATE] [--until DATE] [--exclude REGEX] [--records DIR]
 //        [--run RUN_ID] [--json]
+//   node scripts/crate-split-replay.mjs --observed EVIDENCE_DIR --clone CLONE_DIR --out FILE [--json]
+//
+// --observed replays what happened rather than a proposal: for each pull request in
+// `scripts/crate-split/fetch-evidence.mjs`'s evidence, which Nx tasks each CI job
+// replayed and ran, and which input of each ran task's key its diff matched, read from
+// Nx's own hash plan at the run's tested tree and its base, rebuilt in CLONE_DIR (a
+// clone of this repository holding the pull requests' heads). `scripts/crate-split/observed.mjs`
+// says how.
 //
 // --today replays today's shape instead of a proposal: one crate and the whole e2e
 // binary as one suite, read from the repository's own `nx.json` (`rustBuild` and
@@ -36,6 +44,19 @@
 // by the test-seconds its `modules` spent in that run, so the report also says how
 // many e2e test-seconds the window's pull requests would have skipped.
 //
+// With --changes (the JSON an --observed replay wrote) the changes are exactly the pull
+// requests that replay read — the non-release ones, or with --release the release
+// ones — each as the files its tested tree changed against its base plus each non-file
+// key input that moved, named as the pseudo-paths `runtime:<command>`,
+// `config:<project>` and `external` a mapping can list among a suite's `paths` or in
+// `shared`. Its weights then weigh each suite per platform (linux, darwin, win32), in
+// minutes: a suite's optional `tasks` are Nx tasks weighed by their median executed
+// minutes, and its `modules` by their share of the e2e tier's. The test archive every
+// suite marked `"archive": true` runs from is built once per job; its minutes are saved
+// only on a change that skips every such suite, and `--build-delta
+// linux=M,darwin=M,win32=M` charges what a split adds to that build on every change
+// that does not.
+//
 // The result (Markdown, or JSON with --json) is written to --out; what is printed is
 // one line with the headline figures. It exits 0 once the result is written, and 1
 // with the reason and a `next:` line on stderr when anything is refused or fails.
@@ -43,6 +64,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { observe, renderObserved } from "./crate-split/observed.mjs";
 import { loadRecords, moduleOf, Refusal, selectRun } from "./test-profile-report.mjs";
 
 /** A glob over repository-relative paths: `**` crosses directories, `*` and `?` do not. */
@@ -94,12 +116,12 @@ const MAPPING_HELP =
   "write the mapping in the shape the head of scripts/crate-split-replay.mjs gives; scripts/crate-split/proposed.json is one";
 
 /**
- * Refuse a crate or suite name that is not a plain one: a name an object already has
+ * Refuse a crate or suite name that is not a plain one (an Nx task id, `project:target`, is): a name an object already has
  * (`constructor`, `__proto__`) would read or replace what it inherits, rather than
  * name an entry.
  */
 function named(name, what) {
-  if (!/^[A-Za-z0-9._-]+$/.test(name) || name in Object.prototype) {
+  if (!/^[A-Za-z0-9._:-]+$/.test(name) || name in Object.prototype) {
     throw new Refusal(`${JSON.stringify(name)} is not a ${what} name`, MAPPING_HELP);
   }
 }
@@ -154,10 +176,14 @@ export function compileMapping(mapping) {
     throw new Refusal("the mapping names no suite", MAPPING_HELP);
   for (const [name, suite] of Object.entries(declared)) {
     named(name, "suite");
-    onlyKeys(suite, ["paths", "crates", "modules"], `suites.${name}`);
+    onlyKeys(suite, ["paths", "crates", "modules", "tasks", "archive"], `suites.${name}`);
     strings(suite, "paths", `suites.${name}`, true);
     strings(suite, "crates", `suites.${name}`, true);
     strings(suite, "modules", `suites.${name}`, false);
+    strings(suite, "tasks", `suites.${name}`, false);
+    if (suite.archive !== undefined && typeof suite.archive !== "boolean") {
+      throw new Refusal(`suites.${name}.archive is not true or false`, MAPPING_HELP);
+    }
   }
   // Each module's test-seconds are weighed once, in the one suite that runs it.
   const ownerOf = new Map();
@@ -187,7 +213,13 @@ export function compileMapping(mapping) {
       }
       for (const reached of closure(crate)) reach.add(reached);
     }
-    suites[name] = { own: matcher(suite.paths), crates: reach, modules: suite.modules ?? [] };
+    suites[name] = {
+      own: matcher(suite.paths),
+      crates: reach,
+      modules: suite.modules ?? [],
+      tasks: suite.tasks ?? [],
+      archive: suite.archive === true,
+    };
   }
   return {
     shared: matcher(mapping.shared),
@@ -293,8 +325,60 @@ export function moduleSeconds(records, binary = "e2e") {
   return out;
 }
 
+export const PLATFORMS = ["linux", "darwin", "win32"];
+
+/**
+ * The minutes per platform a replay skips, from --changes weights: each skipped suite's
+ * tasks and modules, the shared archive build on a change that skips every archive
+ * suite, less `buildDelta` on every change that still builds it.
+ */
+export function weighPlatforms(compiled, perChange, weights, buildDelta = {}) {
+  const names = Object.keys(compiled.suites);
+  const unit = (table, key, platform) => table?.[key]?.[platform]?.minutes ?? 0;
+  const out = {};
+  for (const platform of PLATFORMS) {
+    const weight = Object.fromEntries(
+      names.map((name) => [
+        name,
+        compiled.suites[name].tasks.reduce(
+          (sum, task) => sum + unit(weights.tasks, task, platform),
+          0,
+        ) +
+          compiled.suites[name].modules.reduce(
+            (sum, module) => sum + unit(weights.modules, module, platform),
+            0,
+          ),
+      ]),
+    );
+    const archive = names.filter((name) => compiled.suites[name].archive);
+    const build = weights.build?.[platform]?.minutes ?? 0;
+    const delta = buildDelta[platform] ?? 0;
+    let skipped = 0;
+    let buildsSkipped = 0;
+    for (const change of perChange) {
+      for (const name of names) if (!change.affected.includes(name)) skipped += weight[name];
+      if (archive.length && archive.every((name) => !change.affected.includes(name)))
+        buildsSkipped++;
+    }
+    const builds = perChange.length - buildsSkipped;
+    const perRun =
+      names.reduce((sum, name) => sum + weight[name], 0) + (archive.length ? build : 0);
+    const saved = skipped + buildsSkipped * build - (archive.length ? builds * delta : 0);
+    out[platform] = {
+      minutesPerFullRun: perRun,
+      suiteMinutesSkipped: skipped,
+      archiveBuildsSkipped: buildsSkipped,
+      buildDeltaCharged: archive.length ? builds * delta : 0,
+      netMinutesSaved: saved,
+      netMinutesPerChange: perChange.length ? saved / perChange.length : null,
+      perSuite: weight,
+    };
+  }
+  return out;
+}
+
 /** Replay every change against the mapping. */
-export function replay(mapping, changes, seconds) {
+export function replay(mapping, changes, seconds, weights = null, buildDelta = {}) {
   const compiled = compileMapping(mapping);
   const names = Object.keys(compiled.suites);
   const weight = {};
@@ -347,6 +431,7 @@ export function replay(mapping, changes, seconds) {
       modulesInNoSuite: unmapped,
     });
   }
+  if (weights) summary.platforms = weighPlatforms(compiled, perChange, weights, buildDelta);
   return { summary, suites, perChange };
 }
 
@@ -366,6 +451,18 @@ function render(result) {
   }
   if (summary.unclaimedFiles.length) {
     lines.push(`Source files no crate claims: ${summary.unclaimedFiles.join(", ")}.`);
+  }
+  if (summary.platforms) {
+    lines.push(
+      "",
+      "| platform | minutes per full run | suite minutes skipped | archive builds skipped | build delta charged | net minutes saved | net per change |",
+      "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    );
+    for (const [platform, p] of Object.entries(summary.platforms)) {
+      lines.push(
+        `| ${platform} | ${p.minutesPerFullRun.toFixed(1)} | ${p.suiteMinutesSkipped.toFixed(1)} | ${p.archiveBuildsSkipped} | ${p.buildDeltaCharged.toFixed(1)} | ${p.netMinutesSaved.toFixed(1)} | ${p.netMinutesPerChange === null ? "-" : p.netMinutesPerChange.toFixed(1)} |`,
+      );
+    }
   }
   lines.push(
     "",
@@ -454,7 +551,7 @@ function writeOut(out, text) {
 const USAGE =
   "node scripts/crate-split-replay.mjs --mapping scripts/crate-split/proposed.json --out replay.md";
 
-function main(argv) {
+async function main(argv) {
   const options = {
     repo: ".",
     ref: "origin/main",
@@ -464,6 +561,7 @@ function main(argv) {
   };
   let json = false;
   let today = false;
+  let observed;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => {
@@ -471,6 +569,8 @@ function main(argv) {
       return argv[++i];
     };
     if (arg === "--json") json = true;
+    else if (arg === "--release") options.release = true;
+    else if (arg === "--observed") observed = value();
     else if (arg === "--today") today = true;
     else if (
       [
@@ -483,12 +583,16 @@ function main(argv) {
         "--exclude",
         "--records",
         "--run",
+        "--clone",
+        "--changes",
+        "--build-delta",
       ].includes(arg)
     ) {
       options[arg.slice(2)] = value();
     } else throw new Refusal(`${arg} is not an option`, USAGE);
   }
   if (!options.out) throw new Refusal("--out names no file for the result", USAGE);
+  if (observed !== undefined) return mainObserved(observed, options, json);
   if (options.run !== undefined && options.records === undefined) {
     throw new Refusal(
       "--run names a run of records, but no --records were given",
@@ -536,31 +640,110 @@ function main(argv) {
   // the mistake to report, whatever the repository says.
   compileMapping(mapping);
   let changes;
-  try {
-    changes = mergedChanges(options.repo, options);
-  } catch (error) {
-    throw new Refusal(
-      `the history of ${options.ref} in ${options.repo} cannot be read: ${error.message.split("\n")[0]}`,
-      "run from a clone that has the ref, e.g. after git fetch origin",
-    );
-  }
+  let weights = null;
+  if (options.changes !== undefined) {
+    ({ changes, weights } = observedChanges(options.changes, options.release === true));
+  } else
+    try {
+      changes = mergedChanges(options.repo, options);
+    } catch (error) {
+      throw new Refusal(
+        `the history of ${options.ref} in ${options.repo} cannot be read: ${error.message.split("\n")[0]}`,
+        "run from a clone that has the ref, e.g. after git fetch origin",
+      );
+    }
   const seconds = options.records
     ? moduleSeconds(selectRun(loadRecords(options.records), options.run).records)
     : null;
-  const result = replay(mapping, changes, seconds);
+  const result = replay(
+    mapping,
+    changes,
+    seconds,
+    weights,
+    parseBuildDelta(options["build-delta"]),
+  );
   writeOut(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : `${render(result)}\n`);
   const { summary } = result;
   const pct = (x) => (x === null || x === undefined ? "-" : `${(100 * x).toFixed(1)}%`);
   console.log(
     `crate-split-replay: wrote ${options.out}: ${summary.changes} changes, ${summary.suites} suites, ` +
       `${pct(summary.skippedSuiteFraction)} of suite runs skipped` +
-      (seconds ? `, ${pct(summary.testSecondsSkippedFraction)} of test-seconds` : ""),
+      (seconds ? `, ${pct(summary.testSecondsSkippedFraction)} of test-seconds` : "") +
+      (summary.platforms
+        ? `; net minutes saved per change: ${PLATFORMS.map((p) => `${p} ${summary.platforms[p].netMinutesPerChange?.toFixed(1) ?? "-"}`).join(", ")}`
+        : ""),
+  );
+}
+
+/** The pull requests an --observed replay read, as changes, with its weights. */
+export function observedChanges(path, release) {
+  let observed;
+  try {
+    observed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Refusal(
+      `--changes ${path} cannot be read as JSON: ${error.message}`,
+      "give --changes the file an --observed replay wrote with --json",
+    );
+  }
+  if (!Array.isArray(observed?.prs) || !observed.weights) {
+    throw new Refusal(
+      `--changes ${path} is not an --observed replay's JSON`,
+      "give --changes the file an --observed replay wrote with --json",
+    );
+  }
+  const changes = observed.prs
+    .filter((pr) => !pr.unread && pr.release === release)
+    .map((pr) => ({
+      commit: `#${pr.pr}`,
+      subject: pr.title,
+      files: [...pr.changed, ...(pr.moved ?? [])],
+    }));
+  return { changes, weights: observed.weights };
+}
+
+/** `linux=M,darwin=M,win32=M`, the minutes a split adds to each platform's build. */
+export function parseBuildDelta(text) {
+  if (text === undefined) return {};
+  const out = {};
+  for (const part of text.split(",")) {
+    const [platform, value] = part.split("=");
+    if (!PLATFORMS.includes(platform) || !Number.isFinite(Number(value)) || value === "") {
+      throw new Refusal(
+        `--build-delta ${text} is not platform=minutes pairs`,
+        "give e.g. --build-delta linux=1.5,darwin=2,win32=3",
+      );
+    }
+    out[platform] = Number(value);
+  }
+  return out;
+}
+
+function mainObserved(dir, options, json) {
+  if (!options.clone) {
+    throw new Refusal(
+      "--observed needs --clone, a clone of this repository holding the pull requests' heads",
+      "git clone --no-checkout . CLONE && git -C CLONE fetch origin '+refs/pull/*/head:refs/spike/pr/*'",
+    );
+  }
+  const result = observe(dir, options.clone, {
+    nodeModules: join(import.meta.dirname, "..", "node_modules"),
+  });
+  writeOut(options.out, json ? `${JSON.stringify(result, null, 2)}\n` : renderObserved(result));
+  const ran = result.prs.flatMap((pr) => (pr.jobs ?? []).flatMap((job) => job.ran));
+  const replayed = result.prs.flatMap((pr) => (pr.jobs ?? []).flatMap((job) => job.replayed));
+  const forced = ran.filter((row) => row.cause === "one input" || row.cause === "several inputs");
+  const read = result.prs.filter((pr) => !pr.unread).length;
+  console.log(
+    `crate-split-replay: wrote ${options.out}: ${read} of ${result.prs.length} pull requests read, ` +
+      `${replayed.length} task runs replayed and ${ran.length} ran; ${forced.length} of those the diff forced, ` +
+      `${ran.length - forced.length} it did not`,
   );
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    main(process.argv.slice(2));
+    await main(process.argv.slice(2));
   } catch (error) {
     console.error(`crate-split-replay: ${error.message}`);
     console.error(`next: ${error instanceof Refusal ? error.next : USAGE}`);
