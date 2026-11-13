@@ -5,7 +5,7 @@
 //   node scripts/ci-time-profile.mjs job --run RUN_ID --job JOB [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE] [--min-remaining N]
 //   node scripts/ci-time-profile.mjs history --since DATE --split DATE --until DATE
-//        [--compare-since DATE] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
+//        [--compare-since DATE] [--base-ref REF] [--jobs test-linux,test-macos] [--repo OWNER/NAME]
 //        [--cache DIR] [--json FILE]
 //        [--min-remaining N]
 //
@@ -24,7 +24,9 @@
 //
 // `history` lists the pull-request runs of ci.yml created in [since, until) and prints
 // each job's successful durations and medians before and after `split`, counting only runs
-// created at or after --compare-since (default: since).
+// created at or after --compare-since (default: since), overall and by what each run's pull
+// request changed: its head, fetched over git (no API request), diffed against its merge
+// base with --base-ref (default origin/main; fetch it first).
 //
 // Every GitHub response is kept under --cache (default target/ci-time-profile), so a
 // second run of the same measurement makes no request; the command refuses to make one
@@ -1034,17 +1036,54 @@ function history(opts) {
       });
     }
   }
+  // What each run's pull request changed, from the local clone: the head is fetched over git
+  // (no API request) and diffed against its merge base with --base-ref.
+  const baseRef = opts["base-ref"] ?? "origin/main";
+  const classes = new Map();
+  const git = (...a) => execFileSync("git", a, { encoding: "utf8" }).trim();
+  for (const sha of new Set(rows.map((r) => r.head_sha))) {
+    let cls = "unknown (head not in the clone)";
+    try {
+      git("cat-file", "-e", `${sha}^{commit}`);
+    } catch {
+      try {
+        execFileSync("git", ["fetch", "-q", "origin", sha], { stdio: "ignore" });
+      } catch {
+        /* left unknown */
+      }
+    }
+    try {
+      const files = git("diff", "--name-only", git("merge-base", sha, baseRef), sha)
+        .split("\n")
+        .filter(Boolean);
+      cls =
+        files.length && files.every((f) => /^(Cargo\.(toml|lock)|CHANGELOG\.md)$/.test(f))
+          ? "release"
+          : files.some((f) => f.startsWith("src/"))
+            ? "edits src/"
+            : files.some((f) => /^(Cargo\.(toml|lock)|crates\/)/.test(f))
+              ? "edits crates/ or Cargo files, not src/"
+              : "other";
+    } catch {
+      /* left unknown */
+    }
+    classes.set(sha, cls);
+  }
+  for (const r of rows) r.class = classes.get(r.head_sha);
   const summary = {};
   for (const job of opts.jobs)
-    for (const side of ["before", "after"]) {
-      const v = rows.filter((r) => r.job === job && r.side === side).map((r) => r.minutes);
-      summary[`${job} ${side}`] = {
-        n: v.length,
-        median_min: median(v),
-        min_min: v.length ? Math.min(...v) : null,
-        max_min: v.length ? Math.max(...v) : null,
-      };
-    }
+    for (const cls of ["all", ...new Set(rows.map((r) => r.class))])
+      for (const side of ["before", "after"]) {
+        const v = rows
+          .filter((r) => r.job === job && r.side === side && (cls === "all" || r.class === cls))
+          .map((r) => r.minutes);
+        summary[`${job}\t${cls}\t${side}`] = {
+          n: v.length,
+          median_min: median(v),
+          min_min: v.length ? Math.min(...v) : null,
+          max_min: v.length ? Math.max(...v) : null,
+        };
+      }
   return { runs: runs.length, rows, summary, requests: gh.requests, cached_reads: gh.cached };
 }
 
@@ -1055,11 +1094,12 @@ function printHistory(h, opts) {
   ];
   out.push(
     table(
-      ["job", "side", "n", "median min", "min", "max"],
+      ["job", "pull request changed", "side", "n", "median min", "min", "max"],
       Object.entries(h.summary).map(([k, v]) => {
-        const [job, side] = k.split(" ");
+        const [job, cls, side] = k.split("\t");
         return [
           job,
+          cls,
           side,
           v.n,
           v.median_min?.toFixed(1) ?? "-",
@@ -1072,12 +1112,13 @@ function printHistory(h, opts) {
   out.push(
     "",
     table(
-      ["run", "attempt", "PR", "created", "job", "min", "side"],
+      ["run", "attempt", "head", "created", "pull request changed", "job", "min", "side"],
       h.rows.map((r) => [
         r.run,
         r.attempt,
-        r.pr ?? "-",
+        r.head_sha.slice(0, 8),
         r.created_at,
+        r.class,
         r.job,
         r.minutes.toFixed(1),
         r.side,
