@@ -1,468 +1,24 @@
+# A throwaway compile-cost demonstration (scripts/crate-split/demo-commit.mjs): it
+# builds the CI tiers' test archive on each platform and times it. It writes no cache.
 name: CI
 
-# Pull requests, and a push to main for `budgets` alone, which records that
-# commit's results as the history pull requests compare with. No push to main
-# re-runs the other four: branch protection does not require a branch to be up to
-# date, and `rust-cache-warm.yml`'s build on each push to main is what fails when
-# a merge leaves main not building (AGENTS.md "Commits, releases, and merging").
 on:
   pull_request:
-  push:
-    branches: [main]
 
-# Least privilege: most jobs only need to read the repo.
 permissions:
   contents: read
 
-# A pull request's newer push supersedes its older one. A push to main is never
-# cancelled, since each is a commit of the base history.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
   CARGO_TERM_COLOR: always
-  NX_BASE: ${{ github.event.pull_request.base.sha }}
-  NX_HEAD: ${{ github.event.pull_request.head.sha }}
 
 jobs:
-  # One lint job and one test job per platform, then `budgets`. Each of the four runs its checks
-  # through one recipe of its own — `just ci-lint`, `ci-test-linux`,
-  # `ci-test-windows`, `ci-test-macos`, all of them `scripts/ci-job.sh` — as one
-  # Nx invocation scoped to the projects the diff reaches, so a job's checks run
-  # side by side rather than one after another, and a pull request touching
-  # nothing a platform tests finishes that job quickly. None waits on another: a
-  # pull request's wait is its slowest job, and every runner slot is one of the
-  # account-wide limit all repositories share. `.github/ci-shape/` holds the
-  # four to this shape.
-  #
-  # These four and `budgets` are the whole workflow and exactly what branch
-  # protection on `main` requires.
-  #
-  # Rust caches: each test job restores the build `rust-cache-warm.yml` saves on
-  # `main` under the job's own key, and no pull-request run saves one, so the
-  # repository's Actions cache holds main's builds rather than one per branch.
-
-  # What does not depend on the platform it runs on: formatting, lints, the JS
-  # syntax check, the dependency audit, the judged lint, the engine-currency
-  # check, the PR title, the suppressions comment and the visual docs.
-  lint:
-    if: github.event_name == 'pull_request'
+  measure-linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
-    # actions need, granted here because they are steps of this job rather than
-    # screencomp's reusable workflow: the gallery deploy writes contents, the
-    # sticky comment and notignored's comment write the pull request, and the
-    # Pages build screencomp gates on is read. `permissions` takes literals only,
-    # so a narrower grant per step is not something GitHub offers.
-    permissions:
-      contents: write
-      pull-requests: write
-      pages: read
-    # llmlint: ignore-end[least_privilege_grants]
-    env:
-      # The one switch for the visual docs' side effects: the sticky comment and
-      # the /pr-<n>/ preview deploy. This job is the one place a pull request's
-      # visual docs are captured, commented and deployed: visual-docs.yml runs
-      # on a pull request only when it closes, to delete its preview. The
-      # capture, the reproducibility gate, classify and the gallery build run
-      # either way. No offline test drives the publication: its effects are a
-      # comment on a live pull request and a Pages deploy, so its integration
-      # proof is this job on every pull request, the change turning it on
-      # included; ci-shape.test.mjs holds only that the switch and its steps
-      # stay wired.
-      VISUAL_DOCS_PUBLISH: "true"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The merge base for affected selection, notignored's scan and the
-          # judge's diff.
-          fetch-depth: 0
-          # This job's token can write, and the judge runs harness agents over
-          # the checkout: no credential is left in it for them to find.
-          persist-credentials: false
-      # rust-cache keys on the OS, every installed toolchain and every Cargo
-      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
-      # saves from main for `test-linux`, whose warm build includes this job's
-      # clippy build. Before the capture starts: on a restore that is not a
-      # full key match rust-cache prunes files under `target/`, where the
-      # capture's clone of HEAD lives.
-      - name: Decide cache trust and configure the sidecar
-        id: nx-cache-trust
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          node scripts/nx-remote-cache.mjs trust
-          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
-          echo "::add-mask::$token"
-          echo "token=$token" >> "$GITHUB_OUTPUT"
-      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
-        id: nx-cache
-        background: true
-        with:
-          port: '3000'
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Wait for the cache recording proxy
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-        run: node scripts/nx-remote-cache.mjs ready
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-linux
-          save-if: false
-      # The capture builds release binaries in a container for most of this
-      # job's length, so it starts early and runs beside the checks below, from
-      # its own clone of HEAD (screenshots/ci-capture-lanes.sh); the step that
-      # judges it waits for it. Both lanes, one after the other: the second reuses
-      # the first's build, for the reproducibility gate.
-      # The capture's release build, from main's warm run: keyed on the lock, the
-      # toolchain and visual-docs.yml, which names the image it builds in.
-      - name: Restore the visual docs capture's build
-        uses: actions/cache/restore@v4
-        with:
-          path: target/ci-capture-target
-          key: ci-capture-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/workflows/visual-docs.yml') }}
-      - name: Start the visual docs capture beside the checks
-        env:
-          SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
-        run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
-      - name: Read the exact CI tool versions
-        id: ci-tools
-        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.ci-tools.outputs.node }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ steps.ci-tools.outputs.lint_tools }}
-      # The judged lint's toolchain installs through uv.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.ci-tools.outputs.python }}
-      # A fork's run writes nothing to any cache: this action saves its own otherwise.
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Formatting, lints and audit (affected projects)
-        run: just ci-lint
-      # Whether the lock still resolves the sibling engines the manifest permits
-      # (engine-currency.yml asks the same by hand). Advisory: its answer moves
-      # when the registry does, not when this tree does, so a release nobody here
-      # made must not fail an unrelated pull request (AGENTS.md).
-      - name: Engine currency (advisory)
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: just engines-current
-      # The judged tier over the diff: pinned harnesses, the fallback installed and
-      # credentialled, and a missing credential failing rather than reporting
-      # unlinted files as clean.
-      - name: Install the Codex harness
-        if: ${{ !cancelled() }}
-        run: npm install -g @openai/codex@0.145.0
-      - name: Install the Claude Code harness (oneharness fallback)
-        if: ${{ !cancelled() }}
-        run: npm install -g @anthropic-ai/claude-code@2.1.220
-      - name: Install llmlint toolchain
-        if: ${{ !cancelled() }}
-        run: just setup-llmlint-ci
-      - name: Verify the judged lint fingerprint
-        if: ${{ !cancelled() }}
-        run: |
-          llmlint fingerprint
-          printf 'llmlint fingerprint exited 0\n'
-      - name: Validate llmlint config
-        if: ${{ !cancelled() }}
-        run: just lint-llm-validate --diff-base origin/main
-      - name: Lint changed files
-        if: ${{ !cancelled() }}
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: |
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::llmlint needs OPENAI_API_KEY for the Codex harness" >&2
-            exit 1
-          fi
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-            echo "::error::llmlint needs CLAUDE_CODE_OAUTH_TOKEN for the claude-code fallback harness" >&2
-            exit 1
-          fi
-          just lint-llm-diff origin/main
-      # The visual docs, through screencomp's composite actions as steps of this
-      # job rather than its reusable workflow, which would add five jobs. The
-      # capture is visual-docs.yml's own `capture-command`, read out of that file
-      # and run in the image it names (`screenshots/ci-capture.sh`), so there is
-      # one capture command; started at the top of this job.
-      - name: Wait for the visual docs capture
-        if: ${{ !cancelled() }}
-        run: bash screenshots/ci-capture-lanes.sh wait "$RUNNER_TEMP"
-      - uses: nickderobertis/screencomp@v0
-        if: ${{ !cancelled() }}
-        with:
-          # The release visual-docs.yml's reusable workflow is pinned to, so both
-          # paths judge with one CLI; `.github/ci-shape/` holds the two equal.
-          version: v0.4.8
-      - name: Classify, gate and build the gallery
-        id: classify
-        if: ${{ !cancelled() }}
-        uses: nickderobertis/screencomp/visual-docs@v0
-        with:
-          project: ""
-          arch: x86_64
-          current: shots/current
-          manifest: ""
-          gallery-title: Visual docs
-          verify-second: shots/verify
-          pages: "true"
-          publish: ${{ env.VISUAL_DOCS_PUBLISH }}
-          fail-on-drift: "true"
-          update-manifest: "false"
-          comment-mode: aggregated
-          pages-artifact: screencomp-gallery-x86_64
-          github-token: ${{ github.token }}
-      - name: Deploy the gallery preview
-        if: env.VISUAL_DOCS_PUBLISH == 'true' && !cancelled() && steps.classify.outcome != 'skipped'
-        uses: nickderobertis/screencomp/visual-docs-pages@v0
-        with:
-          github-token: ${{ github.token }}
-      - name: Post the visual docs comment
-        if: ${{ !cancelled() && steps.classify.outcome != 'skipped' }}
-        uses: nickderobertis/screencomp/visual-docs-aggregate@v0
-        with:
-          matrix: '[{"arch":"x86_64","project":"","current":"shots/current","verify":"shots/verify","manifest":"","gallery_title":"Visual docs"}]'
-          publish: ${{ env.VISUAL_DOCS_PUBLISH }}
-          github-token: ${{ github.token }}
-      # Under squash-merge the title becomes the release-driving commit.
-      - name: Lint the PR title
-        if: ${{ !cancelled() }}
-        uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # One sticky comment listing the lint and type-check suppressions this
-      # change adds, so a reviewer sees each with its reason: a review artifact,
-      # not a gate. A fork's token cannot upsert a comment, so a fork's pull
-      # request skips it.
-      - name: Comment the suppressions this change adds
-        if: github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
-        uses: nickderobertis/notignored@v0
-
-  # The Linux test job: every test tier under coverage with its floor, the docs
-  # and the budgets (`check` less `lint`'s formatting and lints), the MSRV floor,
-  # the live smoke, the pinned-wheel channel journeys, the workflow-shape test,
-  # the install and documented-install proofs and the x86_64 wheel, in one Nx run
-  # so the proofs build beside the tiers.
-      - name: Report cache entries and task executions
-        if: always()
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
-        with:
-          name: nx-cache-entries-${{ github.job }}
-          path: ${{ runner.temp }}/nx-cache-report
-          retention-days: 7
-      - cancel: nx-cache
-
-  test-linux:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    # From the hosted durations of what this job absorbs (`gate` 5,239-7,167 s on
-    # recent base-tree runs, plus the wheel, install and smoke it now overlaps) and a
-    # first run's cold build, with about a quarter's headroom; see the change that
-    # set it for the run it was confirmed on.
-    timeout-minutes: 180
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: read
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Decide cache trust and configure the sidecar
-        id: nx-cache-trust
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          node scripts/nx-remote-cache.mjs trust
-          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
-          echo "::add-mask::$token"
-          echo "token=$token" >> "$GITHUB_OUTPUT"
-      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
-        id: nx-cache
-        background: true
-        with:
-          port: '3000'
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Wait for the cache recording proxy
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-        run: node scripts/nx-remote-cache.mjs ready
-      - name: The smoke's credential and scratch repository are present
-        env:
-          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
-          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
-        run: |
-          if [ "$HAS_CREDENTIAL" != "true" ]; then
-            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. This job never skips it and never falls back to a fake." >&2
-            exit 1
-          fi
-          if [ "$HAS_SMOKE_REPO" != "true" ]; then
-            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke." >&2
-            exit 1
-          fi
-      - name: Read the exact CI tool versions
-        id: ci-tools
-        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-linux
-          save-if: false
-      # The MSRV floor's check, here rather than in `lint`: a second toolchain's
-      # whole-workspace build, which in `lint` shared the runner with the
-      # visual-docs capture's and left it no headroom under 30 minutes. After
-      # rust-cache, so the key stays the one main's warm run saves.
-      - name: Read the MSRV from Cargo.toml
-        id: msrv
-        run: |
-          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
-          [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.ci-tools.outputs.node }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ steps.ci-tools.outputs.linux_tools }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.ci-tools.outputs.python }}
-      # A fork's run writes nothing to any cache: this action saves its own otherwise.
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      # The released tools `just bootstrap` compiles — two into `target/tools`,
-      # the pool pruner onto cargo's PATH — keyed on the versions the justfile
-      # pins and the toolchain that compiles them.
-      - name: What the bootstrap tools are built from
-        id: pins
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
-      - name: Restore the bootstrap tools
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/tools
-            ~/.cargo/bin/cargo-prune-superseded*
-          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
-      # Also provisions `strace` and the unprivileged user namespace, which the
-      # Linux-only e2e journeys refuse without.
-      - name: Bootstrap
-        run: just bootstrap
-      # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
-      # cannot turn a failed run green); the archive is the instrumented test
-      # build, kept for that step to re-run without compiling.
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential] the
-      # pinned-wheel channel journeys have no credential to require — what they reach
-      # is PyPI's public copy of one pinned wheel, read anonymously — and resolve uv
-      # and the wheel first, failing naming whichever is missing. The credentialled
-      # smoke is placed in `test-linux` by the plan that made these four jobs, and it
-      # stays what it was: `onepipeline-real-smoke`'s own uncached `smoke` target,
-      # reached by no `check`, its credential required above, selected by the same
-      # affected answer as the rest of this job.
-      - name: Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
-        id: gate
-        env:
-          # llmlint: ignore-block[least_privilege_grants] the live smoke's PAT:
-          # the journey pushes to, opens a pull request on and merges in a scratch
-          # repository the default token cannot reach.
-          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          # llmlint: ignore-end[least_privilege_grants]
-          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
-      - name: Keep the per-test profile records
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-profile-test-linux
-          path: target/test-profile/
-          if-no-files-found: warn
-          retention-days: 30
-      # What each `budgets` check this run selected saved, for the `budgets` job's report. A failed
-      # job's results still arrive, and a target this run did not select saved nothing.
-      - name: Keep the saved budget results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: budget-check-results-test-linux
-          path: target/budget-results/
-          if-no-files-found: warn
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 25
-        env:
-          # llmlint: ignore-block[least_privilege_grants] the gate step's own two
-          # values, no wider: a failed live-smoke journey re-run here does what it
-          # did there, in a scratch repository the default token cannot reach.
-          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          # llmlint: ignore-end[least_privilege_grants]
-          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
-        run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-
-  # The Windows test job: clippy over the Windows build, the uninstrumented suite
-  # (`check-cross` less formatting, which `lint` runs), the npm launcher's
-  # process-tree journeys and the two install proofs, on a Dev Drive.
-      - name: Report cache entries and task executions
-        if: always()
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
-        with:
-          name: nx-cache-entries-${{ github.job }}
-          path: ${{ runner.temp }}/nx-cache-report
-          retention-days: 7
-      - cancel: nx-cache
-
-  test-windows:
-    if: github.event_name == 'pull_request'
-    runs-on: windows-latest
-    # From the two Windows shards' summed hosted durations (9,366-10,069 s) plus the
-    # Windows install proof (897-1,275 s) and a cold build, with about a quarter's
-    # headroom, since one job now runs the whole suite.
-    timeout-minutes: 270
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: read
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2]
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -472,39 +28,87 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Decide cache trust and configure the sidecar
-        id: nx-cache-trust
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          node scripts/nx-remote-cache.mjs trust
-          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
-          echo "::add-mask::$token"
-          echo "token=$token" >> "$GITHUB_OUTPUT"
-      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
-        id: nx-cache
-        background: true
-        with:
-          port: '3000'
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Wait for the cache recording proxy
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-        run: node scripts/nx-remote-cache.mjs ready
       - name: Read the exact CI tool versions
         id: ci-tools
         run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
-      # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
-      # the checkout and the temp directory every journey writes its scratch
-      # repositories into, trusted so the Defender filter does not scan it,
-      # and Defender's real-time scan kept off the toolchain's directories too.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ steps.ci-tools.outputs.linux_tools }}
+      - name: The tree this run measures
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "GITHUB_SHA=$GITHUB_SHA head=${{ github.event.pull_request.head.sha }} tree=$(git rev-parse 'HEAD^{tree}')"
+          echo "workflow blob=$(git rev-parse HEAD:.github/workflows/ci.yml)"
+          echo "runner=$RUNNER_OS/$RUNNER_ARCH cpus=$(node -p 'require("os").cpus().length')"
+      - name: Build the coverage test archive, timed
+        working-directory: ${{ github.workspace }}
+        run: node scripts/crate-split/measure-archive.mjs coverage
+
+  measure-macos:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2]
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-macos
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.ci-tools.outputs.node }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ steps.ci-tools.outputs.quick_tools }}
+      - name: The tree this run measures
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "GITHUB_SHA=$GITHUB_SHA head=${{ github.event.pull_request.head.sha }} tree=$(git rev-parse 'HEAD^{tree}')"
+          echo "workflow blob=$(git rev-parse HEAD:.github/workflows/ci.yml)"
+          echo "runner=$RUNNER_OS/$RUNNER_ARCH cpus=$(node -p 'require("os").cpus().length')"
+      - name: Build the quick test archive, timed
+        working-directory: ${{ github.workspace }}
+        run: node scripts/crate-split/measure-archive.mjs quick
+
+  measure-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2]
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read the exact CI tool versions
+        id: ci-tools
+        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
       - uses: samypr100/setup-dev-drive@v3
         with:
           drive-size: 60GB
@@ -515,7 +119,7 @@ jobs:
           env-mapping: |
             TEMP,{{ DEV_DRIVE }}/tmp
             TMP,{{ DEV_DRIVE }}/tmp
-      - name: Keep Defender's real-time scan off the build and the suite
+      - name: Keep Defender's real-time scan off the build
         shell: pwsh
         run: |
           Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
@@ -531,216 +135,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: ${{ steps.ci-tools.outputs.quick_tools }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.ci-tools.outputs.python }}
-      # A fork's run writes nothing to any cache: this action saves its own otherwise.
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: What the bootstrap tools are built from
-        id: pins
+      - name: The tree this run measures
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
-      - name: Restore the bootstrap tools
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
-            ~/.cargo/bin/cargo-prune-superseded*
-          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
-      - name: Bootstrap
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: just bootstrap
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
-      # documented install it runs reaches the remote default branch, because
-      # README's one-liner names no ref: that is the install a user runs, so it is
-      # proven on every pull request this job's affected answer selects.
-      - name: Clippy, suite, launcher and install proofs (affected projects)
-        id: gate
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
-      # On Windows there are no process groups to make a leaked process visible
-      # afterwards, so what was still running is read while it is still true.
-      - name: What was still running when it stopped
-        if: (failure() || cancelled())
-        continue-on-error: true
-        shell: pwsh
-        run: Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | Format-Table -AutoSize -Wrap
-      - name: Keep the per-test profile records
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-profile-test-windows
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/test-profile/
-          if-no-files-found: warn
-          retention-days: 30
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 25
-        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-
-  # The macOS test job (Apple silicon): the same as Windows.
-      - name: Report cache entries and task executions
-        if: always()
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
-        with:
-          name: nx-cache-entries-${{ github.job }}
-          path: ${{ runner.temp }}/nx-cache-report
-          retention-days: 7
-      - cancel: nx-cache
-
-  test-macos:
-    if: github.event_name == 'pull_request'
-    runs-on: macos-latest
-    # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
-    # a cold build, with about a quarter's headroom.
-    timeout-minutes: 210
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: read
-    env:
-      NEXTEST_PROFILE: ci
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Decide cache trust and configure the sidecar
-        id: nx-cache-trust
-        shell: bash
-        working-directory: ${{ github.workspace }}
         run: |
-          node scripts/nx-remote-cache.mjs trust
-          token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
-          echo "::add-mask::$token"
-          echo "token=$token" >> "$GITHUB_OUTPUT"
-      - uses: op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33
-        id: nx-cache
-        background: true
-        with:
-          port: '3000'
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-          CACHE_READ_ONLY: ${{ steps.nx-cache-trust.outputs.read_only == 'true' && '1' || '' }}
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Wait for the cache recording proxy
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          NX_SELF_HOSTED_REMOTE_CACHE_SERVER: http://127.0.0.1:3000
-          NX_SELF_HOSTED_REMOTE_CACHE_ACCESS_TOKEN: ${{ steps.nx-cache-trust.outputs.token }}
-        run: node scripts/nx-remote-cache.mjs ready
-      - name: Read the exact CI tool versions
-        id: ci-tools
-        run: node .github/read-ci-tool-versions.mjs >> "$GITHUB_OUTPUT"
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-macos
-          save-if: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.ci-tools.outputs.node }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: ${{ steps.ci-tools.outputs.quick_tools }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.ci-tools.outputs.python }}
-      # A fork's run writes nothing to any cache: this action saves its own otherwise.
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ steps.ci-tools.outputs.uv }}
-          enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: What the bootstrap tools are built from
-        id: pins
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
-      - name: Restore the bootstrap tools
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            target/tools
-            ~/.cargo/bin/cargo-prune-superseded*
-          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
-      - name: Bootstrap
-        run: just bootstrap
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
-      # documented install it runs reaches the remote default branch, because
-      # README's one-liner names no ref: that is the install a user runs, so it is
-      # proven on every pull request this job's affected answer selects.
-      - name: Clippy, suite, launcher and install proofs (affected projects)
-        id: gate
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
-      - name: What was still running when it stopped
-        if: (failure() || cancelled())
-        continue-on-error: true
-        run: ps -ef
-      - name: Keep the per-test profile records
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-profile-test-macos
-          path: target/test-profile/
-          if-no-files-found: warn
-          retention-days: 30
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 25
-        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-      - name: Report cache entries and task executions
-        if: always()
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
-      - uses: actions/upload-artifact@v4
-        if: always() && steps.nx-cache-trust.outputs.promotable == 'true'
-        with:
-          name: nx-cache-entries-${{ github.job }}
-          path: ${{ runner.temp }}/nx-cache-report
-          retention-days: 7
-      - cancel: nx-cache
-
-
-  # One standing budget report on the pull request, and the same saved results on
-  # a push to main, once the jobs before it have ended however they ended. It adds
-  # no build or test: a budget whose command cannot run here gets a row saying
-  # why. The full history lets local git prove each saved base commit's ancestry,
-  # and the group serializes comment writers.
-  budgets:
-    needs: [lint, test-linux, test-windows, test-macos]
-    if: always()
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: write
-    concurrency:
-      group: budget-report-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: nickderobertis/onebudgetspec-github-action@v0.3.0
-        with:
-          token: ${{ github.token }}
-          enforcement-exclude-labels: release-tail,host-variable
-          omit-labels: not-measured-on-pr
-          saved-results-artifacts: budget-check-results-*
+          echo "GITHUB_SHA=$GITHUB_SHA head=${{ github.event.pull_request.head.sha }} tree=$(git rev-parse 'HEAD^{tree}')"
+          echo "workflow blob=$(git rev-parse HEAD:.github/workflows/ci.yml)"
+          echo "runner=$RUNNER_OS/$RUNNER_ARCH cpus=$(node -p 'require("os").cpus().length')"
+      - name: Build the quick test archive, timed
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: node scripts/crate-split/measure-archive.mjs quick
