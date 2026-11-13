@@ -466,7 +466,12 @@ function caches(evidence, observed) {
           readJson(where, "remove it and re-run fetch-evidence.mjs"),
           where,
         );
-        const t = exec.tasks.find((x) => x.task === r.task);
+        const t = exec.tasks?.find((x) => x.task === r.task);
+        check.need(
+          t,
+          `${where} holds no ${r.task}, which the observed replay read from it`,
+          "run the observed replay again over this evidence",
+        );
         const main = (held.get(`nx-cache-${t.hash}`) ?? []).find(
           (e) => e.ref === "refs/heads/main",
         );

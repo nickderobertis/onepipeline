@@ -402,6 +402,11 @@ export function observedResult(doc, where) {
       `${where} has a pull request with no number, title or release flag`,
       again,
     );
+    need(
+      pr.unread === undefined || isText(pr.unread),
+      `${where}: #${pr.pr}'s unread is not a reason`,
+      again,
+    );
     if (pr.unread) continue;
     need(
       isSha(pr.base) && isSha(pr.head),

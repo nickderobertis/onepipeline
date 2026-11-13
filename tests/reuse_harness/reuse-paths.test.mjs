@@ -1832,3 +1832,59 @@ test("the demonstration reader reads the cache action's and cargo's own lines fr
   assert.equal(twice.status, 1);
   assert.match(twice.stderr, /--dir is given twice/);
 });
+
+test("the inventory names a real Nx cache entry's target from the real record that holds its hash", () => {
+  const { entry, record } = JSON.parse(readFileSync(join(root, "tests", "reuse_harness", "fixtures", "cache-entry-and-record.json"), "utf8"));
+  const dir = join(scratch, "real-inventory");
+  write(dir, {
+    "caches/page-1.json": JSON.stringify({ actions_caches: [entry, { ...entry, id: entry.id + 1, created_at: "2026-11-11T00:00:00Z" }] }),
+    "executions/129609485239.json": JSON.stringify(record),
+  });
+  const run = spawnSync(process.execPath, [script("cache-inventory.mjs"), "--evidence", dir], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const inv = JSON.parse(readFileSync(join(dir, "caches", "inventory.json"), "utf8"));
+  const family = inv.families["nx-cache-# @ pull request"];
+  assert.deepEqual(family.targets, { "onepipeline-e2e:test": { entries: 2, bytes: 2 * entry.size_in_bytes } });
+  // The family's date range is its entries' own oldest and newest.
+  assert.equal(family.oldest, entry.created_at);
+  assert.equal(family.newest, "2026-11-11T00:00:00Z");
+});
+
+test("option (b)'s suites share every input the e2e tier's key held, and each runs on its own files alone", async () => {
+  const dir = join(scratch, "option-b");
+  write(dir, {
+    "today.json": JSON.stringify({
+      "//": "today",
+      sources: ["src/**"],
+      fallback: "onepipeline",
+      crates: { onepipeline: { paths: ["src/**"] } },
+      suites: {
+        "onepipeline-e2e:test": { paths: ["tests/e2e/**/*", "graphs/**", "runtime:recipe"], crates: ["onepipeline"], tasks: ["onepipeline-e2e:test"], archive: true },
+        "onepipeline:lint": { paths: ["clippy.toml"], crates: ["onepipeline"], tasks: ["onepipeline:lint"] },
+      },
+    }),
+    "proposed.json": JSON.stringify({
+      suites: {
+        "e2e-landing": { paths: ["tests/e2e/landing.rs"], crates: ["onepipeline"], modules: ["landing"] },
+        "e2e-store": { paths: ["tests/e2e/store.rs"], crates: ["onepipeline"], modules: ["store"] },
+      },
+    }),
+    "observed.json": JSON.stringify({
+      prs: [
+        { pr: 1, title: "landing journey", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["tests/e2e/landing.rs"], moved: [] },
+        { pr: 2, title: "a graph", release: false, base: SHA_A, head: SHA_B, run: 2, changed: ["graphs/x.toml"], moved: [] },
+        { pr: 3, title: "the recipe", release: false, base: SHA_A, head: SHA_B, run: 3, changed: [], moved: ["runtime:recipe"] },
+      ],
+      weights: { tasks: {}, modules: {} },
+    }),
+  });
+  const { optionB } = await import(pathToFileURL(script("tier-mapping.mjs")).href);
+  writeFileSync(join(dir, "b.json"), JSON.stringify(optionB(JSON.parse(readFileSync(join(dir, "today.json"), "utf8")), JSON.parse(readFileSync(join(dir, "proposed.json"), "utf8")))));
+  const run = spawnSync(process.execPath, [replay, "--mapping", join(dir, "b.json"), "--changes", join(dir, "observed.json"), "--out", join(dir, "r.json"), "--json"], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const affected = Object.fromEntries(JSON.parse(readFileSync(join(dir, "r.json"), "utf8")).perChange.map((c) => [c.commit, c.affected.filter((s) => s.startsWith("e2e-")).sort()]));
+  // A journey file runs only its own suite; what the whole tier's key held runs them all.
+  assert.deepEqual(affected["#1"], ["e2e-landing"]);
+  assert.deepEqual(affected["#2"], ["e2e-landing", "e2e-store"]);
+  assert.deepEqual(affected["#3"], ["e2e-landing", "e2e-store"]);
+});
