@@ -2477,6 +2477,10 @@ fn a_malformed_declaration_is_recorded_unreadable_and_the_host_command_does_not_
     let maintain = interpreted_script(&world, "maintain");
     let host = serde_json::to_string(&[maintain.as_str()]).expect("an argv serializes");
     sized_pools(&world, &[("service", 1, Some(host.as_str()))]);
+    // The slot is cut before the declaration breaks: onevcs refuses to open a
+    // session on a repository whose declaration it cannot read, so a pool can only
+    // hold a slot whose repository's base was broken after the slot was cut.
+    cut_a_slot(&world, &service.checkout);
     std::fs::write(
         service.checkout.join("onevcs.toml"),
         "schema_version = 1\n\n[pool.maintain]\ncommand = 5\n",
@@ -2488,7 +2492,6 @@ fn a_malformed_declaration_is_recorded_unreadable_and_the_host_command_does_not_
         &service.checkout,
         &["commit", "-m", "chore: declare a malformed maintenance"],
     );
-    cut_a_slot(&world, &service.checkout);
 
     let hour = schedule(&world, "unreadable", "1h", "");
     held_run(&world, "unreadable", 2, &["--maintenance-config", &hour]).exited(0);
