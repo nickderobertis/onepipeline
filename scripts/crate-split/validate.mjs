@@ -3,6 +3,16 @@
 // here before anything is computed from it, and refused with what to do next.
 import { Refusal } from "../test-profile-report.mjs";
 
+/**
+ * How the Nx cache sidecar names a task's entry in the Actions cache: `nx-cache-<hash>`,
+ * as the pinned op-nx/github-cache revision ci.yml starts writes it. The drift test
+ * fails if ci.yml pins another revision, whose key spelling must then be read again.
+ */
+export const NX_CACHE_KEY = {
+  prefix: "nx-cache-",
+  producer: "op-nx/github-cache/start-cache-server@91839c24885842cac86567c30e23b37fb85f7e33",
+};
+
 export { Refusal };
 
 /** Refuse unless `ok`, naming what is wrong and the next action. */

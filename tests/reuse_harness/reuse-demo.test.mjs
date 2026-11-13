@@ -112,8 +112,13 @@ test("the archive timer builds the plain archive and reports its wall and unit s
     encoding: "utf8",
   });
   assert.equal(read.status, 0, read.stderr);
-  const wall = lines[0].match(/wall_s=([\d.]+)/)[1];
-  assert.match(readFileSync(join(runs, "t.md"), "utf8"), new RegExp(`\\| quick \\| [\\d.]+ \\| ${wall.replace(".", "\\.")} \\| `));
+  // The wall seconds the table reads are the ones the timer printed, as numbers: a
+  // build of a whole number of seconds prints `1.0` and reads back 1.
+  const wall = Number(lines[0].match(/wall_s=([\d.]+)/)[1]);
+  const row = readFileSync(join(runs, "t.md"), "utf8").split("\n").find((l) => l.startsWith("| 3 |"));
+  const cells = row.split("|").map((c) => c.trim());
+  assert.equal(cells[11], "quick");
+  assert.equal(Number(cells[13]), wall);
 });
 
 test("the coverage archive is cargo-llvm-cov's instrumented build, under -D warnings", () => {

@@ -427,7 +427,10 @@ function caches(evidence, observed) {
     "| scope | entries | named | lint | format-check | test-quick | test | build | other |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   );
-  for (const f of ["nx-cache-# @ pull request", "nx-cache-# @ main"]) {
+  for (const f of [
+    `${check.NX_CACHE_KEY.prefix}# @ pull request`,
+    `${check.NX_CACHE_KEY.prefix}# @ main`,
+  ]) {
     const t = inv.families[f];
     if (!t) continue;
     const by = {};
@@ -439,7 +442,7 @@ function caches(evidence, observed) {
     const main = ["lint", "format-check", "test-quick", "test", "build"];
     const other = named - main.reduce((s, k) => s + (by[k] ?? 0), 0);
     out.push(
-      `| ${f.replace("nx-cache-# @ ", "")} | ${t.entries} | ${named} | ${main.map((k) => by[k] ?? 0).join(" | ")} | ${other} |`,
+      `| ${f.replace(`${check.NX_CACHE_KEY.prefix}# @ `, "")} | ${t.entries} | ${named} | ${main.map((k) => by[k] ?? 0).join(" | ")} | ${other} |`,
     );
   }
   // Was a key a run missed one an earlier run stored, and is it still held?
@@ -472,7 +475,7 @@ function caches(evidence, observed) {
           `${where} holds no ${r.task}, which the observed replay read from it`,
           "run the observed replay again over this evidence",
         );
-        const main = (held.get(`nx-cache-${t.hash}`) ?? []).find(
+        const main = (held.get(`${check.NX_CACHE_KEY.prefix}${t.hash}`) ?? []).find(
           (e) => e.ref === "refs/heads/main",
         );
         if (!main) gone++;

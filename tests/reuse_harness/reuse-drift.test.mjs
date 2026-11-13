@@ -17,7 +17,7 @@ import {
   REST_TASK,
   restTierExclusions,
 } from "../../scripts/crate-split/observed.mjs";
-import { executions } from "../../scripts/crate-split/validate.mjs";
+import { executions, NX_CACHE_KEY } from "../../scripts/crate-split/validate.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ci = parse(readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8"));
@@ -79,7 +79,9 @@ test("the measurement workflow sets up each platform as ci.yml's test job does",
       steps.find((s) => String(s.run ?? "").includes("Add-MpPreference"))?.run;
     assert.equal(defender(mine.steps), defender(theirs.steps), `${platform}: Defender exclusion`);
   }
-  // And nothing in it saves a cache.
+  // And nothing in it saves a cache. This is the offline half of that proof: a hosted
+  // run cannot be started from a test, and its other half, the read-only listing of the
+  // caches each demonstration's ref holds after its run, is recorded in the spike report.
   for (const job of Object.values(measure.jobs)) {
     for (const s of job.steps) {
       assert.ok(!String(s.uses ?? "").startsWith("actions/cache"), "an actions/cache step");
@@ -283,4 +285,12 @@ test("the executions reader reads what nx-remote-cache.mjs's report itself write
     ],
   );
   rmSync(temp, { recursive: true, force: true });
+});
+
+test("the cache key spelling the inventory reads is the pinned sidecar's, which ci.yml still starts", () => {
+  const starts = Object.values(ci.jobs).flatMap((job) => (job.steps ?? []).map((s) => s.uses).filter((u) => String(u).startsWith("op-nx/github-cache/")));
+  assert.ok(starts.length > 0, "ci.yml starts no op-nx/github-cache sidecar");
+  for (const uses of starts) assert.equal(uses, NX_CACHE_KEY.producer, "ci.yml pins another sidecar: read its key spelling again");
+  // nx-remote-cache.mjs records against the same pin.
+  assert.match(readFileSync(join(root, "scripts", "nx-remote-cache.mjs"), "utf8"), new RegExp(`OP_NX_COMMIT = '${NX_CACHE_KEY.producer.split("@")[1]}'`));
 });

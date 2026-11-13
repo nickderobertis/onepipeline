@@ -942,6 +942,14 @@ test("the reuse spike's one command replays today's tiers and every option over 
   );
   // #11's base is the seed, which does not hold the commit standing for #1493.
   assert.match(withCache, /^\| #11 \| before #1493 \| /m);
+  // With the seed itself standing for #1493, every run's base holds it.
+  const after = spawnSync(
+    process.execPath,
+    [join(root, "scripts", "crate-split", "report-tables.mjs"), "--spike", out, "--evidence", evidence, "--out", join(out, "tables5.md"), "--clone", repo, "--caching-change", commits.base],
+    { encoding: "utf8" },
+  );
+  assert.equal(after.status, 0, after.stderr);
+  assert.match(readFileSync(join(out, "tables5.md"), "utf8"), /^\| #11 \| non-release \| /m);
   // A stored key the listing no longer holds is counted gone.
   write(evidence, {
     "caches/page-1.json": JSON.stringify({
