@@ -1888,3 +1888,37 @@ test("option (b)'s suites share every input the e2e tier's key held, and each ru
   assert.deepEqual(affected["#2"], ["e2e-landing", "e2e-store"]);
   assert.deepEqual(affected["#3"], ["e2e-landing", "e2e-store"]);
 });
+
+test("the report tables the cache by family, with the rest summed, and Nx's entries by target", () => {
+  const spike = join(scratch, "typical-spike");
+  const evidence = join(scratch, "inventory-evidence");
+  const family = (entries, bytes, targets = {}) => ({ entries, bytes, oldest: "2026-11-07T00:00:00Z", newest: "2026-11-13T00:00:00Z", targets });
+  const families = {
+    "nx-cache-# @ pull request": family(100, 1e6, {
+      "p:lint": { entries: 40, bytes: 1 },
+      "q:lint": { entries: 10, bytes: 1 },
+      "p:test-quick": { entries: 5, bytes: 1 },
+      "p:custom": { entries: 3, bytes: 1 },
+    }),
+    "nx-cache-# @ main": family(60, 5e5, { "p:test": { entries: 7, bytes: 1 } }),
+  };
+  // Eighteen more, the two smallest of which the table sums rather than lists.
+  for (let i = 0; i < 18; i++) families[`small-${i} @ main`] = family(20 - i, (20 - i) * 1e6);
+  write(evidence, {
+    "caches/inventory.json": JSON.stringify({ entries: 160 + 189, bytes: 1.5e6 + 189e6, families }),
+  });
+  const run = spawnSync(process.execPath, [script("report-tables.mjs"), "--spike", spike, "--evidence", evidence, "--out", join(spike, "inventory.md")], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const md = readFileSync(join(spike, "inventory.md"), "utf8");
+  assert.match(md, /^349 entries, 0\.19 GB\.$/m);
+  assert.match(md, /^\| nx-cache-# @ pull request \| 100 \| 0\.001 \| 2026-11-07T00:00 \| 2026-11-13T00:00 \|$/m);
+  assert.match(md, /^\| small-13 @ main \| 7 \| 0\.007 \| /m);
+  assert.doesNotMatch(md, /^\| small-14 @ main /m);
+  // The four smallest families (small-14 to small-17: 6+5+4+3 entries) are summed.
+  assert.match(md, /^\| 4 other families \| 18 \| 0\.018 \| \| \|$/m);
+  // Nx's entries by target: lint 50, test-quick 5, and custom counted as other.
+  assert.match(md, /^\| pull request \| 100 \| 58 \| 50 \| 0 \| 5 \| 0 \| 0 \| 3 \|$/m);
+  assert.match(md, /^\| main \| 60 \| 7 \| 0 \| 0 \| 0 \| 7 \| 0 \| 0 \|$/m);
+});
