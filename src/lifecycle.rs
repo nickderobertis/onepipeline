@@ -1709,12 +1709,10 @@ fn release_hold(
         None => match onevcs::rules_check(node.repo.as_deref()?)
             .map_err(|error| error.to_string())
             // No policy resolves only where the repository's own declaration could not
-            // be read, which its publication refuses too; its state names why.
-            // llmlint: ignore[changed_behavior_has_e2e] onevcs refuses an unreadable
-            // declaration before the node is dispatched (tests/e2e/adoption.rs
-            // `a_fast_node_whose_repository_declaration_is_unreadable_is_refused_before_dispatch`),
-            // so a closeout reading none is a base edited mid-dispatch, the case the `Err`
-            // arm below is suppressed for, and it reaches that arm unchanged.
+            // be read, which its publication refuses too; its state names why. A
+            // declaration unreadable at dispatch is refused as the session opens, so
+            // this is one broken on the base mid-dispatch, and it is handed to `onevcs`
+            // as the `Err` arm below hands any unreadable policy.
             .and_then(|checked| match checked.policy {
                 Some(resolved) => Ok(resolved.publication),
                 None => Err(format!("{:?}", checked.declaration)),
