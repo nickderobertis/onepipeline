@@ -342,6 +342,7 @@ function measureRun(options, spec) {
     out.jobs[job] = {
       conclusion: meta.conclusion,
       minutes: (Date.parse(meta.completed_at) - Date.parse(meta.started_at)) / 60000,
+      queue_minutes: (Date.parse(meta.started_at) - Date.parse(meta.created_at)) / 60000,
       github_sha: head?.merge ?? null,
       merge_of: head ? `${head.head} into ${head.base}` : null,
       nx_tasks: tasks ? { count: Number(tasks[1]), list: tasks[2].trim() } : null,
@@ -392,8 +393,10 @@ function compare(options) {
   print();
   print("## Minutes per platform (each run, then the side's mean)");
   print();
-  print("| side | job | runs: job min | runs: e2e nextest min | runs: e2e tests run/passed/failed | runs: Linux line coverage % | mean job min | mean e2e min |");
-  print("| --- | --- | --- | --- | --- | --- | ---: | ---: |");
+  print("Job minutes run from the job's start to its end; the time it waited for a runner is the queue column.");
+  print();
+  print("| side | job | runs: queue min | runs: job min | runs: e2e nextest min | runs: e2e tests run/passed/failed | runs: Linux line coverage % | mean job min | mean e2e min |");
+  print("| --- | --- | --- | --- | --- | --- | --- | ---: | ---: |");
   const means = {};
   for (const side of sides) {
     means[side.name] = {};
@@ -402,7 +405,7 @@ function compare(options) {
       const jobMin = js.map((j) => j.minutes);
       const e2eMin = js.map((j) => (j.e2e ? j.e2e.seconds / 60 : null));
       means[side.name][job] = { job: mean(jobMin), e2e: mean(e2eMin) };
-      print(`| ${side.name} | ${job} | ${jobMin.map((v) => fmt(v)).join(", ")} | ${e2eMin.map((v) => fmt(v)).join(", ")} | ${js.map((j) => (j.e2e ? `${j.e2e.run}/${j.e2e.passed}/${j.e2e.failed}` : "–")).join(", ")} | ${js.map((j) => fmt(j.coverage_lines_percent, 4)).join(", ")} | ${fmt(means[side.name][job].job)} | ${fmt(means[side.name][job].e2e)} |`);
+      print(`| ${side.name} | ${job} | ${js.map((j) => fmt(j.queue_minutes)).join(", ")} | ${jobMin.map((v) => fmt(v)).join(", ")} | ${e2eMin.map((v) => fmt(v)).join(", ")} | ${js.map((j) => (j.e2e ? `${j.e2e.run}/${j.e2e.passed}/${j.e2e.failed}` : "–")).join(", ")} | ${js.map((j) => fmt(j.coverage_lines_percent, 4)).join(", ")} | ${fmt(means[side.name][job].job)} | ${fmt(means[side.name][job].e2e)} |`);
     }
   }
   const [base, ...others] = sides;
