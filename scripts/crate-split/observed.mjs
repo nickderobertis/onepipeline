@@ -254,7 +254,12 @@ export function matchedInputs(task, basePlan, mergePlan, diff, attribute) {
     if (!a || !b || a.out !== b.out || !a.ok || !b.ok) inputs.add(entry);
   }
   if (at.config !== before.config) inputs.add("project configuration");
-  if (mergePlan.external !== basePlan.external) inputs.add("external dependencies");
+  // The external dependencies' digest is the workspace's; it moves a task's key only when
+  // the task's plan holds them (all, or a named npm package).
+  const external = (entry) => entry === "AllExternalDependencies" || entry.startsWith("npm:");
+  if (mergePlan.external !== basePlan.external && [...at.plan, ...before.plan].some(external)) {
+    inputs.add("external dependencies");
+  }
   return { inputs: [...inputs].sort(), files };
 }
 

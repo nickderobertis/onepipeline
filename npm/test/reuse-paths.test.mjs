@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = (name) => join(root, "scripts", "crate-split", name);
@@ -377,4 +377,370 @@ test("a demonstration's log reads an exact Rust cache hit in either of its spell
   );
   assert.equal(none.status, 1);
   assert.match(none.stderr, /name at least one run/);
+});
+
+const gitEnv = {
+  ...process.env,
+  GIT_AUTHOR_NAME: "reuse",
+  GIT_AUTHOR_EMAIL: "reuse@example.invalid",
+  GIT_COMMITTER_NAME: "reuse",
+  GIT_COMMITTER_EMAIL: "reuse@example.invalid",
+  GIT_AUTHOR_DATE: "2026-11-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2026-11-01T00:00:00Z",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+};
+const git = (repo, args) =>
+  execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: gitEnv }).trim();
+
+/** A small real Nx workspace in a git repository, and a branch per change. */
+function workspace(dir) {
+  mkdirSync(dir, { recursive: true });
+  git(dir, ["init", "-q", "--initial-branch=main"]);
+  const project = (extra = {}) =>
+    JSON.stringify({
+      name: "p",
+      root: ".",
+      targets: {
+        test: {
+          command: "true",
+          cache: true,
+          inputs: ["rustBuild", { runtime: "node scripts/probe.cjs" }],
+        },
+        lint: { command: "true", cache: true, inputs: ["rustBuild"] },
+        "install-documented": { command: "true", cache: false, inputs: ["rustBuild"] },
+        ...extra,
+      },
+    });
+  write(dir, {
+    ".gitignore": "node_modules\n.nx\n",
+    "package.json": JSON.stringify({ name: "ws", private: true }),
+    "nx.json": JSON.stringify({ namedInputs: { rustBuild: ["{workspaceRoot}/src/**/*"] } }),
+    "project.json": project(),
+    "scripts/probe.cjs": "console.log('ok')\n",
+    "src/a.rs": "a\n",
+    "src/b.rs": "b\n",
+    "CHANGELOG.md": "0.1\n",
+  });
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-qm", "seed"]);
+  const base = git(dir, ["rev-parse", "HEAD"]);
+  const branch = (name, change, from = base) => {
+    git(dir, ["checkout", "-q", "-b", name, from]);
+    change();
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-qm", name]);
+    const head = git(dir, ["rev-parse", "HEAD"]);
+    git(dir, ["checkout", "-q", "main"]);
+    return head;
+  };
+  const heads = {
+    base,
+    deleted: branch("deleted", () => rmSync(join(dir, "src", "b.rs"))),
+    probe: branch("probe", () => write(dir, { "scripts/probe.cjs": "process.exit(3)\n" })),
+    newTask: branch("new-task", () =>
+      write(dir, {
+        "project.json": project({
+          newtask: { command: "true", cache: true, inputs: ["rustBuild"] },
+        }),
+      }),
+    ),
+    changelog: branch("changelog", () => write(dir, { "CHANGELOG.md": "0.2\n" })),
+    source: branch("source", () => write(dir, { "src/a.rs": "a-source\n" })),
+    conflicting: branch("conflicting", () => write(dir, { "src/a.rs": "a-head\n" })),
+  };
+  heads.moved = branch("moved-main", () => write(dir, { "src/a.rs": "a-main\n" }));
+  return heads;
+}
+
+test("the observed replay reads each kind of moved input, each miss's cause and each fallback", async () => {
+  const repo = join(scratch, "ws");
+  const h = workspace(repo);
+  const evidence = join(scratch, "observed-evidence");
+  const lines = (head, base, tasks) =>
+    [
+      `${at(0)} HEAD is now at 1234567 Merge ${head} into ${base}`,
+      ...tasks.map((t, i) => `${at(i + 1)} ${t}`),
+    ].join("\n");
+  const task = (name, extra) => ({
+    task: name,
+    hash: "1",
+    cacheable: true,
+    result: "executed",
+    remote_read: "miss",
+    started_at: at(1),
+    finished_at: at(3),
+    ...extra,
+  });
+  const pr = (n, head, jobs, runId, release = false) => {
+    write(evidence, {
+      [`rollup/${n}.json`]: JSON.stringify(
+        rollup(head, [
+          suite(
+            runId,
+            0,
+            "CI",
+            jobs.map(([name, id]) => checkRun(name, id, 0, 60)),
+          ),
+        ]),
+      ),
+    });
+    return {
+      number: n,
+      title: `${release ? "chore: release" : "feat"} ${n}`,
+      mergedAt: at(n),
+      release,
+    };
+  };
+  const prs = [
+    pr(21, h.deleted, [["test-linux", 2101]], 210),
+    pr(22, h.probe, [["test-linux", 2201]], 220),
+    pr(23, h.newTask, [["test-linux", 2301]], 230),
+    pr(24, h.conflicting, [["test-linux", 2401]], 240),
+    pr(
+      26,
+      h.changelog,
+      [
+        ["test-linux", 2601],
+        ["test-macos", 2602],
+      ],
+      260,
+    ),
+    pr(27, h.source, [["test-linux", 2701]], 270),
+    pr(28, h.changelog, [["test-linux", 2801]], 280, true),
+  ];
+  write(evidence, {
+    "population.json": JSON.stringify({
+      window_from: at(0),
+      non_release: prs.filter((p) => !p.release).map(({ release, ...p }) => p),
+      release: prs.filter((p) => p.release).map(({ release, ...p }) => p),
+    }),
+    "logs/2101.log": lines(h.deleted, h.base, ["> nx run p:test"]),
+    "executions/2101.json": JSON.stringify({ tasks: [task("p:test")], store_attempts: [] }),
+    "logs/2201.log": lines(h.probe, h.base, ["> nx run p:test", "> nx run p:lint  [remote cache]"]),
+    "executions/2201.json": JSON.stringify({
+      tasks: [task("p:test"), task("p:lint", { result: "remote_hit", remote_read: "hit" })],
+      store_attempts: [],
+    }),
+    "logs/2301.log": lines(h.newTask, h.base, ["> nx run p:newtask", "> nx run p:lint"]),
+    "executions/2301.json": JSON.stringify({
+      tasks: [task("p:newtask"), task("p:lint")],
+      store_attempts: [],
+    }),
+    "logs/2401.log": lines(h.conflicting, h.moved, ["> nx run p:test"]),
+    // #26: nothing a key holds moved; each task's own record says why it ran anyway.
+    "logs/2601.log": lines(h.changelog, h.base, [
+      "> nx run p:test",
+      "> nx run p:lint",
+      "> nx run p:install-documented",
+      "> nx run p:newtask  [local cache]",
+    ]),
+    "executions/2601.json": JSON.stringify({
+      tasks: [
+        task("p:test", { remote_read: "not_attempted" }),
+        task("p:lint", { remote_read: undefined }),
+        task("p:install-documented", { cacheable: false }),
+        task("p:newtask", { result: "local_hit" }),
+      ],
+      store_attempts: [],
+    }),
+    // #26's macOS log is gone; its record still lists what ran.
+    "executions/2602.json": JSON.stringify({
+      tasks: [task("p:test", { remote_read: "failed" }), task("p:lint")],
+      store_attempts: [],
+    }),
+    "logs/2701.log": lines(h.source, h.base, [
+      "> nx run p:test  [remote cache]",
+      "> nx run p:install-documented",
+    ]),
+    "executions/2701.json": JSON.stringify({
+      tasks: [
+        task("p:test", { result: "remote_hit", remote_read: "hit" }),
+        task("p:install-documented", { cacheable: false }),
+      ],
+      store_attempts: [],
+    }),
+    "logs/2801.log": lines(h.changelog, h.base, ["> nx run p:install-documented"]),
+    "executions/2801.json": JSON.stringify({
+      tasks: [task("p:install-documented", { cacheable: false })],
+      store_attempts: [],
+    }),
+  });
+  const out = join(scratch, "observed.json");
+  const observe = () =>
+    spawnSync(
+      process.execPath,
+      [replay, "--observed", evidence, "--clone", repo, "--out", out, "--json"],
+      { encoding: "utf8" },
+    );
+  const run = observe();
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(readFileSync(out, "utf8"));
+  const prOf = (n) => result.prs.find((p) => p.pr === n);
+  const row = (n, job, name) =>
+    prOf(n)
+      .jobs.find((j) => j.job === job)
+      .ran.find((r) => r.task === name);
+  // A deleted keyed file is in its base's plan, so it still counts.
+  assert.deepEqual(row(21, "test-linux", "p:test").inputs, ["rustBuild"]);
+  // A runtime input that fails moved, whatever it printed before.
+  assert.deepEqual(row(22, "test-linux", "p:test").inputs, ["runtime:node scripts/probe.cjs"]);
+  assert.deepEqual(prOf(22).moved, ["runtime:node scripts/probe.cjs"]);
+  // A task the base had no plan of is new; the others' configuration moved.
+  assert.deepEqual(row(23, "test-linux", "p:newtask").inputs, ["task new at this pull request"]);
+  assert.deepEqual(row(23, "test-linux", "p:lint").inputs, ["project configuration"]);
+  assert.ok(prOf(23).moved.includes("config:p"));
+  assert.match(prOf(24).unread, /does not merge cleanly/);
+  // Each unforced task's cause is its own record's.
+  assert.equal(row(26, "test-linux", "p:test").cause, "no remote read");
+  assert.equal(
+    row(26, "test-linux", "p:lint").cause,
+    "an executions record too old to say whether it read the remote cache",
+  );
+  assert.equal(row(26, "test-linux", "p:install-documented").cause, "not cacheable");
+  assert.deepEqual(
+    prOf(26)
+      .jobs.find((j) => j.job === "test-linux")
+      .replayed.map((r) => [r.task, r.log]),
+    [["p:newtask", "local cache"]],
+  );
+  const mac = prOf(26).jobs.find((j) => j.job === "test-macos");
+  assert.equal(mac.unread, "log not fetched");
+  assert.deepEqual(
+    mac.ran.map((r) => [r.task, r.cause]),
+    [
+      ["p:test", "remote read failed"],
+      ["p:lint", "absent: no run in the evidence stored this key"],
+    ],
+  );
+  // A replay of a key the diff moved came from the pull request's own earlier run.
+  assert.deepEqual(
+    prOf(27).jobs[0].replayed.map((r) => [r.task, r.diffMatched]),
+    [["p:test", true]],
+  );
+  // A held plan is read again only when a task it lacks is asked for.
+  const plan = join(evidence, "plans", `${h.base}.json`);
+  const before = readFileSync(plan, "utf8");
+  assert.equal(observe().status, 0);
+  assert.equal(readFileSync(plan, "utf8"), before);
+  const held = JSON.parse(before);
+  delete held.plans["p:lint"];
+  writeFileSync(plan, JSON.stringify(held));
+  assert.equal(observe().status, 0);
+  assert.ok(JSON.parse(readFileSync(plan, "utf8")).plans["p:lint"], "the plan was read again");
+  // A plan that is not one is refused with what to do.
+  writeFileSync(plan, JSON.stringify({ plans: [] }));
+  const refused = observe();
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /is not a hash plan/);
+  assert.match(
+    refused.stderr,
+    /^next: remove \S+; the next replay reads the commit's plan again$/m,
+  );
+  rmSync(plan);
+
+  // The documented install keyed on its base: #27 replays #26's run on Linux, macOS ran
+  // it nowhere, and the release pull request counts only among the releases.
+  const { sameBase } = await import(pathToFileURL(script("observed.mjs")).href);
+  result.weights.tasks["p:install-documented"] = { linux: { minutes: 6 } };
+  const nonRelease = sameBase(result, "p:install-documented");
+  assert.deepEqual(nonRelease.linux, { runs: 2, replays: 1, minutesPerChange: 3 });
+  assert.deepEqual(nonRelease.darwin, { runs: 0, replays: 0, minutesPerChange: null });
+  assert.deepEqual(sameBase(result, "p:install-documented", true).linux, {
+    runs: 1,
+    replays: 1,
+    minutesPerChange: 6,
+  });
+});
+
+test("a lockfile change moves every key that holds external dependencies, as Nx's default keys do, and no other", () => {
+  const repo = join(scratch, "ws-external");
+  mkdirSync(repo, { recursive: true });
+  git(repo, ["init", "-q", "--initial-branch=main"]);
+  const lock = (v) => ({
+    "package.json": JSON.stringify({ name: "ws", private: true, dependencies: { "left-pad": v } }),
+    "package-lock.json": JSON.stringify({
+      name: "ws",
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": { name: "ws", dependencies: { "left-pad": v } },
+        "node_modules/left-pad": {
+          version: v,
+          resolved: `https://registry.npmjs.org/left-pad/-/left-pad-${v}.tgz`,
+          integrity: "sha512-x",
+        },
+      },
+    }),
+  });
+  write(repo, {
+    ".gitignore": "node_modules\n.nx\n",
+    "nx.json": JSON.stringify({ namedInputs: {} }),
+    "project.json": JSON.stringify({
+      name: "p",
+      root: ".",
+      targets: {
+        uses: { command: "true", cache: true, inputs: [{ externalDependencies: ["left-pad"] }] },
+        // Nx hashes every external dependency into a key that names none.
+        plain: { command: "true", cache: true, inputs: ["{workspaceRoot}/src/**/*"] },
+        none: {
+          command: "true",
+          cache: true,
+          inputs: ["{workspaceRoot}/src/**/*", { externalDependencies: [] }],
+        },
+      },
+    }),
+    "src/a.rs": "a\n",
+    ...lock("1.2.0"),
+  });
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "seed"]);
+  const base = git(repo, ["rev-parse", "HEAD"]);
+  git(repo, ["checkout", "-q", "-b", "bump"]);
+  write(repo, lock("1.3.0"));
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-qm", "bump"]);
+  const head = git(repo, ["rev-parse", "HEAD"]);
+  git(repo, ["checkout", "-q", "main"]);
+  const evidence = join(scratch, "external-evidence");
+  write(evidence, {
+    "population.json": JSON.stringify({
+      window_from: at(0),
+      non_release: [{ number: 31, title: "fix(deps): bump", mergedAt: at(1) }],
+      release: [],
+    }),
+    "rollup/31.json": JSON.stringify(
+      rollup(head, [suite(310, 0, "CI", [checkRun("test-linux", 3101, 0, 10)])]),
+    ),
+    "logs/3101.log": [
+      `${at(0)} HEAD is now at 1234567 Merge ${head} into ${base}`,
+      `${at(1)} > nx run p:uses`,
+      `${at(2)} > nx run p:plain`,
+      `${at(3)} > nx run p:none`,
+    ].join("\n"),
+    "executions/3101.json": JSON.stringify({
+      tasks: ["p:uses", "p:plain", "p:none"].map((t) => ({
+        task: t,
+        hash: "5",
+        cacheable: true,
+        result: "executed",
+        remote_read: "miss",
+        started_at: at(1),
+        finished_at: at(2),
+      })),
+      store_attempts: [],
+    }),
+  });
+  const out = join(scratch, "external.json");
+  const run = spawnSync(
+    process.execPath,
+    [replay, "--observed", evidence, "--clone", repo, "--out", out, "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const result = JSON.parse(readFileSync(out, "utf8"));
+  const ran = Object.fromEntries(result.prs[0].jobs[0].ran.map((r) => [r.task, r.inputs]));
+  assert.deepEqual(ran["p:uses"], ["external dependencies"]);
+  assert.deepEqual(ran["p:plain"], ["external dependencies"]);
+  assert.ok(!ran["p:none"].includes("external dependencies"), JSON.stringify(ran["p:none"]));
+  assert.ok(result.prs[0].moved.includes("external"));
 });
