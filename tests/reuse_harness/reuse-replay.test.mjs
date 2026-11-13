@@ -280,6 +280,7 @@ test("the cache inventory pages the listing read-only and counts entries by fami
         entry(100, full[99].key, "refs/heads/main", 10),
         entry(201, "v0-rust-test-linux-Linux-x64-0123abcd-deadbeef", "refs/heads/main", 1000),
         entry(202, "v0-rust-test-linux-Linux-x64-0123abcd-feedface", "refs/pull/7/merge", 2000),
+        entry(203, "setup-uv-1-x86_64-unknown-linux-gnu-3.12.10-pruned-0123abcdef", "refs/heads/refs/tags/v0.109.1", 30),
       ],
     ],
   });
@@ -306,10 +307,12 @@ test("the cache inventory pages the listing read-only and counts entries by fami
   // The entry the second page repeats is one entry.
   assert.match(
     run.stdout,
-    /^cache-inventory: 102 entries, 0\.00 GB, 2 pages read; largest families: nx-cache-# @ main 100/,
+    /^cache-inventory: 103 entries, 0\.00 GB, 2 pages read; largest families: nx-cache-# @ main 100/,
   );
   const inv = JSON.parse(readFileSync(join(dir, "caches", "inventory.json"), "utf8"));
   assert.equal(inv.families["v0-rust-test-linux-Linux-x64-#-# @ pull request"].bytes, 2000);
+  // Any other ref is its own scope, named as it is.
+  assert.equal(inv.families["setup-uv-1-x86_64-unknown-linux-gnu-3.12.10-pruned-# @ refs/heads/refs/tags/v0.109.1"].entries, 1);
   assert.deepEqual(inv.families["nx-cache-# @ main"].targets, {
     "onepipeline-e2e:test": { entries: 1, bytes: 10 },
   });

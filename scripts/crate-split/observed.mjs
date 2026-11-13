@@ -93,8 +93,10 @@ export function parseLog(text) {
   const summaries = [];
   let current = null;
   for (const raw of lines) {
-    const stamp = raw.match(/^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s?/);
-    const line = stamp ? raw.slice(stamp[0].length) : raw;
+    const stamped = raw.match(/^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s?/);
+    const line = stamped ? raw.slice(stamped[0].length) : raw;
+    // A stamp that is no time is no stamp: nothing is timed from it.
+    const stamp = stamped && Number.isFinite(Date.parse(stamped[1])) ? stamped : null;
     const checkout = line.match(CHECKOUT_LINE);
     if (checkout && !merge) merge = { head: checkout[1], base: checkout[2] };
     const body = line.replace(/^##\[group\][^>\s]*\s*/, "");

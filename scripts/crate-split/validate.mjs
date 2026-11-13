@@ -149,7 +149,9 @@ export function rollup(doc, pr) {
     );
     if (suite.workflowRun) {
       need(
-        isCount(suite.workflowRun.databaseId) && isTime(suite.workflowRun.createdAt),
+        isCount(suite.workflowRun.databaseId) &&
+          isTime(suite.workflowRun.createdAt) &&
+          isText(suite.workflowRun.workflow?.name),
         `a workflow run read for #${pr} has no id or creation time`,
         again,
       );

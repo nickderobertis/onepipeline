@@ -856,9 +856,10 @@ test("the module graph reads past raw and escaped strings and through every kind
     "src/lib.rs":
       "pub mod a;\npub mod b;\npub mod c;\npub mod d;\npub mod e;\npub use d::Single;\npub use e::Inner as Aliased;\n",
     "src/main.rs": "fn main() {}\n",
-    // Every crate:: below a, b's raw and escaped strings is text, not a reference.
+    // Every crate:: inside a's raw, escaped, byte and raw byte strings is text, not a
+    // reference; the one after them still is.
     "src/a.rs":
-      'pub const R: &str = r#"crate::b "quoted" crate::c"#;\npub const E: &str = "say \\"crate::c\\" here";\npub fn f() { let _ = crate::Single; }\n',
+      'pub const R: &str = r#"crate::b "quoted" crate::c"#;\npub const E: &str = "say \\"crate::c\\" here";\npub const B: &[u8] = b"crate::c";\npub const RB: &[u8] = br#"crate::c"#;\npub fn f() { let _ = crate::Single; }\n',
     "src/b.rs": "pub fn g() { let _ = crate::Aliased; }\n",
     "src/c.rs": "pub fn h() { crate::a::f(); }\n",
     "src/d.rs": "pub struct Single;\n",
@@ -1774,6 +1775,9 @@ test("the log reader reads a real CI job's log lines and what Nx itself prints",
   assert.equal(e2e.summary, 3883.872);
   assert.equal(Date.parse(e2e.starting) - Date.parse(e2e.at), 390532);
   assert.deepEqual(ci.summaries, [{ replayed: 15, of: 39 }]);
+  // A stamp that is no time times nothing.
+  const bad = parseLog("2026-13-45T99:99:99.0000000Z > nx run p:t\n2026-11-13T00:00:01.0000000Z     Starting 1 test across 1 binary\n");
+  assert.deepEqual(bad.tasks.map((t) => [t.task, t.at]), [["p:t", null]]);
   // Nx's own output for a task it runs, then for the same task it replays: with no
   // outputs to restore, Nx says they already match.
   const repo = join(scratch, "ws");
