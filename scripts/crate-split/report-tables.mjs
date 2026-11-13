@@ -372,6 +372,18 @@ function agreement(spike, observed) {
   let under = 0;
   for (const change of today.perChange) {
     const pr = observed.prs.find((p) => `#${p.pr}` === change.commit);
+    check.need(
+      pr && !pr.unread,
+      `today.json replays ${change.commit}, which the observed replay did not read`,
+      "run reuse-spike.mjs into --spike again, so both come from one observed replay",
+    );
+    for (const suite of change.affected) {
+      check.need(
+        suite in today.suites,
+        `today.json's ${change.commit} affects ${suite}, which is none of its suites`,
+        "run reuse-spike.mjs into --spike again",
+      );
+    }
     for (const j of pr.jobs) {
       if (!PLATFORM[j.job]) continue;
       for (const r of [...j.ran.map((x) => ({ ...x, ran: true })), ...j.replayed]) {
@@ -542,7 +554,9 @@ function main(argv) {
     ["Cache inventory", c.table],
     [
       "Eviction",
-      `${c.eviction.missed} task runs missed a key an earlier run in the evidence stored; ${c.eviction.laterOnMain} of them read it before its main-scope copy was created, and ${c.eviction.gone} are no longer in the listing.`,
+      c.eviction
+        ? `${c.eviction.missed} task runs missed a key an earlier run in the evidence stored; ${c.eviction.laterOnMain} of them read it before its main-scope copy was created, and ${c.eviction.gone} are no longer in the listing.`
+        : "Undecided: no cache listing was read (run scripts/crate-split/cache-inventory.mjs --evidence DIR), so a missed key cannot be told evicted or not.",
     ],
     ["Tasks replayed and run, per pull request and job", perJob(observed)],
   ];

@@ -1,0 +1,59 @@
+{
+  "name": "onepipeline-reuse-harness",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/reuse_harness",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/reuse_harness"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/reuse_harness"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/reuse_harness"
+    },
+    "test": {
+      "command": "node --test tests/reuse_harness/*.test.mjs",
+      "//": "The reuse spike's harness (scripts/crate-split/), driven as its commands over real git repositories, small real Nx workspaces and cargo crates, and a gh double. Keyed on the harness and on each file its drift gates hold it to: ci.yml, ci-job.sh, install-proof.sh, nx-remote-cache.mjs, nx.json, the justfile and the project declarations.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/scripts/crate-split-replay.mjs",
+        "{workspaceRoot}/scripts/crate-split/**/*",
+        "{workspaceRoot}/scripts/test-profile-report.mjs",
+        "{workspaceRoot}/scripts/nx-remote-cache.mjs",
+        "{workspaceRoot}/scripts/ci-job.sh",
+        "{workspaceRoot}/scripts/install-proof.sh",
+        "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
+        "{workspaceRoot}/.github/workflows/ci.yml",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/biome.jsonc",
+        "sharedGlobals",
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem cargo"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["justfileSelection", "npmSelection", "cargoSelection"]
+    }
+  }
+}

@@ -882,6 +882,8 @@ test("the reuse spike's one command replays today's tiers and every option over 
     tablesText,
     /^\| the non-release \(2\) \| 0\.0 \/ 0\.0 \/ 0\.0 \| 0 \/ 0 \/ 0 \| 2\.5 \/ 0\.0 \/ 0\.0 \|$/m,
   );
+  // With no cache listing read, eviction is said to be undecided, not counted as none.
+  assert.match(tablesText, /^Undecided: no cache listing was read/m);
   // The model check: #11's four tiers and #12's test (run) and lint (replayed) are
   // each judged alike by today's tier mapping and by Nx's plans at their commits.
   assert.match(

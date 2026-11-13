@@ -19,7 +19,7 @@
 // The layout: `today` changes nothing else; `b` is `prototype-b.mjs` with the one e2e
 // binary replaced by its suites (its `[[test]]` and its `tests/e2e/main.rs` root both
 // removed, since Cargo would discover the root by itself); `c` is `prototype-c.mjs`, the
-// lock refreshed offline for its two new workspace members. `npm/test/reuse-demo.test.mjs`
+// lock refreshed offline for its two new workspace members. `tests/reuse_harness/reuse-drift.test.mjs`
 // holds the workflow's setup steps equal to ci.yml's test jobs'.
 //
 // Exit 0: the demonstration is written; one line says which and where. 1: an argument or

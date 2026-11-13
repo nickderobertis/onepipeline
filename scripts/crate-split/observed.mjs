@@ -26,7 +26,7 @@ import * as check from "./validate.mjs";
 
 /**
  * ci.yml's jobs that run Nx (`scripts/ci-job.sh`'s jobs) and the platform each runs on:
- * the harness's one statement of them, which `npm/test/reuse-replay.test.mjs` holds
+ * the harness's one statement of them, which `tests/reuse_harness/reuse-drift.test.mjs` holds
  * equal to ci-job.sh's and ci.yml's.
  */
 export const JOB_PLATFORM = {
