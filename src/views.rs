@@ -2081,8 +2081,11 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
-        let read = crate::journal_heads::read_heads(&paths.journal());
-        let view = Self::folded_over(paths, &read.folded)?;
+        let mut state = crate::projection::unfolded();
+        let read = crate::journal_heads::read_heads(&paths.journal(), |event, at| {
+            crate::projection::fold_one_at(&mut state, event, at);
+        });
+        let view = Self::of_fold(paths, state, read.coverage)?;
         Ok(RunHeads {
             view,
             heads: read.heads,
@@ -2092,9 +2095,24 @@ impl RunView {
     }
 
     /// A view folded from `events`, a reading of the run's journal in merged order, and
-    /// holding none of them: what [`over_selected`](Self::over_selected) and
-    /// [`heads`](Self::heads) build on.
+    /// holding none of them: what [`over_selected`](Self::over_selected) builds on.
     fn folded_over(paths: &RunPaths, events: &[Envelope]) -> crate::Result<Self> {
+        let state = crate::projection::fold(events);
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in events {
+            coverage.absorb(Some(event), 0);
+        }
+        Self::of_fold(paths, state, coverage)
+    }
+
+    /// A view of the run whose journal, read in merged order, folded to `state` and
+    /// covers `coverage`, holding none of its records: what
+    /// [`folded_over`](Self::folded_over) and [`heads`](Self::heads) build on.
+    fn of_fold(
+        paths: &RunPaths,
+        mut state: RunState,
+        mut coverage: crate::checkpoint::Coverage,
+    ) -> crate::Result<Self> {
         if !paths.exists() {
             return Err(crate::Error::NoSuchRun {
                 run: paths.run.clone(),
@@ -2108,7 +2126,6 @@ impl RunView {
             .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
-        let mut state = crate::projection::fold(events);
         landings_the_run_re_read(&mut state, paths);
         crate::heartbeat::apply(paths, &mut state);
         let root = paths
@@ -2116,10 +2133,6 @@ impl RunView {
             .parent()
             .map_or_else(ledger::runs_root, Path::to_path_buf);
         state.cross_dag = crate::crossdag::resolve_open(&root, &state);
-        let mut coverage = crate::checkpoint::Coverage::default();
-        for event in events {
-            coverage.absorb(Some(event), 0);
-        }
         coverage.bytes = stamp.as_ref().map_or(0, |stamp| {
             crate::journal_selected::covered_bytes(&journal, stamp.len, &coverage.streams)
         });

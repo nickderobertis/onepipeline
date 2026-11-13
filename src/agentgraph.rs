@@ -2194,11 +2194,25 @@ pub struct TurnAddress {
 impl TurnAddress {
     /// One address, or `None` when what was read is not one.
     pub fn of(run: &str, member: &str) -> Option<Self> {
+        let mut address = Self {
+            run: String::new(),
+            member: String::new(),
+        };
+        address.set(run, member).then_some(address)
+    }
+
+    /// Make this the address [`of`](Self::of) reads `run` and `member` as, reusing what
+    /// it holds; where they are not one, leave it as it was and answer `false`.
+    pub(crate) fn set(&mut self, run: &str, member: &str) -> bool {
         let (run, member) = (run.trim(), member.trim());
-        (!run.is_empty() && oneagentgraph::config::is_member_name(member)).then(|| Self {
-            run: run.to_string(),
-            member: member.to_string(),
-        })
+        if run.is_empty() || !oneagentgraph::config::is_member_name(member) {
+            return false;
+        }
+        self.run.clear();
+        self.run.push_str(run);
+        self.member.clear();
+        self.member.push_str(member);
+        true
     }
 
     /// The graph run this turn belongs to.

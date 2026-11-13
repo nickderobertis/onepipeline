@@ -614,7 +614,8 @@ pub(crate) struct Marked {
 impl Marked {
     /// What the marker rule needs of `state` before `event` is folded into it.
     pub(crate) fn before(state: &RunState, event: &Envelope) -> Self {
-        let edit = PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditCommitted);
+        // Its spelling compared rather than looked up: this is asked of every record.
+        let edit = event.kind.0 == PipelineKind::EditCommitted.as_str();
         Self {
             before: (edit && state.hook_marker.is_some())
                 .then(|| ending(state))
@@ -624,11 +625,12 @@ impl Marked {
 
     /// Leave on `state`, now holding `event`, the marker the record leaves standing.
     pub(crate) fn after(self, state: &mut RunState, event: &Envelope) {
-        let kind = PipelineKind::from_wire(&event.kind);
+        // Compared by spelling, as `before` does, rather than looked up for every record.
+        let is = |kind: PipelineKind| event.kind.0 == kind.as_str();
         // An adoption that started an epoch says so on its own record: it was
         // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
         // and is read back rather than derived a second time.
-        let adopted_live = kind == Some(PipelineKind::DriverAdopted)
+        let adopted_live = is(PipelineKind::DriverAdopted)
             && state.hook_marker.is_some()
             && journal::starts_hook_epoch(&event.payload);
         match self.before {
@@ -636,7 +638,7 @@ impl Marked {
                 state.hook_marker = None;
             }
             _ if adopted_live => state.hook_marker = None,
-            _ if kind == Some(PipelineKind::RunHookFired) => {
+            _ if is(PipelineKind::RunHookFired) => {
                 state.hook_marker = Some(if ending(state).is_none() {
                     FiredOver::Live
                 } else {

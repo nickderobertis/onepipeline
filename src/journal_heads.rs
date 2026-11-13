@@ -12,15 +12,19 @@
 //! discards: its middle is never parsed unless it is fetched, and [`fetch`] then
 //! answers [`RecordMoved`](crate::Error::RecordMoved) for it rather than a record.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
 use serde_json::{Map, Value};
 
+use crate::checkpoint::Coverage;
 use crate::event::{Envelope, EventKind, Labels, Phase, Source};
 use crate::journal_selected::{
-    finished_lines, in_order, merged, number_of, parsed_line, skimmed_opening, string_of,
-    whole_file, whole_record, Opening, Skim,
+    covered, finished_lines, in_order, line_runs, merged_in, number_of, on_threads, opening_of,
+    parsed_line, skimmed_opening, string_of, whole_file, whole_record, workers, Numbered, Skim,
 };
 
 /// Where one record's line sits in a run's journal, and which record it is: enough for
@@ -76,32 +80,86 @@ pub(crate) const HEADED_KINDS: [&str; 5] = [
     "turn-completed",
 ];
 
-/// What a heads read gives the view it folds.
+/// What a heads read hands the view it folded for: every record's head, and what the
+/// records cover.
 #[derive(Debug, Default)]
 pub(crate) struct Heads {
     /// Every record's head, in merged order.
     pub(crate) heads: Vec<RecordHead>,
-    /// Every record, in merged order, as the fold reads it: whole, or, for one of
-    /// [`HEADED_KINDS`] in the writers' form, its head with nothing past it.
-    pub(crate) folded: Vec<Envelope>,
+    /// What the records cover, as absorbing each of them in turn would leave it.
+    pub(crate) coverage: Coverage,
     /// The merged store's length.
     pub(crate) store_len: usize,
     /// The highest `seq` in the whole journal.
     pub(crate) last_seq: u64,
 }
 
-/// A labels object in the form [`opening_of`](crate::journal_selected::opening_of)
-/// skims, read whole: string values, a number for `round`, and keys with no escape.
-/// `None` for any other, which the record's whole parse then reads.
-fn labels_of(mut rest: &[u8]) -> Option<Labels> {
-    let mut labels = Labels::default();
-    let mut extra = Map::new();
+/// What a record's head carries that its folded record does not.
+#[derive(Debug)]
+struct Mark {
+    /// Whether its line's `artifacts` are not empty.
+    evidence: bool,
+    /// Its place in the merged store.
+    place: Option<usize>,
+    /// Where its line sits.
+    handle: RecordHandle,
+    /// Its record's `ts` as [`millis_of`](crate::projection::millis_of) reads it, read by
+    /// the worker that built the record rather than by the fold, which cannot be shared.
+    at: Option<u64>,
+}
+
+/// A record's head, made of its folded record's own fields rather than a copy of them.
+fn head_of(record: Envelope, mark: Mark) -> RecordHead {
+    RecordHead {
+        ts: record.ts,
+        stream: record.stream,
+        seq: record.seq,
+        source: record.source,
+        kind: record.kind,
+        phase: record.dimensions.phase,
+        labels: record.labels,
+        evidence: mark.evidence,
+        place: mark.place,
+        handle: mark.handle,
+    }
+}
+
+/// The labels object at the start of `rest`, from just inside its opening brace, walked
+/// as [`labels_of`] reads it: each key and its value, a string or a number for `round`,
+/// handed to `visit`. `None` where the object is not in that form, or `visit` refuses.
+fn walked_labels<'a>(
+    mut rest: &'a [u8],
+    mut visit: impl FnMut(&'a str, Result<u64, &'a str>) -> Option<()>,
+) -> Option<()> {
     if rest.starts_with(b"}") {
-        return Some(labels);
+        return Some(());
     }
     loop {
         let (key, after) = string_of(rest.strip_prefix(b"\"")?)?;
         let after = after.strip_prefix(b":")?;
+        rest = if key == "round" {
+            let (round, after) = number_of(after)?;
+            visit(key, Ok(round))?;
+            after
+        } else {
+            let (value, after) = string_of(after.strip_prefix(b"\"")?)?;
+            visit(key, Err(value))?;
+            after
+        };
+        if rest.starts_with(b"}") {
+            return Some(());
+        }
+        rest = rest.strip_prefix(b",")?;
+    }
+}
+
+/// A labels object in the form [`opening_of`](crate::journal_selected::opening_of)
+/// skims, read whole: string values, a number for `round`, and keys with no escape.
+/// `None` for any other, which the record's whole parse then reads.
+fn labels_of(rest: &[u8]) -> Option<Labels> {
+    let mut labels = Labels::default();
+    let mut extra = Map::new();
+    walked_labels(rest, |key, value| {
         let seen = match key {
             "round" => labels.round.is_some(),
             "run_id" => labels.run_id.is_some(),
@@ -114,40 +172,42 @@ fn labels_of(mut rest: &[u8]) -> Option<Labels> {
         if seen {
             return None;
         }
-        rest = if key == "round" {
-            let (round, after) = number_of(after)?;
-            labels.round = Some(round);
-            after
-        } else {
-            let (value, after) = string_of(after.strip_prefix(b"\"")?)?;
-            let value = value.to_owned();
-            match key {
-                "run_id" => labels.run_id = Some(value),
-                "node" => labels.node = Some(value),
-                "step" => labels.step = Some(value),
-                "member" => labels.member = Some(value),
-                "persona" => labels.persona = Some(value),
-                other => {
-                    extra.insert(other.to_owned(), Value::String(value));
+        match value {
+            Ok(round) => labels.round = Some(round),
+            Err(value) => {
+                let value = value.to_owned();
+                match key {
+                    "run_id" => labels.run_id = Some(value),
+                    "node" => labels.node = Some(value),
+                    "step" => labels.step = Some(value),
+                    "member" => labels.member = Some(value),
+                    "persona" => labels.persona = Some(value),
+                    other => {
+                        extra.insert(other.to_owned(), Value::String(value));
+                    }
                 }
             }
-            after
-        };
-        if rest.starts_with(b"}") {
-            labels.extra = extra;
-            return Some(labels);
         }
-        rest = rest.strip_prefix(b",")?;
-    }
+        Some(())
+    })?;
+    labels.extra = extra;
+    Some(labels)
 }
 
-/// One line as the heads read takes it, before the merge: the skim the merge reads, and
-/// the opening and labels it is headed off where it is one of [`HEADED_KINDS`] in the
-/// writers' form. Every other line is the complete reader's own parse, whose record the
-/// skim holds, so a line that parse refuses is dropped here, as the complete read drops
-/// it, and is never merged.
-type Taken<'a> = (Skim<'a>, Option<(Opening<'a>, Labels)>);
+/// Whether [`labels_of`] reads the labels object at the start of `rest`, answered without
+/// building them, for a line whose skim has already refused a repeated key.
+///
+/// The skim's own walk of the object reads its keys and every value but `node` as bytes,
+/// so what this adds is that each is text, the one thing [`labels_of`] then asks of it.
+fn labels_read(rest: &[u8]) -> bool {
+    walked_labels(rest, |_, _| Some(())).is_some()
+}
 
+/// One line as the heads read takes it, before the merge: the skim the merge reads, which
+/// holds no record where the line is one of [`HEADED_KINDS`] in the writers' form whose
+/// labels [`labels_of`] reads, and is headed off its opening. Every other line is the
+/// complete reader's own parse, whose record the skim holds, so a line that parse refuses
+/// is dropped here, as the complete read drops it, and is never merged.
 // llmlint: ignore-block[boundary_inputs_validated] the planner's ruling for this read: a
 // line of one of `HEADED_KINDS` in the writers' form is headed off its opening, whose
 // every field `opening_of` and `labels_of` read at `Envelope`'s own types (a `Source` and
@@ -162,89 +222,113 @@ type Taken<'a> = (Skim<'a>, Option<(Opening<'a>, Labels)>);
 // `every_head_and_every_fetched_record_is_the_complete_reads_and_the_state_is_opens` holds.
 // Every other line, a malformed one of a kind the fold parses included, is the complete
 // reader's own parse, and dropped where that parse refuses it.
-fn taken(line: &[u8]) -> Option<Taken<'_>> {
+fn taken(line: &[u8]) -> Option<Skim<'_>> {
     if let Some((skim, opening)) = skimmed_opening(line) {
-        if HEADED_KINDS.contains(&opening.kind) {
-            if let Some(labels) = labels_of(opening.labels) {
-                return Some((skim, Some((opening, labels))));
-            }
+        if HEADED_KINDS.contains(&opening.kind) && labels_read(opening.labels) {
+            return Some(skim);
         }
     }
-    parsed_line(line).map(|skim| (skim, None))
+    parsed_line(line)
 }
 
-/// A head and what the fold reads of one line taken by [`taken`].
-fn head_of(
-    skim: &Skim<'_>,
-    opened: Option<&(Opening<'_>, Labels)>,
-    place: Option<usize>,
-    handle: RecordHandle,
-) -> (RecordHead, Envelope) {
-    let Some((opening, labels)) = opened else {
-        let record = skim
-            .parsed
-            .as_deref()
-            .cloned()
-            .expect("a line not headed off its opening is parsed whole");
-        let head = RecordHead {
-            ts: record.ts.clone(),
-            stream: record.stream.clone(),
-            seq: record.seq,
-            source: record.source,
-            kind: record.kind.clone(),
-            phase: record.dimensions.phase,
-            labels: record.labels.clone(),
-            evidence: !record.artifacts.is_empty(),
-            place,
-            handle,
-        };
-        return (head, record);
-    };
-    let head = RecordHead {
+/// What the fold reads of a line [`taken`] heads off its opening: its head, with nothing
+/// past it. The opening is read again here, on the worker building the record, rather
+/// than held from the skim for every line until then.
+fn headed(line: &[u8]) -> Envelope {
+    let opening = opening_of(line).expect("a headed line's opening was read in its skim");
+    Envelope {
+        v: opening.v,
         ts: opening.ts.to_owned(),
         stream: opening.stream.to_owned(),
         seq: opening.seq,
         source: opening.source,
         kind: EventKind(opening.kind.to_owned()),
-        phase: opening.phase,
-        labels: labels.clone(),
-        evidence: skim.evidence,
-        place,
-        handle,
-    };
-    let folded = Envelope {
-        v: opening.v,
-        ts: head.ts.clone(),
-        stream: head.stream.clone(),
-        seq: head.seq,
-        source: head.source,
-        kind: head.kind.clone(),
-        dimensions: head.phase.into(),
-        labels: head.labels.clone(),
+        dimensions: opening.phase.into(),
+        labels: labels_of(opening.labels).expect("a headed line's labels were read in its skim"),
         payload: Map::new(),
         artifacts: Vec::new(),
-    };
-    (head, folded)
+    }
 }
 // llmlint: ignore-end[boundary_inputs_validated]
 
-/// Every record's head, and what the fold reads of each.
+/// One line in merged order, on its way to being a folded record and a head's mark.
+struct Placed {
+    /// Its index among the read's lines.
+    index: usize,
+    /// Its place in the merged store.
+    place: Option<usize>,
+    /// Its record, where its line was parsed whole.
+    parsed: Option<Box<Envelope>>,
+}
+
+/// How many records one step of the pipeline below builds, folds and heads at a time:
+/// enough that a step is worth handing between threads, few enough that the fold starts
+/// on the first records while the rest are still being built.
+const PIPELINED: usize = 2048;
+
+/// Every record's head, with each record handed to `fold` in merged order before its
+/// head is made.
 ///
 /// A journal that cannot be read reads as one holding nothing, which is the rule the
 /// complete read follows. Each line is read once, by [`taken`], and the journal is never
-/// read through a second time.
-pub(crate) fn read_heads(journal: &Path) -> Heads {
+/// read through a second time. Each record's strings are built once, and `fold` reads
+/// them before they are moved into its head.
+pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope, Option<u64>)) -> Heads {
     let Some(bytes) = whole_file(journal) else {
         return Heads::default();
     };
     crate::loopstats::journal_read(journal, 0, bytes.len() as u64);
-    let finished: Vec<&[u8]> = finished_lines(&bytes).collect();
-    let (lines, opened): (Vec<Skim<'_>>, Vec<Option<(Opening<'_>, Labels)>>) =
-        in_order(&finished, |line| taken(line))
-            .into_iter()
-            .flatten()
-            .unzip();
-    let (queues, order) = merged(&lines);
+    // Each worker finds its own run's lines, and numbers their streams.
+    let runs = on_threads(line_runs(&bytes), |run| {
+        let mut numbers: HashMap<Cow<'_, str>, usize> = HashMap::new();
+        let mut skims = Vec::new();
+        let mut of = Vec::new();
+        for skim in finished_lines(run).filter_map(taken) {
+            let number = match numbers.get(skim.stream.as_ref()) {
+                Some(number) => *number,
+                None => {
+                    let number = numbers.len();
+                    numbers.insert(skim.stream.clone(), number);
+                    number
+                }
+            };
+            of.push(number);
+            skims.push(skim);
+        }
+        let mut names = vec![Cow::Borrowed(""); numbers.len()];
+        for (name, number) in numbers {
+            names[number] = name;
+        }
+        (skims, of, names)
+    });
+    let len = runs.iter().map(|(skims, _, _)| skims.len()).sum();
+    let mut lines = Vec::with_capacity(len);
+    let mut run_numbers = Vec::with_capacity(runs.len());
+    let mut run_names = Vec::with_capacity(runs.len());
+    for (skims, of, names) in runs {
+        lines.extend(skims);
+        run_numbers.push(of);
+        run_names.push(names);
+    }
+    // One number for each stream across the runs, each name hashed once a run.
+    let mut numbers: HashMap<&str, usize> = HashMap::new();
+    let mut names: Vec<&str> = Vec::new();
+    let mut of = Vec::with_capacity(len);
+    for (run_of, run_names) in run_numbers.iter().zip(&run_names) {
+        let renumbered: Vec<usize> = run_names
+            .iter()
+            .map(|name| {
+                *numbers.entry(name.as_ref()).or_insert_with(|| {
+                    names.push(name.as_ref());
+                    names.len() - 1
+                })
+            })
+            .collect();
+        of.extend(run_of.iter().map(|number| renumbered[*number]));
+    }
+    drop(run_numbers);
+    let (queues, order) = merged_in(&lines, Some(Numbered { of, names }));
+    let coverage = covered(&lines, &queues);
     // Each line's stream, shared by every handle of it, and whether it repeats the
     // `(stream, seq)` before it in its stream.
     let mut stream_of: Vec<Option<Arc<str>>> = vec![None; lines.len()];
@@ -264,40 +348,149 @@ pub(crate) fn read_heads(journal: &Path) -> Heads {
     drop(queues);
     let mut store_len = 0;
     let mut last_seq = 0;
-    let placed: Vec<(usize, Option<usize>)> = order
-        .iter()
-        .map(|index| {
+    let mut placed: Vec<Vec<Placed>> = Vec::new();
+    for run in order.chunks(PIPELINED) {
+        let mut this = Vec::with_capacity(run.len());
+        for index in run {
             last_seq = last_seq.max(lines[*index].seq);
             let place = (!repeated[*index]).then(|| {
                 store_len += 1;
                 store_len - 1
             });
-            (*index, place)
-        })
-        .collect();
+            this.push(Placed {
+                index: *index,
+                place,
+                // Moved out of its skim rather than copied: the fold reads this record.
+                parsed: lines[*index].parsed.take(),
+            });
+        }
+        placed.push(this);
+    }
+    let skims = &lines;
     let start = bytes.as_ptr() as usize;
-    let (heads, folded) = in_order(&placed, |(index, place)| {
-        let skim = &lines[*index];
+    let built = |placed: Placed| {
+        let skim = &skims[placed.index];
         let handle = RecordHandle {
             offset: (skim.line.as_ptr() as usize - start) as u64,
             len: skim.line.len() as u64,
             stream: Arc::clone(
-                stream_of[*index]
+                stream_of[placed.index]
                     .as_ref()
                     .expect("every line is in a queue"),
             ),
             seq: skim.seq,
         };
-        head_of(skim, opened[*index].as_ref(), *place, handle)
-    })
-    .into_iter()
-    .unzip();
+        let record = match placed.parsed {
+            Some(record) => *record,
+            None => headed(skim.line),
+        };
+        let mark = Mark {
+            evidence: skim.evidence,
+            place: placed.place,
+            handle,
+            at: crate::projection::millis_of(&record.ts),
+        };
+        (record, mark)
+    };
+    let heads = pipelined(placed, order.len(), built, &mut fold);
+    drop(lines);
+    // Nothing reads the journal's bytes once its heads are made, and handing a buffer the
+    // journal's size back to the host is a wait of its own, so it is let go of on a thread
+    // that outlives this read rather than before the read answers. Where the host refuses
+    // that thread, they are let go of here, as they were.
+    let spent = (bytes, stream_of, order, repeated);
+    let _ = std::thread::Builder::new().spawn(move || drop(spent));
     Heads {
         heads,
-        folded,
+        coverage,
         store_len,
         last_seq,
     }
+}
+
+/// One built run of records, and their marks.
+type Built = (Vec<Envelope>, Vec<Mark>);
+
+/// `runs` built by `build` on the read's workers, handed to `fold` in their order, and
+/// then moved into heads on a thread of its own: the fold is the one step that cannot be
+/// shared, so the others are done around it, a run at a time, rather than before and
+/// after it.
+fn pipelined(
+    runs: Vec<Vec<Placed>>,
+    len: usize,
+    build: impl Fn(Placed) -> (Envelope, Mark) + Sync,
+    fold: &mut impl FnMut(&Envelope, Option<u64>),
+) -> Vec<RecordHead> {
+    let made = |runs: &mut dyn Iterator<Item = Built>| {
+        let mut heads = Vec::with_capacity(len);
+        for (records, marks) in runs {
+            heads.extend(
+                records
+                    .into_iter()
+                    .zip(marks)
+                    .map(|(record, mark)| head_of(record, mark)),
+            );
+        }
+        heads
+    };
+    if runs.len() < 2 {
+        let mut folded = runs.into_iter().map(|run| {
+            let (records, marks): Built = run.into_iter().map(&build).unzip();
+            for (record, mark) in records.iter().zip(&marks) {
+                fold(record, mark.at);
+            }
+            (records, marks)
+        });
+        return made(&mut folded);
+    }
+    let count = runs.len();
+    let pending: Vec<Mutex<Option<Vec<Placed>>>> =
+        runs.into_iter().map(|run| Mutex::new(Some(run))).collect();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (built_tx, built_rx) = mpsc::channel::<(usize, Built)>();
+        for _ in 0..workers().min(count) {
+            let built_tx = built_tx.clone();
+            let (pending, next, build) = (&pending, &next, &build);
+            scope.spawn(move || {
+                // Taken in their order, so the fold, which needs them in it, waits least.
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(slot) = pending.get(index) else {
+                        return;
+                    };
+                    let run = slot
+                        .lock()
+                        .expect("a run's slot is never poisoned")
+                        .take()
+                        .expect("each run is built once");
+                    let built: Built = run.into_iter().map(build).unzip();
+                    if built_tx.send((index, built)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(built_tx);
+        let (folded_tx, folded_rx) = mpsc::channel::<Built>();
+        let heads = scope.spawn(move || made(&mut folded_rx.into_iter()));
+        let mut waiting: Vec<Option<Built>> = (0..count).map(|_| None).collect();
+        let mut due = 0;
+        for (index, built) in built_rx {
+            waiting[index] = Some(built);
+            while let Some(built) = waiting.get_mut(due).and_then(Option::take) {
+                for (record, mark) in built.0.iter().zip(&built.1) {
+                    fold(record, mark.at);
+                }
+                if folded_tx.send(built).is_err() {
+                    break;
+                }
+                due += 1;
+            }
+        }
+        drop(folded_tx);
+        heads.join().expect("making heads does not panic")
+    })
 }
 
 /// A positioned read, so the fetch's workers share one open file without a cursor

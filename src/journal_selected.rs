@@ -47,7 +47,7 @@ const MOST_WORKERS: usize = 8;
 
 /// The threads a read of many items works across: the host's parallelism, up to
 /// [`MOST_WORKERS`], and the four spike-first-screen measured at where it cannot say.
-fn workers() -> usize {
+pub(crate) fn workers() -> usize {
     std::thread::available_parallelism().map_or(4, |cores| cores.get().min(MOST_WORKERS))
 }
 
@@ -160,22 +160,46 @@ pub(crate) fn number_of(line: &[u8]) -> Option<(u64, &[u8])> {
     Some((number, &line[digits..]))
 }
 
+/// The keys a labels object has named so far, held inline for as many as a writer's
+/// labels carry, so walking one allocates nothing.
+#[derive(Default)]
+struct Keys<'a> {
+    inline: [&'a [u8]; 12],
+    held: usize,
+    beyond: Vec<&'a [u8]>,
+}
+
+impl<'a> Keys<'a> {
+    /// Whether `key` is new, holding it if it is.
+    fn first_time(&mut self, key: &'a [u8]) -> bool {
+        if self.inline[..self.held].contains(&key) || self.beyond.contains(&key) {
+            return false;
+        }
+        if self.held < self.inline.len() {
+            self.inline[self.held] = key;
+            self.held += 1;
+        } else {
+            self.beyond.push(key);
+        }
+        true
+    }
+}
+
 /// The `node` label off a labels object in the form: its values are strings, or a
 /// number for `round`, and anything else is read by the parse. Also what follows
 /// the object.
 fn labels_of(mut rest: &[u8]) -> Option<(Option<&str>, &[u8])> {
     let mut node = None;
-    let mut seen: Vec<&[u8]> = Vec::new();
+    let mut seen = Keys::default();
     if let Some(after) = rest.strip_prefix(b"}") {
         return Some((None, after));
     }
     loop {
         // Only `node`'s value is text anything reads, so no other is decoded.
         let (key, after) = bytes_of(rest.strip_prefix(b"\"")?)?;
-        if seen.contains(&key) {
+        if !seen.first_time(key) {
             return None;
         }
-        seen.push(key);
         let after = after.strip_prefix(b":")?;
         rest = if let Some(value) = after.strip_prefix(b"\"") {
             if key == b"round" {
@@ -250,6 +274,21 @@ pub(crate) fn opening_of(line: &[u8]) -> Option<Opening<'_>> {
 /// since that array is an envelope's last field and an artifact holds no array.
 const ARTIFACTS: &[u8] = b",\"artifacts\":[";
 
+/// An envelope's opening, which a line holds past its start only where a fragment was
+/// glued to a later append.
+const OPENING: &[u8] = b"{\"v\":";
+
+/// The searchers for [`OPENING`] and [`ARTIFACTS`], built once rather than for each line.
+static SEARCHERS: std::sync::LazyLock<(
+    memchr::memmem::Finder<'static>,
+    memchr::memmem::FinderRev<'static>,
+)> = std::sync::LazyLock::new(|| {
+    (
+        memchr::memmem::Finder::new(OPENING),
+        memchr::memmem::FinderRev::new(ARTIFACTS),
+    )
+});
+
 /// A line in the one form the writers leave, its merge fields read off its opening and
 /// whether it carries evidence off its end, with nothing between parsed; `None` for any
 /// other line, which then goes to [`parsed_line`].
@@ -281,10 +320,11 @@ pub(crate) fn skimmed_line(line: &[u8]) -> Option<Skim<'_>> {
 pub(crate) fn skimmed_opening(line: &[u8]) -> Option<(Skim<'_>, Opening<'_>)> {
     let opening = opening_of(line)?;
     let body = line.strip_suffix(b"]}")?;
-    if memchr::memmem::find(&line[1..], b"{\"v\":").is_some() {
+    let (opens, artifacts) = &*SEARCHERS;
+    if opens.find(&line[1..]).is_some() {
         return None;
     }
-    let artifacts = memchr::memmem::rfind(body, ARTIFACTS)?;
+    let artifacts = artifacts.rfind(body)?;
     let skim = Skim {
         line,
         ts: Cow::Borrowed(opening.ts),
@@ -417,27 +457,80 @@ pub(crate) fn in_order<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + S
     if items.len() < WORKED_ALONE {
         return items.iter().map(work).collect();
     }
+    let parts: Vec<&[T]> = items.chunks(run_size(items.len())).collect();
+    let done = on_threads(parts, |items| items.iter().map(&work).collect::<Vec<_>>());
+    joined(done, items.len())
+}
+
+/// How many of `len` items one worker takes: all of them where they are few.
+pub(crate) fn run_size(len: usize) -> usize {
+    if len < WORKED_ALONE {
+        len.max(1)
+    } else {
+        len.div_ceil(workers())
+    }
+}
+
+/// The runs of `parts`, one after another.
+pub(crate) fn joined<R>(parts: Vec<Vec<R>>, len: usize) -> Vec<R> {
+    let mut done = Vec::with_capacity(len);
+    for part in parts {
+        done.extend(part);
+    }
+    done
+}
+
+/// `work` over each of `parts`, each on a thread of its own where there are several,
+/// the answers in `parts`' order: what every parallel step of these reads is made of.
+pub(crate) fn on_threads<P: Send, R: Send>(parts: Vec<P>, work: impl Fn(P) -> R + Sync) -> Vec<R> {
+    if parts.len() < 2 {
+        return parts.into_iter().map(work).collect();
+    }
     let work = &work;
     #[cfg(test)]
     let counted = whole_parses::current();
     std::thread::scope(|scope| {
-        let workers: Vec<_> = items
-            .chunks(items.len().div_ceil(workers()))
-            .map(|items| {
+        let workers: Vec<_> = parts
+            .into_iter()
+            .map(|part| {
                 #[cfg(test)]
                 let counted = counted.clone();
                 scope.spawn(move || {
                     #[cfg(test)]
                     whole_parses::join(counted);
-                    items.iter().map(work).collect::<Vec<_>>()
+                    work(part)
                 })
             })
             .collect();
         workers
             .into_iter()
-            .flat_map(|worker| worker.join().expect("reading a line does not panic"))
+            .map(|worker| worker.join().expect("reading a line does not panic"))
             .collect()
     })
+}
+
+/// A journal this short is skimmed on one thread.
+const SKIMMED_ALONE: usize = 1 << 20;
+
+/// The finished lines of `bytes`, cut in their order into a run for each thread a read
+/// works across, each run ending where a line does: what [`finished_lines`] yields of
+/// each run, one run after another, is what it yields of `bytes`, and no thread waits on
+/// another to find where its lines start.
+pub(crate) fn line_runs(bytes: &[u8]) -> Vec<&[u8]> {
+    let finished = &bytes[..memchr::memrchr(b'\n', bytes).map_or(0, |end| end + 1)];
+    if finished.len() < SKIMMED_ALONE {
+        return vec![finished];
+    }
+    let size = finished.len().div_ceil(workers());
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < finished.len() {
+        let at = (start + size).min(finished.len() - 1);
+        let end = memchr::memchr(b'\n', &finished[at..]).map_or(finished.len(), |end| at + end + 1);
+        runs.push(&finished[start..end]);
+        start = end;
+    }
+    runs
 }
 
 /// `lines` parsed in their order, `None` for one that does not parse.
@@ -455,6 +548,22 @@ fn parsed_records(lines: &[&Skim<'_>]) -> Vec<Option<Envelope>> {
 /// the `ts` as [`instant_of`] reads it and the stream as its rank among the journal's
 /// streams, which orders them as their text does; otherwise as the text itself.
 pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
+    merged_in(lines, None)
+}
+
+/// Each line's stream as a number: `of[line]` names the stream `names` holds at that
+/// number. Every number is some line's, and no two name the same stream.
+pub(crate) struct Numbered<'n> {
+    pub(crate) of: Vec<usize>,
+    pub(crate) names: Vec<&'n str>,
+}
+
+/// [`merged`], with each line's stream already numbered where the reader did that on its
+/// own workers, so the merge hashes no line's stream itself.
+pub(crate) fn merged_in(
+    lines: &[Skim<'_>],
+    numbered: Option<Numbered<'_>>,
+) -> (Vec<Vec<usize>>, Vec<usize>) {
     let Some(instants) = lines
         .iter()
         .map(|line| line.instant)
@@ -468,14 +577,26 @@ pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
         let order = crate::journal::merge_queues(queues.clone(), key);
         return (queues.into_iter().map(|(_, queue)| queue).collect(), order);
     };
-    let mut streams: HashMap<&str, usize> = HashMap::new();
-    let mut queues: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
-            queues.push((line.stream.as_ref(), Vec::new()));
-            queues.len() - 1
-        });
-        queues[at].1.push(index);
+    let mut queues: Vec<(&str, Vec<usize>)>;
+    if let Some(numbered) = numbered {
+        queues = numbered
+            .names
+            .into_iter()
+            .map(|name| (name, Vec::new()))
+            .collect();
+        for (index, at) in numbered.of.into_iter().enumerate() {
+            queues[at].1.push(index);
+        }
+    } else {
+        queues = Vec::new();
+        let mut streams: HashMap<&str, usize> = HashMap::new();
+        for (index, line) in lines.iter().enumerate() {
+            let at = *streams.entry(line.stream.as_ref()).or_insert_with(|| {
+                queues.push((line.stream.as_ref(), Vec::new()));
+                queues.len() - 1
+            });
+            queues[at].1.push(index);
+        }
     }
     // By stream, so a queue's position is its stream's rank.
     queues.sort_unstable_by(|left, right| left.0.cmp(right.0));
@@ -500,6 +621,40 @@ pub(crate) fn merged(lines: &[Skim<'_>]) -> (Vec<Vec<usize>>, Vec<usize>) {
         }
     }
     (queues, order)
+}
+
+/// What every record of `lines` covers, as absorbing each in turn would leave a
+/// [`Coverage`](crate::checkpoint::Coverage) with no bytes: how many there are, the
+/// furthest of them by `(ts, stream)`, and each stream's greatest `seq`.
+///
+/// Read off [`merged`]'s `queues`, each a stream's lines in `seq` order, so no record is
+/// hashed for it, and where two lines' `ts` are both in the writers' form they are
+/// compared as the numbers [`instant_of`] reads, which order as their text does.
+pub(crate) fn covered(lines: &[Skim<'_>], queues: &[Vec<usize>]) -> crate::checkpoint::Coverage {
+    let placed_order = |left: &Skim<'_>, right: &Skim<'_>| match (left.instant, right.instant) {
+        (Some(left), Some(right)) if left != right => left.cmp(&right),
+        _ => (left.ts.as_ref(), left.stream.as_ref())
+            .cmp(&(right.ts.as_ref(), right.stream.as_ref())),
+    };
+    let mut coverage = crate::checkpoint::Coverage {
+        records: lines.len() as u64,
+        ..crate::checkpoint::Coverage::default()
+    };
+    coverage.at = lines
+        .iter()
+        .max_by(|left, right| placed_order(left, right))
+        .map(|line| crate::checkpoint::Placed {
+            ts: line.ts.to_string(),
+            stream: line.stream.to_string(),
+        });
+    for queue in queues {
+        if let (Some(first), Some(last)) = (queue.first(), queue.last()) {
+            coverage
+                .streams
+                .insert(lines[*first].stream.to_string(), lines[*last].seq);
+        }
+    }
+    coverage
 }
 
 /// A selection over the lines of a journal, or `None` where a kept line in the
@@ -866,5 +1021,55 @@ mod tests {
         let evidence = whole.replace(r#""artifacts":[]"#, r#""artifacts":[{"id":"a"}]"#);
         assert!(skimmed_line(evidence.as_bytes()).is_some_and(|skim| skim.evidence));
         assert!(skimmed_line(whole.as_bytes()).is_some_and(|skim| !skim.evidence));
+    }
+
+    /// A labels object holding more keys than the skim keeps inline is skimmed, and a
+    /// key repeated past them is refused as one repeated among them is.
+    #[test]
+    fn a_labels_object_past_the_keys_held_inline_is_skimmed_and_a_repeat_there_is_not() {
+        let line = |keys: &[String]| {
+            let labels = keys
+                .iter()
+                .map(|key| format!(r#""{key}":"x""#))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"v":2,"ts":"2026-11-06T10:00:00.000Z","stream":"s","seq":1,"source":"pipeline","kind":"node-started","labels":{{"node":"n",{labels}}},"payload":{{}},"artifacts":[]}}"#
+            )
+        };
+        let keys: Vec<String> = (0..20).map(|key| format!("k{key}")).collect();
+        assert!(skimmed_line(line(&keys).as_bytes())
+            .is_some_and(|skim| skim.node.as_deref() == Some("n")));
+        for (at, repeated) in [(15, "k14"), (16, "k3"), (17, "node")] {
+            let mut keys = keys.clone();
+            keys[at] = repeated.to_owned();
+            assert!(
+                skimmed_line(line(&keys).as_bytes()).is_none(),
+                "{repeated} repeated at {at} was skimmed"
+            );
+        }
+    }
+
+    /// The runs a journal is cut into for its workers hold its finished lines, each run
+    /// ending where a line does, in their order, and never the unfinished one after them.
+    #[test]
+    fn the_runs_a_journal_is_cut_into_hold_its_finished_lines_in_order() {
+        let mut bytes = Vec::new();
+        let mut at = 0_usize;
+        while bytes.len() < 3 * SKIMMED_ALONE {
+            // Lines of many lengths, so no cut falls at the same place in each.
+            bytes.extend(format!("line {at} {}\n", "x".repeat(at % 977)).into_bytes());
+            at += 1;
+        }
+        bytes.extend(b"an unfinished line");
+        let runs = line_runs(&bytes);
+        assert_eq!(runs.len() > 1, workers() > 1, "{} runs", runs.len());
+        assert!(runs.iter().all(|run| run.ends_with(b"\n")));
+        let cut: Vec<&[u8]> = runs.iter().flat_map(|run| finished_lines(run)).collect();
+        let whole: Vec<&[u8]> = finished_lines(&bytes).collect();
+        assert_eq!(cut.len(), at);
+        assert!(cut == whole, "the runs' lines are not the journal's");
+        assert_eq!(line_runs(b"one\ntwo\nthree"), vec![&b"one\ntwo\n"[..]]);
+        assert_eq!(line_runs(b"unfinished"), vec![&b""[..]]);
     }
 }
