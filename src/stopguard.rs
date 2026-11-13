@@ -242,18 +242,9 @@ pub(crate) fn guard(
         // In this process, on a thread of its own: the read is the linked
         // `onevcs`'s, so the only processes it starts are the `git` that library
         // runs, and it overlaps `unwatched` rather than following it.
-        // Its wall clock is carried back rather than phased on that thread, because a
-        // phase is counted on the thread that took it and only this one is flushed.
-        let deciding = unpublishing.map(|unpublishing| {
-            scope.spawn(move || {
-                let began = std::time::Instant::now();
-                (owed(asked, unpublishing), began.elapsed())
-            })
-        });
-        let own = {
-            let _unwatched = crate::hostphases::phase("unwatched");
-            own(root, asked, budget)
-        };
+        let deciding =
+            unpublishing.map(|unpublishing| scope.spawn(move || owed(asked, unpublishing)));
+        let own = own(root, asked, budget);
         let answered: Vec<Result<Answer, String>> = consulting
             .into_iter()
             .map(|consulting| {
@@ -267,22 +258,14 @@ pub(crate) fn guard(
         // do; the arm keeps a panic from reading as `none`, blocking as an unanswered
         // decision does.
         let unpublished = deciding.map(|deciding| {
-            let (verdict, took) = deciding.join().unwrap_or_else(|_| {
-                (
-                    Verdict::Block(format!(
-                        "stop-guard: whether this session owes a preserved branch could not be \
+            deciding.join().unwrap_or_else(|_| {
+                Verdict::Block(format!(
+                    "stop-guard: whether this session owes a preserved branch could not be \
                      answered (the decision failed), so this stop is refused; ask it by hand \
                      with `onepipeline unpublished --session {}`.\n",
-                        asked.session.as_str()
-                    )),
-                    std::time::Duration::ZERO,
-                )
-            });
-            crate::hostphases::add(
-                "session-read-us",
-                u64::try_from(took.as_micros()).unwrap_or(u64::MAX),
-            );
-            verdict
+                    asked.session.as_str()
+                ))
+            })
         });
         // llmlint: ignore-end[changed_behavior_has_e2e]
         (own, answered, unpublished)

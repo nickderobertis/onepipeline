@@ -86,7 +86,7 @@ fn window_of(seconds: &[u64]) -> String {
 
 /// `onepipeline ask` as a worker runs it: the run on `ONEPIPELINE_RUN_ID`, and
 /// whatever else the caller names, started and left to wait.
-pub(crate) fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str)]) -> Child {
+fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str)]) -> Child {
     let mut command = world.cmd(&[&["ask"], args].concat());
     command.env("ONEPIPELINE_RUN_ID", run);
     for (key, value) in env {
@@ -101,15 +101,15 @@ pub(crate) fn asking(world: &World, run: &str, args: &[&str], env: &[(&str, &str
 }
 
 /// What one `ask` answered, once it has.
-pub(crate) struct Answered {
-    pub(crate) code: i32,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
+struct Answered {
+    code: i32,
+    stdout: String,
+    stderr: String,
 }
 
 impl Answered {
     /// Its single line of standard output, as the object it is.
-    pub(crate) fn answer(&self) -> Value {
+    fn answer(&self) -> Value {
         assert_eq!(
             self.stdout.lines().count(),
             1,
@@ -121,7 +121,7 @@ impl Answered {
     }
 }
 
-pub(crate) fn waited(child: Child) -> Answered {
+fn waited(child: Child) -> Answered {
     let output = child.wait_with_output().expect("the question ends");
     Answered {
         code: output.status.code().unwrap_or(-1),
@@ -135,7 +135,7 @@ pub(crate) fn waited(child: Child) -> Answered {
 ///
 /// Polled rather than waited on, because the question is raised by another
 /// process and the manager's side has no signal of its own.
-pub(crate) fn question_on(world: &World, run: &str) -> Value {
+fn question_on(world: &World, run: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let next = world.run(&["next", run]);
@@ -715,18 +715,19 @@ fn every_refusal_names_its_cause_at_exit_two_and_raises_nothing_on_the_channel()
 #[test]
 fn a_question_the_bus_refuses_is_answered_refused_at_exit_one() {
     let world = World::new("ask-bus-refused");
-    // A real hook on the `surfaces` queue, refusing: the bus declines the frame
-    // rather than the verb declining to send it.
-    let hook = double("bus-hook").to_string_lossy().into_owned();
-    let reason = "a question this run has no manager to answer";
+    // A real validator on the `surfaces` queue, scripted to decline: the bus
+    // declines the frame rather than the verb declining to send it.
+    let validator = double("bus-validator").to_string_lossy().into_owned();
     let run = run_under(
         &world,
         "askdeclined",
         &format!(
-            "version: 1\ntransport: {{kind: local}}\nhooks:\n  \
-             - {{on: surfaces, command: [{hook:?}, refuse, {reason:?}]}}\n"
+            "version: 1\ntransport: {{kind: local}}\nvalidators:\n  \
+             - {{on: surfaces, kind: command, command: [{validator:?}]}}\n"
         ),
     );
+    let reason = "a question this run has no manager to answer";
+    world.script("bus-validator.refuse", reason);
 
     let refused = waited(asking(&world, &run, &["which bound?"], &[]));
     assert_eq!(refused.code, 1, "{}", refused.stderr);
@@ -736,7 +737,7 @@ fn a_question_the_bus_refuses_is_answered_refused_at_exit_one() {
         answer["reason"]
             .as_str()
             .is_some_and(|it| it.contains(reason)),
-        "the answer does not carry the hook's own words: {answer}"
+        "the answer does not carry the validator's own words: {answer}"
     );
     assert!(
         refused.stderr.contains("the question was refused"),

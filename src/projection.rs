@@ -855,20 +855,20 @@ pub enum MemberLabel {
 /// string of this crate's: the kind is the sibling's vocabulary, and a literal
 /// here would be a second copy of a contract it owns — one that keeps matching
 /// after the producer renames the kind, and silently stops attributing anything.
-/// A kind this build has no reading of simply is not one. Compared with the enum's
-/// own spelling of the kind, which is the one its wire form parses back from, rather
-/// than by parsing every record's kind: the fold asks this of each one it reads.
+/// A kind this build has no reading of simply is not one.
 fn is_fallback_advanced(kind: &crate::event::EventKind) -> bool {
-    kind.0 == oneagentgraph::event::EventKind::FallbackAdvanced.as_str()
+    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
+        .is_ok_and(|known| known == oneagentgraph::event::EventKind::FallbackAdvanced)
 }
 
 /// Whether one relayed kind is `oneagentgraph`'s `oneharness-session`.
 ///
 /// Read the same way [`is_fallback_advanced`] is, and for the same reason: the
-/// kind is that library's own, so it is recognised by that library's spelling of
-/// it rather than by one kept here.
+/// kind is that library's own, so it is recognised by parsing the wire string
+/// back into that library's set rather than by a spelling of it kept here.
 fn is_oneharness_session(kind: &crate::event::EventKind) -> bool {
-    kind.0 == oneagentgraph::event::EventKind::OneharnessSession.as_str()
+    serde_json::from_value::<oneagentgraph::event::EventKind>(Value::String(kind.0.clone()))
+        .is_ok_and(|known| known == oneagentgraph::event::EventKind::OneharnessSession)
 }
 
 /// The kind `oneagentgraph` reports a bounded tool summary as.
@@ -1272,36 +1272,24 @@ fn remember_derived(
 
 /// Fold a run's whole journal.
 pub fn fold(events: &[Envelope]) -> RunState {
-    let mut state = unfolded();
+    let mut state = RunState {
+        strict: true,
+        ..RunState::default()
+    };
     for event in events {
         fold_one(&mut state, event);
     }
     state
 }
 
-/// The state a fold starts from, before [`fold_one`] takes its first record.
-pub(crate) fn unfolded() -> RunState {
-    RunState {
-        strict: true,
-        ..RunState::default()
-    }
-}
-
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
-    fold_one_at(state, event, millis_of(&event.ts));
-}
-
-/// [`fold_one`], where the reader has already read `at`, [`millis_of`] the record's
-/// `ts`, on a thread of its own.
-pub(crate) fn fold_one_at(state: &mut RunState, event: &Envelope, at: Option<u64>) {
     let marked = crate::hooks::Marked::before(state, event);
-    fold_record(state, event, at);
+    fold_record(state, event);
     marked.after(state, event);
 }
 
 /// [`fold_one`], short of the run-end hook's marker it keeps beside the fold.
-/// `at` is [`millis_of`] the record's `ts`.
-fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
+fn fold_record(state: &mut RunState, event: &Envelope) {
     #[cfg(test)]
     crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
@@ -1315,14 +1303,18 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
         state.recalled.push(event.clone());
         return;
     }
-    state.last_write_at = Some(at.unwrap_or(0).max(state.last_write_at.unwrap_or(0)));
+    state.last_write_at = Some(
+        millis_of(&event.ts)
+            .unwrap_or(0)
+            .max(state.last_write_at.unwrap_or(0)),
+    );
     if event.source != Source::Pipeline {
         // A relayed envelope does not decide this crate's graph state — a
         // sibling library does not settle a node — but it is the only evidence
         // of what the node it belongs to is doing while it runs, the only
         // evidence of which identity refused when it stops running, and the only
         // evidence of where it is doing it.
-        fold_activity(state, event, at);
+        fold_activity(state, event);
         fold_addresses(state, event);
         fold_refusal(state, event);
         fold_invocation(state, event);
@@ -1387,21 +1379,6 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
         // from the graph and the recorded settlements, and this record is how a
         // reader sees the moment it happened.
         Some(journal::PipelineKind::NodeReady) => {}
-        // A command node is running from the moment its command starts, exactly as a
-        // dispatched node is: no agent is dispatched for it, so this is its only record
-        // of starting. How it ended is its `node-settled`; `command-exited` adds nothing
-        // the fold reads.
-        Some(journal::PipelineKind::CommandStarted) => {
-            if let Some(node) = &event.labels.node {
-                state
-                    .recorded
-                    .insert(node.clone(), Recorded::At(NodeStatus::Running));
-                if let Some(ts) = millis_of(&event.ts) {
-                    state.dispatched_at.insert(node.clone(), ts);
-                }
-            }
-        }
-        Some(journal::PipelineKind::CommandExited) => {}
         Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
                 state
@@ -2103,21 +2080,14 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
         return;
     };
     if event.source == Source::Agentgraph {
-        // The fold meets an address on nearly every record a dispatch relays, so the one
-        // a node already holds is moved in place rather than built again.
-        let named = event
+        let address = event
             .labels
             .run_id
             .as_deref()
-            .zip(event.labels.member.as_deref());
-        if let Some((run, member)) = named {
-            if let Some(held) = state.last_turns.get_mut(node) {
-                if held.run() != run.trim() || held.member() != member.trim() {
-                    held.set(run, member);
-                }
-            } else if let Some(address) = crate::agentgraph::TurnAddress::of(run, member) {
-                state.last_turns.insert(node.clone(), address);
-            }
+            .zip(event.labels.member.as_deref())
+            .and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member));
+        if let Some(address) = address {
+            state.last_turns.insert(node.clone(), address);
         }
     }
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
@@ -2822,16 +2792,11 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 node,
                 text,
                 reached: crate::note::Reached::Carried { .. },
-                envelope,
-                index,
-                provenance,
                 ..
             } => {
-                // Under its attribution, as the node's own context carries it.
                 let carried = crate::note::with_carried(
                     state.pending_context.get(node).map(String::as_str),
-                    &crate::ruling::Origin::of_record(*provenance, *envelope, *index)
-                        .stored(text.as_str()),
+                    text.as_str(),
                 );
                 state.pending_context.insert(node.clone(), carried);
             }
@@ -2892,21 +2857,12 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
 /// publication steps follow, and the line names whichever came last. The session
 /// *opening* is the one `onevcs` record that is not a step — a dispatch that has
 /// opened one and named no tool has started and done nothing.
-///
-/// `at` is [`millis_of`] of the record's `ts`, which the caller has already read.
-fn fold_activity(state: &mut RunState, event: &Envelope, at: Option<u64>) {
+fn fold_activity(state: &mut RunState, event: &Envelope) {
     let Some(node) = event.labels.node.as_deref() else {
         return;
     };
-    if !state.activity.contains_key(node) {
-        state
-            .activity
-            .insert(node.to_owned(), NodeActivity::default());
-    }
-    let activity = state
-        .activity
-        .get_mut(node)
-        .expect("a node's activity was just made where it had none");
+    let activity = state.activity.entry(node.to_string()).or_default();
+    let at = millis_of(&event.ts);
     if !evidences_progress(event) {
         activity.last_heartbeat_at = at.or(activity.last_heartbeat_at);
         return;
@@ -3135,30 +3091,29 @@ pub fn millis_of(ts: &str) -> Option<u64> {
     // every other position a digit. Without the separator check a string that
     // merely *starts* like a timestamp parses, and `str::parse` would take a
     // signed field like `+12` as well — either way a stranger's malformed clock
-    // becomes this run's timing evidence. Every position is read in one pass against
-    // the form: a digit where it has a `0`, and otherwise exactly its separator.
-    const FORM: &[u8; 24] = b"0000-00-00T00:00:00.000Z";
-    if bytes.len() != FORM.len() {
+    // becomes this run's timing evidence.
+    if bytes.len() != 24 {
         return None;
     }
-    let mut digits = [0_i64; 24];
-    for ((byte, form), digit) in bytes.iter().zip(FORM).zip(&mut digits) {
-        if *form == b'0' {
-            if !byte.is_ascii_digit() {
-                return None;
-            }
-            *digit = i64::from(byte - b'0');
-        } else if byte != form {
+    for (at, separator) in [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b':'),
+        (16, b':'),
+        (19, b'.'),
+        (23, b'Z'),
+    ] {
+        if bytes[at] != separator {
             return None;
         }
     }
     let field = |from: usize, to: usize| -> Option<i64> {
-        Some(
-            digits
-                .get(from..to)?
-                .iter()
-                .fold(0, |number, digit| number * 10 + digit),
-        )
+        let text = ts.get(from..to)?;
+        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
     };
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
     let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
@@ -3835,7 +3790,6 @@ mod tests {
                         reached,
                         envelope: None,
                         index: None,
-                        provenance: crate::provenance::Provenance::Manager,
                     }]),
                 )],
             )
@@ -3898,7 +3852,6 @@ mod tests {
                         reached: crate::note::Reached::Carried { reason: None },
                         envelope: Some(seq),
                         index: Some(0),
-                        provenance: crate::provenance::Provenance::Manager,
                     }]),
                 )],
             )
@@ -3934,20 +3887,6 @@ mod tests {
             carried(2, "keep the loader"),
         ];
         let owed = fold(&both);
-        // Each carried entry under its attribution, naming the envelope it came in.
-        let entry = |envelope: u64, text: &str| {
-            crate::ruling::Origin::of_record(
-                crate::provenance::Provenance::Manager,
-                Some(envelope),
-                Some(0),
-            )
-            .stored(text)
-        };
-        let both_entries = format!(
-            "{}\n\n{}",
-            entry(1, "the fixture moved"),
-            entry(2, "keep the loader")
-        );
         // A live note of the same text, withdrawn, was carried onto nothing, so
         // both carried notes stay owed to the node's next dispatch.
         let mut beside_live = both.to_vec();
@@ -3957,15 +3896,21 @@ mod tests {
             crate::note::WithdrawnFrom::Live,
         ));
         let kept = fold(&beside_live);
-        assert_eq!(kept.pending_context["build"], both_entries);
+        assert_eq!(
+            kept.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
         assert_eq!(
             kept.graph.get("build").expect("build").context.as_deref(),
-            Some(both_entries.as_str())
+            Some("the fixture moved\n\nkeep the loader")
         );
-        assert_eq!(owed.pending_context["build"], both_entries);
+        assert_eq!(
+            owed.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
         for (envelope, gone, left) in [
-            (1, "the fixture moved", entry(2, "keep the loader")),
-            (2, "keep the loader", entry(1, "the fixture moved")),
+            (1, "the fixture moved", "keep the loader"),
+            (2, "keep the loader", "the fixture moved"),
         ] {
             let mut journal = both.to_vec();
             journal.push(withdrawn(envelope, gone));
@@ -3978,7 +3923,7 @@ mod tests {
                     .expect("build")
                     .context
                     .as_deref(),
-                Some(left.as_str()),
+                Some(left),
                 "replay did not leave the other carried note in the planner context"
             );
         }
@@ -4742,65 +4687,6 @@ mod tests {
                 "a checkpoint read {other} as what a dispatch was doing"
             );
         }
-    }
-
-    /// Where a note to a node is carried: the turn its latest relayed record addresses.
-    /// A dispatch that moves to another graph run or member moves it, and a record
-    /// naming no address this crate can carry leaves the last one standing.
-    #[test]
-    fn a_node_s_last_turn_follows_its_relayed_records_and_stays_where_none_is_read() {
-        let plan = plan_of_nodes(vec![agent("build", &[])]);
-        let start = pipeline(
-            journal::PipelineKind::RunStarted,
-            0,
-            None,
-            &[("plan", json!(plan))],
-        );
-        let addressed = |seq: u64, run: &str, member: &str| {
-            let mut event = pipeline(
-                journal::PipelineKind::NodeDispatched,
-                seq,
-                Some("build"),
-                &[],
-            );
-            event.source = Source::Agentgraph;
-            event.kind = crate::event::EventKind(TURN_ACTIVITY.into());
-            event.labels.run_id = Some(run.into());
-            event.labels.member = Some(member.into());
-            event
-        };
-        let last_turn = |events: &[Envelope]| {
-            fold(events)
-                .last_turns
-                .get("build")
-                .map(|turn| (turn.run().to_owned(), turn.member().to_owned()))
-        };
-        let first = || ("graph-a".to_owned(), "worker".to_owned());
-
-        assert_eq!(
-            last_turn(&[start.clone(), addressed(1, "graph-a", "worker")]),
-            Some(first())
-        );
-        assert_eq!(
-            last_turn(&[
-                start.clone(),
-                addressed(1, "graph-a", "worker"),
-                addressed(2, " graph-b ", "reviewer"),
-                addressed(3, "graph-b", "reviewer"),
-            ]),
-            Some(("graph-b".to_owned(), "reviewer".to_owned())),
-            "the turn did not move with the dispatch"
-        );
-        assert_eq!(
-            last_turn(&[
-                start,
-                addressed(1, "graph-a", "worker"),
-                addressed(2, "graph-b", "not a member"),
-                addressed(3, "  ", "reviewer"),
-            ]),
-            Some(first()),
-            "a record naming no address moved the turn"
-        );
     }
 
     /// The readout an operator decides between cancel, retry, and wait on. A

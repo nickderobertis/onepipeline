@@ -110,24 +110,6 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-    /// A [`RecordHandle`](crate::journal::RecordHandle) handed to
-    /// [`fetch`](crate::journal::fetch) names a line that is no longer a record of its
-    /// `(stream, seq)`: the journal was rewritten, not appended to, since the heads read
-    /// that gave it. Exits [`EXIT_REFUSED`].
-    #[error(
-        "{path}: the line at byte {offset} is not record {seq} of stream '{stream}', \
-         so the journal was rewritten since the heads read that named it"
-    )]
-    RecordMoved {
-        /// The journal read.
-        path: PathBuf,
-        /// Where the handle's line was to start.
-        offset: u64,
-        /// The stream of the record the handle names.
-        stream: String,
-        /// That record's `seq`.
-        seq: u64,
-    },
 }
 
 impl Error {

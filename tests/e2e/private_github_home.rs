@@ -308,10 +308,7 @@ fn copied_by_the_store(
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
                     items: onetaskgraph_core::CopyItems::new(vec![project]).expect("one draft"),
-                    scope: onetaskgraph_core::CopyScope::Projects {
-                        tasks: true,
-                        documents: false,
-                    },
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                     destination,
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
                     target_task: None,

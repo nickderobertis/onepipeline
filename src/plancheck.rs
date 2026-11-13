@@ -11,9 +11,7 @@
 //! second implementation of that loader.
 //!
 //! The two kinds of refusal stay apart in the answer: the engine's carry
-//! `source: "engine"` and come first — beside them, carrying `source: "onevcs"`, each
-//! release adoption the linked `onevcs` says can never complete
-//! ([`crate::adoptable`]) — and each registered check's follow in the
+//! `source: "engine"` and come first, and each registered check's follow in the
 //! order its `--check` flags were given, carrying the path as it was given. A
 //! check that could not be **run** is reported separately again, because reading
 //! it as an accept is the one answer that stops anybody looking.
@@ -70,8 +68,6 @@ pub const ENGINE: &str = "engine";
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Engine,
-    /// A loader refusal whose rule and reason are the linked onevcs's.
-    Onevcs,
     Check(String),
 }
 
@@ -82,7 +78,6 @@ impl Serialize for Source {
     ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             Self::Engine => serializer.serialize_str(ENGINE),
-            Self::Onevcs => serializer.serialize_str(crate::adoptable::SOURCE),
             Self::Check(path) => serializer.serialize_str(path),
         }
     }
@@ -92,7 +87,6 @@ impl std::fmt::Display for Source {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Engine => formatter.write_str(ENGINE),
-            Self::Onevcs => formatter.write_str(crate::adoptable::SOURCE),
             Self::Check(path) => formatter.write_str(path),
         }
     }
@@ -286,27 +280,6 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
             {
                 Err(refusal) => refusal,
                 Ok(()) => {
-                    // Last of the loader's refusals, as `start` makes it: whether each
-                    // release adoption can ever complete, which is onevcs's to say. Every
-                    // `never-completes` rule is its own refusal; an unanswered one is a
-                    // notice on stderr and refuses nothing.
-                    let adoptions = crate::adoptable::ask(&read.plan, |_| true);
-                    adoptions.report_unanswered();
-                    if !adoptions.refused.is_empty() {
-                        return Ok(Answered::LoaderRefused {
-                            refusals: adoptions
-                                .refused
-                                .iter()
-                                .map(|refused| Reported {
-                                    source: Source::Onevcs,
-                                    node: Some(refused.node.clone()),
-                                    field: Some(refused.field().to_owned()),
-                                    reason: Reason(refused.detail()),
-                                })
-                                .collect(),
-                            stopped: stopped(args),
-                        });
-                    }
                     let mut refusals = Vec::new();
                     let mut unrunnable = Vec::new();
                     // A document this build cannot write is one no check can be
@@ -317,14 +290,7 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
                     match document(&read) {
                         Ok(document) => {
                             for path in &args.checks {
-                                let answered = Registered::path(path)
-                                    .map_err(|why| Unrunnable {
-                                        check: path.display().to_string(),
-                                        exit_code: None,
-                                        stderr: why.to_string(),
-                                    })
-                                    .and_then(|check| offer(&check, &document));
-                                match answered {
+                                match offer(path, &document) {
                                     Ok(answered) => refusals.extend(answered),
                                     Err(why) => unrunnable.push(why),
                                 }
@@ -345,17 +311,13 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
         }
     };
     Ok(Answered::LoaderRefused {
-        refusals: vec![engine_refusal(refusal)],
-        stopped: stopped(args),
+        refusal: engine_refusal(refusal),
+        stopped: args
+            .checks
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
     })
-}
-
-/// Every registered check, in flag order, by the path it was given as.
-fn stopped(args: &PlanCheckArgs) -> Vec<String> {
-    args.checks
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect()
 }
 
 /// What this verb has to say about one project.
@@ -371,12 +333,11 @@ enum Answered {
     /// The project could not be read at all, so nothing was loaded, nothing was
     /// checked, and nothing accepted it.
     Unreadable,
-    /// The loader refused, which is where it stops: the loader's refusals, and no
-    /// loaded plan to hand a check.
+    /// The loader refused, which is where it stops: one refusal, and no loaded
+    /// plan to hand a check.
     LoaderRefused {
-        /// The loader's own — one engine refusal, or every adoption onevcs says can
-        /// never complete — which are the only refusals this case can hold.
-        refusals: Vec<Reported>,
+        /// The loader's own, which is the only refusal this case can hold.
+        refusal: Reported,
         /// Every registered check, in flag order, by the path it was given as.
         /// None of them ran, and none of them can carry an exit status.
         stopped: Vec<String>,
@@ -406,7 +367,7 @@ impl Answered {
     fn refusals(&self) -> &[Reported] {
         match self {
             Self::Unreadable => &[],
-            Self::LoaderRefused { refusals, .. } => refusals,
+            Self::LoaderRefused { refusal, .. } => std::slice::from_ref(refusal),
             Self::Checked { refusals, .. } => refusals,
         }
     }
@@ -485,27 +446,8 @@ fn print(args: &PlanCheckArgs, answered: &Answered) {
         return;
     }
 
-    let (said, diagnosed) = rendered(&args.project, answered);
-    for line in said {
-        println!("{line}");
-    }
-    // A check that could not be run is the exit-2 diagnosis rather than an
-    // answer about the plan, so it goes where this binary's diagnoses go.
-    for line in diagnosed {
-        eprintln!("{line}");
-    }
-}
-
-/// The human report: what goes to stdout — each refusal, then the acceptance — and the
-/// diagnosis of each check that could not be run, which goes to stderr.
-fn rendered(project: &str, answered: &Answered) -> (Vec<String>, Vec<String>) {
-    let accepted = answered.accepted();
-    let refusals = answered.refusals();
-    let unrunnable = answered.not_run();
-    let mut said = Vec::new();
-    let mut diagnosed = Vec::new();
     for refusal in refusals {
-        said.push(format!(
+        println!(
             "{}: {}{}{}",
             refusal.source,
             refusal
@@ -519,10 +461,12 @@ fn rendered(project: &str, answered: &Answered) -> (Vec<String>, Vec<String>) {
                 .map(|field| format!("`{field}`: "))
                 .unwrap_or_default(),
             refusal.reason.0
-        ));
+        );
     }
+    // A check that could not be run is the exit-2 diagnosis rather than an
+    // answer about the plan, so it goes where this binary's diagnoses go.
     for report in &unrunnable {
-        diagnosed.push(format!(
+        eprintln!(
             "{}: could not be run ({}): {}",
             report.check,
             report.exit_code.map_or_else(
@@ -530,12 +474,11 @@ fn rendered(project: &str, answered: &Answered) -> (Vec<String>, Vec<String>) {
                 |code| format!("exit {code}")
             ),
             report.stderr
-        ));
+        );
     }
     if accepted {
-        said.push(format!("{project}: accepted"));
+        println!("{}: accepted", args.project);
     }
-    (said, diagnosed)
 }
 
 fn engine_refusal(refusal: Refusal) -> Reported {
@@ -598,16 +541,19 @@ fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, Strin
 /// A refusals list is an answer rather than a failure to answer, so `Ok` covers
 /// a check that refused as well as one that accepted. Only [`Unrunnable`] is the
 /// could-not-be-run the contract reports apart from a refusal.
-fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reported>, Unrunnable> {
-    let named = check.named.clone();
+fn offer(path: &Path, document: &[u8]) -> std::result::Result<Vec<Reported>, Unrunnable> {
+    let named = path.display().to_string();
     let cannot = |exit_code: Option<i32>, stderr: String| Unrunnable {
         check: named.clone(),
         exit_code,
         stderr,
     };
-    let resolved = Path::new(check.argv.program());
-    let mut child = Command::new(resolved)
-        .args(check.argv.arguments())
+    // Against the working directory this command was run from, which is also the
+    // one the check itself runs in: a consumer registers a check beside the plan
+    // it is checking, and a path that resolved against anything else would name
+    // a different file to the two sides.
+    let resolved = resolve(path);
+    let mut child = Command::new(&resolved)
         .env(SCHEMA_ENV, SCHEMA_VERSION)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -807,99 +753,6 @@ fn bounded(stream: &mut impl std::io::Read) -> Bounded {
         said,
         past_the_bound,
     }
-}
-
-/// One registered check: the program it is spawned as and its arguments, with no shell
-/// between them, and how its refusals name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Registered {
-    /// What is spawned.
-    argv: crate::filter::Argv,
-    /// The `source` its refusals carry and the `check` its failures name.
-    named: String,
-}
-
-impl Registered {
-    /// A check registered by `--check <PATH>`: that one executable, resolved against the
-    /// working directory, which is also the one the check itself runs in — a consumer
-    /// registers a check beside the plan it is checking, and a path that resolved against
-    /// anything else would name a different file to the two sides. Named by the path as
-    /// it was given.
-    ///
-    /// # Errors
-    ///
-    /// A path that is blank, which names no program.
-    pub(crate) fn path(path: &Path) -> Result<Self> {
-        Ok(Self {
-            argv: crate::filter::Argv::new(vec![resolve(path).display().to_string()])?,
-            named: path.display().to_string(),
-        })
-    }
-
-    /// A check a launch config's `checks` registers: its argv run as the document wrote
-    /// it, from the launch directory, and named by its words joined with one space.
-    pub(crate) fn argv(argv: &crate::filter::Argv) -> Self {
-        Self {
-            argv: argv.clone(),
-            named: argv.spelled(),
-        }
-    }
-}
-
-/// Offer the loaded plan to every check a launch registered, in order, and refuse the
-/// launch where any refused it or could not be run.
-///
-/// Exactly what `plan check` does past its loader — the same document on stdin, the same
-/// environment, the same order and the same reading of each check's exit status — so a
-/// plan `plan check` accepts under the same checks is a plan this accepts. A refusal is
-/// [`Error::Refused`](crate::error::Error::Refused), carrying the report `plan check`
-/// prints: each refusal on its own line naming its source, then each check that could
-/// not be run.
-///
-/// # Errors
-///
-/// The refusal above, before anything of a run exists.
-pub(crate) fn launch(
-    read: &crate::taskgraph::Read,
-    project: &str,
-    checks: &[Registered],
-) -> Result<()> {
-    if checks.is_empty() {
-        return Ok(());
-    }
-    let mut refusals = Vec::new();
-    let mut unrunnable = Vec::new();
-    match document(read) {
-        Ok(document) => {
-            for check in checks {
-                match offer(check, &document) {
-                    Ok(answered) => refusals.extend(answered),
-                    Err(why) => unrunnable.push(why),
-                }
-            }
-        }
-        Err(why) => unrunnable.extend(checks.iter().map(|check| Unrunnable {
-            check: check.named.clone(),
-            exit_code: None,
-            stderr: why.clone(),
-        })),
-    }
-    let answered = Answered::Checked {
-        refusals,
-        unrunnable,
-    };
-    if answered.accepted() {
-        return Ok(());
-    }
-    let (said, diagnosed) = rendered(project, &answered);
-    let report = said
-        .into_iter()
-        .chain(diagnosed)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(crate::error::Error::Refused(format!(
-        "the launch's registered checks refused {project}, so no run was started:\n{report}"
-    )))
 }
 
 /// A relative path against the working directory; anything else as it was given.

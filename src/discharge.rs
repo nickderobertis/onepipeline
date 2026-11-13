@@ -234,7 +234,6 @@ mod tests {
                     abandoned: false,
                     asker: None,
                     correlation: correlation.map(|key| key.parse().expect("a correlation")),
-                    declined_ruling: None,
                 })
                 .expect("the surface queues");
         }

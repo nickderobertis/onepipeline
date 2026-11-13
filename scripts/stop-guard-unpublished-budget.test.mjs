@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { inputFiles, sourceFingerprint } from "./stop-guard-unpublished-build.mjs";
-import { hostShaped, readRecord, slowest } from "./stop-guard-unpublished-record.mjs";
+import { readRecord, slowest } from "./stop-guard-unpublished-record.mjs";
 
 const schema = JSON.parse(
   readFileSync(new URL("./stop-guard-unpublished-budget.schema.json", import.meta.url), "utf8"),
@@ -53,30 +53,8 @@ function record() {
       cold_git: scale === 1 ? 40 : null,
     })),
   });
-  const host = {
-    shape: schema["x-host-shape"],
-    class_counts: {
-      acknowledged: 10,
-      "in-flight": 3,
-      "in-part": 1,
-      landed: 8,
-      owed: 108,
-      unknown: 1,
-    },
-    moved: 20,
-    landed: 6,
-    reads: schema["x-host-reads"].map((read, index) => ({
-      read,
-      verdict_sha256: "c".repeat(64),
-      warm: sample(200_000 + index * 1000),
-      cold_us: read === "unpublished-host" ? 4_000_000 : null,
-      phases_ms: { "onevcs-read": 150.5, render: 2.25 },
-      rederived: 20,
-      git: read === "stop-guard-unreadable" ? 0 : 12,
-    })),
-  };
   return {
-    version: 2,
+    version: 1,
     build: {
       run_id: runId,
       binary: schema["x-binary"],
@@ -86,7 +64,6 @@ function record() {
     },
     load_workers: 0,
     workloads: [workload(1), workload(10)],
-    host,
     preparation_ms: 40_000,
     total_ms: 90_000,
     load1: 1.25,
@@ -118,16 +95,6 @@ test("a complete current-gate record is read, and the slowest scenario is the on
   assert.equal(slowest(read, 1, "warm").scenario.scenario, "unreadable");
   assert.equal(slowest(read, 1, "warm").median, 102_004);
   assert.equal(slowest(read, 1, "cold").median, 302_004);
-  assert.equal(hostShaped(read, "unpublished-host").warm.median_us, 200_004);
-  assert.equal(hostShaped(read, "acknowledge").warm.median_us, 201_004);
-  assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-unreadable");
-  assert.equal(hostShaped(read, "stop-guard").warm.median_us, 204_004);
-  // An earlier guard scenario that is the slowest is still the one reported.
-  const guard = (name) => read.host.reads.find((row) => row.read === name);
-  guard("stop-guard-none").warm.median_us = 209_000;
-  assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-none");
-  guard("stop-guard-owed").warm.median_us = 210_000;
-  assert.equal(hostShaped(read, "stop-guard").read, "stop-guard-owed");
   rmSync(dir, { recursive: true });
 });
 
@@ -199,7 +166,7 @@ const refusals = [
   [
     "a foreign version",
     (_dir, doc) => {
-      doc.version = 1;
+      doc.version = 2;
     },
     /foreign telemetry version/,
   ],
@@ -321,97 +288,6 @@ const refusals = [
     },
     /counted no git/,
   ],
-  [
-    "no host-shaped workload",
-    (_dir, doc) => {
-      delete doc.host;
-    },
-    /record.host is missing/,
-  ],
-  [
-    "a smaller host-shaped workload",
-    (_dir, doc) => {
-      doc.host.shape = [20, 371, 41, 2308, 0, 0];
-    },
-    /foreign host-shaped workload/,
-  ],
-  [
-    "a host that was never aged",
-    (_dir, doc) => {
-      doc.host.moved = 0;
-    },
-    /was not aged/,
-  ],
-  [
-    "a host whose aging landed nothing",
-    (_dir, doc) => {
-      doc.host.landed = 0;
-    },
-    /was not aged/,
-  ],
-  [
-    "a host-shaped class declared with no branch",
-    (_dir, doc) => {
-      doc.host.class_counts.unknown = 0;
-    },
-    /declares classes/,
-  ],
-  [
-    "a cold first read that took no time",
-    (_dir, doc) => {
-      doc.host.reads[0].cold_us = 0;
-    },
-    /its cold first read took no time/,
-  ],
-  [
-    "a host-shaped class missing",
-    (_dir, doc) => {
-      delete doc.host.class_counts.landed;
-    },
-    /declares classes/,
-  ],
-  [
-    "a host-shaped read missing",
-    (_dir, doc) => {
-      doc.host.reads.splice(1, 1);
-    },
-    /host-shaped reads are/,
-  ],
-  [
-    "nine host-shaped calls",
-    (_dir, doc) => {
-      doc.host.reads[0].warm.calls_us.pop();
-    },
-    /incomplete host-shaped unpublished-host/,
-  ],
-  [
-    "a host listing with no cold first read",
-    (_dir, doc) => {
-      doc.host.reads[0].cold_us = null;
-    },
-    /only the host listing states its cold first read/,
-  ],
-  [
-    "a cold read beside the acknowledgement",
-    (_dir, doc) => {
-      doc.host.reads[1].cold_us = 1;
-    },
-    /only the host listing states its cold first read/,
-  ],
-  [
-    "a host-shaped read that counted no git",
-    (_dir, doc) => {
-      doc.host.reads[1].git = 0;
-    },
-    /host-shaped acknowledge counted no git/,
-  ],
-  [
-    "a host-shaped read with no verdict",
-    (_dir, doc) => {
-      doc.host.reads[2].verdict_sha256 = "x";
-    },
-    /host-shaped stop-guard-none carries no verdict/,
-  ],
 ];
 
 for (const [name, spoil, expected] of refusals) {
@@ -446,9 +322,6 @@ test("the budget command reports each mode through the SDK, and refuses naming t
     [["--cold"], 0.302004],
     [["--scale", "10"], 0.102004],
     [["--journey-time"], 90],
-    [["--host-shaped", "unpublished-host"], 0.200004],
-    [["--host-shaped", "acknowledge"], 0.201004],
-    [["--host-shaped", "stop-guard"], 0.204004],
   ]) {
     const result = join(dir, "result.json");
     const ran = spawnSync(process.execPath, [command, ...args], {
@@ -458,16 +331,6 @@ test("the budget command reports each mode through the SDK, and refuses naming t
     assert.equal(ran.status, 0, ran.stderr);
     const reported = JSON.parse(readFileSync(result, "utf8"));
     assert.equal(reported.value, value, JSON.stringify(reported));
-    if (args[0] === "--host-shaped") {
-      const detail = JSON.stringify(reported);
-      assert.match(detail, /onevcs-read 0\.150s, render 0\.002s/, detail);
-      assert.match(detail, /20 branch\(es\) re-derived/, detail);
-      assert.equal(
-        /cold first read 4s \(stated, not budgeted\)/.test(detail),
-        args[1] === "unpublished-host",
-        detail,
-      );
-    }
     rmSync(result);
   }
   rmSync(join(dir, schema["x-record"]));
@@ -573,12 +436,7 @@ test("the budget command refuses arguments it does not take, and a result it can
     [
       ["--warm"],
       { ONEBUDGETSPEC_RESULT: join(dir, "r.json") },
-      /expected no arguments, --cold, --scale 10, --journey-time, or --host-shaped/,
-    ],
-    [
-      ["--host-shaped", "everything"],
-      { ONEBUDGETSPEC_RESULT: join(dir, "r.json") },
-      /expected no arguments/,
+      /expected no arguments, --cold, --scale 10, or --journey-time/,
     ],
     [["--scale", "2"], { ONEBUDGETSPEC_RESULT: join(dir, "r.json") }, /expected no arguments/],
     [[], {}, /ONEBUDGETSPEC_RESULT is missing/],

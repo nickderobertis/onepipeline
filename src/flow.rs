@@ -889,7 +889,13 @@ impl Flow {
 
     /// The flow's own channel, under the configuration it was registered with.
     pub(crate) fn channel(&self) -> ChannelState {
-        ChannelState::configured(&self.paths, self.record.bus_config.as_ref())
+        ChannelState::configured(
+            &self.paths,
+            self.record
+                .bus_config
+                .as_ref()
+                .map(RecordedBusConfig::config),
+        )
     }
 
     /// The bus configuration the flow's channel is kept under, where it names
@@ -1444,7 +1450,6 @@ pub(crate) fn surface(
         asker: None,
         workstream: None,
         correlation: None,
-        declined_ruling: None,
     })?;
     crate::verbs::surfaced_of(offer)
 }

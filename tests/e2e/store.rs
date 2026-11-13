@@ -1366,68 +1366,6 @@ fn assert_spaced(passes: &[u64], answers: &[u64], expected: &[u64]) {
     }
 }
 
-/// Each re-read after the first in `passes` held to the read the driver's schedule chose after
-/// the one before it, as `schedules` sampled it from `source-schedule.json` while the run went
-/// on: that schedule chose the wait `expected` names, counted it from no sooner than the
-/// source's last answer to that pass, one of `answers`, and the pass came no sooner than that
-/// read and no later than the loop's own latency beyond it.
-///
-/// [`assert_spaced`]'s bound with what the host spends between the source answering and the
-/// driver taking up its answer taken out of it: the store's own teardown of the read, and the
-/// loop's pickup. The schedule counts its wait from that pickup, which is never before the
-/// answer, so the lower bound is the same; what a busy host stretches is the pickup, which a
-/// gap measured from the answer charged to the loop's latency. Driven where a Windows runner
-/// took ~18 s to take up one answer with nothing else of the run under way.
-fn assert_scheduled(passes: &[u64], answers: &[u64], schedules: &[Value], expected: &[u64]) {
-    assert!(
-        passes.len() > expected.len(),
-        "{} re-reads, where {} waits were due between them: {passes:?}",
-        passes.len(),
-        expected.len()
-    );
-    for (pair, wait) in passes.windows(2).zip(expected) {
-        let answered = answers
-            .iter()
-            .copied()
-            .filter(|at| (pair[0]..pair[1]).contains(at))
-            .max()
-            .unwrap_or_else(|| panic!("the source was asked nothing in the pass at {}", pair[0]));
-        // The read the driver scheduled after this pass: the last it recorded before the next.
-        let chosen = schedules
-            .iter()
-            .rfind(|schedule| {
-                schedule["next_read_ms"]
-                    .as_u64()
-                    .is_some_and(|at| (answered..=pair[1]).contains(&at))
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "no read was scheduled between the answer at {answered} and the re-read at \
-                     {}, where {wait} intervals were due: {schedules:?}",
-                    pair[1]
-                )
-            });
-        let at = chosen["next_read_ms"].as_u64().expect("a next read");
-        assert_eq!(
-            chosen["wait_seconds"],
-            json!(wait),
-            "the schedule chose {chosen} after the answer at {answered}, where {wait} intervals \
-             were due"
-        );
-        assert!(
-            at >= answered + wait * 1_000,
-            "the schedule chose a read at {at}, sooner than {wait} intervals after the answer at \
-             {answered}"
-        );
-        assert!(
-            (at..at + 3_000).contains(&pair[1]),
-            "the re-read at {} was not the read scheduled at {at}, where {wait} intervals were \
-             due: {passes:?}",
-            pair[1]
-        );
-    }
-}
-
 /// A source that answers rate limited naming no reset is read again on a backoff: one
 /// interval after the driver takes the hold up, then re-reads 1, 2, 4, 8 and 16 intervals
 /// apart, then 30 and 30 — the cap — and never more often; each pass asks it once however
@@ -1783,19 +1721,11 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         );
     }
     let hour_end = launched_at + 60_000;
-    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset. What the
-    // driver records of the source's next read is sampled meanwhile, each change once.
-    let mut schedules: Vec<Value> = Vec::new();
+    // The sixth pass is the first after the hour: 15 + 16 intervals after the reset.
     world.until_within(
         Duration::from_secs(90),
         "the first re-read after the hour",
-        |world| {
-            let schedule = source_schedule(world, name, "vault");
-            if !schedule.is_null() && schedules.last() != Some(&schedule) {
-                schedules.push(schedule);
-            }
-            passes_over(world, name, "vault").len() >= 6
-        },
+        |world| passes_over(world, name, "vault").len() >= 6,
     );
     let passes = passes_over(&world, name, "vault");
     let inside: Vec<u64> = passes
@@ -1820,12 +1750,11 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
         passes[0]
     );
     // The waits the schedule chose after each pass: the backoff from one interval after the
-    // reset's own re-read, which `assert_scheduled` holds each gap to.
+    // reset's own re-read, which `assert_spaced` holds each gap to.
     let waits = [1, 2, 4, 8, 16];
-    assert_scheduled(
+    assert_spaced(
         &passes[..=inside.len()],
         &item_reads(&world, "vault"),
-        &schedules,
         &waits[..inside.len()],
     );
     let operations: Vec<Value> = rereads_of(&world, name, "vault")
@@ -3229,10 +3158,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                         "a-projection:board",
                     )])
                     .expect("one item"),
-                    scope: onetaskgraph_core::CopyScope::Projects {
-                        tasks: false,
-                        documents: false,
-                    },
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination: onetaskgraph_plugin_api::SourceName::new("strict")
                         .expect("a source name"),
                     status_policy: onetaskgraph_core::StatusPolicy::Source,
@@ -4886,10 +4812,7 @@ fn a_live_add_leaves_the_edited_board_project_untouched() {
                         &format!("author:{}", project_id(run)),
                     )])
                     .unwrap(),
-                    scope: onetaskgraph_core::CopyScope::Projects {
-                        tasks: true,
-                        documents: false,
-                    },
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                     destination: onetaskgraph_plugin_api::SourceName::new(
                         crate::harness::STORE_SOURCE,
                     )
@@ -7822,7 +7745,7 @@ fn a_withdrawn_note_written_alike_to_another_leaves_the_other_in_carry_order() {
         let notes = task
             .split_once("## Planner context")
             .and_then(|(_, context)| context.trim().split_once("\n\n"))
-            .map(|(_, notes)| unattributed(notes.trim()))
+            .map(|(_, notes)| notes.trim().to_owned())
             .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
         assert_eq!(
             notes, expected,
@@ -7891,31 +7814,6 @@ fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_afte
     world.until_store("the withdrawal to reach the board", |world| {
         later_context(world) == Some(json!(expected))
     });
-    // The board holds each ruling's own words, never the attribution this run
-    // composes it under — the carried notes above, and an amendment alike — so a
-    // run launched from the board later inherits no reference of this one's.
-    let ruling = "Keep the loader's public signature.";
-    world
-        .run_with_stdin(
-            &["reply", name],
-            &json!({"version": 4, "commands": [{"op": "amend", "id": "later", "text": ruling}]})
-                .to_string(),
-        )
-        .exited(0);
-    world.until_store("the amendment to reach the board", |world| {
-        world
-            .store_tasks(&project)
-            .into_iter()
-            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
-            .is_some_and(|task| task["item"]["metadata"]["onepipeline.amendment"] == json!(ruling))
-    });
-    assert!(
-        !world
-            .store_tasks(&project)
-            .iter()
-            .any(|task| task.to_string().contains("Ruling from the")),
-        "an attribution reached the board"
-    );
 
     // Replayed: a driver taking the run over folds the journal, withdrawal and all,
     // and projects what it folded.
@@ -7951,32 +7849,12 @@ fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_afte
     let notes = task
         .split_once("## Planner context")
         .and_then(|(_, context)| context.trim().split_once("\n\n"))
-        .map(|(_, notes)| unattributed(notes.trim()))
+        .map(|(_, notes)| notes.trim().to_owned())
         .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
     assert_eq!(
         notes, expected,
         "the replayed run did not compose later with B then A"
     );
-}
-
-/// The carried notes of a planner context, each entry's attribution line taken
-/// off once it is held to be the manager's, declinable by a reference: what the
-/// notes themselves say, in the order they were composed.
-fn unattributed(notes: &str) -> String {
-    notes
-        .split("\n\n")
-        .map(|entry| {
-            let (attribution, note) = entry
-                .split_once('\n')
-                .unwrap_or_else(|| panic!("a carried note with no attribution: {entry:?}"));
-            assert!(
-                attribution.starts_with("Ruling from the manager (ruling reference `c"),
-                "a carried note is not under the manager's attribution: {entry:?}"
-            );
-            note
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 /// No assertion in these journeys is a bare presence assertion over metadata the writer

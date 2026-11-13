@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, plan_of, shell_path, World, REFUSED, STORE_SOURCE};
+use crate::harness::{agent, plan_of, World, REFUSED, STORE_SOURCE};
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys prove
 // `plan check`'s own resolution of each node's and step's effective graph in
@@ -95,9 +95,78 @@ fn check_script(world: &World, name: &str, body: &str) -> PathBuf {
 
 /// One check written into `directory` — which is the world's own root for every
 /// journey but the one that registers a check by a path relative to the
-/// directory the verb runs in. See [`crate::harness::posix_script`].
+/// directory the verb runs in.
+#[cfg(unix)]
 fn check_in(directory: &Path, name: &str, body: &str) -> PathBuf {
-    crate::harness::posix_script(directory, name, body)
+    let path = directory.join(format!("{name}.sh"));
+    onepipeline_testfakes::executable(&path, format!("#!/bin/sh\n{body}\n"));
+    path
+}
+
+/// One check written into `directory`, in this platform's spelling.
+///
+/// Windows starts no `#!` script, so what the `--check` flag names here is a
+/// batch file and the POSIX body sits beside it: the batch hands it to the
+/// `bash` git for Windows installs, which is the same shell every `just` recipe
+/// on this platform already runs through, and the check's stdin, stdout, stderr
+/// and exit status all reach it through `cmd` unchanged. One body per check
+/// rather than two, so a journey states what its check does once and neither
+/// spelling can drift from the other.
+///
+/// Written with **CRLF**, for the reason `harness::write_hook_script` records:
+/// `cmd.exe` seeks by byte offset between commands and the arithmetic assumes
+/// two bytes end a line, so an LF batch file is executed from the middles of
+/// words.
+#[cfg(windows)]
+fn check_in(directory: &Path, name: &str, body: &str) -> PathBuf {
+    let posix = directory.join(format!("{name}.sh"));
+    std::fs::write(&posix, format!("#!/bin/sh\n{body}\n")).expect("the check is written");
+    let path = directory.join(format!("{name}.bat"));
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\n\"{}\" \"{}\"\r\nexit /b %ERRORLEVEL%\r\n",
+            bash().display(),
+            shell_path(&posix)
+        ),
+    )
+    .expect("the check is written");
+    path
+}
+
+/// The `bash` this platform's checks are read by, as an absolute path.
+///
+/// Resolved here rather than left as a bare name in the batch file, so a host
+/// without one fails naming what was looked for instead of leaving every check
+/// reported as one that could not be run.
+#[cfg(windows)]
+fn bash() -> PathBuf {
+    let on_path = std::env::var_os("PATH").unwrap_or_default();
+    let installed = PathBuf::from(
+        std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into()),
+    )
+    .join(r"Git\bin");
+    std::env::split_paths(&on_path)
+        .chain([installed])
+        .map(|dir| dir.join("bash.exe"))
+        .find(|candidate| candidate.is_file())
+        .expect("git for windows installs the bash these checks are written in")
+}
+
+/// A path as the shell that reads these bodies spells it.
+///
+/// The bodies are POSIX on both platforms, and that shell reads `\` as an escape
+/// rather than as a separator, so a native path reaches it spelled with the one
+/// separator both sides accept.
+#[cfg(windows)]
+fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// A path as the shell that reads these bodies spells it.
+#[cfg(not(windows))]
+fn shell_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// A check that accepts, and records what it was handed.
@@ -895,294 +964,3 @@ fn a_refusal_beside_an_unrunnable_check_exits_two_and_reports_both() {
     assert_eq!(could_not[0]["check"], json!(as_str(&breaks)), "{answered}");
     assert_eq!(could_not[0]["exit_code"], json!(4), "{answered}");
 }
-
-/// A check a launch registers: it counts each time it is run, keeps the document it was
-/// handed, and refuses `approve` while a `refuse` file sits beside it.
-fn launch_check(world: &World, name: &str) -> PathBuf {
-    let base = world.root.join(name);
-    check_script(
-        world,
-        name,
-        &format!(
-            "cat > '{base}.stdin'\necho run >> '{base}.count'\nif [ -f '{base}.refuse' ]; then \
-             printf '%s' '{{\"refusals\": [{{\"node\": \"approve\", \"field\": null, \"reason\": \
-             \"{name} refuses the launch\"}}]}}'\nelse printf '{{\"refusals\": []}}'\nfi",
-            base = shell_path(&base)
-        ),
-    )
-}
-
-/// How many times the launch check `name` has been run.
-fn runs_of(world: &World, name: &str) -> usize {
-    std::fs::read_to_string(world.root.join(format!("{name}.count")))
-        .map(|count| count.lines().count())
-        .unwrap_or(0)
-}
-
-/// Every run directory under the world's runs root.
-fn run_dirs(world: &World) -> Vec<PathBuf> {
-    std::fs::read_dir(&world.runs)
-        .map(|entries| {
-            entries
-                .filter_map(std::result::Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.join("launch.json").is_file())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the launch-check journeys
-// run `start` and `adopt` themselves — the config read in `filter`, the checks offered by
-// `plancheck` from inside `driver`'s launch, the adoption that runs none — so no project edged
-// narrower than the crate could honestly run them; the same grounds the block at this file's
-// head gives for `plan check` itself.
-/// A launch config naming two checks and `start --check` naming a third: each is handed the
-/// loaded plan exactly as `plan check --check` hands it, one refusal refuses the launch with
-/// that check's report and mints no run, all three accepting starts it, and `adopt` runs none.
-#[test]
-fn launch_checks_refuse_a_launch_before_any_run_exists_and_adopt_runs_none_of_them() {
-    let world = World::new("launch-checks");
-    let project = world.plan(
-        "guarded",
-        &plan_of("guarded", vec![crate::harness::human("approve", &[])]),
-    );
-    let first = launch_check(&world, "first");
-    let second = launch_check(&world, "second");
-    let third = launch_check(&world, "third");
-    let config = world.root.join("launch-checks.json");
-    std::fs::write(
-        &config,
-        json!({
-            "schema_version": 14,
-            "checks": [[as_str(&first)], [as_str(&second)]],
-        })
-        .to_string(),
-    )
-    .expect("the launch config is written");
-    let launch = |world: &World| {
-        world.run(&[
-            "start",
-            &project,
-            "--detach",
-            "--launch-config",
-            &as_str(&config),
-            "--check",
-            &as_str(&third),
-        ])
-    };
-
-    let handed = |name: &str| {
-        std::fs::read(world.root.join(format!("{name}.stdin"))).expect("the check kept its stdin")
-    };
-    // What `plan check --check` hands a check, taken before anything is launched.
-    world
-        .run(&["plan", "check", &project, "--check", &as_str(&third)])
-        .exited(0);
-    let checked = handed("third");
-
-    // The second refuses: the launch is refused with its report, every check still ran in
-    // order, and nothing of a run exists.
-    std::fs::write(world.root.join("second.refuse"), "").expect("the refusal is armed");
-    let refused = launch(&world);
-    refused
-        .exited(REFUSED)
-        .err_has("second refuses the launch")
-        .err_has(&format!(
-            "{}: node 'approve': second refuses the launch",
-            as_str(&second)
-        ))
-        .err_lacks("first refuses");
-    assert_eq!(
-        (
-            runs_of(&world, "first"),
-            runs_of(&world, "second"),
-            runs_of(&world, "third")
-        ),
-        (1, 1, 2),
-        "each registered check runs once, in order, refusal or not"
-    );
-    assert_eq!(
-        handed("third"),
-        checked,
-        "a refused launch handed another document"
-    );
-    assert!(
-        run_dirs(&world).is_empty(),
-        "a refused launch created a run directory: {:?}",
-        run_dirs(&world)
-    );
-
-    // All three accept: the run starts, and each was handed the document `plan check
-    // --check` hands a check, byte for byte.
-    std::fs::remove_file(world.root.join("second.refuse")).expect("the refusal is disarmed");
-    let started = launch(&world);
-    started.exited(0);
-    let run = started.json()["run_id"]
-        .as_str()
-        .expect("a detached launch names its run")
-        .to_owned();
-    assert_eq!(
-        (
-            runs_of(&world, "first"),
-            runs_of(&world, "second"),
-            runs_of(&world, "third")
-        ),
-        (2, 2, 3)
-    );
-    let launched = handed("third");
-    assert_eq!(
-        handed("first"),
-        launched,
-        "two checks of one launch were handed two documents"
-    );
-    assert_eq!(
-        handed("second"),
-        launched,
-        "two checks of one launch were handed two documents"
-    );
-    assert_eq!(
-        launched, checked,
-        "`start` handed its checks a document other than the one `plan check` hands"
-    );
-    let document: Value = serde_json::from_slice(&launched).expect("the document is JSON");
-    assert_eq!(document["tasks"][0]["id"], "approve", "{document}");
-    assert_eq!(document["tasks"][0]["kind"], "human", "{document}");
-
-    // An adoption replays the run and runs none of them.
-    world.until("the driver to pause on the approval", |world| {
-        world.run(&["status", &run]).stdout.contains("PAUSED")
-    });
-    world.run(&["adopt", &run]).exited(0);
-    assert_eq!(
-        (
-            runs_of(&world, "first"),
-            runs_of(&world, "second"),
-            runs_of(&world, "third")
-        ),
-        (2, 2, 3),
-        "`adopt` ran a launch check"
-    );
-    world.run(&["stop", &run]);
-}
-
-/// A launch config declaring the schema before `checks` existed is refused by that key's
-/// name, and one naming a check with no program is refused by it too — each before a run.
-#[test]
-fn a_launch_check_key_below_schema_14_or_naming_no_program_is_refused_by_name() {
-    let world = World::new("launch-checks-refused");
-    let project = world.plan(
-        "keyed",
-        &plan_of("keyed", vec![crate::harness::human("approve", &[])]),
-    );
-    for (name, config) in [
-        (
-            "early",
-            json!({"schema_version": 13, "checks": [["./check.sh"]]}),
-        ),
-        ("emptyearly", json!({"schema_version": 13, "checks": []})),
-        ("blank", json!({"schema_version": 14, "checks": [[" "]]})),
-        ("empty", json!({"schema_version": 14, "checks": [[]]})),
-    ] {
-        let path = world.root.join(format!("{name}.json"));
-        std::fs::write(&path, config.to_string()).expect("the launch config is written");
-        world
-            .run(&[
-                "start",
-                &project,
-                "--detach",
-                "--launch-config",
-                &as_str(&path),
-            ])
-            .exited(REFUSED)
-            .err_has("`checks`");
-    }
-    assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
-}
-
-/// Launch checks run in the order the config lists them and then the flags, a config argv is
-/// spawned with its arguments, and a check that could not be run — a path naming nothing, or
-/// an answer this build cannot read — refuses the launch as `plan check` reports it, before
-/// any run exists.
-#[test]
-fn launch_checks_run_in_order_with_their_arguments_and_an_unrunnable_one_refuses() {
-    let world = World::new("launch-checks-order");
-    let project = world.plan(
-        "ordered",
-        &plan_of("ordered", vec![crate::harness::human("approve", &[])]),
-    );
-    let order = shell_path(&world.root.join("order"));
-    let named = |name: &str| {
-        check_script(
-            &world,
-            name,
-            &format!(
-                "cat > /dev/null\necho \"{name} $*\" >> '{order}'\nprintf '{{\"refusals\": []}}'"
-            ),
-        )
-    };
-    let first = named("first");
-    let second = named("second");
-    let third = named("third");
-    let config = world.root.join("ordered.json");
-    let launch = |checks: Value, extra: &[&str]| {
-        std::fs::write(
-            &config,
-            json!({"schema_version": 14, "checks": checks}).to_string(),
-        )
-        .expect("the launch config is written");
-        let mut args = vec![
-            "start".to_owned(),
-            project.clone(),
-            "--detach".to_owned(),
-            "--launch-config".to_owned(),
-            as_str(&config),
-        ];
-        args.extend(extra.iter().map(|arg| (*arg).to_owned()));
-        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        world.run(&borrowed)
-    };
-
-    // A check that names nothing to run, and one whose answer is not one: each refuses the
-    // launch as a check that could not be run.
-    let malformed = check_script(&world, "malformed", "cat > /dev/null\necho 'not an answer'");
-    for (unrunnable, said) in [
-        (
-            as_str(&world.root.join("no-such-check")),
-            "could not be run",
-        ),
-        (as_str(&malformed), "cannot read"),
-    ] {
-        launch(json!([[unrunnable]]), &[])
-            .exited(REFUSED)
-            .err_has(&format!("{unrunnable}: could not be run"))
-            .err_has(said);
-        assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
-    }
-
-    // A check given arguments is named by its whole argv, refusing as anywhere else.
-    let refuser = check_script(
-        &world,
-        "refuser",
-        "cat > /dev/null\nprintf '%s' '{\"refusals\": [{\"node\": null, \"field\": null, \
-         \"reason\": \"over budget\"}]}'",
-    );
-    launch(json!([[as_str(&refuser), "--budget", "4h"]]), &[])
-        .exited(REFUSED)
-        .err_has(&format!("{} --budget 4h: over budget", as_str(&refuser)));
-    assert!(run_dirs(&world).is_empty(), "{:?}", run_dirs(&world));
-
-    launch(
-        json!([[as_str(&first), "--strict", "fast"], [as_str(&second)]]),
-        &["--check", &as_str(&third)],
-    )
-    .exited(0);
-    let ran = std::fs::read_to_string(world.root.join("order")).expect("the checks ran");
-    assert_eq!(
-        ran.lines().map(str::trim_end).collect::<Vec<_>>(),
-        ["first --strict fast", "second", "third"],
-        "the checks did not run in order, with their arguments"
-    );
-    world.run(&["stop", "ordered"]);
-}
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

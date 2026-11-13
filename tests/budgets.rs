@@ -363,14 +363,14 @@ fn host_view_record() -> serde_json::Value {
     })
 }
 
-/// The reporter reports only what the measurement recorded: the median steady single read as
-/// the value, and the rest — the slowest read among it — as detail. A record that is missing, that
+/// The reporter reports only what the measurement recorded: the slowest steady single read
+/// as the value, since each is judged, and the rest as detail. A record that is missing, that
 /// the measurement did not write, that names no binary or no step that built it, or that
 /// fails the strip guard is refused,
 /// and so is a run outside the checker — never a value nobody measured.
 #[cfg(unix)]
 #[test]
-fn the_host_view_reporter_reports_the_median_steady_read_of_the_record_alone() {
+fn the_host_view_reporter_reports_the_slowest_steady_read_of_the_record_alone() {
     let dir = scratch("host-view-report");
     let record = dir.join("target/budget-records/host-view.json");
     std::fs::create_dir_all(record.parent().expect("a directory")).expect("the record's directory");
@@ -494,8 +494,8 @@ fn the_host_view_reporter_reports_the_median_steady_read_of_the_record_alone() {
     let result: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&result).expect("a result")).expect("JSON");
     assert_eq!(
-        result["value"], 13.0,
-        "the median single read is the value, not the slowest: {result}"
+        result["value"], 31.0,
+        "the slowest single read is the value: {result}"
     );
     let detail = result["detail"].as_str().expect("a detail");
 
@@ -522,8 +522,7 @@ fn the_host_view_reporter_reports_the_median_steady_read_of_the_record_alone() {
     );
     std::fs::write(&record, host_view_record().to_string()).expect("a record");
     for expected in [
-        "median of 5 steady single reads of",
-        "12.5, 31.0, 9.5, 14.0, 13.0 ms; slowest 31.0 ms (reported, not the budget)",
+        "12.5, 31.0, 9.5, 14.0, 13.0 ms; median 13.0 ms (reported, not the budget)",
         "reads of /usr/local/bin/onepipeline (built by ci.yml install job: cargo install \
          --path . --locked)",
         "event registry 2.0 ms",
@@ -541,69 +540,6 @@ fn the_host_view_reporter_reports_the_median_steady_read_of_the_record_alone() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// `host-view-time` as `budgets.yaml` registers it, checked by the linked checker over a record
-/// holding `reads`: the verdict the budget gives those five steady reads.
-#[cfg(unix)]
-fn host_view_verdict(name: &str, reads: [f64; 5]) -> (Verdict, Option<f64>) {
-    let dir = scratch(name);
-    std::fs::copy(root().join("budgets.yaml"), dir.join("budgets.yaml")).expect("the budgets file");
-    // The committed reporter, beside this checkout's locked packages, which it imports its SDK
-    // from. A copy rather than a link: the reporter runs only when invoked by its own path.
-    std::fs::create_dir_all(dir.join("scripts")).expect("a scripts directory");
-    std::fs::copy(
-        root().join("scripts/host-view-budget.mjs"),
-        dir.join("scripts/host-view-budget.mjs"),
-    )
-    .expect("the reporter is copied");
-    std::os::unix::fs::symlink(root().join("node_modules"), dir.join("node_modules"))
-        .expect("the locked packages are linked");
-    let record = dir.join("target/budget-records/host-view.json");
-    std::fs::create_dir_all(record.parent().expect("a directory")).expect("the record's directory");
-    let mut held = host_view_record();
-    held["steady"]["reads_ms"] = serde_json::json!(reads);
-    std::fs::write(&record, held.to_string()).expect("a record");
-    let loaded = onebudgetspec_core::load(&[dir.join("budgets.yaml")], false)
-        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
-    let report = loaded
-        .select(&Selection {
-            ids: vec!["host-view-time".to_owned()],
-            ..Selection::default()
-        })
-        .expect("host-view-time is selected")
-        .check();
-    let [result] = report.results.as_slice() else {
-        panic!("one budget, one result: {:?}", report.results);
-    };
-    assert_eq!(result.error, None, "the checker could not read {reads:?}");
-    let _ = std::fs::remove_dir_all(&dir);
-    (result.verdict, result.actual)
-}
-
-/// How the budget aggregates five reads, over records whose reads are written here rather
-/// than measured: test-linux run 43002330270's five reads, one held up by the job's other
-/// targets at load 8.4 on 4 cores, are within it, while five reads over 100 ms, or three over
-/// with two fast, are over it. That a measured read of a genuinely slower binary fails it is
-/// `tests/e2e/host_view.rs`'s `the_budget_fails_a_measured_host_read_slower_than_its_threshold`.
-#[cfg(unix)]
-#[test]
-fn the_host_view_budget_aggregates_reads_by_their_median_not_their_slowest() {
-    assert_eq!(
-        host_view_verdict("host-view-loaded", [120.8, 77.5, 70.4, 75.4, 85.1]),
-        (Verdict::Within, Some(77.5)),
-        "one read the runner's load delayed failed the budget"
-    );
-    assert_eq!(
-        host_view_verdict("host-view-all-over", [101.2, 104.9, 102.3, 140.0, 103.1]),
-        (Verdict::Over, Some(103.1)),
-        "five reads over the threshold passed"
-    );
-    assert_eq!(
-        host_view_verdict("host-view-most-over", [21.0, 104.0, 22.0, 108.0, 101.0]),
-        (Verdict::Over, Some(101.0)),
-        "three of five reads over the threshold passed"
-    );
 }
 
 /// The budget's measurement and the journeys that hold the view correct read one root, from

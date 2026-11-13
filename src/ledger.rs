@@ -594,18 +594,10 @@ fn unattributed_launcher() -> String {
 /// What the record said is what it keeps saying: [`Serialize`] writes the
 /// recorded document byte for byte, so a record `adopt` rewrites for its own
 /// fields carries its bus configuration exactly as it was launched.
-///
-/// A run launched before `onemessagebus` 0.11 removed validators may have named
-/// some under `validators:`. That key is left out of the runtime configuration,
-/// as a missing codec field is filled in, so the run stays readable; what it
-/// declared is remembered, because an offer those validators would have judged
-/// cannot be judged by this engine and is refused (see
-/// [`RecordedBusConfig::launched_with_validators`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedBusConfig {
     recorded: serde_json::Value,
     config: onemessagebus::Config,
-    launched_with_validators: bool,
 }
 
 impl RecordedBusConfig {
@@ -614,23 +606,13 @@ impl RecordedBusConfig {
     pub fn config(&self) -> &onemessagebus::Config {
         &self.config
     }
-
-    /// Whether the recorded document declares validators: a run launched under
-    /// a bus that judged its offers with them, which this engine no longer runs.
-    pub(crate) fn launched_with_validators(&self) -> bool {
-        self.launched_with_validators
-    }
 }
 
 impl From<onemessagebus::Config> for RecordedBusConfig {
     fn from(config: onemessagebus::Config) -> Self {
         let recorded = serde_json::to_value(&config)
             .unwrap_or_else(|_| unreachable!("a bus configuration serializes"));
-        Self {
-            recorded,
-            config,
-            launched_with_validators: false,
-        }
+        Self { recorded, config }
     }
 }
 
@@ -649,14 +631,6 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
     ) -> std::result::Result<Self, D::Error> {
         let recorded = serde_json::Value::deserialize(deserializer)?;
         let mut completed = recorded.clone();
-        // The key the bus before 0.11 judged offers by: kept in the record, left
-        // out of the configuration this build runs, and remembered whenever it is
-        // there. Every bus that had the key omitted it when it named nothing, so a
-        // record carrying it was launched with validators, whatever it holds.
-        let launched_with_validators = completed
-            .as_object_mut()
-            .and_then(|fields| fields.remove("validators"))
-            .is_some();
         if let Some(codecs) = completed
             .get_mut("codecs")
             .and_then(serde_json::Value::as_object_mut)
@@ -671,11 +645,7 @@ impl<'de> Deserialize<'de> for RecordedBusConfig {
             }
         }
         let config = serde_json::from_value(completed).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            recorded,
-            config,
-            launched_with_validators,
-        })
+        Ok(Self { recorded, config })
     }
 }
 
@@ -1111,16 +1081,6 @@ pub struct LaunchRecord {
     /// field existed reads as. Omitted when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_rendered: bool,
-    /// The hook every node a live edit introduces or changes is offered to, when
-    /// the launch named one.
-    ///
-    /// **Resolved once, at the launch**, out of `--plan-edit-hook` and the launch
-    /// config's `plan_edit_hook` in that order, and replayed by every driver that
-    /// adopts the run — `adopt` takes none of its own. Absent is what a record
-    /// written before this field existed reads as, which is a run whose edits
-    /// are offered to no hook. Omitted when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_edit_hook: Option<crate::filter::PlanEditHook>,
     /// The run's oneharness pointer file — every harness run under every
     /// launch this run starts appends one line to it saying where its session
     /// went — absolute, as the engine names it to each launch.
@@ -3815,7 +3775,6 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
-            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -4753,7 +4712,6 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
-            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -4804,7 +4762,6 @@ mod tests {
             branch_template: String::new(),
             template_root: String::new(),
             require_rendered: false,
-            plan_edit_hook: None,
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
@@ -5849,7 +5806,7 @@ mod tests {
         assert_eq!(codec.select, "");
         assert!(codec.frames.is_empty());
         assert_eq!(codec.reply_window_seconds.map(NonZeroU64::get), Some(3000));
-        assert!(bus.launched_with_validators());
+        assert_eq!(bus.config().validators.len(), 1);
         assert_eq!(
             serde_json::to_value(&record).expect("the record serializes")["bus_config"],
             recorded["bus_config"],
@@ -5861,41 +5818,6 @@ mod tests {
             serde_json::to_value(&launched).expect("it serializes"),
             serde_json::to_value(bus.config()).expect("it serializes")
         );
-    }
-
-    /// A record whose bus configuration carries `validators` was launched with
-    /// them whatever the key holds, and is written back holding exactly that; one
-    /// without the key was not.
-    #[test]
-    fn a_recorded_validators_key_marks_the_run_launched_with_them_whatever_it_holds() {
-        for declared in [
-            serde_json::json!([]),
-            serde_json::Value::Null,
-            serde_json::json!("not a list"),
-        ] {
-            let mut recorded: serde_json::Value =
-                serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
-            recorded["bus_config"]["validators"] = declared.clone();
-            let record: LaunchRecord =
-                serde_json::from_value(recorded.clone()).expect("the record is read");
-            let bus = record.bus_config.as_ref().expect("a bus config");
-            assert!(bus.launched_with_validators(), "{declared}");
-            assert_eq!(
-                serde_json::to_value(&record).expect("it serializes")["bus_config"],
-                recorded["bus_config"]
-            );
-        }
-        let mut recorded: serde_json::Value =
-            serde_json::from_str(OLDER_RECORD).expect("the older record is JSON");
-        recorded["bus_config"]
-            .as_object_mut()
-            .expect("a bus config object")
-            .remove("validators");
-        let record: LaunchRecord = serde_json::from_value(recorded).expect("the record is read");
-        assert!(!record
-            .bus_config
-            .expect("a bus config")
-            .launched_with_validators());
     }
 
     /// A record whose bus configuration is not one at all is still refused, and

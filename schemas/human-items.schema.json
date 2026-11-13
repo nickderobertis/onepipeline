@@ -69,13 +69,6 @@
           "reopen": {
             "description": "Whether it can be reopened.",
             "$ref": "#/$defs/HumanItemReopen"
-          },
-          "history": {
-            "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`. A live\nitem's always holds its raise; omitted only where it is empty, as a sample\nbundle written before the field existed holds it.",
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/HumanItemHistoryEntry"
-            }
           }
         },
         "additionalProperties": false,
@@ -621,10 +614,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -633,21 +622,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -793,87 +767,6 @@
                 }
               }
             }
-          }
-        ]
-      },
-      "HumanItemHistoryEntry": {
-        "description": "One event of an item's history, as [`HumanItemDetail::history`] lists it.",
-        "type": "object",
-        "properties": {
-          "action": {
-            "description": "What the event did.",
-            "$ref": "#/$defs/HumanItemEventAction"
-          },
-          "at": {
-            "description": "When it was recorded, as RFC 3339.",
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          },
-          "actor": {
-            "description": "Who took it: the resolver, the actor a reopen or a note names, the asker's\nsession for a raise, and `engine` for an auto-resolution.",
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          },
-          "on_behalf_of": {
-            "description": "The human a manager acted for, when one did.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provenance": {
-            "description": "Whose words it was. A raise is its asker's own and an auto-resolution\nthe engine's, both read as `manager`, as is every event of schema\nversion 1.",
-            "$ref": "#/$defs/Provenance"
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "action",
-          "at",
-          "actor",
-          "on_behalf_of",
-          "provenance"
-        ]
-      },
-      "HumanItemEventAction": {
-        "description": "The closed action ids transported in human-item event payloads.",
-        "oneOf": [
-          {
-            "description": "human-item-raised",
-            "type": "string",
-            "const": "human-item-raised"
-          },
-          {
-            "description": "human-item-answered",
-            "type": "string",
-            "const": "human-item-answered"
-          },
-          {
-            "description": "human-item-completed",
-            "type": "string",
-            "const": "human-item-completed"
-          },
-          {
-            "description": "human-item-dismissed",
-            "type": "string",
-            "const": "human-item-dismissed"
-          },
-          {
-            "description": "human-item-auto-resolved",
-            "type": "string",
-            "const": "human-item-auto-resolved"
-          },
-          {
-            "description": "human-item-reopened",
-            "type": "string",
-            "const": "human-item-reopened"
-          },
-          {
-            "description": "human-item-noted",
-            "type": "string",
-            "const": "human-item-noted"
           }
         ]
       },
@@ -1483,10 +1376,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -1495,21 +1384,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -1982,10 +1856,6 @@
               "null"
             ]
           },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
-          },
           "action": {
             "type": "string",
             "const": "answer"
@@ -2023,10 +1893,6 @@
               "null"
             ]
           },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
-          },
           "action": {
             "type": "string",
             "const": "answer-batch"
@@ -2058,10 +1924,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
           },
           "action": {
             "type": "string",
@@ -2102,10 +1964,6 @@
               "null"
             ]
           },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
-          },
           "action": {
             "type": "string",
             "const": "dismiss"
@@ -2137,10 +1995,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
           },
           "action": {
             "type": "string",
@@ -2179,10 +2033,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words the action is: `manager`, the default, or `user`.",
-            "$ref": "#/$defs/Provenance"
           },
           "action": {
             "type": "string",
@@ -2368,21 +2218,6 @@
         "required": [
           "board_copy",
           "key"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemBatchAnswer": {
@@ -3098,10 +2933,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -3110,21 +2941,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -3299,13 +3115,6 @@
       "reopen": {
         "description": "Whether it can be reopened.",
         "$ref": "#/$defs/HumanItemReopen"
-      },
-      "history": {
-        "description": "Every event the journal recorded for this item, oldest first: who took\neach action, when, and whose words it was. The engine's own reading of\nits journal; a reader never derives it again from `events.ndjson`. A live\nitem's always holds its raise; omitted only where it is empty, as a sample\nbundle written before the field existed holds it.",
-        "type": "array",
-        "items": {
-          "$ref": "#/$defs/HumanItemHistoryEntry"
-        }
       }
     },
     "additionalProperties": false,
@@ -3851,10 +3660,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -3863,21 +3668,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -4023,87 +3813,6 @@
                 }
               }
             }
-          }
-        ]
-      },
-      "HumanItemHistoryEntry": {
-        "description": "One event of an item's history, as [`HumanItemDetail::history`] lists it.",
-        "type": "object",
-        "properties": {
-          "action": {
-            "description": "What the event did.",
-            "$ref": "#/$defs/HumanItemEventAction"
-          },
-          "at": {
-            "description": "When it was recorded, as RFC 3339.",
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          },
-          "actor": {
-            "description": "Who took it: the resolver, the actor a reopen or a note names, the asker's\nsession for a raise, and `engine` for an auto-resolution.",
-            "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
-          },
-          "on_behalf_of": {
-            "description": "The human a manager acted for, when one did.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provenance": {
-            "description": "Whose words it was. A raise is its asker's own and an auto-resolution\nthe engine's, both read as `manager`, as is every event of schema\nversion 1.",
-            "$ref": "#/$defs/Provenance"
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "action",
-          "at",
-          "actor",
-          "on_behalf_of",
-          "provenance"
-        ]
-      },
-      "HumanItemEventAction": {
-        "description": "The closed action ids transported in human-item event payloads.",
-        "oneOf": [
-          {
-            "description": "human-item-raised",
-            "type": "string",
-            "const": "human-item-raised"
-          },
-          {
-            "description": "human-item-answered",
-            "type": "string",
-            "const": "human-item-answered"
-          },
-          {
-            "description": "human-item-completed",
-            "type": "string",
-            "const": "human-item-completed"
-          },
-          {
-            "description": "human-item-dismissed",
-            "type": "string",
-            "const": "human-item-dismissed"
-          },
-          {
-            "description": "human-item-auto-resolved",
-            "type": "string",
-            "const": "human-item-auto-resolved"
-          },
-          {
-            "description": "human-item-reopened",
-            "type": "string",
-            "const": "human-item-reopened"
-          },
-          {
-            "description": "human-item-noted",
-            "type": "string",
-            "const": "human-item-noted"
           }
         ]
       }
@@ -4689,10 +4398,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -4701,21 +4406,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -5478,10 +5168,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -5490,21 +5176,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -5773,15 +5444,15 @@
   "HumanItemEventPayload": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "HumanItemEventPayload",
-    "description": "The payload transported by a generic bus envelope: written at\n[`EVENT_SCHEMA_VERSION`], and read at version 1 too, whose every action reads\nas the manager's.",
+    "description": "Version-one payload transported by a generic bus envelope.",
     "type": "object",
     "properties": {
       "schema_version": {
-        "description": "Schema version: 2, or 1 for an event written before provenance existed.",
+        "description": "Schema version.",
         "type": "integer",
         "format": "uint32",
         "minimum": 1,
-        "maximum": 2
+        "maximum": 1
       },
       "item_id": {
         "description": "Item id.",
@@ -6641,10 +6312,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,
@@ -6653,21 +6320,6 @@
           "on_behalf_of",
           "text",
           "reason"
-        ]
-      },
-      "Provenance": {
-        "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`.",
-        "oneOf": [
-          {
-            "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as.",
-            "type": "string",
-            "const": "manager"
-          },
-          {
-            "description": "The user's words, relayed by the manager: binding.",
-            "type": "string",
-            "const": "user"
-          }
         ]
       },
       "HumanItemTracker": {
@@ -6705,10 +6357,6 @@
               "string",
               "null"
             ]
-          },
-          "provenance": {
-            "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's.",
-            "$ref": "#/$defs/Provenance"
           }
         },
         "additionalProperties": false,

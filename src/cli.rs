@@ -203,9 +203,6 @@ pub enum Command {
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
     Surface(SurfaceArgs),
-    /// Decline a manager's ruling with a reason, which reaches the manager as a
-    /// `declined-ruling` surface.
-    DeclineRuling(DeclineRulingArgs),
     /// Complete a ready, waiting human action.
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
@@ -311,9 +308,9 @@ pub enum BoundaryCommand {
     /// carries, written once.
     Guidance(BoundaryGuidanceArgs),
     /// Judge one message bus envelope, read from stdin, against a run's boundary: exit 0
-    /// printing it back unchanged to pass it, 1 to refuse it with a neutral reason on
-    /// stderr, and 2 where the check cannot decide, which a bus never sends. The
-    /// command hook a bus configuration's `hooks` names.
+    /// to pass it, 1 to refuse it with a neutral reason on stderr, and 2 where the check
+    /// cannot decide, which a bus never sends. The `command` validator a bus
+    /// configuration names.
     ValidateEnvelope(ValidateEnvelopeArgs),
 }
 
@@ -571,7 +568,7 @@ pub struct StartArgs {
     /// The `onemessagebus` configuration this run's channel is kept under.
     ///
     /// Read at the launch and retained in the launch record: its `authors` block
-    /// declares who may issue which operations, and its `hooks` decide what
+    /// declares who may issue which operations, and its `validators` judge what
     /// is offered to the channel's queues. Codec and schema-link settings belong
     /// to the host's bus server and are retained without being acted on. Its transport is the run
     /// root's own, so a `transport` other than `local`, a `transport.dir`, a
@@ -705,29 +702,6 @@ pub struct StartArgs {
     /// takes the shipped sixty seconds.
     #[arg(long, value_name = "SECONDS")]
     pub dispatch_env_hook_timeout: Option<NonZeroU64>,
-    /// One executable the loaded plan is offered to before any run exists,
-    /// repeatable, run after the launch config's `checks` in the order given.
-    ///
-    /// Each is run exactly as `plan check --check <PATH>` runs a registered
-    /// check — resolved against the working directory, handed the same JSON
-    /// document on stdin with `ONEPIPELINE_PLAN_CHECK_SCHEMA=1`, answering
-    /// `{"refusals": [...]}` with exit 0 — and any refusal, or a check that could
-    /// not be run, refuses the launch with the report `plan check` prints,
-    /// creating no run directory. `adopt` runs none of them.
-    #[arg(long = "check", value_name = "PATH")]
-    pub checks: Vec<PathBuf>,
-    /// One executable every node a live edit introduces or changes is offered to,
-    /// with the task its next dispatch would be given, before the edit applies.
-    ///
-    /// Run once per such node, from the launch directory, with one JSON document
-    /// on stdin; exit 0 passes the node, 1 refuses the whole reply with the
-    /// hook's stderr as the reason, and any other exit — or outliving 600
-    /// seconds — refuses it as not judged. Given here it replaces the launch
-    /// config's `plan_edit_hook` entirely, at the default 600-second timeout.
-    /// Retained in the launch record and replayed by `adopt`. Naming none runs
-    /// nothing.
-    #[arg(long, value_name = "PATH")]
-    pub plan_edit_hook: Option<PathBuf>,
     /// Override one dag-scope graph config field. Passed opaquely to
     /// `oneagentgraph run`, in command-line order.
     #[arg(long = "set", value_name = "PATH=VALUE")]
@@ -1686,11 +1660,6 @@ pub struct ReplyArgs {
     /// `docs/contract.md`'s channel paragraph.
     #[arg(long, value_name = "C")]
     pub correlation: Option<onemessagebus::Correlation>,
-    /// Whose words the envelope carries: `manager`, the manager's own ruling, or
-    /// `user`, the user's words relayed. Omitted, the envelope's own
-    /// `provenance`, or `manager`; an envelope stating the other is refused.
-    #[arg(long = "as", value_name = "PARTY", value_enum)]
-    pub provenance: Option<crate::provenance::Provenance>,
 }
 
 /// `onepipeline surface`.
@@ -1719,22 +1688,6 @@ pub struct SurfaceArgs {
     /// is written here is read by a shell first.
     #[arg(long, value_name = "TEXT")]
     pub message: Option<String>,
-}
-
-/// `onepipeline decline-ruling`.
-///
-/// The reason arrives as [`SurfaceArgs`]'s message does — from a file, or from
-/// stdin when none is named — so a dispatch's prose never passes through a
-/// shell.
-#[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct DeclineRulingArgs {
-    /// The run id.
-    pub run: String,
-    /// The ruling reference the declined ruling was rendered beside.
-    #[arg(long, value_name = "REF")]
-    pub ruling: String,
-    /// The file the reason is read from. Omitted, it is read from stdin.
-    pub file: Option<PathBuf>,
 }
 
 /// `onepipeline attest`.

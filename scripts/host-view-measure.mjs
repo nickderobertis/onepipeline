@@ -10,9 +10,9 @@
 // reads it cold once — the read that leaves it steady, as a host reaches steady
 // state — stamps the sparse run's summary as its writer keeps it, and then, with
 // every ended run's journal unreadable to the reads, times five single steady
-// reads and holds each to the fixture's answer; their median is the budget's
-// value. The same reads over the root grown to 400 and 800 run roots of ended
-// history follow, as evidence that the cost does not grow with it. Everything goes to `target/budget-records/host-view.json`,
+// reads and holds each to the fixture's answer. The same reads over the root grown
+// to 400 and 800 run roots of ended history follow, as evidence that the cost does
+// not grow with it. Everything goes to `target/budget-records/host-view.json`,
 // which `scripts/host-view-budget.mjs` reports.
 //
 // The timed reads cannot open an ended journal, and are held to answering
@@ -44,14 +44,7 @@ import {
   stampSparse,
   startToken,
 } from "../tests/e2e/host_view_fixture.mjs";
-import {
-  BREAKDOWN,
-  median,
-  READS,
-  SCALING,
-  stripGuardOf,
-  validateRecord,
-} from "./host-view-budget.mjs";
+import { BREAKDOWN, READS, SCALING, stripGuardOf, validateRecord } from "./host-view-budget.mjs";
 import { journalOpens, steadyOpens } from "./host-view-trace.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -272,6 +265,8 @@ function traced(manifest, label) {
   holds(manifest, JSON.parse(observed.stdout), `${label} traced read`);
   return steadyOpens(observed, manifest.ended, manifest.live_runs, label);
 }
+
+const median = (walls) => [...walls].sort((a, b) => a - b)[Math.floor(walls.length / 2)];
 
 function steady(manifest, label) {
   readable(runs, manifest.ended, false);
