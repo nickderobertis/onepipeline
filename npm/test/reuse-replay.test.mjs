@@ -56,7 +56,6 @@ function git(repo, args, date = "2026-11-01T00:00:00Z") {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: gitEnv(date) }).trim();
 }
 
-
 /** A `gh` on PATH that answers from a state file and appends each call to a log. */
 function ghDouble(dir, state) {
   const bin = join(dir, "bin");
@@ -323,7 +322,6 @@ test("the cache inventory pages the listing read-only and counts entries by fami
   assert.equal(stopped.status, 2);
   assert.match(stopped.stderr, /10 core remain, below the floor of 2500; 0 pages held/);
 });
-
 
 let repo;
 let evidence;
@@ -873,7 +871,6 @@ test("the reuse spike's one command replays today's tiers and every option over 
   assert.ok(Object.keys(c.suites).some((name) => name.startsWith("onepipeline:test-rest.")));
 });
 
-
 test("a split is weighed per platform: skipped suites, the shared build only when every archive suite skips, less what the split adds", () => {
   const dir = join(scratch, "weights");
   const changes = join(dir, "observed.json");
@@ -966,7 +963,6 @@ test("a split is weighed per platform: skipped suites, the shared build only whe
   assert.equal(notObserved.status, 1);
   assert.match(notObserved.stderr, /is not an --observed replay's JSON/);
 });
-
 
 test("the module graph puts a cycle in one component and leaves the modules outside it their own", () => {
   const crate = join(scratch, "crate");
