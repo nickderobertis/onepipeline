@@ -97,6 +97,11 @@ test("the workflow edits turn every cache write off, add the observers, and are 
   assert.match(overhead, /mv target\/test-profile "\$m\/\$label-records"/);
   assert.match(overhead, /echo "\$label \$start \$\(date \+%s\) \$status" >> "\$m\/times\.txt"/);
   assert.match(overhead, /::warning::measurement: \$label exited \$status.*ACTION: /);
+  // A graph Nx cannot write is reported with how to reproduce it, not dropped.
+  assert.match(
+    linux,
+    /if ! ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts\/nx-affected\.sh -t "[^"]+" --graph=stdout > "\$m\/graph\.json" 2> "\$m\/graph\.err"; then\n\s+echo "::warning::measurement: Nx could not write the task graph.*ACTION: .*reproduce with: ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts\/nx-affected\.sh -t [^"]+"\n\s+fi/,
+  );
   // The sampler's errors go to sampler.err, which the graph step reports with an ACTION.
   assert.match(linux, /nohup bash "\$m\/sampler\.sh" "\$m" > \/dev\/null 2> "\$m\/sampler\.err" &/);
   assert.match(
@@ -1296,6 +1301,28 @@ test("a GitHub answer or sidecar document not in its writer's shape refuses", (t
     assert.equal(result.status, 1, what);
     assert.match(result.stderr, /is malformed\nnext: /, what);
   }
+  // A manifest whose entries are not stored or replayed ones.
+  const manifestDir = scratch(t);
+  const manifestCache = join(manifestDir, "cache");
+  seedCache(manifestCache, oneRun(manifestDir));
+  const manifest = join(
+    manifestCache,
+    "runs",
+    String(RUN),
+    "test-linux",
+    "nx-cache-entries-test-linux",
+    "manifest.json",
+  );
+  writeFileSync(
+    manifest,
+    JSON.stringify({
+      ...JSON.parse(readFileSync(manifest, "utf8")),
+      entries: [{ source: "maybe" }],
+    }),
+  );
+  const badManifest = run(profileScript, job(manifestCache, join(manifestDir, "r.md")));
+  assert.equal(badManifest.status, 1);
+  assert.match(badManifest.stderr, /manifest\.json is malformed\nnext: /);
   // The sidecar's report of another job is not this job's telemetry.
   const dir = scratch(t);
   const cache = join(dir, "cache");
@@ -1490,6 +1517,68 @@ test("the graph Nx itself writes for a task is read as the dependency map", (t) 
     JSON.parse(readFileSync(json, "utf8")).critical_path.map((c) => c.task),
     ["demo-version:smoke"],
   );
+});
+
+test("a run listing or job list not in GitHub's shape refuses the history", (t) => {
+  const listingKey = key(
+    `repos/${REPO}/actions/workflows/ci.yml/runs?event=pull_request&status=completed&per_page=100&page=1&created=2026-11-04T00:00:00..2026-11-13T00:00:00`,
+  );
+  const listed = {
+    id: 1,
+    run_attempt: 1,
+    head_sha: "a".repeat(40),
+    created_at: "2026-11-11T10:00:00Z",
+    conclusion: "success",
+  };
+  for (const [what, answers, message] of [
+    [
+      "a run with no head",
+      { [listingKey]: JSON.stringify({ workflow_runs: [{ ...listed, head_sha: "" }] }) },
+      /ci\.yml's run listing, page 1 is malformed/,
+    ],
+    [
+      "a successful job that ends before it starts",
+      {
+        [listingKey]: JSON.stringify({ workflow_runs: [listed] }),
+        [key(`repos/${REPO}/actions/runs/1/attempts/1/jobs?per_page=100`)]: JSON.stringify({
+          jobs: [
+            {
+              name: "test-linux",
+              conclusion: "success",
+              started_at: "2026-11-11T11:00:00Z",
+              completed_at: "2026-11-11T10:00:00Z",
+            },
+          ],
+        }),
+      },
+      /run 1's jobs is malformed/,
+    ],
+  ]) {
+    const dir = scratch(t);
+    const gh = standInGh(dir, { answers, files: dir, names: [] });
+    const result = run(
+      profileScript,
+      [
+        "history",
+        "--since",
+        "2026-11-04T00:00:00Z",
+        "--split",
+        "2026-11-10T00:00:00Z",
+        "--until",
+        "2026-11-13T00:00:00Z",
+        "--repo",
+        REPO,
+        "--cache",
+        join(dir, "cache"),
+        "--out",
+        join(dir, "h.md"),
+      ],
+      { env: gh.env(4000) },
+    );
+    assert.equal(result.status, 1, what);
+    assert.match(result.stderr, message, what);
+    assert.match(result.stderr, /\nnext: /, what);
+  }
 });
 
 test("a listing at GitHub's 1,000-run limit is noted, not silently cut", (t) => {
