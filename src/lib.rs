@@ -188,3 +188,6 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// measurement-only (spike-onepipeline-profile): a no-behaviour edit, so this demonstration selects
+// and builds what a pull request editing engine source does.
