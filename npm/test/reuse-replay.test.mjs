@@ -816,6 +816,37 @@ test("the reuse spike's one command replays today's tiers and every option over 
     run.stdout,
     /^reuse-spike: d-install-documented \(estimate, keyed on the run's base\): linux 0 of 0 runs replay, - min per change/m,
   );
+  // The report's tables render from what the one command wrote.
+  const tables = spawnSync(
+    process.execPath,
+    [
+      join(root, "scripts", "crate-split", "report-tables.mjs"),
+      "--spike",
+      out,
+      "--evidence",
+      evidence,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(tables.status, 0, tables.stderr);
+  for (const section of [
+    "Population",
+    "Totals per input",
+    "The e2e tier",
+    "Options replayed",
+    "Eviction",
+  ]) {
+    assert.match(tables.stdout, new RegExp(`^### ${section}$`, "m"));
+  }
+  // #11 changed engine source only: its class, its run and its jobs' replays.
+  assert.match(
+    tables.stdout,
+    /^\| #11 \| before #1493 \| engine source, no tests \| 1 \| \[110\]\(https:\/\/github\.com\/nickderobertis\/onepipeline\/actions\/runs\/110\) \| - \| 1101 \(0 of 5 replayed\) \| - \| - \|$/m,
+  );
+  assert.match(
+    tables.stdout,
+    /^- test-linux \(job 1101\): replayed 0: none\. Ran 5: \[rustBuild\] :test, :lint, e2e:test, :test-rest; \[not cacheable\] :smoke\.$/m,
+  );
   // (b): the e2e tier became proposed.json's suites, each weighed by its modules.
   const b = JSON.parse(readFileSync(join(out, "b.mapping.json"), "utf8"));
   const proposed = JSON.parse(
