@@ -882,10 +882,11 @@ test("the reuse spike's one command replays today's tiers and every option over 
     tablesText,
     /^\| the non-release \(2\) \| 0\.0 \/ 0\.0 \/ 0\.0 \| 0 \/ 0 \/ 0 \| 2\.5 \/ 0\.0 \/ 0\.0 \|$/m,
   );
-  // The model check counts each pull-request task run the mapping and Nx's plans judged.
+  // The model check: #11's four tiers and #12's test (run) and lint (replayed) are
+  // each judged alike by today's tier mapping and by Nx's plans at their commits.
   assert.match(
     tablesText,
-    /^\d+ of \d+ pull-request task runs agree \(\d+\.\d%\); the mapping runs \d+ that Nx's plan at the commit did not key on the diff, and skips \d+ it did\.$/m,
+    /^6 of 6 pull-request task runs agree \(100\.0%\); the mapping runs 0 that Nx's plan at the commit did not key on the diff, and skips 0 it did\.$/m,
   );
   // With the cache's listing: #13's miss read a key #11's run stored, whose main copy
   // came later; and with --clone, no run here holds #1493's merge.

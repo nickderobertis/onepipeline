@@ -132,7 +132,7 @@ export function rollup(doc, pr) {
   const timeOrNull = (v) => v === null || v === undefined || isTime(v);
   for (const suite of commit.checkSuites.nodes) {
     need(
-      isObject(suite) && Array.isArray(suite.checkRuns?.nodes ?? []),
+      isObject(suite) && Array.isArray(suite.checkRuns?.nodes),
       `a check suite read for #${pr} has no check runs list`,
       again,
     );
@@ -143,7 +143,7 @@ export function rollup(doc, pr) {
         again,
       );
     }
-    for (const run of suite.checkRuns?.nodes ?? []) {
+    for (const run of suite.checkRuns.nodes) {
       need(
         isText(run.name) &&
           isCount(run.databaseId) &&
@@ -337,7 +337,17 @@ export function observedResult(doc, where) {
     doc.totals === undefined ||
       (isObject(doc.totals) &&
         ["alone", "several", "unforced", "replayed"].every((t) =>
-          ["nonRelease", "release"].every((scope) => isObject(doc.totals[t]?.[scope])),
+          ["nonRelease", "release"].every(
+            (scope) =>
+              isObject(doc.totals[t]?.[scope]) &&
+              Object.values(doc.totals[t][scope]).every(
+                (byJob) =>
+                  isObject(byJob) &&
+                  Object.values(byJob).every(
+                    (x) => isCount(x?.tasks) && Number.isFinite(x.minutes) && x.minutes >= 0,
+                  ),
+              ),
+          ),
         )),
     `${where}'s totals are not the alone, several, unforced and replayed tables of each scope`,
     again,

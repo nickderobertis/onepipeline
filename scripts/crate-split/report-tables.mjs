@@ -71,7 +71,11 @@ const min = (x) => (x === null || x === undefined ? "-" : x.toFixed(1));
 function load(spike, name) {
   const path = join(spike, `${name}.json`);
   const doc = readJson(path, "run scripts/crate-split/reuse-spike.mjs into --spike first");
-  if (name === "observed") return check.observedResult(doc, path);
+  if (name === "observed") {
+    check.observedResult(doc, path);
+    check.need(doc.totals, `${path} holds no totals`, "write it again with --observed --json");
+    return doc;
+  }
   const platforms = ["linux", "darwin", "win32"];
   const again = "run scripts/crate-split/reuse-spike.mjs into --spike again";
   if (name === "d-install-documented") {
@@ -107,14 +111,18 @@ function load(spike, name) {
           ].every((k) => finite(x[k])) &&
           Number.isSafeInteger(x.archiveBuildsSkipped) &&
           (x.netMinutesPerChange === null || finite(x.netMinutesPerChange)) &&
-          Object.values(x.perSuite ?? {}).every(finite)
+          x.perSuite &&
+          typeof x.perSuite === "object" &&
+          Object.values(x.perSuite).every(finite)
         );
       }) &&
       Array.isArray(doc.perChange) &&
       doc.perChange.every((c) => typeof c.commit === "string" && Array.isArray(c.affected)) &&
       doc.suites &&
       typeof doc.suites === "object" &&
-      Number.isSafeInteger(doc.summary.changes),
+      Number.isSafeInteger(doc.summary.changes) &&
+      Number.isSafeInteger(doc.summary.suites) &&
+      Number.isSafeInteger(doc.summary.skippedSuiteRuns),
     `${path} is not a weighed replay's JSON`,
     again,
   );

@@ -568,66 +568,57 @@ export function weigh(perPr, profilesDir, restExcluded = new Set()) {
     }
   }
   for (const [job, run] of newest) {
-    {
-      const platform = PLATFORM_OF[job];
-      const e2e = tasks[E2E_TASK[platform]]?.[platform]?.minutes;
-      if (!e2e) continue;
-      const records = selectRun(loadRecords(join(profilesDir, run, job))).records.filter(
-        (r) => r.binary === "e2e",
-      );
-      const seconds = new Map();
-      for (const record of records) {
-        const name = moduleOf(record.test);
-        seconds.set(name, (seconds.get(name) ?? 0) + (record.wall_s ?? 0));
-      }
-      const total = [...seconds.values()].reduce((a, b) => a + b, 0);
-      // Records that time nothing cannot share the tier out; its modules weigh nothing.
-      if (total <= 0) {
-        sources[platform] = { run, job, records: records.length, testSeconds: 0, e2eMinutes: e2e };
-        continue;
-      }
+    const platform = PLATFORM_OF[job];
+    const all = selectRun(loadRecords(join(profilesDir, run, job))).records;
+    const source = { run, job };
+    // The e2e tier: each module's share of its minutes by test-seconds. Records that
+    // time nothing cannot share it out, so its modules weigh nothing then.
+    const e2e = tasks[E2E_TASK[platform]]?.[platform]?.minutes;
+    const records = all.filter((r) => r.binary === "e2e");
+    const seconds = new Map();
+    for (const record of records) {
+      const name = moduleOf(record.test);
+      seconds.set(name, (seconds.get(name) ?? 0) + (record.wall_s ?? 0));
+    }
+    const total = [...seconds.values()].reduce((a, b) => a + b, 0);
+    if (e2e && total > 0) {
       for (const [name, s] of seconds) {
         modules[name] ??= {};
         modules[name][platform] = { minutes: (e2e * s) / total, testSeconds: s };
       }
-      // The rest tier: the library's unit tests by top-level module, apart from the
-      // integration binaries the tier also runs (`rest:<task>`).
-      const restTask = REST_TASK[platform];
-      const rest = tasks[restTask]?.[platform]?.minutes;
-      const all = selectRun(loadRecords(join(profilesDir, run, job))).records;
-      const restRecords = all.filter((r) => !restExcluded.has(r.binary));
-      const restTotal = restRecords.reduce((sum, r) => sum + (r.wall_s ?? 0), 0);
-      if (rest && restTotal === 0) {
-        // No record of the tier's own tests (the recorder times only the harness's
-        // journeys), so the tier cannot be split by them and weighs whole.
-        modules[`rest:${restTask}`] ??= {};
-        modules[`rest:${restTask}`][platform] = { minutes: rest, unsplit: true };
-      } else if (rest) {
-        let unitShare = 0;
-        const unit = new Map();
-        for (const r of restRecords.filter((r) => r.binary === "onepipeline")) {
-          const name = moduleOf(r.test);
-          unit.set(name, (unit.get(name) ?? 0) + (r.wall_s ?? 0));
-        }
-        for (const [name, s] of unit) {
-          const key = `unit:${restTask}:${name}`;
-          modules[key] ??= {};
-          modules[key][platform] = { minutes: (rest * s) / restTotal, testSeconds: s };
-          unitShare += s / restTotal;
-        }
-        modules[`rest:${restTask}`] ??= {};
-        modules[`rest:${restTask}`][platform] = { minutes: rest * (1 - unitShare) };
-      }
-      sources[platform] = {
-        run,
-        job,
-        records: records.length,
-        testSeconds: total,
-        e2eMinutes: e2e,
-        restRecords: restRecords.length,
-        restUnitRecords: restRecords.filter((r) => r.binary === "onepipeline").length,
-      };
     }
+    Object.assign(source, { records: records.length, testSeconds: total, e2eMinutes: e2e ?? null });
+    // The rest tier, whatever the e2e tier's records say: the library's unit tests by
+    // top-level module, apart from the integration binaries the tier also runs
+    // (`rest:<task>`); with no record of its own tests, the tier weighs whole.
+    const restTask = REST_TASK[platform];
+    const rest = tasks[restTask]?.[platform]?.minutes;
+    const restRecords = all.filter((r) => !restExcluded.has(r.binary));
+    const restTotal = restRecords.reduce((sum, r) => sum + (r.wall_s ?? 0), 0);
+    if (rest && restTotal === 0) {
+      modules[`rest:${restTask}`] ??= {};
+      modules[`rest:${restTask}`][platform] = { minutes: rest, unsplit: true };
+    } else if (rest) {
+      let unitShare = 0;
+      const unit = new Map();
+      for (const r of restRecords.filter((r) => r.binary === "onepipeline")) {
+        const name = moduleOf(r.test);
+        unit.set(name, (unit.get(name) ?? 0) + (r.wall_s ?? 0));
+      }
+      for (const [name, s] of unit) {
+        const key = `unit:${restTask}:${name}`;
+        modules[key] ??= {};
+        modules[key][platform] = { minutes: (rest * s) / restTotal, testSeconds: s };
+        unitShare += s / restTotal;
+      }
+      modules[`rest:${restTask}`] ??= {};
+      modules[`rest:${restTask}`][platform] = { minutes: rest * (1 - unitShare) };
+    }
+    Object.assign(source, {
+      restRecords: restRecords.length,
+      restUnitRecords: restRecords.filter((r) => r.binary === "onepipeline").length,
+    });
+    sources[platform] = source;
   }
   return { tasks, build, modules, sources };
 }

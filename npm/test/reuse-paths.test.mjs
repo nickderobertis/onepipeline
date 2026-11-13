@@ -1071,11 +1071,21 @@ test("each platform is weighed by its newest saved profile run, a run timing not
   assert.equal(weights.modules.beta.linux.minutes, 6);
   assert.equal(weights.sources.darwin.testSeconds, 0);
   assert.ok(!weights.modules.alpha.darwin, "a run timing nothing shares nothing out");
-  // Neither platform's records hold a rest-tier test, so each rest tier weighs whole.
+  // Neither platform's records hold a rest-tier test, so each rest tier weighs whole,
+  // macOS's too, though its e2e records time nothing.
   assert.deepEqual(weights.modules["rest:onepipeline:test-rest"].linux, {
     minutes: 4,
     unsplit: true,
   });
+  assert.deepEqual(weights.modules["rest:onepipeline:test-quick"].darwin, {
+    minutes: 3,
+    unsplit: true,
+  });
+  // A platform with no e2e task to weigh still weighs its rest tier.
+  record("300", "test-windows", 0, "onepipeline", "plan::tests::parses");
+  const noE2e = weigh([rows("test-windows", "onepipeline:test-quick", 5)], dir, new Set(["e2e"]));
+  assert.equal(noE2e.modules["unit:onepipeline:test-quick:plan"].win32.minutes, 5);
+  assert.equal(noE2e.sources.win32.e2eMinutes, null);
 });
 
 test("the report prices a typical pull request, charging a split's build delta on it", () => {
