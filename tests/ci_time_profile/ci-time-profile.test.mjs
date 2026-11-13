@@ -480,7 +480,7 @@ function oneRun(
   );
   const names = ["test-profile-test-linux", "nx-cache-entries-test-linux", "measure-test-linux"];
   put(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`, {
-    artifacts: names.map((name, id) => ({ id, name, expired: false })),
+    artifacts: names.map((name, id) => ({ id, name, expired: false, created_at: iso(700) })),
   });
   const files = join(dir, "artifact-files");
   const artifact = (name) => {
@@ -1369,6 +1369,11 @@ test("a GitHub answer or sidecar document not in its writer's shape refuses", (t
       `repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`,
       (v) => ({ artifacts: v.artifacts.map(({ expired, ...rest }) => rest) }),
     ],
+    [
+      "artifact list without creation times",
+      `repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`,
+      (v) => ({ artifacts: v.artifacts.map(({ created_at, ...rest }) => rest) }),
+    ],
   ];
   for (const [what, endpoint, change] of cases) {
     const dir = scratch(t);
@@ -1949,11 +1954,25 @@ test("the history counts each finished job by what its pull request changed, bef
     writeFileSync(join(d, "t.json"), JSON.stringify(record("t", 0, 10, { spawn: 4 * spawnS })));
     names.push(name);
     answers[key(`repos/${REPO}/actions/runs/${id}/artifacts?per_page=100`)] = JSON.stringify({
-      artifacts: [{ id: names.length - 1, name: "test-profile-test-linux", expired: false }],
+      artifacts: [
+        {
+          id: names.length - 1,
+          name: "test-profile-test-linux",
+          expired: false,
+          created_at: "2026-11-12T00:00:00Z",
+        },
+      ],
     });
   }
   answers[key(`repos/${REPO}/actions/runs/4/artifacts?per_page=100`)] = JSON.stringify({
-    artifacts: [{ id: 99, name: "test-profile-test-linux", expired: true }],
+    artifacts: [
+      {
+        id: 99,
+        name: "test-profile-test-linux",
+        expired: true,
+        created_at: "2026-10-01T00:00:00Z",
+      },
+    ],
   });
   answers[key(`repos/${REPO}/actions/runs/11/artifacts?per_page=100`)] = JSON.stringify({
     artifacts: [],

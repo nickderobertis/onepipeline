@@ -727,7 +727,10 @@ function analyzeJob(opts) {
     Array.isArray(artifacts) &&
       artifacts.every(
         (x) =>
-          Number.isInteger(x?.id) && typeof x.name === "string" && typeof x.expired === "boolean",
+          Number.isInteger(x?.id) &&
+          typeof x.name === "string" &&
+          typeof x.expired === "boolean" &&
+          !Number.isNaN(ms(x.created_at)),
       ),
     `run ${opts.run}'s artifact list`,
   );
@@ -1649,7 +1652,8 @@ function history(opts) {
               (x) =>
                 Number.isInteger(x?.id) &&
                 typeof x.name === "string" &&
-                typeof x.expired === "boolean",
+                typeof x.expired === "boolean" &&
+                !Number.isNaN(ms(x.created_at)),
             ),
         `run ${r.run}'s artifact list`,
       );
