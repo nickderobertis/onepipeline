@@ -880,6 +880,49 @@ test("without cargo the workspace's crates are the instrumented ones, and the re
   assert.equal(r.compile["plain (target/debug)"].dependency_s, 0);
 });
 
+test("a record in the recorder's syntax but not its schema is left out and noted", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  const bad = record("unschemed", 400, 5, { spawn: 5 });
+  bad.schema = 99;
+  writeFileSync(
+    join(
+      cache,
+      "runs",
+      String(RUN),
+      "test-linux",
+      "test-profile-test-linux",
+      "e2e",
+      "unschemed.json",
+    ),
+    JSON.stringify(bad),
+  );
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.ok(!r.slowest.some((x) => x.test === "e2e::unschemed"));
+  assert.ok(r.notes.some((n) => /unschemed\.json was left out: it is schema 99/.test(n)));
+});
+
+test("a job whose gate step is not named as one is all steps, and says so", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  const jobsKey = key(`repos/${REPO}/actions/runs/${RUN}/jobs?per_page=100`);
+  const jobs = JSON.parse(served.answers[jobsKey]);
+  jobs.jobs[0].steps.find((st) => /affected projects/.test(st.name)).name = "Run the tests";
+  served.answers[jobsKey] = JSON.stringify(jobs);
+  const cache = join(dir, "cache");
+  seedCache(cache, served);
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.equal(r.gate_s, 0);
+  assert.deepEqual(r.gate_categories, {});
+  assert.equal(r.step_classes["setup and teardown"], 660);
+  assert.ok(r.notes.some((n) => /has no step named as a gate/.test(n)));
+});
+
 test("a job that uploaded nothing is reported as one unattributed gate", (t) => {
   const dir = scratch(t);
   const served = oneRun(dir);

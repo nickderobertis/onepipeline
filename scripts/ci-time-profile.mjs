@@ -813,6 +813,11 @@ function analyzeJob(opts) {
 
   // The gate: Nx tasks shared fairly, each task's share split by what it was doing.
   const gate = sequential.find((s) => s.class === "gate (Nx tasks)");
+  if (!gate)
+    note(
+      `job ${opts.job} has no step named as a gate ("… (affected projects)"), so its time is the steps' alone, with no breakdown by Nx task`,
+      "if the workflow renamed its gate step, update stepClass in scripts/ci-time-profile.mjs to match",
+    );
   // Nx's own trace when the run kept one: it covers every task the gate's invocation ran,
   // failed and skipped ones too. Otherwise the sidecar's telemetry, which a failed gate's
   // invocation does not reach (its tasks are then only the bootstrap invocation's).
