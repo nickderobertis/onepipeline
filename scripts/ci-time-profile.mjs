@@ -483,12 +483,16 @@ function readMeasure(dir) {
   if (times) {
     out.overhead = { runs: {}, records: {} };
     for (const run of measureLines(times, (line) => {
-      const [label, start, end, status] = line.trim().split(/\s+/);
+      // The step writes four fields: label, start and end epoch seconds, exit status.
+      const fields = line.trim().split(/\s+/);
+      if (fields.length !== 4) return null;
+      const [label, start, end, status] = fields;
       const ok =
         ["instrumented", "plain-build", "plain"].includes(label) &&
-        finite(Number(start), Number(end)) &&
+        /^\d+$/.test(start) &&
+        /^\d+$/.test(end) &&
         Number(end) >= Number(start) &&
-        /^\d+$/.test(status ?? "");
+        /^\d+$/.test(status);
       return ok ? { label, s: Number(end) - Number(start), status: Number(status) } : null;
     }))
       out.overhead.runs[run.label] = { s: run.s, status: run.status };
@@ -639,6 +643,22 @@ function sidecarFile(dir, name, valid) {
  * The artifacts a test job uploads that this reads: ci.yml's `test-profile-<job>` and
  * `nx-cache-entries-<job>`, and `scripts/ci-time-workflow.mjs`'s `measure-<job>`.
  */
+// The run's unexpired artifact of this name. A re-run can leave one per attempt; the newest
+// is the attempt the jobs list reports, and reading it is noted, so no older one stands in
+// for it silently.
+function newestArtifact(artifacts, name, where) {
+  const named = artifacts.filter((x) => x.name === name && !x.expired);
+  if (named.length > 1)
+    note(
+      `${where} has ${named.length} unexpired artifacts named ${name}; the newest, created ${named
+        .map((x) => x.created_at)
+        .sort()
+        .at(-1)}, was read`,
+      "measure the run's latest attempt, which is the one GitHub's jobs list reports",
+    );
+  return named.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+}
+
 export function artifactNames(job) {
   return {
     records: `test-profile-${job}`,
@@ -713,7 +733,7 @@ function analyzeJob(opts) {
   );
   const dir = join(opts.cache, "runs", String(opts.run), opts.job);
   const get = (name) => {
-    const a = artifacts.find((x) => x.name === name && !x.expired);
+    const a = newestArtifact(artifacts, name, `run ${opts.run}`);
     return a ? unzipArtifact(gh, repo, a, join(dir, name)) : null;
   };
   const names = artifactNames(opts.job);
@@ -1215,6 +1235,12 @@ function summarizeOverhead(overhead, gateRecords) {
   const both = [...ins.keys()].filter((k) => pla.has(k));
   const sum = (m) => both.reduce((a, k) => a + m.get(k).wall_s, 0);
   void gateRecords;
+  for (const [label, r] of Object.entries(overhead.runs))
+    if (r.status !== 0)
+      note(
+        `the overhead's ${label} run exited ${r.status}, so its partition's figures leave out what it did not run`,
+        `${label}.log in the measure artifact says why; rerun the measurement before reading the overhead`,
+      );
   return {
     runs: overhead.runs,
     tests_in_both: both.length,
@@ -1627,7 +1653,7 @@ function history(opts) {
             ),
         `run ${r.run}'s artifact list`,
       );
-      const a = listed.get(r.run).find((x) => x.name === `test-profile-${r.job}` && !x.expired);
+      const a = newestArtifact(listed.get(r.run), `test-profile-${r.job}`, `run ${r.run}`);
       if (!a) {
         note(
           `run ${r.run} has no unexpired test-profile-${r.job} artifact, so its e2e figures are blank`,

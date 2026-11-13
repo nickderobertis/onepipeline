@@ -545,6 +545,13 @@ function oneRun(
       rustcRow(20, 50, "onepipeline", "release"),
       rustcRow(20, 24, "git2", "/tmp/cargo-installXyz/release/deps"),
       rustcRow(24, 27, "zerocopy", "npm-staged/x86_64-unknown-linux-gnu/debug"),
+      // A macOS runner's checkout is under /Users/runner/work: still the checkout's target.
+      rustcRow(
+        27,
+        29,
+        "onepipeline",
+        "/Users/runner/work/onepipeline/onepipeline/target/debug/deps",
+      ),
       "17944\t",
     ].join("\n"),
   );
@@ -700,7 +707,7 @@ test("one job's wall clock is divided into steps, Nx tasks, compiles and test ca
       Object.entries(r.compile).map(([tree, c]) => [tree, [c.rustc_s, c.dependency_s]]),
     ),
     {
-      "plain (target/debug)": [150, 0],
+      "plain (target/debug)": [152, 0],
       "instrumented (llvm-cov-target)": [80, 0],
       clippy: [10, 0],
       "msrv toolchain": [12, 12],
@@ -809,6 +816,12 @@ test("a measurement file not in its writer's shape refuses, naming the file and 
     [
       "overhead/times.txt",
       (old) => `instrumented 1000 1060\n${old}`,
+      /times\.txt line 1 is malformed\nnext: /,
+    ],
+    // An overhead row with a field the step does not write.
+    [
+      "overhead/times.txt",
+      (old) => `instrumented 1000 1060 0 extra\n${old}`,
       /times\.txt line 1 is malformed\nnext: /,
     ],
     // A graph Nx did not finish writing.
@@ -1801,6 +1814,55 @@ test("a GitHub answer that is not JSON refuses, naming the endpoint", (t) => {
   assert.match(
     result.stderr,
     /GitHub's answer to repos\/example\/onepipeline\/actions\/runs\/42\/artifacts\?per_page=100 is malformed\nnext: /,
+  );
+});
+
+test("an overhead run that failed is noted beside the figures it leaves short", (t) => {
+  const dir = scratch(t);
+  const cache = join(dir, "cache");
+  seedCache(cache, oneRun(dir));
+  writeFileSync(
+    join(cache, "runs", String(RUN), "test-linux", "measure-test-linux", "overhead", "times.txt"),
+    "instrumented 1000 1060 0\nplain-build 1060 1061 0\nplain 1061 1121 101\n",
+  );
+  const json = join(dir, "out.json");
+  assert.equal(run(profileScript, job(cache, join(dir, "r.md"), ["--json", json])).status, 0);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.equal(r.overhead.runs.plain.status, 101);
+  assert.ok(r.notes.some((n) => /the overhead's plain run exited 101/.test(n)));
+});
+
+test("a re-run's newer artifact is read over the earlier attempt's, and that is noted", (t) => {
+  const dir = scratch(t);
+  const served = oneRun(dir);
+  // The earlier attempt's records: test a only, ten times slower.
+  const older = join(served.files, "older-profile", "e2e");
+  mkdirSync(older, { recursive: true });
+  writeFileSync(join(older, "a.json"), JSON.stringify(record("a", 400, 2000, { spawn: 2000 })));
+  served.names.push("older-profile");
+  const listKey = key(`repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100`);
+  const list = JSON.parse(served.answers[listKey]);
+  // The stand-in serves an artifact's zip by its position in `names`: the older one is id 3.
+  // Listed first, as an earlier attempt's would be.
+  list.artifacts = [
+    { id: 3, name: "test-profile-test-linux", expired: false, created_at: "2026-11-13T09:00:00Z" },
+    ...list.artifacts.map((a) => ({ ...a, created_at: "2026-11-13T12:00:00Z" })),
+  ];
+  served.answers[listKey] = JSON.stringify(list);
+  const gh = standInGh(join(dir, "gh"), served);
+  const json = join(dir, "out.json");
+  const result = run(profileScript, job(join(dir, "cache"), join(dir, "r.md"), ["--json", json]), {
+    env: gh.env(4000),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(readFileSync(json, "utf8"));
+  assert.equal(r.slowest.find((x) => x.test === "e2e::a").wall_s, 200);
+  assert.ok(
+    r.notes.some((n) =>
+      /2 unexpired artifacts named test-profile-test-linux; the newest, created 2026-11-13T12:00:00Z, was read/.test(
+        n,
+      ),
+    ),
   );
 });
 
