@@ -503,6 +503,26 @@ jobs:
           m="$RUNNER_TEMP/measure"; mkdir -p "$m"
           ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t "test,doc,budgets,test-ci-shape,msrv,smoke,release-compat,install-smoke,install-documented,wheel-smoke" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true
           date -u +%s > "$m/ended.txt"
+      - name: 'Measure: one e2e partition instrumented, then plain (measurement-only (spike-onepipeline-profile))'
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          m="$RUNNER_TEMP/measure/overhead"; mkdir -p "$m"
+          filter="$(just --evaluate e2e-tier)"
+          run() {
+            label="$1"; shift
+            start="$(date +%s)"; status=0
+            "$@" > "$m/$label.log" 2>&1 || status=$?
+            echo "$label $start $(date +%s) $status" >> "$m/times.txt"
+            if [ -d target/test-profile ]; then mv target/test-profile "$m/$label-records"; fi
+          }
+          # The gate's records were uploaded by the step before; set them aside so each run
+          # below leaves only its own.
+          if [ -d target/test-profile ]; then mv target/test-profile "$m/gate-records"; fi
+          run instrumented env RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX=/crates/testfakes/ bash scripts/coverage-unit.sh onepipeline-e2e-sample -- nextest --locked -E "$filter" --partition hash:1/6 --no-fail-fast --final-status-level fail
+          run plain-build cargo nextest run --locked --no-run -E "$filter"
+          run plain bash scripts/nextest-run.sh cargo nextest run --locked -E "$filter" --partition hash:1/6 --no-fail-fast --final-status-level fail
       - name: 'Measure: keep the samples, compile timings and graph (measurement-only (spike-onepipeline-profile))'
         if: always()
         uses: actions/upload-artifact@v4
