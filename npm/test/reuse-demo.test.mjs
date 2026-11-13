@@ -92,7 +92,28 @@ test("an archive that does not build fails with cargo's status and says how long
   const result = run(dir, "quick");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /measure-archive: the quick archive build failed after \d+\.\d s/);
-  assert.doesNotMatch(result.stdout, /measure-archive: mode=/);
+  // Whatever cargo reported of a build that failed is said to be of a failed one.
+  for (const line of result.stdout
+    .split("\n")
+    .filter((l) => l.startsWith("measure-archive: mode="))) {
+    assert.match(line, / archive=failed /);
+  }
+});
+
+test("a build cargo finished but nextest would not archive still reports what it cost", () => {
+  const dir = crate("unarchived-crate", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n");
+  // An override naming a binary the build has none of, as a split's stale config would.
+  write(dir, {
+    ".config/nextest.toml":
+      '[[profile.default.overrides]]\nfilter = "binary(gone)"\nslow-timeout = "1s"\n',
+  });
+  const result = run(dir, "quick");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /the quick archive build failed after/);
+  assert.match(
+    result.stdout,
+    /^measure-archive: mode=quick archive=failed wall_s=\d+\.\d units=\d+ unit_s=\d+\.\d workspace_units=\d+ /m,
+  );
 });
 
 test("an archive the timer does not know is refused before cargo runs", () => {
@@ -191,6 +212,7 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
       "2026-11-13T07:42:58.0984206Z Cache Size: ~1869 MB (1959374798 B)",
       "2026-11-13T07:43:01.0000000Z GITHUB_SHA=4fc389b6aa head=2cac816a6a tree=abcdef1234",
       "2026-11-13T07:43:01.0000001Z workflow blob=3d81753b817c",
+      "2026-11-13T07:46:07.0000000Z     Finished `test` profile [unoptimized] target(s) in 1m 57.5s",
       "2026-11-13T07:46:08.0000000Z \u001b[1mmeasure-archive: mode=coverage wall_s=118.9 units=430 unit_s=363.1 workspace_units=62 workspace_unit_s=363.1 dependency_unit_s=0.0 workspace=onepipeline\u001b[0m",
       ...extra,
     ].join("\n");
@@ -225,7 +247,7 @@ test("a demonstration run's jobs are read for the tree, the restore, any save an
   assert.equal(run.status, 0, run.stderr);
   assert.match(
     run.stdout,
-    /^\| 9 \| measure-linux \(1\) \| 1 \| `4fc389b6aa` \| `2cac816a6a` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 26 \| 0 \| coverage \| 118\.9 \| 363\.1 \/ 0 \|$/m,
+    /^\| 9 \| measure-linux \(1\) \| 1 \| `4fc389b6aa` \| `2cac816a6a` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 26 \| 0 \| coverage \| 117\.5 \| 118\.9 \| 363\.1 \/ 0 \|$/m,
   );
   // A job listed before it ran: its restore is timed from its log, and one with no log
   // is said to be unread rather than dropped.

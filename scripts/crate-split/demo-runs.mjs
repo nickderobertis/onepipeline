@@ -30,6 +30,12 @@ export function logStep(text, start) {
   return next ? Math.round((Date.parse(next[1]) - Date.parse(lines[at][1])) / 1000) : null;
 }
 
+/** The seconds of cargo's `Finished `test` profile ... in [Mm ]S[.s]s` line. */
+export function cargoBuild(text) {
+  const m = text.match(/Finished `test` profile \[[^\]]*\] target\(s\) in (?:(\d+)m )?([\d.]+)s/);
+  return m ? Number(m[1] ?? 0) * 60 + Number(m[2]) : null;
+}
+
 export function readJob(job, log) {
   const text = log.replace(ANSI, "");
   const tree = text.match(/GITHUB_SHA=(\w+) head=(\w+) tree=(\w+)/);
@@ -42,7 +48,7 @@ export function readJob(job, log) {
   const size = text.match(/Cache Size: ~(\d+) MB/)?.[1];
   const step = job.steps.find((s) => /rust-cache/.test(s.name));
   const measured = text.match(
-    /measure-archive: mode=(\S+) wall_s=([\d.]+) units=(\d+) unit_s=([\d.]+) workspace_units=(\d+) workspace_unit_s=([\d.]+) dependency_unit_s=([\d.]+)/,
+    /measure-archive: mode=(\S+)(?: archive=failed)? wall_s=([\d.]+) units=(\d+) unit_s=([\d.]+) workspace_units=(\d+) workspace_unit_s=([\d.]+) dependency_unit_s=([\d.]+)/,
   );
   return {
     job: job.name,
@@ -58,6 +64,9 @@ export function readJob(job, log) {
       ? (Date.parse(step.completed_at) - Date.parse(step.started_at)) / 1000
       : logStep(text, /^##\[group\]Run Swatinem\/rust-cache/),
     saves: text.split("\n").filter((l) => SAVES.test(l)).length,
+    // cargo's own build time: the one figure every layout reports, whatever nextest
+    // then does with what was built.
+    cargoSeconds: cargoBuild(text),
     mode: measured?.[1] ?? null,
     wallSeconds: measured ? Number(measured[2]) : null,
     unitSeconds: measured ? Number(measured[4]) : null,
@@ -73,10 +82,10 @@ function main(argv) {
   const dir = argv[at + 1];
   const runs = argv.filter((_, i) => i !== at && i !== at + 1);
   console.log(
-    "| run | job | job id | GITHUB_SHA | head | workflow blob | Rust cache restore | MB | restore s | cache saves | archive | wall s | unit s (workspace / deps) |",
+    "| run | job | job id | GITHUB_SHA | head | workflow blob | Rust cache restore | MB | restore s | cache saves | archive | cargo build s | wall s | unit s (workspace / deps) |",
   );
   console.log(
-    "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | --- |",
+    "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |",
   );
   for (const run of runs) {
     const { jobs } = JSON.parse(readFileSync(join(dir, `${run}.jobs.json`), "utf8"));
@@ -84,13 +93,13 @@ function main(argv) {
       const path = join(dir, `${job.id}.log`);
       if (!existsSync(path)) {
         console.log(
-          `| ${run} | ${job.name} | ${job.id} | not read: ${job.status} when the jobs were listed | | | | | | | | | |`,
+          `| ${run} | ${job.name} | ${job.id} | not read: ${job.status} when the jobs were listed | | | | | | | | | | |`,
         );
         continue;
       }
       const r = readJob(job, readFileSync(path, "utf8"));
       console.log(
-        `| ${run} | ${r.job} | ${r.id} | \`${r.sha?.slice(0, 12)}\` | \`${r.head?.slice(0, 12)}\` | \`${r.workflowBlob?.slice(0, 12)}\` | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${r.mode} | ${r.wallSeconds} | ${r.workspaceUnitSeconds} / ${r.dependencyUnitSeconds} |`,
+        `| ${run} | ${r.job} | ${r.id} | \`${r.sha?.slice(0, 12)}\` | \`${r.head?.slice(0, 12)}\` | \`${r.workflowBlob?.slice(0, 12)}\` | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${r.mode ?? "failed after the build"} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
       );
     }
   }

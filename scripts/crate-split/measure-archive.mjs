@@ -69,7 +69,8 @@ function main([mode]) {
   if (build.status !== 0) {
     console.error(`measure-archive: the ${mode} archive build failed after ${wall.toFixed(1)} s`);
     process.exitCode = build.status ?? 1;
-    return;
+    // cargo may have finished and written its report before nextest refused to archive;
+    // its units are still what the build cost.
   }
   // cargo-llvm-cov builds into its own directory under the target directory.
   const reports = [
@@ -83,18 +84,20 @@ function main([mode]) {
       : [],
   );
   const newest = reports.sort((a, b) => b.at - a.at)[0];
-  if (!newest) {
-    console.error(
-      `measure-archive: the build wrote no cargo timings report under ${metadata.target_directory}`,
-    );
-    process.exitCode = 1;
+  if (!newest || newest.at < begun) {
+    if (build.status === 0) {
+      console.error(
+        `measure-archive: the build wrote no cargo timings report under ${metadata.target_directory}`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
   const units = timingUnits(readFileSync(newest.path, "utf8"));
   const sum = (list) => list.reduce((s, u) => s + u.seconds, 0);
   const own = units.filter((u) => workspace.has(u.name));
   console.log(
-    `measure-archive: mode=${mode} wall_s=${wall.toFixed(1)} units=${units.length} unit_s=${sum(units).toFixed(1)} ` +
+    `measure-archive: mode=${mode}${build.status === 0 ? "" : " archive=failed"} wall_s=${wall.toFixed(1)} units=${units.length} unit_s=${sum(units).toFixed(1)} ` +
       `workspace_units=${own.length} workspace_unit_s=${sum(own).toFixed(1)} ` +
       `dependency_unit_s=${(sum(units) - sum(own)).toFixed(1)} workspace=${[...workspace].sort().join(",")}`,
   );
