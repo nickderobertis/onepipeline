@@ -198,7 +198,7 @@ function parseLog(text) {
 }
 
 function logFacts(lines) {
-  const facts = { github_sha: null, selection: null, cache: [], readOnly: [] };
+  const facts = { github_sha: null, selection: null, cache: [], readOnly: [], nxReport: {} };
   for (let i = 0; i < lines.length; i++) {
     const { text } = lines[i];
     if (!facts.github_sha && /log -1 --format=%H|log -1 --format='%H'/.test(text)) {
@@ -218,6 +218,9 @@ function logFacts(lines) {
       )
     )
       facts.cache.push({ t: lines[i].t, text: text.trim() });
+    // Nx's own performance report at the end of the gate's invocation.
+    const perf = /^\s*(Run duration|Cache|Critical path|Recoverable time):\s+(.*)$/.exec(text);
+    if (perf) facts.nxReport[perf[1]] = perf[2].trim();
     if (/CACHE_READ_ONLY is set/.test(text))
       facts.readOnly.push({ t: lines[i].t, text: text.trim() });
   }
@@ -230,7 +233,14 @@ function readMeasure(dir) {
   if (!dir) return null;
   const files = walk(dir);
   const find = (name) => files.find((f) => f.endsWith(`/${name}`));
-  const out = { samples: [], rustc: [], graph: null, overhead: null, host: null };
+  const out = {
+    samples: [],
+    rustc: [],
+    graph: null,
+    overhead: null,
+    host: null,
+    nxProfile: null,
+  };
   const host = find("host.txt");
   if (host) out.host = readFileSync(host, "utf8").trim().split("\n");
   const samples = find("samples.txt");
@@ -270,6 +280,14 @@ function readMeasure(dir) {
         code: Number(f[6]),
         compiler: f[7] ?? "",
       });
+    }
+  }
+  const profile = find("nx-profile.json");
+  if (profile) {
+    try {
+      out.nxProfile = JSON.parse(readFileSync(profile, "utf8")).filter((e) => e.ph === "X");
+    } catch {
+      out.nxProfile = null;
     }
   }
   const graph = find("graph.json");
@@ -423,6 +441,7 @@ function analyzeJob(opts) {
     completed_at: job.completed_at,
     wall_s: wall,
     selection: facts.selection,
+    nx_report: facts.nxReport,
     cache_lines: facts.cache,
     read_only_lines: facts.readOnly,
     requests: 0,
@@ -457,13 +476,31 @@ function analyzeJob(opts) {
 
   // The gate: Nx tasks shared fairly, each task's share split by what it was doing.
   const gate = sequential.find((s) => s.class === "gate (Nx tasks)");
-  const tasks = (executions?.tasks ?? []).map((t) => ({
-    task: t.task,
-    result: t.result,
-    remote_status: t.remote_status,
-    start: ms(t.started_at),
-    end: ms(t.finished_at),
-  }));
+  // Nx's own trace when the run kept one: it covers every task the gate's invocation ran,
+  // failed and skipped ones too. Otherwise the sidecar's telemetry, which a failed gate's
+  // invocation does not reach (its tasks are then only the bootstrap invocation's).
+  const results = new Map((executions?.tasks ?? []).map((t) => [t.task, t.result]));
+  const tasks = measure?.nxProfile?.length
+    ? measure.nxProfile.map((e) => ({
+        task: e.name,
+        result: results.get(e.name) ?? e.args?.status ?? "-",
+        start: e.ts / 1000,
+        end: (e.ts + e.dur) / 1000,
+      }))
+    : (executions?.tasks ?? []).map((t) => ({
+        task: t.task,
+        result: t.result,
+        remote_status: t.remote_status,
+        start: ms(t.started_at),
+        end: ms(t.finished_at),
+      }));
+  result.task_source = measure?.nxProfile?.length
+    ? "NX_PROFILE trace"
+    : executions?.cancelled_invocations
+      ? "sidecar telemetry without the gate's invocation (a failed gate): tasks incomplete"
+      : executions
+        ? "sidecar telemetry"
+        : "none";
   result.executions_available = Boolean(executions);
   result.store_attempts = executions?.store_attempts ?? null;
   result.stored = manifest
@@ -803,6 +840,13 @@ function printJob(r) {
   out.push(`wall clock ${min(w)} min (${r.started_at} .. ${r.completed_at})`);
   if (r.selection)
     out.push(`Nx selection: ${r.selection.count} task(s): ${r.selection.tasks.join(" ")}`);
+  out.push(`Nx task times from: ${r.task_source}`);
+  if (Object.keys(r.nx_report).length)
+    out.push(
+      `Nx's own report: ${Object.entries(r.nx_report)
+        .map(([k, v]) => `${k} ${v}`)
+        .join("; ")}`,
+    );
   out.push("", "## Steps, one after another (sums to the wall clock)", "");
   const classes = Object.entries(r.step_classes).sort((a, b) => b[1] - a[1]);
   out.push(

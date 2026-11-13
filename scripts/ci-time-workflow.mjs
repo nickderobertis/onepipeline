@@ -14,7 +14,8 @@
 //     `test-macos`, from the job's first step, into `$RUNNER_TEMP/measure`;
 //   - times every rustc invocation there through a `RUSTC_WRAPPER` set after the
 //     rust-cache step (so its key is unchanged, and cargo-llvm-cov chains it);
-//   - writes the Nx task graph the job ran, and uploads all of it as `measure-<job>`;
+//   - keeps Nx's own task trace (`NX_PROFILE`), which a failed gate writes too, and the
+//     Nx task graph the job ran, and uploads all of it as `measure-<job>`;
 //   - with `--overhead-sample`, runs that partition of the e2e tier twice after the
 //     gate in `test-linux`, instrumented and then plain, for coverage's runtime overhead.
 // The same input always produces the same output, so both sides of an A/B carry
@@ -131,14 +132,18 @@ function timerStep() {
     heredoc("$m/rustc-timer", TIMER) +
     'chmod +x "$m/rustc-timer"\n' +
     'echo "RUSTC_WRAPPER=$m/rustc-timer" >> "$GITHUB_ENV"\n' +
-    'echo "ONEPIPELINE_RUSTC_TIMINGS=$m/rustc.tsv" >> "$GITHUB_ENV"\n';
+    'echo "ONEPIPELINE_RUSTC_TIMINGS=$m/rustc.tsv" >> "$GITHUB_ENV"\n' +
+    "# Nx's own trace of every task's start and end, written whatever the tasks' outcome. Nx\n" +
+    "# joins this onto its working directory, so it is relative to the checkout.\n" +
+    'echo "NX_PROFILE=target/ci-time-nx-profile.json" >> "$GITHUB_ENV"\n';
   return `      - name: 'Measure: time every rustc invocation, after rust-cache keyed (${MARK})'\n        shell: bash\n        run: |\n${indent(run, 10)}`;
 }
 
 function graphStep(job) {
   const run =
     'm="$RUNNER_TEMP/measure"; mkdir -p "$m"\n' +
-    `ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx-affected.sh -t "${TARGETS[job]}" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true\n` +
+    'if [ -f target/ci-time-nx-profile.json ]; then cp target/ci-time-nx-profile.json "$m/nx-profile.json"; fi\n' +
+    `ONEPIPELINE_NX_SHOW_OUTPUT=1 env -u NX_PROFILE bash scripts/nx-affected.sh -t "${TARGETS[job]}" --graph=stdout > "$m/graph.json" 2> "$m/graph.err" || true\n` +
     'date -u +%s > "$m/ended.txt"\n';
   return `      - name: 'Measure: the Nx task graph this job ran (${MARK})'\n        if: always()\n        shell: bash\n        working-directory: \${{ github.workspace }}\n        run: |\n${indent(run, 10)}`;
 }
