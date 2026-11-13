@@ -1717,9 +1717,6 @@ onebudgetspec-core = { workspace = true }
 # sibling, with no remote reference resolution.
 jsonschema = { version = "0.56", default-features = false }
 
-[[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
 
 # The pooled-slot journey has its own Nx input edge and coverage tier.
 [[test]]
@@ -1833,3 +1830,41 @@ schemars = { opt-level = 2 }
 [[test]]
 name = "codex_server"
 path = "tests/codex_server/main.rs"
+
+# Option (b)'s throwaway prototype: scripts/crate-split/prototype-b.mjs.
+
+[[test]]
+name = "e2e_landing"
+path = "tests/e2e_split/e2e_landing.rs"
+
+[[test]]
+name = "e2e_store"
+path = "tests/e2e_split/e2e_store.rs"
+
+[[test]]
+name = "e2e_views"
+path = "tests/e2e_split/e2e_views.rs"
+
+[[test]]
+name = "e2e_dispatch"
+path = "tests/e2e_split/e2e_dispatch.rs"
+
+[[test]]
+name = "e2e_channel"
+path = "tests/e2e_split/e2e_channel.rs"
+
+[[test]]
+name = "e2e_runs"
+path = "tests/e2e_split/e2e_runs.rs"
+
+[[test]]
+name = "e2e_watch"
+path = "tests/e2e_split/e2e_watch.rs"
+
+[[test]]
+name = "e2e_maintenance"
+path = "tests/e2e_split/e2e_maintenance.rs"
+
+[[test]]
+name = "e2e_harness"
+path = "tests/e2e_split/e2e_harness.rs"

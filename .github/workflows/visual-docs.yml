@@ -18,17 +18,8 @@ name: Visual docs
 # arrange, and the alternative to configuring them is an unbounded branch of committed
 # images. `screencomp doctor --env` is what checks this call is wired correctly here.
 on:
-  pull_request:
-    # `closed` alone: screencomp deletes this PR's gh-pages preview once it
-    # closes, so stale /pr-<n>/ galleries do not accumulate on the branch.
-    types: [closed]
-  push:
-    branches: [main]
-  schedule:
-    # Monthly: prune the gh-pages gallery history so committed images do not
-    # grow the branch without bound (keeps the 20 most recent versions).
-    - cron: "19 5 1 * *"
   workflow_dispatch:
+
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 jobs:
