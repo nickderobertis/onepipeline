@@ -53,7 +53,7 @@ export function readJob(job, log) {
   const size = text.match(/Cache Size: ~(\d+) MB/)?.[1];
   const step = job.steps.find((s) => /rust-cache/.test(s.name));
   const measured = text.match(
-    /measure-archive: mode=(\S+)(?: archive=failed)? wall_s=([\d.]+) units=(\d+) unit_s=([\d.]+) workspace_units=(\d+) workspace_unit_s=([\d.]+) dependency_unit_s=([\d.]+)/,
+    /measure-archive: mode=(\S+)( archive=failed)? wall_s=([\d.]+) units=(\d+) unit_s=([\d.]+) workspace_units=(\d+) workspace_unit_s=([\d.]+) dependency_unit_s=([\d.]+)/,
   );
   return {
     job: job.name,
@@ -73,31 +73,37 @@ export function readJob(job, log) {
     // then does with what was built.
     cargoSeconds: cargoBuild(text),
     mode: measured?.[1] ?? null,
-    wallSeconds: measured ? Number(measured[2]) : null,
-    unitSeconds: measured ? Number(measured[4]) : null,
-    workspaceUnitSeconds: measured ? Number(measured[6]) : null,
-    dependencyUnitSeconds: measured ? Number(measured[7]) : null,
+    archived: measured ? !measured[2] : null,
+    wallSeconds: measured ? Number(measured[3]) : null,
+    unitSeconds: measured ? Number(measured[5]) : null,
+    workspaceUnitSeconds: measured ? Number(measured[7]) : null,
+    dependencyUnitSeconds: measured ? Number(measured[8]) : null,
   };
 }
 
 const USAGE = "node scripts/crate-split/demo-runs.mjs --dir DIR --out FILE RUN_ID...";
 
 function main(argv) {
-  const dirAt = argv.indexOf("--dir");
-  const outAt = argv.indexOf("--out");
-  check.need(
-    dirAt >= 0 && argv[dirAt + 1] && !argv[dirAt + 1].startsWith("--"),
-    "--dir names the directory the run's jobs and logs were saved in",
-    USAGE,
-  );
-  check.need(
-    outAt >= 0 && argv[outAt + 1] && !argv[outAt + 1].startsWith("--"),
-    "--out names the file the table is written to",
-    USAGE,
-  );
-  const dir = argv[dirAt + 1];
-  const out = argv[outAt + 1];
-  const runs = argv.filter((_, i) => ![dirAt, dirAt + 1, outAt, outAt + 1].includes(i));
+  const options = {};
+  const runs = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (!argv[i].startsWith("--")) {
+      runs.push(argv[i]);
+      continue;
+    }
+    const name = argv[i].slice(2);
+    check.need(["dir", "out"].includes(name), `${argv[i]} is not an option this reads`, USAGE);
+    check.need(!(name in options), `--${name} is given twice`, USAGE);
+    check.need(
+      argv[i + 1] !== undefined && !argv[i + 1].startsWith("--"),
+      `--${name} needs a value`,
+      USAGE,
+    );
+    options[name] = argv[++i];
+  }
+  check.need(options.dir, "--dir names the directory the run's jobs and logs were saved in", USAGE);
+  check.need(options.out, "--out names the file the table is written to", USAGE);
+  const { dir, out } = options;
   check.need(runs.length > 0, "name at least one run", USAGE);
   for (const run of runs) check.runId(run);
   const lines = [
@@ -132,7 +138,8 @@ function main(argv) {
       saves += r.saves;
       const code = (v) => (v ? `\`${v.slice(0, 12)}\`` : "-");
       const archive =
-        r.mode ?? (r.cargoSeconds === null ? "no measurement" : "failed after the build");
+        (r.mode && `${r.mode}${r.archived ? "" : " (archive failed after the build)"}`) ??
+        (r.cargoSeconds === null ? "no measurement" : "failed after the build");
       lines.push(
         `| ${run} | ${r.job} | ${r.id} | ${code(r.sha)} | ${code(r.head)} | ${code(r.workflowBlob)} | ${r.restore} | ${r.restoreMB ?? "-"} | ${r.restoreSeconds ?? "-"} | ${r.saves} | ${archive} | ${r.cargoSeconds ?? "-"} | ${r.wallSeconds ?? "-"} | ${r.workspaceUnitSeconds ?? "-"} / ${r.dependencyUnitSeconds ?? "-"} |`,
       );

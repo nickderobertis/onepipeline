@@ -999,9 +999,9 @@ test("a split is weighed per platform: skipped suites, the shared build only whe
   write(dir, {
     "observed.json": JSON.stringify({
       prs: [
-        { pr: 1, title: "docs only", release: false, base: SHA_A, head: SHA_B, changed: ["docs/a.md"], moved: [] },
-        { pr: 2, title: "a journey", release: false, base: SHA_A, head: SHA_B, changed: ["tests/one.rs"], moved: [] },
-        { pr: 3, title: "the lock", release: false, base: SHA_A, head: SHA_B, changed: [], moved: ["runtime:cargo"] },
+        { pr: 1, title: "docs only", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["docs/a.md"], moved: [] },
+        { pr: 2, title: "a journey", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["tests/one.rs"], moved: [] },
+        { pr: 3, title: "the lock", release: false, base: SHA_A, head: SHA_B, run: 1, changed: [], moved: ["runtime:cargo"] },
       ],
       weights: {
         tasks: {

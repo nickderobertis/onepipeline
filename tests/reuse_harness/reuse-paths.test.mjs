@@ -458,6 +458,8 @@ function workspace(dir) {
     conflicting: branch("conflicting", () => write(dir, { "src/a.rs": "a-head\n" })),
   };
   heads.moved = branch("moved-main", () => write(dir, { "src/a.rs": "a-main\n" }));
+  // A change on top of the failing probe: the probe fails alike at its base and head.
+  heads.stillFailing = branch("still-failing", () => write(dir, { "CHANGELOG.md": "0.3\n" }), heads.probe);
   return heads;
 }
 
@@ -504,6 +506,7 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
     pr(21, h.deleted, [["test-linux", 2101]], 210),
     pr(22, h.probe, [["test-linux", 2201]], 220),
     pr(25, h.runtimeAdded, [["test-linux", 2501]], 250),
+    pr(29, h.stillFailing, [["test-linux", 2901]], 290),
     pr(23, h.newTask, [["test-linux", 2301]], 230),
     pr(24, h.conflicting, [["test-linux", 2401]], 240),
     pr(
@@ -532,6 +535,8 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
       store_attempts: [],
     }),
     "logs/2501.log": lines(h.runtimeAdded, h.base, ["> nx run p:lint"]),
+    "logs/2901.log": lines(h.stillFailing, h.probe, ["> nx run p:test"]),
+    "executions/2901.json": JSON.stringify({ tasks: [task("p:test")], store_attempts: [] }),
     "executions/2501.json": JSON.stringify({ tasks: [task("p:lint")], store_attempts: [] }),
     "logs/2301.log": lines(h.newTask, h.base, ["> nx run p:newtask", "> nx run p:lint"]),
     "executions/2301.json": JSON.stringify({
@@ -605,6 +610,9 @@ test("the observed replay reads each kind of moved input, each miss's cause and 
   // A runtime input only the tested tree's plan holds moved too, with the configuration.
   assert.ok(prOf(25).moved.includes("runtime:node scripts/extra.cjs"), JSON.stringify(prOf(25).moved));
   assert.ok(row(25, "test-linux", "p:lint").inputs.includes("runtime:node scripts/extra.cjs"));
+  // A probe failing alike at both revisions moved nothing: #29's test ran unforced.
+  assert.deepEqual(row(29, "test-linux", "p:test").inputs, []);
+  assert.ok(!prOf(29).moved.includes("runtime:node scripts/probe.cjs"));
   // A task the base had no plan of is new; the others' configuration moved.
   assert.deepEqual(row(23, "test-linux", "p:newtask").inputs, ["task new at this pull request"]);
   assert.deepEqual(row(23, "test-linux", "p:lint").inputs, ["project configuration"]);
@@ -893,9 +901,9 @@ test("option (c)'s unit suites run on a change to their crate or one it depends 
     }),
     "observed.json": JSON.stringify({
       prs: [
-        { pr: 1, title: "d", release: false, base: SHA_A, head: SHA_B, changed: ["src/d.rs"], moved: [] },
-        { pr: 2, title: "c", release: false, base: SHA_A, head: SHA_B, changed: ["src/c.rs"], moved: [] },
-        { pr: 3, title: "a test", release: false, base: SHA_A, head: SHA_B, changed: ["tests/x.rs"], moved: [] },
+        { pr: 1, title: "d", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["src/d.rs"], moved: [] },
+        { pr: 2, title: "c", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["src/c.rs"], moved: [] },
+        { pr: 3, title: "a test", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["tests/x.rs"], moved: [] },
       ],
       weights: { tasks: {}, modules: {} },
     }),
@@ -1148,11 +1156,12 @@ test("the report prices a typical pull request, charging a split's build delta o
           release: false,
           base: SHA_A,
           head: SHA_B,
+          run: 1,
           changed: ["src/a.rs", "tests/e2e/a.rs"],
           moved: [],
           jobs: [],
         },
-        { pr: 2, title: "docs", release: false, base: SHA_A, head: SHA_B, changed: ["docs/a.md"], moved: [], jobs: [] },
+        { pr: 2, title: "docs", release: false, base: SHA_A, head: SHA_B, run: 1, changed: ["docs/a.md"], moved: [], jobs: [] },
       ],
       weights: { tasks: {}, modules: {} },
       totals: {
@@ -1507,6 +1516,7 @@ test("each document the harness reads is refused at its command when malformed, 
           release: false,
           base: SHA_A,
           head: SHA_B,
+          run: 1,
           changed: [],
           moved: [],
           jobs: [{ job: "test-linux", ran: [{ task: "p:t", cause: "one input" }], replayed: [] }],
@@ -1551,6 +1561,7 @@ test("each document the harness reads is refused at its command when malformed, 
           release: false,
           base: SHA_A,
           head: SHA_B,
+          run: 1,
           changed: [],
           moved: [],
           jobs: [{ job: "test-linux", ran: [{ task: "p:t", cause: "one input", inputs: ["a", "b"] }], replayed: [] }],
@@ -1701,7 +1712,7 @@ test("a demonstration whose archive nextest refused still shows cargo's build ti
   assert.equal(run.status, 0, run.stderr);
   assert.match(
     readFileSync(join(dir, "t.md"), "utf8"),
-    /\| coverage \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
+    /\| coverage \(archive failed after the build\) \| 138 \| 140\.4 \| 380 \/ 0 \|$/m,
   );
 });
 
@@ -1790,4 +1801,34 @@ test("a timings report the build did not write as cargo does is refused with wha
     (e) => /no name, target or nonnegative duration/.test(e.message),
   );
   assert.deepEqual(timingUnits('const UNIT_DATA = [{"name":"x","target":" lib","duration":1.5}];'), [{ name: "x", target: " lib", seconds: 1.5 }]);
+});
+
+test("the demonstration reader reads the cache action's and cargo's own lines from real hosted logs", () => {
+  // Lines of two measure-linux jobs of runs 43403322259's predecessors (43387659480's
+  // restore-key hit, 43387654760's exact hit), as the runner wrote them.
+  const dir = join(scratch, "real-runs-logs");
+  const fixtures = join(root, "tests", "reuse_harness", "fixtures");
+  write(dir, {
+    "43387659480.jobs.json": JSON.stringify({ jobs: [{ name: "measure-linux (2)", id: 131759835104, status: "completed", steps: [] }] }),
+    "43387654760.jobs.json": JSON.stringify({ jobs: [{ name: "measure-linux (2)", id: 131759820635, status: "completed", steps: [] }] }),
+    "131759835104.log": readFileSync(join(fixtures, "measure-linux-131759835104.log"), "utf8"),
+    "131759820635.log": readFileSync(join(fixtures, "measure-linux-131759820635.log"), "utf8"),
+  });
+  const run = spawnSync(process.execPath, [script("demo-runs.mjs"), "--dir", dir, "--out", join(dir, "t.md"), "43387659480", "43387654760"], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const table = readFileSync(join(dir, "t.md"), "utf8");
+  assert.match(
+    table,
+    /^\| 43387659480 \| measure-linux \(2\) \| 131759835104 \| `4fc389b6fa15` \| `2cac816a6a74` \| `3d81753b817c` \| restore-key v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 42 \| 0 \| coverage \| 157 \| 169\.9 \| 533\.5 \/ 0 \|$/m,
+  );
+  assert.match(
+    table,
+    /^\| 43387654760 \| measure-linux \(2\) \| 131759820635 \| `2f45e1cbb668` \| `0f001915fe72` \| `3d81753b817c` \| v0-rust-test-linux-Linux-x64-ff458983-9da64e3b \| 1869 \| 71 \| 0 \| coverage \| 104 \| 116\.4 \| 304 \/ 0 \|$/m,
+  );
+  // An option given twice is refused, not read as a run.
+  const twice = spawnSync(process.execPath, [script("demo-runs.mjs"), "--dir", dir, "--dir", dir, "--out", join(dir, "t.md"), "1"], { encoding: "utf8" });
+  assert.equal(twice.status, 1);
+  assert.match(twice.stderr, /--dir is given twice/);
 });

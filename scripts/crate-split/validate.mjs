@@ -408,6 +408,7 @@ export function observedResult(doc, where) {
       `${where}: #${pr.pr} has no base and head commits`,
       again,
     );
+    need(isCount(pr.run), `${where}: #${pr.pr} names no CI run`, again);
     need(
       Array.isArray(pr.changed) &&
         pr.changed.every((f) => typeof f === "string") &&
@@ -419,6 +420,9 @@ export function observedResult(doc, where) {
     for (const job of pr.jobs ?? []) {
       need(
         isText(job.job) &&
+          isCount(job.id) &&
+          Number.isFinite(job.minutes) &&
+          job.minutes >= 0 &&
           Array.isArray(job.ran) &&
           Array.isArray(job.replayed) &&
           job.ran.every(forcedRow) &&
@@ -436,6 +440,22 @@ export function observedResult(doc, where) {
     }
   }
   const weight = (w) => Number.isFinite(w?.minutes) && w.minutes >= 0;
+  for (const table of ["tasks", "modules", "build"]) {
+    const value = doc.weights[table];
+    need(
+      value === undefined || isObject(value),
+      `${where}: weights.${table} is not an object`,
+      again,
+    );
+    if (table === "build") continue;
+    for (const [unit, byPlatform] of Object.entries(value ?? {})) {
+      need(
+        isObject(byPlatform),
+        `${where}: the ${table} weight of ${unit} is not an object of platforms`,
+        again,
+      );
+    }
+  }
   for (const table of ["tasks", "modules"]) {
     for (const [unit, byPlatform] of Object.entries(doc.weights[table] ?? {})) {
       for (const [platform, w] of Object.entries(byPlatform)) {
