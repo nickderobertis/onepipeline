@@ -703,8 +703,8 @@ export function parseBuildDelta(text) {
   if (text === undefined) return {};
   const out = {};
   for (const part of text.split(",")) {
-    const m = part.match(/^(linux|darwin|win32)=(-?\d+(?:\.\d+)?)$/);
-    if (!m || m[1] in out) {
+    const m = part.match(/^(linux|darwin|win32)=(-?\d{1,6}(?:\.\d{1,6})?)$/);
+    if (!m || m[1] in out || !Number.isFinite(Number(m[2]))) {
       throw new Refusal(
         `--build-delta ${text} is not platform=minutes pairs`,
         "give each of linux, darwin and win32 at most once, e.g. --build-delta linux=1.5,darwin=2,win32=-0.5",

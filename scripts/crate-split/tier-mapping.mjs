@@ -293,7 +293,6 @@ function main(argv) {
     observed,
     variants: options.variant,
   });
-  // --split-e2e PROPOSED: option (b) over those tiers.
   if (options["split-e2e"]) {
     mapping = optionB(
       mapping,

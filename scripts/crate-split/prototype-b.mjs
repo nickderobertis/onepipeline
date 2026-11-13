@@ -38,7 +38,7 @@ export function prototypeB(repo) {
   for (const [suite, spec] of Object.entries(proposed.suites)) {
     // The name becomes a file name, a Rust comment and a Cargo target name.
     check.need(
-      /^[A-Za-z0-9-]+$/.test(suite),
+      /^[A-Za-z0-9-]+$/.test(suite) && !(suite in Object.prototype),
       `${JSON.stringify(suite)} is not a suite name a target can take`,
       next,
     );

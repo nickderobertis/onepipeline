@@ -334,17 +334,34 @@ export function observedResult(doc, where) {
     again,
   );
   need(
-    doc.totals === undefined || isObject(doc.totals),
-    `${where}'s totals are not an object`,
+    doc.totals === undefined ||
+      (isObject(doc.totals) &&
+        ["alone", "several", "unforced", "replayed"].every((t) =>
+          ["nonRelease", "release"].every((scope) => isObject(doc.totals[t]?.[scope])),
+        )),
+    `${where}'s totals are not the alone, several, unforced and replayed tables of each scope`,
     again,
   );
+  const forcedRow = (r) =>
+    isText(r.task) &&
+    isText(r.cause) &&
+    (!["one input", "several inputs"].includes(r.cause) ||
+      (Array.isArray(r.inputs) && r.inputs.every(isText)));
   for (const pr of doc.prs) {
     need(
-      isObject(pr) && isCount(pr.pr) && typeof pr.release === "boolean",
-      `${where} has a pull request with no number or release flag`,
+      isObject(pr) &&
+        isCount(pr.pr) &&
+        typeof pr.release === "boolean" &&
+        typeof pr.title === "string",
+      `${where} has a pull request with no number, title or release flag`,
       again,
     );
     if (pr.unread) continue;
+    need(
+      pr.base === undefined || isSha(pr.base),
+      `${where}: #${pr.pr}'s base is not a commit`,
+      again,
+    );
     need(
       Array.isArray(pr.changed) &&
         pr.changed.every((f) => typeof f === "string") &&
@@ -358,9 +375,9 @@ export function observedResult(doc, where) {
         isText(job.job) &&
           Array.isArray(job.ran) &&
           Array.isArray(job.replayed) &&
-          job.ran.every((r) => isText(r.task) && isText(r.cause)) &&
+          job.ran.every(forcedRow) &&
           job.replayed.every((r) => isText(r.task)),
-        `${where}: #${pr.pr} has a job whose tasks are not rows of a task and a cause`,
+        `${where}: #${pr.pr} has a job whose tasks are not rows of a task, a cause and the inputs that forced it`,
         again,
       );
     }

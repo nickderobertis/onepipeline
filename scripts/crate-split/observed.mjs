@@ -334,6 +334,7 @@ export function loadEvidence(dir) {
     const jobs = [];
     for (const checkRun of suite?.checkRuns.nodes ?? []) {
       if (!NX_JOBS.includes(checkRun.name)) continue;
+      check.finishedJob(checkRun, pr.number);
       const logPath = join(dir, "logs", `${checkRun.databaseId}.log`);
       const execPath = join(dir, "executions", `${checkRun.databaseId}.json`);
       jobs.push({
@@ -555,8 +556,12 @@ export function weigh(perPr, profilesDir, restExcluded = new Set()) {
   const sources = {};
   // Each job's newest saved run (run ids rise with time) is the one that weighs it.
   const newest = new Map();
+  // Only a run id's directory and a test job's directory under it are a run's records;
+  // anything else (an unpack fetch-evidence left `.partial`) is none.
   for (const run of existsSync(profilesDir) ? readdirSync(profilesDir) : []) {
+    if (!/^[1-9]\d{0,19}$/.test(run)) continue;
     for (const job of readdirSync(join(profilesDir, run))) {
+      if (!NX_JOBS.includes(job) || job === "lint") continue;
       if (!newest.has(job) || BigInt(run) > BigInt(newest.get(job))) newest.set(job, run);
     }
   }

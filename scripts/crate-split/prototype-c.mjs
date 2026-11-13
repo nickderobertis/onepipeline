@@ -153,7 +153,6 @@ export function prototypeC(repo) {
     lower = [...lower, ...modules];
     lowerCrates.push(crate);
   }
-  // The root: each moved module's declaration becomes a re-export of the crate it is in.
   const moved = new Map(Object.entries(layers).flatMap(([crate, ms]) => ms.map((m) => [m, crate])));
   const root = [allow];
   for (const block of blocks) {
