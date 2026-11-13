@@ -131,14 +131,18 @@ test("the workflow edits turn every cache write off, add the observers, and are 
     step,
     /run plain env -u RUSTFLAGS cargo test --workspace --no-run --locked --timings/,
   );
-  assert.match(step, /cp target\/cargo-timings\/cargo-timing\.html "\$m\/plain\.html"/);
+  assert.match(step, /keep target\/cargo-timings\/cargo-timing\.html plain/);
+  assert.match(
+    step,
+    /if ! cp "\$1" "\$m\/\$2\.html"; then\n\s+echo "::warning::measurement: cargo wrote no --timings report.*ACTION: /,
+  );
   assert.match(
     step,
     /run instrumented env RUSTFLAGS="-D warnings" bash scripts\/coverage-unit\.sh --cargo -- test --workspace --no-run --locked --timings/,
   );
   assert.match(
     step,
-    /cp target\/llvm-cov-target\/cargo-timings\/cargo-timing\.html "\$m\/instrumented\.html"/,
+    /keep target\/llvm-cov-target\/cargo-timings\/cargo-timing\.html instrumented/,
   );
   assert.match(step, /::warning::measurement: the \$label timed build exited \$status.*ACTION: /);
 
