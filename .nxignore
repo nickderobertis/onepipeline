@@ -1,0 +1,3 @@
+# Measurement only (spike-launch-inventory, never lands): the vendored crates under
+# vendor/ carry their own repositories' Nx projects, which are not this workspace's.
+vendor/

@@ -1,0 +1,72 @@
+{
+  "schema": 2,
+  "binary": "e2e",
+  "test": "destination::a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart",
+  "run_id": "ac9aa2f6-6bab-424d-aeda-fcc36b13376e",
+  "attempt": 1,
+  "os": "linux",
+  "arch": "x86_64",
+  "started_at": 1794686020.149236,
+  "wall_s": 0.619899604,
+  "ended": "test-thread",
+  "categories": {
+    "spawn": {
+      "count": 3,
+      "s": 0.366840674,
+      "inclusive_s": 0.366840674,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "git": {
+      "count": 6,
+      "s": 0.197623765,
+      "inclusive_s": 0.199015547,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "build": {
+      "count": 0,
+      "s": 0.0,
+      "inclusive_s": 0.0,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "fixture": {
+      "count": 4,
+      "s": 0.016182547,
+      "inclusive_s": 0.229185795,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "wait": {
+      "count": 0,
+      "s": 0.000724169,
+      "inclusive_s": 0.000757122,
+      "background_count": 0,
+      "background_s": 0.0,
+      "polls": 2
+    },
+    "fs": {
+      "count": 45,
+      "s": 0.019737626,
+      "inclusive_s": 0.019737626,
+      "background_count": 0,
+      "background_s": 0.0
+    }
+  },
+  "unattributed_s": 0.018790823,
+  "programs": {
+    "git": {
+      "count": 5,
+      "s": 0.141702045
+    },
+    "onepipeline": {
+      "count": 2,
+      "s": 0.344930852
+    },
+    "ps": {
+      "count": 1,
+      "s": 0.021909822
+    }
+  }
+}

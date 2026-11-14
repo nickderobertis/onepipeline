@@ -42,11 +42,41 @@ export class Refusal extends Error {
 
 /** git subcommands that write nothing a later read of the same argv would see. */
 export const GIT_READS = new Set([
-  "rev-parse", "status", "log", "show", "cat-file", "for-each-ref", "ls-files", "ls-tree",
-  "diff", "diff-index", "diff-tree", "diff-files", "merge-base", "rev-list", "show-ref",
-  "describe", "name-rev", "check-ignore", "check-attr", "check-ref-format", "grep",
-  "blame", "var", "ls-remote", "count-objects", "version", "--version", "help", "shortlog",
-  "cherry", "range-diff", "whatchanged", "verify-commit", "verify-tag", "fsck",
+  "rev-parse",
+  "status",
+  "log",
+  "show",
+  "cat-file",
+  "for-each-ref",
+  "ls-files",
+  "ls-tree",
+  "diff",
+  "diff-index",
+  "diff-tree",
+  "diff-files",
+  "merge-base",
+  "rev-list",
+  "show-ref",
+  "describe",
+  "name-rev",
+  "check-ignore",
+  "check-attr",
+  "check-ref-format",
+  "grep",
+  "blame",
+  "var",
+  "ls-remote",
+  "count-objects",
+  "version",
+  "--version",
+  "help",
+  "shortlog",
+  "cherry",
+  "range-diff",
+  "whatchanged",
+  "verify-commit",
+  "verify-tag",
+  "fsck",
 ]);
 
 /** Whether one git argv only reads. `config`, `branch`, `worktree`, `remote`, `symbolic-ref`, `tag` and `stash` read in some forms. */
@@ -57,9 +87,31 @@ export function gitReads(sub, argv) {
   const has = (...flags) => rest.some((a) => flags.includes(a));
   switch (sub) {
     case "config":
-      return has("--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--get-urlmatch");
+      return has(
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--list",
+        "-l",
+        "--show-origin",
+        "--get-urlmatch",
+      );
     case "branch":
-      return rest.length === 0 || has("--list", "-l", "--show-current", "--contains", "--merged", "-a", "-r", "-v", "-vv", "--format");
+      return (
+        rest.length === 0 ||
+        has(
+          "--list",
+          "-l",
+          "--show-current",
+          "--contains",
+          "--merged",
+          "-a",
+          "-r",
+          "-v",
+          "-vv",
+          "--format",
+        )
+      );
     case "worktree":
       return rest[0] === "list";
     case "remote":
@@ -79,9 +131,33 @@ export function gitReads(sub, argv) {
 
 /** The engine's verbs that change nothing: a journey re-launching for one is re-reading. */
 export const READ_VERBS = new Set([
-  "status", "show", "events", "view", "views", "list", "logs", "log", "graph", "check",
-  "validate", "schema", "explain", "version", "--version", "help", "doctor", "inspect",
-  "describe", "read", "watch", "health", "diff", "contract", "template", "budget", "ledger",
+  "status",
+  "show",
+  "events",
+  "view",
+  "views",
+  "list",
+  "logs",
+  "log",
+  "graph",
+  "check",
+  "validate",
+  "schema",
+  "explain",
+  "version",
+  "--version",
+  "help",
+  "doctor",
+  "inspect",
+  "describe",
+  "read",
+  "watch",
+  "health",
+  "diff",
+  "contract",
+  "template",
+  "budget",
+  "ledger",
 ]);
 
 const median = (xs) => quantile(xs, 0.5);
@@ -109,7 +185,11 @@ function readJsonl(path) {
 
 /** Every record a job's artifact holds. */
 export function readJob(label, dir) {
-  if (!existsSync(dir)) throw new Refusal(`${label}: ${dir} does not exist`, "unzip the job's test-profile artifact there");
+  if (!existsSync(dir))
+    throw new Refusal(
+      `${label}: ${dir} does not exist`,
+      "unzip the job's test-profile artifact there",
+    );
   const root = existsSync(join(dir, "test-profile")) ? join(dir, "test-profile") : dir;
   const tests = [];
   const e2e = join(root, "e2e");
@@ -134,7 +214,10 @@ export function readJob(label, dir) {
     }
   }
   if (!tests.length && !trace.length)
-    throw new Refusal(`${label}: ${dir} holds no e2e test-profile record and no launch trace`, "point LABEL=DIR at an unzipped test-profile artifact");
+    throw new Refusal(
+      `${label}: ${dir} holds no e2e test-profile record and no launch trace`,
+      "point LABEL=DIR at an unzipped test-profile artifact",
+    );
   const hostFile = join(root, "launch-host.json");
   const host = existsSync(hostFile) ? JSON.parse(readFileSync(hostFile, "utf8")) : null;
   const logFile = join(dir, "job.log");
@@ -152,9 +235,19 @@ export function e2eSummary(log) {
   let found = null;
   for (const line of lines) {
     if (/Nextest run ID/.test(line)) e2e = false;
-    if (/onepipeline::e2e\b/.test(line) || /Starting \d+ tests? across 1 binary \(1 test and/.test(line)) e2e = true;
+    if (
+      /onepipeline::e2e\b/.test(line) ||
+      /Starting \d+ tests? across 1 binary \(1 test and/.test(line)
+    )
+      e2e = true;
     const m = /Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run: (\d+) passed/.exec(line);
-    if (m && e2e) found = { seconds: Number(m[1]), run: Number(m[2]), passed: Number(m[3]), line: line.replace(/^\S+Z\s*/, "").trim() };
+    if (m && e2e)
+      found = {
+        seconds: Number(m[1]),
+        run: Number(m[2]),
+        passed: Number(m[3]),
+        line: line.replace(/^\S+Z\s*/, "").trim(),
+      };
   }
   return found;
 }
@@ -168,12 +261,21 @@ export function readOs(dir) {
     if (f.endsWith(".strace")) starts.push(...parseStrace(readFileSync(path, "utf8"), f));
     else if (f.endsWith(".jsonl"))
       for (const r of readJsonl(path))
-        starts.push({ pid: Number(r.pid), ppid: Number(r.ppid), exe: stem(r.image ?? ""), argv: splitCmd(r.cmd ?? ""), file: f });
+        starts.push({
+          pid: Number(r.pid),
+          ppid: Number(r.ppid),
+          exe: stem(r.image ?? ""),
+          argv: splitCmd(r.cmd ?? ""),
+          file: f,
+        });
   }
   return starts;
 }
 
-const stem = (path) => basename(String(path).replace(/\\/g, "/")).replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
+const stem = (path) =>
+  basename(String(path).replace(/\\/g, "/"))
+    .replace(/\.(exe|cmd|bat)$/i, "")
+    .toLowerCase();
 function splitCmd(cmd) {
   const out = [];
   for (const m of cmd.matchAll(/"([^"]*)"|(\S+)/g)) out.push(m[1] ?? m[2]);
@@ -248,13 +350,14 @@ export function joinTrace(trace) {
   for (const r of trace) {
     if (r.kind === "proc") procs.set(key(r.file, r.pid), r);
     else if (r.kind === "end") ends.set(key(r.file, r.pid), r.t);
-    else if (r.kind === "exit" && r.seq != null) bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
+    else if (r.kind === "exit" && r.seq != null)
+      bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
     else if (r.kind === "exit") exits.set(`${key(r.file, r.pid)}\u0000${r.child}`, r.t);
     else if (r.kind === "start") {
-      if (typeof r.env === "number") r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
+      if (typeof r.env === "number")
+        r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
       starts.push(r);
-    }
-    else if (r.kind === "wait") waits.push(r);
+    } else if (r.kind === "wait") waits.push(r);
     else if (r.kind === "sleeps") sleeps.push(r);
   }
   // A start written at its spawn has its exit, and any wait folded into it, in an
@@ -262,12 +365,13 @@ export function joinTrace(trace) {
   for (const s of starts) {
     const e = s.seq != null ? bySeq.get(`${key(s.file, s.pid)}\u0000${s.seq}`) : null;
     if (!e) continue;
-    for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"]) if (e[f] != null) s[f] = e[f];
+    for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"])
+      if (e[f] != null) s[f] = e[f];
   }
   // A record names its process; the process names its verb and test.
   for (const r of [...starts, ...waits, ...sleeps]) {
     const p = procs.get(key(r.file, r.pid));
-    r.verb ??= p?.verb ?? "";
+    r.verb ??= isTestBinary(p) ? "(test process)" : (p?.verb ?? "");
     r.test ??= p?.test ?? r.file;
   }
   // A start whose wait on it was folded into its record is that wait too.
@@ -277,7 +381,8 @@ export function joinTrace(trace) {
   for (const s of starts) {
     s.dur = s.exit_ns ?? null;
     if (s.dur == null && s.child != null) {
-      const at = exits.get(`${key(s.file, s.pid)}\u0000${s.child}`) ?? ends.get(key(s.file, s.child));
+      const at =
+        exits.get(`${key(s.file, s.pid)}\u0000${s.child}`) ?? ends.get(key(s.file, s.child));
       if (at != null && at >= s.t) s.dur = at - s.t;
     }
   }
@@ -294,7 +399,14 @@ export function joinTrace(trace) {
     let child = null;
     if (s.child != null) child = candidates.find((p) => p.pid === s.child && p.t >= s.t) ?? null;
     else if (["onepipeline", "onevcs"].includes(s.program))
-      child = candidates.find((p) => !claimed.has(p) && p.exe === s.program && p.t >= s.t && (s.dur == null || p.t <= s.t + s.dur)) ?? null;
+      child =
+        candidates.find(
+          (p) =>
+            !claimed.has(p) &&
+            p.exe === s.program &&
+            p.t >= s.t &&
+            (s.dur == null || p.t <= s.t + s.dur),
+        ) ?? null;
     if (child) {
       claimed.add(child);
       s.childProc = child;
@@ -313,7 +425,11 @@ export function joinTrace(trace) {
   }
   for (const s of starts) {
     const inner = s.childProc ? (startsOf.get(key(s.file, s.childProc.pid)) ?? []) : [];
-    s.nested = union(inner.filter((c) => c.dur != null).map((c) => [c.t, c.t + c.dur]), s.t, s.t + (s.dur ?? 0));
+    s.nested = union(
+      inner.filter((c) => c.dur != null).map((c) => [c.t, c.t + c.dur]),
+      s.t,
+      s.t + (s.dur ?? 0),
+    );
     s.self = s.dur == null ? null : Math.max(0, s.dur - s.nested);
   }
   return { procs: [...procs.values()], ends, starts, waits, sleeps, startsOf, key };
@@ -321,7 +437,10 @@ export function joinTrace(trace) {
 
 /** Nanoseconds of [from, to] covered by any interval. */
 function union(intervals, from, to) {
-  const xs = intervals.map(([a, b]) => [Math.max(a, from), Math.min(b, to)]).filter(([a, b]) => b > a).sort((p, q) => p[0] - q[0]);
+  const xs = intervals
+    .map(([a, b]) => [Math.max(a, from), Math.min(b, to)])
+    .filter(([a, b]) => b > a)
+    .sort((p, q) => p[0] - q[0]);
   let total = 0;
   let cur = null;
   for (const [a, b] of xs) {
@@ -344,7 +463,7 @@ export function foldJob(job) {
   const testSeconds = job.tests.reduce((a, r) => a + (r.wall_s ?? 0), 0);
   const summary = e2eSummary(job.log);
   const wallS = summary?.seconds ?? null;
-  const toWallMin = (ns) => (wallS && testSeconds ? (ns / 1e9 / testSeconds) * wallS / 60 : null);
+  const toWallMin = (ns) => (wallS && testSeconds ? ((ns / 1e9 / testSeconds) * wallS) / 60 : null);
   const procOf = (s) => t.procs.find((p) => p.file === s.file && p.pid === s.pid);
   const procIndex = new Map(t.procs.map((p) => [t.key(p.file, p.pid), p]));
   const startedBy = (s) => procIndex.get(t.key(s.file, s.pid));
@@ -357,7 +476,8 @@ export function foldJob(job) {
     const origin = isTestBinary(p) ? "library, in the test process" : `${p?.exe ?? "?"} (traced)`;
     const prog = programOf(s);
     const add = (map, k) => {
-      if (!map.has(k)) map.set(k, { key: k, program: prog, origin, count: 0, durs: [], self: 0, untimed: 0 });
+      if (!map.has(k))
+        map.set(k, { key: k, program: prog, origin, count: 0, durs: [], self: 0, untimed: 0 });
       const e = map.get(k);
       e.count++;
       if (s.dur == null) e.untimed++;
@@ -375,9 +495,18 @@ export function foldJob(job) {
   for (const p of t.procs) {
     if (isTestBinary(p) || p.parentStart) continue;
     const inner = t.startsOf.get(t.key(p.file, p.pid)) ?? [];
-    const end = t.ends.get(t.key(p.file, p.pid)) ?? Math.max(p.t, ...inner.map((c) => c.t + (c.dur ?? 0)));
+    const end =
+      t.ends.get(t.key(p.file, p.pid)) ?? Math.max(p.t, ...inner.map((c) => c.t + (c.dur ?? 0)));
     const k = `${p.file}\u0000${p.exe}`;
-    nestedInTest.set(k, (nestedInTest.get(k) ?? 0) + union(inner.filter((c) => c.dur != null).map((c) => [c.t, c.t + c.dur]), p.t, end));
+    nestedInTest.set(
+      k,
+      (nestedInTest.get(k) ?? 0) +
+        union(
+          inner.filter((c) => c.dur != null).map((c) => [c.t, c.t + c.dur]),
+          p.t,
+          end,
+        ),
+    );
   }
   for (const r of job.tests) {
     const file = r.test.replaceAll("::", "__");
@@ -420,7 +549,14 @@ export function foldJob(job) {
         repeatCount++;
         repeatNs += s.dur ?? 0;
         const rk = `${s.verb || "-"}\u0000${programOf(s)}\u0000${siteOf(s)}`;
-        if (!repeats.has(rk)) repeats.set(rk, { verb: s.verb || "-", program: programOf(s), site: siteOf(s), count: 0, ns: 0 });
+        if (!repeats.has(rk))
+          repeats.set(rk, {
+            verb: s.verb || "-",
+            program: programOf(s),
+            site: siteOf(s),
+            count: 0,
+            ns: 0,
+          });
         const e = repeats.get(rk);
         e.count++;
         e.ns += s.dur ?? 0;
@@ -432,7 +568,8 @@ export function foldJob(job) {
   const waits = new Map();
   for (const w of t.waits) {
     const k = `${w.function} (${w.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
-    if (!waits.has(k)) waits.set(k, { site: k, kind: "wait", count: 0, polls: 0, ns: 0, interval: w.interval_ns });
+    if (!waits.has(k))
+      waits.set(k, { site: k, kind: "wait", count: 0, polls: 0, ns: 0, interval: w.interval_ns });
     const e = waits.get(k);
     e.count++;
     e.polls += w.polls ?? 0;
@@ -440,7 +577,8 @@ export function foldJob(job) {
   }
   for (const w of t.sleeps) {
     const k = `${w.function} (${w.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
-    if (!waits.has(k)) waits.set(k, { site: k, kind: "sleep", count: 0, polls: 0, ns: 0, interval: w.interval_ns });
+    if (!waits.has(k))
+      waits.set(k, { site: k, kind: "sleep", count: 0, polls: 0, ns: 0, interval: w.interval_ns });
     const e = waits.get(k);
     e.count += w.count;
     e.ns += w.slept_ns ?? 0;
@@ -449,19 +587,26 @@ export function foldJob(job) {
   const harness = new Map();
   for (const w of job.harnessWaits ?? []) {
     const k = `${w.kind}\u0000${w.site}`;
-    if (!harness.has(k)) harness.set(k, { kind: w.kind, site: w.site, count: 0, s: 0, interval: w.interval_s });
+    if (!harness.has(k))
+      harness.set(k, { kind: w.kind, site: w.site, count: 0, s: 0, interval: w.interval_s });
     const e = harness.get(k);
     e.count += w.count;
     e.s += w.s;
   }
   const profileWait = job.tests.reduce((a, r) => a + (r.categories?.wait?.s ?? 0), 0);
-  const profileWaitCount = job.tests.reduce((a, r) => a + (r.categories?.wait?.count ?? 0) + (r.categories?.wait?.polls ?? 0), 0);
+  const profileWaitCount = job.tests.reduce(
+    (a, r) => a + (r.categories?.wait?.count ?? 0) + (r.categories?.wait?.polls ?? 0),
+    0,
+  );
 
   // Starts per test and per site.
   const perTest = new Map();
   for (const s of t.starts) perTest.set(s.test || s.file, (perTest.get(s.test || s.file) ?? 0) + 1);
   for (const r of job.tests)
-    perTest.set(r.test, (perTest.get(r.test) ?? 0) + Object.values(r.programs ?? {}).reduce((a, v) => a + v.count, 0));
+    perTest.set(
+      r.test,
+      (perTest.get(r.test) ?? 0) + Object.values(r.programs ?? {}).reduce((a, v) => a + v.count, 0),
+    );
   const perSite = new Map();
   for (const s of t.starts) perSite.set(siteOf(s), (perSite.get(siteOf(s)) ?? 0) + 1);
 
@@ -536,6 +681,16 @@ export function coverage(os, t, records) {
   for (const e of os) {
     if (e.reexec) continue;
     total++;
+    if (/^[a-z0-9_]+-[0-9a-f]{16}$/.test(e.exe) && !procs.get(e.ppid)) {
+      const k = `test binary (nextest's start)\u0000nextest\u0000${e.exe}`;
+      rows.set(k, {
+        kind: "test binary (nextest's start)",
+        starter: "nextest",
+        program: e.exe,
+        count: (rows.get(k)?.count ?? 0) + 1,
+      });
+      continue;
+    }
     const starter = procs.get(e.ppid);
     const parent = osPid.get(e.ppid);
     const starterName = starter ? starter.exe : (parent?.exe ?? "?");
@@ -554,10 +709,16 @@ export function coverage(os, t, records) {
       traced++;
       continue;
     } else if (starter || /^e2e(-|$)/.test(starterName)) kind = "test process (records)";
-    else if (["onepipeline", "onevcs"].includes(starterName)) kind = "MISSED: an engine process with no trace";
+    else if (["onepipeline", "onevcs"].includes(starterName))
+      kind = "MISSED: an engine process with no trace";
     else kind = "uninstrumented descendant";
     const k = `${kind}\u0000${starterName}\u0000${e.exe}`;
-    rows.set(k, { kind, starter: starterName, program: e.exe, count: (rows.get(k)?.count ?? 0) + 1 });
+    rows.set(k, {
+      kind,
+      starter: starterName,
+      program: e.exe,
+      count: (rows.get(k)?.count ?? 0) + 1,
+    });
   }
   const unseen = new Map();
   for (const [k, n] of expected) {
@@ -565,13 +726,30 @@ export function coverage(os, t, records) {
     const program = k.split("\u0000")[1];
     unseen.set(program, (unseen.get(program) ?? 0) + n);
   }
-  const recordStarts = records.reduce((a, r) => a + Object.values(r.programs ?? {}).reduce((b, v) => b + v.count, 0), 0);
-  return { total, traced, rows: [...rows.values()].sort((a, b) => b.count - a.count), unseen: [...unseen].sort((a, b) => b[1] - a[1]), traceStarts: t.starts.length, recordStarts };
+  const recordStarts = records.reduce(
+    (a, r) => a + Object.values(r.programs ?? {}).reduce((b, v) => b + v.count, 0),
+    0,
+  );
+  return {
+    total,
+    traced,
+    rows: [...rows.values()].sort((a, b) => b.count - a.count),
+    unseen: [...unseen].sort((a, b) => b[1] - a[1]),
+    traceStarts: t.starts.length,
+    recordStarts,
+  };
 }
 
 function table(head, rows) {
-  const out = [`| ${head.join(" | ")} |`, `| ${head.map((h) => (/^(count|n|ms|s|min|share|polls|starts)|\b(ms|s|min|%)\b/.test(h) ? "---:" : "---")).join(" | ")} |`];
-  for (const r of rows) out.push(`| ${r.map((c) => String(c ?? "-").replaceAll("|", "\\|")).join(" | ")} |`);
+  // A column is right-aligned when every cell in it is a figure.
+  const figure = (c) => c == null || /^-?[\d.]+%?$|^-$|^blocking$/.test(String(c));
+  const align = head.map((_, i) => rows.length > 0 && rows.every((r) => figure(r[i])));
+  const out = [
+    `| ${head.join(" | ")} |`,
+    `| ${align.map((a) => (a ? "---:" : "---")).join(" | ")} |`,
+  ];
+  for (const r of rows)
+    out.push(`| ${r.map((c) => String(c ?? "-").replaceAll("|", "\\|")).join(" | ")} |`);
   return out.join("\n");
 }
 
@@ -580,10 +758,15 @@ export function render(folds, { top = 20 } = {}) {
   for (const f of folds) {
     out.push(`## ${f.label} (${f.os})\n`);
     const h = f.host;
-    if (h) out.push(`Runner: ${h.cpu_model ?? "?"}, ${h.cpus ?? "?"} logical CPUs${h.physical_cpus ? ` (${h.physical_cpus} physical)` : ""}.`);
+    if (h)
+      out.push(
+        `Runner: ${h.cpu_model ?? "?"}, ${h.cpus ?? "?"} logical CPUs${h.physical_cpus ? ` (${h.physical_cpus} physical)` : ""}.`,
+      );
     out.push(
       `Tier: ${f.testCount} test-profile records (${f.unfinished.length} unfinished), ${(f.testSeconds / 60).toFixed(1)} test-minutes; ` +
-        (f.summary ? `nextest \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min` : "no e2e nextest summary in job.log") +
+        (f.summary
+          ? `nextest \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min`
+          : "no e2e nextest summary in job.log") +
         `; test-name set sha256/16 ${f.testsDigest}.\n`,
     );
     const ts = f.testSeconds * 1e9;
@@ -591,22 +774,92 @@ export function render(folds, { top = 20 } = {}) {
     out.push("### Programs started\n");
     const rows = [];
     for (const e of f.engine.sort((a, b) => b.self - a.self))
-      rows.push(["engine/libraries", e.origin, e.program, e.count, ms(median(e.durs)), ms(quantile(e.durs, 0.9)), sec(e.self), e.untimed, pct(e.self, ts), wm(e.self)]);
+      rows.push([
+        "engine/libraries",
+        e.origin,
+        e.program,
+        e.count,
+        ms(median(e.durs)),
+        ms(quantile(e.durs, 0.9)),
+        sec(e.self),
+        e.untimed,
+        pct(e.self, ts),
+        wm(e.self),
+      ]);
     for (const e of f.tests.sort((a, b) => b.self - a.self))
-      rows.push(["tests", "test process", e.program, e.count, "-", "-", sec(e.self), "-", pct(e.self, ts), wm(e.self)]);
-    out.push(table(["from", "started by", "program", "count", "median ms", "p90 ms", "exclusive s", "untimed", "share of test-s", "wall min (est.)"], rows));
+      rows.push([
+        "tests",
+        "test process",
+        e.program,
+        e.count,
+        "-",
+        "-",
+        sec(e.self),
+        "-",
+        pct(e.self, ts),
+        wm(e.self),
+      ]);
+    out.push(
+      table(
+        [
+          "from",
+          "started by",
+          "program",
+          "count",
+          "median ms",
+          "p90 ms",
+          "exclusive s",
+          "untimed",
+          "share of test-s",
+          "wall min (est.)",
+        ],
+        rows,
+      ),
+    );
     const traceN = f.engine.reduce((a, e) => a + e.count, 0);
     const recN = f.tests.reduce((a, e) => a + e.count, 0);
-    out.push(`\nRows account for ${traceN} traced starts (trace holds ${f.starts.length}) and ${recN} test-process starts (records hold ${recN}).\n`);
+    out.push(
+      `\nRows account for ${traceN} traced starts (trace holds ${f.starts.length}) and ${recN} test-process starts (records hold ${recN}).\n`,
+    );
 
-    out.push("### Engine runs the tests started, by verb (each process's own first-to-last record)\n");
-    out.push(table(["program verb", "count", "median ms", "p90 ms", "total s"], f.verbs.sort((a, b) => b.count - a.count).map((v) => [v.key, v.count, ms(median(v.lives)), ms(quantile(v.lives, 0.9)), sec(v.lives.reduce((a, b) => a + b, 0))])));
+    out.push(
+      "### Engine runs the tests started, by verb (each process's own first-to-last record)\n",
+    );
+    out.push(
+      table(
+        ["program verb", "count", "median ms", "p90 ms", "total s"],
+        f.verbs
+          .sort((a, b) => b.count - a.count)
+          .map((v) => [
+            v.key,
+            v.count,
+            ms(median(v.lives)),
+            ms(quantile(v.lives, 0.9)),
+            sec(v.lives.reduce((a, b) => a + b, 0)),
+          ]),
+      ),
+    );
 
     out.push("\n### By call site and engine verb\n");
-    out.push(table(["program", "site", "verb", "count", "median ms", "p90 ms", "exclusive s"], f.bySite.sort((a, b) => b.self - a.self).map((e) => {
-      const [prog, site, verb] = e.key.split("\u0000");
-      return [prog, site, verb, e.count, ms(median(e.durs)), ms(quantile(e.durs, 0.9)), sec(e.self)];
-    })));
+    out.push(
+      table(
+        ["program", "site", "verb", "count", "median ms", "p90 ms", "exclusive s"],
+        f.bySite
+          .sort((a, b) => b.self - a.self)
+          .map((e) => {
+            const [prog, site, verb] = e.key.split("\u0000");
+            return [
+              prog,
+              site,
+              verb,
+              e.count,
+              ms(median(e.durs)),
+              ms(quantile(e.durs, 0.9)),
+              sec(e.self),
+            ];
+          }),
+      ),
+    );
 
     out.push("\n### Per-start cost\n");
     const cheapest = new Map();
@@ -617,30 +870,111 @@ export function render(folds, { top = 20 } = {}) {
       if (m == null || e.durs.length < 3) continue;
       if (!cheapest.has(base) || m < cheapest.get(base).m) cheapest.set(base, { m, e, prog });
     }
-    const spawn = new Map((h?.spawn?.results ?? []).filter((r) => r.median_ms != null).map((r) => [r.name, r.median_ms]));
+    const spawn = new Map(
+      (h?.spawn?.results ?? [])
+        .filter((r) => r.median_ms != null)
+        .map((r) => [r.name, r.median_ms]),
+    );
     const startsOf = new Map();
-    for (const e of f.engine) startsOf.set(e.program.split(" ")[0], (startsOf.get(e.program.split(" ")[0]) ?? 0) + e.count);
+    for (const e of f.engine)
+      startsOf.set(e.program.split(" ")[0], (startsOf.get(e.program.split(" ")[0]) ?? 0) + e.count);
     for (const e of f.tests) startsOf.set(e.program, (startsOf.get(e.program) ?? 0) + e.count);
-    out.push(table(["program", "cheapest traced invocation", "its median ms", "minimal-start median ms (spawn step)", "starts", "start cost min of test-time (est.)"], [...startsOf.keys()].sort().map((p) => {
-      const c = cheapest.get(p);
-      const floor = spawn.get(p) ?? c?.m / 1e6;
-      const n = startsOf.get(p);
-      return [p, c ? `${c.prog} @ ${c.e.key.split("\u0000")[1]}` : "-", c ? ms(c.m) : "-", spawn.has(p) ? spawn.get(p).toFixed(1) : "-", n, floor ? ((n * floor) / 1000 / 60).toFixed(2) : "-"];
-    })));
+    out.push(
+      table(
+        [
+          "program",
+          "cheapest traced invocation",
+          "its median ms",
+          "minimal-start median ms (spawn step)",
+          "starts",
+          "start cost min of test-time (est.)",
+        ],
+        [...startsOf.keys()].sort().map((p) => {
+          const c = cheapest.get(p);
+          const floor = spawn.get(p) ?? c?.m / 1e6;
+          const n = startsOf.get(p);
+          return [
+            p,
+            c ? `${c.prog} @ ${c.e.key.split("\u0000")[1]}` : "-",
+            c ? ms(c.m) : "-",
+            spawn.has(p) ? spawn.get(p).toFixed(1) : "-",
+            n,
+            floor ? ((n * floor) / 1000 / 60).toFixed(2) : "-",
+          ];
+        }),
+      ),
+    );
 
     out.push("\n### git invocations repeating an earlier one in the same CLI process\n");
     out.push(`${f.repeatCount} repeats, ${sec(f.repeatNs)} s.\n`);
-    out.push(table(["verb", "program", "site", "count", "s"], f.repeats.sort((a, b) => b.ns - a.ns).map((r) => [r.verb, r.program, r.site, r.count, sec(r.ns)])));
+    out.push(
+      table(
+        ["verb", "program", "site", "count", "s"],
+        f.repeats
+          .sort((a, b) => b.ns - a.ns)
+          .map((r) => [r.verb, r.program, r.site, r.count, sec(r.ns)]),
+      ),
+    );
 
     out.push("\n### Waits and polls on a child, by site\n");
-    out.push(table(["site", "kind", "count", "polls", "interval ms", "total s", "share of test-profile wait"], f.waits.sort((a, b) => b.ns - a.ns).map((w) => [w.site, w.kind, w.count, w.kind === "wait" ? w.polls : "-", w.interval == null ? "blocking" : ms(w.interval), sec(w.ns), pct(w.ns / 1e9, f.profileWait)])));
-    out.push(`\nTest-profile \`wait\` over the tier: ${f.profileWait.toFixed(1)} s over ${f.profileWaitCount} sleeps and polls, on the test threads.\n`);
-    out.push("### The e2e harness's waits, by site (`profile::polled` and `profile::thread::sleep`, every thread)\n");
-    out.push("A poll's seconds include the sleeps inside it, which are also listed at their own site.\n");
-    out.push(table(["kind", "site", "count", "interval ms", "s", "share of test-profile wait"], f.harness.sort((a, b) => b.s - a.s).map((w) => [w.kind, w.site.replace(/^.*?(tests\/|crates\/)/, "$1"), w.count, w.interval == null ? "-" : (w.interval * 1000).toFixed(1), w.s.toFixed(1), pct(w.s, f.profileWait)])));
+    out.push(
+      "Engine and library waits run inside the processes the tests start, so they overlap the tests' `spawn` time rather than their `wait`; the last column is the ratio to the records' `wait` all the same.\n",
+    );
+    out.push(
+      table(
+        [
+          "site",
+          "kind",
+          "count",
+          "polls",
+          "interval ms",
+          "total s",
+          "share of test-s",
+          "÷ test-profile wait",
+        ],
+        f.waits
+          .sort((a, b) => b.ns - a.ns)
+          .map((w) => [
+            w.site,
+            w.kind,
+            w.count,
+            w.kind === "wait" ? w.polls : "-",
+            w.interval == null || w.interval === 0 ? "blocking" : ms(w.interval),
+            sec(w.ns),
+            pct(w.ns, ts),
+            pct(w.ns / 1e9, f.profileWait),
+          ]),
+      ),
+    );
+    out.push(
+      `\nTest-profile \`wait\` over the tier: ${f.profileWait.toFixed(1)} s over ${f.profileWaitCount} sleeps and polls, on the test threads.\n`,
+    );
+    out.push(
+      "### The e2e harness's waits, by site (`profile::polled` and `profile::thread::sleep`, every thread)\n",
+    );
+    out.push(
+      "A poll's seconds include the sleeps inside it, which are also listed at their own site.\n",
+    );
+    out.push(
+      table(
+        ["kind", "site", "count", "interval ms", "s", "share of test-profile wait"],
+        f.harness
+          .sort((a, b) => b.s - a.s)
+          .map((w) => [
+            w.kind,
+            w.site.replace(/^.*?(tests\/|crates\/)/, "$1"),
+            w.count,
+            w.interval == null ? "-" : (w.interval * 1000).toFixed(1),
+            w.s.toFixed(1),
+            pct(w.s, f.profileWait),
+          ]),
+      ),
+    );
     const polls = f.harness.filter((w) => w.kind === "poll").reduce((a, w) => a + w.s, 0);
     const bareSleeps = f.harness.filter((w) => w.kind === "sleep").reduce((a, w) => a + w.s, 0);
-    out.push(`\nHarness polls ${polls.toFixed(1)} s and sleeps ${bareSleeps.toFixed(1)} s (the two overlap where a poll sleeps), against the records' ${f.profileWait.toFixed(1)} s of test-thread \`wait\`.\n`);
+    out.push(
+      `\nHarness polls ${polls.toFixed(1)} s and sleeps ${bareSleeps.toFixed(1)} s (the two overlap where a poll sleeps), against the records' ${f.profileWait.toFixed(1)} s of test-thread \`wait\`.\n`,
+    );
 
     out.push(`### The ${top} tests starting the most processes\n`);
     out.push(table(["test", "starts"], [...f.perTest].sort((a, b) => b[1] - a[1]).slice(0, top)));
@@ -648,20 +982,41 @@ export function render(folds, { top = 20 } = {}) {
     out.push(table(["site", "starts"], [...f.perSite].sort((a, b) => b[1] - a[1]).slice(0, top)));
 
     out.push("\n### Journeys re-launching the CLI for read-only verbs\n");
-    const rl = [...f.relaunch].map(([test, m]) => [test, [...m.values()].reduce((a, b) => a + b, 0), [...m].map(([v, n]) => `${v}×${n}`).join(", ")]).filter((r) => r[1] > 1);
-    out.push(table(["test", "read-only launches", "verbs"], rl.sort((a, b) => b[1] - a[1]).slice(0, top)));
-    out.push(`\n${rl.length} journeys launch the CLI more than once for read-only verbs (top ${Math.min(top, rl.length)} shown).\n`);
+    const rl = [...f.relaunch]
+      .map(([test, m]) => [
+        test,
+        [...m.values()].reduce((a, b) => a + b, 0),
+        [...m].map(([v, n]) => `${v}×${n}`).join(", "),
+      ])
+      .filter((r) => r[1] > 1);
+    out.push(
+      table(["test", "read-only launches", "verbs"], rl.sort((a, b) => b[1] - a[1]).slice(0, top)),
+    );
+    out.push(
+      `\n${rl.length} journeys launch the CLI more than once for read-only verbs (top ${Math.min(top, rl.length)} shown).\n`,
+    );
 
     out.push("### Trace cost\n");
     const per = f.trace.records ? (f.trace.traceNs + f.trace.writeNs) / f.trace.records : 0;
-    out.push(`${f.trace.records} records from ${f.trace.procs} processes: ${sec(f.trace.traceNs)} s building them and ${sec(f.trace.writeNs)} s writing them, ${(per / 1000).toFixed(1)} µs per record (each process's last write is not in its own total).\n`);
+    out.push(
+      `${f.trace.records} records from ${f.trace.procs} processes: ${sec(f.trace.traceNs)} s building them and ${sec(f.trace.writeNs)} s writing them, ${(per / 1000).toFixed(1)} µs per record (each process's last write is not in its own total).\n`,
+    );
 
     if (f.coverage) {
       const c = f.coverage;
       out.push("### Coverage against the operating system's own record\n");
-      out.push(`${c.total} process starts observed; ${c.traced} matched a traced start (the trace holds ${c.traceStarts}; the records hold ${c.recordStarts} test-process starts).\n`);
-      out.push(table(["attributed to", "starter", "program", "count"], c.rows.map((r) => [r.kind, r.starter, r.program, r.count])));
-      out.push(`\nTraced starts the OS record has no exec for (a spawn that failed, or a process outside the OS record): ${c.unseen.map(([p, n]) => `${p} ${n}`).join(", ") || "none"}.`);
+      out.push(
+        `${c.total} process starts observed; ${c.traced} matched a traced start (the trace holds ${c.traceStarts}; the records hold ${c.recordStarts} test-process starts).\n`,
+      );
+      out.push(
+        table(
+          ["attributed to", "starter", "program", "count"],
+          c.rows.map((r) => [r.kind, r.starter, r.program, r.count]),
+        ),
+      );
+      out.push(
+        `\nTraced starts the OS record has no exec for (a spawn that failed, or a process outside the OS record): ${c.unseen.map(([p, n]) => `${p} ${n}`).join(", ") || "none"}.`,
+      );
       out.push("");
     }
   }
@@ -669,15 +1024,28 @@ export function render(folds, { top = 20 } = {}) {
     out.push("## Across jobs\n");
     const labels = folds.map((f) => `${f.label} (${f.os})`);
     const lead = folds.find((f) => f.os === "windows") ?? folds[0];
-    for (const [what, field] of [["tests", "perTest"], ["call sites", "perSite"]]) {
+    for (const [what, field] of [
+      ["tests", "perTest"],
+      ["call sites", "perSite"],
+    ]) {
       out.push(`### The ${top} ${what} starting the most on ${lead.label}, beside the others\n`);
-      out.push(table([what === "tests" ? "test" : "site", ...labels], [...lead[field]].sort((a, b) => b[1] - a[1]).slice(0, top).map(([k]) => [k, ...folds.map((f) => f[field].get(k) ?? 0)])));
+      out.push(
+        table(
+          [what === "tests" ? "test" : "site", ...labels],
+          [...lead[field]]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, top)
+            .map(([k]) => [k, ...folds.map((f) => f[field].get(k) ?? 0)]),
+        ),
+      );
       out.push("");
     }
     const sets = folds.map((f) => new Set(f.names));
     const all = new Set(folds.flatMap((f) => f.names));
     const missing = [...all].filter((n) => sets.some((s) => !s.has(n)));
-    out.push(`Test-name sets: ${folds.map((f) => `${f.label} ${f.names.length} (${f.testsDigest})`).join(", ")}; ${missing.length} names not in every job${missing.length ? `: ${missing.slice(0, 20).join(", ")}${missing.length > 20 ? ", ..." : ""}` : ""}.\n`);
+    out.push(
+      `Test-name sets: ${folds.map((f) => `${f.label} ${f.names.length} (${f.testsDigest})`).join(", ")}; ${missing.length} names not in every job${missing.length ? `: ${missing.slice(0, 20).join(", ")}${missing.length > 20 ? ", ..." : ""}` : ""}.\n`,
+    );
   }
   return `${out.join("\n")}\n`;
 }
@@ -710,7 +1078,10 @@ export async function host({ runs = 30 } = {}) {
   const { measureSpawns } = await import("./windows-job-profile.mjs");
   const ask = (cmd, args) => {
     try {
-      return execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      return execFileSync(cmd, args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
     } catch {
       return null;
     }
@@ -734,13 +1105,21 @@ export async function host({ runs = 30 } = {}) {
     cpu_model: model,
     cpus: cpus().length,
     physical_cpus: physical,
-    runner: { name: process.env.RUNNER_NAME ?? null, image: process.env.ImageOS ?? null, version: process.env.ImageVersion ?? null },
+    runner: {
+      name: process.env.RUNNER_NAME ?? null,
+      image: process.env.ImageOS ?? null,
+      version: process.env.ImageVersion ?? null,
+    },
     spawn: measureSpawns({ runs, programs }),
   };
 }
 
 function usage(message) {
-  return new Refusal(message, "run 'node scripts/launch-inventory.mjs fold LABEL=DIR ...' or '... diff A=DIR B=DIR'", 2);
+  return new Refusal(
+    message,
+    "run 'node scripts/launch-inventory.mjs fold LABEL=DIR ...' or '... diff A=DIR B=DIR'",
+    2,
+  );
 }
 
 export async function main(argv) {
