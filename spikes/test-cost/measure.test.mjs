@@ -573,6 +573,20 @@ describe("measure.mjs refusals", () => {
     refused({ logs: { "1 baseline": log({ ruststart: "2026-11-13T10:00:31.5000000Z" }) } }, ONE(), /ends before it starts/);
   });
 
+  it("refuses to count verbs when the profile writer's patch no longer says their key", () => {
+    // The harness and its golden record as they sit in the repository, beside a
+    // writer patch whose verb key has changed shape.
+    const root = mkdtempSync(join(tmpdir(), "measure-producer-"));
+    const harness = join(root, "spikes/test-cost/measure.mjs");
+    write(harness, readFileSync(HARNESS));
+    write(join(root, "tests/golden/test-profile-record-v2.json"), readFileSync(join(ROOT, "tests/golden/test-profile-record-v2.json")));
+    write(join(root, "spikes/test-cost/designs/measurement.diff"), readFileSync(join(HERE, "designs/measurement.diff"), "utf8").replace('Some(format!("{base}:{verb}"))', "Some(verb)"));
+    const w = world();
+    const ran = spawnSync(process.execPath, [harness, "--cache", w.cache, ...ONE()], { cwd: w.repo, env: w.env, encoding: "utf8" });
+    assert.equal(ran.status, 2, ran.stderr);
+    assert.match(ran.stderr, /measurement\.diff no longer says the key it counts an engine verb's runs under/);
+  });
+
   it("refuses a kept answer that is not JSON, saying how to read it again", () => {
     const w = world();
     write(join(w.cache, RUN, "run.json"), "not json");

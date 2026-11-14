@@ -92,6 +92,22 @@ const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
 const GOLDEN_SHAPE = shape(golden);
 const PROGRAM_SHAPE = shape(Object.values(golden.programs)[0]);
 
+/// The engine's name and the separator the profile writer (`designs/measurement.diff`)
+/// counts each verb's runs under, read from that writer's own `format!` so the key
+/// has one source.
+const PRODUCER = resolve(dirname(fileURLToPath(import.meta.url)), "designs/measurement.diff");
+let verbPrefix;
+function engineVerbPrefix() {
+  if (verbPrefix === undefined) {
+    const diff = readFileSync(PRODUCER, "utf8");
+    const tagged = /^\+\s+return \(category, format!\("\{program\}\\u\{1f\}\{verb\}"\)\);$/m.test(diff) && /^\+.*if program == "onepipeline" \{$/m.test(diff);
+    const joined = /^\+.*Some\(format!\("\{base\}(.*?)\{verb\}"\)\)/m.exec(diff);
+    expect(tagged && joined, `${PRODUCER} no longer says the key it counts an engine verb's runs under`);
+    verbPrefix = `onepipeline${joined[1]}`;
+  }
+  return verbPrefix;
+}
+
 function checkRecord(record, path) {
   expect(isDeepStrictEqual(shape(record), GOLDEN_SHAPE), `${path} does not have the golden profile record's shape (${GOLDEN})`);
   expect(record.schema === golden.schema, `${path} is schema ${record.schema}, not ${golden.schema}`);
@@ -141,8 +157,8 @@ function summarize(records) {
       if (program === "onepipeline") {
         engine.count += entry.count;
         engine.s += entry.s;
-      } else if (program.startsWith("onepipeline:")) {
-        const verb = program.slice("onepipeline:".length);
+      } else if (program.startsWith(engineVerbPrefix())) {
+        const verb = program.slice(engineVerbPrefix().length);
         const total = verbs.get(verb) ?? { count: 0, s: 0 };
         total.count += entry.count;
         total.s += entry.s;

@@ -243,8 +243,7 @@ diff --git a/tests/e2e/main.rs b/tests/e2e/main.rs
 index b5e63935..1cda83c7 100644
 --- a/tests/e2e/main.rs
 +++ b/tests/e2e/main.rs
-@@ -400,0 +401,2 @@ mod views;
-+// Prototype (spike-onepipeline-test-cost): the pyramid sample.
+@@ -400,0 +401 @@ mod views;
 +mod pyramid;
 diff --git a/tests/e2e/pyramid.rs b/tests/e2e/pyramid.rs
 new file mode 100644
