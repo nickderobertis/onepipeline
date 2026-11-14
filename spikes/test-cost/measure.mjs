@@ -20,32 +20,38 @@
 // prints the same per-verb engine breakdown for local `target/test-profile/<bin>`
 // record directories.
 //
-// A side's run is RUN, RUN#ATTEMPT or RUN#ATTEMPT@VARIANT: the variant names a
-// matrix job `test-linux (<variant>)` and its `test-profile-test-linux-<variant>`
-// artifact. The spike's matrix demonstration (onepipeline #1572, head f6c3aa78,
-// reachable as refs/pull/1572/head) built each variant with
-// `spikes/test-cost/variants/apply.sh <variant>` from that head's tree, where the
-// patches it applied and the vendored onevcs the `runtime` patch links are kept.
-// Beside this file are the test lists the variants were built from:
-// `variants/idle-tests.txt` and the pyramid sample's `variants/pyramid-replaced.txt`
-// and `variants/pyramid-replacements.txt`, the last two for `--tests`.
+// A side's run is RUN, RUN#ATTEMPT or RUN#ATTEMPT@VARIANT: a variant names the
+// matrix job `<job> (<variant>)` and its `test-profile-<job>-<variant>` artifact.
+// The platform jobs are the run's own `test-*` jobs, read from its job listing.
 //
 // `--tests SET=FILE` names a file of test names (one `module::test` per line,
 // `#` comments allowed); the seconds those tests took are summed per side and
 // platform, which is how the pyramid sample's replaced journeys and their
 // in-process replacements are priced against each other.
+//
+// Exit status: 0 when the report was printed; 2 when an argument, a cached read or
+// a record does not have the shape this reads (the message names which); 1 when a
+// program it runs (`gh`, `unzip`, `git`) fails.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const JOBS = ["test-linux", "test-macos", "test-windows"];
-const PLATFORM = { "test-linux": "linux", "test-macos": "macos", "test-windows": "windows" };
+const TEST_NAME = /^[a-z0-9_]+(::[a-z0-9_]+)+$/;
+const SHA = /^[0-9a-f]{40}$/;
 
 function fail(message) {
   process.stderr.write(`measure: ${message}\n`);
   process.exit(2);
 }
+
+function expect(condition, message) {
+  if (!condition) fail(message);
+}
+
+const isTime = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
+const isCount = (value) => Number.isInteger(value) && value >= 0;
+const isSeconds = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
 function parseArgs(argv) {
   const [mode, ...rest] = argv;
@@ -57,25 +63,28 @@ function parseArgs(argv) {
       return rest[++i];
     };
     if (arg === "--side") {
-      const [name, runs] = value().split("=");
-      if (!name || !runs) fail("--side takes NAME=RUN[,RUN...]");
+      const given = value();
+      const match = /^([A-Za-z0-9_-]+)=([^=]+)$/.exec(given);
+      expect(match, `--side takes NAME=RUN[,RUN...], not '${given}'`);
+      expect(!options.sides.some((side) => side.name === match[1]), `side '${match[1]}' is named twice`);
       options.sides.push({
-        name,
-        runs: runs
-          .split(",")
-          .filter(Boolean)
-          .map((spec) => {
-            const match = /^(\d+)(?:#(\d+))?(?:@([\w-]+))?$/.exec(spec);
-            if (!match) fail(`'${spec}' is not RUN[#ATTEMPT][@VARIANT]`);
-            return { run: match[1], attempt: match[2] ? Number(match[2]) : null, variant: match[3] ?? null };
-          }),
+        name: match[1],
+        runs: match[2].split(",").map((spec) => {
+          const run = /^([1-9]\d*)(?:#([1-9]\d*))?(?:@([A-Za-z0-9_-]+))?$/.exec(spec);
+          expect(run, `'${spec}' is not RUN[#ATTEMPT][@VARIANT] (a run id, an attempt of 1 or more, a variant name)`);
+          return { run: run[1], attempt: run[2] ? Number(run[2]) : null, variant: run[3] ?? null };
+        }),
       });
     } else if (arg === "--tests") {
-      const [name, file] = value().split("=");
-      if (!name || !file) fail("--tests takes SET=FILE");
-      options.tests.push({ name, names: readTestList(file) });
+      const given = value();
+      const match = /^([A-Za-z0-9_-]+)=(.+)$/.exec(given);
+      expect(match, `--tests takes SET=FILE, not '${given}'`);
+      options.tests.push({ name: match[1], names: readTestList(match[2]) });
     } else if (arg === "--cache") options.cache = resolve(value());
-    else if (arg === "--repo") options.repo = value();
+    else if (arg === "--repo") {
+      options.repo = value();
+      expect(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo), `--repo takes OWNER/NAME, not '${options.repo}'`);
+    }
     else if (arg === "--json") options.json = true;
     else if (arg.startsWith("--")) fail(`unknown option ${arg}`);
     else options.dirs.push(arg);
@@ -84,27 +93,49 @@ function parseArgs(argv) {
 }
 
 function readTestList(file) {
-  return readFileSync(file, "utf8")
+  expect(existsSync(file), `test list ${file} does not exist`);
+  const names = readFileSync(file, "utf8")
     .split("\n")
     .map((line) => line.replace(/#.*/, "").trim())
     .filter(Boolean);
+  for (const name of names) expect(TEST_NAME.test(name), `${file}: '${name}' is not a module::test name`);
+  expect(new Set(names).size === names.length, `${file} names a test twice, which would count it twice`);
+  return names;
 }
 
-// ---------------------------------------------------------------- records
+/// A profile record as `onepipeline_testfakes::profile` writes it at schema 2.
+function isRecord(record) {
+  return (
+    record !== null &&
+    typeof record === "object" &&
+    record.schema === 2 &&
+    typeof record.test === "string" &&
+    typeof record.binary === "string" &&
+    typeof record.run_id === "string" &&
+    isSeconds(record.wall_s) &&
+    record.categories !== null &&
+    typeof record.categories === "object" &&
+    record.programs !== null &&
+    typeof record.programs === "object" &&
+    Object.values(record.programs).every((entry) => isCount(entry?.count) && isSeconds(entry?.s))
+  );
+}
 
 function readRecords(dir) {
   const records = [];
-  if (!existsSync(dir)) return records;
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     if (statSync(path).isDirectory()) records.push(...readRecords(path));
     else if (name.endsWith(".json")) {
+      let record;
       try {
-        const record = JSON.parse(readFileSync(path, "utf8"));
-        if (record && record.schema && record.test) records.push(record);
+        record = JSON.parse(readFileSync(path, "utf8"));
       } catch {
-        // A half-written record is not a measurement.
+        // A record its test was killed while writing is not a measurement.
+        continue;
       }
+      expect(isRecord(record), `${path} is not a schema-2 profile record`);
+      records.push(record);
     }
   }
   return records;
@@ -163,8 +194,6 @@ function pct(part, whole) {
   return whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "–";
 }
 
-// ---------------------------------------------------------------- hosted runs
-
 function gh(args, { binary = false } = {}) {
   return execFileSync("gh", args, { encoding: binary ? "buffer" : "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 }
@@ -182,19 +211,19 @@ function fetchRun(options, spec) {
   const { run } = spec;
   const dir = join(options.cache, String(run));
   mkdirSync(dir, { recursive: true });
-  const top = JSON.parse(
-    readFileSync(cached(dir, "run.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}`])), "utf8"),
-  );
+  const top = readJson(cached(dir, "run.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}`])));
+  expect(isCount(top?.run_attempt) && top.run_attempt >= 1, `run ${run}: its record names no attempt`);
   const attempt = spec.attempt ?? top.run_attempt;
   const adir = join(dir, `attempt-${attempt}`);
   mkdirSync(adir, { recursive: true });
-  const meta = JSON.parse(
-    readFileSync(cached(adir, "attempt.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}`])), "utf8"),
-  );
+  const meta = readJson(cached(adir, "attempt.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}`])));
+  expect(typeof meta?.status === "string" && SHA.test(meta.head_sha ?? "") && isTime(meta.run_started_at), `run ${run} attempt ${attempt}: no status, head SHA or start time`);
   if (meta.status !== "completed") return { run, attempt, meta, incomplete: true };
-  const jobs = JSON.parse(
-    readFileSync(cached(adir, "jobs.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`])), "utf8"),
-  ).jobs;
+  const jobs = readJson(cached(adir, "jobs.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`])))?.jobs;
+  expect(
+    Array.isArray(jobs) && jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at)),
+    `run ${run} attempt ${attempt}: its job listing is not a list of named jobs`,
+  );
   const logs = join(adir, "logs");
   if (!existsSync(logs)) {
     const zip = cached(adir, "logs.zip", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/logs`], { binary: true }));
@@ -203,9 +232,11 @@ function fetchRun(options, spec) {
   }
   // A re-run keeps the first attempt's artifacts beside its own, under the same
   // names, so an attempt's are the ones created while it ran.
-  const listed = JSON.parse(
-    readFileSync(cached(adir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])), "utf8"),
-  ).artifacts;
+  const listed = readJson(cached(adir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])))?.artifacts;
+  expect(
+    Array.isArray(listed) && listed.every((a) => isCount(a?.id) && typeof a.name === "string" && isTime(a.created_at) && typeof a.expired === "boolean"),
+    `run ${run}: its artifact listing is not a list of artifacts`,
+  );
   const started = Date.parse(meta.run_started_at);
   const later = listed.filter((a) => Date.parse(a.created_at) >= started);
   const artifacts = join(adir, "artifacts");
@@ -213,8 +244,26 @@ function fetchRun(options, spec) {
   return { run, attempt, meta, jobs, logs, artifacts, listed: later, variant: spec.variant, cacheDir: adir };
 }
 
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    fail(`${path} is not JSON; delete it to read it again`);
+  }
+}
+
 function jobName(job, variant) {
   return variant ? `${job} (${variant})` : job;
+}
+
+/// The run's platform jobs: its `test-*` jobs, without the variant a matrix adds.
+function platformJobs(jobs, variant) {
+  const names = new Set();
+  for (const job of jobs) {
+    const match = /^(test-[a-z0-9-]+)(?: \((.+)\))?$/.exec(job.name);
+    if (match && (match[2] ?? null) === variant) names.add(match[1]);
+  }
+  return [...names].sort();
 }
 
 function records_(options, fetched, job) {
@@ -230,7 +279,7 @@ function records_(options, fetched, job) {
     execFileSync("unzip", ["-o", "-q", zip, "-d", into]);
     writeFileSync(join(into, ".done"), "");
   }
-  return readRecords(into);
+  return existsSync(into) ? readRecords(into) : [];
 }
 
 function jobLog(fetched, job) {
@@ -331,7 +380,10 @@ function workflowBlob(sha) {
 /// answers from what the first one read.
 function cachedBlob(dir, sha) {
   const path = join(dir, `ci-yml-blob-${sha}`);
-  if (existsSync(path)) return readFileSync(path, "utf8").trim();
+  if (existsSync(path)) {
+    const kept = readFileSync(path, "utf8").trim();
+    if (SHA.test(kept)) return kept;
+  }
   const blob = workflowBlob(sha);
   if (/^[0-9a-f]{40}$/.test(blob)) writeFileSync(path, `${blob}\n`);
   return blob;
@@ -349,7 +401,7 @@ function measureRun(options, spec) {
     workflow_blob: cachedBlob(fetched.cacheDir, fetched.meta.head_sha),
     jobs: {},
   };
-  for (const job of JOBS) {
+  for (const job of platformJobs(fetched.jobs, fetched.variant)) {
     const meta = fetched.jobs.find((entry) => entry.name === jobName(job, fetched.variant));
     const log = jobLog(fetched, job);
     if (!meta || !log) {
@@ -360,6 +412,7 @@ function measureRun(options, spec) {
     const tasks = /ci-job: \S+ runs (\d+) task\(s\): (.*)$/m.exec(log);
     const coverage = /lines percent: ([\d.]+)/.exec(log);
     const records = summarizeRecords(records_(options, fetched, job));
+    expect(isTime(meta.started_at) && isTime(meta.completed_at), `run ${spec.run}: job '${meta.name}' has no start or end time`);
     out.jobs[job] = {
       conclusion: meta.conclusion,
       minutes: (Date.parse(meta.completed_at) - Date.parse(meta.started_at)) / 60000,
@@ -389,7 +442,9 @@ function fmt(value, digits = 1) {
 function compare(options) {
   if (!options.cache) options.cache = resolve(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? ".", "test-cost-runs");
   if (!options.sides.length) fail("name at least one --side NAME=RUN[,RUN...]");
+  expect(!options.dirs.length, "compare reads hosted runs named by --side, not record directories");
   const sides = options.sides.map((side) => ({ ...side, measured: side.runs.map((run) => measureRun(options, run)) }));
+  const JOBS = [...new Set(sides.flatMap((side) => side.measured.flatMap((run) => Object.keys(run.jobs ?? {}))))].sort();
   if (options.json) {
     process.stdout.write(`${JSON.stringify(sides, (key, value) => (value instanceof Map ? Object.fromEntries(value) : value), 2)}\n`);
     return;
@@ -539,16 +594,39 @@ function compare(options) {
 }
 
 function verbs(options) {
-  if (!options.dirs.length) fail("name at least one record directory");
+  expect(options.dirs.length, "name at least one record directory");
+  expect(!options.sides.length && !options.tests.length, "verbs reads record directories; --side and --tests are compare's");
+  const summaries = [];
   for (const dir of options.dirs) {
+    expect(existsSync(dir) && statSync(dir).isDirectory(), `${dir} is not a directory of profile records`);
     const records = readRecords(dir);
-    const binary = records[0]?.binary ?? "e2e";
-    const summary = summarizeRecords(records, binary);
+    expect(records.length, `${dir} holds no profile records`);
+    const binary = records[0].binary;
+    summaries.push({ dir, binary, summary: summarizeRecords(records, binary) });
+  }
+  if (options.json) {
+    const plain = summaries.map(({ dir, binary, summary }) => ({
+      dir,
+      binary,
+      records: summary.records,
+      wall_s: summary.wall,
+      engine: summary.programs.get("onepipeline") ?? { count: 0, s: 0 },
+      verbs: Object.fromEntries(summary.verbs),
+    }));
+    process.stdout.write(`${JSON.stringify(plain, null, 2)}\n`);
+    return;
+  }
+  for (const { dir, binary, summary } of summaries) {
     process.stdout.write(`## ${dir} (${summary.records} ${binary} records)\n\n${verbTable(summary, 30)}\n\n`);
   }
 }
 
 const options = parseArgs(process.argv.slice(2));
-if (options.mode === "compare") compare(options);
-else if (options.mode === "verbs") verbs(options);
-else fail("usage: measure.mjs compare --side NAME=RUN[,RUN...] [...] | measure.mjs verbs DIR [DIR...]");
+try {
+  if (options.mode === "compare") compare(options);
+  else if (options.mode === "verbs") verbs(options);
+  else fail("usage: measure.mjs compare --side NAME=RUN[,RUN...] [...] | measure.mjs verbs DIR [DIR...]");
+} catch (error) {
+  process.stderr.write(`measure: ${error.message}\n`);
+  process.exit(1);
+}
