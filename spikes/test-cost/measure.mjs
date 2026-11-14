@@ -20,6 +20,14 @@
 // prints the same per-verb engine breakdown for local `target/test-profile/<bin>`
 // record directories.
 //
+// A side's run is RUN, RUN#ATTEMPT or RUN#ATTEMPT@VARIANT: the variant names a
+// matrix job `test-linux (<variant>)` and its `test-profile-test-linux-<variant>`
+// artifact. The spike's matrix demonstration (onepipeline #1572, head f6c3aa78,
+// reachable as refs/pull/1572/head) built each variant with
+// `spikes/test-cost/variants/apply.sh <variant>`; the patches it applied are kept
+// beside it here, and the vendored onevcs the `runtime` patch links is in that
+// head's tree at spikes/test-cost/variants/onevcs.
+//
 // `--tests SET=FILE` names a file of test names (one `module::test` per line,
 // `#` comments allowed); the seconds those tests took are summed per side and
 // platform, which is how the pyramid sample's replaced journeys and their
@@ -316,6 +324,17 @@ function workflowBlob(sha) {
   }
 }
 
+/// The head's workflow blob, kept beside the run's other reads: a demonstration's
+/// head is unreachable once its branch is deleted, and a later invocation still
+/// answers from what the first one read.
+function cachedBlob(dir, sha) {
+  const path = join(dir, `ci-yml-blob-${sha}`);
+  if (existsSync(path)) return readFileSync(path, "utf8").trim();
+  const blob = workflowBlob(sha);
+  if (/^[0-9a-f]{40}$/.test(blob)) writeFileSync(path, `${blob}\n`);
+  return blob;
+}
+
 function measureRun(options, spec) {
   const fetched = fetchRun(options, spec);
   const run = spec.attempt || spec.variant ? `${spec.run}#${fetched.attempt}${spec.variant ? `@${spec.variant}` : ""}` : spec.run;
@@ -325,7 +344,7 @@ function measureRun(options, spec) {
     attempt: fetched.attempt,
     head_sha: fetched.meta.head_sha,
     head_branch: fetched.meta.head_branch,
-    workflow_blob: workflowBlob(fetched.meta.head_sha),
+    workflow_blob: cachedBlob(fetched.cacheDir, fetched.meta.head_sha),
     jobs: {},
   };
   for (const job of JOBS) {

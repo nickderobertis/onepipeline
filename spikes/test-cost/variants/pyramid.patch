@@ -1,0 +1,631 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index 519b95df..cd0228be 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -43,7 +43,8 @@ e2e = { max-threads = 4 }
+ # Measurement only (spike-onepipeline-test-cost): every tier runs whole, so one failure cannot cut a variant's figures short.
+ fail-fast = false
+ # Measurement only (spike-onepipeline-test-cost): these two read the workflow the measurement edits.
+-default-filter = 'not (test(=every_required_context_is_reported_on_every_pull_request) or test(=the_windows_leg_runs_whole_in_one_job))'
++# Prototype (spike-onepipeline-test-cost): and the journeys the pyramid sample replaces.
++default-filter = 'not (test(=every_required_context_is_reported_on_every_pull_request) or test(=the_windows_leg_runs_whole_in_one_job) or test(=lifecycle::the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with) or test(=lifecycle::a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch) or test(=lifecycle::a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched) or test(=lifecycle::a_drafted_body_is_read_only_from_the_copy_this_run_retained) or test(=lifecycle::an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives) or test(=lifecycle::a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts) or test(=lifecycle::an_unresolvable_repository_is_refused_before_a_run_starts) or test(=lifecycle::a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch) or test(=lifecycle::a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried) or test(=lifecycle::a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix) or test(=lifecycle::a_failure_no_attempt_could_answer_still_skips_its_dependents) or test(=lifecycle::a_published_node_reports_where_a_human_reads_the_change_it_opened) or test(=lifecycle::a_worker_that_committed_nothing_fails_naming_its_empty_branch) or test(=lifecycle::a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes) or test(=lifecycle::a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request) or test(=lifecycle::a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change) or test(=lifecycle::a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died) or test(=lifecycle::a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit) or test(=lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published) or test(=lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words) or test(=lifecycle::a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided) or test(=lifecycle::a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch) or test(=lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change) or test(=lifecycle::a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run) or test(=lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change) or test(=lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement) or test(=lifecycle::a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s) or test(=views::results_reports_each_nodes_own_evidence) or test(=views::results_names_every_skipped_node_and_the_dependency_that_skipped_it) or test(=views::goals_says_what_each_run_is_for_and_which_identities_it_holds) or test(=views::status_carries_the_provider_health_block_from_the_sibling) or test(=views::runs_summarises_every_recorded_run_and_says_whose_it_is) or test(=views::a_run_root_the_views_refuse_is_named_with_its_reason) or test(=views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported) or test(=views::mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read) or test(=views::a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it) or test(=views::one_chain_that_recovers_and_then_runs_out_reports_both_endings) or test(=views::a_provider_refusal_names_the_side_and_the_identity_in_results_and_status) or test(=views::a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider) or test(=views::a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented))'
+ # llmlint: ignore-block[comments_earn_their_place] the run number, test count, and
+ # elapsed time below are not history: they are the measurement that sets both bounds
+ # on the line beneath them. `period` has to sit above what a test here costs and
+diff --git a/crates/testfakes/src/profile.rs b/crates/testfakes/src/profile.rs
+index f991597b..74423c41 100644
+--- a/crates/testfakes/src/profile.rs
++++ b/crates/testfakes/src/profile.rs
+@@ -660,6 +660,12 @@ pub mod process {
+             self
+         }
+ 
++        /// Prototype (spike-onepipeline-test-cost): the command this wraps, for a
++        /// journey answered in-process to read its environment and directory.
++        pub fn as_std(&self) -> &std::process::Command {
++            &self.inner
++        }
++
+         fn program(&self) -> (Category, String) {
+             let program = program_name(self.inner.get_program());
+             let category = Category::of_program(&program);
+diff --git a/tests/e2e/harness.rs b/tests/e2e/harness.rs
+index 378143a8..61557f45 100644
+--- a/tests/e2e/harness.rs
++++ b/tests/e2e/harness.rs
+@@ -1282,6 +1282,9 @@ impl World {
+ 
+     /// Run a command to completion.
+     pub fn run(&self, args: &[&str]) -> Run {
++        if IN_PROCESS.load(std::sync::atomic::Ordering::SeqCst) {
++            return self.run_in_process(args);
++        }
+         Run::of(
+             self.cmd(args).output().expect("the binary runs"),
+             args,
+@@ -1289,6 +1292,55 @@ impl World {
+         )
+     }
+ 
++    /// Prototype (spike-onepipeline-test-cost): [`run`](World::run) answered by
++    /// `onepipeline::run` in this process, under exactly the environment and
++    /// directory [`cmd`](World::cmd) would have given the binary, with this
++    /// process's stdout and stderr taken for the command's.
++    pub fn run_in_process(&self, args: &[&str]) -> Run {
++        let command = self.cmd(args);
++        let std_command = command.as_std();
++        for (key, value) in std_command.get_envs() {
++            match value {
++                Some(value) => std::env::set_var(key, value),
++                None => std::env::remove_var(key),
++            }
++        }
++        if std::env::var_os("GIT_OPTIONAL_LOCKS").is_none() {
++            std::env::set_var("GIT_OPTIONAL_LOCKS", "0");
++        }
++        let previous = std::env::current_dir().expect("a current directory");
++        if let Some(dir) = std_command.get_current_dir() {
++            std::env::set_current_dir(dir).expect("the command's directory");
++        }
++        let words: Vec<&str> = std::iter::once("onepipeline").chain(args.iter().copied()).collect();
++        let (code, stdout, stderr) = captured(&self.root, || {
++            use clap::Parser;
++            match onepipeline::cli::Cli::try_parse_from(&words) {
++                Ok(cli) => match onepipeline::run(cli) {
++                    Ok(code) => code,
++                    Err(error) => {
++                        eprintln!("onepipeline: {error}");
++                        error.exit_code()
++                    }
++                },
++                Err(error) => {
++                    let _ = error.print();
++                    error.exit_code()
++                }
++            }
++        });
++        std::env::set_current_dir(previous).expect("the previous directory");
++        Run::of(
++            std::process::Output {
++                status: exit_status(code),
++                stdout,
++                stderr,
++            },
++            args,
++            self,
++        )
++    }
++
+     /// Run a command to completion, recording what each of its renders did.
+     ///
+     /// The record goes to `path` and nowhere else, so a journey measuring three
+@@ -8951,3 +9003,82 @@ pub fn dispatched_tasks(world: &World, opening: &str) -> Vec<String> {
+         .filter(|task| task.starts_with(opening))
+         .collect()
+ }
++
++
++/// Prototype (spike-onepipeline-test-cost): whether [`World::run`] answers in this
++/// process. Each nextest test is a process of its own, so one test's switch is
++/// never another's.
++static IN_PROCESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// Run a journey with every [`World::run`] it makes answered in this process.
++pub fn in_process(journey: fn()) {
++    IN_PROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
++    journey();
++}
++
++#[cfg(unix)]
++fn exit_status(code: i32) -> std::process::ExitStatus {
++    std::os::unix::process::ExitStatusExt::from_raw((code & 0xff) << 8)
++}
++
++#[cfg(windows)]
++fn exit_status(code: i32) -> std::process::ExitStatus {
++    std::os::windows::process::ExitStatusExt::from_raw(code as u32)
++}
++
++/// What `run` wrote to this process's stdout and stderr, taken through files.
++fn captured(root: &Path, run: impl FnOnce() -> i32) -> (i32, Vec<u8>, Vec<u8>) {
++    use std::io::Write;
++    static TAKEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++    let n = TAKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    let out_path = root.join(format!("in-process-{n}.stdout"));
++    let err_path = root.join(format!("in-process-{n}.stderr"));
++    let out = std::fs::File::create(&out_path).expect("a stdout file");
++    let err = std::fs::File::create(&err_path).expect("a stderr file");
++    let _ = std::io::stdout().flush();
++    let _ = std::io::stderr().flush();
++    let restore = redirect(&out, &err);
++    let code = run();
++    let _ = std::io::stdout().flush();
++    let _ = std::io::stderr().flush();
++    restore();
++    drop((out, err));
++    (
++        code,
++        std::fs::read(&out_path).unwrap_or_default(),
++        std::fs::read(&err_path).unwrap_or_default(),
++    )
++}
++
++#[cfg(unix)]
++fn redirect(out: &std::fs::File, err: &std::fs::File) -> impl FnOnce() {
++    use std::os::fd::AsRawFd;
++    // SAFETY: plain descriptor duplication on descriptors this process owns.
++    let (saved_out, saved_err) = unsafe { (libc::dup(1), libc::dup(2)) };
++    unsafe {
++        libc::dup2(out.as_raw_fd(), 1);
++        libc::dup2(err.as_raw_fd(), 2);
++    }
++    move || unsafe {
++        libc::dup2(saved_out, 1);
++        libc::dup2(saved_err, 2);
++        libc::close(saved_out);
++        libc::close(saved_err);
++    }
++}
++
++#[cfg(windows)]
++fn redirect(out: &std::fs::File, err: &std::fs::File) -> impl FnOnce() {
++    use std::os::windows::io::AsRawHandle;
++    use windows_sys::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
++    // SAFETY: the handles stay open until the restore below runs.
++    let (saved_out, saved_err) = unsafe { (GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
++    unsafe {
++        SetStdHandle(STD_OUTPUT_HANDLE, out.as_raw_handle() as _);
++        SetStdHandle(STD_ERROR_HANDLE, err.as_raw_handle() as _);
++    }
++    move || unsafe {
++        SetStdHandle(STD_OUTPUT_HANDLE, saved_out);
++        SetStdHandle(STD_ERROR_HANDLE, saved_err);
++    }
++}
+diff --git a/tests/e2e/lifecycle.rs b/tests/e2e/lifecycle.rs
+index 2d8a5ff1..f0a50127 100644
+--- a/tests/e2e/lifecycle.rs
++++ b/tests/e2e/lifecycle.rs
+@@ -701,7 +701,7 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
+ /// the host, and what it was asked to open the change request with is where a
+ /// drafted body is a fact rather than an argument this crate passed.
+ #[test]
+-fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
++pub(crate) fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
+     let world = World::new("lifecycle-pr-author");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -783,7 +783,7 @@ fn the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with() {
+ /// A launch that names no drafting graph is the shipped default, and it drafts
+ /// nothing: the change request opens with the plan's own body, or with none.
+ #[test]
+-fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
++pub(crate) fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
+     let world = World::new("lifecycle-body");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -833,7 +833,7 @@ fn a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch() {
+ /// schema with nothing in it — so each is named twice, on `body-not-drafted` and
+ /// on the node's own settlement, where `results` renders it.
+ #[test]
+-fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
++pub(crate) fn a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched() {
+     for (name, scenario, ending, says) in [
+         (
+             "failed",
+@@ -1027,7 +1027,7 @@ fn a_launch_config_names_the_drafting_graph_and_the_flag_overrides_it() {
+ /// request opens with no body at all: the planted words reach nothing this run
+ /// wrote, published or recorded.
+ #[test]
+-fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
++pub(crate) fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
+     let world = World::new("lifecycle-planted-body");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -1070,7 +1070,7 @@ fn a_drafted_body_is_read_only_from_the_copy_this_run_retained() {
+ /// own reading of the branch's conventional commits rather than anything
+ /// composed here.
+ #[test]
+-fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
++pub(crate) fn an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives() {
+     for version in [1, 2] {
+         let world = World::new(&format!("lifecycle-v{version}"));
+         let repo = published_locally(&world);
+@@ -1275,7 +1275,7 @@ fn a_record_written_after_the_follow_ended_still_reaches_the_merged_store_once()
+ /// never going to happen — so the refusal is worth nothing unless no run was
+ /// minted, which is the second half of what this asserts.
+ #[test]
+-fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
++pub(crate) fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts() {
+     let world = World::new("lifecycle-nodrafting");
+     world.repository("local-direct", &[]);
+     let path = world.plan(
+@@ -1301,7 +1301,7 @@ fn a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_
+ }
+ 
+ #[test]
+-fn an_unresolvable_repository_is_refused_before_a_run_starts() {
++pub(crate) fn an_unresolvable_repository_is_refused_before_a_run_starts() {
+     let world = World::new("lifecycle-nosession");
+     // No repository registered, so the node names one `onevcs` has never heard
+     // of. The holders preflight is now the first `onevcs` boundary, so the
+@@ -1411,7 +1411,7 @@ fn a_publication_its_merge_path_refuses_settles_the_node_failed_by_name() {
+ /// title that is legal publishes on the same repository, because a bound is only
+ /// proven by the side of it that commits.
+ #[test]
+-fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
++pub(crate) fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
+     let world = World::new("lifecycle-longtitle");
+     let repo = world.repository("local-direct", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -1525,7 +1525,7 @@ fn a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch() {
+ /// Either is the same kind of answer — one no attempt changes — and it is held to
+ /// the same two properties: said in `onevcs`'s words, and asked once.
+ #[test]
+-fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
++pub(crate) fn a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried() {
+     let world = World::new("lifecycle-residual");
+     let repo = world.repository("change-open", &[]);
+     // Re-registered against a host that is not github.com, so the identity is
+@@ -2185,7 +2185,7 @@ fn accept_one_push_then_refuse(repo: &Repository) {
+ /// what this proves is that the budget is **not** spent: a re-dispatch would be
+ /// the defect.
+ #[test]
+-fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix() {
++pub(crate) fn a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix() {
+     let world = World::new("lifecycle-hostprereq");
+     let hook = merge_path(&world, &ReturningHookVerb::MissingPrerequisite);
+     let repo = world.repository(
+@@ -3356,7 +3356,7 @@ fn two_nodes_against_one_repository_with_no_edge_between_them_run_at_once() {
+ /// The scope of the change above, from the other side: what moved is the one
+ /// outcome whose work reached the origin, and nothing about skipping in general.
+ #[test]
+-fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
++pub(crate) fn a_failure_no_attempt_could_answer_still_skips_its_dependents() {
+     let world = World::new("lifecycle-skippedstill");
+     world.repository("change-auto", &[]);
+     world.script("publish.work", "the worker wrote this\n");
+@@ -4609,7 +4609,7 @@ fn a_publication_over_an_unchanged_tree_is_settled_without_spending_the_budget()
+ }
+ 
+ #[test]
+-fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
++pub(crate) fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
+     let world = World::new("lifecycle-evidence");
+     // A change request left open for review, which is what `change-open` means.
+     world.repository("change-open", &[]);
+@@ -4692,7 +4692,7 @@ fn a_published_node_reports_where_a_human_reads_the_change_it_opened() {
+ /// `NothingToPublish` — a branch that *is* ahead with a tree the base carries —
+ /// is untouched.
+ #[test]
+-fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
++pub(crate) fn a_worker_that_committed_nothing_fails_naming_its_empty_branch() {
+     let world = World::new("lifecycle-nothing");
+     published_locally(&world);
+     // Nothing is scripted for the worker to write, so the session's branch
+@@ -4842,7 +4842,7 @@ fn a_worker_that_only_caught_up_with_a_moved_base_fails_as_an_empty_branch() {
+ /// the branch. Nothing is drafted or published for it either: there is nothing
+ /// the base does not have.
+ #[test]
+-fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
++pub(crate) fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+     let world = World::new("lifecycle-landeditself");
+     let repo = published_locally(&world);
+     // The worker commits and pushes straight to `main` with git, then fetches, so
+@@ -4887,7 +4887,7 @@ fn a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes() {
+ }
+ 
+ #[test]
+-fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
++pub(crate) fn a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request() {
+     let world = World::new("lifecycle-merged");
+     world.repository("change-direct", &[]);
+     // The host lands the change it was handed.
+@@ -6335,7 +6335,7 @@ fn a_continuation_skips_the_steps_the_preserved_branch_already_carries() {
+ /// merged and released — the two call for opposite actions, so they are two
+ /// outcomes.
+ #[test]
+-fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() {
++pub(crate) fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() {
+     let world = World::new("lifecycle-failed-open");
+     // A policy that opens a change request and leaves it open, which is what the
+     // worker's own publication reaches.
+@@ -6411,7 +6411,7 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change()
+ /// producer's statement and over this crate's reading of its standard error
+ /// alike, rather than over whichever of the two a fixture happened to state.
+ #[test]
+-fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
++pub(crate) fn a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died() {
+     let world = World::new("lifecycle-diedopen");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the work its harness never got to judge\n");
+@@ -6563,7 +6563,7 @@ fn a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_
+ /// no commit on that branch. The sentence has to stay true of it — the branch is
+ /// still where to look — without naming a commit nobody wrote.
+ #[test]
+-fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit() {
++pub(crate) fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit() {
+     let world = World::new("lifecycle-diednocommit");
+     published_locally(&world);
+     world.script("service.work", "the work its harness never got to judge\n");
+@@ -6610,7 +6610,7 @@ fn a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_co
+ // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] 17.6s here under load; it settles
+ // through the publication path over the linked `onevcs`, which any change under `src/` can move.
+ #[test]
+-fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
++pub(crate) fn a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published() {
+     let world = World::new("lifecycle-memberdied");
+     published_locally(&world);
+     world.script("service.work", "the work its judge never got to score\n");
+@@ -6847,7 +6847,7 @@ fn a_provider_death_the_turns_own_record_contradicts_is_not_settled_as_one() {
+ /// The third node is the near miss a too-wide narrowing gets wrong — a death the
+ /// producer published, under a rule that is not the provider one.
+ #[test]
+-fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
++pub(crate) fn a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words() {
+     let world = World::new("lifecycle-twowords");
+     published_locally(&world);
+     // The agent's own verdict on its own task, in a sentence that classifies
+@@ -6987,7 +6987,7 @@ fn a_verdict_written_in_the_machinerys_own_shape_is_read_as_the_machinery() {
+ /// keeps it honest now is that it rides *behind* a read rather than instead of
+ /// one.
+ #[test]
+-fn a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided() {
++pub(crate) fn a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided() {
+     let world = World::new("lifecycle-landing-stale");
+     // A change request left for a person to merge, so the node settles with its
+     // change unlanded — the state the incident started from.
+@@ -7301,7 +7301,7 @@ fn a_change_this_crate_cannot_read_the_record_of_settles_as_a_plain_task_failure
+ /// rather than reporting on work it never integrated, and the reason reaches the
+ /// settlement.
+ #[test]
+-fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
++pub(crate) fn a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch() {
+     let world = World::new("lifecycle-selfbase");
+     let repo = world.repository("change-direct", &[]);
+     // The preserved branch a planner is trying to continue: it carries work the
+@@ -7990,7 +7990,7 @@ fn a_retry_on_a_branch_whose_change_request_is_open_rewrites_its_description() {
+ /// closeout ran, nothing was drafted or lifted, and the draft stands on the host
+ /// — which is exactly what a reader of the settlement has to be pointed at.
+ #[test]
+-fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change() {
++pub(crate) fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change() {
+     let world = World::new("lifecycle-draft-then-fail");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -8026,7 +8026,7 @@ fn a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change()
+ /// journey choosing the value, not inheriting it. Nextest runs each test in a
+ /// process of its own, so it reaches no other journey.
+ #[test]
+-fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
++pub(crate) fn a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run() {
+     const OUTER: &str = "s-the-dispatch-running-this-suite";
+     std::env::set_var("ONEVCS_SESSION", OUTER);
+     let world = World::new("lifecycle-outer-session");
+@@ -8211,7 +8211,7 @@ fn every_dispatch_in_a_session_names_its_session_and_every_dispatch_names_the_ru
+ /// step's worker, and the step that failed ran in the worktree and handed no
+ /// session back — so the session the node holds is what names it.
+ #[test]
+-fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change() {
++pub(crate) fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change() {
+     let world = World::new("lifecycle-step-draft-then-fail");
+     world.repository("change-open", &[]);
+     world.script("service.implement.work", "the first step wrote this\n");
+@@ -8248,7 +8248,7 @@ fn a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_c
+ /// as it would have; what the reader is owed is the reason the drafted
+ /// description is not on the change request, beside the publication's own words.
+ #[test]
+-fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement() {
++pub(crate) fn a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement() {
+     let world = World::new("lifecycle-undescribed");
+     world.repository("change-open", &[]);
+     world.script("service.work", "the worker wrote this\n");
+@@ -8402,7 +8402,7 @@ fn a_host_that_cannot_say_whether_the_session_holds_a_change_is_asked_again_by_t
+ /// earlier publication of the branch, which is what the stream could not
+ /// contradict.
+ #[test]
+-fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s() {
++pub(crate) fn a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s() {
+     let world = World::new("lifecycle-draft-unreadable");
+     // llmlint: ignore-block[tests_mirror_real_usage] the same extension point the
+     // unreadable-record journeys above use, and the same reason: a repository's
+diff --git a/tests/e2e/main.rs b/tests/e2e/main.rs
+index b5e63935..1cda83c7 100644
+--- a/tests/e2e/main.rs
++++ b/tests/e2e/main.rs
+@@ -398,6 +398,8 @@ mod unreadable_sessions;
+ mod unwatched;
+ // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+ mod views;
++// Prototype (spike-onepipeline-test-cost): the pyramid sample.
++mod pyramid;
+ // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the wake budget is
+ // decided by `watchers`, `unwatched`, `stopguard`, `summary`, `projection` and `driver`'s
+ // reply path at once, over the run store every launch writes, so any change under `src/`
+diff --git a/tests/e2e/pyramid.rs b/tests/e2e/pyramid.rs
+new file mode 100644
+index 00000000..74667b59
+--- /dev/null
++++ b/tests/e2e/pyramid.rs
+@@ -0,0 +1,60 @@
++//! Prototype (spike-onepipeline-test-cost): the pyramid sample's in-process
++//! replacements. Each test here runs one `lifecycle` or `views` journey's own body
++//! with [`crate::harness::in_process`] on, so every engine command the journey
++//! itself runs through `World::run` is answered by `onepipeline::run` in this
++//! test process rather than by the compiled binary; everything the engine spawns
++//! (git, the host and agent doubles) is unchanged.
++
++macro_rules! in_process {
++    ($($module:ident :: $name:ident => $replacement:ident),* $(,)?) => {
++        $(
++            #[test]
++            fn $replacement() {
++                crate::harness::in_process(crate::$module::$name);
++            }
++        )*
++    };
++}
++
++in_process! {
++    lifecycle::the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with => lifecycle_the_pr_author_dispatch_drafts_the_body_the_change_request_opens_with,
++    lifecycle::a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch => lifecycle_a_node_that_states_its_own_body_publishes_it_and_spends_no_dispatch,
++    lifecycle::a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched => lifecycle_a_drafting_dispatch_that_ends_badly_leaves_the_publication_untouched,
++    lifecycle::a_drafted_body_is_read_only_from_the_copy_this_run_retained => lifecycle_a_drafted_body_is_read_only_from_the_copy_this_run_retained,
++    lifecycle::an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives => lifecycle_an_earlier_plan_still_publishes_under_the_subject_the_sibling_derives,
++    lifecycle::a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts => lifecycle_a_drafting_graph_the_launch_directory_cannot_produce_is_refused_before_a_run_starts,
++    lifecycle::an_unresolvable_repository_is_refused_before_a_run_starts => lifecycle_an_unresolvable_repository_is_refused_before_a_run_starts,
++    lifecycle::a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch => lifecycle_a_title_the_sibling_will_not_commit_under_is_refused_before_any_dispatch,
++    lifecycle::a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried => lifecycle_a_publication_onevcs_refuses_outright_settles_the_residual_and_is_not_retried,
++    lifecycle::a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix => lifecycle_a_push_the_merge_path_refuses_for_a_missing_host_prerequisite_settles_once_naming_the_fix,
++    lifecycle::a_failure_no_attempt_could_answer_still_skips_its_dependents => lifecycle_a_failure_no_attempt_could_answer_still_skips_its_dependents,
++    lifecycle::a_published_node_reports_where_a_human_reads_the_change_it_opened => lifecycle_a_published_node_reports_where_a_human_reads_the_change_it_opened,
++    lifecycle::a_worker_that_committed_nothing_fails_naming_its_empty_branch => lifecycle_a_worker_that_committed_nothing_fails_naming_its_empty_branch,
++    lifecycle::a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes => lifecycle_a_worker_that_lands_its_commit_on_the_base_itself_settles_no_changes,
++    lifecycle::a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request => lifecycle_a_change_the_host_merged_settles_the_node_on_the_merge_rather_than_the_request,
++    lifecycle::a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change => lifecycle_a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change,
++    lifecycle::a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died => lifecycle_a_change_request_open_for_review_outranks_the_word_for_a_dispatch_that_died,
++    lifecycle::a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit => lifecycle_a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit,
++    lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published => lifecycle_a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published,
++    lifecycle::a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words => lifecycle_a_task_its_agent_failed_and_a_dispatch_its_provider_killed_settle_under_different_words,
++    lifecycle::a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided => lifecycle_a_change_whose_route_to_the_base_nothing_recorded_is_reported_as_undecided,
++    lifecycle::a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch => lifecycle_a_node_whose_base_branch_is_its_branch_is_refused_and_told_what_continues_a_branch,
++    lifecycle::a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change => lifecycle_a_dispatch_that_failed_after_drafting_a_change_settles_carrying_that_change,
++    lifecycle::a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run => lifecycle_a_journey_run_inside_a_dispatch_hands_none_of_its_session_to_the_run,
++    lifecycle::a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change => lifecycle_a_later_step_that_failed_after_an_earlier_one_drafted_settles_carrying_that_change,
++    lifecycle::a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement => lifecycle_a_description_the_host_refuses_leaves_the_worker_s_and_says_so_on_the_settlement,
++    lifecycle::a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s => lifecycle_a_draft_whose_record_this_crate_cannot_read_is_finished_as_an_earlier_publication_s,
++    views::results_reports_each_nodes_own_evidence => views_results_reports_each_nodes_own_evidence,
++    views::results_names_every_skipped_node_and_the_dependency_that_skipped_it => views_results_names_every_skipped_node_and_the_dependency_that_skipped_it,
++    views::goals_says_what_each_run_is_for_and_which_identities_it_holds => views_goals_says_what_each_run_is_for_and_which_identities_it_holds,
++    views::status_carries_the_provider_health_block_from_the_sibling => views_status_carries_the_provider_health_block_from_the_sibling,
++    views::runs_summarises_every_recorded_run_and_says_whose_it_is => views_runs_summarises_every_recorded_run_and_says_whose_it_is,
++    views::a_run_root_the_views_refuse_is_named_with_its_reason => views_a_run_root_the_views_refuse_is_named_with_its_reason,
++    views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported => views_a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported,
++    views::mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read => views_mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read,
++    views::a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it => views_a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it,
++    views::one_chain_that_recovers_and_then_runs_out_reports_both_endings => views_one_chain_that_recovers_and_then_runs_out_reports_both_endings,
++    views::a_provider_refusal_names_the_side_and_the_identity_in_results_and_status => views_a_provider_refusal_names_the_side_and_the_identity_in_results_and_status,
++    views::a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider => views_a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider,
++    views::a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented => views_a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented,
++}
+diff --git a/tests/e2e/views.rs b/tests/e2e/views.rs
+index ae2ae959..1656092f 100644
+--- a/tests/e2e/views.rs
++++ b/tests/e2e/views.rs
+@@ -123,7 +123,7 @@ fn monitor_writes_nothing_and_consumes_nothing() {
+ }
+ 
+ #[test]
+-fn results_reports_each_nodes_own_evidence() {
++pub(crate) fn results_reports_each_nodes_own_evidence() {
+     let world = World::new("views-results");
+     world.script("failing.fail", "1");
+     let run = settled(
+@@ -156,7 +156,7 @@ fn results_reports_each_nodes_own_evidence() {
+ /// Two causes on one node and a chain through another, because a reader told
+ /// about one of two would fix it and watch the node stay skipped.
+ #[test]
+-fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
++pub(crate) fn results_names_every_skipped_node_and_the_dependency_that_skipped_it() {
+     let world = World::new("views-skipped-nodes");
+     world.script("build.fail", "1");
+     world.script("lint.fail", "1");
+@@ -282,7 +282,7 @@ fn an_observer_this_host_cannot_ask_about_is_never_reported_dead() {
+ }
+ 
+ #[test]
+-fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
++pub(crate) fn goals_says_what_each_run_is_for_and_which_identities_it_holds() {
+     let world = World::new("views-goals");
+     world.repository("local-direct", &[]);
+     let run = settled(&world, "purposeful", vec![lifecycle("service", &[])]);
+@@ -349,7 +349,7 @@ fn status_names_a_live_dispatch_and_flags_one_nothing_is_driving() {
+ }
+ 
+ #[test]
+-fn status_carries_the_provider_health_block_from_the_sibling() {
++pub(crate) fn status_carries_the_provider_health_block_from_the_sibling() {
+     let world = World::new("views-health");
+     let run = settled(&world, "healthy", vec![agent("build", &[])]);
+     world
+@@ -2100,7 +2100,7 @@ fn a_run_that_has_dispatched_nothing_says_it_has_no_transcript() {
+ }
+ 
+ #[test]
+-fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
++pub(crate) fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
+     let world = World::new("views-runs");
+     settled(&world, "alpha", vec![agent("build", &[])]);
+     settled(&world, "beta", vec![agent("build", &[])]);
+@@ -2121,7 +2121,7 @@ fn runs_summarises_every_recorded_run_and_says_whose_it_is() {
+ /// nothing at all about the rest, so an operator on a host holding thirty run
+ /// roots read `no runs recorded` and took it for an idle machine.
+ #[test]
+-fn a_run_root_the_views_refuse_is_named_with_its_reason() {
++pub(crate) fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+     let world = World::new("views-skipped");
+     let run = settled(&world, "readable", vec![agent("build", &[])]);
+     // llmlint: ignore-block[tests_mirror_real_usage] all three states are the
+@@ -2183,7 +2183,7 @@ fn a_run_root_the_views_refuse_is_named_with_its_reason() {
+ /// is otherwise entirely ordinary, which is what a record from a neighbouring
+ /// build is.
+ #[test]
+-fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
++pub(crate) fn a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported() {
+     let world = World::new("views-newer-record");
+     let run = settled(&world, "from-a-newer-build", vec![agent("build", &[])]);
+     // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a key
+@@ -2424,7 +2424,7 @@ fn a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one() {
+ /// The empty view has to say which of the two it met: `no runs recorded` for a
+ /// listing nothing matched, and the roots it refused named beside it either way.
+ #[test]
+-fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
++pub(crate) fn mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read() {
+     let world = World::new("views-mine-skipped");
+     // The run belongs to another planner's session, so `--mine` has nothing to
+     // list — while the root beside it is still one this build refused.
+@@ -3148,7 +3148,7 @@ fn host_renders_the_live_dispatches_of_a_run_that_was_adopted() {
+ /// The regression this holds down is a recovered chain rendered as a refusal,
+ /// which sends every reader at a subscription that never blocked a turn.
+ #[test]
+-fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() {
++pub(crate) fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it() {
+     let world = World::new("views-recovered");
+     world.script("build.refused", "agent 1 claude-code:alternate quota\n");
+     // The turn the agent side's chain went on to run, under the next candidate.
+@@ -3188,7 +3188,7 @@ fn a_chain_that_fell_through_and_was_served_names_the_identity_that_served_it()
+ /// collapsed them could only ever be rendered as one of the two endings, and
+ /// whichever it picked would decide where every reader went next.
+ #[test]
+-fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
++pub(crate) fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
+     let world = World::new("views-both-endings");
+     world.script(
+         "build.refused",
+@@ -3222,7 +3222,7 @@ fn one_chain_that_recovers_and_then_runs_out_reports_both_endings() {
+ /// judge side had no successful candidate, which is exactly the pair a reader
+ /// has to be able to tell apart.
+ #[test]
+-fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
++pub(crate) fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+     // The reason in oneharness's own spelling, because the real graph writes
+     // that library's `FallThroughReason` onto the advance and the double holds
+     // its script to the same enum: `rate_limit` is a failure *kind*, and a line
+@@ -3277,7 +3277,7 @@ fn a_provider_refusal_names_the_side_and_the_identity_in_results_and_status() {
+ /// opening the node's retained report by hand. Both halves are asserted here,
+ /// because either alone leaves the reader where they were.
+ #[test]
+-fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
++pub(crate) fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
+     let world = World::new("views-verdict");
+     world.script(
+         "build.verdict",
+@@ -3339,7 +3339,7 @@ fn a_node_that_failed_on_a_judge_verdict_says_why_and_names_no_provider() {
+ /// with no side and no turn there is nothing to pair its fall-through with, so
+ /// it is never called a refusal either.
+ #[test]
+-fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
++pub(crate) fn a_refusal_that_names_no_side_is_attributed_to_its_member_rather_than_invented() {
+     let world = World::new("views-refused-side");
+     world.script("build.refused", "- - codex auth\n");
+     world.script("build.fail", "1");
