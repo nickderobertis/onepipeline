@@ -380,6 +380,7 @@ impl Drop for Span {
     }
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the call-site capture in span and polled feeds the per-site wait tally, which every e2e test of the hosted baseline runs writes and the fold reads off their artifacts; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 /// Record `category` for as long as the returned span lives.
 #[track_caller]
 pub fn span(category: Category) -> Span {
@@ -409,6 +410,7 @@ pub fn polled<T>(work: impl FnOnce() -> T) -> T {
     wait_sites::tally("poll", site, began.elapsed(), None);
     answer
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Measurement only (spike-launch-inventory, never lands): each call site of
 /// [`polled`] and [`thread::sleep`], tallied and written beside the launch trace

@@ -715,3 +715,26 @@ test("folding jobs whose test sets differ names the tests not in every job", () 
     /Test-name sets: a 2 \(\w+\), b 3 \(\w+\); 1 names not in every job: surface::an_extra_journey\./,
   );
 });
+
+test("a test name that is not a test path names no file of its own: the record is the runner's untested one", () => {
+  const dir = mkdtempSync(join(scratch, "names-"));
+  const e2e = join(dir, "e2e-0123456789abcdef");
+  copyFileSync(process.execPath, e2e);
+  chmodSync(e2e, 0o755);
+  const out = join(dir, "os");
+  const ran = spawnSync("bash", [runner, e2e, "-e", "0"], {
+    encoding: "utf8",
+    env: { ...process.env, ONEPIPELINE_OS_TRACE_DIR: out, NEXTEST_TEST_NAME: "../../escape" },
+  });
+  if (spawnSync("bash", ["-c", "command -v strace"]).status === 0) {
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.deepEqual(
+      readdirSync(out).map((f) => f.replace(/\.\d+\.strace$/, "")),
+      ["untested"],
+    );
+    assert.ok(!existsSync(join(dir, "escape")));
+  } else {
+    assert.equal(ran.status, 2);
+    assert.match(ran.stderr, /strace is not installed/);
+  }
+});

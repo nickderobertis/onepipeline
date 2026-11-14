@@ -269,6 +269,7 @@ export function validRecord(r) {
   )
     return false;
   if (r.site != null && typeof r.site !== "string") return false;
+  if (["start", "wait", "sleeps"].includes(r.kind) && typeof r.function !== "string") return false;
   for (const f of ["function", "wait_site", "verb", "test"])
     if (r[f] != null && typeof r[f] !== "string") return false;
   if (
@@ -302,6 +303,9 @@ export function validRecord(r) {
   return true;
 }
 
+/** The six categories every schema-2 test-profile record carries, in profile.rs's order. */
+const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
+
 /** Whether `r` is a test-profile record of schema 2 (crates/testfakes/src/profile.rs). */
 export function validProfile(r) {
   return (
@@ -315,9 +319,14 @@ export function validProfile(r) {
     (r.categories?.wait?.polls == null || isTime(r.categories.wait.polls)) &&
     Boolean(r.categories) &&
     typeof r.categories === "object" &&
-    Object.values(r.categories).every((c) => c && isTime(c.s) && isTime(c.count)) &&
+    !Array.isArray(r.categories) &&
+    CATEGORIES.every(
+      (name) =>
+        r.categories[name] && isTime(r.categories[name].s) && isTime(r.categories[name].count),
+    ) &&
     Boolean(r.programs) &&
     typeof r.programs === "object" &&
+    !Array.isArray(r.programs) &&
     Object.values(r.programs).every((v) => v && isTime(v.count) && isTime(v.s))
   );
 }
