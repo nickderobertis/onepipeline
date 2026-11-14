@@ -16,11 +16,3 @@ target-dir = "target"
 # binary drops the 2-3x of its size debuginfo was. `release` is untouched.
 [profile.dev]
 debug = 0
-
-# Measurement only (spike-launch-inventory, never lands): the exact `onevcs`
-# release `Cargo.lock` resolved, vendored byte-identical from its `.crate` apart
-# from the launch-trace calls, so the e2e tier's git starts made inside it are
-# traced. Here rather than in `Cargo.toml` because `tests/patch_pin.rs` holds a
-# manifest `[patch.crates-io]` entry to a git pin.
-[patch.crates-io]
-onevcs = { path = "vendor/onevcs" }
