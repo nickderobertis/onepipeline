@@ -997,6 +997,42 @@ export function coverage(os, t, records) {
   };
 }
 
+/**
+ * Each program's per-start cost in one folded job: the median start-to-exit of its cheapest
+ * traced invocation (a program, git subcommand and site with three or more timed starts),
+ * the minimal-start median the runner's spawn step measured, its start count, and the
+ * minutes those starts cost at that floor (the spawn step's where it measured the program,
+ * else the cheapest invocation's), in test-minutes and scaled to the tier's wall minutes.
+ */
+export function startCosts(f) {
+  const cheapest = new Map();
+  for (const e of f.bySite) {
+    const [prog, site] = e.key.split("\u0000");
+    const base = prog.split(" ")[0];
+    const m = median(e.durs);
+    if (m == null || e.durs.length < 3) continue;
+    if (!cheapest.has(base) || m < cheapest.get(base).ns) cheapest.set(base, { ns: m, prog, site });
+  }
+  const spawn = new Map(
+    (f.host?.spawn?.results ?? [])
+      .filter((r) => r.median_ms != null)
+      .map((r) => [r.name, r.median_ms]),
+  );
+  const starts = new Map();
+  const add = (p, n) => starts.set(p, (starts.get(p) ?? 0) + n);
+  for (const e of f.engine) add(e.program.split(" ")[0], e.count);
+  for (const e of f.tests) add(e.program, e.count);
+  return [...starts.keys()].sort().map((program) => {
+    const c = cheapest.get(program) ?? null;
+    const spawnMs = spawn.get(program) ?? null;
+    const floorMs = spawnMs ?? (c ? c.ns / 1e6 : null);
+    const n = starts.get(program);
+    const testMin = floorMs == null ? null : (n * floorMs) / 1000 / 60;
+    const wallMin = floorMs == null ? null : f.toWallMin(n * floorMs * 1e6);
+    return { program, cheapest: c, spawnMs, floorMs, starts: n, testMin, wallMin };
+  });
+}
+
 function table(head, rows) {
   const figure = (c) => c == null || /^-?[\d.]+%?$|^-$|^blocking$/.test(String(c));
   const align = head.map((_, i) => rows.length > 0 && rows.every((r) => figure(r[i])));
@@ -1122,23 +1158,6 @@ export function render(folds, { top = 20 } = {}) {
     );
 
     out.push("\n### Per-start cost\n");
-    const cheapest = new Map();
-    for (const e of f.bySite) {
-      const [prog] = e.key.split("\u0000");
-      const base = prog.split(" ")[0];
-      const m = median(e.durs);
-      if (m == null || e.durs.length < 3) continue;
-      if (!cheapest.has(base) || m < cheapest.get(base).m) cheapest.set(base, { m, e, prog });
-    }
-    const spawn = new Map(
-      (h?.spawn?.results ?? [])
-        .filter((r) => r.median_ms != null)
-        .map((r) => [r.name, r.median_ms]),
-    );
-    const startsOf = new Map();
-    for (const e of f.engine)
-      startsOf.set(e.program.split(" ")[0], (startsOf.get(e.program.split(" ")[0]) ?? 0) + e.count);
-    for (const e of f.tests) startsOf.set(e.program, (startsOf.get(e.program) ?? 0) + e.count);
     out.push(
       table(
         [
@@ -1148,20 +1167,17 @@ export function render(folds, { top = 20 } = {}) {
           "minimal-start median ms (spawn step)",
           "starts",
           "start cost min of test-time (est.)",
+          "start cost wall min (est.)",
         ],
-        [...startsOf.keys()].sort().map((p) => {
-          const c = cheapest.get(p);
-          const floor = spawn.get(p) ?? c?.m / 1e6;
-          const n = startsOf.get(p);
-          return [
-            p,
-            c ? `${c.prog} @ ${c.e.key.split("\u0000")[1]}` : "-",
-            c ? ms(c.m) : "-",
-            spawn.has(p) ? spawn.get(p).toFixed(1) : "-",
-            n,
-            floor ? ((n * floor) / 1000 / 60).toFixed(2) : "-",
-          ];
-        }),
+        startCosts(f).map((c) => [
+          c.program,
+          c.cheapest ? `${c.cheapest.prog} @ ${c.cheapest.site}` : "-",
+          c.cheapest ? ms(c.cheapest.ns) : "-",
+          c.spawnMs == null ? "-" : c.spawnMs.toFixed(1),
+          c.starts,
+          c.testMin == null ? "-" : c.testMin.toFixed(2),
+          c.wallMin == null ? "-" : c.wallMin.toFixed(2),
+        ]),
       ),
     );
 
@@ -1296,6 +1312,46 @@ export function render(folds, { top = 20 } = {}) {
             .sort((a, b) => b[1] - a[1])
             .slice(0, top)
             .map(([k]) => [k, ...folds.map((f) => f[field].get(k) ?? 0)]),
+        ),
+      );
+      out.push("");
+    }
+    const linux = folds.find((f) => f.os === "linux");
+    if (linux) {
+      out.push(`### Per-start cost against ${linux.label}\n`);
+      const floor = new Map(startCosts(linux).map((c) => [c.program, c]));
+      const rows = [];
+      for (const f of folds) {
+        if (f === linux) continue;
+        for (const c of startCosts(f)) {
+          const l = floor.get(c.program);
+          if (c.floorMs == null || l?.floorMs == null) continue;
+          const extra = c.floorMs - l.floorMs;
+          rows.push([
+            f.label,
+            c.program,
+            c.floorMs.toFixed(1),
+            l.floorMs.toFixed(1),
+            extra.toFixed(1),
+            c.starts,
+            ((c.starts * extra) / 1000 / 60).toFixed(2),
+            f.toWallMin(c.starts * extra * 1e6)?.toFixed(2) ?? "-",
+          ]);
+        }
+      }
+      out.push(
+        table(
+          [
+            "job",
+            "program",
+            "floor ms",
+            `${linux.label} floor ms`,
+            "difference ms",
+            "starts",
+            "difference × starts, test-min (est.)",
+            "wall min (est.)",
+          ],
+          rows,
         ),
       );
       out.push("");
