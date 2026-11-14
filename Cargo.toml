@@ -1830,6 +1830,7 @@ onevcs = { path = "vendor/onevcs" }
 oneharness-core = { path = "vendor/oneharness-core" }
 onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }
+oneagentgraph = { path = "vendor/oneagentgraph" }
 
 [profile.release]
 strip = true

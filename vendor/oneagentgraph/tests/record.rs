@@ -1,0 +1,1505 @@
+//! The persisted contracts: their goldens, and how the CLI treats one this build
+//! did not write.
+//!
+//! A run record outlives the binary that wrote it: `history` reads runs from
+//! months ago, and an operator's tooling reads the same file. So its shape is
+//! versioned, and both versions this build understands are committed here as
+//! files rather than described in prose — a golden is the only kind of schema
+//! documentation that fails when the code stops matching it.
+//!
+//! * `record.v1.json` — the shape written before the version field existed. It
+//!   must keep reading, unchanged, forever, or upgrading loses history.
+//! * `record.v2.json` — the first version that declared every member up front.
+//! * `record.v3.json` — what this build writes, byte for byte.
+//! * `control.v1.json` — the three shapes of `control.json`, the turn-control
+//!   record a run writes into a member's scratch and a *separate*
+//!   `oneagentgraph interrupt` process reads back, possibly from a later build.
+//!   It must keep reading for the same reason `record.v1.json` must: a run in
+//!   flight was written by the build before this one, and an `interrupt` against
+//!   it is the case the version range exists for.
+//! * `control.v2.json` — the shapes the build before the offer protocol wrote:
+//!   the same three, plus the note endpoint a two-party member's own thread
+//!   binds. It must keep reading for `control.v1.json`'s reason.
+//! * `control.v3.json` — what this build writes, byte for byte: the same shapes,
+//!   plus the supervisor turn a two-party member's judge side now asks for.
+//! * `member-died.json` — the three shapes of the one *event* payload that
+//!   changed when onejudge became a library, and again when an exhausted chain
+//!   became its own cause. It is not in `record.json`, but it is in the
+//!   `events.jsonl` a record points at, which outlives the run exactly as the
+//!   record does, and onepipeline compiles against it.
+//! * `member-started.json` — the three shapes of the payload a supervisor reads
+//!   first, on the same terms: one per runner, plus the one a member publishes
+//!   when it comes up without taking a turn.
+//! * `clock-and-note-payloads.v2.json` — every shape of the four payloads a
+//!   scheduled note or a `reset_on` touches, the shapes they had before beside
+//!   the ones they gained: `note-admitted` and `note-withdrawn` at `@2`, and
+//!   `cron-fired` and `cron-reset` at `@1`. A payload naming no scheduled note
+//!   and no cause is byte for byte what it always was.
+//! * `graph.v4.yaml` … `graph.v11.yaml` — the graph config
+//!   schema, which is versioned for the same reason and read on the *other* side
+//!   of the same promise: this build does not write these, an author does, and a
+//!   document written against an older schema has to keep meaning what it said.
+//!   Each differs from the one before it by exactly what that version added: the
+//!   `events` block in version 5, the `personas` catalog in version 6, the
+//!   member's own pre-turn views in version 7, each member's own say over
+//!   whether it holds the run open in version 8, a two-party member's own
+//!   `dir` and `schedule` in version 9, and its onejudge `judge_settings` and
+//!   each judge's own `settings` in version 10, and a two-party member's
+//!   `scheduled_notes` and every clock's `reset_on` in version 11.
+//!
+//!   One key left every one of them at once, by removal rather than by a
+//!   version: a schedule's `resettable`, which `reset_on` replaced. These
+//!   goldens stopped carrying it in the release that removed it, and a document
+//!   that still declares it is refused by its name under every version — which
+//!   `a_golden_still_declaring_resettable_is_refused_naming_reset_on` holds
+//!   against each of them.
+//!
+//! Regenerating an old golden to make a failure go away is the mistake this
+//! guards against: if the bytes changed, either the change was meant — in which
+//! case it is a version bump and a new golden beside the old one — or it was not.
+//!
+//! The journeys at the end plant a record by hand and then drive the compiled
+//! binary against it. That is the only way to reach their subject: what the verbs
+//! do with a record they would never have written — a hostile `run_id`, a stream
+//! path outside the run store — and the real one a user meets it with comes from
+//! a hand-edit, a torn write, or another version. They need no graph and no
+//! harness, which is why they sit here with the rest of the record's contract
+//! rather than among the command-surface journeys.
+
+use std::collections::BTreeMap;
+
+use oneagentgraph::config::{
+    AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
+    OnejudgeMember, PreTurn, Schedule, ScheduledNote, FIRST_BACKGROUND_VERSION,
+    FIRST_EVENT_FILTER_VERSION, FIRST_JUDGE_SETTINGS_VERSION, FIRST_PERSONA_CATALOG_VERSION,
+    FIRST_PRE_TURN_VERSION, FIRST_SCHEDULED_NOTE_VERSION, FIRST_TWO_PARTY_JOB_VERSION,
+    SCHEMA_VERSION,
+};
+use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
+use oneagentgraph::event::{
+    AttemptedCandidate, Cause, CronFired, CronReset, Disposition, EventFilter, MatchFields,
+    Matcher, MemberDied, MemberStarted, NoteAdmitted, NoteWithdrawn, ResetCause, Runner, Source,
+    UndeliveredReason, WithdrawnReason, ENVELOPE_VERSION, SOURCE_WORD,
+};
+use oneagentgraph::member::Rule;
+use oneagentgraph::note::Addressee;
+use oneagentgraph::resolve::ResolvedRef;
+use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_FILE, RECORD_SCHEMA_VERSION};
+
+/// The graph the config goldens describe, at the current schema version.
+///
+/// One member of each kind, so the golden covers both arms of the tagged union;
+/// the `events` block version 5 added — carrying a matcher of each shape the
+/// grammar has: a source, a kind glob, and the reserved labels; and the
+/// `personas` catalog version 6 added; and the member's own pre-turn views
+/// version 7 added; and, on both kinds, the `background` version 8 added — the
+/// scheduled member saying what its schedule already implies, and the two-party
+/// member saying what an unscheduled one is by default, so the golden carries
+/// the field spelled both ways; and the two-party member's own `dir` and
+/// `schedule` version 9 added, which is what makes that `background: false` a
+/// declaration rather than the default: a scheduled conversation that holds the
+/// run open, the observer shape this version exists for; and the onejudge
+/// settings version 10 added, at both levels — the member's `judge_settings`
+/// and its judge's own `settings`; and the scheduled note and the `reset_on`
+/// version 11 added — on the note and on the paced conversation's schedule.
+fn golden_graph() -> GraphConfig {
+    GraphConfig {
+        version: SCHEMA_VERSION,
+        name: "node-scope".into(),
+        env: BTreeMap::from([("MY_VAR".to_string(), "value".to_string())]),
+        personas: Some("./personas".into()),
+        events: Some(Events {
+            filter: Some(EventFilter {
+                include: vec![
+                    Matcher {
+                        kind: Some("member-*".into()),
+                        ..Matcher::default()
+                    },
+                    Matcher {
+                        source: Some(Source::from(SOURCE_WORD)),
+                        fields: MatchFields {
+                            member: Some("worker".into()),
+                            persona: Some("engineer".into()),
+                            ..MatchFields::default()
+                        },
+                        ..Matcher::default()
+                    },
+                ],
+                exclude: vec![Matcher {
+                    kind: Some("turn-activity".into()),
+                    ..Matcher::default()
+                }],
+            }),
+        }),
+        members: BTreeMap::from([
+            (
+                "reporter".to_string(),
+                Member::Oneharness(OneharnessMember {
+                    oneharness_config: ConfigRef("./oneharness.toml".into()),
+                    persona: Some(ConfigRef("./reporter.yaml".into())),
+                    task: None,
+                    dir: None,
+                    schedule: Some(Schedule {
+                        every: 1800,
+                        start_after: Some(1800),
+                        reset_on: None,
+                    }),
+                    background: Some(true),
+                    pre_turn: vec![PreTurn {
+                        command: vec!["./views/queue-depth".into(), "--json".into()],
+                        label: Some("queue".into()),
+                        timeout: Some(20),
+                    }],
+                    deps: Vec::new(),
+                }),
+            ),
+            (
+                "worker".to_string(),
+                Member::Onejudge(OnejudgeMember {
+                    base_config: ConfigRef("./onejudge.base.yaml".into()),
+                    persona: Some(ConfigRef("engineer".into())),
+                    task: None,
+                    agent: AgentSide {
+                        oneharness_config: ConfigRef("./oneharness.toml".into()),
+                        model: None,
+                        stream: true,
+                    },
+                    judge: vec![JudgeSide::Harness(JudgeHarness {
+                        oneharness_config: ConfigRef("./oneharness.judge.toml".into()),
+                        model: None,
+                        label: None,
+                        settings: BTreeMap::from([(
+                            "events".to_string(),
+                            serde_json::Value::Bool(true),
+                        )]),
+                    })],
+                    judge_settings: BTreeMap::from([(
+                        "instructions".to_string(),
+                        serde_json::Value::from("Run the suite before you decide."),
+                    )]),
+                    mode: "bypass".into(),
+                    max_turns: None,
+                    dir: Some("./api".into()),
+                    schedule: Some(Schedule {
+                        every: 300,
+                        start_after: Some(0),
+                        reset_on: Some(surfaced()),
+                    }),
+                    scheduled_notes: vec![ScheduledNote {
+                        id: "progress-report".into(),
+                        every: 1800,
+                        start_after: None,
+                        reset_on: Some(surfaced()),
+                        addressee: Addressee::Supervisor,
+                        text: "Write the progress report now.".into(),
+                    }],
+                    background: Some(false),
+                    deps: Vec::new(),
+                }),
+            ),
+        ]),
+    }
+}
+
+/// The `reset_on` the version 11 golden declares: another program's envelope,
+/// by the words it arrives with.
+fn surfaced() -> EventFilter {
+    EventFilter {
+        include: vec![Matcher {
+            source: Some(Source::from("pipeline")),
+            kind: Some("planner-surfaced".into()),
+            ..Matcher::default()
+        }],
+        exclude: Vec::new(),
+    }
+}
+
+/// The graph config golden is byte-for-byte what this build serializes, reads
+/// back to the same graph, and validates as a runnable one.
+#[test]
+fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
+    let golden = include_str!("golden/graph.v11.yaml");
+    let written = oneagentgraph::yaml::to_string(&golden_graph()).expect("a graph serializes");
+    assert_eq!(
+        written, golden,
+        "the graph schema's serialized shape changed. If that was deliberate, bump \
+         SCHEMA_VERSION and commit a new golden beside the old one — do not overwrite \
+         it, or nothing proves a document written against the old schema still reads."
+    );
+
+    let read: GraphConfig = oneagentgraph::yaml::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_graph(), "the golden did not round-trip");
+    assert_eq!(read.version, SCHEMA_VERSION);
+    oneagentgraph::config::validate(&read).expect("the golden is a graph that could run");
+
+    // The block is the whole of what this version added, so it is read back
+    // rather than merely parsed: a filter that survived the trip as an empty one
+    // would be a document quietly streaming everything it meant to hold back.
+    let filter = read
+        .events
+        .as_ref()
+        .and_then(|events| events.filter.as_ref())
+        .expect("the golden names a filter");
+    assert_eq!(filter.include.len(), 2);
+    assert_eq!(filter.exclude.len(), 1);
+    filter.validate().expect("the golden's filter is usable");
+
+    // And the catalog this version added, on the same terms: a key that survived
+    // the trip as an absent one would be a graph whose own personas are
+    // unreachable by name, which is the state this version exists to end.
+    assert_eq!(
+        read.personas.as_deref(),
+        Some(std::path::Path::new("./personas"))
+    );
+
+    // The views this version added, read back rather than merely parsed for the
+    // same reason: a list that survived the trip empty is a member that opens
+    // every turn by going and looking, which is the state *this* version exists
+    // to end.
+    let Member::Oneharness(reporter) = &read.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert_eq!(reporter.pre_turn.len(), 1);
+    assert_eq!(reporter.pre_turn[0].view(), "queue");
+    assert_eq!(reporter.pre_turn[0].seconds(), 20);
+
+    // The declaration this version added, read back through the one reading of
+    // it rather than off the field: a value that survived the trip as an absent
+    // one would still read the same way on these two members — the default
+    // agrees with what they declare — so the field itself is asserted too.
+    assert_eq!(read.members["reporter"].declared_background(), Some(true));
+    assert_eq!(read.members["worker"].declared_background(), Some(false));
+    assert!(read.is_background("reporter"));
+    assert!(!read.is_background("worker"));
+
+    // The two-party member's own job this version added, read back through the
+    // accessors both kinds answer: a `dir` that survived the trip as absent
+    // would be a conversation run in the graph's directory, and a schedule that
+    // did would be one never held — which is the state *this* version exists to
+    // end.
+    assert_eq!(
+        read.members["worker"].dir(),
+        Some(std::path::Path::new("./api"))
+    );
+    let pace = read.members["worker"]
+        .schedule()
+        .expect("the golden's worker is paced");
+    assert_eq!(pace.every, 300);
+    assert_eq!(pace.first_turn_after(read.version), 0);
+
+    // The onejudge settings this version added, read back at both levels: a
+    // mapping that survived the trip as an empty one would be a member whose
+    // setting never reaches onejudge, which is the wait this version ends.
+    let Member::Onejudge(worker) = &read.members["worker"] else {
+        panic!("worker is onejudge")
+    };
+    assert_eq!(
+        worker.judge_settings["instructions"],
+        "Run the suite before you decide."
+    );
+    assert_eq!(worker.judge[0].settings()["events"], true);
+
+    // The scheduled note and the `reset_on` this version added, read back: a
+    // list that survived the trip empty is a conversation never told anything
+    // on a timer, and a filter that did is a clock that never restarts.
+    assert_eq!(worker.scheduled_notes.len(), 1);
+    assert_eq!(worker.scheduled_notes[0].id, "progress-report");
+    assert_eq!(worker.scheduled_notes[0].reset_on, Some(surfaced()));
+    assert_eq!(pace.reset_on, Some(surfaced()));
+}
+
+/// Every graph golden, written as it was before `resettable` was removed — the
+/// reporter's schedule declaring it — is refused by that key's name, naming
+/// `reset_on` as what replaced it, whichever schema version the document
+/// declares: the key is not read and ignored on any of them.
+#[test]
+fn a_golden_still_declaring_resettable_is_refused_naming_reset_on() {
+    let goldens = [
+        include_str!("golden/graph.v4.yaml"),
+        include_str!("golden/graph.v5.yaml"),
+        include_str!("golden/graph.v6.yaml"),
+        include_str!("golden/graph.v7.yaml"),
+        include_str!("golden/graph.v8.yaml"),
+        include_str!("golden/graph.v9.yaml"),
+        include_str!("golden/graph.v10.yaml"),
+        include_str!("golden/graph.v11.yaml"),
+    ];
+    for golden in goldens {
+        let declared = "      start_after: 1800\n";
+        assert!(golden.contains(declared), "the reporter's schedule moved");
+        let written_before =
+            golden.replace(declared, &format!("{declared}      resettable: true\n"));
+        let error = oneagentgraph::yaml::from_str::<GraphConfig>(&written_before)
+            .expect_err("`resettable` was removed");
+        assert!(
+            error.to_string().contains("`resettable` was removed")
+                && error.to_string().contains("`reset_on`"),
+            "{error}"
+        );
+    }
+}
+
+/// A graph written against the schema before scheduled notes and `reset_on`
+/// reads unchanged, gains neither key when written back, and is refused by the
+/// field's name if it names either anyway.
+#[test]
+fn a_version_ten_graph_still_reads_and_is_refused_the_scheduled_notes_it_predates() {
+    let golden = include_str!("golden/graph.v10.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 10 graph still reads");
+    assert_eq!(graph.version, FIRST_SCHEDULED_NOTE_VERSION - 1);
+    oneagentgraph::config::validate(&graph).expect("a version 10 graph still validates");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 10 document did not round-trip");
+
+    for (asking, field) in [
+        (
+            "    scheduled_notes:\n    - {id: n, every: 60, addressee: worker, text: t}\n    background: false\n",
+            "`scheduled_notes`",
+        ),
+        (
+            "      reset_on: {include: [{source: pipeline}]}\n    background: false\n",
+            "`schedule.reset_on`",
+        ),
+    ] {
+        let asking: GraphConfig = oneagentgraph::yaml::from_str(
+            &golden.replace("    background: false\n", asking),
+        )
+        .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(
+            error.to_string().contains(field)
+                && error.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_SCHEDULED_NOTE_VERSION}"
+                )),
+            "{error}"
+        );
+    }
+}
+
+/// A graph written against the schema before onejudge settings could pass
+/// through reads unchanged, gains neither key when written back, and is refused
+/// by the field's name if it names either anyway.
+#[test]
+fn a_version_nine_graph_still_reads_and_is_refused_the_judge_settings_it_predates() {
+    let golden = include_str!("golden/graph.v9.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 9 graph still reads");
+    assert_eq!(graph.version, FIRST_JUDGE_SETTINGS_VERSION - 1);
+    oneagentgraph::config::validate(&graph).expect("a version 9 graph still validates");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 9 document did not round-trip");
+
+    for asking in [
+        "    judge_settings: {allow_writable_judges: true}\n    mode: bypass\n",
+        "      settings: {events: true}\n    mode: bypass\n",
+    ] {
+        let asking: GraphConfig =
+            oneagentgraph::yaml::from_str(&golden.replace("    mode: bypass\n", asking))
+                .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(error.to_string().contains("worker"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_JUDGE_SETTINGS_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// A graph written against the schema before a two-party member could carry
+/// its own `dir` and `schedule` reads unchanged, gains neither key when written
+/// back, and is refused by the field's name if a two-party member declares one
+/// anyway.
+///
+/// The same three-part promise the journeys below hold, for the two fields
+/// version 9 added: a two-party member that predates them runs in the run's
+/// directory as one unheld conversation, exactly as it always did, and a
+/// document declaring that schema and asking for either is told which version
+/// has it rather than being run with the field silently dropped.
+#[test]
+fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predates() {
+    let golden = include_str!("golden/graph.v8.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 8 graph still reads");
+    assert_eq!(graph.version, FIRST_TWO_PARTY_JOB_VERSION - 1);
+    assert_eq!(graph.members["worker"].dir(), None);
+    assert_eq!(graph.members["worker"].schedule(), None);
+    oneagentgraph::config::validate(&graph).expect("a version 8 graph still validates");
+    // An unscheduled two-party member holds the run open, as it did.
+    assert!(!graph.is_background("worker"));
+
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 8 document did not round-trip");
+
+    for (field, after) in [
+        ("dir", "    mode: bypass\n    dir: ./api\n"),
+        ("schedule", "    mode: bypass\n    schedule: {every: 300}\n"),
+    ] {
+        let asking: GraphConfig =
+            oneagentgraph::yaml::from_str(&golden.replace("    mode: bypass\n", after))
+                .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(
+            error.to_string().contains(&format!("onejudge `{field}`")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("worker"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_TWO_PARTY_JOB_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// A graph written against the schema before `background` existed reads
+/// unchanged, gains no `background` key when written back, keeps the liveness
+/// inference it was written under, and is refused by the field's name if a
+/// member of either kind declares one anyway.
+///
+/// The same three-part promise the journeys below hold, for the field version 8
+/// added — plus the reading, because this version changed what an *omission*
+/// means: under it an unscheduled member is foreground whatever it descends
+/// from, and under version 7 one that descends only from schedules is not.
+#[test]
+fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates() {
+    let golden = include_str!("golden/graph.v7.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 7 graph still reads");
+    assert_eq!(graph.version, FIRST_BACKGROUND_VERSION - 1);
+    for member in graph.members.values() {
+        assert_eq!(
+            member.declared_background(),
+            None,
+            "version 7 has no background declaration"
+        );
+    }
+    oneagentgraph::config::validate(&graph).expect("a version 7 graph still validates");
+    // The inference those documents run under: the schedule is background, and
+    // the member descending from no schedule is not.
+    assert!(graph.is_background("reporter"));
+    assert!(!graph.is_background("worker"));
+
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("background"),
+        "an absent declaration must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 7 document did not round-trip");
+
+    for (kind, before, after) in [
+        (
+            "worker",
+            "    mode: bypass\n",
+            "    mode: bypass\n    background: true\n",
+        ),
+        (
+            "reporter",
+            "    persona: ./reporter.yaml\n",
+            "    persona: ./reporter.yaml\n    background: false\n",
+        ),
+    ] {
+        let asking: GraphConfig =
+            oneagentgraph::yaml::from_str(&golden.replace(before, after)).expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(error.to_string().contains("`background`"), "{error}");
+        assert!(error.to_string().contains(kind), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_BACKGROUND_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// A graph written against the schema before `pre_turn` existed reads unchanged,
+/// gains no `pre_turn` key when written back, and is refused by the field's name
+/// if a member declares one anyway.
+///
+/// The same three-part promise the two journeys below hold, for the field version
+/// 7 added: a member that predates it starts no extra process and receives
+/// exactly the instruction it always did, and a document declaring that schema
+/// and asking for a view is told which version has it rather than being run with
+/// the views silently dropped.
+#[test]
+fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
+    let golden = include_str!("golden/graph.v6.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 6 graph still reads");
+    assert_eq!(graph.version, FIRST_PRE_TURN_VERSION - 1);
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert!(
+        reporter.pre_turn.is_empty(),
+        "version 6 has no pre-turn views"
+    );
+    oneagentgraph::config::validate(&graph).expect("a version 6 graph still validates");
+
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("pre_turn"),
+        "an absent view list must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 6 document did not round-trip");
+
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&golden.replace(
+        "    persona: ./reporter.yaml\n",
+        "    persona: ./reporter.yaml\n    pre_turn:\n    - command: [queue-depth]\n",
+    ))
+    .expect("it still parses");
+    let error = oneagentgraph::config::validate(&asking)
+        .expect_err("the field postdates the schema this document declares");
+    assert!(error.to_string().contains("`pre_turn`"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requires graph schema version {FIRST_PRE_TURN_VERSION}"
+        )),
+        "{error}"
+    );
+}
+
+/// A graph written against the schema before `personas` existed reads unchanged,
+/// gains no `personas` key when written back, and is refused by the key's name
+/// if it names one anyway.
+///
+/// The same three-part promise the version 4 journey below holds, for the key
+/// version 6 added: a document that predates it keeps resolving a member's bare
+/// `persona: NAME` the way it always did, and one declaring that schema and
+/// asking for a catalog is told which version has it rather than being run under
+/// a resolution rule it never named.
+#[test]
+fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
+    let golden = include_str!("golden/graph.v5.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 5 graph still reads");
+    assert_eq!(graph.version, FIRST_PERSONA_CATALOG_VERSION - 1);
+    assert_eq!(graph.personas, None, "version 5 has no persona catalog");
+    oneagentgraph::config::validate(&graph).expect("a version 5 graph still validates");
+
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("personas"),
+        "an absent catalog must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 5 document did not round-trip");
+
+    let named = format!("personas: ./personas\n{golden}");
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&named).expect("it still parses");
+    let error = oneagentgraph::config::validate(&asking)
+        .expect_err("the key postdates the schema this document declares");
+    assert!(error.to_string().contains("`personas`"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requires graph schema version {FIRST_PERSONA_CATALOG_VERSION}"
+        )),
+        "{error}"
+    );
+}
+
+/// A graph written against the schema before `events` existed reads unchanged,
+/// gains no `events` key when written back, and is refused by the block's name
+/// if it names one anyway.
+///
+/// The three halves are one promise: the block is optional and additive, so a
+/// document that predates it keeps meaning exactly what it said — and a document
+/// declaring that schema and asking for the block is told which version has it,
+/// rather than being run unfiltered.
+#[test]
+fn a_version_four_graph_still_reads_and_is_refused_the_block_it_predates() {
+    let golden = include_str!("golden/graph.v4.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 4 graph still reads");
+    assert_eq!(graph.version, FIRST_EVENT_FILTER_VERSION - 1);
+    assert_eq!(graph.events, None, "version 4 has no events block");
+    oneagentgraph::config::validate(&graph).expect("a version 4 graph still validates");
+    assert_eq!(
+        graph.members.keys().collect::<Vec<_>>(),
+        vec!["reporter", "worker"],
+        "everything version 4 carried is unchanged"
+    );
+
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("events"),
+        "an absent events block must stay absent, or an older reader now meets a key \
+         it rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 4 document did not round-trip");
+
+    // The same document, naming the block its schema predates.
+    let named = format!("{golden}events:\n  filter:\n    exclude:\n    - kind: turn-activity\n");
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&named).expect("it still parses");
+    let error = oneagentgraph::config::validate(&asking)
+        .expect_err("the block postdates the schema this document declares");
+    assert!(error.to_string().contains("`events`"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requires graph schema version {FIRST_EVENT_FILTER_VERSION}"
+        )),
+        "{error}"
+    );
+}
+
+/// The record both goldens describe, at the current version.
+fn golden_record() -> Record {
+    Record {
+        schema_version: RECORD_SCHEMA_VERSION,
+        run_id: RunId::parse("node-scope-1786171301679-1447994").expect("a run id"),
+        graph: "./graph.yaml".into(),
+        name: "node-scope".into(),
+        started_ms: 1_786_171_301_679,
+        finished_ms: Some(1_786_171_308_421),
+        exit_code: Some(0),
+        members: BTreeMap::from([
+            ("reporter".into(), MemberOutcome::Died(Rule::Activity)),
+            ("worker".into(), MemberOutcome::Settled),
+        ]),
+        declared_members: vec!["reporter".into(), "worker".into()],
+        refs: vec![ResolvedRef {
+            origin: "./graph.yaml".into(),
+            sha256: "3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e".into(),
+            bytes: 412,
+        }],
+        events_path: "/state/node-scope-1786171301679-1447994/events.jsonl".into(),
+    }
+}
+
+/// What this build writes is byte-for-byte the committed golden, and reading it
+/// back gives the same record.
+#[test]
+fn the_current_golden_is_exactly_what_this_build_writes() {
+    let golden = include_str!("golden/record.v3.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_record()).expect("a record serializes")
+    );
+    assert_eq!(
+        written, golden,
+        "record.json's shape changed. If that was deliberate, bump \
+         RECORD_SCHEMA_VERSION and commit a new golden beside the old one — do not \
+         overwrite it, or nothing proves the old shape still reads."
+    );
+
+    let read: Record = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_record(), "the golden did not round-trip");
+    assert_eq!(read.schema_version, RECORD_SCHEMA_VERSION);
+}
+
+#[test]
+fn a_version_two_record_still_reads() {
+    let record: Record = serde_json::from_str(include_str!("golden/record.v2.json"))
+        .expect("a version 2 record still reads");
+    assert_eq!(record.schema_version, 2);
+    assert_eq!(record.members["worker"], MemberOutcome::Settled);
+}
+
+/// A record written before the version field existed still reads, as version 1.
+///
+/// This is the whole point of defaulting it: every field added since is optional
+/// and absent from that file, so it has to parse without them and report the
+/// version it was actually written under.
+#[test]
+fn a_record_from_before_the_version_field_still_reads_as_version_one() {
+    let v1: Record = serde_json::from_str(include_str!("golden/record.v1.json"))
+        .expect("a version 1 record still reads");
+
+    assert_eq!(v1.schema_version, 1, "an unversioned record is version 1");
+    assert!(
+        v1.declared_members.is_empty(),
+        "a version 1 record declares no members; it predates the field"
+    );
+    // Everything version 1 *did* carry is unchanged, so upgrading does not lose
+    // a run's history.
+    assert_eq!(v1.run_id.as_str(), "node-scope-1786171301679-1447994");
+    assert_eq!(v1.exit_code, Some(0));
+    assert_eq!(v1.members[&"worker".to_string()], MemberOutcome::Settled);
+    assert_eq!(
+        v1.members[&"reporter".to_string()],
+        MemberOutcome::Died(Rule::Activity)
+    );
+    assert_eq!(v1.refs[0].bytes, 412);
+}
+
+/// Every optional field is absent from the JSON when it is empty, and survives a
+/// round trip when it is not.
+///
+/// This is what keeps a reader of an older record unaffected: the keys a newer
+/// build added are simply not there when there is nothing to say, so the
+/// document a version 1 reader sees is the document it always saw.
+#[test]
+fn an_empty_optional_field_is_omitted_and_a_filled_one_round_trips() {
+    let mut record = golden_record();
+    record.finished_ms = None;
+    record.exit_code = None;
+    record.members = BTreeMap::new();
+    record.declared_members = Vec::new();
+    record.refs = Vec::new();
+
+    let value = serde_json::to_value(&record).expect("serializes");
+    let keys: Vec<&str> = value
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for absent in ["finished_ms", "exit_code", "declared_members"] {
+        assert!(
+            !keys.contains(&absent),
+            "{absent} is empty and must be omitted, not written: {keys:?}"
+        );
+    }
+    // The version is not optional: a record that named none would read as 1.
+    assert!(keys.contains(&"schema_version"), "{keys:?}");
+    assert_eq!(
+        serde_json::from_value::<Record>(value).expect("round-trips"),
+        record,
+        "a record with every optional field empty did not round-trip"
+    );
+
+    // And the same field, filled, survives the trip rather than being dropped.
+    let filled = golden_record();
+    assert_eq!(
+        serde_json::from_str::<Record>(&serde_json::to_string(&filled).expect("serializes"))
+            .expect("round-trips")
+            .declared_members,
+        vec!["reporter".to_string(), "worker".to_string()]
+    );
+}
+
+/// The three `member-died` payloads this build writes, in the order the golden
+/// commits them: the member that really was a child process, the one this
+/// process drove in-library, and the single-sided member whose chain reached no
+/// candidate — the one death that carries `candidates`.
+fn golden_deaths() -> Vec<MemberDied> {
+    vec![
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::Exited,
+            detail: "harness failed (quota)".into(),
+            truncated: false,
+            exit_code: Some(2),
+            disposition: Some(Disposition::Exited),
+            stderr_tail: "harness failed (quota)".to_string().into(),
+            candidates: Vec::new(),
+        },
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::Quota,
+            detail: "provider error (respond): the subscription is exhausted".into(),
+            truncated: false,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+            candidates: Vec::new(),
+        },
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::FallbackChainExhausted,
+            detail: "claude-code [auth], codex [not-installed]".into(),
+            truncated: false,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+            candidates: vec![
+                AttemptedCandidate {
+                    identity: "claude-code".into(),
+                    failure_kind: Some("auth".into()),
+                    detail: "claude-code: not logged in".into(),
+                    truncated: false,
+                },
+                AttemptedCandidate {
+                    identity: "codex".into(),
+                    failure_kind: None,
+                    detail: "`codex` not found on PATH; harness skipped".into(),
+                    truncated: false,
+                },
+            ],
+        },
+    ]
+}
+
+/// `member-died`'s three shapes are byte-for-byte the committed golden.
+///
+/// This payload is the one wire shape the onejudge library conversion changed,
+/// and both halves of the change are here because both have to keep holding. A
+/// member that really was a child process still reports `exit_code`,
+/// `disposition`, and `stderr_tail` — dropping those would narrow what a
+/// single-sided member's death says. One driven in this process reports none of
+/// them, and says the same thing through `cause` and `detail` instead; writing
+/// them as `null` would have a consumer read a process that never existed. The
+/// third is the exhausted chain: `candidates` rides that death alone, and the
+/// first two shapes are the proof it is omitted from every other rather than
+/// written empty — an optional field a consumer compiled before it never sees.
+///
+/// It rides envelope version 1, unchanged: `v` is the shared envelope's own
+/// version, duplicated verbatim into every producer in this stack, so bumping it
+/// here alone would desynchronize the very field a consumer reads *before* it
+/// knows whether it can decode the rest.
+#[test]
+fn the_member_died_goldens_are_exactly_what_this_build_writes() {
+    assert_eq!(ENVELOPE_VERSION, 1, "the envelope this payload rides");
+    let golden = include_str!("golden/member-died.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_deaths()).expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "member-died's shape changed. If that was deliberate it is a change to \
+         docs/contract.md and to every consumer compiled against it — amend the contract \
+         and commit the new bytes here in the same change."
+    );
+
+    let read: Vec<MemberDied> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_deaths(), "the golden did not round-trip");
+}
+
+/// The three `member-started` payloads this build writes, in the order the golden
+/// commits them: the member driven in this process, the child process, and the
+/// child that came up without taking a turn.
+fn golden_starts() -> Vec<MemberStarted> {
+    vec![
+        MemberStarted {
+            runner: Runner::Library {
+                engine: "onejudge".into(),
+                config: "/state/node-scope-1786171301679-1447994/members/worker/onejudge.yaml"
+                    .into(),
+                worktree: "/state/node-scope-1786171301679-1447994/members/worker".into(),
+            },
+            start_after: None,
+            truncated: false,
+        },
+        MemberStarted {
+            runner: Runner::Process {
+                program: "oneharness".into(),
+                args: vec![
+                    "run".into(),
+                    "--config".into(),
+                    "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml"
+                        .into(),
+                    "--cwd".into(),
+                    "/work".into(),
+                    "--events".into(),
+                    "--stream".into(),
+                    "--prompt".into(),
+                    "write one status update".into(),
+                ],
+                cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
+            },
+            start_after: None,
+            truncated: false,
+        },
+        MemberStarted {
+            runner: Runner::Process {
+                program: "oneharness".into(),
+                args: vec![
+                    "run".into(),
+                    "--config".into(),
+                    "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml"
+                        .into(),
+                    "--cwd".into(),
+                    "/work".into(),
+                    "--events".into(),
+                    "--stream".into(),
+                    "--prompt".into(),
+                    "write one status update".into(),
+                ],
+                cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
+            },
+            start_after: Some(1800),
+            truncated: false,
+        },
+    ]
+}
+
+/// `member-started`'s three shapes are byte-for-byte the committed golden.
+///
+/// The payload a supervisor reads *first*, and the one this change touched: it
+/// gained `start_after`, so the shape without it is committed beside the shape
+/// with it. Both halves have to keep holding. A member taking its turn now must
+/// publish no delay at all — a `null` would have a consumer read a member that is
+/// waiting for something — and neither runner may carry the other's fields, which
+/// is what makes `runner` a field anything can branch on.
+///
+/// It rides envelope version 1, unchanged, for the reason the deaths above do.
+#[test]
+fn the_member_started_goldens_are_exactly_what_this_build_writes() {
+    assert_eq!(ENVELOPE_VERSION, 1, "the envelope this payload rides");
+    let golden = include_str!("golden/member-started.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_starts()).expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "member-started's shape changed. If that was deliberate it is a change to \
+         docs/contract.md and to every consumer compiled against it — amend the contract \
+         and commit the new bytes here in the same change."
+    );
+
+    let read: Vec<MemberStarted> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_starts(), "the golden did not round-trip");
+}
+
+/// Every shape of the payloads scheduled notes and `reset_on` touch, keyed by
+/// kind, in the order the golden commits them: the shape each had before — a
+/// caller's note, a member's own firing, a reset naming no cause — then the ones
+/// a scheduled note's clock and a `reset_on` match publish.
+fn golden_clock_and_note_payloads() -> BTreeMap<&'static str, Vec<serde_json::Value>> {
+    let offer = "note-1792401955594017000-3399723-1";
+    let note = Some("progress-report".to_string());
+    let cause = ResetCause {
+        source: "pipeline".into(),
+        kind: "planner-surfaced".into(),
+        seq: 42,
+        stream: "pipeline-run-1".into(),
+    };
+    let admitted = |scheduled_note: Option<String>| {
+        serde_json::to_value(NoteAdmitted {
+            member: "monitor".into(),
+            addressee: Addressee::Supervisor,
+            offer: offer.into(),
+            scheduled_note,
+        })
+        .expect("serializes")
+    };
+    let withdrawn = |reason: WithdrawnReason, scheduled_note: Option<String>| {
+        serde_json::to_value(NoteWithdrawn {
+            member: "monitor".into(),
+            offer: offer.into(),
+            reason,
+            scheduled_note,
+        })
+        .expect("serializes")
+    };
+    let fired = |scheduled_note: Option<String>, undelivered: Option<UndeliveredReason>| {
+        serde_json::to_value(CronFired {
+            scheduled_note,
+            undelivered,
+        })
+        .expect("serializes")
+    };
+    let reset = |scheduled_note: Option<String>, cause: Option<ResetCause>| {
+        serde_json::to_value(CronReset {
+            scheduled_note,
+            cause,
+        })
+        .expect("serializes")
+    };
+    BTreeMap::from([
+        (
+            "note-admitted",
+            vec![admitted(None), admitted(note.clone())],
+        ),
+        (
+            "note-withdrawn",
+            vec![
+                withdrawn(WithdrawnReason::Expired, None),
+                withdrawn(WithdrawnReason::Withdrawn, None),
+                withdrawn(WithdrawnReason::Superseded, note.clone()),
+                withdrawn(WithdrawnReason::Reset, note.clone()),
+            ],
+        ),
+        (
+            "cron-fired",
+            vec![
+                fired(None, None),
+                fired(note.clone(), None),
+                fired(note.clone(), Some(UndeliveredReason::ConversationCompleted)),
+                fired(note.clone(), Some(UndeliveredReason::MemberSettled)),
+                fired(note.clone(), Some(UndeliveredReason::NoConversation)),
+            ],
+        ),
+        (
+            "cron-reset",
+            vec![
+                reset(None, None),
+                reset(None, Some(cause.clone())),
+                reset(note, Some(cause)),
+            ],
+        ),
+    ])
+}
+
+/// The clock and note payload golden is exactly what this build writes, and
+/// every shape in it reads back through the type that describes it.
+#[test]
+fn the_clock_and_note_payload_goldens_are_exactly_what_this_build_writes() {
+    let golden = include_str!("golden/clock-and-note-payloads.v2.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_clock_and_note_payloads())
+            .expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "a clock or note payload's shape changed. If that was deliberate, bump its schema \
+         version and commit a new golden beside this one — do not overwrite it."
+    );
+    let read: BTreeMap<String, Vec<serde_json::Value>> =
+        serde_json::from_str(golden).expect("the golden reads");
+    for shape in &read["note-admitted"] {
+        serde_json::from_value::<NoteAdmitted>(shape.clone()).expect("a note-admitted");
+    }
+    for shape in &read["note-withdrawn"] {
+        serde_json::from_value::<NoteWithdrawn>(shape.clone()).expect("a note-withdrawn");
+    }
+    for shape in &read["cron-fired"] {
+        serde_json::from_value::<CronFired>(shape.clone()).expect("a cron-fired");
+    }
+    for shape in &read["cron-reset"] {
+        serde_json::from_value::<CronReset>(shape.clone()).expect("a cron-reset");
+    }
+    // The shapes that predate scheduled notes carry none of their keys.
+    assert_eq!(read["cron-fired"][0], serde_json::json!({}));
+    assert_eq!(read["cron-reset"][0], serde_json::json!({}));
+    assert!(read["note-admitted"][0].get("scheduled_note").is_none());
+}
+
+/// The four turn-control records this build writes, in the order the golden
+/// commits them: a two-party member's address and the note endpoint its own
+/// thread bound, an address whose store the report named, one that left
+/// oneharness's own default, and an ask that was refused.
+///
+/// The last three carry no endpoint on purpose: a member that bound none. A
+/// single-sided member is one — it has no second party for a note to be
+/// addressed away from — and so is a two-party member on a host that refused it
+/// the endpoint. What a consumer reads in `notes` is therefore whether this
+/// member ever had one, which is what a note is offered into: a member whose
+/// conversation is over still names its endpoint, because the refusal it
+/// recorded there is only reachable through it.
+fn golden_controls() -> Vec<ControlRecord> {
+    let session = "node-scope-1786171301679-1447994-worker-skill".to_string();
+    let cwd = std::path::PathBuf::from("/state/node-scope-1786171301679-1447994/members/worker");
+    // Spelled with the separator the golden commits rather than joined: a
+    // committed golden is one file read on every platform, and `Path::join`
+    // writes the *host's* separator — so a `cwd.join(NOTES_DIR)` here renders
+    // `…\notes` on Windows against a golden that says `…/notes`, which is the
+    // suite disagreeing about a path neither the record nor a consumer has any
+    // opinion about. `cwd` above is already spelled this way for the same
+    // reason; only the directory's name comes from the code, so a rename of it
+    // still fails this test.
+    let notes = std::path::PathBuf::from(format!(
+        "{}/{}",
+        cwd.display(),
+        oneagentgraph::note::NOTES_DIR
+    ));
+    vec![
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: None,
+                    cwd: cwd.clone(),
+                },
+            },
+            notes: Some(notes.clone()),
+            supervisor: Some(Turn::Open {
+                address: Address {
+                    session: "node-scope-1786171301679-1447994-worker-user".to_string(),
+                    session_dir: None,
+                    cwd: cwd.clone(),
+                },
+            }),
+        },
+        // A supervisor whose own ask was refused beside a worker whose was
+        // honored: the two sides are separately addressable and separately
+        // refusable.
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: Some("/state/oneharness/sessions".into()),
+                    cwd: cwd.clone(),
+                },
+            },
+            notes: Some(notes),
+            supervisor: Some(Turn::Unavailable {
+                reason: "harness `qwen` has no out-of-band turn control, so --control cannot be \
+                         honored"
+                    .into(),
+            }),
+        },
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: Some("/state/oneharness/sessions".into()),
+                    cwd: cwd.clone(),
+                },
+            },
+            notes: None,
+            supervisor: None,
+        },
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session,
+                    session_dir: None,
+                    cwd,
+                },
+            },
+            notes: None,
+            supervisor: None,
+        },
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Unavailable {
+                reason: "harness `qwen` has no out-of-band turn control, so --control cannot be \
+                         honored"
+                    .into(),
+            },
+            notes: None,
+            supervisor: None,
+        },
+    ]
+}
+
+/// `control.json`'s four shapes are byte-for-byte the committed golden.
+///
+/// It is a persisted contract like the record beside it: a run writes it and a
+/// *different* process — `oneagentgraph interrupt`, minutes or hours later, and
+/// possibly a different build — reads it back. So the shape is versioned and
+/// committed rather than described, and `session_dir` is absent when the run left
+/// oneharness's own default, because an `interrupt` that says nothing resolves
+/// the same store and a written `null` would claim otherwise.
+#[test]
+fn the_control_goldens_are_exactly_what_this_build_writes() {
+    let golden = include_str!("golden/control.v3.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_controls()).expect("the records serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "control.json's shape changed. If that was deliberate, bump \
+         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v3.json — a run in \
+         flight was written by the build before this one."
+    );
+
+    let read: Vec<ControlRecord> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_controls(), "the golden did not round-trip");
+}
+
+/// The shape written before the note endpoint existed still reads, exactly as it
+/// was written.
+///
+/// This is the half the version *range* is for. A run started under the build
+/// before this one has a `control.json` with no `notes` key at all, and an
+/// `interrupt` against it — minutes or hours later, from this build — has to keep
+/// working. What it must read back as is a member that binds no note endpoint,
+/// so a note to it falls through to the lever it does have rather than being
+/// offered into a directory nothing is servicing.
+#[test]
+fn the_shape_written_before_the_note_endpoint_still_reads_as_a_member_that_binds_none() {
+    let read: Vec<ControlRecord> =
+        serde_json::from_str(include_str!("golden/control.v1.json")).expect("the v1 golden reads");
+    assert_eq!(read.len(), 3, "the v1 golden lost a record");
+    for record in &read {
+        assert_eq!(record.schema_version, 1, "a v1 record changed version");
+        assert_eq!(
+            record.notes, None,
+            "a record written before the endpoint existed claimed one"
+        );
+    }
+    assert!(
+        matches!(&read[2].turn, Turn::Unavailable { reason } if reason.contains("qwen")),
+        "the v1 refusal did not survive the trip: {:?}",
+        read[2].turn
+    );
+}
+
+/// The shape written before the judge side asked for a controllable turn still
+/// reads, as a member whose supervisor turn nobody recorded.
+#[test]
+fn the_shape_written_before_the_supervisor_turn_still_reads_as_a_member_with_none() {
+    let read: Vec<ControlRecord> =
+        serde_json::from_str(include_str!("golden/control.v2.json")).expect("the v2 golden reads");
+    assert_eq!(read.len(), 4, "the v2 golden lost a record");
+    for record in &read {
+        assert_eq!(record.schema_version, 2, "a v2 record changed version");
+        assert_eq!(
+            record.supervisor, None,
+            "a record written before the judge side asked claimed a supervisor turn"
+        );
+    }
+    assert!(read[0].notes.is_some(), "the v2 endpoint did not survive");
+}
+
+/// The three fields only a child process has are omitted when it had none, and
+/// survive the trip when it did.
+///
+/// This is the half a consumer branches on. A build that wrote them as `null`
+/// for an in-process member would make "no exit status" and "exit status null"
+/// the same document, and a build that dropped them from a child's death would
+/// lose the evidence that death carries.
+#[test]
+fn a_child_process_s_own_fields_are_omitted_when_empty_and_round_trip_when_not() {
+    let (child, in_process) = {
+        let mut deaths = golden_deaths().into_iter();
+        (deaths.next().expect("child"), deaths.next().expect("lib"))
+    };
+
+    let value = serde_json::to_value(&in_process).expect("serializes");
+    let keys: Vec<&str> = value
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for absent in ["exit_code", "disposition", "stderr_tail", "truncated"] {
+        assert!(
+            !keys.contains(&absent),
+            "{absent} is empty and must be omitted, not written as null: {keys:?}"
+        );
+    }
+    // The three that answer for *every* member are never optional: a death that
+    // named no rule or no cause is one a supervisor cannot branch on at all.
+    for present in ["rule", "cause", "detail"] {
+        assert!(keys.contains(&present), "{present} is missing: {keys:?}");
+    }
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(value).expect("round-trips"),
+        in_process
+    );
+
+    let value = serde_json::to_value(&child).expect("serializes");
+    assert_eq!(value["exit_code"], serde_json::json!(2));
+    assert_eq!(value["disposition"], serde_json::json!("exited"));
+    assert_eq!(
+        value["stderr_tail"],
+        serde_json::json!("harness failed (quota)")
+    );
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(value).expect("round-trips"),
+        child
+    );
+}
+
+/// A `member-died` payload carrying a field this build never heard of is
+/// refused rather than silently dropped.
+///
+/// The envelope is external input — a consumer of this crate's library reads
+/// streams this build did not write — and `docs/contract.md`'s trust-boundary
+/// rule is that a typo fails loudly. Adding three optional fields is exactly the
+/// change that would quietly turn `deny_unknown_fields` off if the derive were
+/// lost, and nothing else here would notice.
+#[test]
+fn a_member_died_payload_with_an_unknown_field_is_rejected() {
+    let mut value = serde_json::to_value(&golden_deaths()[1]).expect("serializes");
+    value["exit_status"] = serde_json::json!(2);
+    let err = serde_json::from_value::<MemberDied>(value)
+        .expect_err("an unknown member-died field must not be silently dropped");
+    assert!(
+        err.to_string().contains("exit_status"),
+        "the refusal did not name the field: {err}"
+    );
+}
+
+/// A record from a *newer* build is refused for its version, not for a key.
+///
+/// `Record` denies unknown fields, so a later build's new key would otherwise be
+/// what the error named — leaving an operator to guess that the run was simply
+/// recorded by something newer.
+#[test]
+fn a_record_from_a_newer_build_is_refused_by_its_version() {
+    let state = tempfile::tempdir().expect("a state dir");
+    let run = state.path().join("node-scope-1786171301679-1447994");
+    std::fs::create_dir_all(&run).expect("mkdir");
+
+    let mut ahead = serde_json::to_value(golden_record()).expect("a record");
+    ahead["schema_version"] = serde_json::json!(u64::from(RECORD_SCHEMA_VERSION) + 1);
+    ahead["something_this_build_never_heard_of"] = serde_json::json!(true);
+    std::fs::write(run.join("record.json"), ahead.to_string()).expect("write");
+
+    let err = oneagentgraph::history::show(state.path(), "node-scope-1786171301679-1447994")
+        .expect_err("a newer record is refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("newer than this build reads"),
+        "the refusal did not name the version: {message}"
+    );
+    assert!(
+        !message.contains("something_this_build_never_heard_of"),
+        "the refusal blamed a key rather than the version: {message}"
+    );
+    // And such a record is skipped in a listing rather than hiding the rest.
+    assert!(oneagentgraph::history::list(state.path()).is_empty());
+}
+
+/// A record write that cannot land is refused naming the record, and leaves the
+/// run's directory as it found it: no partial beside a record that never moved.
+#[test]
+fn a_record_write_that_cannot_land_leaves_no_partial() {
+    let state = tempfile::tempdir().expect("a state dir");
+    let run = state.path().join("node-scope-1786171301679-1447994");
+    std::fs::create_dir_all(run.join(RECORD_FILE)).expect("occupy the record's name");
+
+    let err = oneagentgraph::run::write_record(&run, &golden_record())
+        .expect_err("a record cannot replace a directory");
+    assert!(err.to_string().contains(RECORD_FILE), "{err}");
+    // The record's lock stays: the writer creates it before its first rename and
+    // never removes it, so every later reader of the record finds one.
+    let mut left: Vec<_> = std::fs::read_dir(&run)
+        .expect("the run's directory")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        vec![format!(".{RECORD_FILE}.lock"), RECORD_FILE.to_string()],
+        "{left:?}"
+    );
+}
+
+/// One state directory, and the compiled binary pointed at it.
+struct Store {
+    root: tempfile::TempDir,
+}
+
+/// What one invocation produced.
+struct Ran {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl Store {
+    fn new() -> Self {
+        Self {
+            root: tempfile::tempdir().expect("a state directory"),
+        }
+    }
+
+    fn state(&self) -> &std::path::Path {
+        self.root.path()
+    }
+
+    /// Plant a record for `run_id`, exactly as given.
+    fn plant(&self, run_id: &str, record: &serde_json::Value) -> std::path::PathBuf {
+        let dir = self.state().join(run_id);
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        std::fs::write(dir.join("record.json"), record.to_string()).expect("write the record");
+        dir
+    }
+
+    fn run(&self, args: &[&str]) -> Ran {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+            .args(args)
+            .env("ONEAGENTGRAPH_STATE_DIR", self.state())
+            .output()
+            .expect("the binary runs");
+        Ran {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+}
+
+impl Ran {
+    fn expect_code(&self, code: i32) -> &Self {
+        assert_eq!(
+            self.code, code,
+            "expected exit {code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout, self.stderr
+        );
+        self
+    }
+}
+/// A run id is a *path component* every verb joins onto the state directory,
+/// and it arrives out of `record.json` as well as off the argv — so a record
+/// carrying a traversal in that field is refused rather than followed.
+///
+/// `cancel` is the verb this matters most for: it is the one that *writes*
+/// through the joined path, so a record naming `../..` would have it create a
+/// directory and drop a stop signal outside the run store.
+#[test]
+fn a_record_naming_a_path_outside_the_run_store_is_refused() {
+    let store = Store::new();
+    let escapee = store.state().join("escapee");
+    store.plant(
+        "hostile",
+        &serde_json::json!({
+            "run_id": format!("../../{}", escapee.file_name().expect("a name").to_string_lossy()),
+            "graph": "./graph.yaml",
+            "name": "hostile",
+            "started_ms": 1_u64,
+            "events_path": "/state/hostile/events.jsonl",
+        }),
+    );
+
+    let cancelled = store.run(&["cancel", "hostile"]);
+    cancelled.expect_code(2);
+    assert!(
+        cancelled.stderr.contains("is not a run id"),
+        "{}",
+        cancelled.stderr
+    );
+    assert!(
+        !escapee.exists(),
+        "cancel wrote through a record's run id and escaped the run store: {}",
+        escapee.display()
+    );
+
+    // And the same record never shows up in a listing, rather than listing as
+    // a run whose id nothing else would accept.
+    let listed = store.run(&["history"]);
+    listed.expect_code(0);
+    assert!(!listed.stdout.contains("hostile"), "{}", listed.stdout);
+}
+
+/// `events_path` is reported, never followed. A record naming a stream outside
+/// the run store does not move where `trigger` writes: it
+/// derives the signal directory from the run's id, as `cancel` does.
+///
+/// The record here is otherwise valid — a well-formed run id, a readable record
+/// — so what is under test is the *use* of the path rather than the parse that
+/// already refuses a malformed id.
+#[test]
+fn a_record_naming_a_stream_elsewhere_does_not_move_where_a_signal_is_written() {
+    let store = Store::new();
+    let elsewhere = store.state().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let run = store.plant(
+        "planted-1-1",
+        &serde_json::json!({
+            "run_id": "planted-1-1",
+            "graph": "./graph.yaml",
+            "name": "planted",
+            "started_ms": 1_u64,
+            "members": {"worker": "settled"},
+            "events_path": elsewhere.join("events.jsonl").display().to_string(),
+        }),
+    );
+
+    let triggered = store.run(&["trigger", "planted-1-1", "worker"]);
+    triggered.expect_code(0);
+    assert!(
+        run.join("signals").join("worker.trigger").exists(),
+        "the signal did not land in the run's own directory: {}",
+        triggered.stdout
+    );
+    assert!(
+        !elsewhere.join("signals").exists(),
+        "trigger wrote through the record's events_path and escaped the run store: {}",
+        elsewhere.display()
+    );
+}
