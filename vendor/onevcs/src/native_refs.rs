@@ -785,7 +785,9 @@ fn settled_snapshot(at: &Path) -> Option<Snapshot> {
         if !refs_moving(at) {
             return None;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         crate::launch_trace::sleep(crate::launch_site!(), wait);
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         wait *= 2;
     }
     None

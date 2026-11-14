@@ -932,7 +932,9 @@ fn ensure_sweeper(entry: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(log);
     server_pool::detach(&mut command);
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     match crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command) {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
         Ok(child) => {
             // Recorded by the starter as well as by the sweeper itself, so a
             // second dispatch arriving before the sweeper is up does not start

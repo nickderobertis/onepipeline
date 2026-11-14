@@ -251,9 +251,11 @@ impl Spawner {
             hook.spawning(command, context)
                 .map_err(|e| hook_error(context, "prepare", &e))?;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), command);
         launch.detached();
         let mut child = spawned.map_err(spawn_error)?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let group = match &self.hook {
             // Runs before the caller writes the request, so the child is still
             // blocked on stdin and has spawned nothing of its own.

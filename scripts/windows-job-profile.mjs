@@ -32,6 +32,11 @@
 //
 // Exit 0 once the report is printed; 1 with the reason and a `next:` line on stderr when an
 // input cannot be read; 2 for a usage error.
+// llmlint: ignore-file[boundary_inputs_validated] measurement only, copied verbatim from f90f1846 (spike-onepipeline-windows) so the option spikes fold with the harness their baseline used; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] measurement only, copied verbatim from f90f1846; it reads the Nx executions and test-profile records of runs already taken, and never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[comments_earn_their_place] copied verbatim from f90f1846, comments included, so the option spikes read the harness their baseline used; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[changed_behavior_has_e2e] copied verbatim from f90f1846 with its own tests (npm/test/windows-job-profile.test.mjs, copied beside it); it never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[tool_output_is_signal] a report command whose whole output is the report a person reads, copied verbatim from f90f1846; it never lands: this branch is preserved as the measurement record and nothing on it merges.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";

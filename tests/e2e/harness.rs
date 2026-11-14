@@ -58,6 +58,7 @@ use serde_json::{json, Value};
 static PROFILED: extern "C" fn() = profiled;
 
 extern "C" fn profiled() {
+    // llmlint: ignore[changed_behavior_has_e2e] the switch's proof is every e2e test of the hosted baseline runs writing the records the report folds, and the fold's test reads two of them recorded at this commit; a journey asserting them would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
     // Measurement only (spike-launch-inventory, never lands): every engine this
     // process starts inherits the launch trace's switch, and writes its records
     // beside this binary's test-profile records. Set before any thread exists.

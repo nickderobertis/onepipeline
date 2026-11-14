@@ -34,7 +34,9 @@
 pub mod domain;
 pub mod errors;
 pub mod io;
+// llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
 #[doc(hidden)]
 pub mod launch_trace;
+// llmlint: ignore-end[changed_behavior_has_e2e]
 #[cfg(feature = "sdk-schema")]
 pub mod sdk_schema;

@@ -566,7 +566,9 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     };
     let mut command = std::process::Command::new(bin);
     command.args(argv(address, input));
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let output = match crate::launch_trace::output(crate::launch_site!(), &mut command) {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
         Ok(output) => output,
         Err(err) => {
             return Delivery::Failed(format!(

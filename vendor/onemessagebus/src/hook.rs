@@ -637,6 +637,7 @@ impl CommandHook {
         if let Some(route) = &route {
             command.env(HOOK_ROUTE_ENV, &route.0);
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let (spawned, launch) = crate::launch_trace::spawn(
             crate::launch_site!(),
             command
@@ -644,6 +645,7 @@ impl CommandHook {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
         );
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let mut child = match spawned {
             Ok(child) => child,
             Err(failure) => return self.unjudged(format_args!("could not be run: {failure}")),
@@ -668,11 +670,13 @@ impl CommandHook {
                 return self.unjudged(format_args!("could not receive its message: {failure}"));
             }
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let output = {
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
             child.wait_with_output()
         };
         launch.exited(output.as_ref().ok().and_then(|output| output.status.code()));
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let _ = writing.join();
         let output = match output {
             Ok(output) => output,
@@ -909,6 +913,7 @@ fn bar_digest(command: &[String], fingerprint: &str) -> String {
 /// whitespace removed, when it exits 0 having printed something.
 fn read_fingerprint(argv: &[String]) -> Option<String> {
     let (program, arguments) = argv.split_first()?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let output = crate::launch_trace::output(
         crate::launch_site!(),
         Command::new(program)
@@ -917,6 +922,7 @@ fn read_fingerprint(argv: &[String]) -> Option<String> {
             .stderr(Stdio::null()),
     )
     .ok()?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if !output.status.success() {
         return None;
     }

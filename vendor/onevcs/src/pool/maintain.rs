@@ -513,10 +513,12 @@ fn run(worktree: &Path, maintenance: &Maintenance) -> Ran {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         git::detach_process_group(&mut command);
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         Ok(crate::launch_trace::spawn(
             crate::launch_site!(),
             &mut command,
         ))
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     });
     let (spawned, launch) = match spawned {
         Ok((spawned, launch)) => (spawned, Some(launch)),
@@ -538,6 +540,7 @@ fn run(worktree: &Path, maintenance: &Maintenance) -> Ran {
         ended.clone(),
     );
     let err_reader = git::PipeCapture::start(child.stderr.take().expect("stderr was piped"), ended);
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let exited = {
         let mut watch =
             crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(POLL));
@@ -549,6 +552,7 @@ fn run(worktree: &Path, maintenance: &Maintenance) -> Ran {
             _ => None,
         });
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let Some(status) = exited else {
         git::terminate_group(&child);
         let _ = child.kill();
@@ -592,10 +596,14 @@ fn exited_within(
     started: Instant,
     bound: Duration,
     endings: &mpsc::Receiver<()>,
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     watch: &mut crate::launch_trace::Wait,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 ) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         watch.poll();
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         match child.try_wait() {
             Ok(Some(status)) => return Some(Ok(status)),
             Err(failure) => return Some(Err(failure)),

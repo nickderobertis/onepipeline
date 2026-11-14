@@ -396,7 +396,9 @@ fn capture(view: &View, dir: &Path, group: &Group, scratch: &Path) -> Captured {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => break None,
+            // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
             Ok(None) => crate::launch_trace::sleep(crate::launch_site!(), POLL),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             // llmlint: ignore-block[changed_behavior_has_e2e] `try_wait` fails
             // only when the kernel refuses to report on a child this process
             // itself started, which no input reaches; the arm exists so a view
