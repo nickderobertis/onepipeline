@@ -396,7 +396,7 @@ fn capture(view: &View, dir: &Path, group: &Group, scratch: &Path) -> Captured {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => break None,
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             Ok(None) => crate::launch_trace::sleep(crate::launch_site!(), POLL),
             // llmlint: ignore-block[changed_behavior_has_e2e] `try_wait` fails
             // only when the kernel refuses to report on a child this process

@@ -499,12 +499,12 @@ impl Running {
         });
         let status = {
             let _watch =
-                // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+                // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
                 crate::launch_trace::wait(crate::launch_site!(), Some(self.child.id()), None);
             self.child.wait()
         };
         if let Ok(status) = &status {
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             crate::launch_trace::exit(crate::launch_site!(), self.child.id(), status.code());
         }
         let status = status?;

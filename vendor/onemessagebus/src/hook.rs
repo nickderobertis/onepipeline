@@ -637,7 +637,7 @@ impl CommandHook {
         if let Some(route) = &route {
             command.env(HOOK_ROUTE_ENV, &route.0);
         }
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
         let (spawned, launch) = crate::launch_trace::spawn(
             crate::launch_site!(),
             command
@@ -670,7 +670,7 @@ impl CommandHook {
             }
         };
         let output = {
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
             child.wait_with_output()
         };
@@ -911,7 +911,7 @@ fn bar_digest(command: &[String], fingerprint: &str) -> String {
 /// whitespace removed, when it exits 0 having printed something.
 fn read_fingerprint(argv: &[String]) -> Option<String> {
     let (program, arguments) = argv.split_first()?;
-    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
     let output = crate::launch_trace::output(
         crate::launch_site!(),
         Command::new(program)

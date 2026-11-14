@@ -90,6 +90,8 @@ export const GIT_READS = new Set([
  */
 export function gitReads(sub, argv) {
   if (!sub) return false;
+  // `--output=<file>` makes even a diff or a log a write to the filesystem.
+  if (argv.some((a) => a === "--output" || a.startsWith("--output=") || a === "-o")) return false;
   if (GIT_READS.has(sub)) return true;
   const rest = argv.slice(argv.indexOf(sub) + 1);
   const has = (...flags) => rest.some((a) => flags.includes(a));
@@ -292,7 +294,7 @@ export function validProfile(r) {
     r.schema === 2 &&
     typeof r.test === "string" &&
     typeof r.os === "string" &&
-    typeof r.ended === "string" &&
+    ["test-thread", "process-exit", "unfinished"].includes(r.ended) &&
     isTime(r.wall_s) &&
     (r.categories?.wait?.polls == null || isTime(r.categories.wait.polls)) &&
     Boolean(r.categories) &&
@@ -374,9 +376,10 @@ export function readJob(label, dir) {
     for (const f of readdirSync(launch)) {
       if (f.endsWith(".waits.json")) {
         const doc = readJson(join(launch, f));
-        const sites = doc && Array.isArray(doc.sites) ? doc.sites : [];
+        const sites =
+          doc && typeof doc.test === "string" && Array.isArray(doc.sites) ? doc.sites : [];
         const valid = sites.filter(validWait);
-        skipped.waits += sites.length - valid.length + (doc && Array.isArray(doc.sites) ? 0 : 1);
+        skipped.waits += sites.length - valid.length + (sites === doc?.sites ? 0 : 1);
         for (const site of valid) harnessWaits.push({ ...site, test: doc.test });
         continue;
       }
@@ -581,7 +584,8 @@ export function joinTrace(trace) {
       bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
     else if (r.kind === "exit") exits.set(`${key(r.file, r.pid)}\u0000${r.child}`, r.t);
     else if (r.kind === "start") {
-      if (typeof r.env === "number")
+      // Each writer names a GIT_* set once per process, by an id like `onevcs:0`.
+      if (typeof r.env === "number" || typeof r.env === "string")
         r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
       starts.push(r);
     } else if (r.kind === "wait") waits.push(r);
@@ -899,6 +903,12 @@ export function coverage(os, t, records) {
   const rows = new Map();
   let total = 0;
   let traced = 0;
+  // What the records say the test processes started, per program, consumed as the OS's
+  // record of those starts is read; the rest are starts the records do not hold.
+  const recorded = new Map();
+  for (const r of records)
+    for (const [prog, v] of Object.entries(r.programs ?? {}))
+      recorded.set(prog, (recorded.get(prog) ?? 0) + v.count);
   for (const e of os) {
     if (e.reexec) continue;
     total++;
@@ -929,8 +939,11 @@ export function coverage(os, t, records) {
       expected.set(`${e.ppid}\u0000${e.exe}`, expected.get(`${e.ppid}\u0000${e.exe}`) - 1);
       traced++;
       continue;
-    } else if (starter || /^e2e(-|$)/.test(starterName)) kind = "test process (records)";
-    else if (["onepipeline", "onevcs"].includes(starterName))
+    } else if (starter || /^e2e(-|$)/.test(starterName)) {
+      const left = recorded.get(e.exe) ?? 0;
+      if (left > 0) recorded.set(e.exe, left - 1);
+      kind = left > 0 ? "test process (records)" : "test process, beyond the records";
+    } else if (["onepipeline", "onevcs"].includes(starterName))
       kind = "MISSED: an engine process with no trace";
     else kind = "uninstrumented descendant";
     const k = `${kind}\u0000${starterName}\u0000${e.exe}`;

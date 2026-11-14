@@ -183,7 +183,7 @@ fn read(mut command: Command, bound: Duration, label: &str) -> ReleaseAnswer {
     // probe starts however late — the same teardown a timed-out git command gets.
     git::detach_process_group(&mut command);
 
-    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
     let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
     let mut child = match spawned {
         Ok(child) => child,
@@ -199,7 +199,7 @@ fn read(mut command: Command, bound: Duration, label: &str) -> ReleaseAnswer {
 
     let exited = {
         let mut watch =
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(POLL));
         exited_within(&mut child, started, bound, &endings, &mut watch)
     };
@@ -303,7 +303,7 @@ fn exited_within(
     started: Instant,
     bound: Duration,
     endings: &mpsc::Receiver<()>,
-    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
     watch: &mut crate::launch_trace::Wait,
 ) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {

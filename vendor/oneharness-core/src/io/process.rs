@@ -138,7 +138,7 @@ impl Process {
         if let Some(supervisor) = supervisor {
             supervisor.spawning(&mut command);
         }
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
         let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
         launch.detached();
         let mut child = spawned?;
@@ -184,10 +184,10 @@ impl Process {
         let child = self.child.as_mut().expect("live process has a child");
         let began = Instant::now();
         let waited = child.wait_timeout(deadline - now);
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
         crate::launch_trace::waited(crate::launch_site!(), began.elapsed(), Some(deadline - now));
         if let Ok(Some(status)) = &waited {
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
         }
         waited

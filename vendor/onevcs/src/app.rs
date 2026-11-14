@@ -2597,7 +2597,7 @@ fn events(args: &EventsArgs, providers: &Providers<'_>) -> Result<u8> {
         // return, and a reader asking to follow finished work wants its tail. Asked
         // of the repository side, so a session a supplied implementation opened is
         // followed to its end rather than to the first question it cannot answer.
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
         crate::launch_trace::sleep(crate::launch_site!(), std::time::Duration::from_millis(100));
     }
 }

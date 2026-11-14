@@ -339,6 +339,7 @@ test("a git argv is a read only in a form that writes nothing", () => {
         ["hash-object", ["hash-object", "f"]],
         ["hash-object", ["hash-object", "-w", "f"]],
         ["update-ref", ["update-ref", "refs/x", "HEAD"]],
+        ["diff", ["diff", "--output=patch.diff", "HEAD"]],
       ];
       process.stdout.write(JSON.stringify(cases.map(([sub, argv]) => m.gitReads(sub, argv))));
     })`,
@@ -367,6 +368,7 @@ test("a git argv is a read only in a form that writes nothing", () => {
     true,
     false,
     true,
+    false,
     false,
     false,
   ]);
@@ -633,4 +635,51 @@ test("a document that is not JSON, or a host document of no known shape, is refu
   assert.equal(log.status, 1);
   assert.match(log.stderr, /the job log holds no timestamped line/);
   assert.equal(spawnSync("bash", [runner]).status, 2);
+});
+
+test("a repeat is the same argv, cwd and GIT_* values: the same argv under another GIT_* set is not one", () => {
+  const dir = join(scratch, "envs");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const file = readdirSync(launch).find(
+    (f) => f.startsWith("destination__a_hook") && f.endsWith(".jsonl"),
+  );
+  const lines = readFileSync(join(launch, file), "utf8").split("\n").filter(Boolean);
+  const read = JSON.parse(
+    lines.find((l) => l.includes('"sub":"rev-parse"') && l.includes('"--git-common-dir"')),
+  );
+  const other = {
+    v: 1,
+    kind: "env",
+    pid: read.pid,
+    id: "onevcs:other",
+    env: { GIT_DIR: "/elsewhere" },
+  };
+  const same = { ...read, seq: "onevcs:s", t: read.t + 1e9, exit_ns: 1 };
+  const elsewhere = { ...read, seq: "onevcs:e", t: read.t + 2e9, exit_ns: 1, env: "onevcs:other" };
+  writeFileSync(
+    join(launch, file),
+    [...lines, JSON.stringify(other), JSON.stringify(elsewhere), JSON.stringify(same)].join("\n"),
+  );
+  const out = run("fold", `envs=${dir}`).stdout;
+  // The same-env read repeats; the one under GIT_DIR=/elsewhere does not.
+  assert.match(out, /^1 repeats, 0\.0 s\.$/m);
+});
+
+test("a test process's start beyond what its record counts is told apart from the recorded ones", () => {
+  const dir = join(scratch, "beyond");
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  const file = readdirSync(e2e).find((f) => f.includes("a_hook"));
+  const record = JSON.parse(readFileSync(join(e2e, file), "utf8"));
+  record.programs.git.count -= 2;
+  writeFileSync(join(e2e, file), JSON.stringify(record));
+  const coverage = rows(
+    run("fold", `beyond=${dir}`).stdout,
+    "Coverage against the operating system's own record",
+  );
+  assert.deepEqual(
+    coverage.find((c) => c[0] === "test process, beyond the records" && c[2] === "git"),
+    ["test process, beyond the records", "e2e-3e9c9dc6bf2c36a6", "git", "2"],
+  );
 });
