@@ -1010,7 +1010,10 @@ fn draft(graph: &str, checkout: &Path, branch: &str) -> Drafted {
     }
     let mut deaths = Vec::new();
     let (drafted, handle) = crate::lifecycle::draft(
-        &LocalExecutor,
+        &Idling {
+            inner: &LocalExecutor,
+            turn: Arc::clone(&scratch.turn),
+        },
         DispatchRequest {
             graph: oneagentgraph::config::ConfigRef(graph.to_owned()),
             task: crate::lifecycle::out_of_band_drafting_task(branch, &tree.base, &tree.commits),
@@ -1093,20 +1096,150 @@ fn death(envelope: &Envelope) -> Option<String> {
 /// same two things before the process ends of that signal. What both paths remove
 /// is one [`Leftover`] behind one lock, so whichever comes second finds nothing
 /// left to do, and what is recorded there is only ever what was made.
+///
+/// The signal is handled on a thread of its own while this landing's thread goes
+/// on, so the two are kept apart by [`Turn`]: the removal waits until the
+/// landing's thread is only waiting — on git's read of the branch, or on the
+/// drafting dispatch — and from then on that thread makes nothing more, because
+/// a directory made after the removal (a report the dispatch's settlement is
+/// copied into) is a directory the process then ends of the signal leaving.
 struct Scratch {
     dir: PathBuf,
     checkout: PathBuf,
-    left: Arc<Mutex<Leftover>>,
-    /// Declared last so it is released after [`Drop::drop`] has emptied `left`:
+    turn: Arc<Turn>,
+    /// Declared last so it is released after [`Drop::drop`] has emptied `turn`:
     /// a signal in between finds nothing to remove and still ends the process.
     _interrupts: crate::sys::OnInterrupt,
 }
 
 /// What a drafting turn has made and not yet removed, in the checkout it was made
-/// in.
+/// in, and whether the landing's own thread may be making more of it right now.
 struct Leftover {
     checkout: PathBuf,
     made: Made,
+    /// Whether the landing's thread is anywhere but [`Turn::idle`]. True from the
+    /// turn's start: it is that thread that starts it.
+    in_use: bool,
+    /// Whether an interrupt has taken the turn. Never unset: the process is
+    /// ending of it, and nothing more may be made for the removal to miss.
+    interrupted: bool,
+}
+
+/// A drafting turn's [`Leftover`], shared by the landing's thread and the one an
+/// interrupt is handled on.
+struct Turn {
+    left: Mutex<Leftover>,
+    /// Told each time the landing's thread goes idle.
+    idled: std::sync::Condvar,
+}
+
+impl Turn {
+    /// The leftover behind its lock, whoever panicked while holding it: what it
+    /// records is still exactly what was made.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Leftover> {
+        self.left
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Run `wait` — something that blocks and makes nothing in the turn — with
+    /// the turn free for an interrupt to remove, and come back to it only if no
+    /// interrupt took it meanwhile. One that did leaves this thread parked here
+    /// until the process ends of its signal, which is what keeps the rest of the
+    /// landing from making, or landing, anything after the removal.
+    fn idle<T>(&self, wait: impl FnOnce() -> T) -> T {
+        self.lock().in_use = false;
+        self.idled.notify_all();
+        let waited = wait();
+        let mut left = self.lock();
+        if left.interrupted {
+            drop(left);
+            loop {
+                std::thread::park();
+            }
+        }
+        left.in_use = true;
+        waited
+    }
+
+    /// The landing's thread done with the turn for good: whatever is left is
+    /// removed now, by whichever of the two takes the lock first.
+    fn finish(&self) {
+        let mut left = self.lock();
+        left.remove();
+        left.in_use = false;
+        drop(left);
+        self.idled.notify_all();
+    }
+
+    /// The interrupt's half: take the turn, wait for the landing's thread to be
+    /// idle, and remove what was made.
+    fn interrupt(&self) {
+        let mut left = self.lock();
+        left.interrupted = true;
+        while left.in_use {
+            left = self
+                .idled
+                .wait(left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        left.remove();
+    }
+}
+
+/// An executor whose dispatches leave the drafting turn free for an interrupt
+/// for as long as the landing's thread is waiting on one — for its next envelope
+/// or for its ending — and nowhere else.
+struct Idling<'a> {
+    inner: &'a dyn crate::executor::Executor,
+    turn: Arc<Turn>,
+}
+
+impl crate::executor::Executor for Idling<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn capabilities(&self) -> crate::executor::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn capacity(&self) -> crate::executor::CapacityReport {
+        self.inner.capacity()
+    }
+
+    fn dispatch(&self, req: DispatchRequest) -> Result<Box<dyn crate::executor::DispatchHandle>> {
+        // An interrupt already taken starts no drafter.
+        self.turn.idle(|| ());
+        let inner = self.inner.dispatch(req)?;
+        Ok(Box::new(IdlingDispatch {
+            inner,
+            turn: Arc::clone(&self.turn),
+        }))
+    }
+}
+
+/// One [`Idling`] dispatch.
+struct IdlingDispatch {
+    inner: Box<dyn crate::executor::DispatchHandle>,
+    turn: Arc<Turn>,
+}
+
+impl crate::executor::DispatchHandle for IdlingDispatch {
+    fn events(&mut self) -> crate::executor::EventStream {
+        let turn = Arc::clone(&self.turn);
+        let mut events = self.inner.events();
+        Box::new(std::iter::from_fn(move || turn.idle(|| events.next())))
+    }
+
+    fn wait(&mut self) -> Result<crate::executor::DispatchOutcome> {
+        let inner = &mut self.inner;
+        self.turn.idle(|| inner.wait())
+    }
+
+    fn cancel(&self, mode: crate::executor::CancelMode) {
+        self.inner.cancel(mode);
+    }
 }
 
 /// How far a drafting turn has got, each step inside the one before: a worktree
@@ -1157,14 +1290,6 @@ impl Leftover {
     }
 }
 
-/// The leftover behind its lock, whoever panicked while holding it: what it
-/// records is still exactly what was made.
-fn lock_leftover(leftover: &Mutex<Leftover>) -> std::sync::MutexGuard<'_, Leftover> {
-    leftover
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// What the branch says about itself, read out of the checkout before the
 /// worktree is cut.
 struct Tree {
@@ -1179,50 +1304,65 @@ struct Tree {
 impl Scratch {
     fn new(checkout: &Path) -> std::result::Result<Self, String> {
         static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let leftover = Arc::new(Mutex::new(Leftover {
-            checkout: checkout.to_path_buf(),
-            made: Made::Nothing,
-        }));
+        let turn = Arc::new(Turn {
+            left: Mutex::new(Leftover {
+                checkout: checkout.to_path_buf(),
+                made: Made::Nothing,
+                in_use: true,
+                interrupted: false,
+            }),
+            idled: std::sync::Condvar::new(),
+        });
         // Held before anything is made, so there is no moment in which something
         // exists that an interrupt would leave behind.
         let interrupts = crate::sys::on_interrupt({
-            let leftover = Arc::clone(&leftover);
+            let turn = Arc::clone(&turn);
             move || {
                 eprintln!(
                     "onepipeline: interrupted while drafting; removing the drafting worktree"
                 );
-                lock_leftover(&leftover).remove();
+                turn.interrupt();
             }
         })?;
         let root = std::env::temp_dir();
-        for _ in 0..64 {
-            let dir = root.join(format!(
-                "onepipeline-draft-{}-{}",
-                crate::sys::pid(),
-                MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            let mut left = lock_leftover(&leftover);
-            match std::fs::create_dir(&dir) {
-                Ok(()) => {
-                    left.made = Made::Dir(dir.clone());
-                    drop(left);
-                    return Ok(Self {
-                        dir,
-                        checkout: checkout.to_path_buf(),
-                        left: leftover,
-                        _interrupts: interrupts,
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => {
-                    return Err(format!("{} could not be created: {error}", dir.display()))
+        let made = (|| {
+            for _ in 0..64 {
+                let dir = root.join(format!(
+                    "onepipeline-draft-{}-{}",
+                    crate::sys::pid(),
+                    MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => {
+                        turn.lock().made = Made::Dir(dir.clone());
+                        return Ok(dir);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(format!("{} could not be created: {error}", dir.display()))
+                    }
                 }
             }
+            Err(format!(
+                "no directory for the drafting turn could be created under {}",
+                root.display()
+            ))
+        })();
+        match made {
+            Ok(dir) => Ok(Self {
+                dir,
+                checkout: checkout.to_path_buf(),
+                turn,
+                _interrupts: interrupts,
+            }),
+            Err(why) => {
+                // Done with the turn before the guard goes, so an interrupt the
+                // guard's release still hands over has nothing to wait for.
+                turn.finish();
+                drop(interrupts);
+                Err(why)
+            }
         }
-        Err(format!(
-            "no directory for the drafting turn could be created under {}",
-            root.display()
-        ))
     }
 
     /// Read what the branch says about itself and cut a detached worktree of it.
@@ -1232,6 +1372,37 @@ impl Scratch {
     /// is the origin's default branch, which is the base `onevcs` lands both verbs
     /// onto.
     fn cut(&self, branch: &str) -> std::result::Result<Tree, String> {
+        // Idle, because git reading the checkout makes nothing in the turn and the
+        // origin it may ask is a network away from answering.
+        let (head, base, commits) = self.turn.idle(|| self.read_branch(branch))?;
+        let worktree = self.dir.join("branch");
+        // In the turn, so an interrupt arriving while git is adding the worktree
+        // waits for it and then removes it, rather than finding nothing recorded
+        // and leaving the entry git is about to write.
+        git_in(
+            &self.checkout,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                worktree.as_os_str(),
+                OsStr::new(&head),
+            ],
+        )?;
+        self.turn.lock().made = Made::Worktree {
+            dir: self.dir.clone(),
+            worktree: worktree.clone(),
+        };
+        Ok(Tree {
+            base,
+            commits,
+            worktree,
+        })
+    }
+
+    /// The ref the branch is cut from, its base, and the full commit messages
+    /// between the two.
+    fn read_branch(&self, branch: &str) -> std::result::Result<(String, String, String), String> {
         let head = [
             format!("refs/heads/{branch}"),
             format!("refs/remotes/origin/{branch}"),
@@ -1261,31 +1432,7 @@ impl Scratch {
             &format!("{base}..{head}"),
             "--",
         ])?;
-        let worktree = self.dir.join("branch");
-        // Under the lock, so an interrupt arriving while git is adding the
-        // worktree waits for it and then removes it, rather than finding nothing
-        // recorded and leaving the entry git is about to write.
-        let mut left = lock_leftover(&self.left);
-        git_in(
-            &self.checkout,
-            [
-                OsStr::new("worktree"),
-                OsStr::new("add"),
-                OsStr::new("--detach"),
-                worktree.as_os_str(),
-                OsStr::new(&head),
-            ],
-        )?;
-        left.made = Made::Worktree {
-            dir: self.dir.clone(),
-            worktree: worktree.clone(),
-        };
-        drop(left);
-        Ok(Tree {
-            base,
-            commits,
-            worktree,
-        })
+        Ok((head, base, commits))
     }
 
     /// The origin's default branch, as a ref the checkout resolves — asked the way
@@ -1344,7 +1491,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        lock_leftover(&self.left).remove();
+        self.turn.finish();
     }
 }
 
