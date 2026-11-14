@@ -60,23 +60,27 @@ function log({
   tier = "> nx run onepipeline-e2e:test",
   cache = 'Restored from cache key "v0-rust" full match: true.',
   coverage = coverageLine("96.5000"),
-  tasks,
+  tasks = tasksLine("test-linux", "onepipeline:test onepipeline-e2e:test"),
+  stamp = "2026-11-13T10:00:36.0000000Z",
+  ruststart = "2026-11-13T10:00:02.0000000Z",
 } = {}) {
   return [
-    "an unstamped line the runner never writes",
+    "\uFEFF2026-11-13T10:00:00.5000000Z the runner's first line, after its byte-order mark",
+    "an unstamped continuation of a step's multi-line input",
     `2026-11-13T10:00:01.0000000Z HEAD is now at 1234567 Merge ${"a".repeat(40)} into ${"b".repeat(40)}`,
-    "2026-11-13T10:00:02.0000000Z \x1b[36m##[group]Run Swatinem/rust-cache@v2.9.2\x1b[0m",
+    `${ruststart} \x1b[36m##[group]Run Swatinem/rust-cache@v2.9.2\x1b[0m`,
     `2026-11-13T10:00:30.0000000Z ${cache}`,
     "2026-11-13T10:00:31.0000000Z ##[group]Run actions/cache/restore@v4",
     "2026-11-13T10:00:32.0000000Z Cache not found for input keys: bootstrap-tools",
     "2026-11-13T10:00:33.0000000Z ##[group]Run astral-sh/setup-uv@v6",
     "2026-11-13T10:00:34.0000000Z uv cache restored from GitHub Actions cache with key: setup-uv-1",
     "2026-11-13T10:00:35.0000000Z ##[group]Run just ci-test-linux",
-    `2026-11-13T10:00:36.0000000Z ${tasks ?? tasksLine("test-linux", "onepipeline:test onepipeline-e2e:test")}`,
+    ...(tasks ? [`${stamp} ${tasks}`] : []),
     "2026-11-13T10:01:00.0000000Z github-cache: CACHE_READ_ONLY is set, so this job serves the READ-ONLY Actions-cache backend",
     "2026-11-13T10:01:01.0000000Z   save-if: false",
-    ...(tier ? [`2026-11-13T10:02:00.0000000Z ${tier}`, `2026-11-13T10:12:00.0000000Z ${summary}`] : []),
-    `2026-11-13T10:13:00.0000000Z ${coverage}`,
+    ...(tier ? [`2026-11-13T10:02:00.0000000Z ${tier}`] : []),
+    ...(tier && summary ? [`2026-11-13T10:12:00.0000000Z ${summary}`] : []),
+    ...(coverage ? [`2026-11-13T10:13:00.0000000Z ${coverage}`] : []),
     "2026-11-13T10:14:00.0000000Z ##[group]Run just rerun-failed",
     "",
   ].join("\r\n");
@@ -86,6 +90,7 @@ const VARIANTS = [
   ["baseline", "30"],
   ["idle", "29"],
 ];
+const named = (job, variant, change) => (change.plain ? job : `${job} (${variant})`);
 
 /// A world: a git repository whose one commit is the run's head, a `gh` answering
 /// two attempts of one run in two variants, and an empty directory to keep reads in.
@@ -93,7 +98,7 @@ const VARIANTS = [
 function world(change = {}) {
   const root = mkdtempSync(join(tmpdir(), "measure-test-"));
   const repo = join(root, "repo");
-  const upload = change.workflowName ?? "test-profile-${{ github.job }}-${{ matrix.variant }}";
+  const upload = change.workflowName ?? (change.plain ? "test-profile-${{ github.job }}" : "test-profile-${{ github.job }}-${{ matrix.variant }}");
   write(
     join(repo, ".github/workflows/ci.yml"),
     `jobs:\n  test-linux:\n    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          name: ${upload}\n  budgets:\n    steps: []\n`,
@@ -107,7 +112,7 @@ function world(change = {}) {
 
   const answers = join(root, "answers");
   const answer = (path, body) => write(join(answers, encodeURIComponent(path)), body);
-  answer(`${REPO}/actions/runs/${RUN}`, { run_attempt: 2 });
+  answer(`${REPO}/actions/runs/${RUN}`, change.run ?? { run_attempt: 2 });
   const artifacts = [];
   for (const attempt of [1, 2]) {
     const started = `2026-11-13T1${attempt}:00:00Z`;
@@ -115,10 +120,10 @@ function world(change = {}) {
     answer(`${REPO}/actions/runs/${RUN}/attempts/${attempt}`, change.attempt?.(attempt) ?? { status, head_sha: head, run_started_at: started });
     let jobs = [];
     const logs = {};
-    VARIANTS.forEach(([variant, end], index) => {
+    (change.plain ? VARIANTS.slice(0, 1) : VARIANTS).forEach(([variant, end], index) => {
       jobs.push({
         id: index + 1,
-        name: `test-linux (${variant})`,
+        name: named("test-linux", variant, change),
         conclusion: "success",
         created_at: `2026-11-13T1${attempt}:00:00Z`,
         started_at: `2026-11-13T1${attempt}:0${attempt}:00Z`,
@@ -126,9 +131,9 @@ function world(change = {}) {
       });
       const key = `${attempt} ${variant}`;
       const wanted = change.logs && key in change.logs ? change.logs[key] : log({ summary: `     Summary [ ${variant === "idle" ? 540 : 600}.000s] 2 tests run: 2 passed, 0 skipped` });
-      if (wanted !== null) logs[`${index + 1}_test-linux (${variant}).txt`] = wanted;
+      if (wanted !== null) logs[`${index + 1}_${named("test-linux", variant, change)}.txt`] = wanted;
       const id = attempt * 100 + index + 1;
-      artifacts.push({ id, name: `test-profile-test-linux-${variant}`, created_at: `2026-11-13T1${attempt}:20:00Z`, expired: change.expired?.includes(id) ?? false });
+      artifacts.push({ id, name: change.plain ? "test-profile-test-linux" : `test-profile-test-linux-${variant}`, created_at: `2026-11-13T1${attempt}:20:00Z`, expired: change.expired?.includes(id) ?? false });
       const files = {
         "e2e/views.one.json": record("views::one", 300, {
           onepipeline: { count: 2, s: 4 },
@@ -144,10 +149,10 @@ function world(change = {}) {
     });
     jobs.push({ id: 9, name: "budgets", conclusion: "skipped", created_at: started });
     jobs = change.jobs?.(jobs, attempt) ?? jobs;
-    answer(`${REPO}/actions/runs/${RUN}/attempts/${attempt}/jobs?per_page=100`, change.jobsAnswer?.(attempt) ?? { jobs });
+    answer(`${REPO}/actions/runs/${RUN}/attempts/${attempt}/jobs?per_page=100`, change.jobsAnswer?.(attempt) ?? { total_count: jobs.length, jobs });
     answer(`${REPO}/actions/runs/${RUN}/attempts/${attempt}/logs`, zipOf(logs));
   }
-  answer(`${REPO}/actions/runs/${RUN}/artifacts?per_page=100`, change.artifactsAnswer ?? { artifacts });
+  answer(`${REPO}/actions/runs/${RUN}/artifacts?per_page=100`, change.artifactsAnswer ?? { total_count: artifacts.length, artifacts });
 
   const bin = join(root, "bin");
   const calls = join(root, "gh-calls");
@@ -262,6 +267,62 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.match(none.stdout, /rust-cache: unknown/);
   });
 
+  it("reads a job no matrix names, and takes the latest attempt when none is named", () => {
+    const { stdout } = reported({ plain: true }, ["--side", `plain=${RUN}`]);
+    assert.match(stdout, new RegExp(`\\| plain \\| ${RUN}#2 \\| test-linux \\| success \\| 1234567`));
+    assert.match(stdout, /\| plain \| 4242#2 \| test-linux \| 3 \| 0, 0\.0 \| 0, 0\.0 \|/);
+  });
+
+  it("counts e2e records alone, sums a test's records, and reports an artifact with none", () => {
+    const { stdout } = reported(
+      {
+        records: {
+          101: {
+            "e2e/views.one.again.json": record("views::one", 25, {}),
+            "note/note.one.json": record("note::one", 1000, { onepipeline: { count: 9, s: 900 } }, { binary: "note" }),
+          },
+        },
+      },
+      ONE(),
+    );
+    assert.match(stdout, /engine invocations: 3, 5\.0 s of 595\.0 e2e test-s/, "the note record is not the e2e tier's, and views::one counts twice");
+    const empty = reported(
+      {
+        records: {
+          101: {
+            "e2e/views.one.json": record("views::one", 1, {}, { binary: "note" }),
+            "e2e/views.two.json": record("views::two", 1, {}, { binary: "note" }),
+            "e2e/stale.json": record("views::stale", 1, {}, { binary: "note" }),
+            "e2e/views.four.json": record("views::four", 1, {}, { binary: "note" }),
+          },
+        },
+      },
+      ONE(),
+    );
+    assert.match(empty.stdout, /\| baseline \| 4242#1@baseline \| test-linux \| 0 \| 0, 0\.0 \| 0, 0\.0 \|/);
+  });
+
+  it("reads what a log leaves out as no measurement", () => {
+    const { stdout } = reported({ logs: { "1 baseline": log({ tasks: null, coverage: null, summary: null }) } }, ONE());
+    assert.match(stdout, /\| baseline \| 4242#1@baseline \| test-linux \| success \| 1234567 \| [0-9a-f]{12} \| [0-9a-f]{12} \| – \|/);
+    assert.match(stdout, /\| baseline \| test-linux \| 1\.0 \| 29\.0 \| – \| – \| – \|/);
+  });
+
+  it("compares against the first run of the first side that has records", () => {
+    const { stdout } = reported({ expired: [101] }, ["--side", `baseline=${RUN}#1@baseline,${RUN}#2@baseline`, "--side", `idle=${RUN}#1@idle`]);
+    assert.match(stdout, /\| baseline \| 4242#1@baseline \| test-linux \| – \| no records \| – \|/);
+    assert.match(stdout, /\| idle \| 4242#1@idle \| test-linux \| 3 \| 1, 50\.0 \| 1, 70\.0 \|/);
+  });
+
+  it("reads the workflow again when the artifact name it kept is not one", () => {
+    const w = world();
+    assert.equal(measure(w, ["--cache", w.cache, ...ONE()]).status, 0);
+    write(join(w.cache, RUN, "attempt-1", "profile-artifact-test-linux"), "a name nobody uploads");
+    const ran = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(readFileSync(join(w.cache, RUN, "attempt-1", "profile-artifact-test-linux"), "utf8").trim(), "test-profile-${{ github.job }}-${{ matrix.variant }}");
+  });
+
   it("shows a verb table no longer than fifteen rows, and says when records carry no verbs", () => {
     const many = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`onepipeline:verb${i}`, { count: 1, s: i + 1 }]));
     const { stdout } = reported({ records: { 101: { "e2e/views.many.json": record("views::many", 10, { onepipeline: { count: 20, s: 210 }, ...many }) } } }, ONE());
@@ -288,6 +349,9 @@ describe("measure.mjs refusals", () => {
     refused(at({ "e2e/views.two.json": record("views::two", 1, { git: { count: 1.5, s: 1 } }) }), ONE(), /views\.two\.json: program git is not a count and a duration/);
     refused(at({ "e2e/views.two.json": record("views::two", 1, []) }), ONE(), /views\.two\.json does not have the golden profile record's shape/);
     refused(at({ "e2e/views.two.json": "{ half a record" }), ONE(), /views\.two\.json is not JSON/);
+    const bad = structuredClone(GOLDEN.categories);
+    bad.spawn.count = -1;
+    refused(at({ "e2e/views.two.json": record("views::two", 1, {}, { categories: bad }) }), ONE(), /views\.two\.json: category spawn is not a count and a duration/);
   });
 
   it("refuses answers from gh that are not what it asked for", () => {
@@ -297,7 +361,11 @@ describe("measure.mjs refusals", () => {
       ONE(),
       /not a list of named jobs with known conclusions/,
     );
-    refused({ artifactsAnswer: { artifacts: [{ id: 1, name: "x" }] } }, ONE(), /its artifact listing is not a list of artifacts/);
+    refused({ artifactsAnswer: { total_count: 1, artifacts: [{ id: 1, name: "x" }] } }, ONE(), /its artifact listing is not a list of artifacts/);
+    refused({ artifactsAnswer: { total_count: 120, artifacts: [] } }, ONE(), /its artifact listing holds 0 of 120 artifacts/);
+    refused({ jobsAnswer: () => ({ total_count: 150, jobs: [] }) }, ONE(), /its job listing holds 0 of 150 jobs/);
+    refused({ jobs: (jobs) => jobs.map(({ conclusion, ...job }) => job) }, ONE(), /not a list of named jobs with known conclusions/);
+    refused({ run: { run_attempt: 0 } }, ONE(), /its record names no attempt/);
     refused({ jobs: (jobs) => jobs.map((job) => ({ ...job, started_at: "2026-11-13T09:00:00Z" })) }, ONE(), /created, started and completed times are not in order/);
   });
 
@@ -309,8 +377,14 @@ describe("measure.mjs refusals", () => {
     refused({ logs: { "1 baseline": log({ tasks: "ci-job: test-linux runs 3 task(s): a:b c:d" }) } }, ONE(), /the Nx task selection reads/);
   });
 
-  it("refuses a workflow artifact name it cannot fill", () => {
+  it("refuses a workflow artifact name it cannot fill, or a workflow that names none", () => {
     refused({ workflowName: "test-profile-${{ matrix.os }}" }, ONE(), /with an expression this does not fill/);
+    refused({ workflowName: "profiles" }, ONE(), /workflow names no profile-artifact-test-linux this reads/);
+  });
+
+  it("refuses a log line that opens like a time but is not one, and a step that ends before it starts", () => {
+    refused({ logs: { "1 baseline": log({ stamp: "2026-11-13T99:00:36.0000000Z" }) } }, ONE(), /does not open with a time/);
+    refused({ logs: { "1 baseline": log({ ruststart: "2026-11-13T10:00:31.5000000Z" }) } }, ONE(), /ends before it starts/);
   });
 
   it("refuses a kept answer that is not JSON, saying how to read it again", () => {

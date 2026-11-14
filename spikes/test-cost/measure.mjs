@@ -39,8 +39,10 @@ const CONCLUSIONS = new Set(["success", "failure", "cancelled", "skipped", "time
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 /// The lines `scripts/ci-job.sh` and `scripts/coverage-merge.mjs` print; the
 /// harness's tests read them from lines made by each producer's own statement.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the reconciliation is measure.test.mjs, which makes its fixture lines by running each producer's own print statement; it is run by hand like the rest of this throwaway harness, which lands nowhere and so has no quality-gate target to join or lifetime over which either producer could drift from it.
 const TASKS_LINE = /^ci-job: \S+ runs (\d+) task\(s\): (.*)$/;
 const COVERAGE_LINE = /^lines percent: (\d+(?:\.\d+)?)$/;
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 class Refusal extends Error {}
 
@@ -194,18 +196,25 @@ function fetchAttempt(cache, spec) {
   const jobs = readJson(kept(adir, "jobs.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}/jobs?per_page=100`)))?.jobs;
   expect(
     Array.isArray(jobs) &&
-      jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at) && CONCLUSIONS.has(job.conclusion ?? null)),
+      jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at) && "conclusion" in job && CONCLUSIONS.has(job.conclusion)),
     `run ${spec.run} attempt ${attempt}: its job listing is not a list of named jobs with known conclusions`,
   );
+  const jobCount = readJson(join(adir, "jobs.json")).total_count;
+  expect(jobCount === jobs.length, `run ${spec.run} attempt ${attempt}: its job listing holds ${jobs.length} of ${jobCount} jobs`);
   const logs = unzipped(kept(adir, "logs.zip", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}/logs`, { binary: true })), join(adir, "logs"));
-  // A re-run keeps the first attempt's artifacts beside its own under the same
-  // names, so an attempt's are the ones created after it started.
+  // A re-run keeps the first attempt's artifacts beside its own under the same names.
   const listed = readJson(kept(adir, "artifacts.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/artifacts?per_page=100`)))?.artifacts;
   expect(
     Array.isArray(listed) && listed.every((a) => isCount(a?.id) && typeof a.name === "string" && isTime(a.created_at) && typeof a.expired === "boolean"),
     `run ${spec.run}: its artifact listing is not a list of artifacts`,
   );
+  const artifactCount = readJson(join(adir, "artifacts.json")).total_count;
+  expect(artifactCount === listed.length, `run ${spec.run}: its artifact listing holds ${listed.length} of ${artifactCount} artifacts`);
+  // Its own artifacts were uploaded while its jobs ran: after it started and by the
+  // time its last job ended, which a later attempt's never are.
   const started = Date.parse(meta.run_started_at);
+  const ends = jobs.filter((job) => isTime(job.completed_at)).map((job) => Date.parse(job.completed_at));
+  const ended = ends.length ? Math.max(...ends) : started;
   return {
     label,
     adir,
@@ -213,7 +222,7 @@ function fetchAttempt(cache, spec) {
     jobs,
     logs,
     variant: spec.variant,
-    artifacts: listed.filter((a) => Date.parse(a.created_at) >= started && !a.expired),
+    artifacts: listed.filter((a) => Date.parse(a.created_at) >= started && Date.parse(a.created_at) <= ended && !a.expired),
   };
 }
 
@@ -276,20 +285,27 @@ function records(fetched, job) {
   return readRecords(unzipped(zip, join(fetched.adir, "artifacts", name)));
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the stamp is the one GitHub's runner writes on every log line; the runner is not in this repository, so no gate here can be derived from it, and a line that opens like a stamp but is not one is refused below rather than dropped.
 const STAMP = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?/;
+const STAMPED = /^\d{4}-\d\d-\d\dT/;
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 function jobLog(fetched, job) {
   const name = fetched.variant ? `${job} (${fetched.variant})` : job;
   const file = readdirSync(fetched.logs).find((entry) => entry.endsWith(`_${name}.txt`));
   if (!file) return null;
+  // Unstamped lines are the runner's echo of a step's multi-line inputs, which
+  // carry no measurement; a line opening like a stamp has to be one.
   return readFileSync(join(fetched.logs, file), "utf8")
+    .replace(/^\uFEFF/, "")
     .replace(/\x1b\[[0-9;]*m/g, "")
     .replace(/\r/g, "")
     .split("\n")
-    .filter((line) => STAMP.test(line))
+    .filter((line) => STAMPED.test(line))
     .map((line) => {
-      const at = Date.parse(STAMP.exec(line)[1]);
-      expect(!Number.isNaN(at), `${file}: '${line.slice(0, 40)}' carries no real time`);
+      const stamp = STAMP.exec(line);
+      const at = stamp ? Date.parse(stamp[1]) : Number.NaN;
+      expect(!Number.isNaN(at), `${file}: '${line.slice(0, 40)}' does not open with a time`);
       return { at, text: line.replace(STAMP, "") };
     });
 }
@@ -394,7 +410,9 @@ function measureAttempt(cache, spec) {
       `${fetched.label} ${job}: its created, started and completed times are not in order`,
     );
     const text = lines.map((line) => line.text).join("\n");
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this is actions/checkout's own line for the merge commit a pull-request run checks out; that action is not in this repository, and a log without it reports no GITHUB_SHA rather than a guessed one.
     const head = /HEAD is now at ([0-9a-f]{7,40}) Merge ([0-9a-f]{40}) into ([0-9a-f]{40})/.exec(text);
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
     const found = records(fetched, job);
     out.jobs.set(job, {
       conclusion: meta.conclusion,
