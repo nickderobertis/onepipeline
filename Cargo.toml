@@ -1825,6 +1825,11 @@ path = "tests/status_read/main.rs"
 # `onevcs-testing` requires exactly this `onevcs`, which the path copy is.
 [patch.crates-io]
 onevcs = { path = "vendor/onevcs" }
+# The linked libraries the inventory showed starting processes inside the engine,
+# vendored the same way: the harness runs, the judges, and the bus's hooks.
+oneharness-core = { path = "vendor/oneharness-core" }
+onejudge = { path = "vendor/onejudge" }
+onemessagebus = { path = "vendor/onemessagebus" }
 
 [profile.release]
 strip = true

@@ -412,7 +412,7 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # the run did not select; counting them would hold the floor to code no tier measures.
 _tier-test unit filter:
     @bash scripts/ensure-test-archive.sh coverage
-    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/|/vendor/onevcs/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
+    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/|/vendor/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers
 # build it lazily through ensure-test-archive.sh, so cache hits build nothing.

@@ -1,0 +1,108 @@
+[package]
+name = "onejudge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description.workspace = true
+readme = "../../README.md"
+keywords = ["llm", "agent", "evaluation", "oneharness", "judge"]
+categories = ["development-tools::testing"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The oneharness boundary is parsed into oneharness's OWN typed report/stream
+# contract rather than into shadow structs guessed by field name, so a change
+# upstream is a compile error here instead of a silently-null field at runtime.
+# Non-optional: `OneharnessProvider` is the default provider, so this is the
+# library's core surface, not an opt-in extra.
+oneharness-core = { workspace = true }
+# The note contract is onejudge's own (`onejudge::note`); what the bus supplies
+# is the generic `Sender`/`Inbox` channel it rides and the schema registry the
+# frames are registered in. Non-optional: `Engine::with_notes` is library surface.
+onemessagebus = { workspace = true }
+# Only pulled by the optional `cli` / `skill` features. A bare library consumer
+# (`cargo add onejudge`) never sees clap or a YAML parser. `serde-saphyr` parses
+# both the CLI config and SKILL.md frontmatter. Both are opt-in, kept off the
+# library's (and the MSRV's) default surface.
+clap = { version = "4", features = ["derive"], optional = true }
+serde-saphyr = { workspace = true, optional = true }
+# Non-optional, because `onemessagebus::Message` is sealed on `JsonSchema` and
+# `Note` implements it (`note.rs`) on every build: the note channel `Sender<Note,
+# Accepted>` does not exist without it, and `Engine::with_notes` is library
+# surface. This costs a bare consumer no new dependency — `onemessagebus` itself
+# requires `schemars` — but it must be a direct one, since the derive is ours.
+# The `sdk-schema` feature is what adds the *rest* of the crate's schema surface.
+schemars = { workspace = true }
+
+# Cancelling a turn signals the `oneharness run` child so it tears down the
+# harness tree it owns (`oneharness/mod.rs`). Unix-only: Windows has no SIGTERM,
+# and none is needed there — oneharness puts each harness tree in a Job Object
+# with `KILL_ON_JOB_CLOSE`, so ending the child already ends its descendants.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+# The contract drift gate (`tests/contract.rs`) serializes the public `Report`
+# and diffs it against a checked-in golden.
+serde_json = { workspace = true }
+
+# The deterministic test doubles are not a feature of this crate: they are the
+# `publish = false` `onejudge-test-doubles` crate's bins, so nothing a consumer
+# installs can build them.
+[features]
+# Load a skill from disk (a `SKILL.md` directory) into a `SkillDefinition`. This is
+# onejudge's owned skill-execution primitive — a higher-level framework composes
+# over `load_skill` rather than re-implementing the SKILL.md format. Non-default so
+# the YAML parser stays off a bare `cargo add onejudge`; the `cli` feature enables
+# it (the CLI resolves a `skill:` path through it).
+skill = ["dep:serde-saphyr"]
+
+# The standalone `onejudge` binary: drive a harness through a simulated-user loop
+# to complete one task, configured by YAML. Non-default so the library stays lean
+# (clap + the YAML parser never reach a `cargo add onejudge` consumer). Pulls in
+# `skill` for the `skill:` config key. The deterministic gate builds it and drives
+# the built binary against the test doubles in `onejudge-cli-e2e`.
+cli = ["dep:clap", "skill"]
+
+# Rust-owned JSON Schema metadata for SDK generators. Config is the CLI's YAML
+# input contract, so this opt-in feature includes `cli`. It does not pull
+# `schemars` in — that is non-optional above, for the note contract — it turns on
+# the schema derives and the `sdk_schema` module for everything else.
+sdk-schema = ["cli"]
+
+[[example]]
+name = "generate_sdk_schema"
+required-features = ["sdk-schema"]
+
+[[example]]
+name = "generate_judge_seat_frames"
+required-features = ["sdk-schema"]
+
+[[example]]
+name = "check_judge_seat_frame_version"
+required-features = ["sdk-schema"]
+
+[[example]]
+name = "generate_note_schema"
+required-features = ["sdk-schema"]
+
+# The user-facing standalone binary, behind the `cli` feature. This crate's only
+# binary: it IS published and installed (`cargo install onejudge --features cli`,
+# release archives), while the test doubles live in `onejudge-test-doubles`. Its
+# logic lives in the covered `cli` library modules; this entrypoint stays thin.
+[[bin]]
+name = "onejudge"
+path = "src/bin/onejudge.rs"
+required-features = ["cli"]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

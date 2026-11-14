@@ -1,0 +1,3183 @@
+//! The engine: drives a [`Conversation`] into a [`Transcript`] through a
+//! [`Provider`], turn by turn, and exposes the judge as a helper. This is the
+//! simulated-interaction loop — single-turn for a bare input, or a simulated-user
+//! loop bounded by `max_turns` / `done_when` / the skill declaring itself done.
+
+use std::cell::{Cell, RefCell};
+use std::ops::ControlFlow;
+use std::time::Instant;
+
+use oneharness_core::domain::events::ActionEvent;
+use onemessagebus::{Closed, Delivered};
+
+use crate::control::ControlOutcome;
+use crate::error::Result;
+use crate::history_name::{HistoryScope, JudgeSideCall};
+use crate::interrupt::{Framing, Redirect, Watch};
+use crate::judge_input::JudgeInput;
+use crate::note::{
+    Accepted, Addressee, Criteria, DeliveredNote, Note, NoteInbox, Party, Undelivered,
+};
+use crate::provider::{
+    Assessment, AssistantTurn, EvidenceContext, JudgeKind, JudgeQuery, JudgeVerdict, Provider,
+    SkillRef, SupervisorOutcome, SupervisorQuery, TurnOutcome,
+};
+use crate::report::{Decision, JudgedTurn, NamedVerdict, Report};
+use crate::spawn::SpawnedProcess;
+use crate::telemetry::{aggregate, Telemetry};
+use crate::transcript::{Message, Role, ToolEvent, Transcript};
+use crate::usage::Usage;
+use crate::Error;
+
+/// How many consecutive **no-op exchanges** settle the loop on the work it has.
+///
+/// Two, matching [`SUPERVISOR_REASK_LIMIT`](crate::SUPERVISOR_REASK_LIMIT), and for
+/// the same reason: one repetition is a slip a fresh turn routinely corrects, while
+/// a second identical, empty-handed exchange is a decision the loop has made. Each
+/// one costs a full worker turn *and* a full supervisor turn, so a higher bound buys
+/// nothing but the bill it was raised to avoid — the loops this exists for ran to
+/// their caps (137 turns in the measured case) doing exactly this.
+pub const NOOP_SETTLE_LIMIT: u32 = 2;
+
+/// The longest either message of an exchange may be and still count toward a no-op
+/// streak.
+///
+/// Characters, deliberately, and never token counts: the measured loops report 1–5
+/// input tokens a turn — and so does a perfectly healthy prompt-cached turn, so
+/// tokens cannot tell the two apart. The measured pair is about fifty characters
+/// each way (`No further action; keep this dispatch released.` /
+/// `Dispatch remains released; no action taken.`); this leaves several times that
+/// in headroom while staying far below anything that could carry a real report or
+/// a real instruction.
+const NOOP_EXCHANGE_CHARS: usize = 240;
+
+/// Tracks how many consecutive **no-op exchanges** the loop has just produced, so a
+/// run that has stopped doing work can be settled instead of re-prompted to its cap.
+///
+/// One *exchange* is the user/supervisor message that opened a turn plus the
+/// assistant turn it produced. It is a no-op only when the whole measured signature
+/// holds at once:
+///
+/// * the turn recorded **no tool events** — no commands, no edits, nothing that
+///   could have changed the worktree;
+/// * **both** messages are tiny ([`NOOP_EXCHANGE_CHARS`]); and
+/// * the reply is effectively the one the previous no-op exchange already gave.
+///
+/// Keying on the *pair* is what makes this safe. Any leg alone is ordinary: healthy
+/// turns are often toolless, healthy replies are sometimes short, and a healthy
+/// worker may well repeat itself once. Only all three together describe a loop that
+/// has nothing left to add — and a real next instruction, being neither tiny nor
+/// answered identically, breaks the streak on the very next turn.
+///
+/// What the signature cannot see is a conversation whose *contract* is to report
+/// nothing: a long-lived observer told to answer with one fixed short sentence when
+/// it finds nothing satisfies every leg by construction, on its second quiet
+/// exchange. That conversation says so with
+/// [`Settings::settle_on_noop`]`= false`, which leaves the streak measured but
+/// stops it ending the run; the turn cap remains the bound either way.
+#[derive(Default)]
+struct NoopStreak {
+    /// The normalized reply the current streak keeps repeating.
+    repeated: Option<String>,
+    /// How many consecutive exchanges have repeated it.
+    count: u32,
+}
+
+impl NoopStreak {
+    /// Fold one finished exchange in, and report whether the loop has now repeated
+    /// [`NOOP_SETTLE_LIMIT`] no-op exchanges.
+    fn observe(&mut self, instruction: &str, reply: &str, events: &[ToolEvent]) -> bool {
+        let quiet = events.is_empty() && is_tiny(instruction) && is_tiny(reply);
+        if !quiet {
+            *self = Self::default();
+            return false;
+        }
+        let normalized = normalize(reply);
+        if self.repeated.as_deref() == Some(normalized.as_str()) {
+            self.count += 1;
+        } else {
+            self.repeated = Some(normalized);
+            self.count = 1;
+        }
+        self.count >= NOOP_SETTLE_LIMIT
+    }
+}
+
+/// Why a run that reached no completion decision ended — what a note arriving
+/// afterwards is told, so a caller reading a refusal knows which of relaunch,
+/// amend or follow-up it is choosing between.
+fn ended_because(outcome: &Outcome) -> String {
+    if let Some(settled) = &outcome.settled_reason {
+        return settled.clone();
+    }
+    if outcome.stopped_early {
+        return "the run was short-circuited before it reached a completion decision".into();
+    }
+    "the conversation ended without a completion decision".into()
+}
+
+/// Whether `text` is short enough to be one half of a no-op exchange.
+fn is_tiny(text: &str) -> bool {
+    text.chars().count() <= NOOP_EXCHANGE_CHARS
+}
+
+/// Reduce a reply to what it *said*: lowercase alphanumeric words, single-spaced.
+/// "Dispatch remains released; no action taken." and "Dispatch remains released, no
+/// action taken" are the same answer given twice, and a loop must not be able to
+/// hide behind the punctuation.
+fn normalize(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The skill the worker runs under test.
+#[derive(Debug, Clone)]
+pub struct Skill {
+    /// The skill's name.
+    pub name: String,
+    /// The skill's working directory.
+    pub dir: String,
+    /// The skill instructions, delivered as a system prompt.
+    pub instructions: String,
+}
+
+impl Skill {
+    /// Build a skill from its parts.
+    pub fn new(
+        name: impl Into<String>,
+        dir: impl Into<String>,
+        instructions: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            dir: dir.into(),
+            instructions: instructions.into(),
+        }
+    }
+
+    fn as_ref(&self) -> SkillRef<'_> {
+        SkillRef {
+            name: &self.name,
+            dir: &self.dir,
+            instructions: &self.instructions,
+        }
+    }
+}
+
+/// A simulated user that drives a multi-turn conversation.
+#[derive(Debug, Clone)]
+pub struct SimulatedUser {
+    /// How the simulated user should behave (their instructions).
+    pub persona: String,
+    /// A plain-English condition; when the judge decides it holds, the
+    /// conversation ends. Without it the run ends at `max_turns` or when the skill
+    /// reports itself done.
+    pub done_when: Option<String>,
+    /// Per-conversation override of the engine's assistant-turn cap.
+    pub max_turns: Option<u32>,
+    /// Paths to files or directories every judge-side prompt names for the
+    /// evaluator to read directly — work that may be untracked or gitignored and
+    /// so invisible to `git_status` / `git_diff`. A relative path is resolved
+    /// against the skill's working directory. See
+    /// [`EvidenceContext::artifacts`].
+    pub artifacts: Vec<String>,
+}
+
+impl SimulatedUser {
+    /// A simulated user with just a persona (no `done_when` / `max_turns`).
+    pub fn new(persona: impl Into<String>) -> Self {
+        Self {
+            persona: persona.into(),
+            done_when: None,
+            max_turns: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    /// Name the artifacts the judge side should read directly (builder style).
+    #[must_use]
+    pub fn artifacts(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.artifacts = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the end condition (builder style).
+    #[must_use]
+    pub fn done_when(mut self, criterion: impl Into<String>) -> Self {
+        self.done_when = Some(criterion.into());
+        self
+    }
+
+    /// Set the per-conversation turn cap (builder style).
+    #[must_use]
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+}
+
+/// A conversation to drive: the skill, the initial user input, and — for a
+/// multi-turn run — the simulated user.
+#[derive(Debug, Clone)]
+pub struct Conversation {
+    /// The skill under test.
+    pub skill: Skill,
+    /// The first thing the (real) user says to the skill.
+    pub input: String,
+    /// The simulated user; `None` for a single-turn conversation.
+    pub user: Option<SimulatedUser>,
+}
+
+impl Conversation {
+    /// A single-turn conversation (skill responds once to `input`).
+    pub fn single_turn(skill: Skill, input: impl Into<String>) -> Self {
+        Self {
+            skill,
+            input: input.into(),
+            user: None,
+        }
+    }
+
+    /// A multi-turn conversation driven by `user`.
+    pub fn multi_turn(skill: Skill, input: impl Into<String>, user: SimulatedUser) -> Self {
+        Self {
+            skill,
+            input: input.into(),
+            user: Some(user),
+        }
+    }
+}
+
+/// Engine settings: the loop's own concerns — the default turn cap and the
+/// caller-owned session-name base threaded across turns.
+///
+/// Harness and model **selection** is no longer onejudge's concern: the worker side
+/// uses oneharness's own discovered config (`oneharness.toml`) and the judge /
+/// simulated-user side uses a separately-named oneharness config (see
+/// [`OneharnessProvider`](crate::OneharnessProvider)), so `Settings` carries no
+/// platform or model.
+#[derive(Debug, Clone)]
+pub struct Settings {
+    /// Default assistant-turn cap when a [`SimulatedUser`] does not override it.
+    pub max_turns: u32,
+    /// The base name for the caller-owned session threaded across turns. Use a
+    /// distinct value per run to avoid colliding in the harness's on-disk session
+    /// store. The engine derives `<base>-skill` and `<base>-user` from it, always
+    /// threading them to the provider; a provider that cannot continue a session
+    /// (e.g. a harness with no headless session id) degrades gracefully by
+    /// re-inlining the transcript.
+    pub session_name: String,
+    /// Whether a no-op streak may end the loop early. `true` (the default) is the
+    /// behaviour every run has always had: [`NOOP_SETTLE_LIMIT`] consecutive
+    /// quiet, repeated exchanges settle the run on the work it already has.
+    ///
+    /// Set it `false` for a conversation whose *contract* is to report nothing —
+    /// an observer instructed to answer with one fixed short sentence while it
+    /// finds nothing satisfies the whole no-op signature by construction, and
+    /// settling it silently ends a watch that was still working. The streak goes
+    /// on being measured; it just no longer ends the run, and `max_turns` remains
+    /// the bound, so opting out can never make a loop unbounded.
+    pub settle_on_noop: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Settings {
+    /// Loop settings with `max_turns` defaulting to 8, `session_name` to
+    /// `"onejudge"`, and `settle_on_noop` to `true`. Adjust the fields directly or
+    /// via the builders.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            max_turns: 8,
+            session_name: "onejudge".into(),
+            settle_on_noop: true,
+        }
+    }
+
+    /// Override the default turn cap (builder style).
+    #[must_use]
+    pub fn with_max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = turns;
+        self
+    }
+
+    /// Override the session-name base (builder style).
+    #[must_use]
+    pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
+        self.session_name = name.into();
+        self
+    }
+
+    /// Declare whether a no-op streak may settle the loop (builder style). Pass
+    /// `false` when a quiet repeated exchange is this conversation's contract
+    /// rather than a stalled loop; see [`Settings::settle_on_noop`].
+    #[must_use]
+    pub fn with_settle_on_noop(mut self, settle: bool) -> Self {
+        self.settle_on_noop = settle;
+        self
+    }
+}
+
+/// What driving one conversation produced.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    /// The full conversation transcript, with tool events attached to assistant
+    /// turns.
+    pub transcript: Transcript,
+    /// Aggregated usage across every provider call (`None` if nothing reported).
+    pub usage: Option<Usage>,
+    /// Whether a streaming sink asked to short-circuit the run.
+    pub stopped_early: bool,
+    /// The unified supervisor's completion reason, when it ended the loop.
+    pub completion_reason: Option<String>,
+    /// Why the loop ended *without* a completion decision: the supervisor judged
+    /// the work incomplete and then gave no next instruction to act on, or answered
+    /// in neither documented shape, or the exchanges stopped moving.
+    ///
+    /// Mutually exclusive with [`Outcome::completion_reason`], and the difference
+    /// matters to whoever reads the run: an incomplete outcome with this set is the
+    /// supervisor having nothing usable to say, not the worker failing the task.
+    pub settled_reason: Option<String>,
+    /// Timing, per-party usage, and native session linkage, when provided.
+    pub telemetry: Option<Telemetry>,
+    /// Every process the provider spawned for this run, with the group an
+    /// embedder's [`SpawnHook`](crate::SpawnHook) placed it in. Empty for a
+    /// provider that spawns nothing.
+    pub processes: Vec<SpawnedProcess>,
+    /// Where an `oneharness interrupt` process addresses this run's controllable
+    /// **worker** turn, or why there is none. [`ControlOutcome::NotRequested`]
+    /// unless the provider was asked for control.
+    pub control: ControlOutcome,
+    /// The same, for the **supervisor** turn. Reported apart from
+    /// [`Outcome::control`] because the two sides are separately addressable and
+    /// separately refusable, so one answer cannot stand for both.
+    pub supervisor_control: ControlOutcome,
+    /// What each judge of a [`JudgePanel`](crate::JudgePanel) decided on each
+    /// supervisor turn, in turn order. Empty for a bare provider, which records no
+    /// per-judge decision.
+    pub judge_decisions: Vec<JudgedTurn>,
+}
+
+impl Outcome {
+    /// Bundle this outcome with the `verdicts` scored against it into onejudge's
+    /// versioned [`Report`] contract — the serializable wire form a consumer or
+    /// SDK persists and composes over.
+    #[must_use]
+    pub fn into_report(self, verdicts: Vec<NamedVerdict>) -> Report {
+        self.into_report_with_assessment(verdicts, None)
+    }
+
+    /// Bundle this outcome with verdicts and an optional free-text assessment.
+    #[must_use]
+    pub fn into_report_with_assessment(
+        self,
+        verdicts: Vec<NamedVerdict>,
+        assessment: Option<String>,
+    ) -> Report {
+        let mut report = Report::new(self.transcript, verdicts, self.usage, self.stopped_early);
+        report.completion_reason = self.completion_reason;
+        report.settled_reason = self.settled_reason;
+        report.telemetry = self.telemetry;
+        report.processes = self.processes;
+        report.judge_decisions = self.judge_decisions;
+        report = report.with_control(&self.control);
+        report = report.with_supervisor_control(&self.supervisor_control);
+        match assessment {
+            Some(text) => report.with_assessment(text),
+            None => report,
+        }
+    }
+}
+
+/// Drives conversations against a [`Provider`] and judges transcripts.
+pub struct Engine<'a> {
+    provider: &'a dyn Provider,
+    settings: Settings,
+    started: RefCell<Option<Instant>>,
+    notes: Option<NoteInbox>,
+    /// Every note handed to a party so far, in delivery order — what the judge is
+    /// shown and what [`Criteria`] is composed from. Kept here rather than read back
+    /// from the inbox, whose record holds a note only once its sender is answered:
+    /// a note reaching the judge's live turn is part of the conversation from the
+    /// moment it is handed over, which is before the decision that answers it.
+    delivered: RefCell<Vec<DeliveredNote>>,
+    /// Whether a run has opened the note channel, which decides what a channel this
+    /// engine drops unclosed tells its senders.
+    conversed: Cell<bool>,
+    worktree: RefCell<Option<String>>,
+    /// The artifacts the last run's simulated user named, for the judgements
+    /// scored against its transcript afterwards.
+    artifacts: RefCell<Vec<String>>,
+    /// Every judge's decision on every supervisor turn so far, drained from the
+    /// provider after each supervisor call — kept on the engine like telemetry,
+    /// so a run that fails on a judge still reports what each judge said.
+    judge_decisions: RefCell<Vec<JudgedTurn>>,
+}
+
+/// Notes handed to the judge, whose senders cannot be answered until the decision
+/// they reached says whether it was completion — each with the answer it gets if
+/// it was not: [`Accepted::Interrupted`] for one that redirected the judge's live
+/// turn, [`Accepted::AtTurnEnd`] for one the decision was re-taken with.
+///
+/// Dropped unsettled — a run that fails, or is short-circuited, before the decision
+/// comes back — each is answered as the delivery it really was, whatever became of
+/// the run afterwards.
+#[derive(Default)]
+struct AwaitingDecision(Vec<(Delivered<Note, Accepted>, Accepted)>);
+
+impl AwaitingDecision {
+    fn redirected(&mut self, delivered: Delivered<Note, Accepted>) {
+        self.0.push((
+            delivered,
+            Accepted::Interrupted {
+                party: Party::Supervisor,
+            },
+        ));
+    }
+
+    fn at_turn_end(&mut self, delivered: Delivered<Note, Accepted>) {
+        self.0.push((
+            delivered,
+            Accepted::AtTurnEnd {
+                party: Party::Supervisor,
+            },
+        ));
+    }
+
+    /// Answer every sender: `completion_reason` when the decision completed the
+    /// conversation, and otherwise the delivery each note was.
+    fn settle(mut self, completion_reason: Option<&str>) {
+        for (delivered, otherwise) in self.0.drain(..) {
+            delivered.answer(match completion_reason {
+                Some(reason) => Accepted::JudgedWith {
+                    completion_reason: reason.to_string(),
+                },
+                None => otherwise,
+            });
+        }
+    }
+}
+
+impl Drop for AwaitingDecision {
+    fn drop(&mut self) {
+        for (delivered, otherwise) in self.0.drain(..) {
+            delivered.answer(otherwise);
+        }
+    }
+}
+
+/// The text a correction redirecting the judge's live turn opens its replacement
+/// turn with: the notes, framed by the role each is for, every criterion they
+/// bound, and the question again — because what a redirected turn answers is its
+/// prompt, and a decision is what the conversation needs back.
+fn supervisor_redirect(presented: &[DeliveredNote]) -> String {
+    let mut out = String::from(
+        "## A correction delivered into your turn\n\n\
+         The turn you were taking was interrupted to hand you the following. Take your decision \
+         again with it in hand.\n\n",
+    );
+    if let Some(block) = crate::note::supervisor_block(presented) {
+        out.push_str(&block);
+    }
+    if let Some(criteria) = Criteria::compose(None, presented).rendered() {
+        out.push('\n');
+        out.push_str(&criteria);
+        out.push('\n');
+    }
+    out.push_str(
+        "\nJudge the work against the completion criterion you were given and every criterion \
+         above, and answer in exactly one of the two shapes: `completion:true` with a `reason`, \
+         or `completion:false` with a concrete, actionable next instruction in `message`.",
+    );
+    out
+}
+
+/// The persona a judge-only run's supervisor decision is taken under when its
+/// conversation names no simulated user to supply one.
+const JUDGE_ONLY_PERSONA: &str =
+    "A reviewer judging the agent's reply against the original task and the completion criterion.";
+
+/// Why a run settled on a supervisor that judged the work incomplete and named no
+/// next instruction, with its own reason when it gave one.
+fn no_instruction(reason: &str) -> String {
+    let mut why = "the supervisor judged the work incomplete but gave no next instruction, even \
+                   asked again; settled on the work already done"
+        .to_string();
+    if !reason.trim().is_empty() {
+        why.push_str(&format!(" (supervisor's reason: {})", reason.trim()));
+    }
+    why
+}
+
+/// Why a run settled on a supervisor whose answer never parsed as a decision,
+/// carrying that answer for whoever reads the run.
+fn unparseable(problem: &str, answer: &str) -> String {
+    let mut why = format!(
+        "the supervisor's answer did not parse as a decision ({problem}), even asked again; \
+         settled on the work already done"
+    );
+    if !answer.trim().is_empty() {
+        why.push_str(&format!(" (supervisor's last answer: {})", answer.trim()));
+    }
+    why
+}
+
+/// Append one worker turn to `transcript`, as the turns it really was.
+///
+/// Without a redirect that is the reply and its events. With one, the provider
+/// call held more than one turn: each turn a note interrupted is kept as an
+/// assistant message — the worker's own text and the tool events observed before
+/// the redirect was confirmed, which stand, because a redirect throws away a turn's
+/// remaining words, never its effects — followed by the user message the
+/// replacement turn opened with, exactly as the worker was handed it, and the call's
+/// reply closes the run of turns with the events that came after. A buffered turn
+/// observes nothing while it runs, so its interrupted turns carry nothing of their
+/// own and every event stays with the reply.
+fn push_redirected(
+    transcript: &mut Transcript,
+    redirects: &[Redirect],
+    message: String,
+    mut events: Vec<ToolEvent>,
+) {
+    let mut tools = 0;
+    let mut texts = 0;
+    for redirect in redirects {
+        let upto = redirect.at.tools.clamp(tools, events.len());
+        let interrupted: Vec<ToolEvent> = events.drain(..upto - tools).collect();
+        tools = upto;
+        let said = redirect
+            .at
+            .texts
+            .get(texts..)
+            .unwrap_or_default()
+            .join("\n");
+        texts = redirect.at.texts.len().max(texts);
+        transcript.push(Message::assistant(said).with_events(interrupted));
+        transcript.push(Message::user(redirect.input.clone()));
+    }
+    transcript.push(Message::assistant(message).with_events(events));
+}
+
+/// Close a note channel no conversation ever read, so a note sent to it is refused
+/// as [`Undelivered::NoConversation`] — never as a member that settled, which did
+/// not happen.
+pub(crate) fn close_unread(inbox: &NoteInbox) {
+    inbox.close(Closed::from(&Undelivered::NoConversation {
+        reason: "the conversation's note inbox was dropped before any turn opened".into(),
+    }));
+}
+
+impl Drop for Engine<'_> {
+    fn drop(&mut self) {
+        // A run closes the channel on how it ended, and a second close changes
+        // nothing; this answers the two ways a channel is left unclosed — an engine
+        // that never ran, and one whose run never returned.
+        if let Some(inbox) = &self.notes {
+            if self.conversed.get() {
+                inbox.close(Closed::from(&Undelivered::MemberSettled {
+                    outcome: "the conversation's note inbox was dropped".into(),
+                }));
+            } else {
+                close_unread(inbox);
+            }
+        }
+    }
+}
+
+impl<'a> Engine<'a> {
+    /// Build an engine over `provider` with `settings`.
+    #[must_use]
+    pub fn new(provider: &'a dyn Provider, settings: Settings) -> Self {
+        Self {
+            provider,
+            settings,
+            started: RefCell::new(None),
+            notes: None,
+            delivered: RefCell::new(Vec::new()),
+            conversed: Cell::new(false),
+            worktree: RefCell::new(None),
+            artifacts: RefCell::new(Vec::new()),
+            judge_decisions: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Read notes sent into this run from `inbox` (builder style).
+    ///
+    /// Without one — the default — no note can arrive and every seam below behaves
+    /// exactly as it did before this existed. With one, a note sent on the paired
+    /// [`Notes`](crate::Notes) handle reaches whichever party is live, the other
+    /// party receives it with that party's response, and a criterion the note bound
+    /// enters [`Engine::criteria`]. See the [`note`](crate::note) module.
+    #[must_use]
+    pub fn with_notes(mut self, inbox: NoteInbox) -> Self {
+        self.notes = Some(inbox);
+        self
+    }
+
+    /// The completion criterion actually in force: `configured` plus every
+    /// criterion a delivered binding note added.
+    ///
+    /// Read at **both** judging sites — the per-turn supervisor decision and the
+    /// authoritative re-judge against the finished transcript — so a note that bound
+    /// a criterion cannot be invisible to the verdict that decides whether the work
+    /// is done. Without a note inbox, or on a run where no note bound anything, it
+    /// renders `configured` byte for byte.
+    #[must_use]
+    pub fn criteria(&self, configured: Option<&str>) -> Criteria {
+        Criteria::compose(configured, &self.delivered_notes())
+    }
+
+    /// Every note delivered into this run so far, in delivery order.
+    #[must_use]
+    pub fn delivered_notes(&self) -> Vec<DeliveredNote> {
+        self.delivered.borrow().clone()
+    }
+
+    /// The engine's settings.
+    #[must_use]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Everything that has arrived on the note channel and not yet been handed to a
+    /// party, in arrival order.
+    fn take_notes(&self) -> Vec<Delivered<Note, Accepted>> {
+        match &self.notes {
+            Some(inbox) => std::iter::from_fn(|| inbox.take()).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Hand `taken` to `party`, and answer each sender with `accepted`.
+    fn deliver(
+        &self,
+        taken: Vec<Delivered<Note, Accepted>>,
+        party: Party,
+        accepted: &Accepted,
+    ) -> Vec<DeliveredNote> {
+        taken
+            .into_iter()
+            .map(|delivered| {
+                let handed = self.record(delivered.message().clone(), party);
+                delivered.answer(accepted.clone());
+                handed
+            })
+            .collect()
+    }
+
+    /// Whether a note addressed to the supervisor was delivered past the first
+    /// `held`, so that no supervisor decision has had it in hand.
+    fn supervisor_note_unheld(&self, held: usize) -> bool {
+        self.delivered.borrow()[held..].iter().any(|delivered| {
+            matches!(
+                delivered.note.addressee,
+                Addressee::Supervisor | Addressee::Both
+            )
+        })
+    }
+
+    /// A watch over `party`'s next turn on `session` in `cwd`, when a note can
+    /// arrive and the provider opens that turn with control — `None` otherwise, and
+    /// then nothing is taken from the inbox until the turn ends.
+    fn watch(
+        &self,
+        party: Party,
+        session: &str,
+        cwd: &str,
+        framing: Framing<'a>,
+    ) -> Option<Watch<'_>>
+    where
+        Self: 'a,
+    {
+        let inbox = self.notes.as_ref()?;
+        let address = self.provider.turn_control(party, session, cwd)?;
+        Watch::new(inbox, party, &address, framing)
+    }
+
+    /// Run `call` as one live turn under `watch`, and hand back its result with
+    /// every redirect the watch confirmed while it ran.
+    fn live<T>(&self, watch: Option<&Watch<'_>>, call: impl FnOnce() -> T) -> (T, Vec<Redirect>) {
+        let Some(watch) = watch else {
+            return (call(), Vec::new());
+        };
+        std::thread::scope(|scope| {
+            let watching = scope.spawn(|| watch.run());
+            let result = call();
+            watch.end();
+            let redirects = watching
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (result, redirects)
+        })
+    }
+
+    /// Record that `note` was handed to `party`.
+    fn record(&self, note: Note, party: Party) -> DeliveredNote {
+        let handed = DeliveredNote {
+            note,
+            delivered_to: party,
+        };
+        self.delivered.borrow_mut().push(handed.clone());
+        handed
+    }
+
+    /// Drive `conversation` to completion (buffered turns), returning the
+    /// transcript and aggregated usage.
+    ///
+    /// # Errors
+    /// Propagates the first provider failure.
+    pub fn run(&self, conversation: &Conversation) -> Result<Outcome> {
+        let mut discard = |_: &Observation<'_>| ControlFlow::Continue(());
+        self.converse(conversation, None, false, &mut discard)
+    }
+
+    /// Like [`Engine::run`], but drives each turn through
+    /// [`Provider::respond_streaming`] and delivers each tool event to `on_event`
+    /// the instant it is observed. Returning [`ControlFlow::Break`] short-circuits:
+    /// the current turn is torn down and [`Outcome::stopped_early`] is `true`.
+    ///
+    /// This is the tool half of [`Engine::run_observing`]'s seam: the events it
+    /// delivers, and their order, are exactly the [`Observation::Tool`]s the wider
+    /// sink sees, so an embedder written against this signature is untouched by the
+    /// wider one existing.
+    ///
+    /// # Errors
+    /// As [`Engine::run`].
+    pub fn run_streaming(
+        &self,
+        conversation: &Conversation,
+        on_event: &mut dyn FnMut(&StreamEvent) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        let mut tools_only = |observation: &Observation<'_>| match observation {
+            Observation::Tool(event) => on_event(event),
+            _ => ControlFlow::Continue(()),
+        };
+        self.converse(conversation, None, true, &mut tools_only)
+    }
+
+    /// Like [`Engine::run_streaming`], but delivers the *whole* of each turn as it
+    /// happens: the turn's opening and the instruction it answers, its tool events,
+    /// each party's own reply text, and the turn's usage and bounds. See
+    /// [`Observation`].
+    ///
+    /// This is what an operator supervising work they cannot watch directly reads a
+    /// live dispatch by — the streaming sink alone shows them tool calls with no
+    /// prose around them, and a member that never settles never yields the rest.
+    ///
+    /// Returning [`ControlFlow::Break`] from any observation short-circuits the run
+    /// exactly as it does on the streaming sink, and no further observation is
+    /// delivered.
+    ///
+    /// # Errors
+    /// As [`Engine::run`].
+    pub fn run_observing(
+        &self,
+        conversation: &Conversation,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        self.converse(conversation, None, true, on_observation)
+    }
+
+    /// Judge `input` once, with **no agent side run**: the judge side — a bare
+    /// provider, or every judge of a [`JudgePanel`](crate::JudgePanel), `llmlint`
+    /// judges included — takes one supervisor decision on `input` as the reply to
+    /// `conversation`'s task, against the bar its [`SimulatedUser`] states
+    /// (persona, `done_when`, the criteria a delivered note bound) with its
+    /// artifacts as evidence.
+    ///
+    /// The [`Outcome`] is the one a run whose worker had answered with `input`
+    /// would have reached on that decision: the transcript is the task, `input` as
+    /// the assistant's reply, and — when the judge side judged it incomplete — its
+    /// message, as the user turn a worker would have been handed; a completion
+    /// sets [`Outcome::completion_reason`], and an answer with no usable decision
+    /// [`Outcome::settled_reason`]. Nothing else is invoked: no worker turn, and no
+    /// second decision.
+    ///
+    /// A conversation with no simulated user is judged against its task alone,
+    /// under a reviewer persona. A judge that reads files is told where `input`
+    /// lies ([`Provider::set_judged_file`]): a file under the skill's worktree that
+    /// still holds `input.text` is judged in place, and anything else from a scratch directory removed when
+    /// the decision returns.
+    ///
+    /// # Errors
+    /// A judge-side failure, as a run's supervisor failure is — never a pass; and
+    /// [`Error::Invalid`] for a judge input whose name is not a bare file name or
+    /// that cannot be written out.
+    pub fn judge_only(&self, conversation: &Conversation, input: &JudgeInput) -> Result<Outcome> {
+        let mut discard = |_: &Observation<'_>| ControlFlow::Continue(());
+        self.converse(conversation, Some(input), false, &mut discard)
+    }
+
+    /// [`Engine::judge_only`], delivering the judgement as it happens: the
+    /// supervisor turn's opening (its instruction is `input`), each judge's tool
+    /// events and decision, the message handed back when there is one, and the
+    /// turn's close — the same observations a normal run's supervisor turn yields.
+    /// Returning [`ControlFlow::Break`] stops the run as it does there.
+    ///
+    /// # Errors
+    /// As [`Engine::judge_only`].
+    pub fn judge_only_observing(
+        &self,
+        conversation: &Conversation,
+        input: &JudgeInput,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        self.converse(conversation, Some(input), true, on_observation)
+    }
+
+    /// Drive the loop, then close the note channel on what actually happened: a
+    /// note arriving after this point is refused with the reason, never accepted
+    /// into a conversation that will not read it.
+    fn converse(
+        &self,
+        conversation: &Conversation,
+        judged: Option<&JudgeInput>,
+        streaming: bool,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        self.conversed.set(true);
+        let result = match judged {
+            Some(input) => self.judge_input(conversation, input, streaming, on_observation),
+            None => self.drive(conversation, streaming, on_observation),
+        };
+        if let Some(inbox) = &self.notes {
+            // The close carries the refusal itself, so every sender still waiting —
+            // and every later one — reads back exactly this variant.
+            let refusal = match &result {
+                Ok(outcome) => match &outcome.completion_reason {
+                    Some(reason) => Undelivered::ConversationCompleted {
+                        completion_reason: reason.clone(),
+                    },
+                    None => Undelivered::MemberSettled {
+                        outcome: ended_because(outcome),
+                    },
+                },
+                Err(error) => Undelivered::MemberSettled {
+                    outcome: format!("the conversation failed: {error}"),
+                },
+            };
+            inbox.close(Closed::from(&refusal));
+        }
+        result
+    }
+
+    fn drive(
+        &self,
+        conversation: &Conversation,
+        streaming: bool,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        self.provider.reset_telemetry();
+        self.scope_history();
+        *self.started.borrow_mut() = Some(Instant::now());
+        *self.worktree.borrow_mut() = Some(conversation.skill.dir.clone());
+        *self.artifacts.borrow_mut() = conversation
+            .user
+            .as_ref()
+            .map(|u| u.artifacts.clone())
+            .unwrap_or_default();
+        self.judge_decisions.borrow_mut().clear();
+        let skill = conversation.skill.as_ref();
+        let max_turns = conversation
+            .user
+            .as_ref()
+            .and_then(|u| u.max_turns)
+            .unwrap_or(self.settings.max_turns) as usize;
+
+        // Thread ONE caller-owned session name across turns (skill and simulated
+        // user each get their own), instead of extracting and re-passing a native
+        // id — the uniform `oneharness --session` handle. The engine always threads
+        // them; a provider that cannot continue a session degrades gracefully by
+        // re-inlining the transcript, so onejudge no longer needs to know the
+        // harness's capability up front.
+        let skill_session = format!("{}-skill", self.settings.session_name);
+        let user_session = self.history_scope().name(JudgeSideCall::User);
+
+        let mut transcript = Transcript::from_input(&conversation.input);
+        let mut totals = Usage::default();
+        let mut completion_reason = None;
+        let mut settled_reason = None;
+        let mut noop = NoopStreak::default();
+        // Notes the supervisor has been handed that the worker has not: it receives
+        // them *with* the supervisor's response, and never at all when that response
+        // is completion — the judge passed the work with the note in hand.
+        let mut for_worker: Vec<DeliveredNote> = Vec::new();
+        // How many of the delivered notes some supervisor decision has held. The
+        // record only ever grows, so everything past this has reached no judge.
+        let mut held = self.delivered.borrow().len();
+
+        loop {
+            // A note that arrived between turns reaches the next turn to open.
+            let queued = self.take_notes();
+            if !queued.is_empty() {
+                let delivered = self.deliver(queued, Party::Worker, &Accepted::Queued);
+                transcript.push(Message::user(crate::note::worker_block(&delivered)));
+            }
+            let turn_index = transcript.assistant_turns() + 1;
+            // The message this turn is answering — the original task on the first
+            // pass, the supervisor's last instruction afterwards. Half of the pair a
+            // no-op exchange is measured on, and read before the reply is appended.
+            let instruction = transcript
+                .messages
+                .last()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let started_at = observed_at();
+            if on_observation(&Observation::TurnOpened(TurnOpened {
+                turn: turn_index,
+                role: Role::Assistant,
+                instruction: &instruction,
+                started_at: started_at.clone(),
+            }))
+            .is_break()
+            {
+                return Ok(self.finish(transcript, totals, true, None, None));
+            }
+            let mut broke = false;
+            let invoked = self.worker_invocations();
+            // A note addressed to the worker that arrives while this turn is live
+            // redirects it, when the turn is controlled: the replacement turn opens
+            // with the note alone, framed as the worker's.
+            let watch = self.watch(
+                Party::Worker,
+                &skill_session,
+                &conversation.skill.dir,
+                Box::new(|presented: &[DeliveredNote]| {
+                    crate::note::worker_block(&presented[presented.len() - 1..])
+                }),
+            );
+            let (turn, redirects) = self.live(watch.as_ref(), || {
+                if streaming {
+                    self.provider.respond_with_history(
+                        &skill,
+                        &transcript.messages,
+                        Some(skill_session.as_str()),
+                        &mut |event| {
+                            let action = match event {
+                                crate::HarnessEvent::HistoryBegun(begun) => {
+                                    let flow = on_observation(&Observation::HistoryBegun(
+                                        HistoryBegun::new(Role::Assistant, turn_index, begun),
+                                    ));
+                                    broke |= flow.is_break();
+                                    return flow;
+                                }
+                                crate::HarnessEvent::Action(action) => action,
+                            };
+                            if let Some(watch) = &watch {
+                                watch.observe(action);
+                            }
+                            // Tool activity first, exactly as it always reached a
+                            // streaming sink — a sink that stops on it is handed
+                            // nothing after — then the whole event for a reader.
+                            if let Some(event) = crate::oneharness::tool_event(action) {
+                                let flow = on_observation(&Observation::Tool(StreamEvent {
+                                    turn: turn_index,
+                                    event: &event,
+                                }));
+                                if flow.is_break() {
+                                    broke = true;
+                                    return flow;
+                                }
+                            }
+                            let flow = on_observation(&Observation::Action(TurnAction {
+                                turn: turn_index,
+                                event: action,
+                            }));
+                            broke |= flow.is_break();
+                            flow
+                        },
+                    )
+                } else {
+                    self.provider.respond(
+                        &skill,
+                        &transcript.messages,
+                        Some(skill_session.as_str()),
+                    )
+                }
+            });
+            // A redirected note reached the worker whatever became of the turn
+            // after, and its sender was answered when oneharness confirmed it.
+            for redirect in &redirects {
+                self.record(redirect.note.clone(), Party::Worker);
+            }
+            let turn = match turn {
+                Ok(turn) => turn,
+                Err(error) => {
+                    if !self.provider.supervises_lost_turns() || error.kind().is_none() {
+                        return Err(error);
+                    }
+                    let Some(user) = &conversation.user else {
+                        return Err(error);
+                    };
+                    // The recovery turn opens like any supervisor turn, and an
+                    // observer stopping the run is answered before the judge side is
+                    // asked: a member being stopped tears its harness down, and the
+                    // turn that fails of it is the stop's doing, whatever its kind —
+                    // `cancelled` included. Absent that stop, a cancelled turn is lost
+                    // like any other and the judge side is told so.
+                    let started_at = observed_at();
+                    if broke
+                        || on_observation(&Observation::TurnOpened(TurnOpened {
+                            turn: turn_index,
+                            role: Role::User,
+                            instruction: "",
+                            started_at: started_at.clone(),
+                        }))
+                        .is_break()
+                    {
+                        return Err(error);
+                    }
+                    let delivered = self.delivered_notes();
+                    let criteria = Criteria::compose(user.done_when.as_deref(), &delivered);
+                    let rendered = criteria.rendered();
+                    let history_files = self.history_files();
+                    let decision = self.provider.supervise_with_evidence(
+                        &SupervisorQuery {
+                            task: &conversation.input,
+                            persona: &user.persona,
+                            done_when: rendered.as_deref(),
+                            worktree: &conversation.skill.dir,
+                            history_name: &skill_session,
+                            notes: &delivered,
+                            turn: self.lost_turn(&error, invoked),
+                            turn_index,
+                        },
+                        &transcript.messages,
+                        Some(user_session.as_str()),
+                        EvidenceContext {
+                            worktree: Some(&conversation.skill.dir),
+                            history_files: &history_files,
+                            artifacts: &user.artifacts,
+                        },
+                    );
+                    let _ = self.record_judge_decisions(turn_index);
+                    // Not observed on this path, like the decisions beside them;
+                    // drained so a later turn never inherits them.
+                    let _ = self.provider.take_judge_tools();
+                    let decision = match decision {
+                        Ok(decision) => decision,
+                        Err(_) => return Err(error),
+                    };
+                    held = delivered.len();
+                    if let Some(usage) = &decision.usage {
+                        totals.add(usage);
+                    }
+                    let mut stopped = match &decision.outcome {
+                        SupervisorOutcome::Continue { message, .. } => {
+                            on_observation(&Observation::Message(TurnMessage {
+                                turn: turn_index,
+                                role: Role::User,
+                                text: message,
+                            }))
+                            .is_break()
+                        }
+                        _ => false,
+                    };
+                    if !stopped {
+                        stopped = on_observation(&Observation::TurnClosed(TurnClosed {
+                            turn: turn_index,
+                            role: Role::User,
+                            usage: decision.usage.as_ref(),
+                            started_at,
+                            finished_at: observed_at(),
+                            harness: None,
+                            model: None,
+                        }))
+                        .is_break();
+                    }
+                    if stopped {
+                        return Ok(self.finish(transcript, totals, true, None, None));
+                    }
+                    match decision.outcome {
+                        SupervisorOutcome::Completed { reason } => {
+                            completion_reason = Some(reason);
+                            break;
+                        }
+                        SupervisorOutcome::Continue { message, .. } => {
+                            transcript.push(Message::user(message));
+                            continue;
+                        }
+                        SupervisorOutcome::NoInstruction { .. }
+                        | SupervisorOutcome::Unparseable { .. } => return Err(error),
+                    }
+                }
+            };
+            let AssistantTurn {
+                message,
+                done: skill_done,
+                usage,
+                events,
+            } = turn;
+            if let Some(u) = &usage {
+                totals.add(u);
+            }
+            // Measured on every run, acted on only when this conversation has not
+            // declared a quiet repeated exchange to be its contract — so the streak
+            // state stays honest either way and the two settings differ in exactly
+            // one place.
+            let should_settle =
+                noop.observe(&instruction, &message, &events) && self.settings.settle_on_noop;
+            let finished_at = observed_at();
+            let (harness, model) = self.worker_identity(invoked);
+            // Nothing follows the observation that asked to stop — a sink that broke
+            // mid-turn is not handed the reply it declined to wait for.
+            if !broke {
+                broke = on_observation(&Observation::Message(TurnMessage {
+                    turn: turn_index,
+                    role: Role::Assistant,
+                    text: &message,
+                }))
+                .is_break();
+            }
+            if !broke {
+                broke = on_observation(&Observation::TurnClosed(TurnClosed {
+                    turn: turn_index,
+                    role: Role::Assistant,
+                    usage: usage.as_ref(),
+                    started_at,
+                    finished_at,
+                    harness,
+                    model,
+                }))
+                .is_break();
+            }
+            push_redirected(&mut transcript, &redirects, message, events);
+
+            if broke {
+                return Ok(self.finish(transcript, totals, true, None, None));
+            }
+
+            // Single-turn conversations stop after the first assistant turn.
+            let Some(user) = &conversation.user else {
+                break;
+            };
+            let at_cap = transcript.assistant_turns() >= max_turns;
+            // A note addressed to the supervisor that the capped turn took was
+            // answered as delivered, and only a supervisor decision can read it — so
+            // the cap costs the worker its next turn, never the judge its note. One
+            // closing decision is taken with it in hand, and nothing opens after.
+            let closing = at_cap && self.supervisor_note_unheld(held);
+            if !closing {
+                if skill_done || at_cap {
+                    break;
+                }
+                // The work is done and the conversation has stopped moving: the worker
+                // recorded nothing and gave the same answer again, to an instruction
+                // that asked for nothing. Every further turn is a paid re-prompt of a
+                // finished dispatch — one measured run spent 137 of them — so settle on
+                // the work already there. Checked before the supervisor is asked again,
+                // because that call is one of the two this loop keeps paying for.
+                if should_settle {
+                    settled_reason = Some(format!(
+                        "the agent and the supervisor repeated {NOOP_SETTLE_LIMIT} no-op exchanges \
+                         (no tool activity, and the same agent reply each time); settled on the work \
+                         already done"
+                    ));
+                    break;
+                }
+                // A note that arrived while the worker's turn was live and did not
+                // redirect it reaches the worker now that the turn has ended: the next
+                // turn opens carrying it, before the supervisor is consulted, so the
+                // judge receives it *together with* the worker's response to it rather
+                // than ahead of one. The finished reply is kept — it is real work.
+                let arrived = self.take_notes();
+                if !arrived.is_empty() {
+                    let delivered = self.deliver(
+                        arrived,
+                        Party::Worker,
+                        &Accepted::AtTurnEnd {
+                            party: Party::Worker,
+                        },
+                    );
+                    transcript.push(Message::user(crate::note::worker_block(&delivered)));
+                    continue;
+                }
+            }
+
+            let started_at = observed_at();
+            // The supervisor answers the reply the worker just gave, so that reply is
+            // this turn's instruction — the same relation the worker's own turn has
+            // to the instruction it was handed.
+            let opened = on_observation(&Observation::TurnOpened(TurnOpened {
+                turn: turn_index,
+                role: Role::User,
+                instruction: transcript
+                    .messages
+                    .last()
+                    .map_or("", |m| m.content.as_str()),
+                started_at: started_at.clone(),
+            }));
+            if opened.is_break() {
+                return Ok(self.finish(transcript, totals, true, None, None));
+            }
+            // The supervisor's decision. A note addressed to it that arrives while
+            // its turn is live redirects that turn, when the turn is controlled, and
+            // the decision the redirected turn takes is the one taken with the note.
+            // Every other note that arrives meanwhile has the decision re-taken once
+            // the turn ends, for as long as they keep arriving: a decision taken
+            // without the note is exactly the decision the note exists to change.
+            // Each round is a real judge invocation, so a caller sending notes into
+            // a tight loop pays per note.
+            let mut awaiting = AwaitingDecision::default();
+            let mut turn_usage: Option<Usage> = None;
+            let decision = loop {
+                let delivered = self.delivered_notes();
+                let criteria = Criteria::compose(user.done_when.as_deref(), &delivered);
+                let rendered = criteria.rendered();
+                let history_files = self.history_files();
+                let watch = self.watch(
+                    Party::Supervisor,
+                    &user_session,
+                    &conversation.skill.dir,
+                    Box::new(supervisor_redirect),
+                );
+                let mut history_stopped = false;
+                let (attempt, redirects) = self.live(watch.as_ref(), || {
+                    let query = SupervisorQuery {
+                        task: &conversation.input,
+                        persona: &user.persona,
+                        done_when: rendered.as_deref(),
+                        worktree: &conversation.skill.dir,
+                        history_name: &skill_session,
+                        notes: &delivered,
+                        turn: TurnOutcome::Taken,
+                        turn_index,
+                    };
+                    let evidence = EvidenceContext {
+                        worktree: Some(&conversation.skill.dir),
+                        history_files: &history_files,
+                        artifacts: &user.artifacts,
+                    };
+                    if !streaming {
+                        return self.provider.supervise_with_evidence(
+                            &query,
+                            &transcript.messages,
+                            Some(user_session.as_str()),
+                            evidence,
+                        );
+                    }
+                    self.provider.supervise_observing(
+                        &query,
+                        &transcript.messages,
+                        Some(user_session.as_str()),
+                        evidence,
+                        &mut |begun| {
+                            let flow = on_observation(&Observation::HistoryBegun(
+                                HistoryBegun::new(Role::User, turn_index, begun),
+                            ));
+                            history_stopped |= flow.is_break();
+                            flow
+                        },
+                    )
+                });
+                if history_stopped {
+                    return Ok(self.finish(transcript, totals, true, None, None));
+                }
+                // Handed to the judge by its redirected turn, and to the worker with
+                // the judge's response; answered once the decision says which.
+                for redirect in redirects {
+                    for_worker.push(self.record(redirect.note, Party::Supervisor));
+                    if let Some(held) = redirect.held {
+                        awaiting.redirected(held);
+                    }
+                }
+                // What each judge of a panel said, drained whichever way the call
+                // ended: recorded on the engine first, so a failed run still reports
+                // it, and observed before the error propagates, so a supervisor
+                // watching the run sees which judge failed and what the others said.
+                let broke = self.observe_judges(turn_index, on_observation);
+                let attempt = attempt?;
+                if broke {
+                    return Ok(self.finish(transcript, totals, true, None, None));
+                }
+                if let Some(u) = &attempt.usage {
+                    totals.add(u);
+                    turn_usage.get_or_insert_with(Usage::default).add(u);
+                }
+                let arrived = self.take_notes();
+                if arrived.is_empty() {
+                    break attempt;
+                }
+                // Handed to the judge now, so the re-taken decision is shown them;
+                // answered only once that decision says which answer it is.
+                for delivered in arrived {
+                    for_worker.push(self.record(delivered.message().clone(), Party::Supervisor));
+                    awaiting.at_turn_end(delivered);
+                }
+            };
+            held = self.delivered.borrow().len();
+            let usage = turn_usage;
+            // Answer every sender whose note reached the judge's live turn. Settled
+            // here rather than at the bottom of the loop because an observation that
+            // breaks returns before that, and a delivered note whose sender is never
+            // answered is the silence this seam exists to refuse.
+            awaiting.settle(match &decision.outcome {
+                SupervisorOutcome::Completed { reason } => Some(reason.as_str()),
+                _ => None,
+            });
+            let finished_at = observed_at();
+            // The supervisor's own words are the next instruction, when it gave one.
+            // A completion or a settled decision appends nothing to the transcript,
+            // so the turn is observed as bounds and cost with no message between.
+            let mut broke = match &decision.outcome {
+                SupervisorOutcome::Continue { message, .. } => {
+                    on_observation(&Observation::Message(TurnMessage {
+                        turn: turn_index,
+                        role: Role::User,
+                        text: message,
+                    }))
+                    .is_break()
+                }
+                SupervisorOutcome::Completed { .. }
+                | SupervisorOutcome::NoInstruction { .. }
+                | SupervisorOutcome::Unparseable { .. } => false,
+            };
+            if !broke {
+                broke = on_observation(&Observation::TurnClosed(TurnClosed {
+                    turn: turn_index,
+                    role: Role::User,
+                    usage: usage.as_ref(),
+                    started_at,
+                    finished_at,
+                    harness: None,
+                    model: None,
+                }))
+                .is_break();
+            }
+            if broke {
+                return Ok(self.finish(transcript, totals, true, None, None));
+            }
+            match decision.outcome {
+                SupervisorOutcome::Completed { reason } => {
+                    completion_reason = Some(reason);
+                    break;
+                }
+                // The closing decision wants more work and the cap allows none. Its
+                // words are its verdict, recorded here rather than left in the
+                // transcript as an instruction no turn will ever answer.
+                SupervisorOutcome::Continue { message, .. } if closing => {
+                    settled_reason = Some(format!(
+                        "the conversation reached its turn cap ({max_turns}) and the final \
+                         supervisor turn, taken with a delivered note in hand, judged the work \
+                         incomplete: {}",
+                        message.trim()
+                    ));
+                    break;
+                }
+                SupervisorOutcome::Continue { message, .. } => {
+                    // The other party receives the note *with* the response: one user
+                    // turn carrying the note's framing and then the supervisor's own
+                    // words, so the worker cannot act on one without the other.
+                    let message = if for_worker.is_empty() {
+                        message
+                    } else {
+                        let block = crate::note::worker_block(&for_worker);
+                        for_worker.clear();
+                        format!("{block}\n{message}")
+                    };
+                    transcript.push(Message::user(message))
+                }
+                // The supervisor judged the work incomplete and had no next
+                // instruction to give, even asked again. Settle the run on the work
+                // it already has rather than raising: the alternative destroyed
+                // finished dispatches, and left the operator unable to tell that
+                // from the worker failing the task.
+                SupervisorOutcome::NoInstruction { reason } => {
+                    settled_reason = Some(no_instruction(&reason));
+                    break;
+                }
+                // The supervisor answered, but not in a shape that can be read as a
+                // decision, even asked again with the shape restated. The same
+                // settle, under its own words: this is neither a transport failure
+                // (the harness delivered the turn) nor a supervisor with nothing to
+                // say — it may well have argued a real point, which is why its last
+                // answer is carried here for whoever reads the run.
+                SupervisorOutcome::Unparseable { problem, answer } => {
+                    settled_reason = Some(unparseable(&problem, &answer));
+                    break;
+                }
+            }
+        }
+
+        Ok(self.finish(transcript, totals, false, completion_reason, settled_reason))
+    }
+
+    /// [`Engine::judge_only`]'s one decision. See there.
+    fn judge_input(
+        &self,
+        conversation: &Conversation,
+        input: &JudgeInput,
+        streaming: bool,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> Result<Outcome> {
+        self.provider.reset_telemetry();
+        self.scope_history();
+        *self.started.borrow_mut() = Some(Instant::now());
+        *self.worktree.borrow_mut() = Some(conversation.skill.dir.clone());
+        let user = conversation.user.as_ref();
+        let artifacts = user.map(|u| u.artifacts.clone()).unwrap_or_default();
+        *self.artifacts.borrow_mut() = artifacts.clone();
+        self.judge_decisions.borrow_mut().clear();
+
+        // The material stands where a worker's reply would, answering the task.
+        let mut transcript = Transcript::from_input(&conversation.input);
+        transcript.push(Message::assistant(input.text.clone()));
+        let placed = crate::judge_input::place(input, &conversation.skill.dir)?;
+        let turn_index = 1;
+        let skill_session = format!("{}-skill", self.settings.session_name);
+        let user_session = self.history_scope().name(JudgeSideCall::User);
+        let persona = user.map_or(JUDGE_ONLY_PERSONA, |u| u.persona.as_str());
+        let delivered = self.delivered_notes();
+        let rendered =
+            Criteria::compose(user.and_then(|u| u.done_when.as_deref()), &delivered).rendered();
+
+        let started_at = observed_at();
+        if on_observation(&Observation::TurnOpened(TurnOpened {
+            turn: turn_index,
+            role: Role::User,
+            instruction: &input.text,
+            started_at: started_at.clone(),
+        }))
+        .is_break()
+        {
+            return Ok(self.finish(transcript, Usage::default(), true, None, None));
+        }
+        let query = SupervisorQuery {
+            task: &conversation.input,
+            persona,
+            done_when: rendered.as_deref(),
+            worktree: &conversation.skill.dir,
+            history_name: &skill_session,
+            notes: &delivered,
+            turn: TurnOutcome::Taken,
+            turn_index,
+        };
+        let evidence = EvidenceContext {
+            worktree: Some(&conversation.skill.dir),
+            history_files: &[],
+            artifacts: &artifacts,
+        };
+        let mut history_stopped = false;
+        self.provider.set_judged_file(Some(&placed.file));
+        let attempt = if streaming {
+            self.provider.supervise_observing(
+                &query,
+                &transcript.messages,
+                Some(user_session.as_str()),
+                evidence,
+                &mut |begun| {
+                    let flow = on_observation(&Observation::HistoryBegun(HistoryBegun::new(
+                        Role::User,
+                        turn_index,
+                        begun,
+                    )));
+                    history_stopped |= flow.is_break();
+                    flow
+                },
+            )
+        } else {
+            self.provider.supervise_with_evidence(
+                &query,
+                &transcript.messages,
+                Some(user_session.as_str()),
+                evidence,
+            )
+        };
+        self.provider.set_judged_file(None);
+        drop(placed);
+        if history_stopped {
+            return Ok(self.finish(transcript, Usage::default(), true, None, None));
+        }
+        let broke = self.observe_judges(turn_index, on_observation);
+        let decision = attempt?;
+        let mut totals = Usage::default();
+        if let Some(usage) = &decision.usage {
+            totals.add(usage);
+        }
+        if broke {
+            return Ok(self.finish(transcript, totals, true, None, None));
+        }
+        let mut broke = match &decision.outcome {
+            SupervisorOutcome::Continue { message, .. } => {
+                on_observation(&Observation::Message(TurnMessage {
+                    turn: turn_index,
+                    role: Role::User,
+                    text: message,
+                }))
+                .is_break()
+            }
+            _ => false,
+        };
+        if !broke {
+            broke = on_observation(&Observation::TurnClosed(TurnClosed {
+                turn: turn_index,
+                role: Role::User,
+                usage: decision.usage.as_ref(),
+                started_at,
+                finished_at: observed_at(),
+                harness: None,
+                model: None,
+            }))
+            .is_break();
+        }
+        if broke {
+            return Ok(self.finish(transcript, totals, true, None, None));
+        }
+        let (completion_reason, settled_reason) = match decision.outcome {
+            SupervisorOutcome::Completed { reason } => (Some(reason), None),
+            // The judges' finding, kept as the user turn a worker would have been
+            // handed — where a normal run's report carries it too.
+            SupervisorOutcome::Continue { message, .. } => {
+                transcript.push(Message::user(message));
+                (None, None)
+            }
+            SupervisorOutcome::NoInstruction { reason } => (None, Some(no_instruction(&reason))),
+            SupervisorOutcome::Unparseable { problem, answer } => {
+                (None, Some(unparseable(&problem, &answer)))
+            }
+        };
+        Ok(self.finish(transcript, totals, false, completion_reason, settled_reason))
+    }
+
+    /// Drain the judge side's decisions and tool events for `turn_index` onto the
+    /// run's record and deliver them to `on_observation`: a bare provider's judge
+    /// events first — it records no decision to follow them — then each panel
+    /// judge's, right before its decision. Whether the observer asked to stop.
+    fn observe_judges(
+        &self,
+        turn_index: usize,
+        on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+    ) -> bool {
+        let decided = self.record_judge_decisions(turn_index);
+        let bare = self.provider.take_judge_tools();
+        for tools in &bare {
+            for event in &tools.events {
+                if on_observation(&Observation::JudgeTool(JudgeTool {
+                    turn: turn_index,
+                    judge: &tools.judge,
+                    event,
+                }))
+                .is_break()
+                {
+                    return true;
+                }
+            }
+        }
+        for decision in &decided {
+            for event in &decision.events {
+                if on_observation(&Observation::JudgeTool(JudgeTool {
+                    turn: turn_index,
+                    judge: &decision.judge,
+                    event,
+                }))
+                .is_break()
+                {
+                    return true;
+                }
+            }
+            if on_observation(&Observation::JudgeDecided(JudgeDecided {
+                turn: turn_index,
+                judge: &decision.judge,
+                kind: &decision.kind,
+                decision: decision.decision,
+                reason: &decision.reason,
+                run_id: decision.run_id.as_deref(),
+            }))
+            .is_break()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn finish(
+        &self,
+        transcript: Transcript,
+        totals: Usage,
+        stopped_early: bool,
+        completion_reason: Option<String>,
+        settled_reason: Option<String>,
+    ) -> Outcome {
+        Outcome {
+            transcript,
+            usage: (!totals.is_empty()).then_some(totals),
+            stopped_early,
+            completion_reason,
+            settled_reason,
+            telemetry: self.telemetry(),
+            processes: self.spawned_processes(),
+            control: self.provider.control(),
+            supervisor_control: self.provider.supervisor_control(),
+            judge_decisions: self.judge_decisions(),
+        }
+    }
+
+    /// The lost worker turn as the judge side is told of it: the cause and
+    /// harness of the invocation this turn recorded past the `before` already
+    /// there, else the error's own kind. A turn that died before it reported
+    /// recorded none, and an earlier turn's candidate is not its own.
+    fn lost_turn(&self, error: &Error, before: usize) -> TurnOutcome {
+        let telemetry = self.provider.invocation_telemetry();
+        let invocation = telemetry
+            .iter()
+            .filter(|entry| entry.role == Some(crate::TelemetryRole::Agent))
+            .skip(before)
+            .last();
+        let candidate = invocation.and_then(|entry| {
+            entry
+                .candidates
+                .iter()
+                .find(|candidate| candidate.ran)
+                .or_else(|| entry.candidates.last())
+        });
+        let cause = candidate
+            .map(|candidate| {
+                candidate
+                    .failure_kind
+                    .clone()
+                    .unwrap_or_else(|| candidate.status.clone())
+            })
+            .or_else(|| error.kind().map(|kind| kind.as_str().to_string()))
+            .unwrap_or_else(|| "other".to_string());
+        TurnOutcome::Lost {
+            cause,
+            harness: candidate.map(|candidate| candidate.harness_id.clone()),
+        }
+    }
+
+    /// Drain the provider's per-judge decisions onto this run's record under
+    /// `turn`, and hand back the ones just drained. A decision re-taken on the
+    /// same turn (a note arrived while the judge was live) joins that turn's
+    /// entry rather than opening a second one.
+    fn record_judge_decisions(&self, turn: usize) -> Vec<crate::JudgeDecision> {
+        let decided = self.provider.take_judge_decisions();
+        if !decided.is_empty() {
+            let mut turns = self.judge_decisions.borrow_mut();
+            match turns.last_mut() {
+                Some(last) if last.turn == turn => last.decisions.extend(decided.iter().cloned()),
+                _ => turns.push(JudgedTurn {
+                    turn,
+                    decisions: decided.clone(),
+                }),
+            }
+        }
+        decided
+    }
+
+    /// What each judge of a panel decided on each supervisor turn of the run so
+    /// far — readable after a *failed* run too, so the turn that failed is on the
+    /// record with every judge's decision beside the one that failed.
+    #[must_use]
+    pub fn judge_decisions(&self) -> Vec<JudgedTurn> {
+        self.judge_decisions.borrow().clone()
+    }
+
+    /// Snapshot telemetry from task-loop entry through the current instant.
+    #[must_use]
+    pub fn telemetry(&self) -> Option<Telemetry> {
+        let wall_ms = self.started.borrow().as_ref().map_or(0, |started| {
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        aggregate(wall_ms, &self.provider.invocation_telemetry())
+    }
+
+    /// Every process the provider has spawned since the run began, with the group
+    /// an embedder's [`SpawnHook`](crate::SpawnHook) reported placing it in.
+    ///
+    /// Readable after a *failed* run too, so a caller that has to clean up knows
+    /// what was created before the failure.
+    #[must_use]
+    pub fn spawned_processes(&self) -> Vec<SpawnedProcess> {
+        self.provider.spawned_processes()
+    }
+
+    fn judge_boolean_raw(&self, criterion: &str, transcript: &Transcript) -> Result<JudgeVerdict> {
+        let query = JudgeQuery {
+            kind: JudgeKind::Boolean,
+            criterion,
+            scale: None,
+        };
+        self.scope_history();
+        let histories = self.history_files();
+        let artifacts = self.artifacts.borrow();
+        let worktree = self.worktree.borrow();
+        self.provider.judge_with_evidence(
+            &query,
+            &transcript.messages,
+            EvidenceContext {
+                worktree: worktree.as_deref(),
+                history_files: &histories,
+                artifacts: &artifacts,
+            },
+        )
+    }
+
+    /// Score a boolean criterion against a finished transcript. The judge sees the
+    /// transcript with tool events rendered, so the verdict can reason over what
+    /// the skill did.
+    ///
+    /// # Errors
+    /// Propagates a provider failure.
+    pub fn judge_boolean(&self, criterion: &str, transcript: &Transcript) -> Result<JudgeVerdict> {
+        self.judge_boolean_raw(criterion, transcript)
+    }
+
+    /// Score a numeric criterion against a finished transcript on the inclusive
+    /// `[min, max]` scale.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`](crate::Error::Invalid) if `min > max`; otherwise a
+    /// provider failure.
+    pub fn judge_numeric(
+        &self,
+        criterion: &str,
+        min: f64,
+        max: f64,
+        transcript: &Transcript,
+    ) -> Result<JudgeVerdict> {
+        if min > max {
+            return Err(crate::error::Error::Invalid(format!(
+                "numeric judge scale has min ({min}) greater than max ({max})"
+            )));
+        }
+        let query = JudgeQuery {
+            kind: JudgeKind::Numeric,
+            criterion,
+            scale: Some((min, max)),
+        };
+        self.scope_history();
+        let histories = self.history_files();
+        let artifacts = self.artifacts.borrow();
+        let worktree = self.worktree.borrow();
+        self.provider.judge_with_evidence(
+            &query,
+            &transcript.messages,
+            EvidenceContext {
+                worktree: worktree.as_deref(),
+                history_files: &histories,
+                artifacts: &artifacts,
+            },
+        )
+    }
+
+    /// Write a free-text assessment of a finished transcript. The judge sees the
+    /// same events-aware transcript as boolean and numeric judgements.
+    ///
+    /// # Errors
+    /// Propagates a provider failure.
+    pub fn assess(&self, prompt: &str, transcript: &Transcript) -> Result<Assessment> {
+        self.scope_history();
+        let histories = self.history_files();
+        let artifacts = self.artifacts.borrow();
+        let worktree = self.worktree.borrow();
+        self.provider.assess_with_evidence(
+            prompt,
+            &transcript.messages,
+            EvidenceContext {
+                worktree: worktree.as_deref(),
+                history_files: &histories,
+                artifacts: &artifacts,
+            },
+        )
+    }
+
+    /// The scope every judge-side history name of this engine's runs derives
+    /// from: the run's base session.
+    fn history_scope(&self) -> HistoryScope {
+        HistoryScope::new(self.settings.session_name.clone())
+    }
+
+    /// Name the provider's judge-side history after this engine's run. Set before
+    /// every judge-side entry point rather than once, so a judgement taken on an
+    /// engine that never ran — or on a provider another engine scoped since — is
+    /// still named after this one.
+    /// How many worker invocations the provider has recorded so far.
+    fn worker_invocations(&self) -> usize {
+        self.provider
+            .invocation_telemetry()
+            .iter()
+            .filter(|invocation| invocation.role == Some(crate::TelemetryRole::Agent))
+            .count()
+    }
+
+    /// The harness and model that ran the worker's turn just taken — the
+    /// candidate that ran in the newest worker invocation, if the turn recorded
+    /// one past the `before` already there. A backend that attributes no harness
+    /// names none, rather than a previous turn's.
+    fn worker_identity(&self, before: usize) -> (Option<String>, Option<String>) {
+        let invocations = self.provider.invocation_telemetry();
+        let worker: Vec<_> = invocations
+            .iter()
+            .filter(|invocation| invocation.role == Some(crate::TelemetryRole::Agent))
+            .collect();
+        if worker.len() <= before {
+            return (None, None);
+        }
+        worker
+            .last()
+            .and_then(|invocation| invocation.candidates.iter().find(|c| c.ran))
+            .map_or((None, None), |ran| {
+                (Some(ran.harness_id.clone()), ran.model.clone())
+            })
+    }
+
+    fn scope_history(&self) {
+        self.provider.set_history_scope(Some(&self.history_scope()));
+    }
+
+    fn history_files(&self) -> Vec<String> {
+        self.provider
+            .invocation_telemetry()
+            .into_iter()
+            .filter(|invocation| invocation.role == Some(crate::TelemetryRole::Agent))
+            .filter_map(|invocation| invocation.history_file)
+            .collect()
+    }
+}
+
+/// One streamed tool event delivered live to an [`Engine::run_streaming`] sink,
+/// tagged with the turn it belongs to.
+///
+/// It is also the payload of an `event` line in the **streamed protocol**
+/// (`docs/streaming.md`) that `onejudge run --stream` publishes — the line adds
+/// the `"type": "event"` discriminator around exactly these fields, so an SDK
+/// hands this type straight to its own event callback.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct StreamEvent<'a> {
+    /// 1-based assistant-turn index within this run.
+    pub turn: usize,
+    /// The normalized tool event.
+    pub event: &'a ToolEvent,
+}
+
+/// One live observation of the conversation as the engine produces it, delivered
+/// to an [`Engine::run_observing`] sink.
+///
+/// The wider seam beside [`StreamEvent`], not a replacement for it: a tool event
+/// still reaches a sink as [`Observation::Tool`] carrying exactly the same
+/// payload, and [`Engine::run_streaming`] still delivers only those. What the
+/// wider sink adds is the prose an operator watching a dispatch they cannot see
+/// otherwise reads it by — the instruction each turn is answering, each party's
+/// own reply, and the turn's own cost and bounds.
+///
+/// The engine bounds nothing it hands over. `instruction` and `text` are borrows
+/// of the whole message; where a payload has to be bounded, that bound belongs to
+/// whatever journal or transport the embedder writes it to, which is the only
+/// layer that knows what its own limit is.
+///
+/// Returning [`ControlFlow::Break`] means here exactly what it means on the
+/// streaming sink: the run stops, [`Outcome::stopped_early`] is `true`, and no
+/// further observation is delivered.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Observation<'a> {
+    /// A turn began, naming the message it is answering.
+    TurnOpened(TurnOpened<'a>),
+    /// A harness candidate opened its history. Delivered once per candidate,
+    /// after its turn opens and before any of its actions, tools or messages.
+    HistoryBegun(HistoryBegun<'a>),
+    /// A tool event, exactly as [`Engine::run_streaming`] delivers it.
+    Tool(StreamEvent<'a>),
+    /// Every normalized event the worker's harness reported, as oneharness
+    /// reported it: its own `message` and `reasoning` items as well as its tool
+    /// activity. A tool event is delivered as [`Tool`](Observation::Tool) first
+    /// and then as this; the worker's words are delivered only as this, and never
+    /// become a [`ToolEvent`] — they are rendered for a reader, not summarized for
+    /// a judge.
+    Action(TurnAction<'a>),
+    /// A party's own words for a turn, as they are appended to the transcript.
+    Message(TurnMessage<'a>),
+    /// A turn ended, with what it cost and when it ran.
+    TurnClosed(TurnClosed<'a>),
+    /// One judge of a panel decided, on a supervisor turn: delivered once per
+    /// decision in the panel's list order, after that turn's
+    /// [`TurnOpened`](Observation::TurnOpened) and before its
+    /// [`Message`](Observation::Message) / [`TurnClosed`](Observation::TurnClosed)
+    /// — and, when the supervisor call failed, before the error propagates.
+    JudgeDecided(JudgeDecided<'a>),
+    /// A tool event a judge's harness reported while deciding a supervisor turn:
+    /// delivered after that turn's [`TurnOpened`](Observation::TurnOpened) and
+    /// before that judge's [`JudgeDecided`](Observation::JudgeDecided), in the
+    /// order the harness reported them. Its `event` is the payload
+    /// [`Tool`](Observation::Tool) carries, so one renderer serves the worker's
+    /// events and a judge's.
+    JudgeTool(JudgeTool<'a>),
+}
+
+/// One normalized event the worker's harness reported during a turn.
+///
+/// The payload is oneharness's own [`ActionEvent`], so a reader draws it with
+/// oneharness's renderer (`oneharness_core::domain::render::render_event`) and
+/// shows exactly what `oneharness run --stream --format text` would.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct TurnAction<'a> {
+    /// 1-based assistant-turn index within this run, as [`StreamEvent::turn`].
+    pub turn: usize,
+    /// The event, exactly as oneharness reported it — or, from a backend that
+    /// reports only tool events, the [`ActionEvent`] its tool event describes.
+    pub event: &'a ActionEvent,
+}
+
+/// One tool event a judge's harness reported while deciding a supervisor turn.
+///
+/// Only a judge that asked for events produces these — `events` on the judge,
+/// on by default when its posture can change the tree — and they are the same
+/// events its [`JudgeDecision::events`](crate::JudgeDecision::events) records.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct JudgeTool<'a> {
+    /// 1-based assistant-turn index the supervisor turn belongs to, as
+    /// [`TurnOpened::turn`].
+    pub turn: usize,
+    /// The judge's label within its panel, or the provider's own label for a
+    /// bare provider.
+    pub judge: &'a str,
+    /// The normalized tool event — the payload [`StreamEvent::event`] carries.
+    pub event: &'a ToolEvent,
+}
+
+/// One judge's decision on a supervisor turn, as its panel recorded it.
+///
+/// The observed form of [`JudgeDecision`](crate::JudgeDecision), stamped with the
+/// turn it belongs to. Only a [`JudgePanel`](crate::JudgePanel) produces these; a
+/// run judged by a bare provider is observed exactly as before.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct JudgeDecided<'a> {
+    /// 1-based assistant-turn index the supervisor turn belongs to, as
+    /// [`TurnOpened::turn`].
+    pub turn: usize,
+    /// The judge's label within its panel.
+    pub judge: &'a str,
+    /// The judge entry's provider kind.
+    pub kind: &'a str,
+    /// What it decided, or that it failed.
+    pub decision: Decision,
+    /// Its own reason — or, for an `error`, the error's message.
+    pub reason: &'a str,
+    /// The run its backend kept a record of, as
+    /// [`JudgeDecision::run_id`](crate::JudgeDecision::run_id) — an llmlint
+    /// judge's `llmlint history <run_id>`. Absent when the backend kept none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<&'a str>,
+}
+
+/// A turn beginning, and the message it was given to answer.
+///
+/// The conversation's opening input is never a [`TurnMessage`] — it is already in
+/// the transcript before the loop runs — so it reaches an observer here, as the
+/// `instruction` of the first assistant turn.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct TurnOpened<'a> {
+    /// 1-based assistant-turn index within this run, as [`StreamEvent::turn`]. A
+    /// user turn carries the index of the assistant turn it is reacting to.
+    pub turn: usize,
+    /// Which party is about to speak.
+    pub role: Role,
+    /// The message this turn answers, whole and unbounded — the original task on
+    /// the first assistant turn, the supervisor's last instruction afterwards, and
+    /// the worker's last reply for a user turn — empty for the user turn that
+    /// follows a lost worker turn, which left no reply.
+    pub instruction: &'a str,
+    /// When the turn began, RFC 3339 with millisecond precision in UTC.
+    pub started_at: String,
+}
+
+/// A candidate's history address, available while its turn is still running.
+/// History-disabled sides and providers without harness history emit none.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct HistoryBegun<'a> {
+    /// The side, spelled exactly as on [`TurnOpened::role`].
+    pub role: Role,
+    /// The 1-based turn index from [`TurnOpened::turn`].
+    pub turn: usize,
+    /// The harness candidate which opened this history.
+    pub harness_id: &'a str,
+    /// The candidate's unique run identifier, including on fallback.
+    pub history_id: &'a oneharness_core::domain::history::HistoryId,
+    /// Absolute root of the history store.
+    pub history_dir: &'a oneharness_core::domain::history::AbsoluteHistoryDir,
+    /// Project component beneath the store root.
+    pub history_project: &'a oneharness_core::domain::history::HistoryPathComponent,
+    /// Session component; the file is `<history_dir>/<history_project>/<history_session>.jsonl`.
+    pub history_session: &'a oneharness_core::domain::history::HistoryPathComponent,
+}
+
+impl<'a> HistoryBegun<'a> {
+    fn new(role: Role, turn: usize, begun: &'a oneharness_core::io::run::RunBegun) -> Self {
+        Self {
+            role,
+            turn,
+            harness_id: begun.harness_id.as_str(),
+            history_id: &begun.history_id,
+            history_dir: &begun.history_dir,
+            history_project: &begun.history_project,
+            history_session: &begun.history_session,
+        }
+    }
+}
+
+/// A party's own words for one turn, observed as they are appended to the
+/// transcript.
+///
+/// A supervisor turn that completes or settles the run appends nothing, so it is
+/// observed as an opening and a closing with no message between them.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct TurnMessage<'a> {
+    /// 1-based assistant-turn index within this run, as [`TurnOpened::turn`].
+    pub turn: usize,
+    /// Who is speaking.
+    pub role: Role,
+    /// That party's own words for this turn, whole and unbounded.
+    pub text: &'a str,
+}
+
+/// A turn ending, with what it cost and the interval it ran over.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct TurnClosed<'a> {
+    /// 1-based assistant-turn index within this run, as [`TurnOpened::turn`].
+    pub turn: usize,
+    /// Who spoke.
+    pub role: Role,
+    /// This one turn's usage. Absent means the provider reported none, which is a
+    /// different fact from a turn that cost nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<&'a Usage>,
+    /// When the turn began, RFC 3339 with millisecond precision in UTC — the same
+    /// value the matching [`TurnOpened`] carried.
+    pub started_at: String,
+    /// When the turn ended, RFC 3339 with millisecond precision in UTC.
+    pub finished_at: String,
+    /// The harness identity that ran the worker's turn, as the provider's
+    /// telemetry attributes it (`codex`, `claude-code:fast`). Absent for a
+    /// supervisor turn, and for a backend that attributes no harness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// The model that harness ran, where it reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// The clock read every observation is stamped with: RFC 3339, millisecond
+/// precision, UTC, `Z`-suffixed.
+///
+/// Rendered by oneharness's own formatter, so an instant onejudge mints and one it
+/// reads off a run report are the same spelling rather than two dialects a
+/// consumer has to reconcile. A pre-epoch clock falls back to the epoch rather
+/// than panicking: an observation is a side channel and never takes a run down.
+fn observed_at() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    oneharness_core::domain::history::format_rfc3339_millis(millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{JudgeValue, SkillRef, SupervisorTurn, UserTurn};
+    use crate::{InvocationTelemetry, TelemetryRole};
+    use std::cell::RefCell;
+
+    #[test]
+    fn a_turn_redirected_twice_is_kept_as_the_three_turns_it_was() {
+        use crate::interrupt::Observed;
+        use crate::note::Addressee;
+        let tool = |n: usize| ToolEvent {
+            kind: "tool_call".into(),
+            name: Some("bash".into()),
+            input: None,
+            output: None,
+            index: n,
+            tool_call_id: None,
+        };
+        let redirect = |input: &str, tools: usize, texts: &[&str]| Redirect {
+            note: Note::to(Addressee::Worker, input),
+            input: input.to_string(),
+            held: None,
+            at: Observed {
+                tools,
+                texts: texts.iter().map(|t| (*t).to_string()).collect(),
+            },
+        };
+        let mut transcript = Transcript::from_input("task");
+        push_redirected(
+            &mut transcript,
+            &[
+                redirect("first note", 1, &["reading"]),
+                // Cumulative, as the watch records it: the second turn's share is
+                // what came after the first redirect.
+                redirect("second note", 3, &["reading", "editing"]),
+            ],
+            "done".into(),
+            (0..4).map(tool).collect(),
+        );
+        let shape: Vec<(Role, &str, Vec<usize>)> = transcript
+            .messages
+            .iter()
+            .map(|m| {
+                (
+                    m.role,
+                    m.content.as_str(),
+                    m.events.iter().map(|e| e.index).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (Role::User, "task", vec![]),
+                (Role::Assistant, "reading", vec![0]),
+                (Role::User, "first note", vec![]),
+                (Role::Assistant, "editing", vec![1, 2]),
+                (Role::User, "second note", vec![]),
+                (Role::Assistant, "done", vec![3]),
+            ]
+        );
+
+        // A count past what the report held is clamped to it, never a panic.
+        let mut transcript = Transcript::from_input("task");
+        push_redirected(
+            &mut transcript,
+            &[redirect("note", 9, &[])],
+            "done".into(),
+            vec![tool(0)],
+        );
+        assert_eq!(transcript.messages[1].content, "");
+        assert_eq!(transcript.messages[1].events.len(), 1);
+        assert!(transcript.messages[3].events.is_empty());
+        // A buffered turn observed nothing before its redirect: the interrupted
+        // turn carries nothing of its own, and every event stays with the reply.
+        let mut transcript = Transcript::from_input("task");
+        push_redirected(
+            &mut transcript,
+            &[redirect("note", 0, &[])],
+            "done".into(),
+            vec![tool(0)],
+        );
+        assert!(transcript.messages[1].events.is_empty());
+        assert_eq!(transcript.messages[3].events.len(), 1);
+    }
+
+    /// An in-memory provider scripted with canned turns, so the loop's
+    /// orchestration is testable without a subprocess.
+    struct Scripted {
+        assistant: Vec<AssistantTurn>,
+        user: Vec<UserTurn>,
+        judge: Vec<JudgeVerdict>,
+        seen: RefCell<Seen>,
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        assistant: usize,
+        user: usize,
+        judge: usize,
+        assess: usize,
+        supervisor: usize,
+        skill_sessions: Vec<Option<String>>,
+        user_sessions: Vec<Option<String>>,
+    }
+
+    impl Provider for Scripted {
+        fn respond(
+            &self,
+            _skill: &SkillRef<'_>,
+            _messages: &[Message],
+            session: Option<&str>,
+        ) -> Result<AssistantTurn> {
+            let mut seen = self.seen.borrow_mut();
+            seen.skill_sessions.push(session.map(String::from));
+            let i = seen.assistant.min(self.assistant.len() - 1);
+            seen.assistant += 1;
+            Ok(self.assistant[i].clone())
+        }
+
+        fn simulate_user(
+            &self,
+            _persona: &str,
+            _messages: &[Message],
+            session: Option<&str>,
+        ) -> Result<UserTurn> {
+            let mut seen = self.seen.borrow_mut();
+            seen.user_sessions.push(session.map(String::from));
+            let i = seen.user.min(self.user.len() - 1);
+            seen.user += 1;
+            Ok(self.user[i].clone())
+        }
+
+        fn supervise(
+            &self,
+            query: &SupervisorQuery<'_>,
+            _messages: &[Message],
+            session: Option<&str>,
+        ) -> Result<SupervisorTurn> {
+            let mut seen = self.seen.borrow_mut();
+            seen.supervisor += 1;
+            seen.user_sessions.push(session.map(String::from));
+            if query.done_when.is_some() && !self.judge.is_empty() {
+                let i = seen.judge.min(self.judge.len() - 1);
+                seen.judge += 1;
+                let verdict = self.judge[i].clone();
+                if matches!(verdict.value, JudgeValue::Bool(true)) {
+                    return Ok(SupervisorTurn {
+                        outcome: SupervisorOutcome::Completed {
+                            reason: verdict.reason,
+                        },
+                        usage: verdict.usage,
+                    });
+                }
+            }
+            let i = seen.user.min(self.user.len() - 1);
+            seen.user += 1;
+            if self.user[i].stop {
+                return Ok(SupervisorTurn {
+                    outcome: SupervisorOutcome::Completed {
+                        reason: "simulated user stopped".into(),
+                    },
+                    usage: self.user[i].usage.clone(),
+                });
+            }
+            Ok(SupervisorTurn {
+                outcome: SupervisorOutcome::Continue {
+                    message: self.user[i].message.clone(),
+                    reason: String::new(),
+                },
+                usage: self.user[i].usage.clone(),
+            })
+        }
+
+        fn judge(&self, _query: &JudgeQuery<'_>, _messages: &[Message]) -> Result<JudgeVerdict> {
+            let mut seen = self.seen.borrow_mut();
+            let i = seen.judge.min(self.judge.len().saturating_sub(1));
+            seen.judge += 1;
+            Ok(self.judge[i].clone())
+        }
+
+        fn assess(&self, prompt: &str, _messages: &[Message]) -> Result<Assessment> {
+            self.seen.borrow_mut().assess += 1;
+            Ok(Assessment {
+                text: format!("assessment: {prompt}"),
+                usage: None,
+            })
+        }
+    }
+
+    fn assistant(msg: &str, done: bool) -> AssistantTurn {
+        AssistantTurn {
+            message: msg.into(),
+            done,
+            ..AssistantTurn::default()
+        }
+    }
+
+    fn skill() -> Skill {
+        Skill::new("greeter", "/skills/greeter", "Greet the user.")
+    }
+
+    fn settings() -> Settings {
+        Settings::new()
+    }
+
+    #[test]
+    fn assessment_is_one_distinct_free_text_judge_operation() {
+        let provider = Scripted {
+            assistant: vec![assistant("done", true)],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::new(Seen::default()),
+        };
+        let engine = Engine::new(&provider, settings());
+        let transcript = engine
+            .run(&Conversation::single_turn(skill(), "do it"))
+            .unwrap()
+            .transcript;
+        let assessment = engine.assess("find follow-up work", &transcript).unwrap();
+        assert_eq!(assessment.text, "assessment: find follow-up work");
+        assert_eq!(provider.seen.borrow().assess, 1);
+        assert_eq!(provider.seen.borrow().judge, 0);
+    }
+
+    #[test]
+    fn single_turn_stops_after_one_reply() {
+        let provider = Scripted {
+            assistant: vec![assistant("hi there", false)],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let outcome = engine
+            .run(&Conversation::single_turn(skill(), "hello"))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+        assert!(!outcome.stopped_early);
+        assert_eq!(provider.seen.borrow().assistant, 1);
+    }
+
+    #[test]
+    fn multi_turn_runs_to_max_turns_without_done_when() {
+        let provider = Scripted {
+            // A distinct reply per turn: a conversation that keeps moving is what
+            // the turn cap is meant to bound here, not the no-op loop that
+            // `a_released_dispatch_whose_exchanges_are_no_ops_settles_with_its_work_intact`
+            // settles.
+            assistant: vec![
+                assistant("a", false),
+                assistant("b", false),
+                assistant("c", false),
+            ],
+            user: vec![UserTurn {
+                message: "more".into(),
+                stop: false,
+                usage: None,
+            }],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let user = SimulatedUser::new("keep going").max_turns(3);
+        let outcome = engine
+            .run(&Conversation::multi_turn(skill(), "start", user))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 3);
+    }
+
+    #[test]
+    fn done_when_ends_the_loop_early() {
+        let provider = Scripted {
+            // Distinct per turn, so the `done_when` verdict is what ends this loop
+            // and not the no-op streak two identical toolless replies would be.
+            assistant: vec![
+                assistant("working", false),
+                assistant("still working", false),
+            ],
+            user: vec![UserTurn {
+                message: "ok".into(),
+                stop: false,
+                usage: None,
+            }],
+            // First done_when check is false, second is true -> stop after turn 2.
+            judge: vec![
+                JudgeVerdict {
+                    value: JudgeValue::Bool(false),
+                    reason: String::new(),
+                    usage: None,
+                },
+                JudgeVerdict {
+                    value: JudgeValue::Bool(true),
+                    reason: String::new(),
+                    usage: None,
+                },
+            ],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let user = SimulatedUser::new("shopper")
+            .done_when("the booking is confirmed")
+            .max_turns(8);
+        let outcome = engine
+            .run(&Conversation::multi_turn(skill(), "book me", user))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 2);
+        assert_eq!(provider.seen.borrow().judge, 2);
+    }
+
+    #[test]
+    fn a_supervisor_with_no_instruction_settles_the_run_on_the_work_it_has() {
+        // The run this exists for: real work already done, and a supervisor that
+        // will not say what comes next. Ending the run keeps that work; raising
+        // would have thrown it away, and left the caller unable to tell this apart
+        // from the worker simply failing.
+        struct Speechless;
+
+        impl Provider for Speechless {
+            fn respond(
+                &self,
+                _: &SkillRef<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<AssistantTurn> {
+                Ok(assistant("committed the fix", false))
+            }
+            fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+                unreachable!("the supervisor answers for the simulated user")
+            }
+            fn supervise(
+                &self,
+                _: &SupervisorQuery<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<SupervisorTurn> {
+                Ok(SupervisorTurn {
+                    outcome: SupervisorOutcome::NoInstruction {
+                        reason: "the tests still fail".into(),
+                    },
+                    usage: None,
+                })
+            }
+            fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+                unreachable!()
+            }
+            fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+                unreachable!()
+            }
+        }
+
+        let provider = Speechless;
+        let outcome = Engine::new(&provider, settings())
+            .run(&Conversation::multi_turn(
+                skill(),
+                "fix it",
+                SimulatedUser::new("a strict reviewer").max_turns(8),
+            ))
+            .expect("a speechless supervisor settles the run, it does not fail it");
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+        assert_eq!(
+            outcome.transcript.messages.last().unwrap().content,
+            "committed the fix",
+            "the work is kept"
+        );
+        assert!(
+            outcome.completion_reason.is_none(),
+            "settling is not completing"
+        );
+        let settled = outcome.settled_reason.clone().expect("a settle reason");
+        assert!(settled.contains("no next instruction"), "{settled}");
+        assert!(settled.contains("the tests still fail"), "{settled}");
+        // And it reaches the artifact the operator actually reads.
+        assert_eq!(outcome.into_report(vec![]).settled_reason, Some(settled));
+    }
+
+    #[test]
+    fn a_supervisor_whose_answer_never_parses_settles_the_run_under_its_own_words() {
+        // The other way a supervisor can have nothing usable to say: it wrote a
+        // paragraph where the contract wants an object, and did again when asked.
+        // The run keeps its work, and the settle reason says which case this is
+        // and carries the paragraph — which may have argued a real point — so a
+        // reader tells it from a transport failure and from a silent supervisor.
+        struct Prose;
+
+        impl Provider for Prose {
+            fn respond(
+                &self,
+                _: &SkillRef<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<AssistantTurn> {
+                Ok(assistant("committed the fix", false))
+            }
+            fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+                unreachable!("the supervisor answers for the simulated user")
+            }
+            fn supervise(
+                &self,
+                _: &SupervisorQuery<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<SupervisorTurn> {
+                Ok(SupervisorTurn {
+                    outcome: SupervisorOutcome::Unparseable {
+                        problem: "not a JSON object".into(),
+                        answer: "I'm checking the committed tree against the amended scope…".into(),
+                    },
+                    usage: None,
+                })
+            }
+            fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+                unreachable!()
+            }
+            fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+                unreachable!()
+            }
+        }
+
+        let provider = Prose;
+        let outcome = Engine::new(&provider, settings())
+            .run(&Conversation::multi_turn(
+                skill(),
+                "fix it",
+                SimulatedUser::new("a strict reviewer").max_turns(8),
+            ))
+            .expect("an unparseable supervisor settles the run, it does not fail it");
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+        assert_eq!(
+            outcome.transcript.messages.last().unwrap().content,
+            "committed the fix",
+            "the work is kept"
+        );
+        assert!(outcome.completion_reason.is_none());
+        let settled = outcome.settled_reason.clone().expect("a settle reason");
+        assert!(settled.contains("did not parse"), "{settled}");
+        assert!(settled.contains("not a JSON object"), "{settled}");
+        assert!(settled.contains("checking the committed tree"), "{settled}");
+        assert!(
+            !settled.contains("no next instruction"),
+            "distinguishable from a supervisor with nothing to say: {settled}"
+        );
+        assert_eq!(outcome.into_report(vec![]).settled_reason, Some(settled));
+    }
+
+    /// A supervisor/worker pair scripted from the measured loop: the worker releases
+    /// the dispatch (recording a real command), and from then on the supervisor and
+    /// the worker trade the two verbatim sentences the runs actually produced.
+    ///
+    /// `instruction` is what the supervisor keeps saying; a caller passes a real
+    /// next instruction to prove the loop is *not* settled on one.
+    struct Released {
+        instruction: String,
+        /// Every instruction this supervisor was asked to produce, in order.
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl Released {
+        fn new(instruction: &str) -> Self {
+            Self {
+                instruction: instruction.into(),
+                asked: RefCell::default(),
+            }
+        }
+    }
+
+    impl Provider for Released {
+        fn respond(
+            &self,
+            _: &SkillRef<'_>,
+            messages: &[Message],
+            _: Option<&str>,
+        ) -> Result<AssistantTurn> {
+            // Turn one does the work and records the command that did it.
+            if messages.len() == 1 {
+                return Ok(AssistantTurn {
+                    message: "Released dispatch #42.".into(),
+                    events: vec![ToolEvent {
+                        kind: "tool_call".into(),
+                        name: Some("bash".into()),
+                        input: Some(serde_json::json!({ "command": "git push" })),
+                        output: None,
+                        index: 0,
+                        tool_call_id: None,
+                    }],
+                    ..AssistantTurn::default()
+                });
+            }
+            // A real instruction gets real work; the no-op one gets the measured
+            // no-op answer, verbatim, with nothing recorded.
+            let latest = messages.last().map(|m| m.content.as_str()).unwrap_or("");
+            if latest == NO_OP_INSTRUCTION {
+                return Ok(assistant(
+                    "Dispatch remains released; no action taken.",
+                    false,
+                ));
+            }
+            Ok(AssistantTurn {
+                message: format!("Done: {latest}"),
+                events: vec![ToolEvent {
+                    kind: "tool_call".into(),
+                    name: Some("bash".into()),
+                    input: Some(serde_json::json!({ "command": "cargo test" })),
+                    output: None,
+                    index: 0,
+                    tool_call_id: None,
+                }],
+                ..AssistantTurn::default()
+            })
+        }
+        fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+            unreachable!("the supervisor answers for the simulated user")
+        }
+        fn supervise(
+            &self,
+            _: &SupervisorQuery<'_>,
+            _: &[Message],
+            _: Option<&str>,
+        ) -> Result<SupervisorTurn> {
+            self.asked.borrow_mut().push(self.instruction.clone());
+            Ok(SupervisorTurn {
+                outcome: SupervisorOutcome::Continue {
+                    message: self.instruction.clone(),
+                    reason: String::new(),
+                },
+                usage: None,
+            })
+        }
+        fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+            unreachable!()
+        }
+        fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+            unreachable!()
+        }
+    }
+
+    /// The verbatim no-op instruction one measured run repeated to its cap.
+    const NO_OP_INSTRUCTION: &str = "No further action; keep this dispatch released.";
+
+    #[test]
+    fn a_released_dispatch_whose_exchanges_are_no_ops_settles_with_its_work_intact() {
+        // The run this exists for: the dispatch was released on turn one, and every
+        // exchange after it is the same nothing — no commands, no diff, the same
+        // sentence back. One measured run spent 137 turns here.
+        let provider = Released::new(NO_OP_INSTRUCTION);
+        let outcome = Engine::new(&provider, settings())
+            .run(&Conversation::multi_turn(
+                skill(),
+                "release the dispatch",
+                SimulatedUser::new("a release supervisor").max_turns(40),
+            ))
+            .expect("a no-op loop settles the run, it does not fail it");
+
+        assert_eq!(
+            outcome.transcript.assistant_turns(),
+            1 + NOOP_SETTLE_LIMIT as usize,
+            "the work turn, then exactly the two no-ops it takes to decide"
+        );
+        assert_eq!(
+            provider.asked.borrow().len(),
+            NOOP_SETTLE_LIMIT as usize,
+            "the settling turn does not pay for another supervisor call"
+        );
+        // The completed work — and the command that did it — is still there.
+        assert_eq!(
+            outcome.transcript.messages[1].content,
+            "Released dispatch #42."
+        );
+        assert_eq!(outcome.transcript.messages[1].events.len(), 1);
+        assert!(
+            outcome.completion_reason.is_none(),
+            "settling is not completing"
+        );
+        let settled = outcome.settled_reason.clone().expect("a settle reason");
+        assert!(settled.contains("no-op exchanges"), "{settled}");
+        assert!(settled.contains("same agent reply"), "{settled}");
+        // And it reaches the artifact the operator actually reads.
+        assert_eq!(outcome.into_report(vec![]).settled_reason, Some(settled));
+    }
+
+    #[test]
+    fn a_released_dispatch_whose_supervisor_gives_a_real_instruction_keeps_going() {
+        // Same released dispatch, same toolless-and-short shape available — but the
+        // supervisor names a concrete next action, so there is no loop to settle and
+        // the run keeps working until the cap.
+        let provider = Released::new(
+            "Now back-fill the changelog entry for the released dispatch and push the tag, then \
+             report the resulting version.",
+        );
+        let outcome = Engine::new(&provider, settings())
+            .run(&Conversation::multi_turn(
+                skill(),
+                "release the dispatch",
+                SimulatedUser::new("a release supervisor").max_turns(5),
+            ))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 5);
+        assert!(
+            outcome.settled_reason.is_none(),
+            "a real instruction is not a no-op exchange: {:?}",
+            outcome.settled_reason
+        );
+    }
+
+    #[test]
+    fn the_turn_budget_still_bounds_a_no_op_loop() {
+        // No exchange shape is exempt from `max_turns` accounting: a cap reached
+        // before the streak decides still ends the run, and still ends it as a run
+        // that hit its cap rather than one that settled.
+        let provider = Released::new(NO_OP_INSTRUCTION);
+        let outcome = Engine::new(&provider, settings())
+            .run(&Conversation::multi_turn(
+                skill(),
+                "release the dispatch",
+                SimulatedUser::new("a release supervisor").max_turns(2),
+            ))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 2);
+        assert!(outcome.settled_reason.is_none(), "the cap ended this run");
+    }
+
+    #[test]
+    fn a_no_op_streak_needs_the_whole_signature_and_survives_only_rephrasing() {
+        let mut streak = NoopStreak::default();
+        let command = [ToolEvent {
+            kind: "tool_call".into(),
+            name: Some("bash".into()),
+            input: None,
+            output: None,
+            index: 0,
+            tool_call_id: None,
+        }];
+        let long = "x".repeat(NOOP_EXCHANGE_CHARS + 1);
+
+        // A turn that ran a command is never a no-op, however tiny and repetitive.
+        for _ in 0..5 {
+            assert!(!streak.observe("go on", "same answer", &command));
+        }
+        // Neither is one whose instruction — or whose reply — is substantial.
+        for _ in 0..5 {
+            assert!(!streak.observe(&long, "same answer", &[]));
+        }
+        for _ in 0..5 {
+            assert!(!streak.observe("go on", &long, &[]));
+        }
+        // Nor a toolless, tiny exchange whose reply keeps changing.
+        assert!(!streak.observe("go on", "first", &[]));
+        assert!(!streak.observe("go on", "second", &[]));
+        // The whole signature, twice over: punctuation and case are not new answers.
+        assert!(!streak.observe("go on", "Dispatch remains released.", &[]));
+        assert!(streak.observe("go on", "dispatch remains released", &[]));
+        // And a turn that does work again clears the streak.
+        assert!(!streak.observe("go on", "dispatch remains released", &command));
+        assert!(!streak.observe("go on", "dispatch remains released", &[]));
+    }
+
+    #[test]
+    fn skill_done_and_user_stop_both_end_the_loop() {
+        // skill declares done on turn 1.
+        let done_provider = Scripted {
+            assistant: vec![assistant("all set", true)],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&done_provider, settings());
+        let user = SimulatedUser::new("x").max_turns(5);
+        let outcome = engine
+            .run(&Conversation::multi_turn(skill(), "go", user))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+
+        // user stops after turn 1.
+        let stop_provider = Scripted {
+            assistant: vec![assistant("hi", false)],
+            user: vec![UserTurn {
+                message: "bye".into(),
+                stop: true,
+                usage: None,
+            }],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&stop_provider, settings());
+        let outcome = engine
+            .run(&Conversation::multi_turn(
+                skill(),
+                "go",
+                SimulatedUser::new("x").max_turns(5),
+            ))
+            .unwrap();
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+        assert_eq!(stop_provider.seen.borrow().user, 1);
+    }
+
+    #[test]
+    fn session_name_is_always_threaded() {
+        // The engine always threads `<base>-skill` / `<base>-user`; degradation is
+        // the provider's concern, not a capability gate here.
+        let provider = Scripted {
+            assistant: vec![assistant("a", false)],
+            user: vec![UserTurn {
+                message: "again".into(),
+                stop: false,
+                usage: None,
+            }],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings().with_session_name("run-42"));
+        engine
+            .run(&Conversation::multi_turn(
+                skill(),
+                "go",
+                SimulatedUser::new("x").max_turns(2),
+            ))
+            .unwrap();
+        let seen = provider.seen.borrow();
+        assert!(seen
+            .skill_sessions
+            .iter()
+            .all(|s| s.as_deref() == Some("run-42-skill")));
+        assert!(seen
+            .user_sessions
+            .iter()
+            .all(|s| s.as_deref() == Some("run-42-user")));
+    }
+
+    #[test]
+    fn session_name_threads_on_a_single_turn_too() {
+        let provider = Scripted {
+            assistant: vec![assistant("a", true)],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        engine
+            .run(&Conversation::single_turn(skill(), "go"))
+            .unwrap();
+        assert_eq!(
+            provider.seen.borrow().skill_sessions,
+            vec![Some("onejudge-skill".to_string())]
+        );
+    }
+
+    #[test]
+    fn usage_is_aggregated_across_calls() {
+        let provider = Scripted {
+            assistant: vec![AssistantTurn {
+                message: "a".into(),
+                done: true,
+                usage: Some(Usage {
+                    input_tokens: Some(5),
+                    output_tokens: Some(2),
+                    ..Usage::default()
+                }),
+                events: vec![],
+            }],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let outcome = engine
+            .run(&Conversation::single_turn(skill(), "go"))
+            .unwrap();
+        let usage = outcome.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(5));
+        assert_eq!(usage.output_tokens, Some(2));
+    }
+
+    #[test]
+    fn streaming_break_short_circuits() {
+        let provider = Scripted {
+            assistant: vec![AssistantTurn {
+                message: "working".into(),
+                done: false,
+                usage: None,
+                events: vec![ToolEvent {
+                    kind: "tool_call".into(),
+                    name: Some("bash".into()),
+                    input: None,
+                    output: None,
+                    index: 0,
+                    tool_call_id: None,
+                }],
+            }],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let mut seen = 0;
+        let outcome = engine
+            .run_streaming(
+                &Conversation::multi_turn(skill(), "go", SimulatedUser::new("x").max_turns(9)),
+                &mut |_ev| {
+                    seen += 1;
+                    ControlFlow::Break(())
+                },
+            )
+            .unwrap();
+        assert!(outcome.stopped_early);
+        assert_eq!(seen, 1);
+        // The run stopped on turn 1; the simulated user never spoke.
+        assert_eq!(provider.seen.borrow().user, 0);
+    }
+
+    #[test]
+    fn judge_numeric_rejects_inverted_scale() {
+        let provider = Scripted {
+            assistant: vec![],
+            user: vec![],
+            judge: vec![],
+            seen: RefCell::default(),
+        };
+        let engine = Engine::new(&provider, settings());
+        let err = engine
+            .judge_numeric("x", 10.0, 1.0, &Transcript::default())
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::Invalid(_)));
+    }
+
+    #[test]
+    fn evaluator_evidence_contains_only_typed_agent_history_paths() {
+        struct EvidenceProbe {
+            seen: RefCell<Vec<String>>,
+        }
+
+        impl Provider for EvidenceProbe {
+            fn invocation_telemetry(&self) -> Vec<InvocationTelemetry> {
+                [
+                    (TelemetryRole::Agent, "/history/agent.jsonl"),
+                    (TelemetryRole::Judge, "/history/judge.jsonl"),
+                ]
+                .into_iter()
+                .map(|(role, path)| InvocationTelemetry {
+                    role: Some(role),
+                    history_file: Some(path.into()),
+                    ..InvocationTelemetry::default()
+                })
+                .collect()
+            }
+
+            fn respond(
+                &self,
+                _: &SkillRef<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<AssistantTurn> {
+                unreachable!()
+            }
+
+            fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+                unreachable!()
+            }
+
+            fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+                unreachable!()
+            }
+
+            fn judge_with_evidence(
+                &self,
+                _: &JudgeQuery<'_>,
+                _: &[Message],
+                evidence: EvidenceContext<'_>,
+            ) -> Result<JudgeVerdict> {
+                self.seen.replace(evidence.history_files.to_vec());
+                Ok(JudgeVerdict {
+                    value: JudgeValue::Bool(true),
+                    reason: String::new(),
+                    usage: None,
+                })
+            }
+
+            fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+                unreachable!()
+            }
+        }
+
+        let provider = EvidenceProbe {
+            seen: RefCell::new(Vec::new()),
+        };
+        Engine::new(&provider, settings())
+            .judge_boolean("done", &Transcript::default())
+            .unwrap();
+        assert_eq!(provider.seen.into_inner(), ["/history/agent.jsonl"]);
+    }
+
+    #[test]
+    fn a_sink_that_breaks_on_a_judges_decision_stops_the_run_with_the_decision_recorded() {
+        /// A provider that reports one per-judge decision per supervisor call — the
+        /// shape a panel has — so the engine's draining and observing can be driven
+        /// without a subprocess.
+        struct Deciding;
+
+        impl Provider for Deciding {
+            fn take_judge_decisions(&self) -> Vec<crate::JudgeDecision> {
+                vec![crate::JudgeDecision {
+                    judge: "only".into(),
+                    kind: "command".into(),
+                    decision: Decision::Continue,
+                    reason: "more".into(),
+                    labels: Default::default(),
+                    run_id: None,
+                    posture: None,
+                    events: Vec::new(),
+                }]
+            }
+
+            fn respond(
+                &self,
+                _: &SkillRef<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<AssistantTurn> {
+                Ok(assistant("working", false))
+            }
+
+            fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+                unreachable!()
+            }
+
+            fn supervise(
+                &self,
+                _: &SupervisorQuery<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<SupervisorTurn> {
+                Ok(SupervisorTurn {
+                    outcome: SupervisorOutcome::Continue {
+                        message: "go on".into(),
+                        reason: "more".into(),
+                    },
+                    usage: None,
+                })
+            }
+
+            fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+                unreachable!()
+            }
+
+            fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+                unreachable!()
+            }
+        }
+
+        let provider = Deciding;
+        let engine = Engine::new(&provider, settings());
+        let mut seen = Vec::new();
+        let outcome = engine
+            .run_observing(
+                &Conversation::multi_turn(skill(), "go", SimulatedUser::new("p").max_turns(3)),
+                &mut |observation| {
+                    let (kind, stop) = match observation {
+                        Observation::JudgeDecided(d) => (format!("judged/{}", d.judge), true),
+                        Observation::JudgeTool(t) => (format!("judge-tool/{}", t.judge), false),
+                        Observation::TurnOpened(o) => (format!("opened/{:?}", o.role), false),
+                        Observation::Message(m) => (format!("said/{:?}", m.role), false),
+                        Observation::TurnClosed(c) => (format!("closed/{:?}", c.role), false),
+                        Observation::Tool(_) => ("tool".into(), false),
+                        Observation::Action(_) => ("action".into(), false),
+                        Observation::HistoryBegun(_) => ("history".into(), false),
+                    };
+                    seen.push(kind);
+                    if stop {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                },
+            )
+            .unwrap();
+        // Nothing follows the observation that asked to stop, the run is stopped
+        // early, and the decision it broke on is still on the record.
+        assert_eq!(
+            seen,
+            [
+                "opened/Assistant",
+                "said/Assistant",
+                "closed/Assistant",
+                "opened/User",
+                "judged/only"
+            ]
+        );
+        assert!(outcome.stopped_early);
+        assert_eq!(outcome.transcript.assistant_turns(), 1);
+        assert_eq!(outcome.judge_decisions.len(), 1);
+        assert_eq!(outcome.judge_decisions[0].decisions[0].reason, "more");
+        assert_eq!(engine.judge_decisions(), outcome.judge_decisions);
+    }
+
+    #[test]
+    fn a_bare_providers_judge_events_are_observed_inside_the_supervisor_turn() {
+        /// A bare (non-panel) provider whose judge side reported one tool event per
+        /// supervisor decision and records no per-judge decision.
+        struct Acting {
+            decided: std::cell::Cell<bool>,
+        }
+
+        impl Provider for Acting {
+            fn take_judge_tools(&self) -> Vec<crate::JudgeTools> {
+                vec![crate::JudgeTools {
+                    judge: "solo".into(),
+                    events: vec![ToolEvent {
+                        kind: "tool_call".into(),
+                        name: Some("Bash".into()),
+                        input: Some(serde_json::json!({"command": "cargo test"})),
+                        output: None,
+                        index: 0,
+                        tool_call_id: None,
+                    }],
+                }]
+            }
+
+            fn respond(
+                &self,
+                _: &SkillRef<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<AssistantTurn> {
+                Ok(assistant("working", false))
+            }
+
+            fn simulate_user(&self, _: &str, _: &[Message], _: Option<&str>) -> Result<UserTurn> {
+                unreachable!()
+            }
+
+            fn supervise(
+                &self,
+                _: &SupervisorQuery<'_>,
+                _: &[Message],
+                _: Option<&str>,
+            ) -> Result<SupervisorTurn> {
+                self.decided.set(true);
+                Ok(SupervisorTurn {
+                    outcome: SupervisorOutcome::Completed {
+                        reason: "tests pass".into(),
+                    },
+                    usage: None,
+                })
+            }
+
+            fn judge(&self, _: &JudgeQuery<'_>, _: &[Message]) -> Result<JudgeVerdict> {
+                unreachable!()
+            }
+
+            fn assess(&self, _: &str, _: &[Message]) -> Result<Assessment> {
+                unreachable!()
+            }
+        }
+
+        let provider = Acting {
+            decided: std::cell::Cell::new(false),
+        };
+        let engine = Engine::new(&provider, settings());
+        let mut seen = Vec::new();
+        engine
+            .run_observing(
+                &Conversation::multi_turn(skill(), "go", SimulatedUser::new("p").max_turns(3)),
+                &mut |observation| {
+                    seen.push(match observation {
+                        Observation::JudgeTool(t) => {
+                            format!("judge-tool/{}/{}/{}", t.turn, t.judge, t.event.summary())
+                        }
+                        Observation::JudgeDecided(d) => format!("judged/{}", d.judge),
+                        Observation::TurnOpened(o) => format!("opened/{:?}", o.role),
+                        Observation::Message(m) => format!("said/{:?}", m.role),
+                        Observation::TurnClosed(c) => format!("closed/{:?}", c.role),
+                        Observation::Tool(_) => "tool".into(),
+                        Observation::Action(_) => "action".into(),
+                        Observation::HistoryBegun(_) => "history".into(),
+                    });
+                    ControlFlow::Continue(())
+                },
+            )
+            .unwrap();
+        assert!(provider.decided.get());
+        assert_eq!(
+            seen,
+            [
+                "opened/Assistant",
+                "said/Assistant",
+                "closed/Assistant",
+                "opened/User",
+                r#"judge-tool/1/solo/Bash({"command":"cargo test"})"#,
+                "closed/User"
+            ]
+        );
+    }
+}
