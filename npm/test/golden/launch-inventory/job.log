@@ -1,7 +1,22 @@
+2026-11-14T08:34:14.8627807Z ##[group]Run actions/checkout@v4
+2026-11-14T08:34:18.7187180Z HEAD is now at 02f6e2e Merge c6deec83e950b8ae76ec1ab3ce7b3143cdaef1a4 into 5aa41f09d1e1b3ad368428a6a2f7b2f09707cea2
+2026-11-14T08:34:21.7706499Z ##[group]Run Swatinem/rust-cache@v2.9.2
+2026-11-14T08:34:21.7706906Z   save-if: false
+2026-11-14T08:34:37.6949904Z Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-dc9b55c3
+2026-11-14T08:35:23.0033807Z Cache restored successfully
+2026-11-14T08:35:23.0847064Z Restored from cache key "v0-rust-test-linux-Linux-x64-ff458983-dc9b55c3" full match: false.
+2026-11-14T08:35:46.7714888Z ##[group]Run actions/cache/restore@v4
+2026-11-14T08:35:46.8000000Z Cache not found for input keys: bootstrap-tools-Linux-X64-0.14.15-0.2.0-0.1.1-b73ec04e
+2026-11-14T08:35:46.9185790Z ##[group]Run just bootstrap
+2026-11-14T08:40:00.2627023Z ##[group]Run ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+2026-11-14T08:40:01.8231952Z ci-job: test-linux runs 3 task(s): onepipeline-e2e:test onepipeline-npm:test onepipeline:test-rest
 2026-11-14T08:52:03.8131447Z  Nextest run ID dd39bff0-ab1d-4c21-96d2-5299899c1589 with nextest profile: ci
-2026-11-14T08:52:03.8133967Z     Starting 151 tests across 1 binary (1 test and 47 binaries skipped)
-2026-11-14T08:52:05.0986136Z      Summary [   1.287s] 151 tests run: 151 passed, 1 skipped
+2026-11-14T08:52:03.8133967Z     Starting 1 test across 1 binary (41 tests and 47 binaries skipped)
+2026-11-14T08:52:05.0986136Z      Summary [   1.287s] 1 test run: 1 passed, 41 skipped
 2026-11-14T09:00:00.0000000Z  Nextest run ID 63400e03-501d-4561-9341-259ad855a180 with nextest profile: ci
 2026-11-14T09:00:00.1000000Z     Starting 2 tests across 1 binary (1 test and 47 binaries skipped)
 2026-11-14T09:00:40.0000000Z         SLOW [> 60.000s] (─────────) onepipeline::e2e destination::a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked
 2026-11-14T09:01:00.0000000Z      Summary [  60.000s] 2 tests run: 2 passed (1 slow), 1 skipped
+2026-11-14T09:05:00.0000000Z ##[group]Run node scripts/nx-remote-cache.mjs report --job "$GITHUB_JOB" --out "$RUNNER_TEMP/nx-cache-report"
+2026-11-14T09:05:00.1000000Z Nx cache: stored 0 entries, 0 bytes; replayed 0 entries
+2026-11-14T09:05:10.0000000Z Cleaning up orphan processes

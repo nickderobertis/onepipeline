@@ -413,11 +413,13 @@ pub fn polled<T>(work: impl FnOnce() -> T) -> T {
 /// [`polled`] and [`thread::sleep`], tallied and written beside the launch trace
 /// as `<test>.waits.json` whenever this process's record is, so the harness's
 /// waits can be told apart by site. The record itself is unchanged.
+// llmlint: ignore[changed_behavior_has_e2e] every e2e test on the hosted baseline runs writes these tallies, which the fold reads from their artifacts, and npm/test/launch-inventory.test.mjs folds two of them recorded at this commit; a journey asserting the file itself would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 mod wait_sites {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::time::Duration;
 
+    // llmlint: ignore[invalid_states_unrepresentable] the three kinds are string literals at three call sites in this module and nowhere else; an enum would change the e2e tier's compiled harness after its baseline runs were taken, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
     type Tally = BTreeMap<(&'static str, &'static str, u32), (u64, Duration, Option<Duration>)>;
 
     static SITES: Mutex<Tally> = Mutex::new(BTreeMap::new());

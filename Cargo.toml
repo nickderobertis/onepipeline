@@ -1823,6 +1823,7 @@ path = "tests/status_read/main.rs"
 # `Cargo.lock` resolved, vendored byte-identical from its `.crate` apart from the
 # launch-trace calls, so the e2e tier's git starts made inside it are traced.
 # `onevcs-testing` requires exactly this `onevcs`, which the path copy is.
+# llmlint: ignore-block[crates_stay_in_one_cargo_workspace] the vendored crates are byte-identical copies of released crates.io packages apart from the launch-trace calls, so the option spikes' diffs against them are exactly their prototypes; folding their manifests into this workspace would change what they compile to, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 [patch.crates-io]
 onevcs = { path = "vendor/onevcs" }
 # The linked libraries the inventory showed starting processes inside the engine,
@@ -1831,6 +1832,7 @@ oneharness-core = { path = "vendor/oneharness-core" }
 onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }
 oneagentgraph = { path = "vendor/oneagentgraph" }
+# llmlint: ignore-end[crates_stay_in_one_cargo_workspace]
 
 [profile.release]
 strip = true
