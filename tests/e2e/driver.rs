@@ -1930,10 +1930,9 @@ fn a_stop_waits_out_an_observer_restart_under_way_and_ends_what_it_started() {
 /// refused, the run it left running is still being driven, and is watched
 /// again.
 ///
-/// Linux only: the refusal is a stop with no `ps` to list the tree with, and
-/// only Linux proves the driver without one — from `/proc` — so only there does
-/// that stop reach the hold at all. macOS reads the driver's start through `ps`,
-/// and a stop that cannot prove its driver holds nothing.
+/// Linux only: the refusal is a stop with no `ps` to list the tree with, which
+/// reaches the hold only where the driver is proved without one, as Linux proves
+/// it from `/proc`. A stop that cannot prove its driver holds nothing.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_stop_that_refused_leaves_its_runs_observer_restarted() {
