@@ -25,7 +25,7 @@
 // when a program it runs (`gh`, `unzip`, `git`) fails.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -108,7 +108,9 @@ function readRecords(dir) {
   const records = [];
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) records.push(...readRecords(path));
+    const kind = lstatSync(path);
+    expect(!kind.isSymbolicLink(), `${path} is a link, which a profile artifact never holds`);
+    if (kind.isDirectory()) records.push(...readRecords(path));
     else if (name.endsWith(".json")) {
       let record;
       try {
@@ -174,10 +176,18 @@ function readJson(path) {
   }
 }
 
+/// The archive extracted once; one that does not extract is dropped with what it
+/// left, so the next invocation fetches it again.
 function unzipped(zip, into) {
   if (!existsSync(join(into, ".done"))) {
     mkdirSync(into, { recursive: true });
-    execFileSync("unzip", ["-o", "-q", zip, "-d", into]);
+    try {
+      execFileSync("unzip", ["-o", "-q", zip, "-d", into], { stdio: ["ignore", "ignore", "pipe"] });
+    } catch (error) {
+      rmSync(into, { recursive: true, force: true });
+      rmSync(zip, { force: true });
+      throw new Error(`${zip} did not extract and is dropped; run again to fetch it again (${String(error.stderr ?? error.message).trim()})`);
+    }
     writeFileSync(join(into, ".done"), "");
   }
   return into;
@@ -384,8 +394,13 @@ function e2eTier(lines) {
   return measurement(
     lines.slice(start),
     /^Summary \[/,
-    /^Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed(?:[^,]*, (\d+) failed)?/,
-    (m) => ({ seconds: Number(m[1]), run: Number(m[2]), passed: Number(m[3]), failed: Number(m[4] ?? 0) }),
+    /^Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed((?: \(\d+ [a-z]+\))*)((?:, \d+ [a-z][a-z -]*?)*)$/,
+    (m) => ({
+      seconds: Number(m[1]),
+      run: Number(m[2]),
+      passed: Number(m[3]),
+      failed: Number(/, (\d+) failed\b/.exec(m[5])?.[1] ?? 0),
+    }),
     (t) => isSeconds(t.seconds) && isCount(t.run) && isCount(t.passed) && isCount(t.failed) && t.passed + t.failed <= t.run,
     "the e2e tier's summary",
   );
@@ -423,8 +438,8 @@ function measureAttempt(cache, spec) {
         lines,
         /^ci-job: \S+ runs /,
         TASKS_LINE,
-        (m) => ({ count: Number(m[1]), list: m[2].trim() }),
-        (t) => t.count === t.list.split(/\s+/).length,
+        (m) => ({ count: Number(m[1]), list: m[2].trim() === "none" ? "" : m[2].trim() }),
+        (t) => t.count === (t.list ? t.list.split(/\s+/).length : 0),
         "the Nx task selection",
       ),
       e2e: e2eTier(lines),

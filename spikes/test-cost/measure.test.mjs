@@ -21,13 +21,14 @@ const GOLDEN = JSON.parse(readFileSync(join(ROOT, "tests/golden/test-profile-rec
 const RUN = "4242";
 const REPO = "repos/nickderobertis/onepipeline";
 
-/// `scripts/ci-job.sh`'s own `echo` of the tasks it runs, run by bash.
+/// `scripts/ci-job.sh`'s own lines that count the tasks and print them, run by bash.
 function tasksLine(job, tasks) {
-  const echo = readFileSync(join(ROOT, "scripts/ci-job.sh"), "utf8")
-    .split("\n")
-    .find((line) => /^echo "ci-job: \$job runs/.test(line));
-  assert.ok(echo, "scripts/ci-job.sh no longer prints the tasks line this harness reads");
-  return execFileSync("bash", ["-c", `job="$1"; tasks="$2"; count=$(printf '%s\\n' $tasks | wc -l | tr -d ' '); ${echo}`, "bash", job, tasks], { encoding: "utf8" }).trim();
+  const lines = readFileSync(join(ROOT, "scripts/ci-job.sh"), "utf8").split("\n");
+  const echo = lines.findIndex((line) => /^echo "ci-job: \$job runs/.test(line));
+  const counted = lines.findIndex((line) => /^count=0$/.test(line));
+  assert.ok(echo > counted && counted >= 0, "scripts/ci-job.sh no longer counts and prints the tasks line this harness reads");
+  const script = lines.slice(counted, echo + 1).join("\n");
+  return execFileSync("bash", ["-c", `job="$1"; tasks="$2"\n${script}`, "bash", job, tasks], { encoding: "utf8" }).trim();
 }
 
 /// `scripts/coverage-merge.mjs`'s own print of the line percentage, filled.
@@ -63,11 +64,13 @@ function log({
   tasks = tasksLine("test-linux", "onepipeline:test onepipeline-e2e:test"),
   stamp = "2026-11-13T10:00:36.0000000Z",
   ruststart = "2026-11-13T10:00:02.0000000Z",
+  checkout = `HEAD is now at 1234567 Merge ${"a".repeat(40)} into ${"b".repeat(40)}`,
+  extra = [],
 } = {}) {
   return [
     "\uFEFF2026-11-13T10:00:00.5000000Z the runner's first line, after its byte-order mark",
     "an unstamped continuation of a step's multi-line input",
-    `2026-11-13T10:00:01.0000000Z HEAD is now at 1234567 Merge ${"a".repeat(40)} into ${"b".repeat(40)}`,
+    ...(checkout ? [`2026-11-13T10:00:01.0000000Z ${checkout}`] : []),
     `${ruststart} \x1b[36m##[group]Run Swatinem/rust-cache@v2.9.2\x1b[0m`,
     `2026-11-13T10:00:30.0000000Z ${cache}`,
     "2026-11-13T10:00:31.0000000Z ##[group]Run actions/cache/restore@v4",
@@ -81,6 +84,7 @@ function log({
     ...(tier ? [`2026-11-13T10:02:00.0000000Z ${tier}`] : []),
     ...(tier && summary ? [`2026-11-13T10:12:00.0000000Z ${summary}`] : []),
     ...(coverage ? [`2026-11-13T10:13:00.0000000Z ${coverage}`] : []),
+    ...extra.map((line) => `2026-11-13T10:13:30.0000000Z ${line}`),
     "2026-11-13T10:14:00.0000000Z ##[group]Run just rerun-failed",
     "",
   ].join("\r\n");
@@ -169,7 +173,7 @@ process.stdout.write(fs.readFileSync(file));
 `,
   );
   chmodSync(join(bin, "gh"), 0o755);
-  return { root, repo, head, blob, cache: join(root, "cache"), calls, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } };
+  return { root, repo, head, blob, answer, cache: join(root, "cache"), calls, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } };
 }
 
 function measure(w, args) {
@@ -323,6 +327,42 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.equal(readFileSync(join(w.cache, RUN, "attempt-1", "profile-artifact-test-linux"), "utf8").trim(), "test-profile-${{ github.job }}-${{ matrix.variant }}");
   });
 
+  it("reads a log with no checkout line as naming no GITHUB_SHA, and the producer's own line for no tasks", () => {
+    const { stdout } = reported({ logs: { "1 baseline": log({ checkout: null, tasks: tasksLine("test-linux", "") }) } }, ONE());
+    assert.match(stdout, /\| baseline \| 4242#1@baseline \| test-linux \| success \| – \| [0-9a-f]{12} \| [0-9a-f]{12} \| 0 \|/);
+  });
+
+  it("quotes each line about saving once, and none of a test's own output", () => {
+    const extra = ["save-cache: false", "save-cache: false", "ok 3 - a cache step that sets save-if: false is accepted", "# Subtest: save-if is read"];
+    const { stdout } = reported({ logs: { "1 baseline": log({ extra }) } }, ONE());
+    const said = /\| baseline \| 4242#1@baseline \| test-linux \| [^|]+ \| (.*) \|$/m.exec(stdout.split("## Cache restores")[1])[1];
+    assert.equal(said, "github-cache: CACHE_READ_ONLY is set, so this job serves the READ-ONLY Actions-cache backend / save-if: false / save-cache: false");
+  });
+
+  it("compares another side's records when the first side has none for a job", () => {
+    const { stdout } = reported({ expired: [101, 201] }, SIDES);
+    assert.match(stdout, /\| idle \| 4242#1@idle \| test-linux \| 3 \| – \| – \|/);
+  });
+
+  it("shows no share for verbs of an engine that took no time", () => {
+    const { stdout } = reported({ records: { 101: { "e2e/views.one.json": record("views::one", 1, { onepipeline: { count: 0, s: 0 }, "onepipeline:start": { count: 0, s: 0 } }), "e2e/views.two.json": record("views::two", 1, {}) } } }, ONE());
+    assert.match(stdout, /\| start \| 0 \| 0\.0 \| 0 \| – \|/);
+  });
+
+  it("drops an archive that does not extract, fails with 1, and fetches it again on the next invocation", () => {
+    const w = world();
+    const logs = `${REPO}/actions/runs/${RUN}/attempts/1/logs`;
+    const good = readFileSync(join(w.root, "answers", encodeURIComponent(logs)));
+    w.answer(logs, "not a zip");
+    const broken = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(broken.status, 1);
+    assert.match(broken.stderr, /logs\.zip did not extract and is dropped/);
+    w.answer(logs, good);
+    const ran = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(calls(w).filter((call) => call === logs).length, 2);
+  });
+
   it("shows a verb table no longer than fifteen rows, and says when records carry no verbs", () => {
     const many = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`onepipeline:verb${i}`, { count: 1, s: i + 1 }]));
     const { stdout } = reported({ records: { 101: { "e2e/views.many.json": record("views::many", 10, { onepipeline: { count: 20, s: 210 }, ...many }) } } }, ONE());
@@ -372,6 +412,7 @@ describe("measure.mjs refusals", () => {
   it("refuses a measurement line that is there but does not read", () => {
     refused({ logs: { "1 baseline": log({ summary: "     Summary [ 600.000s] 1 test run: 2 passed, 0 skipped" }) } }, ONE(), /the e2e tier's summary reads/);
     refused({ logs: { "1 baseline": log({ summary: "     Summary [ fast ] everything passed" }) } }, ONE(), /the e2e tier's summary reads/);
+    refused({ logs: { "1 baseline": log({ summary: "     Summary [ 600.000s] 2 tests run: 1 passed, nonsense failed" }) } }, ONE(), /the e2e tier's summary reads/);
     refused({ logs: { "1 baseline": log({ coverage: coverageLine("196.5") }) } }, ONE(), /the line coverage reads/);
     refused({ logs: { "1 baseline": log({ coverage: "lines percent: lots" }) } }, ONE(), /the line coverage reads/);
     refused({ logs: { "1 baseline": log({ tasks: "ci-job: test-linux runs 3 task(s): a:b c:d" }) } }, ONE(), /the Nx task selection reads/);
