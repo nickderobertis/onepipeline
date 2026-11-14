@@ -174,8 +174,8 @@ function readJson(path) {
   }
 }
 
-/// Every entry named under the archive's own root, read from its name listing (one
-/// name a line) before anything is extracted; links are refused once extracted.
+/// Every entry named under the archive's own root and none a link, read from its
+/// listings before anything is extracted.
 function checkArchive(zip) {
   let names;
   try {
@@ -184,9 +184,18 @@ function checkArchive(zip) {
     rmSync(zip, { force: true });
     throw new Error(`${zip} is not an archive and is dropped; run again to fetch it again (${String(error.stderr ?? error.message).trim()})`);
   }
-  for (const name of names.split("\n").filter(Boolean)) {
+  const entries = names.split("\n").filter(Boolean);
+  for (const name of entries) {
     expect(!name.startsWith("/") && !name.split(/[\\/]/).includes(".."), `${zip} holds ${name}, outside the directory it extracts to`);
   }
+  // Each entry's type, from zipinfo's listing (one line an entry, in the name
+  // listing's order, its mode first), so a link is refused before unzip acts on it.
+  const modes = execFileSync("unzip", ["-Z", "-s", zip], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 })
+    .split("\n")
+    .map((line) => /^(\S+)\s+\d+\.\d+\s+\S+\s+\d+\s/.exec(line)?.[1])
+    .filter(Boolean);
+  expect(modes.length === entries.length, `${zip} lists ${entries.length} names but ${modes.length} entry types; it is not read`);
+  entries.forEach((name, i) => expect(!modes[i].startsWith("l"), `${zip} holds ${name}, a link, which no log or profile archive holds; nothing is extracted`));
 }
 
 /// Nothing extracted is a link: a log or profile archive holds files and directories.

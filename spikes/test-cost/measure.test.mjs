@@ -31,6 +31,16 @@ function tasksLine(job, tasks) {
   return execFileSync("bash", ["-c", `job="$1"; tasks="$2"\n${script}`, "bash", job, tasks], { encoding: "utf8" }).trim();
 }
 
+/// The key `designs/measurement.diff`'s profile writer counts an engine verb's runs
+/// under: the engine's name and the verb, joined by its own `format!`.
+function verbKey(verb) {
+  const diff = readFileSync(join(HERE, "designs/measurement.diff"), "utf8");
+  const tags = /^\+.*if program == "onepipeline" \{$/m.test(diff) && /^\+\s+return \(category, format!\("\{program\}\\u\{1f\}\{verb\}"\)\);$/m.test(diff);
+  const joined = /^\+.*Some\(format!\("\{base\}(.*?)\{verb\}"\)\)/m.exec(diff);
+  assert.ok(tags && joined, "designs/measurement.diff no longer counts an engine verb's runs under the key this harness reads");
+  return `onepipeline${joined[1]}${verb}`;
+}
+
 /// `scripts/coverage-merge.mjs`'s own print of the line percentage, filled.
 function coverageLine(percent) {
   const print = /console\.log\(`(lines percent: \$\{percent\})`\);/.exec(readFileSync(join(ROOT, "scripts/coverage-merge.mjs"), "utf8"));
@@ -153,10 +163,10 @@ function world(change = {}) {
       const files = {
         "e2e/views.one.json": record("views::one", 300, {
           onepipeline: { count: 2, s: 4 },
-          "onepipeline:start": { count: 1, s: 3 },
-          "onepipeline:status": { count: 1, s: 1 },
+          [verbKey("start")]: { count: 1, s: 3 },
+          [verbKey("status")]: { count: 1, s: 1 },
         }),
-        "e2e/views.two.json": record("views::two", 200, { onepipeline: { count: 1, s: 1 }, "onepipeline:start": { count: 1, s: 1 } }),
+        "e2e/views.two.json": record("views::two", 200, { onepipeline: { count: 1, s: 1 }, [verbKey("start")]: { count: 1, s: 1 } }),
         "e2e/stale.json": record("views::stale", 999, {}, { run_id: "an-earlier-run" }),
         ...(variant === "idle" ? { "e2e/views.three.json": record("views::three", 50, {}) } : { "e2e/views.four.json": record("views::four", 70, {}) }),
         ...(change.records?.[id] ?? {}),
@@ -407,7 +417,7 @@ describe("measure.mjs over a run it reads through gh", () => {
   });
 
   it("shows no share for verbs of an engine that took no time", () => {
-    const { stdout } = reported({ records: { 101: { "e2e/views.one.json": record("views::one", 1, { onepipeline: { count: 0, s: 0 }, "onepipeline:start": { count: 0, s: 0 } }), "e2e/views.two.json": record("views::two", 1, {}) } } }, ONE());
+    const { stdout } = reported({ records: { 101: { "e2e/views.one.json": record("views::one", 1, { onepipeline: { count: 0, s: 0 }, [verbKey("start")]: { count: 0, s: 0 } }), "e2e/views.two.json": record("views::two", 1, {}) } } }, ONE());
     assert.match(stdout, /\| start \| 0 \| 0\.0 \| 0 \| – \|/);
   });
 
@@ -490,7 +500,7 @@ describe("measure.mjs over a run it reads through gh", () => {
   });
 
   it("shows a verb table no longer than fifteen rows, and says when records carry no verbs", () => {
-    const many = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`onepipeline:verb${i}`, { count: 1, s: i + 1 }]));
+    const many = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [verbKey(`verb${i}`), { count: 1, s: i + 1 }]));
     const { stdout } = reported({ records: { 101: { "e2e/views.many.json": record("views::many", 10, { onepipeline: { count: 20, s: 210 }, ...many }) } } }, ONE());
     assert.equal((stdout.match(/^\| verb\d+ \|/gm) ?? []).length, 15);
     const bare = reported({ records: { 102: { "e2e/views.one.json": record("views::one", 300, {}), "e2e/views.two.json": record("views::two", 200, {}) } } }, ONE("idle"));
@@ -520,7 +530,7 @@ describe("measure.mjs refusals", () => {
     refused(at({ "e2e/views.two.json": record("views::two", 1, { git: { count: 1.5, s: 1 } }) }), ONE(), /views\.two\.json: program git is not a count and a duration/);
     refused(at({ "e2e/views.two.json": record("views::two", 1, []) }), ONE(), /views\.two\.json does not have the golden profile record's shape/);
     refused(at({ "e2e/views.two.json": "{ half a record" }), ONE(), /views\.two\.json is not JSON/);
-    refused(at({ "e2e/views.link.json": { link: "/etc/hostname" } }), ONE(), /views\.link\.json is a link, which no log or profile archive holds/);
+    refused(at({ "e2e/views.link.json": { link: "/etc/hostname" } }), ONE(), /holds e2e\/views\.link\.json, a link, which no log or profile archive holds; nothing is extracted/);
     const bad = structuredClone(GOLDEN.categories);
     bad.spawn.count = -1;
     refused(at({ "e2e/views.two.json": record("views::two", 1, {}, { categories: bad }) }), ONE(), /views\.two\.json: category spawn is not a count and a duration/);
