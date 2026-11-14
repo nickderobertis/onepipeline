@@ -1129,7 +1129,8 @@ struct Leftover {
 /// interrupt is handled on.
 struct Turn {
     left: Mutex<Leftover>,
-    /// Told each time the landing's thread goes idle.
+    /// What [`Turn::interrupt`] waits on: it removes nothing while the
+    /// landing's thread is in the turn.
     idled: std::sync::Condvar,
 }
 
@@ -1219,7 +1220,9 @@ impl crate::executor::Executor for Idling<'_> {
     }
 }
 
-/// One [`Idling`] dispatch.
+/// A dispatch whose two waits, for its next envelope and for its ending, leave
+/// the turn free, and whose caller is back in the turn for everything it does
+/// with what either answers.
 struct IdlingDispatch {
     inner: Box<dyn crate::executor::DispatchHandle>,
     turn: Arc<Turn>,
