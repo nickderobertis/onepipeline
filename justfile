@@ -460,10 +460,14 @@ _tier-lint bin:
 # The e2e journeys are the ones that run the binary under `strace` and drive the
 # released `onetaskgraph`, so that tier asks for both up front.
 #
-# Measurement only (spike-launch-inventory, never lands): then the runner's processor and
-# each CLI's minimal start, beside the tier's launch trace, in the uploaded artifact.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "onepipeline-e2e" e2e-tier)
-    @node scripts/launch-inventory.mjs host > target/test-profile/launch-host.json || echo "launch-host: not measured" >&2
+# Measurement only (spike-launch-inventory, never lands): `_launch-host` first records the
+# runner's processor and each CLI's minimal start beside the tier's launch trace, in the
+# uploaded artifact, so a run whose tier fails still names its runner.
+_e2e-test: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test "onepipeline-e2e" e2e-tier)
+
+# Measurement only (spike-launch-inventory, never lands): see `_e2e-test`.
+_launch-host:
+    @mkdir -p target/test-profile && node scripts/launch-inventory.mjs host > target/test-profile/launch-host.json || echo "launch-host: not measured" >&2
 
 _contract-test: (_tier-test "onepipeline-contract" contract-tier)
 
