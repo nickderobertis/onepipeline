@@ -503,6 +503,23 @@ function compare(options) {
     }
   }
   print();
+  print("## Nx task selection (each distinct list, and the runs that selected it)");
+  for (const job of JOBS) {
+    const lists = new Map();
+    for (const side of sides) {
+      for (const run of side.measured) {
+        const list = run.incomplete ? null : run.jobs[job]?.nx_tasks?.list;
+        if (!list) continue;
+        if (!lists.has(list)) lists.set(list, []);
+        lists.get(list).push(`${side.name}/${run.run}`);
+      }
+    }
+    for (const [list, runs] of lists) {
+      print();
+      print(`- ${job}, ${list.split(" ").length} tasks, selected by ${runs.length} run(s) (${runs.join(", ")}): ${list}`);
+    }
+  }
+  print();
   print("## Cache restores and saves");
   print();
   print("| side | run | job | restores (kind: outcome, s) | save evidence |");
