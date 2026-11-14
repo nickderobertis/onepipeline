@@ -347,12 +347,14 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     if let Some(path) = &args.follow_events {
         command.arg("--follow-events").arg(path);
     }
-    let child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|err| Error::InvalidConfig(format!("cannot detach: {err}")))?;
+    let child = oneagentgraph::launch_trace::spawn_detached(
+        oneagentgraph::launch_site!(),
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .map_err(|err| Error::InvalidConfig(format!("cannot detach: {err}")))?;
 
     // The run id is the child's to mint, so it is read back from the state
     // directory rather than guessed here — a guess would be a second source for
@@ -738,25 +740,29 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
 /// this at the shared working-directory boundary keeps harness-specific flags
 /// out of a command whose chain may select any identity.
 fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
-    let inside = std::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| {
+    let inside = oneagentgraph::launch_trace::output(
+        oneagentgraph::launch_site!(),
+        std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null()),
+    )
+    .map_err(|err| {
             Error::InvalidConfig(format!("cannot inspect {} with git: {err}", dir.display()))
         })?;
     if inside.status.success() && inside.stdout == b"true\n" {
         return Ok(());
     }
 
-    let initialized = std::process::Command::new("git")
-        .arg("init")
-        .arg("--quiet")
-        .arg(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| {
+    let initialized = oneagentgraph::launch_trace::output(
+        oneagentgraph::launch_site!(),
+        std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(dir)
+            .stdin(std::process::Stdio::null()),
+    )
+    .map_err(|err| {
             Error::InvalidConfig(format!(
                 "cannot initialize {} as a git repository: {err}",
                 dir.display()

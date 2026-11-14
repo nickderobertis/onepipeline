@@ -309,7 +309,7 @@ impl Group {
     /// that started but could not be grouped is killed rather than returned.
     pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
         self.prepare(command)?;
-        let mut child = command.spawn()?;
+        let mut child = crate::launch_trace::spawn_detached(crate::launch_site!(), command)?;
         match self.adopt(&child) {
             Ok(_) => Ok(child),
             // A member running unsupervised is worse than one that never

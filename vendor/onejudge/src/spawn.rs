@@ -251,7 +251,9 @@ impl Spawner {
             hook.spawning(command, context)
                 .map_err(|e| hook_error(context, "prepare", &e))?;
         }
-        let mut child = command.spawn().map_err(spawn_error)?;
+        let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), command);
+        launch.detached();
+        let mut child = spawned.map_err(spawn_error)?;
         let group = match &self.hook {
             // Runs before the caller writes the request, so the child is still
             // blocked on stdin and has spawned nothing of its own.

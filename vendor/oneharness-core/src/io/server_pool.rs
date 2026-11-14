@@ -778,7 +778,7 @@ fn start(entry: &Path, plan: &LaunchPlan, linger: Duration) -> io::Result<Server
         command.env(key, value);
     }
     detach(&mut command);
-    let child = command.spawn()?;
+    let child = crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command)?;
     let pid =
         Pid::new(child.id()).map_err(|message| io::Error::new(io::ErrorKind::Other, message))?;
     let identity = identify_spawned(child, pid, process_identity, IDENTIFY_GRACE)?;

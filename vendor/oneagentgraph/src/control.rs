@@ -566,7 +566,7 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     };
     let mut command = std::process::Command::new(bin);
     command.args(argv(address, input));
-    let output = match command.output() {
+    let output = match crate::launch_trace::output(crate::launch_site!(), &mut command) {
         Ok(output) => output,
         Err(err) => {
             return Delivery::Failed(format!(

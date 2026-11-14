@@ -17,6 +17,8 @@
 #![warn(missing_docs)]
 
 mod anchor;
+#[doc(hidden)]
+pub mod launch_trace;
 mod clock;
 mod resets;
 mod scheduled;

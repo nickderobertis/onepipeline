@@ -1194,29 +1194,31 @@ fn hardened_git(worktree: &str, args: &[&str]) -> Result<String> {
     if let Some(system_root) = system_root {
         command.env("SystemRoot", system_root);
     }
-    let output = command
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        )
-        .env("GIT_PAGER", "cat")
-        .env("PAGER", "cat")
-        .args([
-            "-c",
-            "core.pager=cat",
-            "-c",
-            "interactive.diffFilter=",
-            "-c",
-            "diff.external=",
-            "-c",
-            "core.fsmonitor=false",
-        ])
-        .arg("-C")
-        .arg(worktree)
-        .args(args)
-        .output()
+    let output = crate::launch_trace::output(
+        crate::launch_site!(),
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat")
+            .args([
+                "-c",
+                "core.pager=cat",
+                "-c",
+                "interactive.diffFilter=",
+                "-c",
+                "diff.external=",
+                "-c",
+                "core.fsmonitor=false",
+            ])
+            .arg("-C")
+            .arg(worktree)
+            .args(args),
+    )
         .map_err(|error| {
             Error::provider_classified(
                 "evidence",

@@ -307,7 +307,7 @@ fn exited_within(child: &mut std::process::Child, grace: Duration) -> bool {
             Ok(Some(_)) => return true,
             Err(_) => return false,
             Ok(None) if Instant::now() >= deadline => return false,
-            Ok(None) => std::thread::sleep(TEARDOWN_POLL),
+            Ok(None) => crate::launch_trace::sleep(crate::launch_site!(), TEARDOWN_POLL),
         }
     }
 }
@@ -1204,7 +1204,15 @@ impl OneharnessProvider {
         };
         let mut child = self.spawn(op, bin, &turn::argv(spec))?;
         write_prompt(op, child.stdin.as_mut(), &spec.prompt)?;
-        let output = child.wait_with_output().map_err(|e| {
+        let pid = child.id();
+        let output = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
+            child.wait_with_output()
+        };
+        if let Ok(output) = &output {
+            crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
+        }
+        let output = output.map_err(|e| {
             Error::provider(op.to_string(), format!("oneharness did not complete: {e}"))
         })?;
         self.finish(
@@ -1291,7 +1299,14 @@ impl OneharnessProvider {
             // closed pipe above.
             terminate(&mut child);
         }
-        let status = child.wait().map_err(|e| {
+        let status = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
+            child.wait()
+        };
+        if let Ok(status) = &status {
+            crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
+        }
+        let status = status.map_err(|e| {
             Error::provider(op.to_string(), format!("oneharness did not complete: {e}"))
         })?;
         let stderr = draining.join().unwrap_or_default();

@@ -188,11 +188,25 @@ export function parseStrace(text, file = "") {
   const parentOf = new Map();
   const groupOf = new Map();
   const execs = [];
+  const unfinished = new Map();
   for (const line of text.split("\n")) {
     const m = /^(\d+)\s+(?:[\d:.]+\s+)?(.*)$/.exec(line);
     if (!m) continue;
     const tid = Number(m[1]);
-    const rest = m[2];
+    let rest = m[2];
+    // A call another thread interrupted is printed in two halves: rejoin them.
+    const cut = /^(.*?)\s*<unfinished \.\.\.>$/.exec(rest);
+    if (cut) {
+      unfinished.set(tid, cut[1]);
+      continue;
+    }
+    const resumed = /^<\.\.\. (\w+) resumed>\s?(.*)$/.exec(rest);
+    if (resumed) {
+      const head = unfinished.get(tid);
+      unfinished.delete(tid);
+      if (head == null) continue;
+      rest = `${head}${resumed[2]}`;
+    }
     const clone = /^(clone3?|fork|vfork)\((.*)\)\s*=\s*(\d+)/.exec(rest);
     if (clone) {
       const child = Number(clone[3]);
@@ -226,6 +240,7 @@ export function joinTrace(trace) {
   const waits = [];
   const sleeps = [];
   const envs = new Map();
+  const bySeq = new Map();
   const key = (file, pid) => `${file}\u0000${pid}`;
   for (const r of trace) {
     if (r.kind === "env") envs.set(`${key(r.file, r.pid)}\u0000${r.id}`, r.env);
@@ -233,6 +248,7 @@ export function joinTrace(trace) {
   for (const r of trace) {
     if (r.kind === "proc") procs.set(key(r.file, r.pid), r);
     else if (r.kind === "end") ends.set(key(r.file, r.pid), r.t);
+    else if (r.kind === "exit" && r.seq != null) bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
     else if (r.kind === "exit") exits.set(`${key(r.file, r.pid)}\u0000${r.child}`, r.t);
     else if (r.kind === "start") {
       if (typeof r.env === "number") r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
@@ -240,6 +256,13 @@ export function joinTrace(trace) {
     }
     else if (r.kind === "wait") waits.push(r);
     else if (r.kind === "sleeps") sleeps.push(r);
+  }
+  // A start written at its spawn has its exit, and any wait folded into it, in an
+  // `exit` record of the same seq.
+  for (const s of starts) {
+    const e = s.seq != null ? bySeq.get(`${key(s.file, s.pid)}\u0000${s.seq}`) : null;
+    if (!e) continue;
+    for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"]) if (e[f] != null) s[f] = e[f];
   }
   // A record names its process; the process names its verb and test.
   for (const r of [...starts, ...waits, ...sleeps]) {
@@ -313,7 +336,7 @@ function union(intervals, from, to) {
 
 const programOf = (s) => (s.program === "git" && s.sub ? `git ${s.sub}` : s.program);
 const siteOf = (s) => `${s.function} (${s.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
-const isTestBinary = (p) => p && !["onepipeline", "onevcs"].includes(p.exe);
+const isTestBinary = (p) => Boolean(p) && /^[a-z0-9_]+-[0-9a-f]{16}$/.test(p.exe);
 
 /** A job folded: every figure the tables print, as data. */
 export function foldJob(job) {
@@ -525,13 +548,25 @@ export function coverage(os, t, records) {
         continue;
       }
       kind = "MISSED by the trace";
-    } else if (starter || ["e2e"].includes(starterName) || /^e2e-/.test(starterName)) kind = "test process (records)";
+    } else if (starter && (expected.get(`${e.ppid}\u0000${e.exe}`) ?? 0) > 0) {
+      // The engine's library, called in the test process, traced as it starts.
+      expected.set(`${e.ppid}\u0000${e.exe}`, expected.get(`${e.ppid}\u0000${e.exe}`) - 1);
+      traced++;
+      continue;
+    } else if (starter || /^e2e(-|$)/.test(starterName)) kind = "test process (records)";
+    else if (["onepipeline", "onevcs"].includes(starterName)) kind = "MISSED: an engine process with no trace";
     else kind = "uninstrumented descendant";
     const k = `${kind}\u0000${starterName}\u0000${e.exe}`;
     rows.set(k, { kind, starter: starterName, program: e.exe, count: (rows.get(k)?.count ?? 0) + 1 });
   }
+  const unseen = new Map();
+  for (const [k, n] of expected) {
+    if (n <= 0) continue;
+    const program = k.split("\u0000")[1];
+    unseen.set(program, (unseen.get(program) ?? 0) + n);
+  }
   const recordStarts = records.reduce((a, r) => a + Object.values(r.programs ?? {}).reduce((b, v) => b + v.count, 0), 0);
-  return { total, traced, rows: [...rows.values()].sort((a, b) => b.count - a.count), traceStarts: t.starts.length, recordStarts };
+  return { total, traced, rows: [...rows.values()].sort((a, b) => b.count - a.count), unseen: [...unseen].sort((a, b) => b[1] - a[1]), traceStarts: t.starts.length, recordStarts };
 }
 
 function table(head, rows) {
@@ -626,6 +661,7 @@ export function render(folds, { top = 20 } = {}) {
       out.push("### Coverage against the operating system's own record\n");
       out.push(`${c.total} process starts observed; ${c.traced} matched a traced start (the trace holds ${c.traceStarts}; the records hold ${c.recordStarts} test-process starts).\n`);
       out.push(table(["attributed to", "starter", "program", "count"], c.rows.map((r) => [r.kind, r.starter, r.program, r.count])));
+      out.push(`\nTraced starts the OS record has no exec for (a spawn that failed, or a process outside the OS record): ${c.unseen.map(([p, n]) => `${p} ${n}`).join(", ") || "none"}.`);
       out.push("");
     }
   }

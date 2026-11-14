@@ -26,8 +26,15 @@
 //!   plugin). It is generic — the command and plugin identity are
 //!   caller-supplied, never hardcoded.
 
+// Measurement only (spike-launch-inventory): a path dependency is built without
+// lint capping, and the e2e builds deny warnings, so the one this release raises on
+// the current toolchain (`io/cancel.rs`, `handler as usize`) is allowed here.
+#![allow(unknown_lints)]
+#![allow(function_casts_as_integer)]
 pub mod domain;
 pub mod errors;
 pub mod io;
+#[doc(hidden)]
+pub mod launch_trace;
 #[cfg(feature = "sdk-schema")]
 pub mod sdk_schema;

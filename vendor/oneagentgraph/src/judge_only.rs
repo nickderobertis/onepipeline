@@ -565,13 +565,15 @@ fn fingerprint_options(
     bin: &str,
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, bool)>, String> {
-    let output = std::process::Command::new(bin)
-        .args(["fingerprint", "--help"])
-        .env_clear()
-        .envs(env)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| format!("could not run `{bin} fingerprint --help`: {err}"))?;
+    let output = crate::launch_trace::output(
+        crate::launch_site!(),
+        std::process::Command::new(bin)
+            .args(["fingerprint", "--help"])
+            .env_clear()
+            .envs(env)
+            .stdin(std::process::Stdio::null()),
+    )
+    .map_err(|err| format!("could not run `{bin} fingerprint --help`: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "`{bin} fingerprint --help` failed ({}): {}",
@@ -676,8 +678,7 @@ fn llmlint_fingerprint(
         .env_clear()
         .envs(env)
         .stdin(std::process::Stdio::null());
-    let output = command
-        .output()
+    let output = crate::launch_trace::output(crate::launch_site!(), &mut command)
         .map_err(|err| refused(format!("could not run: {err}")))?;
     if !output.status.success() {
         return Err(refused(format!(

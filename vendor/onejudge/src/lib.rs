@@ -91,6 +91,8 @@ mod error;
 mod history_name;
 mod interrupt;
 mod judge_input;
+#[doc(hidden)]
+pub mod launch_trace;
 mod llmlint;
 pub mod note;
 mod oneharness;

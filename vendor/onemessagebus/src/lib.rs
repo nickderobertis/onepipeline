@@ -27,6 +27,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[doc(hidden)]
+pub mod launch_trace;
 pub mod ask;
 mod author;
 mod bounds;

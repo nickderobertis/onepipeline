@@ -625,12 +625,14 @@ impl PluginProcess {
             transport: kind.clone(),
             detail,
         };
-        let mut child = Command::new(path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|failure| {
+        let mut child = crate::launch_trace::spawn_detached(
+            crate::launch_site!(),
+            Command::new(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit()),
+        )
+        .map_err(|failure| {
                 backend(format!(
                     "cannot start the plugin {}: {failure}",
                     path.display()

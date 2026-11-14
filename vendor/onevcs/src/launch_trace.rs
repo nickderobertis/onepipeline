@@ -4,7 +4,9 @@
 //! otherwise.
 //!
 //! Lives in the vendored `onevcs` so that the engine, which links it, and this
-//! library write one shape through one writer. Each record is one JSON line
+//! library write one shape through one writer; the other vendored libraries
+//! (`oneharness-core`, `onejudge`, `onemessagebus`) carry a byte-identical copy,
+//! each its own writer into the same per-test file. Each record is one JSON line
 //! appended to `<dir>/<test>.jsonl`, where `<test>` is nextest's
 //! `NEXTEST_TEST_NAME` with `::` spelled `__` (`_untested` outside nextest). One
 //! `write` per line on a file opened for append, so the processes of one test
@@ -14,7 +16,8 @@
 //!
 //! - `proc`: this process — `pid`, `exe` (file stem), `verb` (its first argument
 //!   not starting with `-`), `test`, `t` (unix ns when first traced).
-//! - `start`: one process started — `pid` (the starter), `child` (its pid, or
+//! - `start`: one process started — `pid` (the starter), `seq` (its order in
+//!   this process's writer), `child` (its pid, or
 //!   null when the spawn failed), `program` (file stem), `sub` (git's
 //!   subcommand, past any `-c k=v`/`-C dir`/`--git-dir d` options), `argv`, `cwd`, `env`
 //!   (the id of an `env` record of this pid: every `GIT_*` the child gets,
@@ -27,8 +30,10 @@
 //! - `env`: one `GIT_*` set a start of this process gave its child — `pid`, `id`,
 //!   `env`.
 //! - `end`: this process reaching the C runtime's exit — `pid`, `t`.
-//! - `exit`: a child started at a `start` record whose `exit_ns` is null was
-//!   collected elsewhere — `pid`, `child`, `site`/`function`, `t`, `status`.
+//! - `exit`: the exit of a start written at its spawn — `pid`, `seq` (the
+//!   start's), `child`, `t`, `exit_ns`, `status`, and any folded wait; or, with
+//!   `site`/`function` and no `seq`, a child of a detached start collected
+//!   elsewhere — `pid`, `child`, `t`, `status`.
 //! - `sleeps`: at this process's exit, per site of [`sleep`] — `site`/`function`,
 //!   `count`, `slept_ns`, `interval_ns` (the last duration asked).
 //!   A start whose wait was folded into it ([`Wait::into_launch`]) also carries
@@ -91,7 +96,8 @@ struct Tracer {
     test: String,
     writes: AtomicU64,
     inherited_git: std::collections::BTreeMap<String, Option<String>>,
-    envs: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    envs: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    seq: AtomicU64,
 }
 
 fn tracer() -> Option<&'static Tracer> {
@@ -140,6 +146,7 @@ fn tracer() -> Option<&'static Tracer> {
                     })
                     .collect(),
                 envs: std::sync::Mutex::default(),
+                seq: AtomicU64::new(0),
             };
             tracer.write(serde_json::json!({
                 "v": 1,
@@ -168,6 +175,22 @@ type Sleeps = std::collections::BTreeMap<(&'static str, u32), (&'static str, u64
 fn sleeps() -> &'static std::sync::Mutex<Sleeps> {
     static SLEEPS: OnceLock<std::sync::Mutex<Sleeps>> = OnceLock::new();
     SLEEPS.get_or_init(Default::default)
+}
+
+/// A blocking wait on a child that took `took`, bounded by `interval`, counted
+/// per `site` with the sleeps and written once at exit.
+pub fn waited(site: Site, took: Duration, interval: Option<Duration>) {
+    if tracer().is_none() {
+        return;
+    }
+    if let Ok(mut sleeps) = sleeps().lock() {
+        let entry = sleeps
+            .entry((site.file, site.line))
+            .or_insert((site.function, 0, 0, 0));
+        entry.1 += 1;
+        entry.2 += nanos(took);
+        entry.3 = interval.map_or(0, nanos);
+    }
 }
 
 /// [`std::thread::sleep`], counted per `site` and written once at exit.
@@ -235,16 +258,19 @@ pub fn exit(site: Site, child: u32, status: Option<i32>) {
 impl Tracer {
     /// The id this process gave one `GIT_*` set, written as an `env` record the
     /// first time it is seen.
-    fn env_id(&self, env: &std::collections::BTreeMap<String, Option<String>>) -> u64 {
+    ///
+    /// Named by this crate, because each vendored library carries its own copy of
+    /// this module and so its own writer into the same file.
+    fn env_id(&self, env: &std::collections::BTreeMap<String, Option<String>>) -> String {
         let text = serde_json::to_string(env).unwrap_or_default();
         let Ok(mut envs) = self.envs.lock() else {
-            return u64::MAX;
+            return String::new();
         };
         if let Some(id) = envs.get(&text) {
-            return *id;
+            return id.clone();
         }
-        let id = u64::try_from(envs.len()).unwrap_or(u64::MAX);
-        envs.insert(text, id);
+        let id = format!("{}:{}", env!("CARGO_PKG_NAME"), envs.len());
+        envs.insert(text, id.clone());
         drop(envs);
         self.write(serde_json::json!({
             "v": 1,
@@ -300,16 +326,23 @@ fn subcommand(args: &[String]) -> Option<String> {
     None
 }
 
-/// One process started, recorded when it is dropped or [`Launch::exited`].
+/// One process started. A start whose spawn returns ([`Launch::spawned`]) is
+/// written then, and its exit as an `exit` record of the same `seq`, so a process
+/// ended while it waits still leaves the start; a start through `output` or
+/// `status` is written whole once it returns.
 pub struct Launch {
     record: Option<(serde_json::Value, Instant, Duration)>,
+    written: Option<serde_json::Value>,
 }
 
 /// Record the start of `command` at `site`; call this immediately before its
 /// `spawn`, `output` or `status`.
 pub fn launch(site: Site, command: &Command) -> Launch {
     let Some(tracer) = tracer() else {
-        return Launch { record: None };
+        return Launch {
+            record: None,
+            written: None,
+        };
     };
     let began = Instant::now();
     let t = unix_ns(SystemTime::now());
@@ -338,6 +371,7 @@ pub fn launch(site: Site, command: &Command) -> Launch {
         "v": 1,
         "kind": "start",
         "pid": tracer.pid,
+        "seq": format!("{}:{}", env!("CARGO_PKG_NAME"), tracer.seq.fetch_add(1, Ordering::Relaxed)),
         "site": format!("{}:{}", site.file, site.line),
         "function": site.function,
         "program": program,
@@ -354,28 +388,60 @@ pub fn launch(site: Site, command: &Command) -> Launch {
     let cost = began.elapsed();
     Launch {
         record: Some((record, Instant::now(), cost)),
+        written: None,
     }
 }
 
 impl Launch {
-    /// The spawn returned, with the child's pid when it started.
+    /// The spawn returned, with the child's pid when it started: the start is
+    /// written now.
     pub fn spawned(&mut self, child: Option<u32>) {
-        if let Some((record, began, _)) = &mut self.record {
+        let Some(tracer) = tracer() else { return };
+        if let Some((record, began, cost)) = &mut self.record {
+            let stamped = Instant::now();
             record["spawn_ns"] = nanos(began.elapsed()).into();
             record["child"] = child.into();
+            record["trace_ns"] = nanos(*cost + stamped.elapsed()).into();
+            tracer.write(record.clone());
+            self.written = Some(serde_json::json!({
+                "v": 1,
+                "kind": "exit",
+                "pid": tracer.pid,
+                "seq": record["seq"].clone(),
+                "child": child,
+            }));
         }
     }
 
     /// The child's exit was collected, with its code when it has one.
     pub fn exited(mut self, status: Option<i32>) {
-        if let Some((record, began, _)) = &mut self.record {
-            record["exit_ns"] = nanos(began.elapsed()).into();
+        let Some(elapsed) = self
+            .record
+            .as_ref()
+            .map(|(_, began, _)| nanos(began.elapsed()))
+        else {
+            return;
+        };
+        if let Some(exit) = &mut self.written {
+            exit["exit_ns"] = elapsed.into();
+            exit["status"] = status.into();
+            exit["t"] = unix_ns(SystemTime::now()).into();
+            if let Some(tracer) = tracer() {
+                tracer.write(exit.clone());
+            }
+            self.record = None;
+        } else if let Some((record, _, _)) = &mut self.record {
+            record["exit_ns"] = elapsed.into();
             record["status"] = status.into();
         }
     }
 
-    /// Note that this start is not collected here, and record it now.
-    pub fn detached(self) {}
+    /// Note that this start is not collected here: it was written at its spawn.
+    pub fn detached(mut self) {
+        if self.written.is_some() {
+            self.record = None;
+        }
+    }
 }
 
 impl Drop for Launch {
@@ -383,6 +449,9 @@ impl Drop for Launch {
         let Some((mut record, _, cost)) = self.record.take() else {
             return;
         };
+        if self.written.is_some() {
+            return;
+        }
         let Some(tracer) = tracer() else { return };
         let began = Instant::now();
         record["trace_ns"] = nanos(cost + began.elapsed()).into();
@@ -467,9 +536,12 @@ impl Wait {
     /// `wait_site`, `wait_ns`, `polls` and `interval_ns`, rather than as a record of
     /// its own.
     pub fn into_launch(mut self, launch: &mut Launch) {
-        if let (Some((wait, began)), Some((record, _, _))) =
-            (self.record.take(), launch.record.as_mut())
-        {
+        let target = match (&mut launch.written, launch.record.as_mut()) {
+            (Some(exit), _) => Some(exit),
+            (None, Some((record, _, _))) => Some(record),
+            (None, None) => None,
+        };
+        if let (Some((wait, began)), Some(record)) = (self.record.take(), target) {
             record["wait_site"] = wait["site"].clone();
             record["wait_ns"] = nanos(began.elapsed()).into();
             record["polls"] = self.polls.into();

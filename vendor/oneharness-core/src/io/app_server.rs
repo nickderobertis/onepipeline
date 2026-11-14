@@ -932,7 +932,7 @@ fn ensure_sweeper(entry: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(log);
     server_pool::detach(&mut command);
-    match command.spawn() {
+    match crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command) {
         Ok(child) => {
             // Recorded by the starter as well as by the sweeper itself, so a
             // second dispatch arriving before the sweeper is up does not start

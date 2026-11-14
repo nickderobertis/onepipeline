@@ -138,7 +138,9 @@ impl Process {
         if let Some(supervisor) = supervisor {
             supervisor.spawning(&mut command);
         }
-        let mut child = command.spawn()?;
+        let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
+        launch.detached();
+        let mut child = spawned?;
         if let Err(error) = tree.attach(&mut child) {
             tree.terminate(&mut child, TERM_GRACE);
             return Err(error);
@@ -178,10 +180,14 @@ impl Process {
         if now >= deadline {
             return Ok(None);
         }
-        self.child
-            .as_mut()
-            .expect("live process has a child")
-            .wait_timeout(deadline - now)
+        let child = self.child.as_mut().expect("live process has a child");
+        let began = Instant::now();
+        let waited = child.wait_timeout(deadline - now);
+        crate::launch_trace::waited(crate::launch_site!(), began.elapsed(), Some(deadline - now));
+        if let Ok(Some(status)) = &waited {
+            crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
+        }
+        waited
     }
 
     /// Receive one stdout chunk for incremental parsing while preserving the

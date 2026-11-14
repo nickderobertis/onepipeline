@@ -497,7 +497,15 @@ impl Running {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             (out, err)
         });
-        let status = self.child.wait()?;
+        let status = {
+            let _watch =
+                crate::launch_trace::wait(crate::launch_site!(), Some(self.child.id()), None);
+            self.child.wait()
+        };
+        if let Ok(status) = &status {
+            crate::launch_trace::exit(crate::launch_site!(), self.child.id(), status.code());
+        }
+        let status = status?;
         self.reaped = true;
         Ok(Output {
             status,

@@ -426,7 +426,15 @@ impl CommandProvider {
                 })?;
         }
 
-        let output = child.wait_with_output().map_err(|e| {
+        let pid = child.id();
+        let output = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
+            child.wait_with_output()
+        };
+        if let Ok(output) = &output {
+            crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
+        }
+        let output = output.map_err(|e| {
             Error::provider(op.to_string(), format!("provider did not complete: {e}"))
         })?;
 

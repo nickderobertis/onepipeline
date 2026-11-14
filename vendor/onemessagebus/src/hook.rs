@@ -637,11 +637,13 @@ impl CommandHook {
         if let Some(route) = &route {
             command.env(HOOK_ROUTE_ENV, &route.0);
         }
-        let spawned = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+        let (spawned, launch) = crate::launch_trace::spawn(
+            crate::launch_site!(),
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        );
         let mut child = match spawned {
             Ok(child) => child,
             Err(failure) => return self.unjudged(format_args!("could not be run: {failure}")),
@@ -666,7 +668,11 @@ impl CommandHook {
                 return self.unjudged(format_args!("could not receive its message: {failure}"));
             }
         };
-        let output = child.wait_with_output();
+        let output = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
+            child.wait_with_output()
+        };
+        launch.exited(output.as_ref().ok().and_then(|output| output.status.code()));
         let _ = writing.join();
         let output = match output {
             Ok(output) => output,
@@ -903,12 +909,14 @@ fn bar_digest(command: &[String], fingerprint: &str) -> String {
 /// whitespace removed, when it exits 0 having printed something.
 fn read_fingerprint(argv: &[String]) -> Option<String> {
     let (program, arguments) = argv.split_first()?;
-    let output = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = crate::launch_trace::output(
+        crate::launch_site!(),
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
