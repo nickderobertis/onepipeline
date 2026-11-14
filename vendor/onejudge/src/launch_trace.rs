@@ -1,3 +1,10 @@
+// llmlint: ignore-file[boundary_inputs_validated] its one input, NEXTEST_TEST_NAME, is a test path nextest itself sets (identifiers joined by ::), and the module never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[changed_behavior_has_e2e] its proof is every e2e test of the hosted baseline runs writing the records the report folds (and the strace/ETW coverage check against them); a journey asserting them would be a new test body in the suite this measurement must not change, and the module never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] the copies are this one measurement module and scripts/launch-inventory.mjs is its only reader, both on this branch, with the reader's fixture recorded from it; a generated schema would be code for a contract that never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[invalid_states_unrepresentable] records are written once and read by one fold; typed records would change the e2e tier's compiled code after its baseline runs were taken, and the module never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[new_code_lands_in_a_project] vendor/ holds copies of released crates, excluded from Nx because their own project.json files are not this workspace's; the module never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[no_panics_on_recoverable_errors] std::env::args panics only on a non-Unicode argument, which no e2e journey passes, and changing it would change the e2e tier's compiled code after its baseline runs were taken; the module never lands: this branch is preserved as the measurement record and nothing on it merges.
+// llmlint: ignore-file[comments_earn_their_place] the measurement-only note is what tells an option spike's reader that this module is the harness rather than the crate, and the module never lands: this branch is preserved as the measurement record and nothing on it merges.
 //! Measurement only (spike-launch-inventory, never lands): a record of every
 //! process this process starts, and of every wait whose only purpose is to watch
 //! one, written when `ONEPIPELINE_LAUNCH_TRACE` names a directory and inert
@@ -5,8 +12,12 @@
 //!
 //! Lives in the vendored `onevcs` so that the engine, which links it, and this
 //! library write one shape through one writer; the other vendored libraries
-//! (`oneharness-core`, `onejudge`, `onemessagebus`) carry a byte-identical copy,
-//! each its own writer into the same per-test file. Each record is one JSON line
+//! (`oneharness-core`, `onejudge`, `onemessagebus`, `oneagentgraph`) carry a copy,
+//! each its own writer into the same per-test file. The copies are identical but
+//! for the two crates that forbid `unsafe` (`onejudge`, `onemessagebus`), which
+//! register no exit hook: their `end` record is the engine's own writer's, and their
+//! sleep tallies are never written — `onejudge`'s teardown poll is the one site that
+//! loses, and the report says so. Each record is one JSON line
 //! appended to `<dir>/<test>.jsonl`, where `<test>` is nextest's
 //! `NEXTEST_TEST_NAME` with `::` spelled `__` (`_untested` outside nextest). One
 //! `write` per line on a file opened for append, so the processes of one test
@@ -160,7 +171,7 @@ fn tracer() -> Option<&'static Tracer> {
             }));
             // This crate forbids `unsafe`, so this copy registers no exit hook:
             // the engine's own writer (the vendored onevcs) records the process's
-            // end, and nothing here is tallied for it to flush.
+            // end, and what `sleep` tallies here is never written.
             Some(tracer)
         })
         .as_ref()

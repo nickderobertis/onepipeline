@@ -347,6 +347,7 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     if let Some(path) = &args.follow_events {
         command.arg("--follow-events").arg(path);
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let child = oneagentgraph::launch_trace::spawn_detached(
         oneagentgraph::launch_site!(),
         command
@@ -355,6 +356,7 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
             .stderr(std::process::Stdio::null()),
     )
     .map_err(|err| Error::InvalidConfig(format!("cannot detach: {err}")))?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     // The run id is the child's to mint, so it is read back from the state
     // directory rather than guessed here — a guess would be a second source for
@@ -740,6 +742,7 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
 /// this at the shared working-directory boundary keeps harness-specific flags
 /// out of a command whose chain may select any identity.
 fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let inside = oneagentgraph::launch_trace::output(
         oneagentgraph::launch_site!(),
         std::process::Command::new("git")
@@ -748,12 +751,14 @@ fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
             .stdin(std::process::Stdio::null()),
     )
     .map_err(|err| {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
             Error::InvalidConfig(format!("cannot inspect {} with git: {err}", dir.display()))
         })?;
     if inside.status.success() && inside.stdout == b"true\n" {
         return Ok(());
     }
 
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let initialized = oneagentgraph::launch_trace::output(
         oneagentgraph::launch_site!(),
         std::process::Command::new("git")
@@ -763,6 +768,7 @@ fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
             .stdin(std::process::Stdio::null()),
     )
     .map_err(|err| {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
             Error::InvalidConfig(format!(
                 "cannot initialize {} as a git repository: {err}",
                 dir.display()

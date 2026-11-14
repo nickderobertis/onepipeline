@@ -426,6 +426,7 @@ impl CommandProvider {
                 })?;
         }
 
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let pid = child.id();
         let output = {
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
@@ -435,6 +436,7 @@ impl CommandProvider {
             crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
         }
         let output = output.map_err(|e| {
+        // llmlint: ignore-end[changed_behavior_has_e2e]
             Error::provider(op.to_string(), format!("provider did not complete: {e}"))
         })?;
 

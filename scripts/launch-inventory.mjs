@@ -40,6 +40,10 @@ export class Refusal extends Error {
   }
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: a job log carries ANSI colour codes.
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] git's read/write semantics are git's, held nowhere this repository could gate against; a form this does not recognise is counted as a write, which can only under-count repeats, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 /** git subcommands that write nothing a later read of the same argv would see. */
 export const GIT_READS = new Set([
   "rev-parse",
@@ -76,50 +80,76 @@ export const GIT_READS = new Set([
   "whatchanged",
   "verify-commit",
   "verify-tag",
-  "fsck",
 ]);
 
-/** Whether one git argv only reads. `config`, `branch`, `worktree`, `remote`, `symbolic-ref`, `tag` and `stash` read in some forms. */
+/**
+ * Whether one git argv only reads. `config`, `branch`, `worktree`, `remote`, `symbolic-ref`,
+ * `tag`, `stash` and `hash-object` read in some forms and write in others; any flag or
+ * argument shape this does not recognise as a read is a write, so a repeat is never counted
+ * across something that might have changed what it reads.
+ */
 export function gitReads(sub, argv) {
   if (!sub) return false;
+  // `--output=<file>` makes even a diff or a log a write to the filesystem.
+  if (argv.some((a) => a === "--output" || a.startsWith("--output=") || a === "-o")) return false;
   if (GIT_READS.has(sub)) return true;
   const rest = argv.slice(argv.indexOf(sub) + 1);
   const has = (...flags) => rest.some((a) => flags.includes(a));
+  const operands = rest.filter((a) => !a.startsWith("-"));
   switch (sub) {
     case "config":
-      return has(
-        "--get",
-        "--get-all",
-        "--get-regexp",
-        "--list",
-        "-l",
-        "--show-origin",
-        "--get-urlmatch",
+      return (
+        has("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l") &&
+        !has(
+          "--add",
+          "--unset",
+          "--unset-all",
+          "--replace-all",
+          "--rename-section",
+          "--remove-section",
+          "--edit",
+          "-e",
+        )
       );
     case "branch":
       return (
-        rest.length === 0 ||
-        has(
-          "--list",
-          "-l",
-          "--show-current",
-          "--contains",
-          "--merged",
-          "-a",
-          "-r",
-          "-v",
-          "-vv",
-          "--format",
-        )
+        !has(
+          "-d",
+          "-D",
+          "--delete",
+          "-m",
+          "-M",
+          "--move",
+          "-c",
+          "-C",
+          "--copy",
+          "-f",
+          "--force",
+          "-u",
+          "--set-upstream-to",
+          "--unset-upstream",
+          "--edit-description",
+          "-t",
+          "--track",
+        ) &&
+        (operands.length === 0 ||
+          has("--list", "--contains", "--merged", "--no-merged", "--points-at"))
       );
     case "worktree":
       return rest[0] === "list";
     case "remote":
-      return rest.length === 0 || ["get-url", "show", "-v"].includes(rest[0]);
+      return (
+        rest.length === 0 ||
+        ["get-url", "show"].includes(rest[0]) ||
+        (rest.length === 1 && rest[0] === "-v")
+      );
     case "symbolic-ref":
-      return rest.filter((a) => !a.startsWith("-")).length <= 1;
+      return !has("-d", "--delete", "-m") && operands.length <= 1;
     case "tag":
-      return rest.length === 0 || has("--list", "-l", "--contains", "--points-at");
+      return (
+        !has("-d", "--delete", "-a", "-s", "-f", "-m", "-F") &&
+        (operands.length === 0 || has("--list", "-l", "--contains", "--points-at"))
+      );
     case "stash":
       return ["list", "show"].includes(rest[0]);
     case "hash-object":
@@ -129,36 +159,65 @@ export function gitReads(sub, argv) {
   }
 }
 
-/** The engine's verbs that change nothing: a journey re-launching for one is re-reading. */
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+/**
+ * The engine's verbs that read and change nothing, from its `--help`: a journey re-launching
+ * the CLI for one is re-reading. `review`, `unpublished` and `supersessions` read unless
+ * given one of `RECORDING_FLAGS`, so a launch carrying one is not counted as a read.
+ */
 export const READ_VERBS = new Set([
-  "status",
-  "show",
-  "events",
-  "view",
-  "views",
-  "list",
-  "logs",
-  "log",
-  "graph",
-  "check",
-  "validate",
-  "schema",
-  "explain",
-  "version",
-  "--version",
-  "help",
-  "doctor",
-  "inspect",
-  "describe",
-  "read",
-  "watch",
-  "health",
-  "diff",
-  "contract",
+  "plan",
   "template",
-  "budget",
-  "ledger",
+  "boundary",
+  "channel",
+  "next",
+  "review",
+  "runs",
+  "status",
+  "host",
+  "monitor",
+  "watch",
+  "unwatched",
+  "stop-guard",
+  "unpublished",
+  "results",
+  "supersessions",
+  "goals",
+  "transcript",
+  "agents",
+  "telemetry",
+  "help",
 ]);
+
+/** Every other verb `--help` lists: each changes a run, a branch, or the host. */
+export const WRITE_VERBS = new Set([
+  "human-items",
+  "scratch",
+  "start",
+  "adopt",
+  "readjust",
+  "reply",
+  "surface",
+  "decline-ruling",
+  "attest",
+  "stop",
+  "label",
+  "shutdown",
+  "ask",
+  "flow",
+  "publish-branch",
+  "repo-recover",
+  "integrate",
+]);
+
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] which of a verb's flags record is the engine's behaviour, stated in no machine-readable form a gate could compare; a flag missing here can only count a recording launch as a read, which over-states re-reads in a measurement table that never lands: this branch is preserved as the measurement record and nothing on it merges.
+/** The flags that make a reading verb record something. */
+export const RECORDING_FLAGS = ["--record", "--acknowledge", "--decide", "--reply", "--post"];
+
+/** Whether one engine launch, by its argv, only reads. */
+export function launchReads(verb, argv) {
+  return READ_VERBS.has(verb) && !(argv ?? []).some((a) => RECORDING_FLAGS.includes(a));
+}
 
 const median = (xs) => quantile(xs, 0.5);
 function quantile(xs, p) {
@@ -170,17 +229,150 @@ const ms = (ns) => (ns == null ? "-" : (ns / 1e6).toFixed(1));
 const sec = (ns) => (ns / 1e9).toFixed(1);
 const pct = (x, of) => (of > 0 ? `${((100 * x) / of).toFixed(2)}%` : "-");
 
-function readJsonl(path) {
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the producer is vendor/onevcs/src/launch_trace.rs on this same branch, and npm/test/golden/launch-inventory is that producer's own output recorded at this commit; a cross-language drift gate would be code for a reader that never lands: this branch is preserved as the measurement record and nothing on it merges.
+/** The trace's record kinds, each with the fields a fold reads from it. */
+const RECORD_FIELDS = {
+  proc: ["pid", "t"],
+  env: ["pid", "id"],
+  start: ["pid", "t", "program", "site"],
+  exit: ["pid"],
+  end: ["pid", "t"],
+  wait: ["pid", "t", "site"],
+  sleeps: ["pid", "site", "count"],
+};
+
+const isTime = (x) => Number.isFinite(x) && x >= 0;
+
+/** A GIT_* set as a child was given it: each name a GIT_ variable, each value a string or unset. */
+const gitEnv = (env) =>
+  Boolean(env) &&
+  typeof env === "object" &&
+  !Array.isArray(env) &&
+  Object.entries(env).every(
+    ([k, v]) => k.startsWith("GIT_") && (v === null || typeof v === "string"),
+  );
+const isTimeOrNull = (x) => x == null || isTime(x);
+
+/** Whether `r` is a trace record of a kind this fold reads, its fields of their types. */
+export function validRecord(r) {
+  const fields =
+    r && typeof r === "object" && r.v === 1 && Object.hasOwn(RECORD_FIELDS, r.kind)
+      ? RECORD_FIELDS[r.kind]
+      : null;
+  if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
+  if (r.t != null && !isTime(r.t)) return false;
+  const scalar = (x) => x == null || typeof x === "string" || Number.isFinite(x);
+  if (
+    !scalar(r.id) ||
+    !scalar(r.seq) ||
+    (r.env != null && typeof r.env !== "object" && !scalar(r.env))
+  )
+    return false;
+  if (r.site != null && typeof r.site !== "string") return false;
+  if (["start", "wait", "sleeps"].includes(r.kind) && typeof r.function !== "string") return false;
+  for (const f of ["function", "wait_site", "verb", "test"])
+    if (r[f] != null && typeof r[f] !== "string") return false;
+  if (
+    !["child", "interval_ns", "polls", "write_ns_before", "trace_ns"].every((f) =>
+      isTimeOrNull(r[f]),
+    )
+  )
+    return false;
+  if (r.kind === "env") return gitEnv(r.env);
+  if (r.kind === "start" && r.env != null && typeof r.env === "object" && !gitEnv(r.env))
+    return false;
+  if (r.kind === "proc")
+    return (
+      typeof r.exe === "string" &&
+      (r.verb == null || typeof r.verb === "string") &&
+      (r.test == null || typeof r.test === "string") &&
+      (r.argv == null || (Array.isArray(r.argv) && r.argv.every((a) => typeof a === "string")))
+    );
+  if (r.kind === "start")
+    return (
+      typeof r.program === "string" &&
+      (r.cwd == null || typeof r.cwd === "string") &&
+      (r.sub == null || typeof r.sub === "string") &&
+      Array.isArray(r.argv) &&
+      r.argv.every((a) => typeof a === "string") &&
+      ["spawn_ns", "exit_ns", "wait_ns", "trace_ns"].every((f) => isTimeOrNull(r[f]))
+    );
+  if (r.kind === "exit") return ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]));
+  if (r.kind === "wait") return isTimeOrNull(r.wait_ns) && isTimeOrNull(r.polls);
+  if (r.kind === "sleeps") return isTime(r.count) && isTime(r.slept_ns);
+  return true;
+}
+
+/** The six categories every schema-2 test-profile record carries, in profile.rs's order. */
+const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
+
+/** Whether `r` is a test-profile record of schema 2 (crates/testfakes/src/profile.rs). */
+export function validProfile(r) {
+  return (
+    Boolean(r) &&
+    typeof r === "object" &&
+    r.schema === 2 &&
+    typeof r.test === "string" &&
+    typeof r.os === "string" &&
+    ["test-thread", "process-exit", "unfinished"].includes(r.ended) &&
+    isTime(r.wall_s) &&
+    (r.categories?.wait?.polls == null || isTime(r.categories.wait.polls)) &&
+    Boolean(r.categories) &&
+    typeof r.categories === "object" &&
+    !Array.isArray(r.categories) &&
+    CATEGORIES.every(
+      (name) =>
+        r.categories[name] && isTime(r.categories[name].s) && isTime(r.categories[name].count),
+    ) &&
+    Boolean(r.programs) &&
+    typeof r.programs === "object" &&
+    !Array.isArray(r.programs) &&
+    Object.values(r.programs).every((v) => v && isTime(v.count) && isTime(v.s))
+  );
+}
+
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the waits document is written by crates/testfakes/src/profile.rs's wait_sites on this branch, and the fixture is its own output recorded at this commit; a cross-language gate would be code for a reader that never lands: this branch is preserved as the measurement record and nothing on it merges.
+/** Whether `w` is one site of a harness waits document. */
+const validWait = (w) =>
+  Boolean(w) &&
+  typeof w === "object" &&
+  ["span", "poll", "sleep"].includes(w.kind) &&
+  typeof w.site === "string" &&
+  isTime(w.count) &&
+  isTime(w.s) &&
+  (w.interval_s == null || isTime(w.interval_s));
+
+/**
+ * A JSONL file's valid records, counting into `skipped` each line that is not JSON (one a
+ * process the runner ended was writing when it went) and each record of no known shape.
+ */
+function readJsonl(path, skipped) {
   const out = [];
   for (const line of readFileSync(path, "utf8").split("\n")) {
     if (!line.trim()) continue;
+    let r;
     try {
-      out.push(JSON.parse(line));
+      r = JSON.parse(line);
     } catch {
-      // A line cut short by a process the runner ended mid-write is not a record.
+      skipped.malformed++;
+      continue;
     }
+    if (validRecord(r)) out.push(r);
+    else skipped.invalid++;
   }
   return out;
+}
+
+/** A JSON document, or a refusal naming the file. */
+function readJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Refusal(
+      `${path} is not a JSON document: ${error.message}`,
+      "re-download the job's test-profile artifact",
+    );
+  }
 }
 
 /** Every record a job's artifact holds. */
@@ -191,11 +383,15 @@ export function readJob(label, dir) {
       "unzip the job's test-profile artifact there",
     );
   const root = existsSync(join(dir, "test-profile")) ? join(dir, "test-profile") : dir;
+  const skipped = { malformed: 0, invalid: 0, records: 0, waits: 0 };
   const tests = [];
   const e2e = join(root, "e2e");
   if (existsSync(e2e)) {
     for (const f of readdirSync(e2e)) {
-      if (f.endsWith(".json")) tests.push(JSON.parse(readFileSync(join(e2e, f), "utf8")));
+      if (!f.endsWith(".json")) continue;
+      const r = readJson(join(e2e, f));
+      if (validProfile(r)) tests.push(r);
+      else skipped.records++;
     }
   }
   const trace = [];
@@ -204,13 +400,17 @@ export function readJob(label, dir) {
   if (existsSync(launch)) {
     for (const f of readdirSync(launch)) {
       if (f.endsWith(".waits.json")) {
-        const doc = JSON.parse(readFileSync(join(launch, f), "utf8"));
-        for (const site of doc.sites ?? []) harnessWaits.push({ ...site, test: doc.test });
+        const doc = readJson(join(launch, f));
+        const sites =
+          doc && typeof doc.test === "string" && Array.isArray(doc.sites) ? doc.sites : [];
+        const valid = sites.filter(validWait);
+        skipped.waits += sites.length - valid.length + (sites === doc?.sites ? 0 : 1);
+        for (const site of valid) harnessWaits.push({ ...site, test: doc.test });
         continue;
       }
       if (!f.endsWith(".jsonl")) continue;
       const file = basename(f, ".jsonl");
-      for (const r of readJsonl(join(launch, f))) trace.push({ ...r, file });
+      for (const r of readJsonl(join(launch, f), skipped)) trace.push({ ...r, file });
     }
   }
   if (!tests.length && !trace.length)
@@ -219,55 +419,109 @@ export function readJob(label, dir) {
       "point LABEL=DIR at an unzipped test-profile artifact",
     );
   const hostFile = join(root, "launch-host.json");
-  const host = existsSync(hostFile) ? JSON.parse(readFileSync(hostFile, "utf8")) : null;
+  const host = existsSync(hostFile) ? readJson(hostFile) : null;
+  const result = (x) =>
+    x &&
+    typeof x === "object" &&
+    typeof x.name === "string" &&
+    (x.error != null ? x.median_ms == null : isTime(x.median_ms));
+  const facts = (h) =>
+    (h.cpu_model == null || typeof h.cpu_model === "string") &&
+    isTime(h.cpus) &&
+    (h.physical_cpus == null || isTime(h.physical_cpus));
+  if (
+    host !== null &&
+    !(
+      host &&
+      typeof host === "object" &&
+      facts(host) &&
+      Array.isArray(host.spawn?.results) &&
+      host.spawn.results.every(result)
+    )
+  )
+    throw new Refusal(
+      `${hostFile} holds no spawn results`,
+      "regenerate it with 'node scripts/launch-inventory.mjs host'",
+    );
   const logFile = join(dir, "job.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
-  const os = readOs(join(dir, "os"));
-  return { label, tests, trace, harnessWaits, host, log, os };
+  const os = readOs(join(dir, "os"), skipped);
+  return { label, tests, trace, harnessWaits, host, log, os, skipped };
 }
 
-/** The e2e tier's nextest summary in a job log: the run whose lines name `onepipeline::e2e`. */
-export function e2eSummary(log) {
-  if (!log) return null;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: a job log carries ANSI colour codes.
-  const lines = log.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").split(/\r?\n/);
-  let e2e = false;
-  let found = null;
+/**
+ * Each nextest run a job log holds, as `{ start, end, seconds, run, passed, line }`, and
+ * which of them is the e2e tier: the largest, since the e2e binary's ~2,150 journeys are
+ * the most tests any one nextest invocation in a test job runs.
+ */
+export function nextestRuns(log) {
+  const lines = log.replace(ANSI, "").split(/\r?\n/);
+  const runs = [];
+  let start = null;
   for (const line of lines) {
-    if (/Nextest run ID/.test(line)) e2e = false;
-    if (
-      /onepipeline::e2e\b/.test(line) ||
-      /Starting \d+ tests? across 1 binary \(1 test and/.test(line)
-    )
-      e2e = true;
+    const t = Date.parse(/^(\S+Z)\s/.exec(line)?.[1] ?? "") / 1000;
+    if (!Number.isFinite(t)) continue;
+    if (/Nextest run ID/.test(line)) start = t;
     const m = /Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run: (\d+) passed/.exec(line);
-    if (m && e2e)
-      found = {
+    if (m)
+      runs.push({
+        start,
+        end: t,
         seconds: Number(m[1]),
         run: Number(m[2]),
         passed: Number(m[3]),
         line: line.replace(/^\S+Z\s*/, "").trim(),
-      };
+      });
   }
-  return found;
+  return runs;
+}
+
+/**
+ * The largest nextest run a job log holds, or null. In this repository's test jobs that is
+ * the e2e tier, whose ~2,150 journeys no other tier approaches, and the reports print it as
+ * the largest run, naming that tier only as what it is in these jobs.
+ */
+export function largestRun(log) {
+  if (!log) return null;
+  return nextestRuns(log).reduce((best, r) => (!best || r.run > best.run ? r : best), null);
 }
 
 /** The operating system's own process starts: `strace -f` output or ETW JSONL. */
-export function readOs(dir) {
+export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
   if (!existsSync(dir)) return null;
   const starts = [];
   for (const f of readdirSync(dir)) {
     const path = join(dir, f);
     if (f.endsWith(".strace")) starts.push(...parseStrace(readFileSync(path, "utf8"), f));
     else if (f.endsWith(".jsonl"))
-      for (const r of readJsonl(path))
+      for (const line of readFileSync(path, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        let r;
+        try {
+          r = JSON.parse(line);
+        } catch {
+          skipped.malformed++;
+          continue;
+        }
+        if (
+          !r ||
+          typeof r !== "object" ||
+          !Number.isFinite(r.pid) ||
+          !Number.isFinite(r.ppid) ||
+          typeof r.image !== "string" ||
+          (r.cmd != null && typeof r.cmd !== "string")
+        ) {
+          skipped.invalid++;
+          continue;
+        }
         starts.push({
-          pid: Number(r.pid),
-          ppid: Number(r.ppid),
-          exe: stem(r.image ?? ""),
+          pid: r.pid,
+          ppid: r.ppid,
+          exe: stem(r.image),
           argv: splitCmd(r.cmd ?? ""),
           file: f,
         });
+      }
   }
   return starts;
 }
@@ -354,7 +608,8 @@ export function joinTrace(trace) {
       bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
     else if (r.kind === "exit") exits.set(`${key(r.file, r.pid)}\u0000${r.child}`, r.t);
     else if (r.kind === "start") {
-      if (typeof r.env === "number")
+      // Each writer names a GIT_* set once per process, by an id like `onevcs:0`.
+      if (typeof r.env === "number" || typeof r.env === "string")
         r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
       starts.push(r);
     } else if (r.kind === "wait") waits.push(r);
@@ -368,7 +623,6 @@ export function joinTrace(trace) {
     for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"])
       if (e[f] != null) s[f] = e[f];
   }
-  // A record names its process; the process names its verb and test.
   for (const r of [...starts, ...waits, ...sleeps]) {
     const p = procs.get(key(r.file, r.pid));
     r.verb ??= isTestBinary(p) ? "(test process)" : (p?.verb ?? "");
@@ -461,14 +715,13 @@ const isTestBinary = (p) => Boolean(p) && /^[a-z0-9_]+-[0-9a-f]{16}$/.test(p.exe
 export function foldJob(job) {
   const t = joinTrace(job.trace);
   const testSeconds = job.tests.reduce((a, r) => a + (r.wall_s ?? 0), 0);
-  const summary = e2eSummary(job.log);
+  const summary = largestRun(job.log);
   const wallS = summary?.seconds ?? null;
   const toWallMin = (ns) => (wallS && testSeconds ? ((ns / 1e9 / testSeconds) * wallS) / 60 : null);
   const procOf = (s) => t.procs.find((p) => p.file === s.file && p.pid === s.pid);
   const procIndex = new Map(t.procs.map((p) => [t.key(p.file, p.pid), p]));
   const startedBy = (s) => procIndex.get(t.key(s.file, s.pid));
 
-  // Engine and library starts, from the trace.
   const engine = new Map();
   const bySite = new Map();
   for (const s of t.starts) {
@@ -520,7 +773,6 @@ export function foldJob(job) {
     }
   }
 
-  // Each top-level engine run by verb, from its own process records.
   const verbs = new Map();
   for (const p of t.procs) {
     if (isTestBinary(p) || p.parentStart) continue;
@@ -564,7 +816,6 @@ export function foldJob(job) {
     }
   }
 
-  // Waits on a child, by site.
   const waits = new Map();
   for (const w of t.waits) {
     const k = `${w.function} (${w.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
@@ -583,7 +834,6 @@ export function foldJob(job) {
     e.count += w.count;
     e.ns += w.slept_ns ?? 0;
   }
-  // The harness's own waits, on the test process's threads, by site.
   const harness = new Map();
   for (const w of job.harnessWaits ?? []) {
     const k = `${w.kind}\u0000${w.site}`;
@@ -599,7 +849,6 @@ export function foldJob(job) {
     0,
   );
 
-  // Starts per test and per site.
   const perTest = new Map();
   for (const s of t.starts) perTest.set(s.test || s.file, (perTest.get(s.test || s.file) ?? 0) + 1);
   for (const r of job.tests)
@@ -610,16 +859,14 @@ export function foldJob(job) {
   const perSite = new Map();
   for (const s of t.starts) perSite.set(siteOf(s), (perSite.get(siteOf(s)) ?? 0) + 1);
 
-  // Journeys re-launching the CLI for read-only verbs.
   const relaunch = new Map();
   for (const p of t.procs) {
-    if (p.exe !== "onepipeline" || p.parentStart || !READ_VERBS.has(p.verb)) continue;
+    if (p.exe !== "onepipeline" || p.parentStart || !launchReads(p.verb, p.argv)) continue;
     if (!relaunch.has(p.test)) relaunch.set(p.test, new Map());
     const m = relaunch.get(p.test);
     m.set(p.verb, (m.get(p.verb) ?? 0) + 1);
   }
 
-  // The trace's own cost.
   let traceNs = 0;
   let records = 0;
   const lastWrite = new Map();
@@ -634,6 +881,7 @@ export function foldJob(job) {
   const names = job.tests.map((r) => r.test).sort();
   return {
     label: job.label,
+    skipped: job.skipped ?? { malformed: 0, invalid: 0, records: 0, waits: 0 },
     os: job.tests[0]?.os ?? "?",
     host: job.host,
     summary,
@@ -678,6 +926,12 @@ export function coverage(os, t, records) {
   const rows = new Map();
   let total = 0;
   let traced = 0;
+  // What the records say the test processes started, per program, consumed as the OS's
+  // record of those starts is read; the rest are starts the records do not hold.
+  const recorded = new Map();
+  for (const r of records)
+    for (const [prog, v] of Object.entries(r.programs ?? {}))
+      recorded.set(prog, (recorded.get(prog) ?? 0) + v.count);
   for (const e of os) {
     if (e.reexec) continue;
     total++;
@@ -708,8 +962,11 @@ export function coverage(os, t, records) {
       expected.set(`${e.ppid}\u0000${e.exe}`, expected.get(`${e.ppid}\u0000${e.exe}`) - 1);
       traced++;
       continue;
-    } else if (starter || /^e2e(-|$)/.test(starterName)) kind = "test process (records)";
-    else if (["onepipeline", "onevcs"].includes(starterName))
+    } else if (starter || /^e2e(-|$)/.test(starterName)) {
+      const left = recorded.get(e.exe) ?? 0;
+      if (left > 0) recorded.set(e.exe, left - 1);
+      kind = left > 0 ? "test process (records)" : "test process, beyond the records";
+    } else if (["onepipeline", "onevcs"].includes(starterName))
       kind = "MISSED: an engine process with no trace";
     else kind = "uninstrumented descendant";
     const k = `${kind}\u0000${starterName}\u0000${e.exe}`;
@@ -741,7 +998,6 @@ export function coverage(os, t, records) {
 }
 
 function table(head, rows) {
-  // A column is right-aligned when every cell in it is a figure.
   const figure = (c) => c == null || /^-?[\d.]+%?$|^-$|^blocking$/.test(String(c));
   const align = head.map((_, i) => rows.length > 0 && rows.every((r) => figure(r[i])));
   const out = [
@@ -765,9 +1021,13 @@ export function render(folds, { top = 20 } = {}) {
     out.push(
       `Tier: ${f.testCount} test-profile records (${f.unfinished.length} unfinished), ${(f.testSeconds / 60).toFixed(1)} test-minutes; ` +
         (f.summary
-          ? `nextest \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min`
+          ? `largest nextest run (the e2e tier in this repository's test jobs) \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min`
           : "no e2e nextest summary in job.log") +
         `; test-name set sha256/16 ${f.testsDigest}.\n`,
+    );
+    const k = f.skipped;
+    out.push(
+      `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries.\n`,
     );
     const ts = f.testSeconds * 1e9;
     const wm = (ns) => (f.toWallMin(ns) == null ? "-" : f.toWallMin(ns).toFixed(2));
@@ -1073,16 +1333,138 @@ export function diffCounts(a, b) {
   return rows.sort((p, q) => Math.abs(q[4]) - Math.abs(p[4]));
 }
 
+/**
+ * One hosted job's own facts, from its log: the commit it checked out, the Nx selection,
+ * each cache step's restore and time, what it saved, and where the e2e tier ran in it.
+ */
+export function jobFacts(log) {
+  const lines = log
+    .replace(ANSI, "")
+    .split(/\r?\n/)
+    .map((line) => {
+      const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ?(.*)$/.exec(line);
+      const t = m ? Date.parse(m[1]) / 1000 : Number.NaN;
+      return Number.isFinite(t) ? { t, text: m[2] } : null;
+    })
+    .filter(Boolean);
+  if (!lines.length)
+    throw new Refusal(
+      "the job log holds no timestamped line",
+      "save the log as 'gh api .../actions/jobs/<id>/logs' serves it, timestamps included",
+    );
+  const facts = {
+    checkout: null,
+    selection: null,
+    steps: [],
+    cacheSaves: [],
+    nxStored: null,
+    e2e: null,
+  };
+  const steps = [];
+  for (let i = 0; i < lines.length; i++) {
+    const { t, text } = lines[i];
+    const step = /^##\[group\]Run (.*)$/.exec(text);
+    if (step) steps.push({ name: step[1].trim(), start: t, lines: [] });
+    else if (steps.length) steps.at(-1).lines.push(text);
+    const head = /^HEAD is now at (\w+) Merge (\w+) into (\w+)/.exec(text);
+    if (head) facts.checkout = { merge: head[1], head: head[2], base: head[3] };
+    const sel = /^ci-job: (\S+) runs (\d+) task\(s\): (.*)$/.exec(text);
+    if (sel)
+      facts.selection = { job: sel[1], count: Number(sel[2]), tasks: sel[3].trim().split(/\s+/) };
+    const stored = /^Nx cache: stored (\d+) entries, (\d+) bytes; replayed (\d+) entries/.exec(
+      text,
+    );
+    if (stored)
+      facts.nxStored = {
+        entries: Number(stored[1]),
+        bytes: Number(stored[2]),
+        replayed: Number(stored[3]),
+      };
+    if (/^Saving cache path|^Cache saved|tar --posix -cf cache\.tzst/.test(text))
+      facts.cacheSaves.push(text.slice(0, 160));
+  }
+  const end = lines.at(-1)?.t ?? 0;
+  steps.forEach((s, i) => {
+    s.end = steps[i + 1]?.start ?? end;
+  });
+  for (const s of steps) {
+    if (
+      !/rust-cache|actions\/cache\/restore|setup-uv|start-cache-server|setup-node|setup-python/.test(
+        s.name,
+      )
+    )
+      continue;
+    const said = s.lines
+      .filter((l) =>
+        /Cache hit|Cache restored|full match|No cache found|Cache not found|cache miss|not found|Restored from/i.test(
+          l,
+        ),
+      )
+      .map((l) => l.trim());
+    const hit = said.some((l) => /full match: true|Cache hit for:|Cache restored from key/i.test(l))
+      ? "hit"
+      : said.some((l) => /restore-key|full match: false/i.test(l))
+        ? "partial (restore key)"
+        : said.length
+          ? "miss"
+          : "no restore";
+    facts.steps.push({
+      name: s.name.slice(0, 60),
+      seconds: s.end - s.start,
+      hit,
+      said: said.slice(0, 3),
+    });
+  }
+  facts.largest = largestRun(log);
+  const gate = steps.find((s) => /just ci-test-/.test(s.name));
+  facts.job = { start: lines[0]?.t ?? 0, end, gateStart: gate?.start ?? null };
+  return facts;
+}
+
+function renderFacts(label, f) {
+  const min = (s) => (s / 60).toFixed(1);
+  const out = [`## ${label}\n`];
+  if (f.checkout)
+    out.push(
+      `Checked out ${f.checkout.merge}, merging head ${f.checkout.head} into base ${f.checkout.base}.`,
+    );
+  out.push(
+    `Job ${min(f.job.end - f.job.start)} min; gate step from ${f.job.gateStart ? min(f.job.gateStart - f.job.start) : "-"} min.`,
+  );
+  if (f.largest)
+    out.push(
+      `Largest nextest run (the e2e tier in this repository's test jobs): summary ${min(f.largest.seconds)} min, ${f.largest.run} run, ${f.largest.passed} passed; it started ${min(f.largest.start - f.job.start)} min into the job (${f.job.gateStart ? min(f.largest.start - f.job.gateStart) : "-"} min into the gate step, the compile and the tasks before it) and ended ${min(f.job.end - f.largest.end)} min before the job did.`,
+    );
+  if (f.selection)
+    out.push(`Nx selection: ${f.selection.count} tasks: ${f.selection.tasks.join(" ")}.`);
+  out.push(
+    `Nx remote cache: ${f.nxStored ? `stored ${f.nxStored.entries} entries (${f.nxStored.bytes} bytes), replayed ${f.nxStored.replayed}` : "no report line"}. Actions-cache saves in the log: ${f.cacheSaves.length}${f.cacheSaves.length ? ` (${f.cacheSaves.join("; ")})` : ""}.\n`,
+  );
+  out.push(
+    table(
+      ["cache step", "s", "restore", "what it said"],
+      f.steps.map((s) => [s.name, s.seconds.toFixed(1), s.hit, s.said.join(" / ") || "-"]),
+    ),
+  );
+  return `${out.join("\n")}\n`;
+}
+
 /** The runner: its processor, as each OS names it, and each CLI's minimal start. */
 export async function host({ runs = 30 } = {}) {
+  if (!Number.isSafeInteger(runs) || runs < 1) throw usage("--runs takes a positive whole number");
   const { measureSpawns } = await import("./windows-job-profile.mjs");
+  // llmlint: ignore[changed_behavior_has_e2e] the only failure this records is a macOS sysctl refusing, which no runner here produces; the npm tests of test-macos run host for real and assert it answered, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+  const unanswered = [];
   const ask = (cmd, args) => {
     try {
       return execFileSync(cmd, args, {
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-    } catch {
+    } catch (error) {
+      unanswered.push(
+        `${cmd} ${args.join(" ")}: ${String(error.stderr || error.message).trim()} (next: read the processor off the runner's own system report in the job log)`,
+      );
       return null;
     }
   };
@@ -1105,6 +1487,7 @@ export async function host({ runs = 30 } = {}) {
     cpu_model: model,
     cpus: cpus().length,
     physical_cpus: physical,
+    unanswered,
     runner: {
       name: process.env.RUNNER_NAME ?? null,
       image: process.env.ImageOS ?? null,
@@ -1124,7 +1507,28 @@ function usage(message) {
 
 export async function main(argv) {
   const [verb, ...rest] = argv;
-  if (verb === "host") return `${JSON.stringify(await host(), null, 2)}\n`;
+  // llmlint: ignore-block[tool_output_is_signal] fold, diff, run and host are report commands: the multi-line Markdown or JSON they print on success is the whole of what they are for, and they never lands: this branch is preserved as the measurement record and nothing on it merges.
+  if (verb === "host") {
+    if (!(rest.length === 0 || (rest.length === 2 && rest[0] === "--runs")))
+      throw usage("host takes nothing but an optional --runs N");
+    return `${JSON.stringify(await host({ runs: rest.length ? Number(rest[1]) : 30 }), null, 2)}\n`;
+  }
+  if (verb === "run") {
+    if (!rest.length) throw usage("name at least one LABEL=LOG job log");
+    return rest
+      .map((arg) => {
+        const at = arg.indexOf("=");
+        if (at < 1) throw usage(`'${arg}' is not LABEL=LOG`);
+        const path = arg.slice(at + 1);
+        if (!existsSync(path))
+          throw new Refusal(
+            `${arg.slice(0, at)}: ${path} does not exist`,
+            "save the job's log there (gh api .../actions/jobs/<id>/logs)",
+          );
+        return renderFacts(arg.slice(0, at), jobFacts(readFileSync(path, "utf8")));
+      })
+      .join("\n");
+  }
   let top = 20;
   const jobs = [];
   for (let i = 0; i < rest.length; i++) {
@@ -1146,15 +1550,22 @@ export async function main(argv) {
     const rows = diffCounts(jobs[0], jobs[1]);
     return `${table(["test", "program", jobs[0].label, jobs[1].label, "difference"], rows)}\n\n${rows.length} (test, program) pairs differ.\n`;
   }
-  throw usage(verb ? `unknown verb '${verb}'` : "name a verb: fold or diff");
+  // llmlint: ignore-end[tool_output_is_signal]
+  throw usage(verb ? `unknown verb '${verb}'` : "name a verb: fold, diff, run or host");
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     process.stdout.write(await main(process.argv.slice(2)));
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    process.stderr.write(`launch-inventory: ${error.message}\nnext: ${error.next}\n`);
-    process.exitCode = error.code;
+    const refusal =
+      error instanceof Refusal
+        ? error
+        : new Refusal(
+            `could not fold the input: ${error.message}`,
+            "check that each LABEL=DIR is one job's unzipped test-profile artifact, and report the input if it is",
+          );
+    process.stderr.write(`launch-inventory: ${refusal.message}\nnext: ${refusal.next}\n`);
+    process.exitCode = refusal.code;
   }
 }

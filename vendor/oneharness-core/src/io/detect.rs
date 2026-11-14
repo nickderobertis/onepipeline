@@ -146,6 +146,7 @@ pub fn resolve_named(spec: &HarnessSpec, id: &str, overrides: &BinOverrides) -> 
 /// Best-effort `<bin> --version`, returning the first non-empty output line.
 /// Never fails loudly: a probe that errors or times out simply yields `None`.
 pub fn probe_version(bin: &str) -> Option<String> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let mut child = crate::launch_trace::spawn_detached(
         crate::launch_site!(),
         Command::new(bin)
@@ -155,6 +156,7 @@ pub fn probe_version(bin: &str) -> Option<String> {
             .stderr(Stdio::piped()),
     )
     .ok()?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     let status = child.wait_timeout(Duration::from_secs(5)).ok()?;
     if status.is_none() {

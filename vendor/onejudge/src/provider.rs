@@ -1194,6 +1194,7 @@ fn hardened_git(worktree: &str, args: &[&str]) -> Result<String> {
     if let Some(system_root) = system_root {
         command.env("SystemRoot", system_root);
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let output = crate::launch_trace::output(
         crate::launch_site!(),
         command
@@ -1219,6 +1220,7 @@ fn hardened_git(worktree: &str, args: &[&str]) -> Result<String> {
             .arg(worktree)
             .args(args),
     )
+    // llmlint: ignore-end[changed_behavior_has_e2e]
         .map_err(|error| {
             Error::provider_classified(
                 "evidence",

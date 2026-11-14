@@ -116,6 +116,7 @@ pub fn attempt_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<Answer> {
 
 /// Binary-preserving transport for artifact archives.
 pub(crate) fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<std::process::Output> {
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     crate::launch_trace::output(
         crate::launch_site!(),
         Command::new(program())
@@ -124,6 +125,7 @@ pub(crate) fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<std
             .stdin(Stdio::null()),
     )
     .map_err(error::at("run", &program()))
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Run one `gh` invocation and return its standard output.

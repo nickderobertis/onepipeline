@@ -138,9 +138,11 @@ impl Process {
         if let Some(supervisor) = supervisor {
             supervisor.spawning(&mut command);
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
         launch.detached();
         let mut child = spawned?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         if let Err(error) = tree.attach(&mut child) {
             tree.terminate(&mut child, TERM_GRACE);
             return Err(error);
@@ -180,6 +182,7 @@ impl Process {
         if now >= deadline {
             return Ok(None);
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let child = self.child.as_mut().expect("live process has a child");
         let began = Instant::now();
         let waited = child.wait_timeout(deadline - now);
@@ -188,6 +191,7 @@ impl Process {
             crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
         }
         waited
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 
     /// Receive one stdout chunk for incremental parsing while preserving the

@@ -778,7 +778,9 @@ fn start(entry: &Path, plan: &LaunchPlan, linger: Duration) -> io::Result<Server
         command.env(key, value);
     }
     detach(&mut command);
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let child = crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command)?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let pid =
         Pid::new(child.id()).map_err(|message| io::Error::new(io::ErrorKind::Other, message))?;
     let identity = identify_spawned(child, pid, process_identity, IDENTIFY_GRACE)?;
