@@ -1393,9 +1393,9 @@ fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
         == Some(ZOMBIE_STATE)
 }
 
-/// Through `ps` on the Unix targets without procfs, in the fixed environment
-/// [`ps_process_start_token`] uses and for the same reason: the reading has to be
-/// a function of the process rather than of whoever is asking.
+/// Through `ps` on the Unix targets without procfs, in the fixed environment a
+/// start token read through `ps` uses and for the same reason: the reading has to
+/// be a function of the process rather than of whoever is asking.
 ///
 /// `state` is a code whose first character is the state itself and whose
 /// remainder is the flags `ps` decorates it with, so a zombie is `Z` followed by
@@ -1762,10 +1762,42 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     })
 }
 
-/// Through `ps` on macOS and the other supported Unix targets, because they do
-/// not expose Linux's procfs record. On macOS `lstart` comes from the process's
-/// kernel-recorded start `timeval`, so unlike Linux procps's uptime-to-wall-time
-/// reconstruction it remains fixed for the life of the process.
+/// Through the kernel's own record on macOS, and through `ps` on the other
+/// supported Unix targets, because none of them exposes Linux's procfs record.
+///
+/// **macOS starts no other program for it.** Reading `ps` means reading its
+/// output to the end, and on macOS the end of a pipe is not this process's to
+/// decide: the standard library makes a pipe and only then marks it
+/// close-on-exec, because the platform has no `pipe2`, so a child another thread
+/// of this process starts at that moment inherits the pipe's write end and holds
+/// the read open for as long as it lives. A dispatch's registration asks for its
+/// process's start while the run's other dispatches are being started, so a
+/// sibling dispatch held open inherited that `ps`'s pipe and the registration
+/// never returned — the dispatch was never read, and its node never settled. The
+/// kernel answers the same fact with no child and no pipe: `proc_pidinfo`'s
+/// `PROC_PIDTBSDINFO` start `timeval`, the one `ps` renders as `lstart`, and it
+/// answers for a zombie too. Its second is spelled exactly as `ps -o lstart=`
+/// spells it in UTC and the C locale — see [`lstart_spelling`] — so a record a
+/// build that asked `ps` wrote still reads the same.
+///
+/// `lstart` is spelled to the second, which cannot tell apart two processes
+/// started within one: a driver retained to displace another can take that
+/// one's pid and its record would read as claimed before the driver had done
+/// anything. So on macOS the kernel's microseconds of the same start follow the
+/// second, see `kernel_start`. Where the kernel will not say there is no token:
+/// a second alone would read as another process against the record this very
+/// process wrote.
+#[cfg(target_os = "macos")]
+fn platform_process_start_token(pid: u32) -> Option<StartToken> {
+    let (second, micros) = kernel_start(pid)?;
+    let recorded = format!("{}{START_MICROS}{micros:06}", lstart_spelling(second)?);
+    Some(StartToken { recorded })
+}
+
+/// On the Unix targets that are neither Linux nor macOS, `ps`'s `lstart`, which
+/// those targets render from the process's stored start, so it stays fixed for
+/// the life of the process. Their pipes are made close-on-exec atomically, so the
+/// read ends when `ps` does.
 ///
 /// **Asked in a fixed environment**, and that is what makes two readings
 /// comparable at all. `lstart` is not a fact `ps` copies out; it is that fact
@@ -1778,17 +1810,7 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// looked at from another is two processes with two environments, and the view
 /// that exists to say whether its dispatches are alive reported them dead.
 /// Pinning the zone and locale on the child leaves the reading a function of the
-/// process alone.
-///
-/// `lstart` is spelled to the second, which cannot tell apart two processes
-/// started within one: a driver retained to displace another can take that
-/// one's pid and its record would read as claimed before the driver had done
-/// anything. So on macOS the kernel's own microseconds of the same start —
-/// `proc_pidinfo`'s `PROC_PIDTBSDINFO`, which answers for a zombie too — follow
-/// the second, see `kernel_start_micros`. Where the kernel will not say there
-/// is no token, as where `ps` will not: a second alone would read as another
-/// process against the record this very process wrote. The other targets
-/// without procfs keep the one-second spelling.
+/// process alone. These targets keep the one-second spelling.
 ///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
@@ -1800,13 +1822,9 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// live process disagree with its own recorded stamp, which a caller reads as a
 /// pid handed to somebody else — the one verdict that must never come from the
 /// host misbehaving rather than from the process ending.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn platform_process_start_token(pid: u32) -> Option<StartToken> {
-    let second = ps_process_start_token(pid)?;
-    #[cfg(target_os = "macos")]
-    let recorded = format!("{second}{START_MICROS}{:06}", kernel_start_micros(pid)?);
-    #[cfg(not(target_os = "macos"))]
-    let recorded = second;
+    let recorded = ps_process_start_token(pid)?;
     Some(StartToken { recorded })
 }
 
@@ -1815,8 +1833,54 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 #[cfg(any(test, target_os = "macos"))]
 const START_MICROS: &str = " +0.";
 
-/// The microseconds of `pid`'s start the kernel recorded, or `None` where it
-/// will not say: no such process, or an answer that is not the whole record.
+/// `seconds` since the epoch as `ps -o lstart=` spells them in UTC and the C
+/// locale — `strftime("%c")`, which is `%a %b %e %H:%M:%S %Y`, as
+/// `Sun Oct 11 19:23:36 2026` and `Thu Jan  1 00:00:00 1970` — or `None` past
+/// the four-digit years that spelling has.
+///
+/// Spelled here rather than asked of `ps`, for the reason on macOS's
+/// [`platform_process_start_token`]; the inverse of Linux's `lstart_seconds`.
+/// Pure, so it is compiled into every target's tests and held on hosts that are
+/// not macOS too.
+#[cfg(any(test, target_os = "macos"))]
+fn lstart_spelling(seconds: u64) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // 1970-01-01 was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let days = i64::try_from(seconds / 86_400).ok()?;
+    let of_day = seconds % 86_400;
+    // The civil date of a day count from 1970-01-01, by Howard Hinnant's algorithm.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let of_era = shifted - era * 146_097;
+    let year_of_era = (of_era - of_era / 1_460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let from_march = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * from_march + 2) / 5 + 1;
+    let month = if from_march < 10 {
+        from_march + 3
+    } else {
+        from_march - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    if year > 9_999 {
+        return None;
+    }
+    let weekday = WEEKDAYS[usize::try_from(days.rem_euclid(7)).ok()?];
+    let month = MONTHS[usize::try_from(month - 1).ok()?];
+    Some(format!(
+        "{weekday} {month} {day:>2} {:02}:{:02}:{:02} {year}",
+        of_day / 3_600,
+        of_day % 3_600 / 60,
+        of_day % 60
+    ))
+}
+
+/// The second and the microseconds of `pid`'s start the kernel recorded, or
+/// `None` where it will not say: no such process, or an answer that is not the
+/// whole record.
 ///
 /// A non-zero `arg` is what asks this flavor to answer for a zombie as well:
 /// XNU's `proc_pidinfo` looks among exited, unreaped processes for
@@ -1825,7 +1889,7 @@ const START_MICROS: &str = " +0.";
 /// that settled at once — had no token, so its claim was refused and a record
 /// naming another process read as its own.
 #[cfg(target_os = "macos")]
-fn kernel_start_micros(pid: u32) -> Option<u64> {
+fn kernel_start(pid: u32) -> Option<(u64, u64)> {
     const FIND_ZOMBIE: u64 = 1;
     let pid = libc::c_int::try_from(pid).ok()?;
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
@@ -1843,20 +1907,21 @@ fn kernel_start_micros(pid: u32) -> Option<u64> {
     };
     // llmlint: ignore[changed_behavior_has_e2e] a short `proc_pidinfo` answer or a
     // microsecond field of a million or more is the kernel misreporting a process, not a state a
-    // test can put it in; the process that is not there at all is the `ps` refusal above.
+    // test can put it in; a process that is not there at all answers nothing, which every
+    // journey that reads a dispatch that has gone drives.
     if written != size {
         return None;
     }
     // SAFETY: the kernel answered with the whole struct, so every field is set.
     let info = unsafe { info.assume_init() };
-    (info.pbi_start_tvusec < 1_000_000).then_some(info.pbi_start_tvusec)
+    (info.pbi_start_tvusec < 1_000_000).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
 }
 
 /// How a Linux start token is spelled ahead of its clock ticks.
 #[cfg(target_os = "linux")]
 const PROC_STAT_TOKEN: &str = "linux-proc-stat:";
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn ps_process_start_token(pid: u32) -> Option<String> {
     crate::rendercost::process_spawned("ps");
     let listed = std::process::Command::new("ps")
@@ -2802,6 +2867,55 @@ mod tests {
                 token.recorded().contains(START_MICROS),
                 "{:?} carries no microseconds",
                 token.recorded()
+            );
+        }
+    }
+
+    /// A macOS token's second is spelled as `ps -o lstart=` spells it in UTC and
+    /// the C locale, so a record a build that asked `ps` wrote reads the same as
+    /// the kernel's answer for the same process: held against that format's
+    /// spellings on every host, round-tripped through Linux's reader of the same
+    /// spelling there, and against the host's own `ps` on macOS.
+    #[test]
+    fn a_start_second_is_spelled_as_ps_spells_lstart() {
+        for (seconds, spelled) in [
+            (0, "Thu Jan  1 00:00:00 1970"),
+            (1_709_208_000, "Thu Feb 29 12:00:00 2024"),
+            (1_791_746_616, "Sun Oct 11 19:23:36 2026"),
+            (1_794_647_484, "Sat Nov 14 09:11:24 2026"),
+            (253_402_300_799, "Fri Dec 31 23:59:59 9999"),
+        ] {
+            assert_eq!(
+                lstart_spelling(seconds).as_deref(),
+                Some(spelled),
+                "{seconds}"
+            );
+        }
+        assert_eq!(lstart_spelling(253_402_300_800), None);
+        #[cfg(target_os = "linux")]
+        for seconds in (0..4_102_444_800_u64).step_by(7_919_993) {
+            let spelled = lstart_spelling(seconds).expect("a four-digit year");
+            assert_eq!(
+                lstart_seconds(&spelled).and_then(|read| u64::try_from(read).ok()),
+                Some(seconds),
+                "{spelled}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let listed = std::process::Command::new("ps")
+                .args(["-p", &pid().to_string(), "-o", "lstart="])
+                .env("TZ", "UTC")
+                .env("LC_ALL", "C")
+                .output()
+                .expect("ps answers");
+            let token = process_start_token(pid()).expect("this host says when a process started");
+            assert_eq!(
+                token
+                    .recorded()
+                    .split_once(START_MICROS)
+                    .map(|(second, _)| second),
+                Some(String::from_utf8_lossy(&listed.stdout).trim()),
             );
         }
     }
