@@ -24,9 +24,11 @@
 // matrix job `test-linux (<variant>)` and its `test-profile-test-linux-<variant>`
 // artifact. The spike's matrix demonstration (onepipeline #1572, head f6c3aa78,
 // reachable as refs/pull/1572/head) built each variant with
-// `spikes/test-cost/variants/apply.sh <variant>`; the patches it applied are kept
-// beside it here, and the vendored onevcs the `runtime` patch links is in that
-// head's tree at spikes/test-cost/variants/onevcs.
+// `spikes/test-cost/variants/apply.sh <variant>` from that head's tree, where the
+// patches it applied and the vendored onevcs the `runtime` patch links are kept.
+// Beside this file are the test lists the variants were built from:
+// `variants/idle-tests.txt` and the pyramid sample's `variants/pyramid-replaced.txt`
+// and `variants/pyramid-replacements.txt`, the last two for `--tests`.
 //
 // `--tests SET=FILE` names a file of test names (one `module::test` per line,
 // `#` comments allowed); the seconds those tests took are summed per side and
