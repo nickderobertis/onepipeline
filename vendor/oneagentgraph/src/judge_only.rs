@@ -565,7 +565,7 @@ fn fingerprint_options(
     bin: &str,
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, bool)>, String> {
-    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let output = crate::launch_trace::output(
         crate::launch_site!(),
         std::process::Command::new(bin)
@@ -575,6 +575,7 @@ fn fingerprint_options(
             .stdin(std::process::Stdio::null()),
     )
     .map_err(|err| format!("could not run `{bin} fingerprint --help`: {err}"))?;
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if !output.status.success() {
         return Err(format!(
             "`{bin} fingerprint --help` failed ({}): {}",
@@ -679,8 +680,9 @@ fn llmlint_fingerprint(
         .env_clear()
         .envs(env)
         .stdin(std::process::Stdio::null());
-    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let output = crate::launch_trace::output(crate::launch_site!(), &mut command)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
         .map_err(|err| refused(format!("could not run: {err}")))?;
     if !output.status.success() {
         return Err(refused(format!(

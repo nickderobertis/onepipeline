@@ -55,10 +55,10 @@ test("the fold prints every program the recorded journeys started, from the trac
   const out = r.stdout;
   assert.match(out, /^## recorded \(linux\)$/m);
   assert.match(out, /Runner: AMD EPYC 7763 64-Core Processor, 4 logical CPUs\./);
-  // The e2e tier's summary is the run whose lines name an e2e test, not the first one.
+  // The e2e tier's summary is the largest nextest run, not the first one.
   assert.match(
     out,
-    /nextest `Summary \[ {2}60\.000s\] 2 tests run: 2 passed \(1 slow\), 1 skipped` = 1\.0 min/,
+    /largest nextest run \(the e2e tier in this repository's test jobs\) `Summary \[ {2}60\.000s\] 2 tests run: 2 passed \(1 slow\), 1 skipped` = 1\.0 min/,
   );
   const programs = rows(out, "Programs started");
   const row = (from, by, program) =>
@@ -257,7 +257,7 @@ test("the run verb reads a job's checkout, selection, caches and e2e tier off it
   );
   assert.match(
     r.stdout,
-    /e2e tier: nextest summary 1\.0 min, 2 run, 2 passed; it started 25\.8 min into the job \(20\.0 min into the gate step/,
+    /Largest nextest run \(the e2e tier in this repository's test jobs\): summary 1\.0 min, 2 run, 2 passed; it started 25\.8 min into the job \(20\.0 min into the gate step/,
   );
   const caches = rows(`### x\n${r.stdout.slice(r.stdout.indexOf("| cache step"))}`, "x");
   assert.deepEqual(
@@ -681,5 +681,37 @@ test("a test process's start beyond what its record counts is told apart from th
   assert.deepEqual(
     coverage.find((c) => c[0] === "test process, beyond the records" && c[2] === "git"),
     ["test process, beyond the records", "e2e-3e9c9dc6bf2c36a6", "git", "2"],
+  );
+});
+
+test("each program's per-start cost is its cheapest traced invocation's median, beside the runner's minimal start", () => {
+  const out = run("fold", `recorded=${recorded}`).stdout;
+  const cost = rows(out, "Per-start cost");
+  const git = cost.find((c) => c[0] === "git");
+  // The cheapest of git's invocations with three or more starts, and host's 30-start median.
+  assert.deepEqual(git.slice(2, 5), ["6.9", "13.5", "52"]);
+  assert.match(git[1], /^git show-ref @ onevcs::git::bounded/);
+  // A program the trace never timed three times takes the runner's figure alone.
+  assert.deepEqual(cost.find((c) => c[0] === "onepipeline").slice(1, 5), ["-", "-", "62.1", "6"]);
+  assert.match(
+    out,
+    /^115 records from 10 processes: 0\.0 s building them and 0\.0 s writing them, \d+\.\d µs per record/m,
+  );
+});
+
+test("folding jobs whose test sets differ names the tests not in every job", () => {
+  const extra = join(scratch, "extra");
+  cpSync(recorded, extra, { recursive: true });
+  const e2e = join(extra, "test-profile", "e2e");
+  const file = readdirSync(e2e)[0];
+  const record = JSON.parse(readFileSync(join(e2e, file), "utf8"));
+  writeFileSync(
+    join(e2e, "extra.json"),
+    JSON.stringify({ ...record, test: "surface::an_extra_journey" }),
+  );
+  const out = run("fold", `a=${recorded}`, `b=${extra}`).stdout;
+  assert.match(
+    out,
+    /Test-name sets: a 2 \(\w+\), b 3 \(\w+\); 1 names not in every job: surface::an_extra_journey\./,
   );
 });

@@ -625,7 +625,7 @@ impl PluginProcess {
             transport: kind.clone(),
             detail,
         };
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let mut child = crate::launch_trace::spawn_detached(
             crate::launch_site!(),
             Command::new(path)
@@ -634,6 +634,7 @@ impl PluginProcess {
                 .stderr(Stdio::inherit()),
         )
         .map_err(|failure| {
+        // llmlint: ignore-end[changed_behavior_has_e2e]
                 backend(format!(
                     "cannot start the plugin {}: {failure}",
                     path.display()

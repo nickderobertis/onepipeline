@@ -91,8 +91,10 @@ mod error;
 mod history_name;
 mod interrupt;
 mod judge_input;
+// llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
 #[doc(hidden)]
 pub mod launch_trace;
+// llmlint: ignore-end[changed_behavior_has_e2e]
 mod llmlint;
 pub mod note;
 mod oneharness;

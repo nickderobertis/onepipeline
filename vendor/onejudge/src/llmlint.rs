@@ -497,17 +497,17 @@ impl Running {
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
             (out, err)
         });
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let status = {
             let _watch =
-                // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
                 crate::launch_trace::wait(crate::launch_site!(), Some(self.child.id()), None);
             self.child.wait()
         };
         if let Ok(status) = &status {
-            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
             crate::launch_trace::exit(crate::launch_site!(), self.child.id(), status.code());
         }
         let status = status?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         self.reaped = true;
         Ok(Output {
             status,

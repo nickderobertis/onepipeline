@@ -309,8 +309,9 @@ impl Group {
     /// that started but could not be grouped is killed rather than returned.
     pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
         self.prepare(command)?;
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         let mut child = crate::launch_trace::spawn_detached(crate::launch_site!(), command)?;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         match self.adopt(&child) {
             Ok(_) => Ok(child),
             // A member running unsupervised is worse than one that never

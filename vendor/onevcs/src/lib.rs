@@ -78,8 +78,10 @@ mod import;
 mod integrate;
 mod label;
 mod landed;
+// llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
 #[doc(hidden)]
 pub mod launch_trace;
+// llmlint: ignore-end[changed_behavior_has_e2e]
 mod lfs_pointer;
 mod lock;
 mod merge_path;

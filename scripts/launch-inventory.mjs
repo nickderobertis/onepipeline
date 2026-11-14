@@ -262,8 +262,20 @@ export function validRecord(r) {
   if (r.site != null && typeof r.site !== "string") return false;
   for (const f of ["function", "wait_site", "verb", "test"])
     if (r[f] != null && typeof r[f] !== "string") return false;
-  if (!["child", "interval_ns", "polls", "write_ns_before"].every((f) => isTimeOrNull(r[f])))
+  if (
+    !["child", "interval_ns", "polls", "write_ns_before", "trace_ns"].every((f) =>
+      isTimeOrNull(r[f]),
+    )
+  )
     return false;
+  if (r.kind === "env")
+    return (
+      Boolean(r.env) &&
+      typeof r.env === "object" &&
+      Object.entries(r.env).every(
+        ([k, v]) => k.startsWith("GIT_") && (v === null || typeof v === "string"),
+      )
+    );
   if (r.kind === "proc")
     return (
       typeof r.exe === "string" &&
@@ -453,8 +465,8 @@ export function nextestRuns(log) {
 
 /**
  * The largest nextest run a job log holds, or null. In this repository's test jobs that is
- * the e2e tier, whose ~2,150 journeys no other tier approaches; a report says it took the
- * largest run rather than claiming to have identified the tier by name.
+ * the e2e tier, whose ~2,150 journeys no other tier approaches, and the reports print it as
+ * the largest run, naming that tier only as what it is in these jobs.
  */
 export function largestRun(log) {
   if (!log) return null;
@@ -998,7 +1010,7 @@ export function render(folds, { top = 20 } = {}) {
     out.push(
       `Tier: ${f.testCount} test-profile records (${f.unfinished.length} unfinished), ${(f.testSeconds / 60).toFixed(1)} test-minutes; ` +
         (f.summary
-          ? `nextest \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min`
+          ? `largest nextest run (the e2e tier in this repository's test jobs) \`${f.summary.line}\` = ${(f.summary.seconds / 60).toFixed(1)} min`
           : "no e2e nextest summary in job.log") +
         `; test-name set sha256/16 ${f.testsDigest}.\n`,
     );
@@ -1392,7 +1404,7 @@ export function jobFacts(log) {
       said: said.slice(0, 3),
     });
   }
-  facts.e2e = largestRun(log);
+  facts.largest = largestRun(log);
   const gate = steps.find((s) => /just ci-test-/.test(s.name));
   facts.job = { start: lines[0]?.t ?? 0, end, gateStart: gate?.start ?? null };
   return facts;
@@ -1408,9 +1420,9 @@ function renderFacts(label, f) {
   out.push(
     `Job ${min(f.job.end - f.job.start)} min; gate step from ${f.job.gateStart ? min(f.job.gateStart - f.job.start) : "-"} min.`,
   );
-  if (f.e2e)
+  if (f.largest)
     out.push(
-      `e2e tier: nextest summary ${min(f.e2e.seconds)} min, ${f.e2e.run} run, ${f.e2e.passed} passed; it started ${min(f.e2e.start - f.job.start)} min into the job (${f.job.gateStart ? min(f.e2e.start - f.job.gateStart) : "-"} min into the gate step, the compile and the tasks before it) and ended ${min(f.job.end - f.e2e.end)} min before the job did.`,
+      `Largest nextest run (the e2e tier in this repository's test jobs): summary ${min(f.largest.seconds)} min, ${f.largest.run} run, ${f.largest.passed} passed; it started ${min(f.largest.start - f.job.start)} min into the job (${f.job.gateStart ? min(f.largest.start - f.job.gateStart) : "-"} min into the gate step, the compile and the tasks before it) and ended ${min(f.job.end - f.largest.end)} min before the job did.`,
     );
   if (f.selection)
     out.push(`Nx selection: ${f.selection.count} tasks: ${f.selection.tasks.join(" ")}.`);

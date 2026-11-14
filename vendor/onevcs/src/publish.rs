@@ -662,8 +662,9 @@ pub(crate) fn pause_unless_cancelled(
         if left.is_zero() {
             return Ok(());
         }
-        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call, never landed: the hosted e2e runs and their strace/ETW check exercise it.
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
         crate::launch_trace::sleep(crate::launch_site!(), left.min(CANCELLATION_GRAIN));
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 
