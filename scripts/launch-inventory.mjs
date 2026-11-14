@@ -215,8 +215,8 @@ export const WRITE_VERBS = new Set([
 export const RECORDING_FLAGS = ["--record", "--acknowledge", "--decide", "--reply", "--post"];
 
 /** Whether one engine launch, by its argv, only reads. */
-export function launchReads(verb, argv = []) {
-  return READ_VERBS.has(verb) && !argv.some((a) => RECORDING_FLAGS.includes(a));
+export function launchReads(verb, argv) {
+  return READ_VERBS.has(verb) && !(argv ?? []).some((a) => RECORDING_FLAGS.includes(a));
 }
 
 const median = (xs) => quantile(xs, 0.5);
@@ -242,6 +242,15 @@ const RECORD_FIELDS = {
 };
 
 const isTime = (x) => Number.isFinite(x) && x >= 0;
+
+/** A GIT_* set as a child was given it: each name a GIT_ variable, each value a string or unset. */
+const gitEnv = (env) =>
+  Boolean(env) &&
+  typeof env === "object" &&
+  !Array.isArray(env) &&
+  Object.entries(env).every(
+    ([k, v]) => k.startsWith("GIT_") && (v === null || typeof v === "string"),
+  );
 const isTimeOrNull = (x) => x == null || isTime(x);
 
 /** Whether `r` is a trace record of a kind this fold reads, its fields of their types. */
@@ -268,14 +277,9 @@ export function validRecord(r) {
     )
   )
     return false;
-  if (r.kind === "env")
-    return (
-      Boolean(r.env) &&
-      typeof r.env === "object" &&
-      Object.entries(r.env).every(
-        ([k, v]) => k.startsWith("GIT_") && (v === null || typeof v === "string"),
-      )
-    );
+  if (r.kind === "env") return gitEnv(r.env);
+  if (r.kind === "start" && r.env != null && typeof r.env === "object" && !gitEnv(r.env))
+    return false;
   if (r.kind === "proc")
     return (
       typeof r.exe === "string" &&
@@ -490,7 +494,6 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
           skipped.malformed++;
           continue;
         }
-        // An ETW process start: its pid, its parent's, and its image.
         if (
           !r ||
           typeof r !== "object" ||
@@ -822,7 +825,6 @@ export function foldJob(job) {
     e.count += w.count;
     e.ns += w.slept_ns ?? 0;
   }
-  // The harness's own waits, on the test process's threads, by site.
   const harness = new Map();
   for (const w of job.harnessWaits ?? []) {
     const k = `${w.kind}\u0000${w.site}`;
