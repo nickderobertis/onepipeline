@@ -202,7 +202,7 @@ function fetchRun(options, spec) {
   // A re-run keeps the first attempt's artifacts beside its own, under the same
   // names, so an attempt's are the ones created while it ran.
   const listed = JSON.parse(
-    readFileSync(cached(dir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])), "utf8"),
+    readFileSync(cached(adir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])), "utf8"),
   ).artifacts;
   const started = Date.parse(meta.run_started_at);
   const later = listed.filter((a) => Date.parse(a.created_at) >= started);
