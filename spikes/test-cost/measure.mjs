@@ -232,13 +232,21 @@ function fetchAttempt(cache, spec) {
   const attempt = spec.attempt ?? top.run_attempt;
   const adir = join(dir, `attempt-${attempt}`);
   const meta = readJson(kept(adir, "attempt.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}`)));
-  expect(STATUSES.has(meta?.status) && SHA.test(meta.head_sha ?? "") && isTime(meta.run_started_at), `run ${spec.run} attempt ${attempt}: no known status, head SHA or start time`);
+  expect(STATUSES.has(meta?.status) && typeof meta.head_sha === "string" && SHA.test(meta.head_sha) && isTime(meta.run_started_at), `run ${spec.run} attempt ${attempt}: no known status, head SHA or start time`);
   const label = `${spec.run}#${attempt}${spec.variant ? `@${spec.variant}` : ""}`;
   if (meta.status !== "completed") return { label, incomplete: meta.status };
   const jobs = readJson(kept(adir, "jobs.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}/jobs?per_page=100`)))?.jobs;
   expect(
     Array.isArray(jobs) &&
-      jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at) && "conclusion" in job && CONCLUSIONS.has(job.conclusion)),
+      jobs.every(
+        (job) =>
+          isCount(job?.id) &&
+          typeof job.name === "string" &&
+          isTime(job.created_at) &&
+          "conclusion" in job &&
+          CONCLUSIONS.has(job.conclusion) &&
+          (job.completed_at === undefined || job.completed_at === null || isTime(job.completed_at)),
+      ),
     `run ${spec.run} attempt ${attempt}: its job listing is not a list of named jobs with known conclusions`,
   );
   const jobCount = readJson(join(adir, "jobs.json")).total_count;

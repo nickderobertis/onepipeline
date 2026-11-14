@@ -144,6 +144,10 @@ function world(change = {}) {
       const wanted = change.logs && key in change.logs ? change.logs[key] : log({ summary: `     Summary [ ${variant === "idle" ? 540 : 600}.000s] 2 tests run: 2 passed, 0 skipped` });
       if (wanted !== null) logs[`${index + 1}_${named("test-linux", variant, change)}.txt`] = wanted;
       const id = attempt * 100 + index + 1;
+      if (change.duplicate && id === 101) {
+        artifacts.push({ id: 151, name: "test-profile-test-linux-baseline", created_at: "2026-11-13T11:25:00Z", expired: false });
+        answer(`${REPO}/actions/artifacts/151/zip`, zipOf({ "e2e/views.late.json": record("views::late", 5, {}) }));
+      }
       artifacts.push({ id, name: change.plain ? "test-profile-test-linux" : `test-profile-test-linux-${variant}`, created_at: `2026-11-13T1${attempt}:20:00Z`, expired: change.expired?.includes(id) ?? false });
       const files = {
         "e2e/views.one.json": record("views::one", 300, {
@@ -449,6 +453,16 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.ok(!existsSync(join(w.cache, RUN, "escaped.txt")));
   });
 
+  it("takes an attempt's earliest artifact of a name when it uploaded that name twice", () => {
+    const { stdout } = reported({ duplicate: true }, ONE());
+    assert.match(stdout, /\| baseline \| 4242#1@baseline \| test-linux \| 3 \| 0, 0\.0 \| 0, 0\.0 \|/);
+  });
+
+  it("times a restore that is the log's last step to the log's last line", () => {
+    const last = `${log()}2026-11-13T10:15:00.0000000Z ##[group]Run Swatinem/rust-cache@v2.9.2\r\n2026-11-13T10:15:12.0000000Z Cache restored successfully\r\n`;
+    assert.match(reported({ logs: { "1 baseline": last } }, ONE()).stdout, /; rust-cache: hit, 12\.0 s \|/);
+  });
+
   it("reads each restore message the cache actions print", () => {
     for (const [line, outcome] of [
       ["No cache found.", "miss"],
@@ -521,6 +535,8 @@ describe("measure.mjs refusals", () => {
     refused({ jobsAnswer: () => ({ total_count: 150, jobs: [] }) }, ONE(), /its job listing holds 0 of 150 jobs/);
     refused({ jobs: (jobs) => jobs.map(({ conclusion, ...job }) => job) }, ONE(), /not a list of named jobs with known conclusions/);
     refused({ run: { run_attempt: 0 } }, ONE(), /its record names no attempt/);
+    refused({ attempt: () => ({ status: "completed", head_sha: ["a".repeat(40)], run_started_at: "2026-11-13T10:00:00Z" }) }, ONE(), /no known status, head SHA or start time/);
+    refused({ jobs: (jobs) => jobs.map((job) => ({ ...job, completed_at: "soon" })) }, ONE(), /not a list of named jobs with known conclusions/);
     refused({ jobs: (jobs) => jobs.map((job) => ({ ...job, started_at: "2026-11-13T09:00:00Z" })) }, ONE(), /created, started and completed times are not in order/);
   });
 
