@@ -738,3 +738,24 @@ test("a test name that is not a test path names no file of its own: the record i
     assert.match(ran.stderr, /strace is not installed/);
   }
 });
+
+test("each program's per-start floor is set against the Linux job's, with the minutes the difference costs", () => {
+  const win = join(scratch, "windows");
+  cpSync(recorded, win, { recursive: true });
+  const e2e = join(win, "test-profile", "e2e");
+  for (const f of readdirSync(e2e)) {
+    const record = JSON.parse(readFileSync(join(e2e, f), "utf8"));
+    writeFileSync(join(e2e, f), JSON.stringify({ ...record, os: "windows" }));
+  }
+  const hostFile = join(win, "test-profile", "launch-host.json");
+  const host = JSON.parse(readFileSync(hostFile, "utf8"));
+  for (const r of host.spawn.results) if (r.name === "git") r.median_ms = 73.5;
+  writeFileSync(hostFile, JSON.stringify(host));
+  const out = run("fold", `linux=${recorded}`, `windows=${win}`).stdout;
+  const rows_ = rows(out, "Per-start cost against linux");
+  // git's floor is 73.5 ms against 13.5 ms: 60 ms over its 52 starts.
+  assert.deepEqual(
+    rows_.find((c) => c[0] === "windows" && c[1] === "git"),
+    ["windows", "git", "73.5", "13.5", "60.0", "52", "0.05", "1.86"],
+  );
+});
