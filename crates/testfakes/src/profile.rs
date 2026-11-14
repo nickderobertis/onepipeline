@@ -425,6 +425,7 @@ mod wait_sites {
 
     static SITES: Mutex<Tally> = Mutex::new(BTreeMap::new());
 
+    // llmlint: ignore[invalid_states_unrepresentable] the kind is one of three literals at this module's three call sites, the same reason as the Tally alias above; an enum would change the e2e tier's compiled harness after its baseline runs were taken, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
     pub(super) fn tally(
         kind: &'static str,
         site: &'static std::panic::Location<'static>,

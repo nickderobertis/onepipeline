@@ -378,6 +378,11 @@ test("host names this runner's processor and times each CLI's cheapest start", (
   assert.equal(typeof doc.cpu_model, "string");
   assert.ok(doc.cpu_model.length > 0);
   assert.ok(doc.cpus >= 1);
+  // macOS names its processor through sysctl, with the physical core count beside it.
+  if (process.platform === "darwin") {
+    assert.deepEqual(doc.unanswered, []);
+    assert.ok(doc.physical_cpus >= 1);
+  }
   const node = doc.spawn.results.find((x) => x.name === "node");
   assert.equal(node.runs, 2);
   assert.ok(node.median_ms > 0);
@@ -600,4 +605,30 @@ test("the OS trace runner runs an e2e binary untraced when no trace is asked for
       ? /cannot create .* for the strace record: point ONEPIPELINE_OS_TRACE_DIR/
       : /strace is not installed/,
   );
+});
+
+test("a document that is not JSON, or a host document of no known shape, is refused naming the file", () => {
+  const broken = join(scratch, "broken");
+  cpSync(recorded, broken, { recursive: true });
+  const host = join(broken, "test-profile", "launch-host.json");
+  writeFileSync(host, "{ not json");
+  const notJson = run("fold", `b=${broken}`);
+  assert.equal(notJson.status, 1);
+  assert.match(
+    notJson.stderr,
+    /launch-host\.json is not a JSON document: .*\nnext: re-download the job's test-profile artifact\n/,
+  );
+  writeFileSync(host, JSON.stringify({ cpus: "four", spawn: { results: [] } }));
+  const shapeless = run("fold", `b=${broken}`);
+  assert.equal(shapeless.status, 1);
+  assert.match(
+    shapeless.stderr,
+    /launch-host\.json holds no spawn results\nnext: regenerate it with 'node scripts\/launch-inventory\.mjs host'\n/,
+  );
+  const empty = join(scratch, "empty.log");
+  writeFileSync(empty, "no timestamps here\n");
+  const log = run("run", `e=${empty}`);
+  assert.equal(log.status, 1);
+  assert.match(log.stderr, /the job log holds no timestamped line/);
+  assert.equal(spawnSync("bash", [runner]).status, 2);
 });

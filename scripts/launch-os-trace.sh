@@ -7,6 +7,10 @@
 # variable is unset or the binary is not the e2e tier's, and refuses when tracing is
 # asked for and strace is missing, rather than running the test untraced.
 set -euo pipefail
+[ "$#" -ge 1 ] || {
+  echo "launch-os-trace: name the binary to run, as cargo's target runner does: launch-os-trace.sh BINARY [ARG...]" >&2
+  exit 2
+}
 binary="$1"
 case "$(basename "$binary")" in
   e2e-*) ;;

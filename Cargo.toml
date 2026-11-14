@@ -1827,7 +1827,11 @@ path = "tests/status_read/main.rs"
 [patch.crates-io]
 onevcs = { path = "vendor/onevcs" }
 # The linked libraries the inventory showed starting processes inside the engine,
-# vendored the same way: the harness runs, the judges, and the bus's hooks.
+# vendored the same way: the harness runs, the judges, the bus's hooks and the agent
+# graph's pre-turn scripts. Two departures besides the trace calls: oneharness-core
+# allows the one warning its release raises on this toolchain, and oneagentgraph's
+# test-only tests/yaml-corpus/ is left out, since the publication boundary refuses
+# terms it carries.
 oneharness-core = { path = "vendor/oneharness-core" }
 onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }

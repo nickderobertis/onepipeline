@@ -208,6 +208,7 @@ export const WRITE_VERBS = new Set([
   "integrate",
 ]);
 
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] which of a verb's flags record is the engine's behaviour, stated in no machine-readable form a gate could compare; a flag missing here can only count a recording launch as a read, which over-states re-reads in a measurement table that never lands: this branch is preserved as the measurement record and nothing on it merges.
 /** The flags that make a reading verb record something. */
 export const RECORDING_FLAGS = ["--record", "--acknowledge", "--decide", "--reply", "--post"];
 
@@ -247,7 +248,8 @@ export function validRecord(r) {
   if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
   if (r.t != null && !isTime(r.t)) return false;
   if (r.site != null && typeof r.site !== "string") return false;
-  if (r.function != null && typeof r.function !== "string") return false;
+  for (const f of ["function", "wait_site", "verb", "test"])
+    if (r[f] != null && typeof r[f] !== "string") return false;
   if (!["child", "interval_ns", "polls", "write_ns_before"].every((f) => isTimeOrNull(r[f])))
     return false;
   if (r.kind === "proc")
@@ -384,7 +386,7 @@ export function readJob(label, dir) {
     x &&
     typeof x === "object" &&
     typeof x.name === "string" &&
-    (x.error != null || isTime(x.median_ms));
+    (x.error != null ? x.median_ms == null : isTime(x.median_ms));
   const facts = (h) =>
     (h.cpu_model == null || typeof h.cpu_model === "string") &&
     isTime(h.cpus) &&
@@ -414,6 +416,7 @@ export function nextestRuns(log) {
   let start = null;
   for (const line of lines) {
     const t = Date.parse(/^(\S+Z)\s/.exec(line)?.[1] ?? "") / 1000;
+    if (!Number.isFinite(t)) continue;
     if (/Nextest run ID/.test(line)) start = t;
     const m = /Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run: (\d+) passed/.exec(line);
     if (m)
@@ -943,7 +946,6 @@ export function coverage(os, t, records) {
 }
 
 function table(head, rows) {
-  // A column is right-aligned when every cell in it is a figure.
   const figure = (c) => c == null || /^-?[\d.]+%?$|^-$|^blocking$/.test(String(c));
   const align = head.map((_, i) => rows.length > 0 && rows.every((r) => figure(r[i])));
   const out = [
@@ -1289,9 +1291,15 @@ export function jobFacts(log) {
     .split(/\r?\n/)
     .map((line) => {
       const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ?(.*)$/.exec(line);
-      return m ? { t: Date.parse(m[1]) / 1000, text: m[2] } : null;
+      const t = m ? Date.parse(m[1]) / 1000 : Number.NaN;
+      return Number.isFinite(t) ? { t, text: m[2] } : null;
     })
     .filter(Boolean);
+  if (!lines.length)
+    throw new Refusal(
+      "the job log holds no timestamped line",
+      "save the log as 'gh api .../actions/jobs/<id>/logs' serves it, timestamps included",
+    );
   const facts = {
     checkout: null,
     selection: null,
@@ -1355,7 +1363,6 @@ export function jobFacts(log) {
       said: said.slice(0, 3),
     });
   }
-  // The e2e tier: the largest nextest run.
   facts.e2e = largestRun(log);
   const gate = steps.find((s) => /just ci-test-/.test(s.name));
   facts.job = { start: lines[0]?.t ?? 0, end, gateStart: gate?.start ?? null };
