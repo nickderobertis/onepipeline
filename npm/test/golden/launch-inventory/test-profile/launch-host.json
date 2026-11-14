@@ -1,0 +1,78 @@
+{
+  "platform": "linux",
+  "cpu_model": "AMD EPYC 7763 64-Core Processor",
+  "cpus": 4,
+  "physical_cpus": null,
+  "runner": {
+    "name": null,
+    "image": null,
+    "version": null
+  },
+  "spawn": {
+    "platform": "linux",
+    "arch": "x64",
+    "runs": 30,
+    "results": [
+      {
+        "name": "onepipeline",
+        "path": "/work/onepipeline/target/debug/onepipeline",
+        "args": [
+          "--version"
+        ],
+        "runs": 30,
+        "median_ms": 62.134727,
+        "p10_ms": 51.343689,
+        "p90_ms": 106.681797
+      },
+      {
+        "name": "onevcs",
+        "path": "/work/onepipeline/target/debug/onevcs",
+        "args": [
+          "--version"
+        ],
+        "runs": 30,
+        "median_ms": 34.978645,
+        "p10_ms": 25.756391,
+        "p90_ms": 46.466342
+      },
+      {
+        "name": "git",
+        "path": "/usr/bin/git",
+        "args": [
+          "--version"
+        ],
+        "runs": 30,
+        "median_ms": 13.524868,
+        "p10_ms": 8.729553,
+        "p90_ms": 20.85314
+      },
+      {
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "args": [
+          "-c",
+          ":"
+        ],
+        "runs": 30,
+        "median_ms": 13.030997,
+        "p10_ms": 9.791362,
+        "p90_ms": 24.556045
+      },
+      {
+        "name": "sh",
+        "path": "/usr/bin/sh",
+        "args": [
+          "-c",
+          ":"
+        ],
+        "runs": 30,
+        "median_ms": 9.857016,
+        "p10_ms": 6.2837,
+        "p90_ms": 17.314795
+      }
+    ],
+    "git_on_path": [
+      "/usr/bin/git"
+    ]
+  }
+}

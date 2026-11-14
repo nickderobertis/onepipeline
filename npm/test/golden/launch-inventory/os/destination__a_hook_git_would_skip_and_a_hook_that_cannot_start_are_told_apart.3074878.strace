@@ -1,0 +1,317 @@
+3074893 execve("/work/onepipeline/target/debug/deps/e2e-3e9c9dc6bf2c36a6", ["/work/onepipeline/target/debug/deps/e2e-3e9c9dc6bf2c36a6", "--exact", "destination::a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart", "--nocapture"], 0x7ffffb86c3e8 /* 125 vars */) = 0
+3074893 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2dff990, parent_tid=0x7079e2dff990, exit_signal=0, stack=0x7079e2bff000, stack_size=0x1ff380, tls=0x7079e2dff6c0} => {parent_tid=[3074901]}, 88) = 3074901
+3074893 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079da9ff990, parent_tid=0x7079da9ff990, exit_signal=0, stack=0x7079da7ff000, stack_size=0x1ff380, tls=0x7079da9ff6c0} => {parent_tid=[3074902]}, 88) = 3074902
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3074914 execve(".venv/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/tools/.venv/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/tools/node_modules/.bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/tools/.venv/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.local/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.cargo/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.local/node/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.asdf/shims/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/home/runner/.asdf/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/usr/local/sbin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/usr/local/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/usr/sbin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074914 execve("/usr/bin/git", ["git", "init", "--bare", "--initial-branch=main"], 0x7079d4004330 /* 132 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3074914
+3074914 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3074926 execve(".venv/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/tools/.venv/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/tools/node_modules/.bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/tools/.venv/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.local/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.cargo/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.local/node/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.asdf/shims/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/home/runner/.asdf/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/usr/local/sbin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/usr/local/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/usr/sbin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */) = -1 ENOENT (No such file or directory)
+3074926 execve("/usr/bin/git", ["git", "fast-import", "--quiet", "--done"], 0x7079d40091d0 /* 128 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3074926
+3074926 <... execve resumed>)           = 0
+3074926 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7a406fe44350) = 3074934
+3074934 execve("/usr/lib/git-core/git", ["/usr/lib/git-core/git", "unpack-objects", "-q"], 0x5e9bb3420220 /* 132 vars */) = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3074954 execve(".venv/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/tools/.venv/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/tools/node_modules/.bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/tools/.venv/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.local/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.cargo/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.local/node/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.asdf/shims/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/home/runner/.asdf/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/usr/local/sbin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/usr/local/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/usr/sbin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */) = -1 ENOENT (No such file or directory)
+3074954 execve("/usr/bin/git", ["git", "clone", "/tmp/op-3074893-0/origin.git", "/tmp/op-3074893-0/service"], 0x7079d400b4d0 /* 132 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3074954
+3074954 <... execve resumed>)           = 0
+3074954 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7e2de5e0b350) = 3074966
+3074966 execve("/bin/sh", ["/bin/sh", "-c", "git-upload-pack '/tmp/op-3074893-0/origin.git'", "git-upload-pack '/tmp/op-3074893-0/origin.git'"], 0x5931bfa8b5f0 /* 134 vars */) = 0
+3074966 vfork( <unfinished ...>
+3074978 execve("/usr/lib/git-core/git-upload-pack", ["git-upload-pack", "/tmp/op-3074893-0/origin.git"], 0x5e8fcfbc0d98 /* 134 vars */ <unfinished ...>
+3074966 <... vfork resumed>)            = 3074978
+3074978 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3074983 execve(".venv/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/tools/.venv/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/tools/node_modules/.bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/tools/.venv/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.local/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.cargo/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.local/node/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.asdf/shims/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/home/runner/.asdf/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/usr/local/sbin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/usr/local/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/usr/sbin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3074983 execve("/usr/bin/git", ["git", "remote", "get-url", "origin"], 0x7079d400c720 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3074983
+3074983 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3074989 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--is-inside-work-tree"], 0x5ef77f20fcd0 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3074989
+3074989 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3074991]}, 88) = 3074991
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e29fd990, parent_tid=0x7079e29fd990, exit_signal=0, stack=0x7079e27fd000, stack_size=0x1ff380, tls=0x7079e29fd6c0} => {parent_tid=[3074992]}, 88) = 3074992
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e29fd990, parent_tid=0x7079e29fd990, exit_signal=0, stack=0x7079e27fd000, stack_size=0x1ff380, tls=0x7079e29fd6c0} => {parent_tid=[3074996]}, 88) = 3074996
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3075005]}, 88) = 3075005
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075009 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--git-common-dir"], 0x5ef77f20fcd0 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075009
+3075009 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3075015]}, 88) = 3075015
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e29fd990, parent_tid=0x7079e29fd990, exit_signal=0, stack=0x7079e27fd000, stack_size=0x1ff380, tls=0x7079e29fd6c0} => {parent_tid=[3075016]}, 88) = 3075016
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e29fd990, parent_tid=0x7079e29fd990, exit_signal=0, stack=0x7079e27fd000, stack_size=0x1ff380, tls=0x7079e29fd6c0} => {parent_tid=[3075020]}, 88) = 3075020
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3075026]}, 88) = 3075026
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3075030]}, 88) = 3075030
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075032 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--git-path", "hooks"], 0x5ef77f20fcd0 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075032
+3075032 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e2bfe990, parent_tid=0x7079e2bfe990, exit_signal=0, stack=0x7079e29fe000, stack_size=0x1ff380, tls=0x7079e2bfe6c0} => {parent_tid=[3075036]}, 88) = 3075036
+3074902 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7079e29fd990, parent_tid=0x7079e29fd990, exit_signal=0, stack=0x7079e27fd000, stack_size=0x1ff380, tls=0x7079e29fd6c0} => {parent_tid=[3075038]}, 88) = 3075038
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075041 execve(".venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/tools/.venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/tools/node_modules/.bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/tools/.venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.local/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.cargo/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.local/node/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.asdf/plugins/nodejs/shims/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.asdf/shims/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/home/runner/.asdf/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/usr/local/sbin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/usr/local/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/usr/sbin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075041 execve("/usr/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075041
+3075041 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075053 execve(".venv/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/tools/.venv/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/tools/node_modules/.bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/tools/.venv/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.local/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.cargo/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.local/node/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.asdf/shims/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/home/runner/.asdf/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/usr/local/sbin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/usr/local/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/usr/sbin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */) = -1 ENOENT (No such file or directory)
+3075053 execve("/usr/bin/git", ["git", "config", "core.hooksPath", "/tmp/op-3074893-0/hooks"], 0x7079d4059420 /* 133 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075053
+3075053 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075061 execve("/work/onepipeline/target/debug/onepipeline", ["/work/onepipeline/target/debug/onepipeline", "plan", "check", "plans:titled-board"], 0x7079d40231d0 /* 134 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075061
+3075061 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075082 execve("/work/onepipeline/target/debug/build/doubles/3074893/onevcs", ["onevcs", "resolve", "service"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075082
+3075082 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075084 execve("/work/onepipeline/target/debug/build/doubles/3074893/onevcs", ["onevcs", "rules", "check", "service"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075084
+3075084 <... execve resumed>)           = 0
+3075084 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x733c0149f000, stack_size=0x9000}, 88 <unfinished ...>
+3075094 execve("/usr/bin/git", ["/usr/bin/git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 0x7ffff08c40b0 /* 134 vars */ <unfinished ...>
+3075084 <... clone3 resumed>)           = 3075094
+3075094 <... execve resumed>)           = 0
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00fff990, parent_tid=0x733c00fff990, exit_signal=0, stack=0x733c00dff000, stack_size=0x1ff680, tls=0x733c00fff6c0} => {parent_tid=[3075097]}, 88) = 3075097
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00dfe990, parent_tid=0x733c00dfe990, exit_signal=0, stack=0x733c00bfe000, stack_size=0x1ff680, tls=0x733c00dfe6c0} => {parent_tid=[3075098]}, 88) = 3075098
+3075084 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x733c0149f000, stack_size=0x9000}, 88 <unfinished ...>
+3075103 execve("/usr/bin/git", ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], 0x7ffff08c40b0 /* 134 vars */ <unfinished ...>
+3075084 <... clone3 resumed>)           = 3075103
+3075103 <... execve resumed>)           = 0
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00dfe990, parent_tid=0x733c00dfe990, exit_signal=0, stack=0x733c00bfe000, stack_size=0x1ff680, tls=0x733c00dfe6c0} => {parent_tid=[3075104]}, 88) = 3075104
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00fff990, parent_tid=0x733c00fff990, exit_signal=0, stack=0x733c00dff000, stack_size=0x1ff680, tls=0x733c00fff6c0} => {parent_tid=[3075105]}, 88) = 3075105
+3075084 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x733c0149f000, stack_size=0x9000}, 88 <unfinished ...>
+3075112 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--abbrev-ref", "HEAD"], 0x7ffff08c40b0 /* 134 vars */ <unfinished ...>
+3075084 <... clone3 resumed>)           = 3075112
+3075112 <... execve resumed>)           = 0
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00fff990, parent_tid=0x733c00fff990, exit_signal=0, stack=0x733c00dff000, stack_size=0x1ff680, tls=0x733c00fff6c0} => {parent_tid=[3075113]}, 88) = 3075113
+3075084 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x733c00dfe990, parent_tid=0x733c00dfe990, exit_signal=0, stack=0x733c00bfe000, stack_size=0x1ff680, tls=0x733c00dfe6c0} => {parent_tid=[3075114]}, 88) = 3075114
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075124 execve("/work/onepipeline/target/debug/build/doubles/3074893/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve(".venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/tools/.venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/tools/node_modules/.bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/tools/.venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.local/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.cargo/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.local/node/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.asdf/shims/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/home/runner/.asdf/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/usr/local/sbin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/usr/local/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/usr/sbin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075124 execve("/usr/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075124
+3075124 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b75ff990, parent_tid=0x7995b75ff990, exit_signal=0, stack=0x7995b73ff000, stack_size=0x1ff340, tls=0x7995b75ff6c0} => {parent_tid=[3075134]}, 88) = 3075134
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075139 execve("/usr/bin/git", ["/usr/bin/git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075139
+3075139 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b75ff990, parent_tid=0x7995b75ff990, exit_signal=0, stack=0x7995b73ff000, stack_size=0x1ff340, tls=0x7995b75ff6c0} => {parent_tid=[3075141]}, 88) = 3075141
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b73fe990, parent_tid=0x7995b73fe990, exit_signal=0, stack=0x7995b71fe000, stack_size=0x1ff340, tls=0x7995b73fe6c0} => {parent_tid=[3075142]}, 88) = 3075142
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075148 execve("/usr/bin/git", ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075148
+3075148 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b73fe990, parent_tid=0x7995b73fe990, exit_signal=0, stack=0x7995b71fe000, stack_size=0x1ff340, tls=0x7995b73fe6c0} => {parent_tid=[3075151]}, 88) = 3075151
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b75ff990, parent_tid=0x7995b75ff990, exit_signal=0, stack=0x7995b73ff000, stack_size=0x1ff340, tls=0x7995b75ff6c0} => {parent_tid=[3075154]}, 88) = 3075154
+3075061 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7995b7acc000, stack_size=0x9000}, 88 <unfinished ...>
+3075156 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--abbrev-ref", "HEAD"], 0x7ffe68163c80 /* 134 vars */ <unfinished ...>
+3075061 <... clone3 resumed>)           = 3075156
+3075156 <... execve resumed>)           = 0
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b75ff990, parent_tid=0x7995b75ff990, exit_signal=0, stack=0x7995b73ff000, stack_size=0x1ff340, tls=0x7995b75ff6c0} => {parent_tid=[3075163]}, 88) = 3075163
+3075061 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7995b73fe990, parent_tid=0x7995b73fe990, exit_signal=0, stack=0x7995b71fe000, stack_size=0x1ff340, tls=0x7995b73fe6c0} => {parent_tid=[3075164]}, 88) = 3075164
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075171 execve(".venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/tools/.venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/tools/node_modules/.bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/tools/.venv/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.local/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.cargo/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.local/node/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.asdf/plugins/nodejs/shims/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.asdf/shims/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/home/runner/.asdf/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/usr/local/sbin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/usr/local/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/usr/sbin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */) = -1 ENOENT (No such file or directory)
+3075171 execve("/usr/bin/cp", ["cp", "/tmp/op-3074893-0/hooks/commit-msg.staged.3074893", "/tmp/op-3074893-0/hooks/commit-msg"], 0x5ef77f20fcd0 /* 129 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075171
+3075171 <... execve resumed>)           = 0
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075183 execve("/work/onepipeline/target/debug/onepipeline", ["/work/onepipeline/target/debug/onepipeline", "plan", "check", "plans:titled-board"], 0x7079d403fcc0 /* 134 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075183
+3075183 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075221 execve("/work/onepipeline/target/debug/build/doubles/3074893/onevcs", ["onevcs", "resolve", "service"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075221
+3075221 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075229 execve("/work/onepipeline/target/debug/build/doubles/3074893/onevcs", ["onevcs", "rules", "check", "service"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075229
+3075229 <... execve resumed>)           = 0
+3075229 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7a7a09e97000, stack_size=0x9000}, 88 <unfinished ...>
+3075237 execve("/usr/bin/git", ["/usr/bin/git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 0x7ffc5a0afc40 /* 134 vars */ <unfinished ...>
+3075229 <... clone3 resumed>)           = 3075237
+3075237 <... execve resumed>)           = 0
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a099ff990, parent_tid=0x7a7a099ff990, exit_signal=0, stack=0x7a7a097ff000, stack_size=0x1ff680, tls=0x7a7a099ff6c0} => {parent_tid=[3075239]}, 88) = 3075239
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a097fe990, parent_tid=0x7a7a097fe990, exit_signal=0, stack=0x7a7a095fe000, stack_size=0x1ff680, tls=0x7a7a097fe6c0} => {parent_tid=[3075240]}, 88) = 3075240
+3075229 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7a7a09e97000, stack_size=0x9000}, 88 <unfinished ...>
+3075246 execve("/usr/bin/git", ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], 0x7ffc5a0afc40 /* 134 vars */ <unfinished ...>
+3075229 <... clone3 resumed>)           = 3075246
+3075246 <... execve resumed>)           = 0
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a097fe990, parent_tid=0x7a7a097fe990, exit_signal=0, stack=0x7a7a095fe000, stack_size=0x1ff680, tls=0x7a7a097fe6c0} => {parent_tid=[3075249]}, 88) = 3075249
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a099ff990, parent_tid=0x7a7a099ff990, exit_signal=0, stack=0x7a7a097ff000, stack_size=0x1ff680, tls=0x7a7a099ff6c0} => {parent_tid=[3075252]}, 88) = 3075252
+3075229 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7a7a09e97000, stack_size=0x9000}, 88 <unfinished ...>
+3075255 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--abbrev-ref", "HEAD"], 0x7ffc5a0afc40 /* 134 vars */ <unfinished ...>
+3075229 <... clone3 resumed>)           = 3075255
+3075255 <... execve resumed>)           = 0
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a099ff990, parent_tid=0x7a7a099ff990, exit_signal=0, stack=0x7a7a097ff000, stack_size=0x1ff680, tls=0x7a7a099ff6c0} => {parent_tid=[3075259]}, 88) = 3075259
+3075229 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7a7a097fe990, parent_tid=0x7a7a097fe990, exit_signal=0, stack=0x7a7a095fe000, stack_size=0x1ff680, tls=0x7a7a097fe6c0} => {parent_tid=[3075262]}, 88) = 3075262
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075268 execve("/work/onepipeline/target/debug/build/doubles/3074893/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve(".venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/tools/.venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/tools/node_modules/.bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/tools/.venv/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.local/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.cargo/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.local/node/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.asdf/plugins/nodejs/shims/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.asdf/shims/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/home/runner/.asdf/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/usr/local/sbin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/usr/local/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/usr/sbin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075268 execve("/usr/bin/git", ["git", "rev-parse", "--git-path", "hooks"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075268
+3075268 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075273 execve("/tmp/op-3074893-0/hooks/commit-msg", ["/tmp/op-3074893-0/hooks/commit-msg", "/tmp/onepipeline-commit-msg-3075183-0"], 0x7ffc418217a0 /* 134 vars */) = -1 ENOENT (No such file or directory)
+3075183 <... clone3 resumed>)           = 3075273
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e7bff990, parent_tid=0x7f79e7bff990, exit_signal=0, stack=0x7f79e79ff000, stack_size=0x1ff340, tls=0x7f79e7bff6c0} => {parent_tid=[3075277]}, 88) = 3075277
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075279 execve("/usr/bin/git", ["/usr/bin/git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075279
+3075279 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e7bff990, parent_tid=0x7f79e7bff990, exit_signal=0, stack=0x7f79e79ff000, stack_size=0x1ff340, tls=0x7f79e7bff6c0} => {parent_tid=[3075284]}, 88) = 3075284
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e79fe990, parent_tid=0x7f79e79fe990, exit_signal=0, stack=0x7f79e77fe000, stack_size=0x1ff340, tls=0x7f79e79fe6c0} => {parent_tid=[3075285]}, 88) = 3075285
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075288 execve("/usr/bin/git", ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075288
+3075288 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e79fe990, parent_tid=0x7f79e79fe990, exit_signal=0, stack=0x7f79e77fe000, stack_size=0x1ff340, tls=0x7f79e79fe6c0} => {parent_tid=[3075293]}, 88) = 3075293
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e7bff990, parent_tid=0x7f79e7bff990, exit_signal=0, stack=0x7f79e79ff000, stack_size=0x1ff340, tls=0x7f79e7bff6c0} => {parent_tid=[3075294]}, 88) = 3075294
+3075183 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7f79e8115000, stack_size=0x9000}, 88 <unfinished ...>
+3075297 execve("/usr/bin/git", ["/usr/bin/git", "rev-parse", "--abbrev-ref", "HEAD"], 0x7ffc418217a0 /* 134 vars */ <unfinished ...>
+3075183 <... clone3 resumed>)           = 3075297
+3075297 <... execve resumed>)           = 0
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e7bff990, parent_tid=0x7f79e7bff990, exit_signal=0, stack=0x7f79e79ff000, stack_size=0x1ff340, tls=0x7f79e7bff6c0} => {parent_tid=[3075299]}, 88) = 3075299
+3075183 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7f79e79fe990, parent_tid=0x7f79e79fe990, exit_signal=0, stack=0x7f79e77fe000, stack_size=0x1ff340, tls=0x7f79e79fe6c0} => {parent_tid=[3075304]}, 88) = 3075304
+3074902 clone3({flags=CLONE_VM|CLONE_VFORK|CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack=0x7079e30e3000, stack_size=0x9000}, 88 <unfinished ...>
+3075316 execve(".venv/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/tools/.venv/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/tools/node_modules/.bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/tools/.venv/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.local/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.cargo/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.local/node/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.asdf/plugins/nodejs/shims/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.asdf/installs/nodejs/26.8.2/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.asdf/shims/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/home/runner/.asdf/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/usr/local/sbin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/usr/local/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/usr/sbin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */) = -1 ENOENT (No such file or directory)
+3075316 execve("/usr/bin/ps", ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], 0x7079d403ed00 /* 130 vars */ <unfinished ...>
+3074902 <... clone3 resumed>)           = 3075316
+3075316 <... execve resumed>)           = 0

@@ -267,7 +267,7 @@ export function joinTrace(trace) {
   // A record names its process; the process names its verb and test.
   for (const r of [...starts, ...waits, ...sleeps]) {
     const p = procs.get(key(r.file, r.pid));
-    r.verb ??= p?.verb ?? "";
+    r.verb ??= isTestBinary(p) ? "(test process)" : (p?.verb ?? "");
     r.test ??= p?.test ?? r.file;
   }
   // A start whose wait on it was folded into its record is that wait too.
@@ -536,6 +536,11 @@ export function coverage(os, t, records) {
   for (const e of os) {
     if (e.reexec) continue;
     total++;
+    if (/^[a-z0-9_]+-[0-9a-f]{16}$/.test(e.exe) && !procs.get(e.ppid)) {
+      const k = "test binary (nextest's start)\u0000nextest\u0000" + e.exe;
+      rows.set(k, { kind: "test binary (nextest's start)", starter: "nextest", program: e.exe, count: (rows.get(k)?.count ?? 0) + 1 });
+      continue;
+    }
     const starter = procs.get(e.ppid);
     const parent = osPid.get(e.ppid);
     const starterName = starter ? starter.exe : (parent?.exe ?? "?");
@@ -570,7 +575,10 @@ export function coverage(os, t, records) {
 }
 
 function table(head, rows) {
-  const out = [`| ${head.join(" | ")} |`, `| ${head.map((h) => (/^(count|n|ms|s|min|share|polls|starts)|\b(ms|s|min|%)\b/.test(h) ? "---:" : "---")).join(" | ")} |`];
+  // A column is right-aligned when every cell in it is a figure.
+  const figure = (c) => c == null || /^-?[\d.]+%?$|^-$|^blocking$/.test(String(c));
+  const align = head.map((_, i) => rows.length > 0 && rows.every((r) => figure(r[i])));
+  const out = [`| ${head.join(" | ")} |`, `| ${align.map((a) => (a ? "---:" : "---")).join(" | ")} |`];
   for (const r of rows) out.push(`| ${r.map((c) => String(c ?? "-").replaceAll("|", "\\|")).join(" | ")} |`);
   return out.join("\n");
 }
@@ -633,7 +641,8 @@ export function render(folds, { top = 20 } = {}) {
     out.push(table(["verb", "program", "site", "count", "s"], f.repeats.sort((a, b) => b.ns - a.ns).map((r) => [r.verb, r.program, r.site, r.count, sec(r.ns)])));
 
     out.push("\n### Waits and polls on a child, by site\n");
-    out.push(table(["site", "kind", "count", "polls", "interval ms", "total s", "share of test-profile wait"], f.waits.sort((a, b) => b.ns - a.ns).map((w) => [w.site, w.kind, w.count, w.kind === "wait" ? w.polls : "-", w.interval == null ? "blocking" : ms(w.interval), sec(w.ns), pct(w.ns / 1e9, f.profileWait)])));
+    out.push("Engine and library waits run inside the processes the tests start, so they overlap the tests' `spawn` time rather than their `wait`; the last column is the ratio to the records' `wait` all the same.\n");
+    out.push(table(["site", "kind", "count", "polls", "interval ms", "total s", "share of test-s", "÷ test-profile wait"], f.waits.sort((a, b) => b.ns - a.ns).map((w) => [w.site, w.kind, w.count, w.kind === "wait" ? w.polls : "-", w.interval == null || w.interval === 0 ? "blocking" : ms(w.interval), sec(w.ns), pct(w.ns, ts), pct(w.ns / 1e9, f.profileWait)])));
     out.push(`\nTest-profile \`wait\` over the tier: ${f.profileWait.toFixed(1)} s over ${f.profileWaitCount} sleeps and polls, on the test threads.\n`);
     out.push("### The e2e harness's waits, by site (`profile::polled` and `profile::thread::sleep`, every thread)\n");
     out.push("A poll's seconds include the sleeps inside it, which are also listed at their own site.\n");
