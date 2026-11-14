@@ -1943,6 +1943,147 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
         .out_has(&format!("home {project} — written: Completed"));
 }
 
+/// The `metadata_fields` mapping an ai-orchestrator host's Linear source carries for its
+/// follow-up tickets, indented as it sits under the source's `config`: each entry shown in an
+/// item's collapsed `Fields` section, read from the `orchestrator.follow-up` record.
+const FOLLOW_UP_FIELDS: &str = "      metadata_fields:
+        - { field: Host, key: orchestrator.follow-up, path: [host] }
+        - { field: Owning runs, key: orchestrator.follow-up, path: [runs] }
+";
+
+/// A run homed in a Linear project whose source is configured with `metadata_fields`, launched
+/// from that configuration with an issue carrying the record those fields read, to its settled
+/// end. Answers the world, the loopback, the issue, and the `start` command's own output.
+fn launched_with_fields(name: &str, fields: &str) -> (World, Linear, String, crate::harness::Run) {
+    let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve(
+        STATES,
+        STATUSES,
+        name,
+        &described(
+            "",
+            &json!({
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": format!("Deliver {name}")},
+            }),
+        ),
+        "In Progress",
+    );
+    let only = linear.file(
+        "chore: only",
+        &described(
+            &task_text("only"),
+            &json!({
+                "onepipeline.id": "only",
+                "onepipeline.persona": "engineer",
+                "orchestrator.follow-up": {
+                    "host": "ai-orchestrator",
+                    "runs": ["run-one", "run-two"],
+                },
+            }),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!("{}{fields}", configuration(&linear)),
+    )
+    .expect("the launch directory's store configuration");
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--detach"]);
+    let started = world.run_on(start, "start --detach");
+    (world, linear, only, started)
+}
+
+/// A host whose Linear source carries a `metadata_fields` mapping — the configuration an
+/// ai-orchestrator host's store writes its follow-up tickets' fields through — launches its plan
+/// from that configuration without refusal, and the run settles its one node: the issue moves to
+/// `Done`, and the write-back that moved it sent the issue's metadata shown in its collapsed
+/// `Fields` section, one line for the host and one per owning run, while the metadata slot stays
+/// the record's one home.
+#[test]
+fn a_linear_source_configured_with_metadata_fields_launches_and_shows_them_on_write_back() {
+    let name = "linear-metadata-fields";
+    let (world, linear, only, started) = launched_with_fields(name, FOLLOW_UP_FIELDS);
+    started.exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    let result = world.run_json(name, "result.json");
+    let status = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|held| held["id"] == "only")
+        .map(|held| held["status"].clone());
+    assert_eq!(status, Some(json!("done")), "{result}");
+    world.until("the settlement to reach Linear", |_| {
+        linear.state_of(&only) == "Done"
+    });
+
+    let log = linear.log();
+    let written: Vec<&str> = log
+        .iter()
+        .filter(|request| {
+            request.operation == Operation::IssueUpdate && request.variables["id"] == only.as_str()
+        })
+        .filter_map(|request| request.variables["input"]["description"].as_str())
+        .collect();
+    let last = written
+        .last()
+        .unwrap_or_else(|| panic!("no write-back sent {only} a description: {log:#?}"));
+    for shown in [
+        "<!-- `onetaskgraph.fields` -->",
+        "Fields",
+        "**Host**",
+        "ai-orchestrator",
+        "**Owning runs**",
+        "run-one",
+        "run-two",
+    ] {
+        assert!(
+            last.contains(shown),
+            "the write-back's description does not show {shown:?}:\n{last}"
+        );
+    }
+    let held = metadata_of(&linear.description_of(&only));
+    assert_eq!(
+        held["orchestrator.follow-up"],
+        json!({"host": "ai-orchestrator", "runs": ["run-one", "run-two"]}),
+        "the metadata slot no longer holds the follow-up record: {held:?}"
+    );
+}
+
+/// A `metadata_fields` entry the store cannot stand — one reading a key under the namespace the
+/// store reserves — refuses the launch before any run starts, naming the entry, rather than
+/// launching a plan whose write-backs would show nothing.
+#[test]
+fn a_linear_source_with_an_unusable_metadata_fields_entry_refuses_the_launch_naming_it() {
+    let name = "linear-metadata-fields-refused";
+    let (world, linear, only, refused) = launched_with_fields(
+        name,
+        "      metadata_fields:\n        - { field: Host, key: onetaskgraph.host }\n",
+    );
+    assert_ne!(
+        refused.code, 0,
+        "a launch over an unusable entry started:\n{}",
+        refused.stdout
+    );
+    let said = format!("{}{}", refused.stdout, refused.stderr);
+    assert!(
+        said.contains("metadata_fields[0]"),
+        "the refusal does not name the entry:\n{said}"
+    );
+    assert!(
+        !world.run_file(name, "result.json").is_file(),
+        "a refused launch left a run behind"
+    );
+    assert_eq!(linear.state_of(&only), "Todo", "{:#?}", linear.log());
+}
+
 /// A live edit creates a public view from a private Linear home, and the home records it in
 /// its public projection map. The home is read back as Linear stored it, so this path writes
 /// no rewritten content and does not reach onetaskgraph #3781's follow-up write; the copy

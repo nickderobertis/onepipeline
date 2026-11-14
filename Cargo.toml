@@ -1456,16 +1456,20 @@ onevcs-testing = "0.21.5"
 # (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
 # as its collapsible section as well as GitHub as the HTML element.
 # **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
-# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes, and it is
-# the store release ai-orchestrator's own store CLI pin is held to, so it must be the one linked.
-onetaskgraph-core = "=0.14.14"
-onetaskgraph-plugin-api = "=0.14.14"
-onetaskgraph-local-md = "=0.14.14"
+# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes.
+# **0.14.15 takes a `metadata_fields` mapping in a Linear source's config** and shows an item's
+# metadata there as a collapsed `Fields` section (and projects a list or map onto a GitHub Projects
+# text field), which 0.14.14 refuses as an unknown key; it is the store release ai-orchestrator's
+# own store CLI pin is held to, so it must be the one linked. The metadata-fields journeys in
+# `tests/e2e/linear_writeback.rs` fail on 0.14.14.
+onetaskgraph-core = "=0.14.15"
+onetaskgraph-plugin-api = "=0.14.15"
+onetaskgraph-local-md = "=0.14.15"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.14"
+onetaskgraph-linear = "=0.14.15"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
