@@ -335,10 +335,9 @@ function records(fetched, job) {
   return readRecords(unzipped(zip, join(fetched.adir, "artifacts", name)));
 }
 
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the stamp is the one GitHub's runner writes on every log line; the runner is not in this repository, so no gate here can be derived from it, and a line that opens like a stamp but is not one is refused below rather than dropped.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] from here to the save evidence, the formats read are GitHub's and its actions': the stamp the runner writes on every log line, the `<n>_<job>.txt` names its log archive gives each job, the `##[group]Run` header it opens each step with, the restore lines rust-cache, actions/cache and setup-uv print, the save lines those actions and the Nx sidecar print, and the TAP lines `node --test` prints, set apart so a test's own output is not read as the job's. None is produced in this repository, so no gate here can be derived from them; each was read from the 30 job logs of the two attempts this spike measured, and what none of them matches is refused, reported as `unknown`, or left out, never guessed.
 const STAMP = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?/;
 const STAMPED = /^\d{4}-\d\d-\d\dT/;
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 function jobLog(fetched, job) {
   const name = fetched.variant ? `${job} (${fetched.variant})` : job;
@@ -382,7 +381,6 @@ function steps(lines) {
   });
 }
 
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the step headers are GitHub's runner's and the outcome lines are what rust-cache, actions/cache and setup-uv print; none is produced in this repository, so no gate here can be derived from them, and a restore none of these lines matches is reported as `unknown` in the table rather than guessed.
 const CACHE_STEPS = [
   ["rust-cache", "Swatinem/rust-cache"],
   ["actions/cache/restore", "actions/cache/restore"],
@@ -403,7 +401,6 @@ function cacheSteps(lines) {
   }
   return out;
 }
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Every distinct line where the job itself says whether it saves, in its own words.
 function saveEvidence(lines) {
@@ -413,6 +410,7 @@ function saveEvidence(lines) {
     .filter((text) => !/# Subtest|^ok \d+ -|^not ok \d+ -/.test(text));
   return [...new Set(said)];
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The first line `marker` finds, read by `pattern`: no such line is no
 /// measurement, and a line that does not read is refused rather than taken for none.

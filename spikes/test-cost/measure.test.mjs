@@ -61,6 +61,7 @@ function zipOf(files) {
   return readFileSync(join(dir, "out.zip"));
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] these fixtures stand in for GitHub's REST answers and for the runner's, actions/checkout's, the cache actions' and nextest's log lines, none of which this repository produces or any test here can run; they are written in the shapes the two real attempts this spike measured have, the lines this repository does produce are made by their own producers above, and the records are cloned from the repository's golden record.
 /// A job log as the runner writes it: stamped lines, colour codes, CRLF.
 function log({
   summary = "     Summary [ 600.000s] 2 tests run: 2 passed, 0 skipped",
@@ -200,6 +201,8 @@ process.stdout.write(fs.readFileSync(file));
   chmodSync(join(bin, "gh"), 0o755);
   return { root, repo, head, blob, answer, cache: join(root, "cache"), calls, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } };
 }
+
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 function measure(w, args) {
   const ran = spawnSync(process.execPath, [HARNESS, ...args], { cwd: w.repo, env: w.env, encoding: "utf8" });
