@@ -16,9 +16,7 @@
       {
         "name": "onepipeline",
         "path": "/work/onepipeline/target/debug/onepipeline",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 30,
         "median_ms": 62.134727,
         "p10_ms": 51.343689,
@@ -27,9 +25,7 @@
       {
         "name": "onevcs",
         "path": "/work/onepipeline/target/debug/onevcs",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 30,
         "median_ms": 34.978645,
         "p10_ms": 25.756391,
@@ -38,9 +34,7 @@
       {
         "name": "git",
         "path": "/usr/bin/git",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 30,
         "median_ms": 13.524868,
         "p10_ms": 8.729553,
@@ -49,10 +43,7 @@
       {
         "name": "bash",
         "path": "/usr/bin/bash",
-        "args": [
-          "-c",
-          ":"
-        ],
+        "args": ["-c", ":"],
         "runs": 30,
         "median_ms": 13.030997,
         "p10_ms": 9.791362,
@@ -61,18 +52,13 @@
       {
         "name": "sh",
         "path": "/usr/bin/sh",
-        "args": [
-          "-c",
-          ":"
-        ],
+        "args": ["-c", ":"],
         "runs": 30,
         "median_ms": 9.857016,
         "p10_ms": 6.2837,
         "p90_ms": 17.314795
       }
     ],
-    "git_on_path": [
-      "/usr/bin/git"
-    ]
+    "git_on_path": ["/usr/bin/git"]
   }
 }

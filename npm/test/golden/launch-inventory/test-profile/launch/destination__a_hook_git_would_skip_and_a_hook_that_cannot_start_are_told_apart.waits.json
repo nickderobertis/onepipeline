@@ -1,1 +1,12 @@
-{"test":"destination::a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart","sites":[{"kind":"poll","site":"tests/e2e/harness.rs:4276","count":2,"s":0.000763904,"interval_s":null}]}
+{
+  "test": "destination::a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart",
+  "sites": [
+    {
+      "kind": "poll",
+      "site": "tests/e2e/harness.rs:4276",
+      "count": 2,
+      "s": 0.000763904,
+      "interval_s": null
+    }
+  ]
+}

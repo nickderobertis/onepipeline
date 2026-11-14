@@ -1,1 +1,12 @@
-{"test":"destination::a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked","sites":[{"kind":"poll","site":"tests/e2e/harness.rs:4276","count":2,"s":0.000946359,"interval_s":null}]}
+{
+  "test": "destination::a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked",
+  "sites": [
+    {
+      "kind": "poll",
+      "site": "tests/e2e/harness.rs:4276",
+      "count": 2,
+      "s": 0.000946359,
+      "interval_s": null
+    }
+  ]
+}
