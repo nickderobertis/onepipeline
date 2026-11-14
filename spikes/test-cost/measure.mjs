@@ -3,122 +3,96 @@
 //
 // One measurement, one command:
 //
-//   node spikes/test-cost/measure.mjs compare --side NAME=RUN[,RUN...] [--side ...]
-//        [--cache DIR] [--tests SET=FILE ...] [--repo OWNER/NAME] [--json]
+//   node spikes/test-cost/measure.mjs --cache DIR --side NAME=RUN[#ATTEMPT][@VARIANT][,...] [--side ...]
 //
-// For every hosted run named, it reads (through `gh`, read-only, cached under
-// --cache so a second invocation makes no request) the run, its jobs, its log
-// archive and its `test-profile-test-*` artifacts, and prints, per side and per
-// platform job: the job's minutes, the e2e tier's nextest seconds and counts, the
-// line coverage (Linux), the per-verb engine invocation counts and seconds out of
-// the profile records, each cache restore's hit or miss and time, the evidence
-// that nothing was saved, the run's GITHUB_SHA, head SHA, executed workflow blob
-// and Nx task selection, and whether every side ran and passed the same e2e tests.
+// For every hosted run attempt named it reads, through `gh api` and only once
+// (each answer is kept under DIR, so a second invocation makes no request), the
+// attempt, its jobs, its log archive and its profile-record artifacts. It prints,
+// per side and per platform job: the job's queue and run minutes, the e2e tier's
+// nextest minutes and counts, the Linux line coverage, the run's GITHUB_SHA, head
+// SHA, executed workflow blob and Nx task selection, each cache restore's outcome
+// and seconds with the job's own words about saving, every side's difference from
+// the first side, the e2e tests a run ran that the first side's first run did not
+// (and the reverse) with their seconds, and the engine's invocations per verb.
 //
-//   node spikes/test-cost/measure.mjs verbs DIR [DIR...]
+// A variant names the matrix job `<job> (<variant>)`. The platform jobs are the
+// attempt's own `test-*` jobs; the artifact holding a job's records is the one the
+// head's own workflow uploads for that job; a record is held to the repository's
+// golden profile record, which `tests/e2e/profiling.rs` holds the writer to.
 //
-// prints the same per-verb engine breakdown for local `target/test-profile/<bin>`
-// record directories.
-//
-// A side's run is RUN, RUN#ATTEMPT or RUN#ATTEMPT@VARIANT: a variant names the
-// matrix job `<job> (<variant>)` and its `test-profile-<job>-<variant>` artifact.
-// The platform jobs are the run's own `test-*` jobs, read from its job listing.
-//
-// `--tests SET=FILE` names a file of test names (one `module::test` per line,
-// `#` comments allowed); the seconds those tests took are summed per side and
-// platform, which is how the pyramid sample's replaced journeys and their
-// in-process replacements are priced against each other.
-//
-// Exit status: 0 when the report was printed; 2 when an argument, a cached read or
-// a record does not have the shape this reads (the message names which); 1 when a
-// program it runs (`gh`, `unzip`, `git`) fails.
+// Exit status: 0 when the report was printed; 2 when an argument, a kept answer, a
+// log or a record does not have the shape this reads (the message names which); 1
+// when a program it runs (`gh`, `unzip`, `git`) fails.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
-const TEST_NAME = /^[a-z0-9_]+(::[a-z0-9_]+)+$/;
+const REPO = "nickderobertis/onepipeline";
+const GOLDEN = resolve(dirname(fileURLToPath(import.meta.url)), "../../tests/golden/test-profile-record-v2.json");
 const SHA = /^[0-9a-f]{40}$/;
+const STATUSES = new Set(["queued", "in_progress", "completed", "waiting", "requested", "pending"]);
+const CONCLUSIONS = new Set(["success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale", null]);
 
-function fail(message) {
-  process.stderr.write(`measure: ${message}\n`);
-  process.exit(2);
-}
+class Refusal extends Error {}
 
 function expect(condition, message) {
-  if (!condition) fail(message);
+  if (!condition) throw new Refusal(message);
 }
 
 const isTime = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
-const isCount = (value) => Number.isInteger(value) && value >= 0;
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
 const isSeconds = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
 function parseArgs(argv) {
-  const [mode, ...rest] = argv;
-  const options = { mode, sides: [], tests: [], cache: null, repo: "nickderobertis/onepipeline", json: false, dirs: [] };
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    const value = () => {
-      if (i + 1 >= rest.length) fail(`${arg} needs a value`);
-      return rest[++i];
-    };
-    if (arg === "--side") {
-      const given = value();
-      const match = /^([A-Za-z0-9_-]+)=([^=]+)$/.exec(given);
-      expect(match, `--side takes NAME=RUN[,RUN...], not '${given}'`);
-      expect(!options.sides.some((side) => side.name === match[1]), `side '${match[1]}' is named twice`);
-      options.sides.push({
-        name: match[1],
-        runs: match[2].split(",").map((spec) => {
-          const run = /^([1-9]\d*)(?:#([1-9]\d*))?(?:@([A-Za-z0-9_-]+))?$/.exec(spec);
-          expect(run, `'${spec}' is not RUN[#ATTEMPT][@VARIANT] (a run id, an attempt of 1 or more, a variant name)`);
-          return { run: run[1], attempt: run[2] ? Number(run[2]) : null, variant: run[3] ?? null };
-        }),
+  const options = { cache: null, sides: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    expect(i + 1 < argv.length, `${arg} needs a value`);
+    const given = argv[++i];
+    if (arg === "--cache") options.cache = resolve(given);
+    else if (arg === "--side") {
+      const side = /^([A-Za-z0-9_-]+)=([^=]+)$/.exec(given);
+      expect(side, `--side takes NAME=RUN[#ATTEMPT][@VARIANT][,...], not '${given}'`);
+      expect(!options.sides.some((known) => known.name === side[1]), `side '${side[1]}' is named twice`);
+      const runs = side[2].split(",").map((spec) => {
+        const run = /^([1-9]\d{0,15})(?:#([1-9]\d{0,3}))?(?:@([A-Za-z0-9_-]+))?$/.exec(spec);
+        expect(run, `'${spec}' is not RUN[#ATTEMPT][@VARIANT]: a run id, an attempt from 1 to 9999, a variant name`);
+        return { run: run[1], attempt: run[2] ? Number(run[2]) : null, variant: run[3] ?? null };
       });
-    } else if (arg === "--tests") {
-      const given = value();
-      const match = /^([A-Za-z0-9_-]+)=(.+)$/.exec(given);
-      expect(match, `--tests takes SET=FILE, not '${given}'`);
-      options.tests.push({ name: match[1], names: readTestList(match[2]) });
-    } else if (arg === "--cache") options.cache = resolve(value());
-    else if (arg === "--repo") {
-      options.repo = value();
-      expect(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.repo), `--repo takes OWNER/NAME, not '${options.repo}'`);
-    }
-    else if (arg === "--json") options.json = true;
-    else if (arg.startsWith("--")) fail(`unknown option ${arg}`);
-    else options.dirs.push(arg);
+      options.sides.push({ name: side[1], runs });
+    } else throw new Refusal(`unknown argument ${arg}`);
   }
+  expect(options.cache, "name the directory its reads are kept in with --cache DIR");
+  expect(options.sides.length, "name at least one --side NAME=RUN[#ATTEMPT][@VARIANT]");
   return options;
 }
 
-function readTestList(file) {
-  expect(existsSync(file), `test list ${file} does not exist`);
-  const names = readFileSync(file, "utf8")
-    .split("\n")
-    .map((line) => line.replace(/#.*/, "").trim())
-    .filter(Boolean);
-  for (const name of names) expect(TEST_NAME.test(name), `${file}: '${name}' is not a module::test name`);
-  expect(new Set(names).size === names.length, `${file} names a test twice, which would count it twice`);
-  return names;
+/// What a record says without its values, as `tests/e2e/profiling.rs` reduces it:
+/// each object's keys and each leaf's JSON type, `programs` taken per entry.
+function shape(value) {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  if (typeof value !== "object") return typeof value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === "programs" ? "programs" : shape(field)]));
 }
 
-/// A profile record as `onepipeline_testfakes::profile` writes it at schema 2.
-function isRecord(record) {
-  return (
-    record !== null &&
-    typeof record === "object" &&
-    record.schema === 2 &&
-    typeof record.test === "string" &&
-    typeof record.binary === "string" &&
-    typeof record.run_id === "string" &&
-    isSeconds(record.wall_s) &&
-    record.categories !== null &&
-    typeof record.categories === "object" &&
-    record.programs !== null &&
-    typeof record.programs === "object" &&
-    Object.values(record.programs).every((entry) => isCount(entry?.count) && isSeconds(entry?.s))
-  );
+const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
+const GOLDEN_SHAPE = shape(golden);
+const PROGRAM_SHAPE = shape(Object.values(golden.programs)[0]);
+
+function checkRecord(record, path) {
+  expect(isDeepStrictEqual(shape(record), GOLDEN_SHAPE), `${path} does not have the golden profile record's shape (${GOLDEN})`);
+  expect(record.schema === golden.schema, `${path} is schema ${record.schema}, not ${golden.schema}`);
+  expect(isSeconds(record.wall_s), `${path}: wall_s is not a duration`);
+  for (const [name, category] of Object.entries(record.categories)) {
+    expect(isCount(category.count) && isSeconds(category.s), `${path}: category ${name} is not a count and a duration`);
+  }
+  for (const [name, entry] of Object.entries(record.programs)) {
+    expect(isDeepStrictEqual(shape(entry), PROGRAM_SHAPE) && isCount(entry.count) && isSeconds(entry.s), `${path}: program ${name} is not a count and a duration`);
+  }
 }
 
 function readRecords(dir) {
@@ -131,502 +105,459 @@ function readRecords(dir) {
       try {
         record = JSON.parse(readFileSync(path, "utf8"));
       } catch {
-        // A record its test was killed while writing is not a measurement.
-        continue;
+        throw new Refusal(`${path} is not JSON`);
       }
-      expect(isRecord(record), `${path} is not a schema-2 profile record`);
+      checkRecord(record, path);
       records.push(record);
     }
   }
   return records;
 }
 
-/// The run id most records share: a directory holding stray records of an
-/// earlier run on the same runner keeps only this run's.
-function ofOneRun(records) {
+/// The e2e records of the run most of them share: a directory holding stray
+/// records of an earlier run on the same runner keeps only this run's.
+function summarize(records) {
+  const e2e = records.filter((record) => record.binary === "e2e");
   const counts = new Map();
-  for (const record of records) counts.set(record.run_id, (counts.get(record.run_id) ?? 0) + 1);
+  for (const record of e2e) counts.set(record.run_id, (counts.get(record.run_id) ?? 0) + 1);
   const [run] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
-  return records.filter((record) => record.run_id === run);
-}
-
-function summarizeRecords(records, binary = "e2e") {
-  const own = ofOneRun(records.filter((record) => record.binary === binary));
-  const verbs = new Map();
-  const programs = new Map();
-  let wall = 0;
-  let wait = 0;
-  let spawn = 0;
   const tests = new Map();
-  for (const record of own) {
+  const verbs = new Map();
+  const engine = { count: 0, s: 0 };
+  let wall = 0;
+  for (const record of e2e.filter((r) => r.run_id === run)) {
     wall += record.wall_s;
-    wait += record.categories?.wait?.s ?? 0;
-    spawn += record.categories?.spawn?.s ?? 0;
     tests.set(record.test, (tests.get(record.test) ?? 0) + record.wall_s);
-    for (const [program, entry] of Object.entries(record.programs ?? {})) {
-      const into = program.startsWith("onepipeline:") ? verbs : programs;
-      const key = program.startsWith("onepipeline:") ? program.slice("onepipeline:".length) : program;
-      const total = into.get(key) ?? { count: 0, s: 0 };
-      total.count += entry.count;
-      total.s += entry.s;
-      into.set(key, total);
+    for (const [program, entry] of Object.entries(record.programs)) {
+      if (program === "onepipeline") {
+        engine.count += entry.count;
+        engine.s += entry.s;
+      } else if (program.startsWith("onepipeline:")) {
+        const verb = program.slice("onepipeline:".length);
+        const total = verbs.get(verb) ?? { count: 0, s: 0 };
+        total.count += entry.count;
+        total.s += entry.s;
+        verbs.set(verb, total);
+      }
     }
   }
-  return { records: own.length, wall, wait, spawn, tests, verbs, programs };
+  return { wall, tests, verbs, engine };
 }
 
-function verbTable(summary, top = 15) {
-  const engine = summary.programs.get("onepipeline") ?? { count: 0, s: 0 };
-  const rows = [...summary.verbs.entries()].sort((a, b) => b[1].s - a[1].s).slice(0, top);
-  const lines = [
-    `engine invocations: ${engine.count}, ${engine.s.toFixed(1)} s (${pct(engine.s, summary.wall)} of ${summary.wall.toFixed(1)} e2e test-s)`,
-    "",
-    "| verb | count | s | mean ms | share of engine s |",
-    "| --- | ---: | ---: | ---: | ---: |",
-  ];
-  for (const [verb, total] of rows) {
-    lines.push(`| ${verb} | ${total.count} | ${total.s.toFixed(1)} | ${((total.s / Math.max(total.count, 1)) * 1000).toFixed(0)} | ${pct(total.s, engine.s)} |`);
-  }
-  return lines.join("\n");
+function gh(path, { binary = false } = {}) {
+  return execFileSync("gh", ["api", path], { encoding: binary ? "buffer" : "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
 }
 
-function pct(part, whole) {
-  return whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "–";
-}
-
-function gh(args, { binary = false } = {}) {
-  return execFileSync("gh", args, { encoding: binary ? "buffer" : "utf8", maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function cached(cache, name, produce) {
-  const path = join(cache, name);
+function kept(dir, name, produce) {
+  const path = join(dir, name);
   if (!existsSync(path)) {
-    mkdirSync(cache, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     writeFileSync(path, produce());
   }
   return path;
-}
-
-function fetchRun(options, spec) {
-  const { run } = spec;
-  const dir = join(options.cache, String(run));
-  mkdirSync(dir, { recursive: true });
-  const top = readJson(cached(dir, "run.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}`])));
-  expect(isCount(top?.run_attempt) && top.run_attempt >= 1, `run ${run}: its record names no attempt`);
-  const attempt = spec.attempt ?? top.run_attempt;
-  const adir = join(dir, `attempt-${attempt}`);
-  mkdirSync(adir, { recursive: true });
-  const meta = readJson(cached(adir, "attempt.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}`])));
-  expect(typeof meta?.status === "string" && SHA.test(meta.head_sha ?? "") && isTime(meta.run_started_at), `run ${run} attempt ${attempt}: no status, head SHA or start time`);
-  if (meta.status !== "completed") return { run, attempt, meta, incomplete: true };
-  const jobs = readJson(cached(adir, "jobs.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`])))?.jobs;
-  expect(
-    Array.isArray(jobs) && jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at)),
-    `run ${run} attempt ${attempt}: its job listing is not a list of named jobs`,
-  );
-  const logs = join(adir, "logs");
-  if (!existsSync(logs)) {
-    const zip = cached(adir, "logs.zip", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/attempts/${attempt}/logs`], { binary: true }));
-    mkdirSync(logs, { recursive: true });
-    execFileSync("unzip", ["-o", "-q", zip, "-d", logs]);
-  }
-  // A re-run keeps the first attempt's artifacts beside its own, under the same
-  // names, so an attempt's are the ones created while it ran.
-  const listed = readJson(cached(adir, "artifacts.json", () => gh(["api", `repos/${options.repo}/actions/runs/${run}/artifacts?per_page=100`])))?.artifacts;
-  expect(
-    Array.isArray(listed) && listed.every((a) => isCount(a?.id) && typeof a.name === "string" && isTime(a.created_at) && typeof a.expired === "boolean"),
-    `run ${run}: its artifact listing is not a list of artifacts`,
-  );
-  const started = Date.parse(meta.run_started_at);
-  const later = listed.filter((a) => Date.parse(a.created_at) >= started);
-  const artifacts = join(adir, "artifacts");
-  mkdirSync(artifacts, { recursive: true });
-  return { run, attempt, meta, jobs, logs, artifacts, listed: later, variant: spec.variant, cacheDir: adir };
 }
 
 function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    fail(`${path} is not JSON; delete it to read it again`);
+    throw new Refusal(`${path} is not JSON; delete it to read it again`);
   }
 }
 
-function jobName(job, variant) {
-  return variant ? `${job} (${variant})` : job;
-}
-
-/// The run's platform jobs: its `test-*` jobs, without the variant a matrix adds.
-function platformJobs(jobs, variant) {
-  const names = new Set();
-  for (const job of jobs) {
-    const match = /^(test-[a-z0-9-]+)(?: \((.+)\))?$/.exec(job.name);
-    if (match && (match[2] ?? null) === variant) names.add(match[1]);
-  }
-  return [...names].sort();
-}
-
-function records_(options, fetched, job) {
-  const name = `test-profile-${job}${fetched.variant ? `-${fetched.variant}` : ""}`;
-  const into = join(fetched.artifacts, name);
+function unzipped(zip, into) {
   if (!existsSync(join(into, ".done"))) {
-    const artifact = fetched.listed
-      .filter((a) => a.name === name && !a.expired)
-      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0];
-    if (!artifact) return [];
-    const zip = cached(fetched.cacheDir, `${name}.zip`, () => gh(["api", `repos/${options.repo}/actions/artifacts/${artifact.id}/zip`], { binary: true }));
     mkdirSync(into, { recursive: true });
     execFileSync("unzip", ["-o", "-q", zip, "-d", into]);
     writeFileSync(join(into, ".done"), "");
   }
-  return existsSync(into) ? readRecords(into) : [];
+  return into;
 }
 
-function jobLog(fetched, job) {
-  const name = jobName(job, fetched.variant);
-  const top = readdirSync(fetched.logs).find((file) => file.endsWith(`_${name}.txt`));
-  if (!top) return null;
-  return readFileSync(join(fetched.logs, top), "utf8").replace(/\x1b\[[0-9;]*m/g, "").replace(/\r/g, "");
+function fetchAttempt(cache, spec) {
+  const dir = join(cache, spec.run);
+  const top = readJson(kept(dir, "run.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}`)));
+  expect(isCount(top?.run_attempt) && top.run_attempt >= 1, `run ${spec.run}: its record names no attempt`);
+  const attempt = spec.attempt ?? top.run_attempt;
+  const adir = join(dir, `attempt-${attempt}`);
+  const meta = readJson(kept(adir, "attempt.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}`)));
+  expect(STATUSES.has(meta?.status) && SHA.test(meta.head_sha ?? "") && isTime(meta.run_started_at), `run ${spec.run} attempt ${attempt}: no known status, head SHA or start time`);
+  const label = `${spec.run}#${attempt}${spec.variant ? `@${spec.variant}` : ""}`;
+  if (meta.status !== "completed") return { label, incomplete: meta.status };
+  const jobs = readJson(kept(adir, "jobs.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}/jobs?per_page=100`)))?.jobs;
+  expect(
+    Array.isArray(jobs) &&
+      jobs.every((job) => isCount(job?.id) && typeof job.name === "string" && isTime(job.created_at) && CONCLUSIONS.has(job.conclusion ?? null)),
+    `run ${spec.run} attempt ${attempt}: its job listing is not a list of named jobs with known conclusions`,
+  );
+  const logs = unzipped(kept(adir, "logs.zip", () => gh(`repos/${REPO}/actions/runs/${spec.run}/attempts/${attempt}/logs`, { binary: true })), join(adir, "logs"));
+  // A re-run keeps the first attempt's artifacts beside its own under the same
+  // names, so an attempt's are the ones created after it started.
+  const listed = readJson(kept(adir, "artifacts.json", () => gh(`repos/${REPO}/actions/runs/${spec.run}/artifacts?per_page=100`)))?.artifacts;
+  expect(
+    Array.isArray(listed) && listed.every((a) => isCount(a?.id) && typeof a.name === "string" && isTime(a.created_at) && typeof a.expired === "boolean"),
+    `run ${spec.run}: its artifact listing is not a list of artifacts`,
+  );
+  const started = Date.parse(meta.run_started_at);
+  return {
+    label,
+    adir,
+    meta,
+    jobs,
+    logs,
+    variant: spec.variant,
+    artifacts: listed.filter((a) => Date.parse(a.created_at) >= started && !a.expired),
+  };
+}
+
+/// The attempt's platform jobs: its `test-*` jobs of this variant.
+function platformJobs(fetched) {
+  const names = new Map();
+  for (const job of fetched.jobs) {
+    const match = /^(test-[a-z0-9-]+)(?: \((.+)\))?$/.exec(job.name);
+    if (match && (match[2] ?? null) === fetched.variant) names.set(match[1], job);
+  }
+  return [...names.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function git(args) {
+  try {
+    return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+}
+
+/// A fact about the head commit, kept beside the attempt's other reads: a
+/// demonstration's head is unreachable once its branch is deleted.
+function headFact(fetched, name, valid, read) {
+  const path = join(fetched.adir, name);
+  if (existsSync(path)) {
+    const known = readFileSync(path, "utf8").trim();
+    if (valid(known)) return known;
+  }
+  const answer = read();
+  expect(answer !== null && valid(answer), `the head ${fetched.meta.head_sha} is not in this clone; fetch it to read ${name}`);
+  writeFileSync(path, `${answer}\n`);
+  return answer;
+}
+
+function workflowBlob(fetched) {
+  return headFact(fetched, "ci-yml-blob", (v) => SHA.test(v), () => git(["rev-parse", `${fetched.meta.head_sha}:.github/workflows/ci.yml`])?.trim() ?? null);
+}
+
+/// The profile artifact the head's own workflow uploads for this job: the upload
+/// step's `name:` under that job naming `test-profile-…`, its expressions filled.
+function profileArtifact(fetched, job) {
+  const name = headFact(
+    fetched,
+    `profile-artifact-${job}`,
+    (v) => /^test-profile-[A-Za-z0-9${}. _-]+$/.test(v),
+    () => {
+      const workflow = git(["show", `${fetched.meta.head_sha}:.github/workflows/ci.yml`]);
+      if (workflow === null) return null;
+      const section = new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z0-9-]*:\\n|$)`).exec(workflow);
+      const upload = section && /\n\s+name: (test-profile-[^\n]+)/.exec(section[1]);
+      return upload ? upload[1].trim() : null;
+    },
+  );
+  return name.replaceAll("${{ matrix.variant }}", fetched.variant ?? "").replaceAll("${{ github.job }}", job);
+}
+
+function records(fetched, job) {
+  const name = profileArtifact(fetched, job);
+  const artifact = fetched.artifacts.filter((a) => a.name === name).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0];
+  if (!artifact) return null;
+  const zip = kept(fetched.adir, `${name}.zip`, () => gh(`repos/${REPO}/actions/artifacts/${artifact.id}/zip`, { binary: true }));
+  return readRecords(unzipped(zip, join(fetched.adir, "artifacts", name)));
 }
 
 const STAMP = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?/;
-function at(line) {
-  const match = STAMP.exec(line);
-  return match ? Date.parse(match[1]) : null;
+
+function jobLog(fetched, job) {
+  const name = fetched.variant ? `${job} (${fetched.variant})` : job;
+  const file = readdirSync(fetched.logs).find((entry) => entry.endsWith(`_${name}.txt`));
+  if (!file) return null;
+  return readFileSync(join(fetched.logs, file), "utf8")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .filter((line) => STAMP.test(line))
+    .map((line) => ({ at: Date.parse(STAMP.exec(line)[1]), text: line.replace(STAMP, "") }));
 }
 
-/// Each step as the log marks it: `##[group]Run X` opens one; the next opens the
-/// next. Its seconds run to the next step's first line.
-function steps(log) {
-  const lines = log.split("\n");
+/// Each step as the log opens it with `##[group]Run X`; its seconds run to the next.
+function steps(lines) {
   const found = [];
-  for (let i = 0; i < lines.length; i++) {
-    const match = /##\[group\]Run (.*)$/.exec(lines[i]);
-    if (match && !/^\s/.test(lines[i].replace(STAMP, ""))) found.push({ name: match[1].trim(), start: at(lines[i]), line: i });
-  }
-  for (let i = 0; i < found.length; i++) {
-    const end = i + 1 < found.length ? found[i + 1].start : at(lines[lines.length - 2] ?? "");
-    found[i].seconds = end && found[i].start ? (end - found[i].start) / 1000 : null;
-    found[i].text = lines.slice(found[i].line, i + 1 < found.length ? found[i + 1].line : lines.length).join("\n");
-  }
-  return found;
+  lines.forEach((line, index) => {
+    const match = /^##\[group\]Run (.*)$/.exec(line.text);
+    if (match) found.push({ name: match[1].trim(), index });
+  });
+  return found.map((step, i) => {
+    const end = i + 1 < found.length ? found[i + 1].index : lines.length;
+    const until = end < lines.length ? lines[end].at : lines[end - 1].at;
+    return {
+      name: step.name,
+      seconds: (until - lines[step.index].at) / 1000,
+      text: lines
+        .slice(step.index, end)
+        .map((line) => line.text)
+        .join("\n"),
+    };
+  });
 }
 
-function cacheSteps(log) {
+const CACHE_STEPS = [
+  ["rust-cache", "Swatinem/rust-cache"],
+  ["actions/cache/restore", "actions/cache/restore"],
+  ["setup-uv", "astral-sh/setup-uv"],
+];
+
+function cacheSteps(lines) {
   const out = [];
-  for (const step of steps(log)) {
-    let kind = null;
-    if (step.name.startsWith("Swatinem/rust-cache")) kind = "rust-cache";
-    else if (step.name.startsWith("actions/cache/restore")) kind = "actions/cache/restore";
-    else if (step.name.startsWith("astral-sh/setup-uv")) kind = "setup-uv";
+  for (const step of steps(lines)) {
+    const kind = CACHE_STEPS.find(([, uses]) => step.name.startsWith(uses))?.[0];
     if (!kind) continue;
-    const text = step.text;
     let outcome = "unknown";
-    if (/full match: true/.test(text)) outcome = "hit (full)";
-    else if (/full match: false/.test(text)) outcome = "hit (partial key)";
-    else if (/Cache restored from key|uv cache restored|Cache restored successfully/.test(text)) outcome = "hit";
-    else if (/No cache found|Cache not found|No GitHub Actions cache found/.test(text)) outcome = "miss";
-    out.push({ kind, outcome, seconds: step.seconds });
+    if (/full match: true/.test(step.text)) outcome = "hit (full)";
+    else if (/full match: false/.test(step.text)) outcome = "hit (partial key)";
+    else if (/No cache found|Cache not found|No GitHub Actions cache found/.test(step.text)) outcome = "miss";
+    else if (/Cache restored from key|uv cache restored|Cache restored successfully/.test(step.text)) outcome = "hit";
+    out.push(`${kind}: ${outcome}, ${step.seconds.toFixed(1)} s`);
   }
   return out;
 }
 
-/// What the post-job steps and the sidecar say about saving: every line naming a
-/// save, so a reader sees the job's own words rather than this script's verdict.
-function saveEvidence(log) {
-  return log
-    .split("\n")
-    .filter((line) => /Post job cleanup|save-if|save-cache|Saving cache|Cache saved|not saving|Not saving|CACHE_READ_ONLY|read_only=|read-only/i.test(line))
-    .filter((line) => !/# Subtest|ok \d+ -|not ok \d+ -/.test(line))
-    .map((line) => line.replace(STAMP, "").trim())
-    .filter((line, i, all) => all.indexOf(line) === i)
-    .slice(0, 40);
+/// Every distinct line where the job itself says whether it saves, in its own words.
+function saveEvidence(lines) {
+  const said = lines
+    .map((line) => line.text.trim())
+    .filter((text) => /save-if|save-cache|Saving cache|Cache saved|not saving|Not saving|CACHE_READ_ONLY|READ-ONLY/.test(text))
+    .filter((text) => !/# Subtest|^ok \d+ -|^not ok \d+ -/.test(text));
+  return [...new Set(said)];
 }
 
-function nextestTier(log, project) {
-  const lines = log.split("\n");
-  const start = lines.findIndex((line) => new RegExp(`> nx run ${project}:(test|test-quick)\\b`).test(line));
+function measurement(pattern, text, parse, valid, what) {
+  const match = pattern.exec(text);
+  if (!match) return null;
+  const value = parse(match);
+  expect(valid(value), `${what} reads '${match[0]}', which is not a measurement`);
+  return value;
+}
+
+function e2eTier(lines) {
+  const start = lines.findIndex((line) => /^> nx run onepipeline-e2e:(test|test-quick)\b/.test(line.text));
   if (start < 0) return null;
-  for (let i = start; i < lines.length; i++) {
-    const match = /Summary \[\s*([\d.]+)s\] (\d+) tests? run: (\d+) passed(?:.*?(\d+) failed)?/.exec(lines[i]);
-    if (match) {
-      return {
-        seconds: Number(match[1]),
-        run: Number(match[2]),
-        passed: Number(match[3]),
-        failed: Number(match[4] ?? 0),
-        task_seconds: (at(lines[i]) - at(lines[start])) / 1000,
-      };
-    }
-  }
-  return null;
+  const summary = lines.slice(start).find((line) => /^\s*Summary \[/.test(line.text));
+  if (!summary) return null;
+  return measurement(
+    /Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed(?:[^,]*, (\d+) failed)?/,
+    summary.text,
+    (m) => ({ seconds: Number(m[1]), run: Number(m[2]), passed: Number(m[3]), failed: Number(m[4] ?? 0) }),
+    (t) => isSeconds(t.seconds) && isCount(t.run) && isCount(t.passed) && isCount(t.failed) && t.passed + t.failed <= t.run,
+    "the e2e tier's summary",
+  );
 }
 
-function headOf(log) {
-  const match = /HEAD is now at ([0-9a-f]+) Merge ([0-9a-f]{40}) into ([0-9a-f]{40})/.exec(log);
-  return match ? { merge: match[1], head: match[2], base: match[3] } : null;
-}
-
-function workflowBlob(sha) {
-  try {
-    return execFileSync("git", ["rev-parse", `${sha}:.github/workflows/ci.yml`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "(commit not in this clone)";
-  }
-}
-
-/// The head's workflow blob, kept beside the run's other reads: a demonstration's
-/// head is unreachable once its branch is deleted, and a later invocation still
-/// answers from what the first one read.
-function cachedBlob(dir, sha) {
-  const path = join(dir, `ci-yml-blob-${sha}`);
-  if (existsSync(path)) {
-    const kept = readFileSync(path, "utf8").trim();
-    if (SHA.test(kept)) return kept;
-  }
-  const blob = workflowBlob(sha);
-  if (/^[0-9a-f]{40}$/.test(blob)) writeFileSync(path, `${blob}\n`);
-  return blob;
-}
-
-function measureRun(options, spec) {
-  const fetched = fetchRun(options, spec);
-  const run = spec.attempt || spec.variant ? `${spec.run}#${fetched.attempt}${spec.variant ? `@${spec.variant}` : ""}` : spec.run;
-  if (fetched.incomplete) return { run, incomplete: true, status: fetched.meta.status };
-  const out = {
-    run,
-    attempt: fetched.attempt,
-    head_sha: fetched.meta.head_sha,
-    head_branch: fetched.meta.head_branch,
-    workflow_blob: cachedBlob(fetched.cacheDir, fetched.meta.head_sha),
-    jobs: {},
-  };
-  for (const job of platformJobs(fetched.jobs, fetched.variant)) {
-    const meta = fetched.jobs.find((entry) => entry.name === jobName(job, fetched.variant));
-    const log = jobLog(fetched, job);
-    if (!meta || !log) {
-      out.jobs[job] = null;
+function measureAttempt(cache, spec) {
+  const fetched = fetchAttempt(cache, spec);
+  if (fetched.incomplete) return fetched;
+  const out = { label: fetched.label, head: fetched.meta.head_sha, blob: workflowBlob(fetched), jobs: new Map() };
+  for (const [job, meta] of platformJobs(fetched)) {
+    const lines = jobLog(fetched, job);
+    if (!lines?.length) {
+      out.jobs.set(job, { conclusion: meta.conclusion, absent: "no log" });
       continue;
     }
-    const head = headOf(log);
-    const tasks = /ci-job: \S+ runs (\d+) task\(s\): (.*)$/m.exec(log);
-    const coverage = /lines percent: ([\d.]+)/.exec(log);
-    const records = summarizeRecords(records_(options, fetched, job));
-    expect(isTime(meta.started_at) && isTime(meta.completed_at), `run ${spec.run}: job '${meta.name}' has no start or end time`);
-    out.jobs[job] = {
+    expect(
+      isTime(meta.started_at) &&
+        isTime(meta.completed_at) &&
+        Date.parse(meta.created_at) <= Date.parse(meta.started_at) &&
+        Date.parse(meta.started_at) <= Date.parse(meta.completed_at),
+      `${fetched.label} ${job}: its created, started and completed times are not in order`,
+    );
+    const text = lines.map((line) => line.text).join("\n");
+    const head = /HEAD is now at ([0-9a-f]{7,40}) Merge ([0-9a-f]{40}) into ([0-9a-f]{40})/.exec(text);
+    const found = records(fetched, job);
+    out.jobs.set(job, {
       conclusion: meta.conclusion,
+      queue: (Date.parse(meta.started_at) - Date.parse(meta.created_at)) / 60000,
       minutes: (Date.parse(meta.completed_at) - Date.parse(meta.started_at)) / 60000,
-      queue_minutes: (Date.parse(meta.started_at) - Date.parse(meta.created_at)) / 60000,
-      github_sha: head?.merge ?? null,
-      merge_of: head ? `${head.head} into ${head.base}` : null,
-      nx_tasks: tasks ? { count: Number(tasks[1]), list: tasks[2].trim() } : null,
-      e2e: nextestTier(log, "onepipeline-e2e"),
-      coverage_lines_percent: coverage ? Number(coverage[1]) : null,
-      caches: cacheSteps(log),
-      save_evidence: saveEvidence(log),
-      records,
-    };
+      githubSha: head ? head[1] : null,
+      tasks: measurement(
+        /ci-job: \S+ runs (\d+) task\(s\): (.*)$/m,
+        text,
+        (m) => ({ count: Number(m[1]), list: m[2].trim() }),
+        (t) => t.count === t.list.split(/\s+/).length,
+        "the Nx task selection",
+      ),
+      e2e: e2eTier(lines),
+      coverage: measurement(/^lines percent: (\d+(?:\.\d+)?)$/m, text, (m) => Number(m[1]), (v) => v >= 0 && v <= 100, "the line coverage"),
+      caches: cacheSteps(lines),
+      saves: saveEvidence(lines),
+      records: found ? summarize(found) : null,
+    });
   }
   return out;
 }
 
-function mean(values) {
-  const real = values.filter((value) => typeof value === "number" && !Number.isNaN(value));
+const fmt = (value, digits = 1) => (typeof value === "number" ? value.toFixed(digits) : "–");
+const mean = (values) => {
+  const real = values.filter((value) => typeof value === "number");
   return real.length ? real.reduce((a, b) => a + b, 0) / real.length : null;
-}
+};
 
-function fmt(value, digits = 1) {
-  return typeof value === "number" ? value.toFixed(digits) : "–";
-}
-
-function compare(options) {
-  if (!options.cache) options.cache = resolve(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? ".", "test-cost-runs");
-  if (!options.sides.length) fail("name at least one --side NAME=RUN[,RUN...]");
-  expect(!options.dirs.length, "compare reads hosted runs named by --side, not record directories");
-  const sides = options.sides.map((side) => ({ ...side, measured: side.runs.map((run) => measureRun(options, run)) }));
-  const JOBS = [...new Set(sides.flatMap((side) => side.measured.flatMap((run) => Object.keys(run.jobs ?? {}))))].sort();
-  if (options.json) {
-    process.stdout.write(`${JSON.stringify(sides, (key, value) => (value instanceof Map ? Object.fromEntries(value) : value), 2)}\n`);
-    return;
-  }
+function report(sides) {
   const print = (line = "") => process.stdout.write(`${line}\n`);
+  const done = (side) => side.measured.filter((attempt) => !attempt.incomplete);
+  const jobs = [...new Set(sides.flatMap((side) => done(side).flatMap((attempt) => [...attempt.jobs.keys()])))].sort();
+  const of = (side, job) =>
+    done(side)
+      .map((attempt) => attempt.jobs.get(job))
+      .filter((j) => j && !j.absent);
+
   print("## Runs");
   print();
-  print("| side | run | attempt | job | conclusion | GITHUB_SHA | head SHA | ci.yml blob | Nx tasks |");
-  print("| --- | --- | --- | --- | --- | --- | --- | --- | ---: |");
+  print("| side | run | job | conclusion | GITHUB_SHA | head SHA | ci.yml blob | Nx tasks |");
+  print("| --- | --- | --- | --- | --- | --- | --- | ---: |");
   for (const side of sides) {
-    for (const run of side.measured) {
-      if (run.incomplete) {
-        print(`| ${side.name} | ${run.run} | – | – | ${run.status} | – | – | – | – |`);
+    for (const attempt of side.measured) {
+      if (attempt.incomplete) {
+        print(`| ${side.name} | ${attempt.label} | – | ${attempt.incomplete} | – | – | – | – |`);
         continue;
       }
-      for (const job of JOBS) {
-        const j = run.jobs[job];
-        print(`| ${side.name} | ${run.run} | ${run.attempt} | ${job} | ${j?.conclusion ?? "absent"} | ${j?.github_sha ?? "–"} | ${run.head_sha.slice(0, 12)} | ${run.workflow_blob.slice(0, 12)} | ${j?.nx_tasks?.count ?? "–"} |`);
+      for (const [job, j] of attempt.jobs) {
+        print(
+          `| ${side.name} | ${attempt.label} | ${job} | ${j.conclusion ?? "–"}${j.absent ? ` (${j.absent})` : ""} | ${j.githubSha ?? "–"} | ${attempt.head.slice(0, 12)} | ${attempt.blob.slice(0, 12)} | ${j.tasks?.count ?? "–"} |`,
+        );
       }
     }
   }
+
   print();
   print("## Minutes per platform (each run, then the side's mean)");
   print();
   print("Job minutes run from the job's start to its end; the time it waited for a runner is the queue column.");
   print();
-  print("| side | job | runs: queue min | runs: job min | runs: e2e nextest min | runs: e2e tests run/passed/failed | runs: Linux line coverage % | mean job min | mean e2e min |");
+  print("| side | job | queue min | job min | e2e nextest min | e2e tests run/passed/failed | Linux line coverage % | mean job min | mean e2e min |");
   print("| --- | --- | --- | --- | --- | --- | --- | ---: | ---: |");
-  const means = {};
+  const means = new Map();
   for (const side of sides) {
-    means[side.name] = {};
-    for (const job of JOBS) {
-      const js = side.measured.filter((run) => !run.incomplete).map((run) => run.jobs[job]).filter(Boolean);
+    for (const job of jobs) {
+      const js = of(side, job);
       const jobMin = js.map((j) => j.minutes);
       const e2eMin = js.map((j) => (j.e2e ? j.e2e.seconds / 60 : null));
-      means[side.name][job] = { job: mean(jobMin), e2e: mean(e2eMin) };
-      print(`| ${side.name} | ${job} | ${js.map((j) => fmt(j.queue_minutes)).join(", ")} | ${jobMin.map((v) => fmt(v)).join(", ")} | ${e2eMin.map((v) => fmt(v)).join(", ")} | ${js.map((j) => (j.e2e ? `${j.e2e.run}/${j.e2e.passed}/${j.e2e.failed}` : "–")).join(", ")} | ${js.map((j) => fmt(j.coverage_lines_percent, 4)).join(", ")} | ${fmt(means[side.name][job].job)} | ${fmt(means[side.name][job].e2e)} |`);
+      const m = { job: mean(jobMin), e2e: mean(e2eMin), spread: jobMin.length ? `${fmt(Math.min(...jobMin))}–${fmt(Math.max(...jobMin))}` : "–" };
+      means.set(`${side.name} ${job}`, m);
+      print(
+        `| ${side.name} | ${job} | ${js.map((j) => fmt(j.queue)).join(", ")} | ${jobMin.map((v) => fmt(v)).join(", ")} | ${e2eMin.map((v) => fmt(v)).join(", ")} | ${js.map((j) => (j.e2e ? `${j.e2e.run}/${j.e2e.passed}/${j.e2e.failed}` : "–")).join(", ")} | ${js.map((j) => fmt(j.coverage, 4)).join(", ")} | ${fmt(m.job)} | ${fmt(m.e2e)} |`,
+      );
     }
   }
+
   const [base, ...others] = sides;
   if (others.length) {
     print();
     print(`## Against \`${base.name}\` (mean minus mean; negative saves)`);
     print();
-    print("| side | job | job min | e2e min | spread of the two sides' runs (job min) |");
+    print("| side | job | job min | e2e min | job-minute spread of each side's runs |");
     print("| --- | --- | ---: | ---: | --- |");
     for (const side of others) {
-      for (const job of JOBS) {
-        const a = means[base.name][job];
-        const b = means[side.name][job];
-        const spread = (s) => {
-          const v = s.measured.filter((r) => !r.incomplete).map((r) => r.jobs[job]?.minutes).filter((x) => typeof x === "number");
-          return v.length ? `${fmt(Math.min(...v))}–${fmt(Math.max(...v))}` : "–";
-        };
-        print(`| ${side.name} | ${job} | ${a.job != null && b.job != null ? fmt(b.job - a.job) : "–"} | ${a.e2e != null && b.e2e != null ? fmt(b.e2e - a.e2e) : "–"} | ${base.name} ${spread(base)}; ${side.name} ${spread(side)} |`);
+      for (const job of jobs) {
+        const a = means.get(`${base.name} ${job}`);
+        const b = means.get(`${side.name} ${job}`);
+        const delta = (key) => (a[key] !== null && b[key] !== null ? fmt(b[key] - a[key]) : "–");
+        print(`| ${side.name} | ${job} | ${delta("job")} | ${delta("e2e")} | ${base.name} ${a.spread}; ${side.name} ${b.spread} |`);
       }
     }
   }
+
   print();
-  print("## The same e2e tests on every run of every side (from the profile records)");
+  print(`## E2E tests each run ran that \`${base.name}\`'s first run did not, and the reverse (from the records)`);
   print();
-  for (const job of JOBS) {
-    const sets = [];
-    for (const side of sides) for (const run of side.measured) if (!run.incomplete && run.jobs[job]) sets.push({ label: `${side.name}/${run.run}`, tests: new Set(run.jobs[job].records.tests.keys()) });
-    if (!sets.length) continue;
-    const [first, ...rest] = sets;
-    const differing = rest
-      .map((set) => ({
-        label: set.label,
-        missing: [...first.tests].filter((t) => !set.tests.has(t)).length,
-        extra: [...set.tests].filter((t) => !first.tests.has(t)).length,
-      }))
-      .filter((d) => d.missing || d.extra);
-    print(`- ${job}: ${sets.map((s) => `${s.label} ${s.tests.size}`).join(", ")} records; ${differing.length ? `differs from ${first.label}: ${differing.map((d) => `${d.label} −${d.missing}/+${d.extra}`).join(", ")}` : `identical test-name sets`}`);
-  }
-  for (const set of options.tests) {
-    print();
-    print(`## Test set \`${set.name}\` (${set.names.length} tests): summed record seconds`);
-    print();
-    print("| side | run | job | tests found | s |");
-    print("| --- | --- | --- | ---: | ---: |");
+  print("| side | run | job | records | only here: tests, s | only in the first run: tests, s (there) |");
+  print("| --- | --- | --- | ---: | --- | --- |");
+  for (const job of jobs) {
+    const first = done(base)
+      .map((attempt) => attempt.jobs.get(job)?.records)
+      .find(Boolean);
+    if (!first) continue;
     for (const side of sides) {
-      for (const run of side.measured) {
-        if (run.incomplete) continue;
-        for (const job of JOBS) {
-          const j = run.jobs[job];
-          if (!j) continue;
-          let found = 0;
-          let seconds = 0;
-          for (const name of set.names) {
-            if (j.records.tests.has(name)) {
-              found++;
-              seconds += j.records.tests.get(name);
-            }
-          }
-          print(`| ${side.name} | ${run.run} | ${job} | ${found} | ${fmt(seconds)} |`);
+      for (const attempt of done(side)) {
+        const mine = attempt.jobs.get(job)?.records;
+        if (!mine) {
+          print(`| ${side.name} | ${attempt.label} | ${job} | – | no records | – |`);
+          continue;
         }
+        const only = [...mine.tests].filter(([test]) => !first.tests.has(test));
+        const missing = [...first.tests].filter(([test]) => !mine.tests.has(test));
+        const sum = (pairs) => pairs.reduce((total, [, s]) => total + s, 0);
+        print(`| ${side.name} | ${attempt.label} | ${job} | ${mine.tests.size} | ${only.length}, ${fmt(sum(only))} | ${missing.length}, ${fmt(sum(missing))} |`);
       }
     }
   }
+
   print();
-  print("## Engine invocations per verb (first run of each side)");
+  print("## Engine invocations per verb (each side's first run)");
   for (const side of sides) {
-    const run = side.measured.find((r) => !r.incomplete);
-    if (!run) continue;
-    for (const job of JOBS) {
-      const j = run.jobs[job];
-      if (!j || !j.records.records) continue;
+    const attempt = done(side)[0];
+    for (const job of jobs) {
+      const r = attempt?.jobs.get(job)?.records;
+      if (!r) continue;
       print();
-      print(`### ${side.name} ${run.run} ${job}`);
+      print(`### ${side.name} ${attempt.label} ${job}`);
       print();
-      print(j.records.verbs.size ? verbTable(j.records) : `(no per-verb entries in these records; engine total ${fmt(j.records.programs.get("onepipeline")?.s)} s)`);
+      print(`engine invocations: ${r.engine.count}, ${r.engine.s.toFixed(1)} s of ${r.wall.toFixed(1)} e2e test-s`);
+      if (!r.verbs.size) {
+        print();
+        print("(these records carry no per-verb entries)");
+        continue;
+      }
+      print();
+      print("| verb | count | s | mean ms | share of engine s |");
+      print("| --- | ---: | ---: | ---: | ---: |");
+      for (const [verb, total] of [...r.verbs].sort((a, b) => b[1].s - a[1].s).slice(0, 15)) {
+        const share = r.engine.s > 0 ? `${((100 * total.s) / r.engine.s).toFixed(1)}%` : "–";
+        print(`| ${verb} | ${total.count} | ${total.s.toFixed(1)} | ${((total.s / Math.max(total.count, 1)) * 1000).toFixed(0)} | ${share} |`);
+      }
     }
   }
+
   print();
   print("## Nx task selection (each distinct list, and the runs that selected it)");
-  for (const job of JOBS) {
+  for (const job of jobs) {
     const lists = new Map();
     for (const side of sides) {
-      for (const run of side.measured) {
-        const list = run.incomplete ? null : run.jobs[job]?.nx_tasks?.list;
-        if (!list) continue;
-        if (!lists.has(list)) lists.set(list, []);
-        lists.get(list).push(`${side.name}/${run.run}`);
+      for (const attempt of done(side)) {
+        const list = attempt.jobs.get(job)?.tasks?.list;
+        if (list) lists.set(list, [...(lists.get(list) ?? []), `${side.name}/${attempt.label}`]);
       }
     }
     for (const [list, runs] of lists) {
       print();
-      print(`- ${job}, ${list.split(" ").length} tasks, selected by ${runs.length} run(s) (${runs.join(", ")}): ${list}`);
+      print(`- ${job}, ${list.split(/\s+/).length} tasks, selected by ${runs.length} run(s) (${runs.join(", ")}): ${list}`);
     }
   }
+
   print();
   print("## Cache restores and saves");
   print();
-  print("| side | run | job | restores (kind: outcome, s) | save evidence |");
+  print("| side | run | job | restores (kind: outcome, s) | the job's words about saving |");
   print("| --- | --- | --- | --- | --- |");
   for (const side of sides) {
-    for (const run of side.measured) {
-      if (run.incomplete) continue;
-      for (const job of JOBS) {
-        const j = run.jobs[job];
-        if (!j) continue;
-        print(`| ${side.name} | ${run.run} | ${job} | ${j.caches.map((c) => `${c.kind}: ${c.outcome}, ${fmt(c.seconds)}`).join("; ")} | ${j.save_evidence.join(" / ").replace(/\|/g, "\\|")} |`);
+    for (const attempt of done(side)) {
+      for (const [job, j] of attempt.jobs) {
+        if (j.absent) continue;
+        print(`| ${side.name} | ${attempt.label} | ${job} | ${j.caches.join("; ")} | ${j.saves.join(" / ").replace(/\|/g, "\\|")} |`);
       }
     }
   }
 }
 
-function verbs(options) {
-  expect(options.dirs.length, "name at least one record directory");
-  expect(!options.sides.length && !options.tests.length, "verbs reads record directories; --side and --tests are compare's");
-  const summaries = [];
-  for (const dir of options.dirs) {
-    expect(existsSync(dir) && statSync(dir).isDirectory(), `${dir} is not a directory of profile records`);
-    const records = readRecords(dir);
-    expect(records.length, `${dir} holds no profile records`);
-    const binary = records[0].binary;
-    summaries.push({ dir, binary, summary: summarizeRecords(records, binary) });
-  }
-  if (options.json) {
-    const plain = summaries.map(({ dir, binary, summary }) => ({
-      dir,
-      binary,
-      records: summary.records,
-      wall_s: summary.wall,
-      engine: summary.programs.get("onepipeline") ?? { count: 0, s: 0 },
-      verbs: Object.fromEntries(summary.verbs),
-    }));
-    process.stdout.write(`${JSON.stringify(plain, null, 2)}\n`);
-    return;
-  }
-  for (const { dir, binary, summary } of summaries) {
-    process.stdout.write(`## ${dir} (${summary.records} ${binary} records)\n\n${verbTable(summary, 30)}\n\n`);
-  }
-}
-
-const options = parseArgs(process.argv.slice(2));
 try {
-  if (options.mode === "compare") compare(options);
-  else if (options.mode === "verbs") verbs(options);
-  else fail("usage: measure.mjs compare --side NAME=RUN[,RUN...] [...] | measure.mjs verbs DIR [DIR...]");
+  const options = parseArgs(process.argv.slice(2));
+  report(options.sides.map((side) => ({ name: side.name, measured: side.runs.map((spec) => measureAttempt(options.cache, spec)) })));
 } catch (error) {
   process.stderr.write(`measure: ${error.message}\n`);
-  process.exit(1);
+  process.exit(error instanceof Refusal ? 2 : 1);
 }
