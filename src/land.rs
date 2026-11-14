@@ -1100,9 +1100,10 @@ fn death(envelope: &Envelope) -> Option<String> {
 /// The signal is handled on a thread of its own while this landing's thread goes
 /// on, so the two are kept apart by [`Turn`]: the removal waits until the
 /// landing's thread is only waiting — on git's read of the branch, or on the
-/// drafting dispatch — and from then on that thread makes nothing more, because
-/// a directory made after the removal (a report the dispatch's settlement is
-/// copied into) is a directory the process then ends of the signal leaving.
+/// drafting dispatch's next envelope — and from then on that thread makes
+/// nothing more, because a directory made after the removal (a report the
+/// dispatch's settlement is copied into) is a directory the process then ends of
+/// the signal leaving.
 struct Scratch {
     dir: PathBuf,
     checkout: PathBuf,
@@ -1189,8 +1190,8 @@ impl Turn {
 }
 
 /// An executor whose dispatches leave the drafting turn free for an interrupt
-/// for as long as the landing's thread is waiting on one — for its next envelope
-/// or for its ending — and nowhere else.
+/// for as long as the landing's thread is waiting on one for its next envelope,
+/// and nowhere else.
 struct Idling<'a> {
     inner: &'a dyn crate::executor::Executor,
     turn: Arc<Turn>,
@@ -1220,9 +1221,10 @@ impl crate::executor::Executor for Idling<'_> {
     }
 }
 
-/// A dispatch whose two waits, for its next envelope and for its ending, leave
-/// the turn free, and whose caller is back in the turn for everything it does
-/// with what either answers.
+/// A dispatch whose wait for its next envelope leaves the turn free, and whose
+/// caller is back in the turn for everything it does with what that answers.
+/// Its ending is waited on in the turn: the launch is held for the drafter's
+/// record of the run and not for the drafter to go, so that wait is short.
 struct IdlingDispatch {
     inner: Box<dyn crate::executor::DispatchHandle>,
     turn: Arc<Turn>,
@@ -1236,8 +1238,7 @@ impl crate::executor::DispatchHandle for IdlingDispatch {
     }
 
     fn wait(&mut self) -> Result<crate::executor::DispatchOutcome> {
-        let inner = &mut self.inner;
-        self.turn.idle(|| inner.wait())
+        self.inner.wait()
     }
 
     fn cancel(&self, mode: crate::executor::CancelMode) {
