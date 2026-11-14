@@ -462,7 +462,9 @@ _tier-lint bin:
 #
 # Measurement only (spike-launch-inventory, never lands): then the runner's processor and
 # each CLI's minimal start, beside the tier's launch trace, in the uploaded artifact.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "onepipeline-e2e" e2e-tier)
+_e2e-test: _strace-preflight _onetaskgraph-preflight
+    @# Demonstration only (spike-launch-inventory): the tier under the OS's own record of process starts.
+    @bash scripts/launch-os-observe.sh -- just _tier-test "onepipeline-e2e" "{{e2e-tier}}"
     @node scripts/launch-inventory.mjs host > target/test-profile/launch-host.json || echo "launch-host: not measured" >&2
 
 _contract-test: (_tier-test "onepipeline-contract" contract-tier)
