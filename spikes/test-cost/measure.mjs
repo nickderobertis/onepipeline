@@ -33,8 +33,14 @@ import { isDeepStrictEqual } from "node:util";
 const REPO = "nickderobertis/onepipeline";
 const GOLDEN = resolve(dirname(fileURLToPath(import.meta.url)), "../../tests/golden/test-profile-record-v2.json");
 const SHA = /^[0-9a-f]{40}$/;
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] these are the values GitHub's REST API documents for a workflow run's status and a job's conclusion; their producer is GitHub, which nothing in this repository runs, so no gate here can be derived from it, and a value outside them is refused by name rather than read.
 const STATUSES = new Set(["queued", "in_progress", "completed", "waiting", "requested", "pending"]);
 const CONCLUSIONS = new Set(["success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale", null]);
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+/// The lines `scripts/ci-job.sh` and `scripts/coverage-merge.mjs` print; the
+/// harness's tests read them from lines made by each producer's own statement.
+const TASKS_LINE = /^ci-job: \S+ runs (\d+) task\(s\): (.*)$/;
+const COVERAGE_LINE = /^lines percent: (\d+(?:\.\d+)?)$/;
 
 class Refusal extends Error {}
 
@@ -76,7 +82,8 @@ function shape(value) {
   if (Array.isArray(value)) return "array";
   if (value === null) return "null";
   if (typeof value !== "object") return typeof value;
-  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === "programs" ? "programs" : shape(field)]));
+  const isMap = (field) => field !== null && typeof field === "object" && !Array.isArray(field);
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === "programs" && isMap(field) ? "programs" : shape(field)]));
 }
 
 const golden = JSON.parse(readFileSync(GOLDEN, "utf8"));
@@ -221,11 +228,7 @@ function platformJobs(fetched) {
 }
 
 function git(args) {
-  try {
-    return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  } catch {
-    return null;
-  }
+  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /// A fact about the head commit, kept beside the attempt's other reads: a
@@ -237,13 +240,13 @@ function headFact(fetched, name, valid, read) {
     if (valid(known)) return known;
   }
   const answer = read();
-  expect(answer !== null && valid(answer), `the head ${fetched.meta.head_sha} is not in this clone; fetch it to read ${name}`);
+  expect(answer !== null && valid(answer), `the head ${fetched.meta.head_sha}'s workflow names no ${name} this reads`);
   writeFileSync(path, `${answer}\n`);
   return answer;
 }
 
 function workflowBlob(fetched) {
-  return headFact(fetched, "ci-yml-blob", (v) => SHA.test(v), () => git(["rev-parse", `${fetched.meta.head_sha}:.github/workflows/ci.yml`])?.trim() ?? null);
+  return headFact(fetched, "ci-yml-blob", (v) => SHA.test(v), () => git(["rev-parse", `${fetched.meta.head_sha}:.github/workflows/ci.yml`]).trim());
 }
 
 /// The profile artifact the head's own workflow uploads for this job: the upload
@@ -255,13 +258,14 @@ function profileArtifact(fetched, job) {
     (v) => /^test-profile-[A-Za-z0-9${}. _-]+$/.test(v),
     () => {
       const workflow = git(["show", `${fetched.meta.head_sha}:.github/workflows/ci.yml`]);
-      if (workflow === null) return null;
       const section = new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [a-z][a-z0-9-]*:\\n|$)`).exec(workflow);
       const upload = section && /\n\s+name: (test-profile-[^\n]+)/.exec(section[1]);
       return upload ? upload[1].trim() : null;
     },
   );
-  return name.replaceAll("${{ matrix.variant }}", fetched.variant ?? "").replaceAll("${{ github.job }}", job);
+  const filled = name.replaceAll("${{ matrix.variant }}", fetched.variant ?? "").replaceAll("${{ github.job }}", job);
+  expect(!filled.includes("${{"), `the workflow names ${job}'s profile artifact '${name}' with an expression this does not fill`);
+  return filled;
 }
 
 function records(fetched, job) {
@@ -283,7 +287,11 @@ function jobLog(fetched, job) {
     .replace(/\r/g, "")
     .split("\n")
     .filter((line) => STAMP.test(line))
-    .map((line) => ({ at: Date.parse(STAMP.exec(line)[1]), text: line.replace(STAMP, "") }));
+    .map((line) => {
+      const at = Date.parse(STAMP.exec(line)[1]);
+      expect(!Number.isNaN(at), `${file}: '${line.slice(0, 40)}' carries no real time`);
+      return { at, text: line.replace(STAMP, "") };
+    });
 }
 
 /// Each step as the log opens it with `##[group]Run X`; its seconds run to the next.
@@ -296,6 +304,7 @@ function steps(lines) {
   return found.map((step, i) => {
     const end = i + 1 < found.length ? found[i + 1].index : lines.length;
     const until = end < lines.length ? lines[end].at : lines[end - 1].at;
+    expect(until >= lines[step.index].at, `the step '${step.name}' ends before it starts`);
     return {
       name: step.name,
       seconds: (until - lines[step.index].at) / 1000,
@@ -307,6 +316,7 @@ function steps(lines) {
   });
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the step headers are GitHub's runner's and the outcome lines are what rust-cache, actions/cache and setup-uv print; none is produced in this repository, so no gate here can be derived from them, and a restore none of these lines matches is reported as `unknown` in the table rather than guessed.
 const CACHE_STEPS = [
   ["rust-cache", "Swatinem/rust-cache"],
   ["actions/cache/restore", "actions/cache/restore"],
@@ -327,6 +337,7 @@ function cacheSteps(lines) {
   }
   return out;
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Every distinct line where the job itself says whether it saves, in its own words.
 function saveEvidence(lines) {
@@ -337,27 +348,33 @@ function saveEvidence(lines) {
   return [...new Set(said)];
 }
 
-function measurement(pattern, text, parse, valid, what) {
+/// The first line `marker` finds, read by `pattern`: no such line is no
+/// measurement, and a line that does not read is refused rather than taken for none.
+function measurement(lines, marker, pattern, parse, valid, what) {
+  const line = lines.find((entry) => marker.test(entry.text.trim()));
+  if (!line) return null;
+  const text = line.text.trim();
   const match = pattern.exec(text);
-  if (!match) return null;
+  expect(match, `${what} reads '${text}', which is not a measurement`);
   const value = parse(match);
-  expect(valid(value), `${what} reads '${match[0]}', which is not a measurement`);
+  expect(valid(value), `${what} reads '${text}', which is not a measurement`);
   return value;
 }
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] `> nx run <task>` is Nx's own task header and `Summary [...]` is cargo-nextest's run summary; both are third-party output this repository only prints through, so no gate here can be derived from them, and a summary line that does not read is refused by `measurement`.
 function e2eTier(lines) {
   const start = lines.findIndex((line) => /^> nx run onepipeline-e2e:(test|test-quick)\b/.test(line.text));
   if (start < 0) return null;
-  const summary = lines.slice(start).find((line) => /^\s*Summary \[/.test(line.text));
-  if (!summary) return null;
   return measurement(
-    /Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed(?:[^,]*, (\d+) failed)?/,
-    summary.text,
+    lines.slice(start),
+    /^Summary \[/,
+    /^Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed(?:[^,]*, (\d+) failed)?/,
     (m) => ({ seconds: Number(m[1]), run: Number(m[2]), passed: Number(m[3]), failed: Number(m[4] ?? 0) }),
     (t) => isSeconds(t.seconds) && isCount(t.run) && isCount(t.passed) && isCount(t.failed) && t.passed + t.failed <= t.run,
     "the e2e tier's summary",
   );
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 function measureAttempt(cache, spec) {
   const fetched = fetchAttempt(cache, spec);
@@ -385,14 +402,15 @@ function measureAttempt(cache, spec) {
       minutes: (Date.parse(meta.completed_at) - Date.parse(meta.started_at)) / 60000,
       githubSha: head ? head[1] : null,
       tasks: measurement(
-        /ci-job: \S+ runs (\d+) task\(s\): (.*)$/m,
-        text,
+        lines,
+        /^ci-job: \S+ runs /,
+        TASKS_LINE,
         (m) => ({ count: Number(m[1]), list: m[2].trim() }),
         (t) => t.count === t.list.split(/\s+/).length,
         "the Nx task selection",
       ),
       e2e: e2eTier(lines),
-      coverage: measurement(/^lines percent: (\d+(?:\.\d+)?)$/m, text, (m) => Number(m[1]), (v) => v >= 0 && v <= 100, "the line coverage"),
+      coverage: measurement(lines, /^lines percent:/, COVERAGE_LINE, (m) => Number(m[1]), (v) => v >= 0 && v <= 100, "the line coverage"),
       caches: cacheSteps(lines),
       saves: saveEvidence(lines),
       records: found ? summarize(found) : null,
@@ -481,12 +499,15 @@ function report(sides) {
     const first = done(base)
       .map((attempt) => attempt.jobs.get(job)?.records)
       .find(Boolean);
-    if (!first) continue;
     for (const side of sides) {
       for (const attempt of done(side)) {
         const mine = attempt.jobs.get(job)?.records;
         if (!mine) {
           print(`| ${side.name} | ${attempt.label} | ${job} | – | no records | – |`);
+          continue;
+        }
+        if (!first) {
+          print(`| ${side.name} | ${attempt.label} | ${job} | ${mine.tests.size} | – | – |`);
           continue;
         }
         const only = [...mine.tests].filter(([test]) => !first.tests.has(test));
