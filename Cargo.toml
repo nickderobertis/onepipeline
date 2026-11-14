@@ -1456,16 +1456,19 @@ onevcs-testing = "0.21.5"
 # (`onetaskgraph-expandable-blocks`): a design document's collapsed `<details>` blocks reach Linear
 # as its collapsible section as well as GitHub as the HTML element.
 # **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
-# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes, and it is
-# the store release ai-orchestrator's own store CLI pin is held to, so it must be the one linked.
-onetaskgraph-core = "=0.14.14"
-onetaskgraph-plugin-api = "=0.14.14"
-onetaskgraph-local-md = "=0.14.14"
+# `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes.
+# **0.14.16 keeps an attestation valid through a copy that renumbers its dependency edges**
+# (`otg-attest-copy-invariant`, onetaskgraph #4033), so a reviewed plan keeps its review across
+# a board copy. It is the store release ai-orchestrator's own store CLI pin is held to, so it
+# must be the one linked.
+onetaskgraph-core = "=0.14.16"
+onetaskgraph-plugin-api = "=0.14.16"
+onetaskgraph-local-md = "=0.14.16"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.14"
+onetaskgraph-linear = "=0.14.16"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
