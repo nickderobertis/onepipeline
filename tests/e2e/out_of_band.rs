@@ -1171,7 +1171,9 @@ fn landing_command(
     }
 }
 
-/// Start a landing [`landing_command`] built, as [`start_landing`] does.
+/// Start `landing` in a process group of its own, so a signal sent to that
+/// group reaches nothing this journey did not start, with its output piped for
+/// the assertions made of how it ended.
 #[cfg(unix)]
 fn spawn_landing(
     mut landing: onepipeline_testfakes::profile::process::Command,
