@@ -160,8 +160,8 @@ pub(crate) fn attribution(provenance: Provenance, reference: Option<&Reference>)
         (Provenance::Manager, Some(reference)) => format!(
             "{ATTRIBUTION_OPENING}manager (ruling reference `{reference}`): a strong default \
              you may decline with your reason. To decline it, run `onepipeline decline-ruling \
-             \"$ONEPIPELINE_RUN_ID\" --ruling {reference}` with the reason on standard input; \
-             the manager is told, and may take it to the user."
+             \"$ONEPIPELINE_RUN_ID\" --ruling {reference} --reason <text>`, giving the reason \
+             as that one quoted argument; the manager is told, and may take it to the user."
         ),
         (Provenance::Manager, None) => format!(
             "{ATTRIBUTION_OPENING}manager: a strong default you may decline with your reason \
@@ -357,7 +357,8 @@ mod tests {
         assert!(
             manager.contains("manager")
                 && manager.contains("decline-ruling")
-                && manager.contains("--ruling c4.0"),
+                && manager.contains("--ruling c4.0 --reason <text>")
+                && !manager.contains("standard input"),
             "{manager}"
         );
         let stored = attributed(Provenance::Manager, Some(&reference), "Do X.\n\nThen Y.");

@@ -49,8 +49,18 @@ fn declinable(reference: &str) -> String {
     format!(
         "Ruling from the manager (ruling reference `{reference}`): a strong default you may \
          decline with your reason. To decline it, run `onepipeline decline-ruling \
-         \"$ONEPIPELINE_RUN_ID\" --ruling {reference}`"
+         \"$ONEPIPELINE_RUN_ID\" --ruling {reference} --reason <text>`, giving the reason as \
+         that one quoted argument;"
     )
+}
+
+/// The attribution line a dispatch was handed for a manager's ruling: the one
+/// line of `task` opening as [`declinable`] does.
+fn attribution_line<'a>(task: &'a str, reference: &str) -> &'a str {
+    let opening = format!("Ruling from the manager (ruling reference `{reference}`)");
+    task.lines()
+        .find(|line| line.starts_with(&opening))
+        .unwrap_or_else(|| panic!("no attribution names {reference}:\n{task}"))
 }
 
 fn envelope(commands: Value) -> String {
@@ -311,6 +321,14 @@ fn an_amendment_names_whose_ruling_it_is_and_only_a_managers_can_be_declined() {
             && managers.contains(MANAGER_RULING),
         "the manager's amendment is not rendered as a declinable ruling:\n{managers}"
     );
+    // A judge can pass only arguments, so the attribution names `--reason` and
+    // no longer sends the reason to standard input.
+    let line = attribution_line(managers, &reference);
+    assert!(
+        line.contains(&format!("--ruling {reference} --reason <text>"))
+            && !line.contains("standard input"),
+        "the attribution does not name the argument form: {line}"
+    );
 
     declined_as_sent(
         &world,
@@ -384,6 +402,110 @@ fn a_decline_reads_its_reason_from_a_file_and_refuses_one_it_cannot_read() {
     assert_eq!(declined["declined_ruling"]["reason"], json!(reason.trim()));
     assert_eq!(declined["declined_ruling"]["kind"], json!("amendment"));
     assert_eq!(declined["declined_ruling"]["ruling"], json!(reference));
+}
+
+/// The surface every fact of a decline is read from, off the run's channel.
+fn the_declined(world: &World, run: &str) -> Value {
+    let declined: Vec<Value> = surfaces(world, run)
+        .into_iter()
+        .filter(|surface| surface["kind"] == "declined-ruling")
+        .collect();
+    let [one] = &declined[..] else {
+        panic!("{run} holds {} declined rulings, not one", declined.len());
+    };
+    one.clone()
+}
+
+/// `decline-ruling --reason TEXT` takes the reason as one argument, with stdin
+/// closed — the one form a read-only judge's granted command receives on every
+/// harness — and raises exactly the surface the same text read from stdin
+/// raises. `--reason` beside a file, and a `--reason` with nothing in it, are
+/// refused with nothing appended.
+#[test]
+fn a_decline_given_its_reason_as_one_argument_raises_the_surface_stdin_does() {
+    let world = World::new("rulings-decline-argument");
+    let by_argument = held(&world, "rulingsdeclineargument", &["managers"]);
+    let by_stdin = held(&world, "rulingsdeclinestdin", &["managers"]);
+    let amend = envelope(json!([{"op": "amend", "id": "managers", "text": MANAGER_RULING}]));
+    let id = reply(&world, &by_argument, &amend, false);
+    assert_eq!(reply(&world, &by_stdin, &amend, false), id);
+    let reference = format!("c{id}.0");
+    let reason = "  The user's plan says the opposite.\nIt's in the task's own words:\n\"touch the whole module\".\n";
+
+    // Refused, naming both, with nothing appended: `--reason` beside a file —
+    // a file that exists, so it is the pairing that is refused, not the read.
+    let before = surface_records(&world, &by_argument);
+    let file = world.root.join("reason.md");
+    std::fs::write(&file, reason).unwrap();
+    world
+        .run(&[
+            "decline-ruling",
+            &by_argument,
+            "--ruling",
+            &reference,
+            "--reason",
+            reason,
+            file.to_str().unwrap(),
+        ])
+        .exited(REFUSED)
+        .err_has("`--reason`")
+        .err_has("file");
+    // And a `--reason` that is empty once trimmed, as an empty stdin is.
+    world
+        .run(&[
+            "decline-ruling",
+            &by_argument,
+            "--ruling",
+            &reference,
+            "--reason",
+            " \n\t ",
+        ])
+        .exited(REFUSED)
+        .err_has("carried none");
+    assert_eq!(
+        surface_records(&world, &by_argument),
+        before,
+        "a refused decline appended"
+    );
+
+    // `World::run` closes stdin: the reason reaches the verb as the argument
+    // alone.
+    world
+        .run(&[
+            "decline-ruling",
+            &by_argument,
+            "--ruling",
+            &reference,
+            "--reason",
+            reason,
+        ])
+        .exited(0)
+        .out_has("\"state\":\"queued\"");
+    decline(&world, &by_stdin, &reference, reason)
+        .exited(0)
+        .out_has("\"state\":\"queued\"");
+
+    let argued = the_declined(&world, &by_argument);
+    let read = the_declined(&world, &by_stdin);
+    assert_eq!(argued["declined_ruling"]["reason"], json!(reason.trim()));
+    assert_eq!(argued["declined_ruling"]["ruling"], json!(reference));
+    assert_eq!(argued["blocking"], json!(false), "{argued}");
+    for field in [
+        "kind",
+        "workstream",
+        "blocking",
+        "message",
+        "declined_ruling",
+    ] {
+        assert_eq!(
+            argued[field], read[field],
+            "`{field}` differs between the argument and the stdin decline"
+        );
+    }
+    assert_eq!(
+        declined_from_next(&world, &by_argument)["declined_ruling"],
+        argued["declined_ruling"]
+    );
 }
 
 /// The two ways `reply` is told whose words an envelope carries cannot
