@@ -247,9 +247,21 @@ export function validRecord(r) {
   if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
   if (r.t != null && !isTime(r.t)) return false;
   if (r.site != null && typeof r.site !== "string") return false;
+  if (r.function != null && typeof r.function !== "string") return false;
+  if (!["child", "interval_ns", "polls", "write_ns_before"].every((f) => isTimeOrNull(r[f])))
+    return false;
+  if (r.kind === "proc")
+    return (
+      typeof r.exe === "string" &&
+      (r.verb == null || typeof r.verb === "string") &&
+      (r.test == null || typeof r.test === "string") &&
+      (r.argv == null || (Array.isArray(r.argv) && r.argv.every((a) => typeof a === "string")))
+    );
   if (r.kind === "start")
     return (
       typeof r.program === "string" &&
+      (r.cwd == null || typeof r.cwd === "string") &&
+      (r.sub == null || typeof r.sub === "string") &&
       Array.isArray(r.argv) &&
       r.argv.every((a) => typeof a === "string") &&
       ["spawn_ns", "exit_ns", "wait_ns", "trace_ns"].every((f) => isTimeOrNull(r[f]))
@@ -267,7 +279,10 @@ export function validProfile(r) {
     typeof r === "object" &&
     r.schema === 2 &&
     typeof r.test === "string" &&
+    typeof r.os === "string" &&
+    typeof r.ended === "string" &&
     isTime(r.wall_s) &&
+    (r.categories?.wait?.polls == null || isTime(r.categories.wait.polls)) &&
     Boolean(r.categories) &&
     typeof r.categories === "object" &&
     Object.values(r.categories).every((c) => c && isTime(c.s) && isTime(c.count)) &&
@@ -370,7 +385,14 @@ export function readJob(label, dir) {
     typeof x === "object" &&
     typeof x.name === "string" &&
     (x.error != null || isTime(x.median_ms));
-  if (host && !(Array.isArray(host.spawn?.results) && host.spawn.results.every(result)))
+  const facts = (h) =>
+    (h.cpu_model == null || typeof h.cpu_model === "string") &&
+    isTime(h.cpus) &&
+    (h.physical_cpus == null || isTime(h.physical_cpus));
+  if (
+    host &&
+    !(facts(host) && Array.isArray(host.spawn?.results) && host.spawn.results.every(result))
+  )
     throw new Refusal(
       `${hostFile} holds no spawn results`,
       "regenerate it with 'node scripts/launch-inventory.mjs host'",
@@ -407,8 +429,12 @@ export function nextestRuns(log) {
   return runs;
 }
 
-/** The e2e tier's nextest summary in a job log, or null. */
-export function e2eSummary(log) {
+/**
+ * The largest nextest run a job log holds, or null. In this repository's test jobs that is
+ * the e2e tier, whose ~2,150 journeys no other tier approaches; a report says it took the
+ * largest run rather than claiming to have identified the tier by name.
+ */
+export function largestRun(log) {
   if (!log) return null;
   return nextestRuns(log).reduce((best, r) => (!best || r.run > best.run ? r : best), null);
 }
@@ -642,7 +668,7 @@ const isTestBinary = (p) => Boolean(p) && /^[a-z0-9_]+-[0-9a-f]{16}$/.test(p.exe
 export function foldJob(job) {
   const t = joinTrace(job.trace);
   const testSeconds = job.tests.reduce((a, r) => a + (r.wall_s ?? 0), 0);
-  const summary = e2eSummary(job.log);
+  const summary = largestRun(job.log);
   const wallS = summary?.seconds ?? null;
   const toWallMin = (ns) => (wallS && testSeconds ? ((ns / 1e9 / testSeconds) * wallS) / 60 : null);
   const procOf = (s) => t.procs.find((p) => p.file === s.file && p.pid === s.pid);
@@ -1330,7 +1356,7 @@ export function jobFacts(log) {
     });
   }
   // The e2e tier: the largest nextest run.
-  facts.e2e = e2eSummary(log);
+  facts.e2e = largestRun(log);
   const gate = steps.find((s) => /just ci-test-/.test(s.name));
   facts.job = { start: lines[0]?.t ?? 0, end, gateStart: gate?.start ?? null };
   return facts;
@@ -1376,7 +1402,9 @@ export async function host({ runs = 30 } = {}) {
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
     } catch (error) {
-      unanswered.push(`${cmd} ${args.join(" ")}: ${String(error.stderr || error.message).trim()}`);
+      unanswered.push(
+        `${cmd} ${args.join(" ")}: ${String(error.stderr || error.message).trim()} (next: read the processor off the runner's own system report in the job log)`,
+      );
       return null;
     }
   };

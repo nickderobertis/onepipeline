@@ -327,6 +327,7 @@ fn open(category: Category, counts: Counts, program: Option<String>) -> Span {
 impl Drop for Span {
     fn drop(&mut self) {
         let now = Instant::now();
+        // llmlint: ignore[changed_behavior_has_e2e] a wait span's tally is written by every e2e test of the hosted baseline runs and read off their artifacts by the fold; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
         if let Some((site, began)) = self.site.take() {
             wait_sites::tally("span", site, now.saturating_duration_since(began), None);
         }
@@ -834,6 +835,7 @@ pub mod thread {
     /// [`std::thread::sleep`].
     #[track_caller]
     pub fn sleep(duration: std::time::Duration) {
+        // llmlint: ignore[changed_behavior_has_e2e] a sleep's tally is written by every e2e test of the hosted baseline runs and read off their artifacts by the fold; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
         let site = std::panic::Location::caller();
         let began = std::time::Instant::now();
         super::leaf(super::Category::Wait, || std::thread::sleep(duration));
