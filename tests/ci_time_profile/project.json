@@ -1,0 +1,57 @@
+{
+  "name": "onepipeline-ci-time-profile",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/ci_time_profile",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/ci_time_profile"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/ci_time_profile"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/ci_time_profile"
+    },
+    "test": {
+      "command": "node --test tests/ci_time_profile/*.test.mjs",
+      "//": "The CI time-profile spike harness (scripts/ci-time-profile.mjs, scripts/ci-time-workflow.mjs), driven as its users run it: over the repository's own ci.yml and ci-job.sh, against a stand-in gh on PATH, and with the rustc timer and sampler it generates executed for real.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "sharedGlobals",
+        "{workspaceRoot}/scripts/ci-time-profile.mjs",
+        "{workspaceRoot}/scripts/ci-time-workflow.mjs",
+        "{workspaceRoot}/scripts/test-profile-report.mjs",
+        "{workspaceRoot}/scripts/ci-job.sh",
+        "{workspaceRoot}/scripts/nx-remote-cache.mjs",
+        "{workspaceRoot}/scripts/nx.sh",
+        "{workspaceRoot}/.github/workflows/ci.yml",
+        "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
+        "{workspaceRoot}/rust-toolchain.toml",
+        {
+          "runtime": "node -p process.platform"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["npmSelection"]
+    }
+  }
+}
