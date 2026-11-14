@@ -182,7 +182,9 @@ retain the version wherever a proof reads it or requires its producing binary.
 Forks and Dependabot read only. Promote trusted merged-PR results before release
 automation without testing `main`; manual promotion writes only its own branch
 scope. Cache-use reads saved executions and receipts and treats unavailable
-evidence as missing data.
+evidence as missing data. A demonstration measured more than once needs a pull
+request per run: a whole-run re-run reads the Nx results its first attempt wrote
+to the same ref, so its tasks replay instead of running.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `onepipeline:install-documented`, which the three test jobs run, installs the
