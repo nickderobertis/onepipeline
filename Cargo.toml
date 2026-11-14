@@ -1457,6 +1457,10 @@ onevcs-testing = "0.21.5"
 # as its collapsible section as well as GitHub as the HTML element.
 # **0.14.14 reports `assignees` as an updated field and refuses with `relations-incomplete`,
 # `no-assignees` and `several-assignees`**, each of which `src/writeback.rs` classes.
+# **0.14.15 takes a `metadata_fields` mapping in a Linear source's config** and shows an item's
+# metadata there as a collapsed `Fields` section (and projects a list or map onto a GitHub Projects
+# text field), which 0.14.14 refuses as an unknown key. The metadata-fields journeys in
+# `tests/e2e/linear_writeback.rs` fail on 0.14.14.
 # **0.14.16 keeps an attestation valid through a copy that renumbers its dependency edges**
 # (`otg-attest-copy-invariant`, onetaskgraph #4033), so a reviewed plan keeps its review across
 # a board copy. It is the store release ai-orchestrator's own store CLI pin is held to, so it
@@ -1486,7 +1490,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.111.0"
+version = "0.113.0"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
