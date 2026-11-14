@@ -14,7 +14,10 @@ mkdir -p "$out"
 case "$(uname -s)" in
   Linux)
     command -v strace >/dev/null || sudo apt-get install -y strace >/dev/null 2>&1 || true
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$root/scripts/launch-os-trace.sh" \
+    # The ci profile runs every test whatever another did: the journeys that run the
+    # binary under strace themselves fail under this one (ptrace does not nest), and
+    # the default profile's fail-fast would end the tier at the first of them.
+    NEXTEST_PROFILE=ci CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$root/scripts/launch-os-trace.sh" \
       ONEPIPELINE_OS_TRACE_DIR="$out" "$@"
     rc=$?
     exit "$rc"
