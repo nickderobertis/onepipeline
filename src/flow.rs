@@ -1337,10 +1337,22 @@ fn supervise(
         Some(id) => command.env(FLOW_ENV, id),
         None => command.env_remove(FLOW_ENV),
     };
-    let status = match command.spawn() {
+    let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut command);
+    let status = match spawned {
         Ok(mut child) => {
             sys::forward_terminating_signals(child.id());
-            match child.wait() {
+            let waited = {
+                let _watch =
+                    onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), None);
+                child.wait()
+            };
+            launch.exited(
+                waited
+                    .as_ref()
+                    .ok()
+                    .and_then(std::process::ExitStatus::code),
+            );
+            match waited {
                 Ok(status) => status_of(status),
                 // llmlint: ignore-block[changed_behavior_has_e2e] a child this process
                 // spawned and then cannot wait for is a host condition no journey stages;

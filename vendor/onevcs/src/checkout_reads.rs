@@ -699,7 +699,7 @@ fn read_lease(lease: &Path) -> Result<Option<lock::Guard>> {
                     lock::TIMEOUT_ENV
                 )));
             }
-            std::thread::sleep(PROBE_POLL);
+            crate::launch_trace::sleep(crate::launch_site!(), PROBE_POLL);
         }
     })
 }

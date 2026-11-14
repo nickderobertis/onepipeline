@@ -430,7 +430,7 @@ pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Re
     .map_err(|error| sibling(format!("cancel observer {id}: {error}")))?;
     let deadline = Instant::now() + patience;
     while !graph_run_ended(recorded, run) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(20));
     }
     Ok(true)
 }
@@ -700,7 +700,7 @@ impl Said {
     fn settled(&self) -> String {
         let deadline = Instant::now() + SAID_PATIENCE;
         while !self.ended.load(Ordering::Acquire) && Instant::now() < deadline {
-            std::thread::sleep(SAID_POLL);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), SAID_POLL);
         }
         String::from_utf8_lossy(&held(&self.bytes)).into_owned()
     }
@@ -956,7 +956,7 @@ fn hold_until_ending_recorded(state_dir: &Path, run_id: &GraphRunId) {
         if ending_recorded(&record) {
             return;
         }
-        std::thread::sleep(Duration::from_millis(2));
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(2));
     }
 }
 
@@ -1288,9 +1288,10 @@ impl ProcessGraphRun {
                 command.stdout(log(path)?).stderr(log(path)?);
             }
         }
-        let mut child = command
-            .spawn()
-            .map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
+        let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut command);
+        launch.detached();
+        let mut child =
+            spawned.map_err(|e| sibling(format!("cannot start `{} run`: {e}", binary())))?;
         let pid = child.id();
         // The destination asked for is the destination recorded, so the two
         // cannot come apart: a relayed launch reads its pipe even on the host
@@ -1442,7 +1443,9 @@ impl ProcessGraphRun {
     /// be taken as started with no run id to address it by.
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
+        let mut watch = onevcs::launch_trace::wait(onevcs::launch_site!(), None, Some(LAUNCH_POLL));
         loop {
+            watch.poll();
             // llmlint: ignore-block[changed_behavior_has_e2e] the two orders differ only for an
             // announcement written inside one iteration, between these two statements, which no
             // driver outside this process can schedule: a graph that announced and exited before
@@ -1524,7 +1527,9 @@ impl ProcessGraphRun {
     /// exited with.
     fn settle_unstarted(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
+        let mut watch = onevcs::launch_trace::wait(onevcs::launch_site!(), None, Some(LAUNCH_POLL));
         loop {
+            watch.poll();
             let waited = held(&self.child).try_wait();
             match waited {
                 Err(error) => {
@@ -1640,9 +1645,18 @@ impl ProcessGraphRun {
 
     /// Block until the graph settles, and report whether it succeeded.
     pub fn wait(&mut self) -> Result<Settled> {
-        let status = held(&self.child)
-            .wait()
-            .map_err(|e| sibling(format!("waiting for `{} run`: {e}", binary())))?;
+        let status = {
+            let mut child = held(&self.child);
+            let pid = child.id();
+            let watch = onevcs::launch_trace::wait(onevcs::launch_site!(), Some(pid), None);
+            let status = child.wait();
+            drop(watch);
+            if let Ok(status) = &status {
+                onevcs::launch_trace::exit(onevcs::launch_site!(), pid, status.code());
+            }
+            status
+        }
+        .map_err(|e| sibling(format!("waiting for `{} run`: {e}", binary())))?;
         Ok(Settled {
             code: status.code(),
             stderr: self.said(),
@@ -2069,7 +2083,7 @@ impl GraphRun {
         }
         let deadline = Instant::now() + patience;
         while !self.has_exited() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(20));
         }
         if !self.has_exited() {
             self.cancel();
@@ -2576,14 +2590,16 @@ fn read_envelopes(text: &str) -> Vec<Envelope> {
 /// The same interrupt, through an executable an operator named at
 /// [`BINARY_ENV`].
 fn interrupt_by_process(address: &TurnAddress, input: &str) -> Interrupt {
-    let output = Command::new(binary())
-        .arg("interrupt")
-        .arg(address.run())
-        .arg(address.member())
-        .arg("--input")
-        .arg(input)
-        .stdin(Stdio::null())
-        .output();
+    let output = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        Command::new(binary())
+            .arg("interrupt")
+            .arg(address.run())
+            .arg(address.member())
+            .arg("--input")
+            .arg(input)
+            .stdin(Stdio::null()),
+    );
     let output = match output {
         Ok(output) => output,
         // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
@@ -2648,11 +2664,11 @@ fn interrupt_by_process(address: &TurnAddress, input: &str) -> Interrupt {
 /// provider block is missing still reports everything else it knows.
 pub fn health() -> Option<String> {
     if std::env::var_os(BINARY_ENV).is_some() {
-        let output = Command::new(binary())
-            .arg("health")
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
+        let output = onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            Command::new(binary()).arg("health").stdin(Stdio::null()),
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }

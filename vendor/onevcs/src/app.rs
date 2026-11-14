@@ -2597,7 +2597,7 @@ fn events(args: &EventsArgs, providers: &Providers<'_>) -> Result<u8> {
         // return, and a reader asking to follow finished work wants its tail. Asked
         // of the repository side, so a session a supplied implementation opened is
         // followed to its end rather than to the first question it cannot answer.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::launch_trace::sleep(crate::launch_site!(), std::time::Duration::from_millis(100));
     }
 }
 

@@ -183,7 +183,8 @@ fn read(mut command: Command, bound: Duration, label: &str) -> ReleaseAnswer {
     // probe starts however late — the same teardown a timed-out git command gets.
     git::detach_process_group(&mut command);
 
-    let mut child = match command.spawn() {
+    let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(failure) => return not_answered(format!("{label} could not be started: {failure}")),
     };
@@ -195,7 +196,15 @@ fn read(mut command: Command, bound: Duration, label: &str) -> ReleaseAnswer {
     );
     let err_reader = git::PipeCapture::start(child.stderr.take().expect("stderr was piped"), ended);
 
-    let exited = exited_within(&mut child, started, bound, &endings);
+    let exited = {
+        let mut watch =
+            crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(POLL));
+        exited_within(&mut child, started, bound, &endings, &mut watch)
+    };
+    launch.exited(match &exited {
+        Some(Ok(status)) => status.code(),
+        _ => None,
+    });
     let Some(status) = exited else {
         git::terminate_group(&child);
         let _ = child.kill();
@@ -292,8 +301,10 @@ fn exited_within(
     started: Instant,
     bound: Duration,
     endings: &mpsc::Receiver<()>,
+    watch: &mut crate::launch_trace::Wait,
 ) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => return Some(Ok(status)),
             Err(failure) => return Some(Err(failure)),

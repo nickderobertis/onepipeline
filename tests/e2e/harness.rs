@@ -58,6 +58,17 @@ use serde_json::{json, Value};
 static PROFILED: extern "C" fn() = profiled;
 
 extern "C" fn profiled() {
+    // Measurement only (spike-launch-inventory, never lands): every engine this
+    // process starts inherits the launch trace's switch, and writes its records
+    // beside this binary's test-profile records. Set before any thread exists.
+    if std::env::var_os(onevcs::launch_trace::ENV).is_none() {
+        std::env::set_var(
+            onevcs::launch_trace::ENV,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(profile::RECORD_DIR)
+                .join("launch"),
+        );
+    }
     profile::start(
         env!("CARGO_CRATE_NAME"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(profile::RECORD_DIR),

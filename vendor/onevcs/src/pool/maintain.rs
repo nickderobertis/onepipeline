@@ -513,8 +513,15 @@ fn run(worktree: &Path, maintenance: &Maintenance) -> Ran {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         git::detach_process_group(&mut command);
-        command.spawn()
+        Ok(crate::launch_trace::spawn(
+            crate::launch_site!(),
+            &mut command,
+        ))
     });
+    let (spawned, launch) = match spawned {
+        Ok((spawned, launch)) => (spawned, Some(launch)),
+        Err(failure) => (Err(failure), None),
+    };
     let mut child = match spawned {
         Ok(child) => child,
         Err(failure) => {
@@ -531,7 +538,17 @@ fn run(worktree: &Path, maintenance: &Maintenance) -> Ran {
         ended.clone(),
     );
     let err_reader = git::PipeCapture::start(child.stderr.take().expect("stderr was piped"), ended);
-    let exited = exited_within(&mut child, started, bound, &endings);
+    let exited = {
+        let mut watch =
+            crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(POLL));
+        exited_within(&mut child, started, bound, &endings, &mut watch)
+    };
+    if let Some(launch) = launch {
+        launch.exited(match &exited {
+            Some(Ok(status)) => status.code(),
+            _ => None,
+        });
+    }
     let Some(status) = exited else {
         git::terminate_group(&child);
         let _ = child.kill();
@@ -575,8 +592,10 @@ fn exited_within(
     started: Instant,
     bound: Duration,
     endings: &mpsc::Receiver<()>,
+    watch: &mut crate::launch_trace::Wait,
 ) -> Option<std::io::Result<std::process::ExitStatus>> {
     loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => return Some(Ok(status)),
             Err(failure) => return Some(Err(failure)),

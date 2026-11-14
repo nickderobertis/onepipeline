@@ -785,7 +785,7 @@ fn settled_snapshot(at: &Path) -> Option<Snapshot> {
         if !refs_moving(at) {
             return None;
         }
-        std::thread::sleep(wait);
+        crate::launch_trace::sleep(crate::launch_site!(), wait);
         wait *= 2;
     }
     None

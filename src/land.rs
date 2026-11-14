@@ -1367,12 +1367,14 @@ fn git_in<'a>(
             .collect();
         format!("`git {}` in {}", words.join(" "), dir.display())
     };
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("{} could not be run: {error}", named()))?;
+    let output = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        Command::new("git")
+            .args(&args)
+            .current_dir(dir)
+            .stdin(Stdio::null()),
+    )
+    .map_err(|error| format!("{} could not be run: {error}", named()))?;
     if !output.status.success() {
         return Err(format!(
             "{} exited {}: {}",
@@ -1832,7 +1834,7 @@ fn drain(
                 if failed >= RELAY_READ_ATTEMPTS {
                     return Err(why);
                 }
-                std::thread::sleep(poll);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), poll);
                 continue;
             }
         };
@@ -1844,7 +1846,7 @@ fn drain(
             return Ok(());
         }
         if drained {
-            std::thread::sleep(poll);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), poll);
         }
     }
 }

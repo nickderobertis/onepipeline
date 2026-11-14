@@ -326,7 +326,7 @@ fn gone_within(aimed: &[u32], patience: Duration) -> bool {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return false;
         }
-        std::thread::sleep(PROBE_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), PROBE_POLL);
     }
 }
 
@@ -570,7 +570,7 @@ fn discover(
             return Discovery::Incomplete;
         }
         if !stopped(aimed) {
-            std::thread::sleep(STOPPED_POLL);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), STOPPED_POLL);
             continue;
         }
         let Some(table) = list() else {
@@ -616,13 +616,14 @@ fn all_stopped(pids: &[u32]) -> bool {
     // `ps -p` fails when none of its ids is a process any more, which is also
     // the answer of a `ps` that could not start or could not run: asked again
     // next round.
-    let Some(answered) = asked
-        .args(["-o", "pid=,stat=", "-p", &ids])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|answered| answered.status.success())
-    else {
+    let Some(answered) = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        asked
+            .args(["-o", "pid=,stat=", "-p", &ids])
+            .stderr(std::process::Stdio::null()),
+    )
+    .ok()
+    .filter(|answered| answered.status.success()) else {
         return false;
     };
     let Ok(text) = String::from_utf8(answered.stdout) else {
@@ -819,11 +820,13 @@ fn descended_from(table: &[(u32, u32)], pid: u32) -> Vec<u32> {
 #[cfg(unix)]
 fn process_table() -> Option<Vec<(u32, u32)>> {
     crate::rendercost::process_spawned("ps");
-    let listed = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let listed = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid="])
+            .stderr(std::process::Stdio::null()),
+    )
+    .ok()?;
     if !listed.status.success() {
         return None;
     }
@@ -1039,9 +1042,11 @@ fn taskkill(pid: u32, reach: Reach) -> std::io::Result<std::process::ExitStatus>
     if reach == Reach::Tree {
         ask.arg("/T");
     }
-    ask.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+    onevcs::launch_trace::status(
+        onevcs::launch_site!(),
+        ask.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
 }
 
 /// What a run of `taskkill /T /F` established about the tree it was aimed at.
@@ -1403,13 +1408,14 @@ fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
     crate::rendercost::process_spawned("ps");
-    let Ok(listed) = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "state="])
-        .env("TZ", "UTC")
-        .env("LC_ALL", "C")
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
+    let Ok(listed) = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "state="])
+            .env("TZ", "UTC")
+            .env("LC_ALL", "C")
+            .stderr(std::process::Stdio::null()),
+    ) else {
         return false;
     };
     if !listed.status.success() {
@@ -1859,15 +1865,17 @@ const PROC_STAT_TOKEN: &str = "linux-proc-stat:";
 #[cfg(unix)]
 fn ps_process_start_token(pid: u32) -> Option<String> {
     crate::rendercost::process_spawned("ps");
-    let listed = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "lstart="])
-        // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides
-        // whatever else the reader's environment sets.
-        .env("TZ", "UTC")
-        .env("LC_ALL", "C")
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let listed = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart="])
+            // `LC_ALL` rather than `LC_TIME`, because it is the one that overrides
+            // whatever else the reader's environment sets.
+            .env("TZ", "UTC")
+            .env("LC_ALL", "C")
+            .stderr(std::process::Stdio::null()),
+    )
+    .ok()?;
     if !listed.status.success() {
         return None;
     }
@@ -2223,7 +2231,10 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
                         || code == ERROR_LOCK_VIOLATION as i32
                 ) && waiting_since.elapsed() < DEADLINE =>
             {
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(2),
+                );
             }
             other => return other,
         }

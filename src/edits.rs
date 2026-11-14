@@ -1144,13 +1144,15 @@ enum NodeVerdict {
 fn judge_node(validator: &str, document: &[u8], queue: &QueueName) -> NodeVerdict {
     use std::io::Write as _;
     use std::process::{Command as Process, Stdio};
-    let spawned = Process::new(validator)
-        .env("ONEMESSAGEBUS_VALIDATE_QUEUE", queue.as_str())
-        .env_remove("ONEMESSAGEBUS_VALIDATE_CORRELATION")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
+    let spawned = onevcs::launch_trace::spawn_detached(
+        onevcs::launch_site!(),
+        Process::new(validator)
+            .env("ONEMESSAGEBUS_VALIDATE_QUEUE", queue.as_str())
+            .env_remove("ONEMESSAGEBUS_VALIDATE_CORRELATION")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
     let mut child = match spawned {
         Ok(child) => child,
         Err(failure) => {

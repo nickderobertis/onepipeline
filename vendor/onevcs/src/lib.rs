@@ -78,6 +78,8 @@ mod import;
 mod integrate;
 mod label;
 mod landed;
+#[doc(hidden)]
+pub mod launch_trace;
 mod lfs_pointer;
 mod lock;
 mod merge_path;

@@ -789,7 +789,10 @@ fn bounded(
         Tree::prepare(&mut command);
     }
 
-    let mut child = command.spawn().map_err(unspawnable)?;
+    let mut launch = crate::launch_trace::launch(crate::launch_site!(), &command);
+    let spawned = command.spawn();
+    launch.spawned(spawned.as_ref().ok().map(Child::id));
+    let mut child = spawned.map_err(unspawnable)?;
     let tree = match stop {
         Some(_) => Some(Tree::contain(&mut child).map_err(|why| {
             error::invalid(format!(
@@ -821,7 +824,18 @@ fn bounded(
     );
     let err_reader = PipeCapture::start(child.stderr.take().expect("stderr was piped"), ended);
 
-    let collected = match wait_for_exit(&mut child, started, bound, &endings, stop) {
+    let waited = {
+        let mut watch =
+            crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(EXIT_POLL));
+        let waited = wait_for_exit(&mut child, started, bound, &endings, stop, &mut watch);
+        watch.into_launch(&mut launch);
+        waited
+    };
+    launch.exited(match &waited {
+        Waited::Exited(Ok(status)) => status.code(),
+        _ => None,
+    });
+    let collected = match waited {
         Waited::Exited(collected) => collected,
         Waited::Stopped => {
             // `Stopped` is only reached where `stop` was given, and so a tree was held.
@@ -1103,7 +1117,7 @@ pub(crate) trait PipeRead: Read + std::os::windows::io::AsRawHandle {
     /// is left picking output up at that granularity. End of stream still retires it
     /// at once, which is what an ordinary command's teardown turns on.
     fn await_readable(&self, bound: Duration) {
-        std::thread::sleep(bound);
+        crate::launch_trace::sleep(crate::launch_site!(), bound);
     }
 }
 
@@ -1621,8 +1635,10 @@ fn wait_for_exit(
     bound: Duration,
     endings: &mpsc::Receiver<()>,
     stop: Option<&dyn Fn() -> bool>,
+    watch: &mut crate::launch_trace::Wait,
 ) -> Waited {
     loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => return Waited::Exited(Ok(status)),
             // A child this process cannot ask about is one it will never collect,
@@ -1780,7 +1796,7 @@ fn await_group_empty(
                 ),
             });
         }
-        std::thread::sleep(EXIT_POLL);
+        crate::launch_trace::sleep(crate::launch_site!(), EXIT_POLL);
     }
 }
 
@@ -1894,7 +1910,7 @@ impl Tree {
                     REAP_BOUND.as_secs()
                 ));
             }
-            std::thread::sleep(EXIT_POLL);
+            crate::launch_trace::sleep(crate::launch_site!(), EXIT_POLL);
         }
     }
 }
@@ -2542,7 +2558,7 @@ impl ConfigLock {
                     if e.kind() == std::io::ErrorKind::AlreadyExists
                         && started.elapsed() < Duration::from_secs(10) =>
                 {
-                    std::thread::sleep(Duration::from_millis(50));
+                    crate::launch_trace::sleep(crate::launch_site!(), Duration::from_millis(50));
                 }
                 Err(e) => return Err(error::at("take git's configuration lock at", path)(e)),
             }
@@ -2824,7 +2840,7 @@ fn fetch_settled(cwd: &Path, args: &[&str]) -> Result<Output> {
                     ),
                 });
             }
-            std::thread::sleep(pause);
+            crate::launch_trace::sleep(crate::launch_site!(), pause);
             pause = (pause * 2).min(FETCH_RERUN_PAUSE_LIMIT);
         }
     })

@@ -621,9 +621,8 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = spawning
-        .spawn()
-        .map_err(|error| format!("it could not be started ({error})"))?;
+    let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut spawning);
+    let mut child = spawned.map_err(|error| format!("it could not be started ({error})"))?;
     let mut input = source_input(asked);
     input.push('\n');
     // Written on a thread of its own, so a source that never reads its input
@@ -666,7 +665,13 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
         .checked_add(timeout)
         .ok_or_else(|| format!("its timeout of {timeout:?} is past what the clock can count"))?;
     let late = || format!("it did not answer within {} second(s)", timeout.as_secs());
+    let mut watch = onevcs::launch_trace::wait(
+        onevcs::launch_site!(),
+        Some(child.id()),
+        Some(crate::hooks::POLL),
+    );
     let status = loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {}
@@ -690,6 +695,8 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
         }
         std::thread::sleep(crate::hooks::POLL);
     };
+    drop(watch);
+    launch.exited(None);
     if !status.success() {
         return Err(match status.code() {
             // What POSIX shells exit with for a command they could not find.

@@ -346,7 +346,7 @@ pub fn stop(holders: &[Holder], run_root: &Path) -> Vec<Outcome> {
         }
         let deadline = Instant::now() + GRACE;
         while !left.is_empty() && Instant::now() < deadline {
-            std::thread::sleep(POLL);
+            crate::launch_trace::sleep(crate::launch_site!(), POLL);
             left.retain(|holder| still_holding(holder, run_root));
         }
         if left.is_empty() {

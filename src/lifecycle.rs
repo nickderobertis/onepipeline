@@ -1870,7 +1870,7 @@ fn close_and_keep(
     let mut refused = close(Some(token));
     let deadline = Instant::now() + TERMINATOR_GRACE;
     while refused.is_some() && Instant::now() < deadline {
-        std::thread::sleep(TERMINATOR_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), TERMINATOR_POLL);
         refused = close(Some(token));
     }
     let answered = match (&refused, branch, node.repo.as_deref()) {
@@ -2920,7 +2920,7 @@ fn waited(backoff: std::time::Duration, cancel: &crate::executor::CancellationTo
         if left.is_zero() {
             return true;
         }
-        std::thread::sleep(left.min(STEP));
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), left.min(STEP));
     }
 }
 
@@ -4297,7 +4297,7 @@ fn relay_session_events(
         if refused.is_some() {
             refused = close(Some(token));
         }
-        std::thread::sleep(TERMINATOR_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), TERMINATOR_POLL);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 }

@@ -109,7 +109,7 @@ pub fn turn(identity: &str, cancellation: &dyn PublicationCancellation) -> Resul
                 ),
             });
         }
-        std::thread::sleep(POLL);
+        crate::launch_trace::sleep(crate::launch_site!(), POLL);
     }
 }
 

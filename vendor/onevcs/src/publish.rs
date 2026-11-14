@@ -662,7 +662,7 @@ pub(crate) fn pause_unless_cancelled(
         if left.is_zero() {
             return Ok(());
         }
-        std::thread::sleep(left.min(CANCELLATION_GRAIN));
+        crate::launch_trace::sleep(crate::launch_site!(), left.min(CANCELLATION_GRAIN));
     }
 }
 
