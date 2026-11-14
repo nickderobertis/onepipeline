@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -48,10 +48,16 @@ function record(test, wallS, programs, change = {}) {
   return { ...structuredClone(GOLDEN), test, run_id: "nextest-run", wall_s: wallS, programs, ...change };
 }
 
+/// An archive of these files; a value `{ link }` is stored as a link to that path.
 function zipOf(files) {
   const dir = mkdtempSync(join(tmpdir(), "measure-zip-"));
-  for (const [name, content] of Object.entries(files)) write(join(dir, name), content);
-  execFileSync("zip", ["-q", "-r", "out.zip", ...Object.keys(files)], { cwd: dir });
+  for (const [name, content] of Object.entries(files)) {
+    if (content !== null && typeof content === "object" && typeof content.link === "string") {
+      mkdirSync(dirname(join(dir, name)), { recursive: true });
+      symlinkSync(content.link, join(dir, name));
+    } else write(join(dir, name), content);
+  }
+  execFileSync("zip", ["-q", "-r", "--symlinks", "out.zip", ...Object.keys(files)], { cwd: dir });
   return readFileSync(join(dir, "out.zip"));
 }
 
@@ -103,9 +109,10 @@ function world(change = {}) {
   const root = mkdtempSync(join(tmpdir(), "measure-test-"));
   const repo = join(root, "repo");
   const upload = change.workflowName ?? (change.plain ? "test-profile-${{ github.job }}" : "test-profile-${{ github.job }}-${{ matrix.variant }}");
+  const platforms = change.macos ? ["test-linux", "test-macos"] : ["test-linux"];
   write(
     join(repo, ".github/workflows/ci.yml"),
-    `jobs:\n  test-linux:\n    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          name: ${upload}\n  budgets:\n    steps: []\n`,
+    `jobs:\n${platforms.map((job) => `  ${job}:\n    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          name: ${upload}\n`).join("")}  budgets:\n    steps: []\n`,
   );
   const git = (...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], { cwd: repo, encoding: "utf8" }).trim();
   git("init", "-q");
@@ -151,6 +158,20 @@ function world(change = {}) {
       };
       answer(`${REPO}/actions/artifacts/${id}/zip`, zipOf(files));
     });
+    if (change.macos) {
+      jobs.push({
+        id: 3,
+        name: "test-macos (baseline)",
+        conclusion: "success",
+        created_at: `2026-11-13T1${attempt}:00:00Z`,
+        started_at: `2026-11-13T1${attempt}:00:00Z`,
+        completed_at: `2026-11-13T1${attempt}:40:00Z`,
+      });
+      logs["3_test-macos (baseline).txt"] = log({ summary: "     Summary [ 1200.000s] 2 tests run: 2 passed, 0 skipped", tasks: tasksLine("test-macos", "onepipeline-e2e:test-quick"), coverage: null });
+      const id = attempt * 100 + 3;
+      artifacts.push({ id, name: "test-profile-test-macos-baseline", created_at: `2026-11-13T1${attempt}:20:00Z`, expired: false });
+      answer(`${REPO}/actions/artifacts/${id}/zip`, zipOf({ "e2e/views.one.json": record("views::one", 900, {}) }));
+    }
     jobs.push({ id: 9, name: "budgets", conclusion: "skipped", created_at: started });
     jobs = change.jobs?.(jobs, attempt) ?? jobs;
     answer(`${REPO}/actions/runs/${RUN}/attempts/${attempt}/jobs?per_page=100`, change.jobsAnswer?.(attempt) ?? { total_count: jobs.length, jobs });
@@ -344,6 +365,19 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.match(stdout, /\| idle \| 4242#1@idle \| test-linux \| 3 \| – \| – \|/);
   });
 
+  it("groups each platform's runs apart, and shows a side without that platform as having no runs of it", () => {
+    const { stdout } = reported({ macos: true });
+    assert.match(stdout, /\| baseline \| test-macos \| 0\.0, 0\.0 \| 40\.0, 40\.0 \| 20\.0, 20\.0 \|/);
+    assert.match(stdout, /\| idle \| test-macos \|  \|  \|  \|  \|  \| – \| – \|/);
+    assert.match(stdout, /\| idle \| test-macos \| – \| – \| baseline 40\.0–40\.0; idle – \|/);
+    assert.match(stdout, /test-macos, 1 tasks, selected by 2 run\(s\)/);
+  });
+
+  it("keeps a pipe in the job's own words from breaking the table", () => {
+    const { stdout } = reported({ logs: { "1 baseline": log({ extra: ["save-if: ${{ a || b }}"] }) } }, ONE());
+    assert.match(stdout, /save-if: \$\{\{ a \\\|\\\| b \}\}/);
+  });
+
   it("shows no share for verbs of an engine that took no time", () => {
     const { stdout } = reported({ records: { 101: { "e2e/views.one.json": record("views::one", 1, { onepipeline: { count: 0, s: 0 }, "onepipeline:start": { count: 0, s: 0 } }), "e2e/views.two.json": record("views::two", 1, {}) } } }, ONE());
     assert.match(stdout, /\| start \| 0 \| 0\.0 \| 0 \| – \|/);
@@ -356,11 +390,26 @@ describe("measure.mjs over a run it reads through gh", () => {
     w.answer(logs, "not a zip");
     const broken = measure(w, ["--cache", w.cache, ...ONE()]);
     assert.equal(broken.status, 1);
-    assert.match(broken.stderr, /logs\.zip did not extract and is dropped/);
+    assert.match(broken.stderr, /logs\.zip is not an archive and is dropped/);
     w.answer(logs, good);
     const ran = measure(w, ["--cache", w.cache, ...ONE()]);
     assert.equal(ran.status, 0, ran.stderr);
     assert.equal(calls(w).filter((call) => call === logs).length, 2);
+  });
+
+  it("drops an archive whose listing reads but whose contents do not extract", () => {
+    const w = world();
+    const logs = `${REPO}/actions/runs/${RUN}/attempts/1/logs`;
+    const dir = mkdtempSync(join(tmpdir(), "measure-crc-"));
+    write(join(dir, "1_test-linux (baseline).txt"), "x".repeat(4096));
+    execFileSync("zip", ["-q", "-0", "out.zip", "1_test-linux (baseline).txt"], { cwd: dir });
+    const archive = readFileSync(join(dir, "out.zip"));
+    archive[archive.indexOf("xxxx")] = "y".charCodeAt(0);
+    w.answer(logs, archive);
+    const broken = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(broken.status, 1);
+    assert.match(broken.stderr, /logs\.zip did not extract and is dropped/);
+    assert.ok(!existsSync(join(w.cache, RUN, "attempt-1", "logs.zip")));
   });
 
   it("shows a verb table no longer than fifteen rows, and says when records carry no verbs", () => {
@@ -379,6 +428,11 @@ describe("measure.mjs refusals", () => {
     refused({}, ["--side", "a=1", "--side", "a=2"], /side 'a' is named twice/);
     refused({}, ["--verbs", "y"], /unknown argument --verbs/);
     refused({}, [], /at least one --side/);
+    refused({}, ["--side", "no-run-named"], /--side takes NAME=RUN/);
+    const w = world();
+    const ran = measure(w, ["--side", `baseline=${RUN}`]);
+    assert.equal(ran.status, 2);
+    assert.match(ran.stderr, /--cache DIR/);
   });
 
   it("refuses a record that is not the golden record's, naming the file and what is wrong", () => {
@@ -389,6 +443,7 @@ describe("measure.mjs refusals", () => {
     refused(at({ "e2e/views.two.json": record("views::two", 1, { git: { count: 1.5, s: 1 } }) }), ONE(), /views\.two\.json: program git is not a count and a duration/);
     refused(at({ "e2e/views.two.json": record("views::two", 1, []) }), ONE(), /views\.two\.json does not have the golden profile record's shape/);
     refused(at({ "e2e/views.two.json": "{ half a record" }), ONE(), /views\.two\.json is not JSON/);
+    refused(at({ "e2e/views.link.json": { link: "/etc/hostname" } }), ONE(), /holds a link, e2e\/views\.link\.json/);
     const bad = structuredClone(GOLDEN.categories);
     bad.spawn.count = -1;
     refused(at({ "e2e/views.two.json": record("views::two", 1, {}, { categories: bad }) }), ONE(), /views\.two\.json: category spawn is not a count and a duration/);
@@ -413,6 +468,7 @@ describe("measure.mjs refusals", () => {
     refused({ logs: { "1 baseline": log({ summary: "     Summary [ 600.000s] 1 test run: 2 passed, 0 skipped" }) } }, ONE(), /the e2e tier's summary reads/);
     refused({ logs: { "1 baseline": log({ summary: "     Summary [ fast ] everything passed" }) } }, ONE(), /the e2e tier's summary reads/);
     refused({ logs: { "1 baseline": log({ summary: "     Summary [ 600.000s] 2 tests run: 1 passed, nonsense failed" }) } }, ONE(), /the e2e tier's summary reads/);
+    refused({ logs: { "1 baseline": log({ summary: "     Summary [ 600.000s] 2 tests run: 1 passed, 1 flubbed" }) } }, ONE(), /the e2e tier's summary reads/);
     refused({ logs: { "1 baseline": log({ coverage: coverageLine("196.5") }) } }, ONE(), /the line coverage reads/);
     refused({ logs: { "1 baseline": log({ coverage: "lines percent: lots" }) } }, ONE(), /the line coverage reads/);
     refused({ logs: { "1 baseline": log({ tasks: "ci-job: test-linux runs 3 task(s): a:b c:d" }) } }, ONE(), /the Nx task selection reads/);

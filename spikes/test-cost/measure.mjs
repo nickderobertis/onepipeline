@@ -176,10 +176,31 @@ function readJson(path) {
   }
 }
 
+/// Every entry a plain file or directory under the archive's own root, read from
+/// the archive's listing before anything is extracted.
+function checkArchive(zip) {
+  let listing;
+  try {
+    listing = execFileSync("unzip", ["-Z", zip], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
+  } catch (error) {
+    rmSync(zip, { force: true });
+    throw new Error(`${zip} is not an archive and is dropped; run again to fetch it again (${String(error.stderr ?? error.message).trim()})`);
+  }
+  for (const line of listing.split("\n")) {
+    // zipinfo's own columns: mode, version, system, size, kind, method, date, time, name.
+    const entry = /^([-dl])[-rwxsStT]{6,9}\s+\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s(.+)$/.exec(line);
+    if (!entry) continue;
+    expect(entry[1] !== "l", `${zip} holds a link, ${entry[2]}, which no log or profile archive holds`);
+    const parts = entry[2].split("/");
+    expect(!entry[2].startsWith("/") && !parts.includes(".."), `${zip} holds ${entry[2]}, outside the directory it extracts to`);
+  }
+}
+
 /// The archive extracted once; one that does not extract is dropped with what it
 /// left, so the next invocation fetches it again.
 function unzipped(zip, into) {
   if (!existsSync(join(into, ".done"))) {
+    checkArchive(zip);
     mkdirSync(into, { recursive: true });
     try {
       execFileSync("unzip", ["-o", "-q", zip, "-d", into], { stdio: ["ignore", "ignore", "pipe"] });
@@ -394,7 +415,7 @@ function e2eTier(lines) {
   return measurement(
     lines.slice(start),
     /^Summary \[/,
-    /^Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed((?: \(\d+ [a-z]+\))*)((?:, \d+ [a-z][a-z -]*?)*)$/,
+    /^Summary \[\s*(\d+\.\d+)s\] (\d+)(?:\/\d+)? tests? run: (\d+) passed((?: \(\d+ (?:slow|flaky|leaky)\))*)((?:, \d+ (?:failed|skipped|timed out|exec failed|leaky|flaky|not run))*)$/,
     (m) => ({
       seconds: Number(m[1]),
       run: Number(m[2]),
