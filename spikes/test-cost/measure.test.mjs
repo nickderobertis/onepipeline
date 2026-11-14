@@ -410,6 +410,45 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.equal(broken.status, 1);
     assert.match(broken.stderr, /logs\.zip did not extract and is dropped/);
     assert.ok(!existsSync(join(w.cache, RUN, "attempt-1", "logs.zip")));
+    assert.ok(!existsSync(join(w.cache, RUN, "attempt-1", "logs")), "nothing it half extracted is kept");
+    w.answer(logs, zipOf({ "1_test-linux (baseline).txt": log() }));
+    const ran = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.match(ran.stdout, /\| baseline \| test-linux \| 1\.0 \| 29\.0 \| 10\.0 \|/);
+  });
+
+  it("refuses an archive naming an entry outside the directory it extracts to, before extracting it", () => {
+    const w = world();
+    const dir = mkdtempSync(join(tmpdir(), "measure-escape-"));
+    execFileSync("python3", ["-I", "-c", "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], 'w'); z.writestr('../escaped.txt', 'x'); z.close()", join(dir, "out.zip")]);
+    w.answer(`${REPO}/actions/runs/${RUN}/attempts/1/logs`, readFileSync(join(dir, "out.zip")));
+    const ran = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(ran.status, 2);
+    assert.match(ran.stderr, /holds \.\.\/escaped\.txt, outside the directory it extracts to/);
+    assert.ok(!existsSync(join(w.cache, RUN, "escaped.txt")));
+  });
+
+  it("reads each restore message the cache actions print", () => {
+    for (const [line, outcome] of [
+      ["No cache found.", "miss"],
+      ["No GitHub Actions cache found for key: x", "miss"],
+      ["Cache restored from key: v0-rust", "hit"],
+      ["Cache restored successfully", "hit"],
+    ]) {
+      assert.match(reported({ logs: { "1 baseline": log({ cache: line }) } }, ONE()).stdout, new RegExp(`rust-cache: ${outcome.replace(/[()]/g, "\\$&")},`), line);
+    }
+  });
+
+  it("reads every summary form nextest prints", () => {
+    for (const [summary, counts] of [
+      ["Summary [ 600.000s] 1165/1442 tests run: 1164 passed (1 slow), 1 failed, 1 skipped", "1165/1164/1"],
+      ["Summary [ 600.000s] 3 tests run: 3 passed (2 slow) (1 flaky), 1 skipped", "3/3/0"],
+      ["Summary [ 600.000s] 4 tests run: 1 passed, 1 timed out, 1 exec failed, 1 leaky", "4/1/2"],
+      ["Summary [ 600.000s] 2 tests run: 1 passed, 1 not run", "2/1/0"],
+      ["Summary [ 600.000s] 1 test run: 1 passed (1 leaky)", "1/1/0"],
+    ]) {
+      assert.match(reported({ logs: { "1 baseline": log({ summary: `     ${summary}` }) } }, ONE()).stdout, new RegExp(`\\| ${counts} \\|`), summary);
+    }
   });
 
   it("shows a verb table no longer than fifteen rows, and says when records carry no verbs", () => {
@@ -443,7 +482,7 @@ describe("measure.mjs refusals", () => {
     refused(at({ "e2e/views.two.json": record("views::two", 1, { git: { count: 1.5, s: 1 } }) }), ONE(), /views\.two\.json: program git is not a count and a duration/);
     refused(at({ "e2e/views.two.json": record("views::two", 1, []) }), ONE(), /views\.two\.json does not have the golden profile record's shape/);
     refused(at({ "e2e/views.two.json": "{ half a record" }), ONE(), /views\.two\.json is not JSON/);
-    refused(at({ "e2e/views.link.json": { link: "/etc/hostname" } }), ONE(), /holds a link, e2e\/views\.link\.json/);
+    refused(at({ "e2e/views.link.json": { link: "/etc/hostname" } }), ONE(), /views\.link\.json is a link, which no log or profile archive holds/);
     const bad = structuredClone(GOLDEN.categories);
     bad.spawn.count = -1;
     refused(at({ "e2e/views.two.json": record("views::two", 1, {}, { categories: bad }) }), ONE(), /views\.two\.json: category spawn is not a count and a duration/);

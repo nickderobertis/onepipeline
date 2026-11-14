@@ -108,9 +108,7 @@ function readRecords(dir) {
   const records = [];
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    const kind = lstatSync(path);
-    expect(!kind.isSymbolicLink(), `${path} is a link, which a profile artifact never holds`);
-    if (kind.isDirectory()) records.push(...readRecords(path));
+    if (lstatSync(path).isDirectory()) records.push(...readRecords(path));
     else if (name.endsWith(".json")) {
       let record;
       try {
@@ -176,23 +174,28 @@ function readJson(path) {
   }
 }
 
-/// Every entry a plain file or directory under the archive's own root, read from
-/// the archive's listing before anything is extracted.
+/// Every entry named under the archive's own root, read from its name listing (one
+/// name a line) before anything is extracted; links are refused once extracted.
 function checkArchive(zip) {
-  let listing;
+  let names;
   try {
-    listing = execFileSync("unzip", ["-Z", zip], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
+    names = execFileSync("unzip", ["-Z1", zip], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 28 });
   } catch (error) {
     rmSync(zip, { force: true });
     throw new Error(`${zip} is not an archive and is dropped; run again to fetch it again (${String(error.stderr ?? error.message).trim()})`);
   }
-  for (const line of listing.split("\n")) {
-    // zipinfo's own columns: mode, version, system, size, kind, method, date, time, name.
-    const entry = /^([-dl])[-rwxsStT]{6,9}\s+\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s(.+)$/.exec(line);
-    if (!entry) continue;
-    expect(entry[1] !== "l", `${zip} holds a link, ${entry[2]}, which no log or profile archive holds`);
-    const parts = entry[2].split("/");
-    expect(!entry[2].startsWith("/") && !parts.includes(".."), `${zip} holds ${entry[2]}, outside the directory it extracts to`);
+  for (const name of names.split("\n").filter(Boolean)) {
+    expect(!name.startsWith("/") && !name.split(/[\\/]/).includes(".."), `${zip} holds ${name}, outside the directory it extracts to`);
+  }
+}
+
+/// Nothing extracted is a link: a log or profile archive holds files and directories.
+function checkExtracted(dir) {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const kind = lstatSync(path);
+    expect(!kind.isSymbolicLink(), `${path} is a link, which no log or profile archive holds`);
+    if (kind.isDirectory()) checkExtracted(path);
   }
 }
 
@@ -208,6 +211,12 @@ function unzipped(zip, into) {
       rmSync(into, { recursive: true, force: true });
       rmSync(zip, { force: true });
       throw new Error(`${zip} did not extract and is dropped; run again to fetch it again (${String(error.stderr ?? error.message).trim()})`);
+    }
+    try {
+      checkExtracted(into);
+    } catch (refusal) {
+      rmSync(into, { recursive: true, force: true });
+      throw refusal;
     }
     writeFileSync(join(into, ".done"), "");
   }
@@ -420,7 +429,8 @@ function e2eTier(lines) {
       seconds: Number(m[1]),
       run: Number(m[2]),
       passed: Number(m[3]),
-      failed: Number(/, (\d+) failed\b/.exec(m[5])?.[1] ?? 0),
+      // nextest counts timed-out and unstartable tests apart from its `failed`; none passed.
+      failed: [...m[5].matchAll(/, (\d+) (?:failed|timed out|exec failed)\b/g)].reduce((total, hit) => total + Number(hit[1]), 0),
     }),
     (t) => isSeconds(t.seconds) && isCount(t.run) && isCount(t.passed) && isCount(t.failed) && t.passed + t.failed <= t.run,
     "the e2e tier's summary",
