@@ -220,6 +220,8 @@ function unzipped(zip, into) {
     }
     writeFileSync(join(into, ".done"), "");
   }
+  // Again on every reuse: what was kept may have been changed since it was checked.
+  checkExtracted(into);
   return into;
 }
 

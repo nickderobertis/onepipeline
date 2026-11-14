@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -260,6 +260,27 @@ describe("measure.mjs over a run it reads through gh", () => {
     assert.match(reported({ workflowName: "test-profile-elsewhere" }, ONE()).stdout, /\| baseline \| 4242#1@baseline \| test-linux \| – \| no records \| – \|/);
     const expired = reported({ expired: [201] }, ["--side", `baseline=${RUN}#1@baseline,${RUN}#2@baseline`]);
     assert.match(expired.stdout, /\| baseline \| 4242#2@baseline \| test-linux \| – \| no records \| – \|/);
+  });
+
+  it("answers from what it kept about the head once git can no longer reach it", () => {
+    const w = world();
+    const first = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(first.status, 0, first.stderr);
+    const elsewhere = mkdtempSync(join(tmpdir(), "measure-no-repo-"));
+    const again = spawnSync(process.execPath, [HARNESS, "--cache", w.cache, ...ONE()], { cwd: elsewhere, env: { ...w.env, GIT_CEILING_DIRECTORIES: tmpdir() }, encoding: "utf8" });
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(again.stdout, first.stdout);
+  });
+
+  it("refuses a kept log that has become a link since it was extracted", () => {
+    const w = world();
+    assert.equal(measure(w, ["--cache", w.cache, ...ONE()]).status, 0);
+    const kept = join(w.cache, RUN, "attempt-1", "logs", "1_test-linux (baseline).txt");
+    rmSync(kept);
+    symlinkSync("/etc/hostname", kept);
+    const ran = measure(w, ["--cache", w.cache, ...ONE()]);
+    assert.equal(ran.status, 2);
+    assert.match(ran.stderr, /is a link, which no log or profile archive holds/);
   });
 
   it("reads the head again when what it kept about it is not an answer", () => {
