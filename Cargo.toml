@@ -1829,9 +1829,11 @@ onevcs = { path = "vendor/onevcs" }
 # The linked libraries the inventory showed starting processes inside the engine,
 # vendored the same way: the harness runs, the judges, the bus's hooks and the agent
 # graph's pre-turn scripts. Two departures besides the trace calls: oneharness-core
-# allows the one warning its release raises on this toolchain, and oneagentgraph's
-# test-only tests/yaml-corpus/ is left out, since the publication boundary refuses
-# terms it carries.
+# allows the one warning its release raises on this toolchain; and four files no build
+# reads are left out: oneagentgraph's test-only tests/yaml-corpus/ (the publication
+# boundary refuses terms it carries), its justfile, and oneharness-core's and
+# onejudge's project.json (their repositories' Nx projects, which this repository's
+# structure tests would read as its own).
 oneharness-core = { path = "vendor/oneharness-core" }
 onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }
