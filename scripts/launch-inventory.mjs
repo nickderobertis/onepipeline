@@ -43,6 +43,7 @@ export class Refusal extends Error {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: a job log carries ANSI colour codes.
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] git's read/write semantics are git's, held nowhere this repository could gate against; a form this does not recognise is counted as a write, which can only under-count repeats, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 /** git subcommands that write nothing a later read of the same argv would see. */
 export const GIT_READS = new Set([
   "rev-parse",
@@ -79,7 +80,6 @@ export const GIT_READS = new Set([
   "whatchanged",
   "verify-commit",
   "verify-tag",
-  "fsck",
 ]);
 
 /**
@@ -157,10 +157,11 @@ export function gitReads(sub, argv) {
   }
 }
 
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 /**
  * The engine's verbs that read and change nothing, from its `--help`: a journey re-launching
- * the CLI for one is re-reading. (`unpublished`, `supersessions` and `review` read unless
- * given their recording flags, which a re-launch for a read does not pass.)
+ * the CLI for one is re-reading. `review`, `unpublished` and `supersessions` read unless
+ * given one of `RECORDING_FLAGS`, so a launch carrying one is not counted as a read.
  */
 export const READ_VERBS = new Set([
   "plan",
@@ -184,9 +185,36 @@ export const READ_VERBS = new Set([
   "agents",
   "telemetry",
   "help",
-  "--version",
-  "--help",
 ]);
+
+/** Every other verb `--help` lists: each changes a run, a branch, or the host. */
+export const WRITE_VERBS = new Set([
+  "human-items",
+  "scratch",
+  "start",
+  "adopt",
+  "readjust",
+  "reply",
+  "surface",
+  "decline-ruling",
+  "attest",
+  "stop",
+  "label",
+  "shutdown",
+  "ask",
+  "flow",
+  "publish-branch",
+  "repo-recover",
+  "integrate",
+]);
+
+/** The flags that make a reading verb record something. */
+export const RECORDING_FLAGS = ["--record", "--acknowledge", "--decide", "--reply", "--post"];
+
+/** Whether one engine launch, by its argv, only reads. */
+export function launchReads(verb, argv = []) {
+  return READ_VERBS.has(verb) && !argv.some((a) => RECORDING_FLAGS.includes(a));
+}
 
 const median = (xs) => quantile(xs, 0.5);
 function quantile(xs, p) {
@@ -210,11 +238,55 @@ const RECORD_FIELDS = {
   sleeps: ["pid", "site", "count"],
 };
 
-/** Whether `r` is a trace record of a kind this fold reads, carrying its fields. */
+const isTime = (x) => Number.isFinite(x) && x >= 0;
+const isTimeOrNull = (x) => x == null || isTime(x);
+
+/** Whether `r` is a trace record of a kind this fold reads, its fields of their types. */
 export function validRecord(r) {
-  const fields = r && r.v === 1 ? RECORD_FIELDS[r.kind] : null;
-  return Boolean(fields) && fields.every((f) => r[f] != null) && Number.isFinite(r.pid);
+  const fields = r && typeof r === "object" && r.v === 1 ? RECORD_FIELDS[r.kind] : null;
+  if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
+  if (r.t != null && !isTime(r.t)) return false;
+  if (r.site != null && typeof r.site !== "string") return false;
+  if (r.kind === "start")
+    return (
+      typeof r.program === "string" &&
+      Array.isArray(r.argv) &&
+      r.argv.every((a) => typeof a === "string") &&
+      ["spawn_ns", "exit_ns", "wait_ns", "trace_ns"].every((f) => isTimeOrNull(r[f]))
+    );
+  if (r.kind === "exit") return ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]));
+  if (r.kind === "wait") return isTimeOrNull(r.wait_ns) && isTimeOrNull(r.polls);
+  if (r.kind === "sleeps") return isTime(r.count) && isTime(r.slept_ns);
+  return true;
 }
+
+/** Whether `r` is a test-profile record of schema 2 (crates/testfakes/src/profile.rs). */
+export function validProfile(r) {
+  return (
+    Boolean(r) &&
+    typeof r === "object" &&
+    r.schema === 2 &&
+    typeof r.test === "string" &&
+    isTime(r.wall_s) &&
+    Boolean(r.categories) &&
+    typeof r.categories === "object" &&
+    Object.values(r.categories).every((c) => c && isTime(c.s) && isTime(c.count)) &&
+    Boolean(r.programs) &&
+    typeof r.programs === "object" &&
+    Object.values(r.programs).every((v) => v && isTime(v.count) && isTime(v.s))
+  );
+}
+
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the waits document is written by crates/testfakes/src/profile.rs's wait_sites on this branch, and the fixture is its own output recorded at this commit; a cross-language gate would be code for a reader that never lands: this branch is preserved as the measurement record and nothing on it merges.
+/** Whether `w` is one site of a harness waits document. */
+const validWait = (w) =>
+  Boolean(w) &&
+  typeof w === "object" &&
+  ["span", "poll", "sleep"].includes(w.kind) &&
+  typeof w.site === "string" &&
+  isTime(w.count) &&
+  isTime(w.s) &&
+  (w.interval_s == null || isTime(w.interval_s));
 
 /**
  * A JSONL file's valid records, counting into `skipped` each line that is not JSON (one a
@@ -264,15 +336,7 @@ export function readJob(label, dir) {
     for (const f of readdirSync(e2e)) {
       if (!f.endsWith(".json")) continue;
       const r = readJson(join(e2e, f));
-      // The test-profile record's own shape, schema 2 (crates/testfakes/src/profile.rs).
-      if (
-        r.schema === 2 &&
-        typeof r.test === "string" &&
-        Number.isFinite(r.wall_s) &&
-        r.categories &&
-        r.programs
-      )
-        tests.push(r);
+      if (validProfile(r)) tests.push(r);
       else skipped.records++;
     }
   }
@@ -283,15 +347,9 @@ export function readJob(label, dir) {
     for (const f of readdirSync(launch)) {
       if (f.endsWith(".waits.json")) {
         const doc = readJson(join(launch, f));
-        const sites = Array.isArray(doc.sites) ? doc.sites : [];
-        const valid = sites.filter(
-          (w) =>
-            ["span", "poll", "sleep"].includes(w.kind) &&
-            typeof w.site === "string" &&
-            Number.isFinite(w.count) &&
-            Number.isFinite(w.s),
-        );
-        skipped.waits += sites.length - valid.length + (Array.isArray(doc.sites) ? 0 : 1);
+        const sites = doc && Array.isArray(doc.sites) ? doc.sites : [];
+        const valid = sites.filter(validWait);
+        skipped.waits += sites.length - valid.length + (doc && Array.isArray(doc.sites) ? 0 : 1);
         for (const site of valid) harnessWaits.push({ ...site, test: doc.test });
         continue;
       }
@@ -307,7 +365,12 @@ export function readJob(label, dir) {
     );
   const hostFile = join(root, "launch-host.json");
   const host = existsSync(hostFile) ? readJson(hostFile) : null;
-  if (host && !Array.isArray(host.spawn?.results))
+  const result = (x) =>
+    x &&
+    typeof x === "object" &&
+    typeof x.name === "string" &&
+    (x.error != null || isTime(x.median_ms));
+  if (host && !(Array.isArray(host.spawn?.results) && host.spawn.results.every(result)))
     throw new Refusal(
       `${hostFile} holds no spawn results`,
       "regenerate it with 'node scripts/launch-inventory.mjs host'",
@@ -368,7 +431,14 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
           continue;
         }
         // An ETW process start: its pid, its parent's, and its image.
-        if (!Number.isFinite(r.pid) || !Number.isFinite(r.ppid) || typeof r.image !== "string") {
+        if (
+          !r ||
+          typeof r !== "object" ||
+          !Number.isFinite(r.pid) ||
+          !Number.isFinite(r.ppid) ||
+          typeof r.image !== "string" ||
+          (r.cmd != null && typeof r.cmd !== "string")
+        ) {
           skipped.invalid++;
           continue;
         }
@@ -480,7 +550,6 @@ export function joinTrace(trace) {
     for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"])
       if (e[f] != null) s[f] = e[f];
   }
-  // A record names its process; the process names its verb and test.
   for (const r of [...starts, ...waits, ...sleeps]) {
     const p = procs.get(key(r.file, r.pid));
     r.verb ??= isTestBinary(p) ? "(test process)" : (p?.verb ?? "");
@@ -580,7 +649,6 @@ export function foldJob(job) {
   const procIndex = new Map(t.procs.map((p) => [t.key(p.file, p.pid), p]));
   const startedBy = (s) => procIndex.get(t.key(s.file, s.pid));
 
-  // Engine and library starts, from the trace.
   const engine = new Map();
   const bySite = new Map();
   for (const s of t.starts) {
@@ -632,7 +700,6 @@ export function foldJob(job) {
     }
   }
 
-  // Each top-level engine run by verb, from its own process records.
   const verbs = new Map();
   for (const p of t.procs) {
     if (isTestBinary(p) || p.parentStart) continue;
@@ -676,7 +743,6 @@ export function foldJob(job) {
     }
   }
 
-  // Waits on a child, by site.
   const waits = new Map();
   for (const w of t.waits) {
     const k = `${w.function} (${w.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
@@ -711,7 +777,6 @@ export function foldJob(job) {
     0,
   );
 
-  // Starts per test and per site.
   const perTest = new Map();
   for (const s of t.starts) perTest.set(s.test || s.file, (perTest.get(s.test || s.file) ?? 0) + 1);
   for (const r of job.tests)
@@ -722,16 +787,14 @@ export function foldJob(job) {
   const perSite = new Map();
   for (const s of t.starts) perSite.set(siteOf(s), (perSite.get(siteOf(s)) ?? 0) + 1);
 
-  // Journeys re-launching the CLI for read-only verbs.
   const relaunch = new Map();
   for (const p of t.procs) {
-    if (p.exe !== "onepipeline" || p.parentStart || !READ_VERBS.has(p.verb)) continue;
+    if (p.exe !== "onepipeline" || p.parentStart || !launchReads(p.verb, p.argv)) continue;
     if (!relaunch.has(p.test)) relaunch.set(p.test, new Map());
     const m = relaunch.get(p.test);
     m.set(p.verb, (m.get(p.verb) ?? 0) + 1);
   }
 
-  // The trace's own cost.
   let traceNs = 0;
   let records = 0;
   const lastWrite = new Map();
@@ -1356,9 +1419,11 @@ function usage(message) {
 
 export async function main(argv) {
   const [verb, ...rest] = argv;
+  // llmlint: ignore-block[tool_output_is_signal] fold, diff, run and host are report commands: the multi-line Markdown or JSON they print on success is the whole of what they are for, and they never lands: this branch is preserved as the measurement record and nothing on it merges.
   if (verb === "host") {
-    const at = rest.indexOf("--runs");
-    return `${JSON.stringify(await host({ runs: at < 0 ? 30 : Number(rest[at + 1]) }), null, 2)}\n`;
+    if (!(rest.length === 0 || (rest.length === 2 && rest[0] === "--runs")))
+      throw usage("host takes nothing but an optional --runs N");
+    return `${JSON.stringify(await host({ runs: rest.length ? Number(rest[1]) : 30 }), null, 2)}\n`;
   }
   if (verb === "run") {
     if (!rest.length) throw usage("name at least one LABEL=LOG job log");
@@ -1388,7 +1453,6 @@ export async function main(argv) {
       jobs.push(foldJob(readJob(arg.slice(0, at), arg.slice(at + 1))));
     } else throw usage(`unknown argument '${arg}'`);
   }
-  // llmlint: ignore-block[tool_output_is_signal] fold, diff, run and host are report commands: the multi-line Markdown or JSON they print on success is the whole of what they are for, and they never lands: this branch is preserved as the measurement record and nothing on it merges.
   if (verb === "fold") {
     if (!jobs.length) throw usage("name at least one LABEL=DIR job");
     return render(jobs, { top });

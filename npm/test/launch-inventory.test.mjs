@@ -421,3 +421,183 @@ test("the OS trace runner passes a non-e2e binary through, and traces or refuses
     assert.ok(!existsSync(out) || readdirSync(out).length === 0);
   }
 });
+
+/** Run a snippet against the fold's module, and parse what it prints as JSON. */
+function withModule(body) {
+  const r = spawnSync(
+    process.execPath,
+    ["-e", `import(${JSON.stringify(script)}).then((m) => { ${body} })`],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test("every verb the built CLI lists is classified as a read or a write, and none it lacks", () => {
+  const exe = join(
+    root,
+    "target",
+    "debug",
+    process.platform === "win32" ? "onepipeline.exe" : "onepipeline",
+  );
+  assert.ok(
+    existsSync(exe),
+    `${exe} is not built: run 'just _crate-build' (npm/project.json's test depends on it)`,
+  );
+  const help = spawnSync(exe, ["--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  const listed = help.stdout
+    .slice(help.stdout.indexOf("Commands:"), help.stdout.indexOf("Options:"))
+    .split("\n")
+    .slice(1)
+    .map((l) => /^ {2}(\S+)/.exec(l)?.[1])
+    .filter(Boolean);
+  const { reads, writes } = withModule(
+    "process.stdout.write(JSON.stringify({ reads: [...m.READ_VERBS], writes: [...m.WRITE_VERBS] }))",
+  );
+  assert.deepEqual([...reads, ...writes].sort(), [...listed].sort());
+  assert.deepEqual(
+    reads.filter((v) => writes.includes(v)),
+    [],
+  );
+});
+
+test("the repository's own test-profile golden passes the fold's record check", () => {
+  const golden = join(root, "tests", "golden", "test-profile-record-v2.json");
+  const ok = withModule(
+    `process.stdout.write(JSON.stringify(m.validProfile(JSON.parse(require("node:fs").readFileSync(${JSON.stringify(golden)}, "utf8")))))`,
+  );
+  assert.equal(ok, true);
+});
+
+test("a recording flag makes a reading verb a write, so its re-launch is not counted as a read", () => {
+  const got = withModule(
+    'process.stdout.write(JSON.stringify([m.launchReads("supersessions", ["supersessions", "r"]), m.launchReads("supersessions", ["supersessions", "r", "--record"]), m.launchReads("start", ["start"])]))',
+  );
+  assert.deepEqual(got, [true, false, false]);
+});
+
+test("diff names each test and program whose start counts differ between two jobs", () => {
+  const dir = join(scratch, "fewer");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const file = readdirSync(launch).find(
+    (f) => f.startsWith("destination__a_hook") && f.endsWith(".jsonl"),
+  );
+  const lines = readFileSync(join(launch, file), "utf8").split("\n");
+  let dropped = 0;
+  const kept = lines.filter((l) => {
+    if (dropped < 2 && l.includes('"kind":"start"') && l.includes('"sub":"symbolic-ref"')) {
+      dropped++;
+      return false;
+    }
+    return true;
+  });
+  writeFileSync(join(launch, file), kept.join("\n"));
+  const out = run("diff", `full=${recorded}`, `fewer=${dir}`).stdout;
+  assert.match(
+    out,
+    /\| destination::a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart \| git symbolic-ref \| 4 \| 2 \| -2 \|/,
+  );
+  assert.match(out, /^1 \(test, program\) pairs differ\.$/m);
+});
+
+test("sleep tallies, a detached start's later exit, and inputs of no known shape are each accounted for", () => {
+  const dir = join(scratch, "shapes");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const file = readdirSync(launch).find(
+    (f) => f.startsWith("destination__a_hook") && f.endsWith(".jsonl"),
+  );
+  const lines = readFileSync(join(launch, file), "utf8").split("\n").filter(Boolean);
+  const engine = JSON.parse(
+    lines.find((l) => l.includes('"kind":"proc"') && l.includes('"exe":"onepipeline"')),
+  );
+  const at = engine.t + 1e6;
+  const added = [
+    {
+      v: 1,
+      kind: "sleeps",
+      pid: engine.pid,
+      site: "src/engine.rs:3265",
+      function: "onepipeline::engine::InPass::run",
+      count: 3,
+      slept_ns: 600e6,
+      interval_ns: 200e6,
+    },
+    {
+      v: 1,
+      kind: "start",
+      pid: engine.pid,
+      site: "src/driver.rs:2436",
+      function: "onepipeline::driver::retain_driver",
+      program: "onepipeline",
+      argv: ["drive-run", "x"],
+      t: at,
+      child: 4242,
+      spawn_ns: 1e6,
+      exit_ns: null,
+    },
+    {
+      v: 1,
+      kind: "exit",
+      pid: engine.pid,
+      child: 4242,
+      site: "src/agentgraph.rs:1651",
+      function: "w",
+      t: at + 250e6,
+      status: 0,
+    },
+    { v: 1, kind: "start", pid: engine.pid, site: "x", program: "git", argv: "not a list", t: at },
+  ].map((r) => JSON.stringify(r));
+  writeFileSync(join(launch, file), [...lines, ...added, "{cut short"].join("\n"));
+  writeFileSync(
+    join(launch, "bogus.waits.json"),
+    JSON.stringify({ test: "t", sites: [{ kind: "nap", site: "x", count: 1, s: 1 }] }),
+  );
+  const e2e = join(dir, "test-profile", "e2e");
+  writeFileSync(join(e2e, "old.json"), JSON.stringify({ schema: 1, test: "old", wall_s: 1 }));
+  const out = run("fold", `shapes=${dir}`).stdout;
+  assert.match(
+    out,
+    /skipped 1 lines that are not JSON, 1 records of no known shape, 1 test-profile records not of schema 2 and 1 harness wait entries\./,
+  );
+  const waits = rows(out, "Waits and polls on a child, by site");
+  assert.deepEqual(
+    waits.find((c) => c[0].startsWith("onepipeline::engine::InPass::run")).slice(1, 6),
+    ["sleep", "3", "-", "200.0", "0.6"],
+  );
+  const sites = rows(out, "By call site and engine verb");
+  const driver = sites.find((c) => c[1].startsWith("onepipeline::driver::retain_driver"));
+  // Its exit, recorded where the child was collected, gives the start its 250 ms.
+  assert.equal(driver[4], "250.0");
+});
+
+test("the OS trace runner runs an e2e binary untraced when no trace is asked for, and refuses a directory it cannot make", () => {
+  const dir = mkdtempSync(join(scratch, "runner-"));
+  const e2e = join(dir, "e2e-0123456789abcdef");
+  copyFileSync(process.execPath, e2e);
+  chmodSync(e2e, 0o755);
+  const { ONEPIPELINE_OS_TRACE_DIR: _, ...unset } = process.env;
+  const plain = spawnSync("bash", [runner, e2e, "-e", "process.exit(4)"], {
+    encoding: "utf8",
+    env: unset,
+  });
+  assert.equal(plain.status, 4, plain.stderr);
+  const file = join(dir, "a-file");
+  writeFileSync(file, "");
+  const refused = spawnSync("bash", [runner, e2e, "-e", "0"], {
+    encoding: "utf8",
+    env: { ...process.env, ONEPIPELINE_OS_TRACE_DIR: join(file, "os") },
+  });
+  assert.equal(refused.status, 2);
+  const strace = spawnSync("bash", ["-c", "command -v strace"]).status === 0;
+  assert.match(
+    refused.stderr,
+    strace
+      ? /cannot create .* for the strace record: point ONEPIPELINE_OS_TRACE_DIR/
+      : /strace is not installed/,
+  );
+});

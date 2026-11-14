@@ -23,5 +23,7 @@ mkdir -p "$dir" || {
   exit 2
 }
 name="${NEXTEST_TEST_NAME:-untested}"
+# A test's path is identifiers joined by `::`; anything else names no file under $dir.
+[[ "$name" =~ ^[A-Za-z0-9_]+(::[A-Za-z0-9_]+)*$ ]] || name=untested
 exec strace -f -qq --seccomp-bpf -e trace=execve,clone,clone3,fork,vfork -e signal=none -s 256 \
   -o "$dir/${name//::/__}.$$.strace" -- "$@"
