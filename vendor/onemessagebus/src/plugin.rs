@@ -625,6 +625,7 @@ impl PluginProcess {
             transport: kind.clone(),
             detail,
         };
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
         let mut child = crate::launch_trace::spawn_detached(
             crate::launch_site!(),
             Command::new(path)

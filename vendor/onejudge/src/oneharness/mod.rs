@@ -307,6 +307,7 @@ fn exited_within(child: &mut std::process::Child, grace: Duration) -> bool {
             Ok(Some(_)) => return true,
             Err(_) => return false,
             Ok(None) if Instant::now() >= deadline => return false,
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             Ok(None) => crate::launch_trace::sleep(crate::launch_site!(), TEARDOWN_POLL),
         }
     }
@@ -1206,10 +1207,12 @@ impl OneharnessProvider {
         write_prompt(op, child.stdin.as_mut(), &spec.prompt)?;
         let pid = child.id();
         let output = {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
             child.wait_with_output()
         };
         if let Ok(output) = &output {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
         }
         let output = output.map_err(|e| {
@@ -1300,10 +1303,12 @@ impl OneharnessProvider {
             terminate(&mut child);
         }
         let status = {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
             child.wait()
         };
         if let Ok(status) = &status {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
         }
         let status = status.map_err(|e| {

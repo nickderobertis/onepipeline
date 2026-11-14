@@ -244,9 +244,19 @@ const isTimeOrNull = (x) => x == null || isTime(x);
 
 /** Whether `r` is a trace record of a kind this fold reads, its fields of their types. */
 export function validRecord(r) {
-  const fields = r && typeof r === "object" && r.v === 1 ? RECORD_FIELDS[r.kind] : null;
+  const fields =
+    r && typeof r === "object" && r.v === 1 && Object.hasOwn(RECORD_FIELDS, r.kind)
+      ? RECORD_FIELDS[r.kind]
+      : null;
   if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
   if (r.t != null && !isTime(r.t)) return false;
+  const scalar = (x) => x == null || typeof x === "string" || Number.isFinite(x);
+  if (
+    !scalar(r.id) ||
+    !scalar(r.seq) ||
+    (r.env != null && typeof r.env !== "object" && !scalar(r.env))
+  )
+    return false;
   if (r.site != null && typeof r.site !== "string") return false;
   for (const f of ["function", "wait_site", "verb", "test"])
     if (r[f] != null && typeof r[f] !== "string") return false;
@@ -392,8 +402,14 @@ export function readJob(label, dir) {
     isTime(h.cpus) &&
     (h.physical_cpus == null || isTime(h.physical_cpus));
   if (
-    host &&
-    !(facts(host) && Array.isArray(host.spawn?.results) && host.spawn.results.every(result))
+    host !== null &&
+    !(
+      host &&
+      typeof host === "object" &&
+      facts(host) &&
+      Array.isArray(host.spawn?.results) &&
+      host.spawn.results.every(result)
+    )
   )
     throw new Refusal(
       `${hostFile} holds no spawn results`,
@@ -1401,6 +1417,7 @@ function renderFacts(label, f) {
 export async function host({ runs = 30 } = {}) {
   if (!Number.isSafeInteger(runs) || runs < 1) throw usage("--runs takes a positive whole number");
   const { measureSpawns } = await import("./windows-job-profile.mjs");
+  // llmlint: ignore[changed_behavior_has_e2e] the only failure this records is a macOS sysctl refusing, which no runner here produces; the npm tests of test-macos run host for real and assert it answered, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
   const unanswered = [];
   const ask = (cmd, args) => {
     try {

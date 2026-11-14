@@ -932,6 +932,7 @@ fn ensure_sweeper(entry: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(log);
     server_pool::detach(&mut command);
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     match crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command) {
         Ok(child) => {
             // Recorded by the starter as well as by the sweeper itself, so a

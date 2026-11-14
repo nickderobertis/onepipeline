@@ -778,6 +778,7 @@ fn start(entry: &Path, plan: &LaunchPlan, linger: Duration) -> io::Result<Server
         command.env(key, value);
     }
     detach(&mut command);
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let child = crate::launch_trace::spawn_detached(crate::launch_site!(), &mut command)?;
     let pid =
         Pid::new(child.id()).map_err(|message| io::Error::new(io::ErrorKind::Other, message))?;

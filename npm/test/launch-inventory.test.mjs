@@ -263,7 +263,9 @@ test("the run verb reads a job's checkout, selection, caches and e2e tier off it
   assert.deepEqual(
     caches.map((c) => [c[0], c[1], c[2]]),
     [
-      ["Swatinem/rust-cache@v2.9.2", "85.0", "partial (restore key)"],
+      ["Swatinem/rust-cache@v2.9.2", "69.3", "partial (restore key)"],
+      ["actions/setup-node@v4", "3.9", "no restore"],
+      ["actions/cache/restore@v4", "11.8", "hit"],
       ["actions/cache/restore@v4", "0.1", "miss"],
     ],
   );

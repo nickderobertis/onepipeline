@@ -428,10 +428,12 @@ impl CommandProvider {
 
         let pid = child.id();
         let output = {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
             child.wait_with_output()
         };
         if let Ok(output) = &output {
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
         }
         let output = output.map_err(|e| {

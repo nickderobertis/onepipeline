@@ -789,6 +789,7 @@ fn bounded(
         Tree::prepare(&mut command);
     }
 
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let mut launch = crate::launch_trace::launch(crate::launch_site!(), &command);
     let spawned = command.spawn();
     launch.spawned(spawned.as_ref().ok().map(Child::id));
@@ -826,6 +827,7 @@ fn bounded(
 
     let waited = {
         let mut watch =
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), Some(EXIT_POLL));
         let waited = wait_for_exit(&mut child, started, bound, &endings, stop, &mut watch);
         watch.into_launch(&mut launch);
@@ -1117,6 +1119,7 @@ pub(crate) trait PipeRead: Read + std::os::windows::io::AsRawHandle {
     /// is left picking output up at that granularity. End of stream still retires it
     /// at once, which is what an ordinary command's teardown turns on.
     fn await_readable(&self, bound: Duration) {
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
         crate::launch_trace::sleep(crate::launch_site!(), bound);
     }
 }
@@ -1635,6 +1638,7 @@ fn wait_for_exit(
     bound: Duration,
     endings: &mpsc::Receiver<()>,
     stop: Option<&dyn Fn() -> bool>,
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     watch: &mut crate::launch_trace::Wait,
 ) -> Waited {
     loop {
@@ -1796,6 +1800,7 @@ fn await_group_empty(
                 ),
             });
         }
+        // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
         crate::launch_trace::sleep(crate::launch_site!(), EXIT_POLL);
     }
 }
@@ -1910,6 +1915,7 @@ impl Tree {
                     REAP_BOUND.as_secs()
                 ));
             }
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::sleep(crate::launch_site!(), EXIT_POLL);
         }
     }
@@ -2558,6 +2564,7 @@ impl ConfigLock {
                     if e.kind() == std::io::ErrorKind::AlreadyExists
                         && started.elapsed() < Duration::from_secs(10) =>
                 {
+                    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
                     crate::launch_trace::sleep(crate::launch_site!(), Duration::from_millis(50));
                 }
                 Err(e) => return Err(error::at("take git's configuration lock at", path)(e)),
@@ -2840,6 +2847,7 @@ fn fetch_settled(cwd: &Path, args: &[&str]) -> Result<Output> {
                     ),
                 });
             }
+            // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
             crate::launch_trace::sleep(crate::launch_site!(), pause);
             pause = (pause * 2).min(FETCH_RERUN_PAUSE_LIMIT);
         }

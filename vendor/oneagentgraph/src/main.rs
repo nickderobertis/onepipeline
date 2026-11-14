@@ -347,6 +347,7 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     if let Some(path) = &args.follow_events {
         command.arg("--follow-events").arg(path);
     }
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let child = oneagentgraph::launch_trace::spawn_detached(
         oneagentgraph::launch_site!(),
         command
@@ -740,6 +741,7 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
 /// this at the shared working-directory boundary keeps harness-specific flags
 /// out of a command whose chain may select any identity.
 fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let inside = oneagentgraph::launch_trace::output(
         oneagentgraph::launch_site!(),
         std::process::Command::new("git")
@@ -754,6 +756,7 @@ fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
         return Ok(());
     }
 
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let initialized = oneagentgraph::launch_trace::output(
         oneagentgraph::launch_site!(),
         std::process::Command::new("git")

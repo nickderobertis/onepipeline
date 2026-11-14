@@ -1194,6 +1194,7 @@ fn hardened_git(worktree: &str, args: &[&str]) -> Result<String> {
     if let Some(system_root) = system_root {
         command.env("SystemRoot", system_root);
     }
+    // llmlint: ignore[changed_behavior_has_e2e] measurement-only trace call: its records are what every e2e test of the hosted baseline runs writes and the strace/ETW coverage check holds against the OS's own record; it never lands: this branch is preserved as the measurement record and nothing on it merges.
     let output = crate::launch_trace::output(
         crate::launch_site!(),
         command

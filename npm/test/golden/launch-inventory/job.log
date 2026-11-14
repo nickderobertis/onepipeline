@@ -5,6 +5,10 @@
 2026-11-14T08:34:37.6949904Z Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-dc9b55c3
 2026-11-14T08:35:23.0033807Z Cache restored successfully
 2026-11-14T08:35:23.0847064Z Restored from cache key "v0-rust-test-linux-Linux-x64-ff458983-dc9b55c3" full match: false.
+2026-11-14T08:35:31.0695256Z ##[group]Run actions/setup-node@v4
+2026-11-14T08:35:35.0000000Z ##[group]Run actions/cache/restore@v4
+2026-11-14T08:35:35.5000000Z Cache hit for: visual-docs-release-build-Linux-ab12
+2026-11-14T08:35:36.0000000Z Cache restored from key: visual-docs-release-build-Linux-ab12
 2026-11-14T08:35:46.7714888Z ##[group]Run actions/cache/restore@v4
 2026-11-14T08:35:46.8000000Z Cache not found for input keys: bootstrap-tools-Linux-X64-0.14.15-0.2.0-0.1.1-b73ec04e
 2026-11-14T08:35:46.9185790Z ##[group]Run just bootstrap
