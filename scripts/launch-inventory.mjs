@@ -242,6 +242,8 @@ const RECORD_FIELDS = {
 };
 
 const isTime = (x) => Number.isFinite(x) && x >= 0;
+/** A count or an id: a whole number, not negative. */
+const isCount = (x) => Number.isSafeInteger(x) && x >= 0;
 
 /** A GIT_* set as a child was given it: each name a GIT_ variable, each value a string or unset. */
 const gitEnv = (env) =>
@@ -259,7 +261,9 @@ export function validRecord(r) {
     r && typeof r === "object" && r.v === 1 && Object.hasOwn(RECORD_FIELDS, r.kind)
       ? RECORD_FIELDS[r.kind]
       : null;
-  if (!fields?.every((f) => r[f] != null) || !Number.isFinite(r.pid)) return false;
+  if (!fields?.every((f) => r[f] != null) || !isCount(r.pid)) return false;
+  if (r.child != null && !isCount(r.child)) return false;
+  if (r.polls != null && !isCount(r.polls)) return false;
   if (r.t != null && !isTime(r.t)) return false;
   const scalar = (x) => x == null || typeof x === "string" || Number.isFinite(x);
   if (
@@ -299,13 +303,14 @@ export function validRecord(r) {
     );
   if (r.kind === "exit") return ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]));
   if (r.kind === "wait") return isTimeOrNull(r.wait_ns) && isTimeOrNull(r.polls);
-  if (r.kind === "sleeps") return isTime(r.count) && isTime(r.slept_ns);
+  if (r.kind === "sleeps") return isCount(r.count) && isTime(r.slept_ns);
   return true;
 }
 
 /** The six categories every schema-2 test-profile record carries, in profile.rs's order. */
 const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
 
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the gate is a chain the rule does not see: tests/e2e/profiling.rs holds every record crates/testfakes/src/profile.rs writes to tests/golden/test-profile-record-v2.json's shape, and npm/test/launch-inventory.test.mjs holds this check to that same golden.
 /** Whether `r` is a test-profile record of schema 2 (crates/testfakes/src/profile.rs). */
 export function validProfile(r) {
   return (
@@ -322,12 +327,12 @@ export function validProfile(r) {
     !Array.isArray(r.categories) &&
     CATEGORIES.every(
       (name) =>
-        r.categories[name] && isTime(r.categories[name].s) && isTime(r.categories[name].count),
+        r.categories[name] && isTime(r.categories[name].s) && isCount(r.categories[name].count),
     ) &&
     Boolean(r.programs) &&
     typeof r.programs === "object" &&
     !Array.isArray(r.programs) &&
-    Object.values(r.programs).every((v) => v && isTime(v.count) && isTime(v.s))
+    Object.values(r.programs).every((v) => v && isCount(v.count) && isTime(v.s))
   );
 }
 
@@ -338,7 +343,7 @@ const validWait = (w) =>
   typeof w === "object" &&
   ["span", "poll", "sleep"].includes(w.kind) &&
   typeof w.site === "string" &&
-  isTime(w.count) &&
+  isCount(w.count) &&
   isTime(w.s) &&
   (w.interval_s == null || isTime(w.interval_s));
 
@@ -519,8 +524,8 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
         if (
           !r ||
           typeof r !== "object" ||
-          !Number.isFinite(r.pid) ||
-          !Number.isFinite(r.ppid) ||
+          !isCount(r.pid) ||
+          !isCount(r.ppid) ||
           typeof r.image !== "string" ||
           (r.cmd != null && typeof r.cmd !== "string")
         ) {

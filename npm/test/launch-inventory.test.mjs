@@ -560,6 +560,7 @@ test("sleep tallies, a detached start's later exit, and inputs of no known shape
       status: 0,
     },
     { v: 1, kind: "start", pid: engine.pid, site: "x", program: "git", argv: "not a list", t: at },
+    { v: 1, kind: "end", pid: 12.5, t: at },
   ].map((r) => JSON.stringify(r));
   writeFileSync(join(launch, file), [...lines, ...added, "{cut short"].join("\n"));
   const waitsFile = readdirSync(launch).find(
@@ -573,7 +574,7 @@ test("sleep tallies, a detached start's later exit, and inputs of no known shape
   const out = run("fold", `shapes=${dir}`).stdout;
   assert.match(
     out,
-    /skipped 1 lines that are not JSON, 1 records of no known shape, 1 test-profile records not of schema 2 and 1 harness wait entries; left out 0 trace and waits files/,
+    /skipped 1 lines that are not JSON, 2 records of no known shape, 1 test-profile records not of schema 2 and 1 harness wait entries; left out 0 trace and waits files/,
   );
   const waits = rows(out, "Waits and polls on a child, by site");
   assert.deepEqual(
