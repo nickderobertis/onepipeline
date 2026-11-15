@@ -2164,6 +2164,9 @@ After source 9902aa4c, inspection found the new parser journeys used URL.pathnam
 The 20:23 snapshots (jobs-2023.json.gz for each point) record point1 macOS job132926636261 starting at 20:15:54 UTC. Point2 job ids are Linux132941104723, lint132941104952, macOS132941104978 and Windows132941105006; macOS is still queued. No test job has completed and no after figure is inferred from in-progress logs.
 
 
+Collection at approximately 20:38 UTC stopped at the shared GitHub allowance floor before any run read; second-point collection was not attempted. Under a55, the next read waits for the approximate 20:52 UTC reset. No newer job state or result is inferred from this pause. The active demo heads remain frozen.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
