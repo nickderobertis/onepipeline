@@ -66,7 +66,7 @@ static PROFILED: extern "C" fn() = profiled;
 pub mod spike_variant {
     /// The prototypes in effect for this build, unless the environment already
     /// names them.
-    pub const SELECTED: &str = "";
+    pub const SELECTED: &str = "relaunch";
 
     /// Whether `name` is in effect: [`SELECTED`], unless the environment this test
     /// process started in already chose, which is how a local slice tries one.
