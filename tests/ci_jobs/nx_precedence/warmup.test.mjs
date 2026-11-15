@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -21,18 +21,20 @@ function fixture(t) {
   );
   writeFileSync(
     join(dir, "justfile"),
-    `set shell := ["bash", "-eu", "-o", "pipefail", "-c"]\nset positional-arguments\nllvm-cov-target-dir := justfile_directory() / "target/llvm-cov-target"\n${recipe}`,
+    `set shell := ["bash", "-eu", "-o", "pipefail", "-c"]\nset positional-arguments\nllvm-cov-target-dir := env("PREPARE_TARGET")\n${recipe}`,
   );
   writeFileSync(
     join(dir, "cargo"),
     `#!/usr/bin/env bash
 set -eu
-if [ "$1" = llvm-cov ]; then echo "export CARGO_TARGET_DIR='$PWD/target/llvm-cov-target'"; exit; fi
+if [ "$1" = llvm-cov ]; then echo "export CARGO_TARGET_DIR='$PREPARE_TARGET'"; exit; fi
 printf '%s|%s|%s\\n' "$*" "$RUSTFLAGS" "$CARGO_TARGET_DIR" >> calls
 if [ -n "\${FAIL_BUILD:-}" ]; then exit 42; fi
 `,
   );
   chmodSync(join(dir, "cargo"), 0o755);
+  writeFileSync(join(dir, "uname"), "#!/usr/bin/env bash\nprintf '%s\\n' Linux\n");
+  chmodSync(join(dir, "uname"), 0o755);
   writeFileSync(
     join(dir, "test-command"),
     `#!/usr/bin/env bash
@@ -48,7 +50,12 @@ exit "\${TEST_EXIT:-0}"
     run(extra = {}, args = [join(dir, "test-command"), "an argument with spaces"]) {
       return spawnSync("bash", [script, ...args], {
         cwd: dir,
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ...extra },
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH}`,
+          PREPARE_TARGET: `${dir.replaceAll("\\", "/")}/target/llvm-cov-target`,
+          ...extra,
+        },
         encoding: "utf8",
         timeout: 30_000,
       });
@@ -70,7 +77,7 @@ test("the real preparation script builds all instrumented helpers before startin
   ].entries()) {
     assert.equal(
       calls[index],
-      `build --offline --package ${selection} --target-dir ${dir}/target/llvm-cov-target|-D warnings|${dir}/target/llvm-cov-target`,
+      `build --offline --package ${selection} --target-dir ${dir.replaceAll("\\", "/")}/target/llvm-cov-target|-D warnings|${dir.replaceAll("\\", "/")}/target/llvm-cov-target`,
     );
   }
   assert.equal(readFileSync(join(dir, "tested"), "utf8"), "an argument with spaces\n");
@@ -97,4 +104,15 @@ test("a missing test command is rejected before building", (t) => {
   assert.equal(result.status, 2);
   assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
   assert.match(result.stderr, /ACTION: pass the coverage-unit command/);
+});
+
+test("non-Linux coverage runs keep their uninstrumented command without building helpers", (t) => {
+  const { dir, run } = fixture(t);
+  writeFileSync(join(dir, "uname"), "#!/usr/bin/env bash\nprintf '%s\\n' Darwin\n");
+  chmodSync(join(dir, "uname"), 0o755);
+  const result = run({}, ["bash", "-c", "printf '%s' native > tested; exit 19"]);
+  assert.equal(result.status, 19, result.stderr);
+  assert.equal(readFileSync(join(dir, "tested"), "utf8"), "native");
+  assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
+  assert.doesNotMatch(result.stderr, /helpers ready/);
 });

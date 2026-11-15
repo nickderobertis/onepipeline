@@ -5,6 +5,9 @@ if [ "$#" -eq 0 ]; then
   echo 'e2e-prepare: missing test command. ACTION: pass the coverage-unit command and its arguments.' >&2
   exit 2
 fi
+if [ "$(uname -s)" != Linux ]; then
+  exec "$@"
+fi
 started=$SECONDS
 if just _e2e-doubles-build instrumented; then
   echo "e2e-prepare: helpers ready in $((SECONDS - started)) seconds" >&2
