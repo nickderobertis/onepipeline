@@ -1073,3 +1073,19 @@ test("Windows source separators match the same Linux call sites across jobs", ()
     assert.ok(Number(site[1]) > 0, site[0]);
   }
 });
+
+test("an interrupted tier does not borrow a smaller completed tier's wall time", () => {
+  const dir = join(scratch, "interrupted-tier");
+  cpSync(recorded, dir, { recursive: true });
+  writeFileSync(
+    join(dir, "job.log"),
+    "2026-11-14T00:00:00Z Nextest run ID completed-other-tier\n" +
+      "2026-11-14T00:00:01Z Summary [1.000s] 1 test run: 1 passed\n" +
+      "2026-11-14T00:00:02Z Nextest run ID interrupted-e2e-tier\n",
+  );
+  const r = run("fold", `interrupted=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /no e2e nextest summary in job.log/);
+  assert.doesNotMatch(r.stdout, /largest nextest run/);
+  for (const row of rows(r.stdout, "Programs started")) assert.equal(row.at(-1), "-");
+});

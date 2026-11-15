@@ -820,7 +820,10 @@ const isTestBinary = (p) => Boolean(p) && /^[a-z0-9_]+-[0-9a-f]{16}$/.test(p.exe
 export function foldJob(job) {
   const t = joinTrace(job.trace);
   const testSeconds = job.tests.reduce((a, r) => a + (r.wall_s ?? 0), 0);
-  const summary = largestRun(job.log);
+  const completed = largestRun(job.log);
+  // A cancelled e2e run can leave profiles but no summary. A smaller tier's
+  // completed summary cannot price those profiles' share of the e2e wall time.
+  const summary = completed && completed.run >= job.tests.length ? completed : null;
   const wallS = summary?.seconds ?? null;
   const toWallMin = (ns) => (wallS && testSeconds ? ((ns / 1e9 / testSeconds) * wallS) / 60 : null);
   const procOf = (s) =>
