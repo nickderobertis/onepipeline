@@ -260,12 +260,22 @@ export function summarizeJob(label, dir) {
       /^e2e-|^smoke-/.test(r.exe ?? "") ? "(test process)" : `${r.exe} ${r.verb ?? ""}`.trim(),
     ]),
   );
-  const git = { starts: 0, seconds: 0, byVerb: {}, byShape: {} };
+  const git = { starts: 0, seconds: 0, byVerb: {}, byShape: {}, engineSites: {} };
   for (const r of trace.starts) {
     if (r.program !== "git") continue;
     const s = (r.exit_ns ?? 0) / 1e9;
     const verb = verbOf.get(trace.key(r.file, r.pid, r.instance)) ?? "(unknown)";
     const { shape, site } = classify(r.argv ?? []);
+    const engineSite = /^onepipeline(?:::|_core::)/.test(r.function ?? "")
+      ? ["destination::git_path", "vcs::worktree_head"].find((site) =>
+          r.function.includes(`::${site}`),
+        )
+      : null;
+    if (engineSite) {
+      git.engineSites[engineSite] ??= { starts: 0, seconds: 0 };
+      git.engineSites[engineSite].starts++;
+      git.engineSites[engineSite].seconds += s;
+    }
     git.starts++;
     git.seconds += s;
     git.byVerb[verb] ??= { starts: 0, seconds: 0 };
@@ -511,6 +521,19 @@ function renderComparison(before, after) {
       })
       .sort((x, y) => Number(y[1]) - Number(x[1]));
     out.push(table(["verb", "starts before", "starts after", "s before", "s after"], verbRows));
+    out.push(
+      "",
+      `### ${platform}: engine-owned read sites (separate API adoption scope)`,
+      "",
+      table(
+        ["site", "starts before", "starts after", "s before", "s after"],
+        ["destination::git_path", "vcs::worktree_head"].map((site) => {
+          const per = (jobs) => mean(jobs.map((j) => j.git.engineSites[site]?.starts ?? 0));
+          const sec = (jobs) => mean(jobs.map((j) => j.git.engineSites[site]?.seconds ?? 0));
+          return [site, fmt(per(b), 0), fmt(per(a), 0), fmt(sec(b), 1), fmt(sec(a), 1)];
+        }),
+      ),
+    );
     const baselinePassed = new Set(b.flatMap((j) => j.passed));
     out.push("", `### ${platform}: tests the before side passed, on every after run`, "");
     for (const j of a) {
