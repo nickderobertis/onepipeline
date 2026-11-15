@@ -59,7 +59,13 @@ exit "\${TEST_EXIT:-0}"
           ...process.env,
           PATH: `${dir}${delimiter}${process.env.PATH}`,
           PREPARE_METADATA: JSON.stringify({
-            packages: [{ dependencies: [{ name: "oneagentgraph" }] }],
+            packages: [
+              {
+                name: "onepipeline-testfakes",
+                dependencies: [{ name: "oneagentgraph" }],
+                targets: [{ kind: ["bin"] }],
+              },
+            ],
           }),
           PREPARE_TARGET: `${dir.replaceAll("\\", "/")}/target/llvm-cov-target`,
           ...extra,
@@ -125,13 +131,18 @@ test("non-Linux coverage runs keep their uninstrumented command without building
   assert.doesNotMatch(result.stderr, /helpers ready/);
 });
 
-test("a workspace without engine dependencies runs its tests without preparing absent helpers", (t) => {
+test("a workspace without helper binaries runs its tests without preparing absent helpers", (t) => {
   const { dir, run } = fixture(t);
-  const result = run({ PREPARE_METADATA: JSON.stringify({ packages: [{ dependencies: [] }] }) }, [
-    "bash",
-    "-c",
-    "printf '%s' minimal > tested; exit 19",
-  ]);
+  const result = run(
+    {
+      PREPARE_METADATA: JSON.stringify({
+        packages: [
+          { name: "onepipeline-testfakes", dependencies: [], targets: [{ kind: ["lib"] }] },
+        ],
+      }),
+    },
+    ["bash", "-c", "printf '%s' minimal > tested; exit 19"],
+  );
   assert.equal(result.status, 19, result.stderr);
   assert.equal(readFileSync(join(dir, "tested"), "utf8"), "minimal");
   assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
@@ -154,4 +165,24 @@ test("malformed Cargo metadata is rejected before building or testing", (t) => {
   assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
   assert.throws(() => readFileSync(join(dir, "tested")), { code: "ENOENT" });
   assert.match(result.stderr, /ACTION: restore valid Cargo metadata/);
+});
+
+test("helper detection follows the canonical recipe when a selected dependency changes", (t) => {
+  const { dir, run } = fixture(t);
+  const path = join(dir, "justfile");
+  writeFileSync(
+    path,
+    readFileSync(path, "utf8").replaceAll(
+      "--package onepipeline-testfakes",
+      "--package renamed-helpers",
+    ),
+  );
+  const result = run({
+    PREPARE_METADATA: JSON.stringify({
+      packages: [{ name: "renamed-helpers", dependencies: [], targets: [{ kind: ["bin"] }] }],
+    }),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(readFileSync(join(dir, "calls"), "utf8"), /--package renamed-helpers --target-dir/);
+  assert.equal(readFileSync(join(dir, "tested"), "utf8"), "an argument with spaces\n");
 });

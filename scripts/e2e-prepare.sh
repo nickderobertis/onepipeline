@@ -18,16 +18,25 @@ else
 fi
 if helpers="$(printf '%s' "$metadata" | node -e '
   const data = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-  if (!Array.isArray(data.packages) || data.packages.some(p => !Array.isArray(p.dependencies) || p.dependencies.some(d => typeof d.name !== "string"))) {
-    throw new Error("Cargo metadata must list packages and their named dependencies");
+  if (!Array.isArray(data.packages) || data.packages.some(p => typeof p.name !== "string" || !Array.isArray(p.targets) || p.targets.some(t => !Array.isArray(t.kind) || t.kind.some(k => typeof k !== "string")))) {
+    throw new Error("Cargo metadata must list named packages and their target kinds");
   }
-  const engines = new Set(["oneagentgraph", "oneharness", "onevcs"]);
-  process.stdout.write(data.packages.some(p => p.dependencies.some(d => engines.has(d.name))) ? "needed" : "absent");
+  const dump = JSON.parse(require("node:child_process").execFileSync("just", ["--dump", "--dump-format", "json"], { encoding: "utf8" }));
+  const recipe = dump.recipes?.["_e2e-doubles-build"];
+  if (!Array.isArray(recipe?.body)) throw new Error("the helper build recipe is missing");
+  const text = recipe.body.flat().filter(part => typeof part === "string").join("\n");
+  const selections = [...text.matchAll(/--package\s+([A-Za-z0-9_-]+)/g)].map(match => match[1]);
+  if (!selections.length || selections.length !== (text.match(/--package\b/g) ?? []).length) {
+    throw new Error("the helper recipe must declare literal Cargo package selections");
+  }
+  const selected = new Set(selections);
+  const needed = data.packages.some(p => selected.has(p.name) && p.targets.some(t => t.kind.includes("bin")));
+  process.stdout.write(needed ? "needed" : "absent");
 ')"; then
   :
 else
   status=$?
-  echo 'e2e-prepare: cannot read workspace dependencies. ACTION: restore valid Cargo metadata before running tests.' >&2
+  echo 'e2e-prepare: cannot read helper requirements. ACTION: restore valid Cargo metadata and the canonical helper recipe, with Just on PATH, before running tests.' >&2
   exit "$status"
 fi
 if [ "$helpers" = absent ]; then

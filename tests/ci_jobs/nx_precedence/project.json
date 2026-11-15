@@ -27,6 +27,8 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/nx-precedence.sh",
         "{workspaceRoot}/scripts/e2e-prepare.sh",
+        "{workspaceRoot}/scripts/ensure-test-archive.sh",
+        "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/justfile",
         "sharedGlobals",
         {
