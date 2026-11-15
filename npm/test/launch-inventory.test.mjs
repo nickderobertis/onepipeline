@@ -1089,3 +1089,141 @@ test("an interrupted tier does not borrow a smaller completed tier's wall time",
   assert.doesNotMatch(r.stdout, /largest nextest run/);
   for (const row of rows(r.stdout, "Programs started")) assert.equal(row.at(-1), "-");
 });
+
+test("the fold scopes append-only traces to the matching completed nextest invocation", () => {
+  const dir = join(scratch, "completed-invocation");
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  const profile = JSON.parse(readFileSync(join(e2e, readdirSync(e2e)[0]), "utf8"));
+  const launch = join(dir, "test-profile", "launch");
+  const times = [];
+  for (const file of readdirSync(launch).filter((f) => f.endsWith(".jsonl"))) {
+    const events = readFileSync(join(launch, file), "utf8").trim().split("\n").map(JSON.parse);
+    for (const e of events) if (e.t != null) times.push(e.t);
+    const shifted = (offset) =>
+      events.map((e) => ({
+        ...e,
+        ...(e.t == null ? {} : { t: e.t + offset }),
+      }));
+    writeFileSync(
+      join(launch, file),
+      `${[...shifted(-3600e9), ...events, ...shifted(3600e9)]
+        .map((e) => JSON.stringify(e))
+        .join("\n")}\n`,
+    );
+  }
+  const start = new Date(Math.min(...times) / 1e6 - 1000).toISOString();
+  const end = new Date(Math.max(...times) / 1e6 + 1000).toISOString();
+  const log = (id) =>
+    `${start} Nextest run ID ${id}\n` + `${end} Summary [60.000s] 2 tests run: 2 passed\n`;
+  writeFileSync(join(dir, "job.log"), log(profile.run_id));
+  const scoped = run("fold", `scoped=${dir}`);
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.match(scoped.stdout, /Rows account for 52 traced starts \(trace holds 52\)/);
+  assert.match(scoped.stdout, /excluded 230 trace records \(104 starts\)/);
+  writeFileSync(join(dir, "job.log"), log("another-invocation"));
+  const unscoped = run("fold", `unscoped=${dir}`);
+  assert.equal(unscoped.status, 0, unscoped.stderr);
+  assert.match(
+    unscoped.stdout,
+    /Time scope unavailable: no completed nextest run matches the profiles/,
+  );
+  assert.match(unscoped.stdout, /Rows account for 156 traced starts \(trace holds 156\)/);
+});
+
+function scopedFixture(name) {
+  const dir = join(scratch, name);
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  const profiles = readdirSync(e2e).map((f) => join(e2e, f));
+  const profile = JSON.parse(readFileSync(profiles[0], "utf8"));
+  const launch = join(dir, "test-profile", "launch");
+  const files = readdirSync(launch).filter((f) => f.endsWith(".jsonl"));
+  const events = files.flatMap((f) =>
+    readFileSync(join(launch, f), "utf8").trim().split("\n").map(JSON.parse),
+  );
+  const times = events.filter((e) => e.t != null).map((e) => e.t);
+  const start = Math.floor(Math.min(...times) / 1e6) - 1000;
+  const end = Math.ceil(Math.max(...times) / 1e6) + 1000;
+  const log = (count = 2) =>
+    writeFileSync(
+      join(dir, "job.log"),
+      `${new Date(start).toISOString()} Nextest run ID ${profile.run_id}\n` +
+        `${new Date(end).toISOString()} Summary [60.000s] ${count} tests run: ${count} passed\n`,
+    );
+  log();
+  return { dir, e2e, profiles, profile, launch, files, events, start, end, log };
+}
+
+test("mixed profile invocations need a majority and report the unrecoverable profile count", () => {
+  const f = scopedFixture("mixed-profile-invocations");
+  const extra = join(f.e2e, "overwritten.json");
+  writeFileSync(
+    extra,
+    JSON.stringify({ ...f.profile, test: "later::overwritten", run_id: "later" }),
+  );
+  f.log(3);
+  const majority = run("fold", `mixed=${f.dir}`);
+  assert.equal(majority.status, 0, majority.stderr);
+  assert.match(majority.stdout, /Time scope: nextest/);
+  assert.match(majority.stdout, /1 profiles belong to another invocation/);
+  writeFileSync(f.profiles[0], JSON.stringify({ ...f.profile, run_id: "later" }));
+  const minority = run("fold", `mixed=${f.dir}`);
+  assert.equal(minority.status, 0, minority.stderr);
+  assert.match(minority.stdout, /Time scope unavailable/);
+  rmSync(extra);
+  f.log();
+  const tied = run("fold", `mixed=${f.dir}`);
+  assert.equal(tied.status, 0, tied.stderr);
+  assert.match(tied.stdout, /Time scope unavailable/);
+});
+
+test("trace scope retains boundary slack but excludes events immediately beyond it", () => {
+  const f = scopedFixture("trace-boundary-slack");
+  const path = join(f.launch, f.files[0]);
+  const events = readFileSync(path, "utf8").trim().split("\n").map(JSON.parse);
+  const start = events.find((e) => e.kind === "start");
+  const proc = events.find((e) => e.kind === "proc" && e.pid === start.pid);
+  const extra = [f.start - 500, f.start - 1001, f.end + 500, f.end + 1001].flatMap((at, i) => {
+    const pid = 900000 + i;
+    return [
+      { ...proc, pid, t: at * 1e6 },
+      { ...start, pid, t: at * 1e6, seq: `boundary:${i}`, env: {}, child: null },
+      { v: 1, kind: "end", pid, t: at * 1e6 + 1 },
+    ];
+  });
+  writeFileSync(path, `${[...events, ...extra].map((e) => JSON.stringify(e)).join("\n")}\n`);
+  const r = run("fold", `boundary=${f.dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Rows account for 54 traced starts \(trace holds 54\)/);
+  assert.match(r.stdout, /excluded 6 trace records \(2 starts\)/);
+});
+
+test("OS scope excludes another journey and out-of-window ETW while retaining untimed starts", () => {
+  const f = scopedFixture("os-invocation-scope");
+  const os = join(f.dir, "os");
+  const testProc = f.events.find((e) => e.kind === "proc" && e.exe.startsWith("e2e-"));
+  const at = [f.start - 500, f.start - 1001, f.end + 1001, null];
+  writeFileSync(
+    join(os, "extra.jsonl"),
+    `${at
+      .map((t, i) =>
+        JSON.stringify({
+          pid: 910000 + i,
+          ppid: testProc.pid,
+          image: "/usr/bin/cp",
+          cmd: "cp a b",
+          ...(t == null ? {} : { t: new Date(t).toISOString() }),
+        }),
+      )
+      .join("\n")}\n`,
+  );
+  writeFileSync(
+    join(os, "another__journey.999.strace"),
+    '920000 execve("/usr/bin/cp", ["cp", "a", "b"], 0x0) = 0\n',
+  );
+  const r = run("fold", `os=${f.dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /and 3 OS records outside the tier/);
+  assert.match(r.stdout, /88 process starts observed/);
+});

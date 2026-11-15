@@ -404,7 +404,7 @@ export function readJob(label, dir) {
       else if (r.test !== VERSION_ONLY_TEST) tests.push(r);
     }
   }
-  const trace = [];
+  let trace = [];
   const harnessWaits = [];
   const launch = join(root, "launch");
   // The note, smoke and other binaries that compile the e2e harness write into the same
@@ -470,8 +470,41 @@ export function readJob(label, dir) {
     );
   const logFile = join(dir, "job.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
-  const os = readOs(existsSync(join(dir, "os")) ? join(dir, "os") : join(root, "os"), skipped);
-  return { label, tests, trace, harnessWaits, host, log, os, skipped };
+  const completed = largestRun(log);
+  const matching = tests.filter((r) => r.run_id === completed?.id).length;
+  const scope =
+    completed?.start != null && completed.run >= tests.length && matching > tests.length / 2
+      ? { ...completed, records: 0, starts: 0, os: 0, otherProfiles: tests.length - matching }
+      : null;
+  // GitHub timestamps received nextest output, rather than the trace's clock read.
+  // One second of slack keeps boundary events while excluding earlier/later tiers.
+  const inside = (t) => t >= (scope.start - 1) * 1e9 && t <= (scope.end + 1) * 1e9;
+  if (scope) {
+    const active = new Map();
+    const kept = trace.filter((r) => {
+      const key = `${r.file}\u0000${r.pid}`;
+      if (r.t != null) active.set(key, inside(r.t));
+      // Untimed env/exit records belong to the preceding record of their writer.
+      const keep = active.get(key) === true;
+      if (!keep) {
+        scope.records++;
+        if (r.kind === "start") scope.starts++;
+      }
+      return keep;
+    });
+    trace = kept;
+  }
+  const observed = readOs(
+    existsSync(join(dir, "os")) ? join(dir, "os") : join(root, "os"),
+    skipped,
+  );
+  const os =
+    observed?.filter((e) => {
+      const keep = !scope || ((e.test == null || ours(e.test)) && (e.t == null || inside(e.t)));
+      if (!keep && scope) scope.os++;
+      return keep;
+    }) ?? null;
+  return { label, tests, trace, harnessWaits, host, log, os, skipped, scope };
 }
 
 /**
@@ -483,13 +516,19 @@ export function nextestRuns(log) {
   const lines = log.replace(ANSI, "").split(/\r?\n/);
   const runs = [];
   let start = null;
+  let id = null;
   for (const line of lines) {
     const t = Date.parse(/^(\S+Z)\s/.exec(line)?.[1] ?? "") / 1000;
     if (!Number.isFinite(t)) continue;
-    if (/Nextest run ID/.test(line)) start = t;
+    const nextest = /Nextest run ID\s+(\S+)/.exec(line);
+    if (nextest) {
+      start = t;
+      id = nextest[1];
+    }
     const m = /Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run: (\d+) passed/.exec(line);
     if (m)
       runs.push({
+        id,
         start,
         end: t,
         seconds: Number(m[1]),
@@ -995,6 +1034,7 @@ export function foldJob(job) {
   const names = job.tests.map((r) => r.test).sort();
   return {
     label: job.label,
+    scope: job.scope,
     skipped: job.skipped ?? { malformed: 0, invalid: 0, records: 0, waits: 0, otherBinaries: 0 },
     os: job.tests[0]?.os ?? "?",
     host: job.host,
@@ -1287,6 +1327,11 @@ export function render(folds, { top = 20 } = {}) {
         `; test-name set sha256/16 ${f.testsDigest}.\n`,
     );
     const k = f.skipped;
+    out.push(
+      f.scope
+        ? `Time scope: nextest ${f.scope.id}, with one second of clock slack; excluded ${f.scope.records} trace records (${f.scope.starts} starts) and ${f.scope.os} OS records outside the tier. ${f.scope.otherProfiles} profiles belong to another invocation and remain an aggregate uncertainty.\n`
+        : "Time scope unavailable: no completed nextest run matches the profiles; trace totals cover the supplied artifact.\n",
+    );
     out.push(
       `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries; left out ${k.otherBinaries} trace and waits files of tests no e2e record names (other binaries that compile the harness, or the separate version tier).\n`,
     );
