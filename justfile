@@ -465,7 +465,7 @@ _tier-lint bin:
 # uploaded artifact, so a run whose tier fails still names its runner.
 _e2e-test: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test "onepipeline-e2e" e2e-tier)
 
-# Measurement only (spike-launch-inventory, never lands): see `_e2e-test`.
+# Measurement only (spike-launch-inventory, never lands): see `_e2e-test` and `_e2e-test-quick`.
 _launch-host:
     @mkdir -p target/test-profile && node scripts/launch-inventory.mjs host > target/test-profile/launch-host.json || echo "launch-host: not measured" >&2
 
@@ -512,7 +512,9 @@ _tier-test-quick filter:
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
-_e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e-tier)
+# Measurement only (spike-launch-inventory, never lands): the Windows and macOS jobs run the
+# tier through this recipe, so it records the runner first too (see `_e2e-test`).
+_e2e-test-quick: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test-quick e2e-tier)
 
 _contract-test-quick: (_tier-test-quick contract-tier)
 
