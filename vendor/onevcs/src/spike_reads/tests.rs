@@ -488,3 +488,237 @@ fn modes_are_named_as_the_demonstrations_name_them() {
     assert_eq!(Mode::parse("reuse+"), None);
     assert_eq!(Mode::parse("fast"), None);
 }
+
+#[test]
+fn spike_safety_failed_symbolic_delete_forgets_a_warm_read() {
+    let w = world();
+    let args = ["rev-parse", "--git-path", "hooks"];
+    for write in [
+        vec!["symbolic-ref", "--delete", "refs/heads/absent"],
+        vec!["log", "--output=absent-dir/result"],
+        vec!["merge-tree"],
+        vec!["tag", "--contains=HEAD", "--delete", "absent"],
+    ] {
+        asked("reuse", &w.clone, &args, &[]);
+        with_mode(Mode::parse("reuse").unwrap(), || {
+            assert!(Call::new(&args, Some(&w.clone), &[], false)
+                .answer()
+                .is_some());
+            let written = crate::git::run(&write, Some(&w.clone)).unwrap();
+            assert_ne!(written.status, 0);
+            assert!(
+                Call::new(&args, Some(&w.clone), &[], false)
+                    .answer()
+                    .is_none(),
+                "even a failed write attempt invalidates the memo before git runs: {write:?}"
+            );
+        });
+    }
+}
+
+#[test]
+fn spike_safety_symbolic_cycles_delegate_to_git() {
+    let w = world();
+    git(
+        &w.clone,
+        &["symbolic-ref", "refs/heads/loop-a", "refs/heads/loop-b"],
+    );
+    git(
+        &w.clone,
+        &["symbolic-ref", "refs/heads/loop-b", "refs/heads/loop-a"],
+    );
+    agree(&w.clone, &queries(&["symbolic-ref refs/heads/loop-a"]), &[]);
+}
+
+#[cfg(unix)]
+#[test]
+fn spike_safety_unreadable_refs_never_authorize_reuse() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let heads = w.clone.join(".git/refs/heads");
+    let permissions = std::fs::metadata(&heads).unwrap().permissions();
+    std::fs::set_permissions(&heads, std::fs::Permissions::from_mode(0o0)).unwrap();
+    std::thread::sleep(Duration::from_millis(80));
+    let args = ["rev-parse", "--git-path", "hooks"];
+    let actual = asked("reuse", &w.clone, &args, &[]);
+    let expected = truth(&w.clone, &args, &[]);
+    let reused = with_mode(Mode::parse("reuse").unwrap(), || {
+        Call::new(&args, Some(&w.clone), &[], false)
+            .answer()
+            .is_some()
+    });
+    std::fs::set_permissions(&heads, permissions).unwrap();
+    assert_eq!(actual, expected);
+    assert!(
+        !reused,
+        "a partial refs scan cannot authorize an answer without git"
+    );
+}
+
+#[test]
+fn spike_safety_reuse_observes_an_external_included_configuration_change() {
+    let w = world();
+    let included = w._root.path().join("included.conf");
+    git(
+        &w.clone,
+        &[
+            "config",
+            "--file",
+            included.to_str().unwrap(),
+            "spike.value",
+            "before",
+        ],
+    );
+    git(
+        &w.clone,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    std::thread::sleep(Duration::from_millis(80));
+    let args = ["config", "--get", "spike.value"];
+    assert_eq!(
+        asked("reuse", &w.clone, &args, &[]),
+        truth(&w.clone, &args, &[])
+    );
+    git(
+        &w.clone,
+        &[
+            "config",
+            "--file",
+            included.to_str().unwrap(),
+            "spike.value",
+            "after",
+        ],
+    );
+    assert_eq!(
+        asked("reuse", &w.clone, &args, &[]),
+        truth(&w.clone, &args, &[])
+    );
+}
+
+#[test]
+fn spike_safety_every_mode_observes_an_object_another_process_prunes() {
+    for mode in MODES {
+        let w = world();
+        let file = w._root.path().join("orphan");
+        std::fs::write(&file, "an unreachable object\n").unwrap();
+        let oid = git(&w.clone, &["hash-object", "-w", file.to_str().unwrap()]);
+        std::thread::sleep(Duration::from_millis(80));
+        let args = ["cat-file", "-e", oid.as_str()];
+        assert_eq!(asked(mode, &w.clone, &args, &[]).0, 0);
+        git(&w.clone, &["prune", "--expire=now"]);
+        assert_ne!(truth(&w.clone, &args, &[]).0, 0);
+        assert_eq!(
+            asked(mode, &w.clone, &args, &[]),
+            truth(&w.clone, &args, &[]),
+            "{mode}"
+        );
+        batched::release();
+        reuse::forget();
+    }
+}
+
+#[test]
+fn spike_safety_every_mode_observes_a_packed_object_pruned_while_reads_continue() {
+    for mode in MODES {
+        let w = world();
+        let file = w._root.path().join("orphan");
+        std::fs::write(&file, "an unreachable packed object\n").unwrap();
+        let oid = git(&w.clone, &["hash-object", "-w", file.to_str().unwrap()]);
+        git(&w.clone, &["update-ref", "refs/spike/orphan", &oid]);
+        git(&w.clone, &["repack", "-ad"]);
+        git(&w.clone, &["update-ref", "-d", "refs/spike/orphan"]);
+        std::thread::sleep(Duration::from_millis(80));
+        let args = ["cat-file", "-e", oid.as_str()];
+        assert_eq!(asked(mode, &w.clone, &args, &[]).0, 0);
+        if mode.contains("batched") {
+            with_mode(Mode::parse(mode).unwrap(), || {
+                assert!(
+                    Call::new(&args, Some(&w.clone), &[], false)
+                        .answer()
+                        .is_none(),
+                    "packed stores must delegate to a fresh git process"
+                );
+            });
+        }
+        let mut gc = Command::new("git")
+            .args(["-c", "gc.cruftPacks=false", "gc", "--prune=now"])
+            .current_dir(&w.clone)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        loop {
+            if let Some(status) = gc.try_wait().unwrap() {
+                assert!(status.success(), "the external gc completed");
+                break;
+            }
+            asked(mode, &w.clone, &args, &[]);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_ne!(truth(&w.clone, &args, &[]).0, 0, "the object was pruned");
+        assert_eq!(
+            asked(mode, &w.clone, &args, &[]),
+            truth(&w.clone, &args, &[]),
+            "{mode}"
+        );
+        batched::release();
+        reuse::forget();
+    }
+}
+
+#[test]
+fn measurement_mode_is_validated_in_a_real_process_and_selected_once() {
+    const CHILD: &str = "ONEVCS_SPIKE_MODE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let selected = mode();
+        let expected = std::env::var("ONEVCS_SPIKE_EXPECTED_MODE").unwrap();
+        assert_eq!(selected, Mode::parse(&expected).unwrap());
+        std::env::set_var(MODE_ENV, "invalid-after-selection");
+        assert_eq!(mode(), selected);
+        println!("spike-mode-selected");
+        return;
+    }
+    let run = |word: Option<&std::ffi::OsStr>, expected: &str| {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "spike_reads::tests::measurement_mode_is_validated_in_a_real_process_and_selected_once", "--nocapture"])
+            .env(CHILD, "1").env("ONEVCS_SPIKE_EXPECTED_MODE", expected);
+        match word {
+            Some(word) => {
+                command.env(MODE_ENV, word);
+            }
+            None => {
+                command.env_remove(MODE_ENV);
+            }
+        }
+        command.output().unwrap()
+    };
+    for word in [
+        "stock",
+        "batched",
+        "native",
+        "reuse",
+        "reuse+batched",
+        "reuse+native",
+        "  native  ",
+    ] {
+        let output = run(Some(std::ffi::OsStr::new(word)), word.trim());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("spike-mode-selected"));
+    }
+    let unset = run(None, DEMONSTRATION);
+    assert!(unset.status.success());
+    assert!(String::from_utf8_lossy(&unset.stdout).contains("spike-mode-selected"));
+    let invalid = run(Some(std::ffi::OsStr::new("typo")), DEMONSTRATION);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains(MODE_ENV));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let invalid = run(Some(std::ffi::OsStr::from_bytes(&[0xff])), DEMONSTRATION);
+        assert_eq!(invalid.status.code(), Some(2));
+    }
+}
