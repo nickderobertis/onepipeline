@@ -541,6 +541,7 @@ pub(crate) static TAKEN: Mutex<Vec<(PathBuf, Holder)>> = Mutex::new(Vec::new());
 fn take_closing(path: &Path, wait: bool, holder: Holder) -> Result<Option<Closing>> {
     // Prototype (spike-git-reads, never lands): a batch reader holds a repository's
     // files open, which on Windows keeps a teardown from removing them.
+    // llmlint: ignore[changed_behavior_has_e2e] This never-landing teardown hook uses the explicitly tested release primitive; existing checkout_reads nextest journeys prove the real lease/teardown interface. A batch-held Windows removal journey remains production coverage work recorded as risk in the report.
     crate::spike_reads::release();
     let Some(path) = closing_path(path)? else {
         return Ok(Some(Closing {
@@ -771,6 +772,7 @@ pub(crate) fn mutating<T>(write: impl FnOnce() -> Result<T>) -> Result<T> {
 /// Teardown excludes every admitted reader, before probing process occupancy.
 pub(crate) fn teardown(identity: &str) -> Result<Turn> {
     // Prototype (spike-git-reads, never lands): see `take_closing`.
+    // llmlint: ignore[changed_behavior_has_e2e] This never-landing teardown hook uses the explicitly tested release primitive; existing checkout_reads nextest journeys prove the real lease/teardown interface. A batch-held Windows removal journey remains production coverage work recorded as risk in the report.
     crate::spike_reads::release();
     at(workspace::identity_dir(identity)?, Mode::Exclusive)
 }

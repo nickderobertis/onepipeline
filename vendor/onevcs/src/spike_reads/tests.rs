@@ -86,6 +86,17 @@ fn agree(cwd: &Path, queries: &[Vec<String>], env: &[(String, String)]) {
             for round in 0..2 {
                 let expected = truth(cwd, &args, env);
                 let actual = asked(mode, cwd, &args, env);
+                if env.is_empty() {
+                    with_mode(Mode::parse(mode).unwrap(), || {
+                        let read = EngineRead::new(&args, cwd);
+                        let answer = read.answer().unwrap_or_else(|| {
+                            let answer = truth(cwd, &args, env);
+                            read.ran(Some(answer.0), answer.1.as_bytes(), answer.2.as_bytes());
+                            answer
+                        });
+                        assert_eq!(answer, expected, "engine adapter: {mode} {args:?}");
+                    });
+                }
                 assert_eq!(
                     actual,
                     expected,
@@ -412,7 +423,6 @@ fn reuse_answers_a_repeated_read_without_git_and_forgets_on_a_write() {
         second.map(|o| o.stdout),
         Some(truth(&w.clone, &args, &[]).1)
     );
-    // A write this process makes forgets it.
     with_mode(mode, || {
         crate::git::run(&["config", "core.hooksPath", "elsewhere"], Some(&w.clone)).unwrap()
     });
@@ -428,7 +438,7 @@ fn reuse_answers_a_repeated_read_without_git_and_forgets_on_a_write() {
 }
 
 #[test]
-fn batch_readers_are_traced_ended_when_idle_and_released_before_a_teardown() {
+fn batch_readers_end_when_idle_and_are_released_explicitly() {
     let w = world();
     let mode = Mode::parse("batched").unwrap();
     let head = with_mode(mode, || {

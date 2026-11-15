@@ -25,6 +25,9 @@ for mode in stock batched native reuse reuse+batched reuse+native; do
   for name in a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked; do
     cp "target/test-profile/e2e/destination.$name.json" "$job/test-profile/e2e/"
   done
+  ONEVCS_SPIKE_GIT_READS="$mode" cargo nextest run --locked --status-level pass --lib \
+    -E 'test(spike_worktree_head) | test(destination::tests::a_repositorys_own_hook_answers_for_each_title_it_is_put) | test(destination::tests::an_absent_hook_states_no_policy_and_a_directory_git_cannot_answer_for_is_not_a_verdict)' \
+    > "$job/engine-reads.log" 2>&1
   sides+=("$mode=$out/$mode")
 done
 node scripts/git-reads-compare.mjs compare "${sides[@]}" > "$out/comparison.md"

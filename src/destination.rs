@@ -483,6 +483,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
 fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
     // Prototype (spike-git-reads, never lands): the read is answered as onevcs's
     // are, where the demonstration's mode can answer it without starting git.
+    // llmlint: ignore[changed_behavior_has_e2e] local-slice.sh runs the existing real-Git hook success/refusal journeys in all six modes; the public EngineRead adapter is also included in every no-environment differential query. This never-landing seam adds no fabricated Git-output cases.
     let read = onevcs::spike_reads::EngineRead::new(&["rev-parse", "--git-path", name], checkout);
     let (succeeded, stdout, stderr) = match read.answer() {
         Some((status, stdout, stderr)) => (status == 0, stdout.into_bytes(), stderr.into_bytes()),

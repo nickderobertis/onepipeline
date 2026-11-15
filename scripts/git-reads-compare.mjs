@@ -6,6 +6,7 @@
 //
 //   node scripts/git-reads-compare.mjs compare baseline=DIR native=DIR ...
 //
+// Exit 0: comparison produced; 1: unreadable or invalid evidence; 2: usage error.
 // Each DIR holds one directory per hosted run attempt, each holding `test-linux`,
 // `test-macos` and `test-windows` job directories with the unzipped test-profile artifact, timestamped `job.log` and `meta.json`. The first
 // side is the before side every other side is compared with.
@@ -25,6 +26,7 @@ export const TYPICAL_SHARE = 27 / 30;
  * the call site a git start is attributed to, since every onevcs start is spawned at
  * one site (`git::bounded`). Unlisted shapes are named by their subcommand.
  */
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] This never-landing measurement labels the frozen inventory argv shapes; SHAs pin the observed callers and unrecognized shapes remain explicit, so no shipped interface or evolving ownership table is promised.
 const SHAPES = [
   [/^show-ref --verify --quiet /, "show-ref --verify", "onevcs git::ref_exists"],
   [/^symbolic-ref --short refs\//, "symbolic-ref --short", "onevcs git::tracked_head"],
@@ -144,10 +146,50 @@ export function mergedCoverage(log) {
 
 const minutes = (seconds) => seconds / 60;
 
+/** GitHub's UTC metadata timestamps, including calendar validity. */
+function timestamp(x) {
+  return (
+    typeof x === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(x) &&
+    Number.isFinite(Date.parse(x)) &&
+    new Date(x).toISOString().slice(0, 19) === x.slice(0, 19)
+  );
+}
+
+/** Validate optional metadata before it can change measured identity or timing. */
+function metadata(path) {
+  if (!existsSync(path)) return {};
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  const fields = {
+    run_id: (x) => Number.isSafeInteger(x) && x > 0,
+    attempt: (x) => Number.isSafeInteger(x) && x > 0,
+    job_id: (x) => Number.isSafeInteger(x) && x > 0,
+    head_sha: (x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x),
+    workflow_blob: (x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x),
+    started_at: timestamp,
+    completed_at: timestamp,
+  };
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.entries(value).some(([key, x]) => !Object.hasOwn(fields, key) || !fields[key](x)) ||
+    (value.started_at &&
+      value.completed_at &&
+      Date.parse(value.completed_at) < Date.parse(value.started_at))
+  ) {
+    throw new Refusal(
+      `${path}: invalid run metadata`,
+      "supply positive integer ids, hexadecimal commit/blob ids and ordered ISO timestamps",
+    );
+  }
+  return value;
+}
+
 /** Everything the comparison needs from one job directory. */
 export function summarizeJob(label, dir) {
   const metaFile = join(dir, "meta.json");
-  const meta = existsSync(metaFile) ? JSON.parse(readFileSync(metaFile, "utf8")) : {};
+  const meta = metadata(metaFile);
   const job = readJob(label, dir);
   const log = job.log ?? "";
   const facts = log ? jobFacts(log) : null;
@@ -464,6 +506,7 @@ export function main(argv) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
+    // llmlint: ignore[tool_output_is_signal] This never-landing comparison command is required to emit the complete Markdown measurement tables for the report; stdout is redirected to its evidence artifact, with refusals on stderr.
     process.stdout.write(main(process.argv.slice(2)));
   } catch (error) {
     const refusal =
