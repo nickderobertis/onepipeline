@@ -488,3 +488,69 @@ fn modes_are_named_as_the_demonstrations_name_them() {
     assert_eq!(Mode::parse("reuse+"), None);
     assert_eq!(Mode::parse("fast"), None);
 }
+
+#[test]
+fn spike_safety_failed_symbolic_delete_forgets_a_warm_read() {
+    let w = world();
+    let args = ["rev-parse", "--git-path", "hooks"];
+    for write in [
+        vec!["symbolic-ref", "--delete", "refs/heads/absent"],
+        vec!["log", "--output=absent-dir/result"],
+        vec!["merge-tree"],
+        vec!["tag", "--contains=HEAD", "--delete", "absent"],
+    ] {
+        asked("reuse", &w.clone, &args, &[]);
+        with_mode(Mode::parse("reuse").unwrap(), || {
+            assert!(Call::new(&args, Some(&w.clone), &[], false)
+                .answer()
+                .is_some());
+            let written = crate::git::run(&write, Some(&w.clone)).unwrap();
+            assert_ne!(written.status, 0);
+            assert!(
+                Call::new(&args, Some(&w.clone), &[], false)
+                    .answer()
+                    .is_none(),
+                "even a failed write attempt invalidates the memo before git runs: {write:?}"
+            );
+        });
+    }
+}
+
+#[test]
+fn spike_safety_symbolic_cycles_delegate_to_git() {
+    let w = world();
+    git(
+        &w.clone,
+        &["symbolic-ref", "refs/heads/loop-a", "refs/heads/loop-b"],
+    );
+    git(
+        &w.clone,
+        &["symbolic-ref", "refs/heads/loop-b", "refs/heads/loop-a"],
+    );
+    agree(&w.clone, &queries(&["symbolic-ref refs/heads/loop-a"]), &[]);
+}
+
+#[cfg(unix)]
+#[test]
+fn spike_safety_unreadable_refs_never_authorize_reuse() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let heads = w.clone.join(".git/refs/heads");
+    let permissions = std::fs::metadata(&heads).unwrap().permissions();
+    std::fs::set_permissions(&heads, std::fs::Permissions::from_mode(0)).unwrap();
+    std::thread::sleep(Duration::from_millis(80));
+    let args = ["rev-parse", "--git-path", "hooks"];
+    let actual = asked("reuse", &w.clone, &args, &[]);
+    let expected = truth(&w.clone, &args, &[]);
+    let reused = with_mode(Mode::parse("reuse").unwrap(), || {
+        Call::new(&args, Some(&w.clone), &[], false)
+            .answer()
+            .is_some()
+    });
+    std::fs::set_permissions(&heads, permissions).unwrap();
+    assert_eq!(actual, expected);
+    assert!(
+        !reused,
+        "a partial refs scan cannot authorize an answer without git"
+    );
+}

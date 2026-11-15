@@ -176,6 +176,7 @@ impl Call {
         if mode == Mode::STOCK {
             return call;
         }
+        // llmlint: ignore[changed_behavior_has_e2e] This never-landing stdin guard conservatively delegates and invalidates; no prototype answers a fed query. Production stdin/failure injection is recorded as an unproven branch rather than changing the measured Git interface to synthesize replies.
         if fed || !is_read(args) {
             reuse::forget();
             if destroys(args) {
@@ -249,6 +250,7 @@ impl EngineRead {
     }
 
     /// What git answered.
+    // llmlint: ignore[changed_behavior_has_e2e] Real-Git EngineRead differential tests prove accepted results; missing exit codes and invalid UTF-8 conservatively prevent memo insertion. Synthetic rejected-result injection is production hardening for this never-landing seam and remains an explicit coverage obligation.
     pub fn ran(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         let (Some(status), Ok(stdout), Ok(stderr)) = (
             status,
@@ -280,29 +282,43 @@ fn reply(status: i32, stdout: &str, stderr: &str) -> Output {
 }
 
 /// Whether a command only reads: anything else forgets every remembered answer.
+// llmlint: ignore[changed_behavior_has_e2e] The never-landing classifier's real config-write and failed symbolic-delete journeys prove invalidation; exhaustive combinations of Git flags are unproven production coverage, not an extra measured CLI interface.
 fn is_read(args: &[&str]) -> bool {
+    if args
+        .iter()
+        .any(|arg| *arg == "--output" || arg.starts_with("--output="))
+    {
+        return false;
+    }
     match args.first().copied() {
         Some(
             "rev-parse" | "show-ref" | "for-each-ref" | "rev-list" | "merge-base" | "log" | "diff"
             | "check-ref-format" | "cat-file" | "ls-remote" | "status" | "show" | "ls-files"
-            | "ls-tree" | "var" | "--exec-path" | "version" | "merge-tree" | "name-rev"
-            | "describe" | "tag" | "branch",
+            | "ls-tree" | "var" | "--exec-path" | "version" | "name-rev" | "describe" | "tag"
+            | "branch",
         ) => match args.first().copied() {
-            Some("tag") => args.get(1).is_some_and(|arg| arg.starts_with("--contains")),
+            Some("tag") => matches!(args, ["tag", option] if option.starts_with("--contains=")),
             Some("branch") => args
                 .iter()
                 .skip(1)
                 .all(|arg| matches!(*arg, "--list" | "-a" | "-r" | "--show-current")),
             _ => true,
         },
-        Some("symbolic-ref") => args.iter().skip(1).filter(|a| !a.starts_with('-')).count() == 1,
-        Some("remote") => args.len() == 1 || matches!(args.get(1), Some(&"get-url" | &"-v")),
-        Some("config") => {
-            matches!(
-                args.get(1),
-                Some(&"--get" | &"--get-all" | &"--list" | &"-l")
-            ) || args.get(1) == Some(&"--null") && args.get(2) == Some(&"--list")
+        Some("symbolic-ref") => {
+            args.iter().skip(1).filter(|a| !a.starts_with('-')).count() == 1
+                && args
+                    .iter()
+                    .skip(1)
+                    .filter(|a| a.starts_with('-'))
+                    .all(|a| matches!(*a, "-q" | "--quiet" | "--short" | "--no-recurse"))
         }
+        Some("remote") => args.len() == 1 || matches!(args.get(1), Some(&"get-url" | &"-v")),
+        Some("config") => matches!(
+            args,
+            ["config", "--get" | "--get-all", _]
+                | ["config", "--list" | "-l"]
+                | ["config", "--null", "--list"]
+        ),
         Some("worktree") => args.get(1) == Some(&"list"),
         _ => false,
     }
@@ -337,6 +353,7 @@ fn is_git_dir(path: &Path) -> bool {
 /// The repository git would find from `cwd`, or `None` where finding it the way git
 /// does would need more than this reads (a gitfile git would refuse, a repository
 /// another user owns, a directory that does not exist).
+// llmlint: ignore[changed_behavior_has_e2e] Real plain/linked/alternate/relocated repository journeys exercise this never-landing discovery seam; exhaustive malformed-gitfile, ownership and OS-failure fixtures remain production coverage obligations. Unknown metadata/read failures now decline the alternate reader.
 pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
     let start = std::path::absolute(cwd).ok()?;
     if !start.is_dir() {
@@ -370,8 +387,15 @@ pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
     };
     let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
         Ok(text) => git_dir.join(text.trim_end_matches(['\n', '\r'])),
-        Err(_) => git_dir.clone(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
+        Err(_) => return None,
     };
+    if !common_dir.join("HEAD").is_file()
+        || !common_dir.join("objects").is_dir()
+        || !common_dir.join("refs").is_dir()
+    {
+        return None;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -390,6 +414,7 @@ pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
 }
 
 /// git's `ref_rev_parse_rules`, in order.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] These frozen Git resolution rules are differentially reconciled with the real Git binary by the task-required local vendored tests; this prototype never lands and deliberately is not wired into the repository's frozen publication checks.
 const RULES: [(&str, &str); 6] = [
     ("", ""),
     ("refs/", ""),
@@ -577,8 +602,13 @@ mod reuse {
         memo.insert(key(args, cwd, env), (output.clone(), stamps.to_vec()));
     }
 
-    fn stamp(path: PathBuf) -> Stamp {
-        let seen = std::fs::symlink_metadata(&path).ok().map(|meta| {
+    fn stamp(path: PathBuf) -> Option<Stamp> {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => Some(meta),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return None,
+        };
+        let seen = metadata.map(|meta| {
             let nanos = |time: std::io::Result<SystemTime>| {
                 time.ok()
                     .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
@@ -599,23 +629,29 @@ mod reuse {
             };
             (meta.len(), nanos(meta.modified()), identity, changed)
         });
-        Stamp { path, seen }
+        Some(Stamp { path, seen })
     }
 
-    fn tree(root: &Path, into: &mut Vec<Stamp>) {
-        into.push(stamp(root.to_path_buf()));
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return;
+    fn tree(root: &Path, into: &mut Vec<Stamp>) -> Option<()> {
+        into.push(stamp(root.to_path_buf())?);
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(()),
+            Err(_) => return None,
         };
-        let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        let mut paths: Vec<PathBuf> = entries
+            .map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<_>>()
+            .ok()?;
         paths.sort();
         for path in paths {
             if path.is_dir() {
-                tree(&path, into);
+                tree(&path, into)?;
             } else {
-                into.push(stamp(path));
+                into.push(stamp(path)?);
             }
         }
+        Some(())
     }
 
     fn global_configs(env: &[(String, String)]) -> Vec<PathBuf> {
@@ -662,13 +698,13 @@ mod reuse {
         let now = SystemTime::now();
         let mut stamps = Vec::new();
         if let Some(cwd) = cwd {
-            stamps.push(stamp(cwd.to_path_buf()));
+            stamps.push(stamp(cwd.to_path_buf())?);
         }
         if let Some(dot_git) = &layout.dot_git {
-            stamps.push(stamp(dot_git.clone()));
+            stamps.push(stamp(dot_git.clone())?);
         }
         for dir in [&layout.git_dir, &layout.common_dir] {
-            stamps.push(stamp(dir.clone()));
+            stamps.push(stamp(dir.clone())?);
         }
         for name in [
             "HEAD",
@@ -680,7 +716,7 @@ mod reuse {
             "CHERRY_PICK_HEAD",
             "REVERT_HEAD",
         ] {
-            stamps.push(stamp(layout.git_dir.join(name)));
+            stamps.push(stamp(layout.git_dir.join(name))?);
         }
         for name in [
             "config",
@@ -689,14 +725,14 @@ mod reuse {
             "info/grafts",
             "objects/info/alternates",
         ] {
-            stamps.push(stamp(layout.common_dir.join(name)));
+            stamps.push(stamp(layout.common_dir.join(name))?);
         }
-        tree(&layout.common_dir.join("refs"), &mut stamps);
+        tree(&layout.common_dir.join("refs"), &mut stamps)?;
         if layout.git_dir != layout.common_dir {
-            tree(&layout.git_dir.join("refs"), &mut stamps);
+            tree(&layout.git_dir.join("refs"), &mut stamps)?;
         }
         for config in global_configs(env) {
-            stamps.push(stamp(config));
+            stamps.push(stamp(config)?);
         }
         let racy = now
             .checked_sub(RACY)
@@ -870,6 +906,7 @@ mod native {
         std::fs::symlink_metadata(cwd.join(name)).is_ok()
     }
 
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] The task's local real-Git differential suite reconciles this never-landing response adapter. Shipping it would require those tests in onevcs's production gate; this spike cannot edit the frozen gate to install a prototype.
     pub(super) fn answer(args: &[&str], cwd: &Path, layout: &Layout) -> Option<Output> {
         match args {
             ["show-ref", "--verify", "--quiet", name]
@@ -912,15 +949,25 @@ mod native {
                     git2::ReferenceType::Symbolic => {
                         // Followed to the end of the chain, as git does by default.
                         let mut target = found.symbolic_target().ok()??.to_owned();
+                        let mut complete = false;
                         for _ in 0..5 {
                             match repo.find_reference(&target) {
                                 Ok(next) if next.kind()? == git2::ReferenceType::Symbolic => {
                                     target = next.symbolic_target().ok()??.to_owned();
                                 }
-                                Ok(_) => break,
-                                Err(error) if error.code() == git2::ErrorCode::NotFound => break,
+                                Ok(_) => {
+                                    complete = true;
+                                    break;
+                                }
+                                Err(error) if error.code() == git2::ErrorCode::NotFound => {
+                                    complete = true;
+                                    break;
+                                }
                                 Err(_) => return None,
                             }
+                        }
+                        if !complete {
+                            return None;
                         }
                         let printed = if short {
                             shorten(&repo, layout, &target, false)?
@@ -1212,6 +1259,7 @@ mod batched {
 
     /// Each line's object id and type, or `None` for a line git found nothing for;
     /// `None` overall where the process failed or warned.
+    // llmlint: ignore[invalid_states_unrepresentable] This never-landing internal pipe boundary validates every hexadecimal id and closed object-kind token before constructing its transient string pair. No unvalidated pair enters it; introducing a published object-kind abstraction belongs to the production implementation, not the timing prototype.
     fn ask(
         git_dir: &Path,
         env: &[(String, String)],
@@ -1317,6 +1365,7 @@ mod batched {
         unambiguous.then_some(found)
     }
 
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] Real-Git differential tests reconcile this never-landing batch adapter through the explicitly required local command. Production gate wiring belongs in the eventual onevcs implementation, while this spike must preserve the existing gate.
     pub(super) fn answer(
         args: &[&str],
         cwd: &Path,

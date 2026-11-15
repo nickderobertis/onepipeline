@@ -192,6 +192,13 @@ export function summarizeJob(label, dir) {
   const meta = metadata(metaFile);
   const job = readJob(label, dir);
   const log = job.log ?? "";
+  const hostPlatforms = { linux: "linux", darwin: "macos", win32: "windows" };
+  if (job.host?.platform != null && !Object.hasOwn(hostPlatforms, job.host.platform)) {
+    throw new Refusal(
+      `${dir}: unsupported host platform ${JSON.stringify(job.host.platform)}`,
+      "supply an artifact from Linux, macOS or Windows; preserve the producer's platform value",
+    );
+  }
   const facts = log ? jobFacts(log) : null;
   const run = largestRun(log);
   const { failed, retried, passedLines } = outcomes(log, run);
@@ -240,7 +247,7 @@ export function summarizeJob(label, dir) {
   return {
     label,
     platform:
-      job.host?.platform ??
+      hostPlatforms[job.host?.platform] ??
       (/macos/.test(label) ? "macos" : /windows/.test(label) ? "windows" : "linux"),
     run: meta.run_id ?? null,
     attempt: meta.attempt ?? null,
@@ -412,9 +419,9 @@ function renderComparison(before, after) {
         "runs before/after",
         "e2e mean min before",
         "e2e mean min after",
-        "saved min (before − after)",
+        "mean difference min (before − after)",
         "difference",
-        `expected min saved per typical PR (× ${fmt(TYPICAL_SHARE, 2)})`,
+        `PR-scaled mean difference (undecided is not a saving) (× ${fmt(TYPICAL_SHARE, 2)})`,
         "git starts before",
         "git starts after",
         "git s before",
