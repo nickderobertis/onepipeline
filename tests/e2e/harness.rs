@@ -2246,7 +2246,9 @@ impl World {
     /// journey can enumerate that.
     ///
     /// On macOS and other non-Linux Unix that set is `ps`, delegated to the real
-    /// one by absolute path. Linux asks procfs and Windows asks the process
+    /// one by absolute path: the targets other than macOS ask it when a process
+    /// started, and macOS — which asks the kernel that — still asks it whether a
+    /// process has ended unreaped. Linux asks procfs and Windows asks the process
     /// itself, so there is nothing to hold there and this is an empty directory.
     #[cfg(all(unix, not(target_os = "linux")))]
     pub fn path_with_only_what_a_dispatch_resolves(&self) -> PathBuf {
@@ -2395,7 +2397,7 @@ impl World {
     /// token would make a live process disagree with the stamp its own record
     /// carries, which a reader takes for a pid the host has handed to somebody
     /// else: the one verdict that must never come from the host misbehaving.
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub fn path_whose_ps_says_more_than_it_was_asked(&self) -> PathBuf {
         self.path_with_ps("talkative-ps", &answer_plus("a line nobody asked for"))
     }

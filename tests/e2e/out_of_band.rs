@@ -1139,9 +1139,17 @@ fn start_landing(
     graph: &str,
     launcher: Option<&str>,
 ) -> onepipeline_testfakes::profile::process::Child {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
+    spawn_landing(landing_command(world, graph, launcher))
+}
 
+/// The command [`start_landing`] starts, for a journey that changes how it is
+/// started before it is.
+#[cfg(unix)]
+fn landing_command(
+    world: &World,
+    graph: &str,
+    launcher: Option<&str>,
+) -> onepipeline_testfakes::profile::process::Command {
     let args = [
         "publish-branch",
         BRANCH,
@@ -1152,7 +1160,7 @@ fn start_landing(
         "--pr-author-graph",
         graph,
     ];
-    let mut landing = match launcher {
+    match launcher {
         None => world.cmd(&args),
         Some(launcher) => {
             let binary = crate::harness::binary().display().to_string();
@@ -1160,7 +1168,19 @@ fn start_landing(
             words.extend(args);
             world.cmd_on(Path::new(launcher), &words)
         }
-    };
+    }
+}
+
+/// Start `landing` in a process group of its own, so a signal sent to that
+/// group reaches nothing this journey did not start, with its output piped for
+/// the assertions made of how it ended.
+#[cfg(unix)]
+fn spawn_landing(
+    mut landing: onepipeline_testfakes::profile::process::Command,
+) -> onepipeline_testfakes::profile::process::Child {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
     landing.process_group(0);
     landing
         .stdout(Stdio::piped())
@@ -1382,6 +1402,90 @@ fn a_landing_signalled_while_its_worktree_is_being_added_still_removes_it() {
         &before.0,
         &worktree,
         "adding",
+    );
+}
+
+/// A landing signalled while git is still reading the branch it is to draft —
+/// before any worktree is cut — ends of the signal without waiting for that read
+/// to answer, with its turn's directory gone and nothing drafted or landed.
+///
+/// The read is held by a `git` standing first on the landing's `PATH` that runs
+/// the real one, holding only `git log --reverse`, the read of the branch's
+/// commits; the landing is sent `SIGTERM` alone, so that `git` outlives it and is
+/// asked afterwards whether it is still holding.
+#[cfg(unix)]
+#[test]
+fn a_landing_signalled_while_git_reads_its_branch_ends_without_waiting_for_the_read() {
+    let world = world_with_its_own_tmp("oob-interrupted-reading");
+    let repository = world.repository("change-open", &[]);
+    branch_with_work(&world, &repository);
+    world.script("pr-author.body", "## What\nA widget.\n");
+    let real = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("sh answers");
+    let ahead = world.root.join("reading-git");
+    std::fs::create_dir_all(&ahead).expect("a directory for the held git");
+    onepipeline_testfakes::executable(
+        &ahead.join("git"),
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = log ] && [ \"$2\" = --reverse ]; then\n\
+             echo $$ > '{reading}.part' && mv '{reading}.part' '{reading}'\n\
+             tries=0\n\
+             while [ ! -f '{go}' ] && [ \"$tries\" -lt 1200 ]; do sleep 0.05; tries=$((tries + 1)); done\n\
+             fi\n\
+             exec '{real}' \"$@\"\n",
+            reading = world.fakes.join("reading").display(),
+            go = world.fakes.join("reading.go").display(),
+            real = String::from_utf8_lossy(&real.stdout).trim(),
+        ),
+    );
+    let graph = world.pr_author_graph();
+    let before = state_of(&world, &repository.checkout);
+
+    let mut command = landing_command(&world, &graph, None);
+    let path = command
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .map(std::ffi::OsStr::to_owned)
+        .expect("the world names a PATH");
+    let mut leading = ahead.clone().into_os_string();
+    leading.push(":");
+    leading.push(path);
+    command.env("PATH", leading);
+    let landing = spawn_landing(command);
+    let reading = world.fakes.join("reading");
+    world.until("git to be reading the branch", |_| reading.is_file());
+    let held: i32 = std::fs::read_to_string(&reading)
+        .expect("the held git said who it is")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Where the turn is made: the landing's own pid and the first number it mints.
+    let turn = world
+        .root
+        .join("tmp")
+        .join(format!("onepipeline-draft-{}-0", landing.id()));
+    signal_landing(&landing, libc::SIGTERM, false);
+    let ended = landing.wait_with_output().expect("the landing ends");
+    // SAFETY: signal 0 asks whether the pid is there and delivers nothing.
+    let still_reading = unsafe { libc::kill(held, 0) } == 0;
+    world.release("reading.go");
+    assert!(
+        still_reading,
+        "the landing waited for git's read of the branch before it ended\n{}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    ended_leaving_nothing(
+        &world,
+        &repository,
+        &ended,
+        libc::SIGTERM,
+        &before.0,
+        &turn.join("branch"),
+        "reading",
     );
 }
 
