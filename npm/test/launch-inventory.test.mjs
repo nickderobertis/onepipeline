@@ -778,3 +778,23 @@ test("trace and waits files of a binary other than e2e that compiles the harness
   assert.match(out, /left out 2 trace and waits files of tests no e2e record names/);
   assert.match(out, /Rows account for 52 traced starts \(trace holds 52\)/);
 });
+
+test("an OS-observed image is named as the trace names a program: everything before its last dot", () => {
+  const dir = mkdtempSync(join(scratch, "stems-"));
+  writeFileSync(
+    join(dir, "t.1.strace"),
+    [
+      "100 clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD}, 88) = 101",
+      '101 execve("/tmp/op-1/probe.sh", ["/tmp/op-1/probe.sh", "x"], 0x1 /* 3 vars */) = 0',
+      "100 clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD}, 88) = 102",
+      '102 execve("/usr/bin/git", ["git", "status"], 0x1 /* 3 vars */) = 0',
+    ].join("\n"),
+  );
+  const exes = withModule(
+    `process.stdout.write(JSON.stringify(m.readOs(${JSON.stringify(dir)}).map((e) => [e.pid, e.ppid, e.exe])))`,
+  );
+  assert.deepEqual(exes, [
+    [101, 100, "probe"],
+    [102, 100, "git"],
+  ]);
+});
