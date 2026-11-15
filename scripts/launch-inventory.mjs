@@ -321,7 +321,7 @@ export function validProfile(r) {
     typeof r.os === "string" &&
     ["test-thread", "process-exit", "unfinished"].includes(r.ended) &&
     isTime(r.wall_s) &&
-    (r.categories?.wait?.polls == null || isTime(r.categories.wait.polls)) &&
+    (r.categories?.wait?.polls == null || isCount(r.categories.wait.polls)) &&
     Boolean(r.categories) &&
     typeof r.categories === "object" &&
     !Array.isArray(r.categories) &&

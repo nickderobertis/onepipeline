@@ -29,5 +29,6 @@ mkdir -p "$dir" || {
 name="${NEXTEST_TEST_NAME:-untested}"
 # A test's path is identifiers joined by `::`; anything else names no file under $dir.
 [[ "$name" =~ ^[A-Za-z0-9_]+(::[A-Za-z0-9_]+)*$ ]] || name=untested
+# llmlint: ignore[tool_output_is_signal] This measurement-only runner deliberately execs strace so the observed process tree and signal/exit behaviour are strace's own; a wrapper adding its own failure message changes that measured boundary. strace's stderr is forwarded unchanged, and the setup refusals above already name missing-tool and unwritable-directory repairs. This spike never lands (manager ruling a1).
 exec strace -f -qq --seccomp-bpf -e trace=execve,clone,clone3,fork,vfork -e signal=none -s 256 \
   -o "$dir/${name//::/__}.$$.strace" -- "$@"

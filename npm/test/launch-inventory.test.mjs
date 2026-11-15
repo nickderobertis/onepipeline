@@ -856,3 +856,20 @@ test("OS coverage joins reused PIDs by time and program, and never consumes a fa
   );
   assert.match(r.stdout, /Traced starts the OS record has no exec for .*git 2/);
 });
+
+test("a fractional test-profile polling count is rejected rather than folded", () => {
+  const dir = join(scratch, "fractional-polls");
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  const file = join(e2e, readdirSync(e2e)[0]);
+  const record = JSON.parse(readFileSync(file, "utf8"));
+  record.categories.wait.polls = 1.5;
+  writeFileSync(file, JSON.stringify(record));
+  const r = run("fold", `invalid=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /1 test-profile records not of schema 2/);
+  // Recovery: an integral count remains a valid record.
+  record.categories.wait.polls = 2;
+  writeFileSync(file, JSON.stringify(record));
+  assert.match(run("fold", `valid=${dir}`).stdout, /0 test-profile records not of schema 2/);
+});
