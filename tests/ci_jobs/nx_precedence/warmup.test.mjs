@@ -27,6 +27,11 @@ function fixture(t) {
     join(dir, "cargo"),
     `#!/usr/bin/env bash
 set -eu
+if [ "$1" = metadata ]; then
+  if [ -n "\${FAIL_METADATA:-}" ]; then echo 'invalid Cargo manifest' >&2; exit 43; fi
+  printf '%s' "$PREPARE_METADATA"
+  exit
+fi
 if [ "$1" = llvm-cov ]; then echo "export CARGO_TARGET_DIR='$PREPARE_TARGET'"; exit; fi
 printf '%s|%s|%s\\n' "$*" "$RUSTFLAGS" "$CARGO_TARGET_DIR" >> calls
 if [ -n "\${FAIL_BUILD:-}" ]; then exit 42; fi
@@ -53,6 +58,9 @@ exit "\${TEST_EXIT:-0}"
         env: {
           ...process.env,
           PATH: `${dir}${delimiter}${process.env.PATH}`,
+          PREPARE_METADATA: JSON.stringify({
+            packages: [{ dependencies: [{ name: "oneagentgraph" }] }],
+          }),
           PREPARE_TARGET: `${dir.replaceAll("\\", "/")}/target/llvm-cov-target`,
           ...extra,
         },
@@ -115,4 +123,35 @@ test("non-Linux coverage runs keep their uninstrumented command without building
   assert.equal(readFileSync(join(dir, "tested"), "utf8"), "native");
   assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
   assert.doesNotMatch(result.stderr, /helpers ready/);
+});
+
+test("a workspace without engine dependencies runs its tests without preparing absent helpers", (t) => {
+  const { dir, run } = fixture(t);
+  const result = run({ PREPARE_METADATA: JSON.stringify({ packages: [{ dependencies: [] }] }) }, [
+    "bash",
+    "-c",
+    "printf '%s' minimal > tested; exit 19",
+  ]);
+  assert.equal(result.status, 19, result.stderr);
+  assert.equal(readFileSync(join(dir, "tested"), "utf8"), "minimal");
+  assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
+  assert.doesNotMatch(result.stderr, /helpers ready/);
+});
+
+test("failed Cargo metadata prevents both helper builds and tests", (t) => {
+  const { dir, run } = fixture(t);
+  const result = run({ FAIL_METADATA: "1" });
+  assert.equal(result.status, 43, result.stderr);
+  assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
+  assert.throws(() => readFileSync(join(dir, "tested")), { code: "ENOENT" });
+  assert.match(result.stderr, /ACTION: resolve the Cargo metadata failure/);
+});
+
+test("malformed Cargo metadata is rejected before building or testing", (t) => {
+  const { dir, run } = fixture(t);
+  const result = run({ PREPARE_METADATA: "{}" });
+  assert.notEqual(result.status, 0);
+  assert.throws(() => readFileSync(join(dir, "calls")), { code: "ENOENT" });
+  assert.throws(() => readFileSync(join(dir, "tested")), { code: "ENOENT" });
+  assert.match(result.stderr, /ACTION: restore valid Cargo metadata/);
 });
