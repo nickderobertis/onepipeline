@@ -262,23 +262,29 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     });
   }
 
-  it("lowers the run once ps answers again after refusing", (t) => {
-    const dir = workspace(t);
-    const stubs = failing(t, { ps: "ps refused here" }, 1);
-    const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
-    assert.equal(status, 0, log);
-    assert.equal(read(dir, "lead.nice"), "0", log);
-    if (!linux) return assert.deepEqual(lines(log), []);
-    assert.equal(read(dir, "side.nice"), "19", log);
-    assert.equal(read(dir, "late.nice"), "19", log);
-    const [warning, summary, ...rest] = lines(log);
-    assert.match(warning, /cannot list processes \(ps refused here\)/);
-    assert.match(
-      summary,
-      /^nx-precedence: lead:work ran ahead of .*late:work .*side:work, keeping kept:work$/,
-    );
-    assert.deepEqual(rest, []);
-  });
+  for (const [tool, code, warning] of [
+    ["ps", 1, /cannot list processes \(ps refused here\)/],
+    ["grep", 3, /cannot read which processes are this run's \(grep exited 3\)/],
+    ["renice", 1, /cannot lower the tasks beside lead:work \(renice refused here\)/],
+  ]) {
+    it(`lowers the run once ${tool} answers again after refusing`, (t) => {
+      const dir = workspace(t);
+      const stubs = failing(t, { [tool]: `${tool} refused here` }, 1, code);
+      const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+      assert.equal(status, 0, log);
+      assert.equal(read(dir, "lead.nice"), "0", log);
+      if (!linux) return assert.deepEqual(lines(log), []);
+      assert.equal(read(dir, "side.nice"), "19", log);
+      assert.equal(read(dir, "late.nice"), "19", log);
+      const [said, summary, ...rest] = lines(log);
+      assert.match(said, warning);
+      assert.match(
+        summary,
+        /^nx-precedence: lead:work ran ahead of .*late:work .*side:work, keeping kept:work$/,
+      );
+      assert.deepEqual(rest, []);
+    });
+  }
 
   it("names no failure for processes that ended before it lowered them", (t) => {
     const dir = workspace(t, { churn: true });
