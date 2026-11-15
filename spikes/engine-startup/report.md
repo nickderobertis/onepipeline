@@ -8,14 +8,14 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 20:23 UTC
+### Live hosted handoff — 2026-11-15 20:52 UTC
 
 This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux/Windows/macOS running; macOS started 20:15:54 UTC; lint cancelled at its thirty-minute limit |
-| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (awaits checkout log) | Linux/Windows/lint running, macOS queued |
+| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux/Windows running, macOS queued; lint cancelled after its judged tier failed |
 
 Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining: collect both points, start the third once a slot frees, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No hosted after timing or saving is claimed yet.
 
@@ -2169,7 +2169,14 @@ Collection at approximately 20:38 UTC stopped at the shared GitHub allowance flo
 
 ### Adoption effort by file and repository
 
-Estimated implementation effort for this option is two dispatches, not a measured duration. In github.com/nickderobertis/privateterms, change src/matcher.rs and add a public-API equivalence journey (proposed tests/startup_equivalence.rs); validate negative-text throughput before choosing this eager-table/full-scan trade for a release. The existing src/normalize.rs contributor implementation becomes unused by the cut but need not be rewritten to demonstrate it. A compatible performance-only implementation takes a patch release. In github.com/nickderobertis/onepipeline, move Cargo.lock’s privateterms resolution to that patch, keep the existing caret requirements, run the consumer proofs and take a performance patch release. onevcs and onetaskgraph-core already admit the compatible privateterms patch; neither needs a release for this lock adoption. These are proposed production files/dispatches, not changes made by this never-land measurement branch. The prototype’s files are vendor/privateterms/src/matcher.rs and src/lib.rs, plus the root Cargo.toml/Cargo.lock path adoption; the measurement commands, fixtures and report remain measurement artifacts.
+Estimated implementation effort for this option is two dispatches, not a measured duration. In github.com/nickderobertis/privateterms, change src/matcher.rs and add a public-API equivalence journey (proposed tests/startup_equivalence.rs); validate negative-text throughput before choosing this eager-table/full-scan trade for a release. The existing src/normalize.rs contributor implementation becomes unused by the cut but need not be rewritten to demonstrate it. A compatible performance-only implementation takes a patch release. In github.com/nickderobertis/onepipeline, move Cargo.lock’s privateterms resolution to that patch, keep the existing caret requirements, run the consumer proofs and take a performance patch release. onevcs and onetaskgraph-core already admit the compatible privateterms patch; neither needs a release for this lock adoption. These are proposed production files/dispatches, not changes made by this never-land measurement branch. The prototype’s files are vendor/privateterms/src/matcher.rs and vendor/privateterms/src/lib.rs, plus the root Cargo.toml/Cargo.lock path adoption; the measurement commands, fixtures and report remain measurement artifacts.
+
+
+### Hosted checkpoint — 2026-11-15 20:52 UTC
+
+Point2 lint job132941104952 ran 20:08:13–20:38:29 UTC and was cancelled at its existing thirty-minute job limit, while waiting for the existing Pages build. Before cancellation its judged tier completed at 20:34:17 UTC: history20261115T203417Z-7802b reports forty rules, twenty-six passed, one failed, eight skipped, five not relevant. The sole finding is comments_earn_their_place at demo-only src/lib.rs:191, the byte-identical no-behavior source touch the comparison requires. Under a49, that non-measurement finding is retained as a limitation rather than starting another style repair/refinement loop or changing the agreed source touch across sides. This hosted finding is not a green local judged-lint claim; the final local pass is still owed. The stock workflow’s later Pages work is unchanged by this spike; the timeout does not establish a timing result for any test tier.
+
+The saved lint log confirms point2 GITHUB_SHA 591dd36224fb3402f9f48130175a8c690b4eb524 (lines471,496,499), head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 and base 934364b8d2bdd125f81828df1fd09e86b6aaca16. The shared jobFacts output lists all fifty-four selected lint tasks and each cache step’s restore/time; it records no Actions-cache save line and zero Nx entries/bytes stored or replayed (log line3624). Both files and the current job snapshot are under evidence/hosted/43756326338/attempt-1/lint.*.gz and jobs-2052.json.gz. Point1’s three test jobs remain in progress; point2 Linux/Windows run and macOS is queued. No test-job artifact has completed, and no after timing is claimed.
 
 
 ## Candidate budgets
