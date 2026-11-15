@@ -433,3 +433,21 @@ test("an artifact with no changed-site or changed-journey records says what was 
   assert.match(out.stdout, /No wait at a changed site was recorded\./);
   assert.match(out.stdout, /No CLI launch count for a changed journey was recorded\./);
 });
+
+test("a successful LEAK warning remains a pass rather than a failed test", () => {
+  const dir = copyOf("after");
+  const log = join(dir, "job.log");
+  writeFileSync(
+    log,
+    readFileSync(log, "utf8")
+      .split("\n")
+      .map((line) => (line.includes(CANNOT_START) ? line.replace("PASS", "LEAK") : line))
+      .join("\n"),
+  );
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:leak=${dir}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(
+    out.stdout,
+    /after leak: 2 passed in the tier;[^\n]+failed and not passed again: none\./,
+  );
+});

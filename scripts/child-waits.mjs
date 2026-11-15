@@ -80,6 +80,10 @@ const ANSI = /\u001b\[[0-9;]*m/g;
 const OUTCOME =
   /^\s*([A-Z][A-Z-]*)\s+\[\s*\d+(?:\.\d+)?s\]\s+(?:\(\s*\d+\/\d+\)\s+)?onepipeline::e2e\s+(\S+)/;
 
+// Nextest's successful leak warning is LEAK; the ci profile's failed-leak
+// setting produces LEAK-FAIL instead (.config/nextest.toml).
+const succeeded = (outcome) => outcome === "PASS" || outcome === "LEAK";
+
 /**
  * Every e2e test the log's nextest runs ended, in order: `{ t, outcome, test }`, so a
  * test failing in the tier and passing on the job's own re-run reads as both.
@@ -164,9 +168,9 @@ export function runOf(side, name, dir) {
   }
   const ended = outcomes(job.log);
   const inTier = (e) => e.t >= tier.start - 1 && e.t <= tier.end;
-  for (const e of ended) if (inTier(e) && e.outcome === "PASS") passed.add(e.test);
+  for (const e of ended) if (inTier(e) && succeeded(e.outcome)) passed.add(e.test);
   const failedInTier = new Set(
-    ended.filter((e) => inTier(e) && e.outcome !== "PASS").map((e) => e.test),
+    ended.filter((e) => inTier(e) && !succeeded(e.outcome)).map((e) => e.test),
   );
   // A completed profile proves execution, not success. When every failure the
   // summary counts is named, the other completed names passed even in a quiet
@@ -175,7 +179,7 @@ export function runOf(side, name, dir) {
     for (const test of completed) if (!failedInTier.has(test)) passed.add(test);
   }
   const passedLater = new Set(
-    ended.filter((e) => e.t > tier.end && e.outcome === "PASS").map((e) => e.test),
+    ended.filter((e) => e.t > tier.end && succeeded(e.outcome)).map((e) => e.test),
   );
   for (const test of failedInTier) passed.delete(test);
   return {
