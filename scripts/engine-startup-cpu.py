@@ -6,12 +6,13 @@ import gzip
 import json
 import math
 import re
+import sys
 from pathlib import Path
 
 
 def read_json(path):
     opener = gzip.open if str(path).endswith('.gz') else open
-    with opener(path, 'rt') as stream:
+    with opener(path, 'rt', encoding='utf-8') as stream:
         return json.load(stream, parse_constant=lambda value: invalid(f'non-finite JSON number {value}'))
 
 
@@ -159,6 +160,8 @@ def fold(profile, symbols):
 
 
 if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__ + ' Exit codes: 0 report produced; 2 malformed input or command usage, with a repair on stderr.')
     parser.add_argument('profile')
     parser.add_argument('symbols')

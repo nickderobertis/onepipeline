@@ -209,3 +209,31 @@ test("recorded attribution rows conserve CPU and stop at the first 80-percent cr
     assert.ok(Math.abs((sum / 265.121) * 100 - expected) < rounding);
   }
 });
+
+test("valid UTF-8 sampler input and symbols work under an ASCII process locale", async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { gunzipSync } = await import("node:zlib");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-utf8-"),
+  );
+  try {
+    const input = join(root, "profile.json");
+    const sidecar = join(root, "symbols.json");
+    writeFileSync(input, JSON.stringify(JSON.parse(gunzipSync(readFileSync(profile)))));
+    const syms = JSON.parse(gunzipSync(readFileSync(symbols)));
+    syms.string_table = syms.string_table.map((name) => `${name}Ω`);
+    writeFileSync(sidecar, JSON.stringify(syms));
+    const run = spawnSync("python", [script, input, sidecar], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", PYTHONUTF8: "0", PYTHONCOERCECLOCALE: "0" },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /sampled CPU 265\.121 ms/);
+    assert.match(run.stdout, /Ω/);
+    assert.doesNotMatch(run.stdout, /�/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
