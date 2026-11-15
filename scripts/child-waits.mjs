@@ -287,7 +287,7 @@ export function render(before, after, share) {
       ],
     ),
     "",
-    `Difference, after − before: ${f2(v.diff)} min — ${v.decided ? "decided: non-overlapping ranges and mean difference outside both spreads" : "undecided: inside the spread of the runs"}.`,
+    `Difference, after − before: ${f2(v.diff)} min — ${v.decided ? "decided: non-overlapping ranges and mean difference outside both spreads" : "undecided: ranges overlap or the mean difference does not exceed both spreads"}.`,
     `Typical pull request (estimate, the difference × ${share.toFixed(3)} of pull requests reaching src/): ${f2(v.typical)} min.`,
   );
   const keys = new Set();
