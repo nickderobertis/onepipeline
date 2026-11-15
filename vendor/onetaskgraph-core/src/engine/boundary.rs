@@ -530,12 +530,17 @@ async fn run(
     runner
         .spawn(move || {
             let ran = (|| {
-                let mut child = std::process::Command::new(&program)
-                    .args(&arguments)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
+                // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+                let (spawned, launch) = crate::launch_trace::spawn(
+                    crate::launch_site!(),
+                    std::process::Command::new(&program)
+                        .args(&arguments)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null()),
+                );
+                // llmlint: ignore-end[changed_behavior_has_e2e]
+                let mut child = spawned
                     .map_err(|error| {
                         PolicyError::new(format!(
                             "the command {program} could not be started: {error}"
@@ -546,7 +551,15 @@ async fn run(
                     // answered is still read below, and decides.
                     let _ = stdin.write_all(&document);
                 }
-                let output = child.wait_with_output().map_err(|error| {
+                // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+                let output = {
+                    let _watch =
+                        crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
+                    child.wait_with_output()
+                };
+                launch.exited(output.as_ref().ok().and_then(|output| output.status.code()));
+                // llmlint: ignore-end[changed_behavior_has_e2e]
+                let output = output.map_err(|error| {
                     PolicyError::new(format!("the command {program} could not be read: {error}"))
                 })?;
                 Ok((output.status.code(), output.stdout))

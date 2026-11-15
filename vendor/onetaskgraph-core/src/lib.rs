@@ -29,6 +29,8 @@
 
 pub mod attestation;
 pub mod cache;
+#[doc(hidden)]
+pub mod launch_trace;
 mod clock;
 pub mod config;
 

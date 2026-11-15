@@ -356,12 +356,16 @@ impl Peer {
             // unrelated token held by its host process.
             .env_clear();
         keep_platform_state(&mut command);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| SourceError::Unavailable {
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+        let mut child = crate::launch_trace::spawn_detached(
+            crate::launch_site!(),
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        .map_err(|error| SourceError::Unavailable {
                 message: format!("could not run the plugin program {program:?}: {error}"),
             })?;
         // Every stream was asked for as a pipe immediately above, so none of them can be
