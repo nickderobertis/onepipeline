@@ -463,7 +463,7 @@ export function readJob(label, dir) {
     );
   const logFile = join(dir, "job.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
-  const os = readOs(join(dir, "os"), skipped);
+  const os = readOs(existsSync(join(dir, "os")) ? join(dir, "os") : join(root, "os"), skipped);
   return { label, tests, trace, harnessWaits, host, log, os, skipped };
 }
 
@@ -510,7 +510,11 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
   const starts = [];
   for (const f of readdirSync(dir)) {
     const path = join(dir, f);
-    if (f.endsWith(".strace")) starts.push(...parseStrace(readFileSync(path, "utf8"), f));
+    if (f.endsWith(".strace")) {
+      // `<test>.<runner pid>.strace`: its starts are that test's alone.
+      const test = f.replace(/\.\d+\.strace$/, "");
+      for (const e of parseStrace(readFileSync(path, "utf8"), f)) starts.push({ ...e, test });
+    }
     else if (f.endsWith(".jsonl"))
       for (const line of readFileSync(path, "utf8").split("\n")) {
         if (!line.trim()) continue;
@@ -538,10 +542,24 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
           exe: stem(r.image),
           argv: splitCmd(r.cmd ?? ""),
           file: f,
+          t: etwTime(r.t),
         });
       }
   }
   return starts;
+}
+
+/**
+ * An ETW start's `TimeCreated` (ISO 8601, to 100 ns) as unix nanoseconds, the trace's own
+ * unit; null when absent or unreadable, which leaves the join to the pid alone.
+ */
+export function etwTime(iso) {
+  if (typeof iso !== "string") return null;
+  const m = /^(.*?T\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)$/.exec(iso);
+  if (!m) return null;
+  const ms = Date.parse(`${m[1]}${m[3]}`);
+  if (!Number.isFinite(ms)) return null;
+  return ms * 1e6 + Number(((m[2] ?? "") + "000000000").slice(0, 9));
 }
 
 // The trace names a program by Rust's `Path::file_stem` (everything before the last dot),
@@ -937,13 +955,92 @@ export function foldJob(job) {
 
 /** What the OS saw start that the trace and the records do not hold, by starter. */
 export function coverage(os, t, records) {
-  const procs = new Map(t.procs.map((p) => [p.pid, p]));
-  const osPid = new Map(os.map((e) => [e.pid, e]));
-  const expected = new Map();
-  for (const s of t.starts) {
-    const k = `${s.pid}\u0000${s.program.toLowerCase()}`;
-    expected.set(k, (expected.get(k) ?? 0) + 1);
+  // A pid names many processes over a whole tier — Windows reuses them within seconds — so
+  // an OS start is first the traced start that named it as its child, in the same test (an
+  // strace file is one test's) or, where the OS gave the start a time (ETW), the nearest
+  // within SLACK. One with no such start falls back to its parent: the traced process of
+  // that pid in the same test, or the one whose first record is the latest before it,
+  // allowing SLACK, because ETW's clock drifts tens of milliseconds from the trace's.
+  // A start the trace knows the child of is only ever matched by that child; the fallback
+  // counts, per traced process and program, only the starts that name none.
+  const SLACK = 1e9;
+  const procsByPid = new Map();
+  for (const p of t.procs) {
+    if (!procsByPid.has(p.pid)) procsByPid.set(p.pid, []);
+    procsByPid.get(p.pid).push(p);
   }
+  const osByPid = new Map();
+  for (const e of os) {
+    if (e.reexec) continue;
+    if (!osByPid.has(e.pid)) osByPid.set(e.pid, []);
+    osByPid.get(e.pid).push(e);
+  }
+  // Which test a candidate belongs to: a traced process by its trace file, an OS start by
+  // its strace file's test.
+  const latest = (candidates, e, time, testOf) => {
+    if (!candidates?.length) return null;
+    let pool = candidates;
+    if (e.test != null) pool = pool.filter((c) => testOf(c) === e.test);
+    if (e.t != null) {
+      let best = null;
+      for (const c of pool) {
+        const at = time(c);
+        if (at != null && at <= e.t + SLACK && (best == null || at > time(best))) best = c;
+      }
+      return best;
+    }
+    return pool[0] ?? null;
+  };
+  // The parent itself, as the OS saw it start: on ETW's own clock, so with no slack.
+  const parentOf = (e) => {
+    if (e.t == null) return latest(osByPid.get(e.ppid), e, (o) => o.t, (o) => o.test);
+    let best = null;
+    for (const o of osByPid.get(e.ppid) ?? [])
+      if (o.t != null && o.t <= e.t && (best == null || o.t > best.t)) best = o;
+    return best;
+  };
+  // A traced process is the starter only if it is that parent: its first record falls
+  // after the parent's OS start, so a pid an untraced process reused is not taken for an
+  // engine's.
+  const starterOf = (e, parent) => {
+    if (e.t == null || parent?.t == null)
+      return latest(procsByPid.get(e.ppid), e, (p) => p.t, (p) => p.file);
+    let best = null;
+    for (const p of procsByPid.get(e.ppid) ?? [])
+      if (p.t >= parent.t - SLACK && p.t <= e.t + SLACK && (best == null || p.t < best.t))
+        best = p;
+    return best;
+  };
+  const id = (file, pid) => `${file}\u0000${pid}`;
+  const expected = new Map();
+  const byChild = new Map();
+  const keyOf = (s) => `${id(s.file, s.pid)}\u0000${s.program.toLowerCase()}`;
+  // A spawn that returned no child (`spawn_ns` set, `child` null) started no process: it is
+  // reported as one the OS has no exec for, and never absorbs a start the OS did see.
+  const failed = [];
+  for (const s of t.starts) {
+    if (s.child == null && s.spawn_ns != null) {
+      failed.push(s);
+      continue;
+    }
+    if (s.child == null) {
+      expected.set(keyOf(s), (expected.get(keyOf(s)) ?? 0) + 1);
+      continue;
+    }
+    if (!byChild.has(s.child)) byChild.set(s.child, []);
+    byChild.get(s.child).push(s);
+  }
+  const claimed = new Set();
+  const namedBy = (e) => {
+    let best = null;
+    for (const s of byChild.get(e.pid) ?? []) {
+      if (claimed.has(s) || s.program.toLowerCase() !== e.exe) continue;
+      if (e.test != null && s.file !== e.test) continue;
+      if (e.t != null && Math.abs(e.t - s.t) > SLACK) continue;
+      if (best == null || (e.t != null && Math.abs(e.t - s.t) < Math.abs(e.t - best.t))) best = s;
+    }
+    return best;
+  };
   const rows = new Map();
   let total = 0;
   let traced = 0;
@@ -956,7 +1053,15 @@ export function coverage(os, t, records) {
   for (const e of os) {
     if (e.reexec) continue;
     total++;
-    if (/^[a-z0-9_]+-[0-9a-f]{16}$/.test(e.exe) && !procs.get(e.ppid)) {
+    const named = namedBy(e);
+    if (named) {
+      claimed.add(named);
+      traced++;
+      continue;
+    }
+    const parent = parentOf(e);
+    const starter = starterOf(e, parent);
+    if (/^[a-z0-9_]+-[0-9a-f]{16}$/.test(e.exe) && !starter) {
       const k = `test binary (nextest's start)\u0000nextest\u0000${e.exe}`;
       rows.set(k, {
         kind: "test binary (nextest's start)",
@@ -966,21 +1071,20 @@ export function coverage(os, t, records) {
       });
       continue;
     }
-    const starter = procs.get(e.ppid);
-    const parent = osPid.get(e.ppid);
     const starterName = starter ? starter.exe : (parent?.exe ?? "?");
+    const key = starter ? `${id(starter.file, starter.pid)}\u0000${e.exe}` : null;
     let kind;
     if (starter && !isTestBinary(starter)) {
-      const k = `${e.ppid}\u0000${e.exe}`;
+      const k = key;
       if ((expected.get(k) ?? 0) > 0) {
         expected.set(k, expected.get(k) - 1);
         traced++;
         continue;
       }
       kind = "MISSED by the trace";
-    } else if (starter && (expected.get(`${e.ppid}\u0000${e.exe}`) ?? 0) > 0) {
+    } else if (starter && (expected.get(key) ?? 0) > 0) {
       // The engine's library, called in the test process, traced as it starts.
-      expected.set(`${e.ppid}\u0000${e.exe}`, expected.get(`${e.ppid}\u0000${e.exe}`) - 1);
+      expected.set(key, expected.get(key) - 1);
       traced++;
       continue;
     } else if (starter || /^e2e(-|$)/.test(starterName)) {
@@ -999,9 +1103,15 @@ export function coverage(os, t, records) {
     });
   }
   const unseen = new Map();
+  for (const list of [...byChild.values(), failed])
+    for (const s of list) {
+      if (claimed.has(s)) continue;
+      const k = keyOf(s);
+      expected.set(k, (expected.get(k) ?? 0) + 1);
+    }
   for (const [k, n] of expected) {
     if (n <= 0) continue;
-    const program = k.split("\u0000")[1];
+    const program = k.split("\u0000")[2];
     unseen.set(program, (unseen.get(program) ?? 0) + n);
   }
   const recordStarts = records.reduce(
