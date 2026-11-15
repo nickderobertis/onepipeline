@@ -326,7 +326,14 @@ fn gone_within(aimed: &[u32], patience: Duration) -> bool {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return false;
         }
-        onevcs::launch_trace::sleep(onevcs::launch_site!(), PROBE_POLL);
+        // Measurement only (spike-child-waits, never lands): woken by the first
+        // live process's exit rather than the tick.
+        match aimed.iter().find(|pid| process_may_be_live(**pid)) {
+            Some(pid) if onevcs::spike_waits::exit_notify() => {
+                onevcs::spike_waits::await_pid_exit(onevcs::launch_site!(), *pid, PROBE_POLL);
+            }
+            _ => onevcs::launch_trace::sleep(onevcs::launch_site!(), PROBE_POLL),
+        }
     }
 }
 

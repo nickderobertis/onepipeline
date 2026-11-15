@@ -648,10 +648,12 @@ fn concurrent_watches_are_recorded_apart_and_hold_the_run_watched_until_the_last
         watch.kill().expect("the watch takes the signal");
         watch.wait().expect("the watch ends");
     }
-    world.until("the two killed watches to read as gone", |world| {
-        world.run(&["unwatched"]).code == SUCCESS
-    });
-    let asked = world.run(&["unwatched"]);
+    let asked = world.until_read(
+        "the two killed watches to read as gone",
+        false,
+        |world| world.run(&["unwatched"]),
+        |asked| asked.code == SUCCESS,
+    );
     asked.exited(SUCCESS);
     assert!(
         asked.stdout.is_empty(),

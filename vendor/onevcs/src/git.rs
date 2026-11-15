@@ -935,6 +935,9 @@ const STDERR: &str = "standard error";
 /// tick.
 pub(crate) struct PipeCapture {
     stopping: Arc<AtomicBool>,
+    // Measurement only (spike-child-waits, never lands): what wakes a reader that
+    // would otherwise sleep out its tick once the exit has been collected.
+    wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     reader: std::thread::JoinHandle<Captured>,
 }
 
@@ -966,6 +969,8 @@ impl PipeCapture {
         pipe.nonblocking();
         let stopping = Arc::new(AtomicBool::new(false));
         let requested = Arc::clone(&stopping);
+        let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let woken = Arc::clone(&wake);
         let reader = std::thread::spawn(move || {
             let mut output = Vec::new();
             let mut failure = None;
@@ -992,7 +997,25 @@ impl PipeCapture {
                         if collected {
                             break;
                         }
-                        pipe.await_readable(EXIT_POLL);
+                        // Measurement only (spike-child-waits, never lands): where the
+                        // pipe cannot be waited on, the tick is cut short by `finish`.
+                        if cfg!(windows) && crate::spike_waits::exit_notify() {
+                            let began = std::time::Instant::now();
+                            let (lock, signal) = &*woken;
+                            let finished = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if !*finished {
+                                let _ = signal.wait_timeout(finished, EXIT_POLL);
+                            }
+                            crate::launch_trace::waited(
+                                crate::launch_site!(),
+                                began.elapsed(),
+                                Some(EXIT_POLL),
+                            );
+                        } else {
+                            pipe.await_readable(EXIT_POLL);
+                        }
                     }
                     // Nothing is left to do but retire — the read will not start
                     // working again — so what is owed is the reason. Kept rather
@@ -1012,7 +1035,11 @@ impl PipeCapture {
                 failure,
             }
         });
-        Self { stopping, reader }
+        Self {
+            stopping,
+            wake,
+            reader,
+        }
     }
 
     /// Every byte the command wrote, and any failure that cut the read short, once
@@ -1023,6 +1050,13 @@ impl PipeCapture {
     /// than *not yet* is that the command was already gone when the store happened.
     pub(crate) fn finish(self) -> Captured {
         self.stopping.store(true, Ordering::Release);
+        {
+            let (lock, signal) = &*self.wake;
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            signal.notify_all();
+        }
         self.reader.join().unwrap_or_else(|_| Captured {
             bytes: Vec::new(),
             // A reader thread that panicked collected nothing this process can
@@ -1656,6 +1690,11 @@ fn wait_for_exit(
             Err(error) => return Waited::Exited(Err(error)),
             Ok(None) if started.elapsed() >= bound => return Waited::Elapsed,
             Ok(None) if stop.is_some_and(|stop| stop()) => return Waited::Stopped,
+            // Measurement only (spike-child-waits, never lands): woken by the exit
+            // itself rather than by a reader's end of stream or the tick.
+            Ok(None) if crate::spike_waits::exit_notify() => {
+                crate::spike_waits::await_child_exit(child, EXIT_POLL);
+            }
             Ok(None) => await_an_ending(endings, EXIT_POLL),
         }
     }

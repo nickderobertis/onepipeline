@@ -693,7 +693,12 @@ fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, St
                 });
             }
         }
-        std::thread::sleep(crate::hooks::POLL);
+        // Measurement only (spike-child-waits, never lands): woken by the exit.
+        if onevcs::spike_waits::exit_notify() {
+            onevcs::spike_waits::await_child_exit(&child, crate::hooks::POLL);
+        } else {
+            std::thread::sleep(crate::hooks::POLL);
+        }
     };
     drop(watch);
     launch.exited(None);

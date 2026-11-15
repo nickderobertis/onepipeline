@@ -3660,11 +3660,12 @@ fn a_run_whose_unfinished_work_is_parked_reads_ended_unfinished_and_is_given_no_
     });
     // Each look starts a process, so it yields between looks rather than taking
     // the host from the exit it is waiting on (`tests/AGENTS.md`).
-    world.until_store("the run to read as ended", |world| {
-        world.run(&["runs"]).stdout.contains("ENDED unfinished")
-    });
-
-    let listing = world.run(&["runs"]);
+    let listing = world.until_read(
+        "the run to read as ended",
+        true,
+        |world| world.run(&["runs"]),
+        |listing| listing.stdout.contains("ENDED unfinished"),
+    );
     listing.exited(0).out_has("parkedrun");
     listing.out_has("ENDED unfinished");
     let status = world.run(&["status", "parkedrun"]);
@@ -3710,12 +3711,12 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
     });
 
     crate::harness::end_process(driver);
-    world.until("the run to read as undriven", |world| {
-        world
-            .run(&["status", "livework"])
-            .stdout
-            .contains("DRIVER DEAD")
-    });
+    let undriven = world.until_read(
+        "the run to read as undriven",
+        false,
+        |world| world.run(&["status", "livework"]),
+        |status| status.stdout.contains("DRIVER DEAD"),
+    );
 
     let listing = world.run(&["runs"]);
     listing.exited(0).out_has(
@@ -3724,7 +3725,7 @@ fn a_run_with_work_a_fresh_driver_could_schedule_is_still_told_to_adopt() {
     );
     listing.out_lacks("requeue");
 
-    let status = world.run(&["status", "livework"]);
+    let status = undriven;
     status.exited(0);
     status.out_has("DRIVER DEAD: nothing is driving this run; adopt it or stop it");
     status.out_lacks("requeue");

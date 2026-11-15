@@ -2083,7 +2083,17 @@ impl GraphRun {
         }
         let deadline = Instant::now() + patience;
         while !self.has_exited() && Instant::now() < deadline {
-            onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(20));
+            match &self.backend {
+                // Measurement only (spike-child-waits, never lands): woken by the exit.
+                GraphBackend::Process(run) if onevcs::spike_waits::exit_notify() => {
+                    onevcs::spike_waits::await_pid_exit(
+                        onevcs::launch_site!(),
+                        run.pid(),
+                        Duration::from_millis(20),
+                    );
+                }
+                _ => onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(20)),
+            }
         }
         if !self.has_exited() {
             self.cancel();

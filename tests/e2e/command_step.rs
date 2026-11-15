@@ -94,6 +94,56 @@ fn result(world: &World, run: &str, node: &str) -> Value {
         .unwrap_or_else(|| panic!("`results {run} --json` does not list {node}: {reading}"))
 }
 
+/// Measurement only (spike-child-waits, never lands): a settled run's `results --json`,
+/// read once where the re-launch prototype is selected and once per node otherwise.
+///
+/// Every entry it hands out is one [`result`] would have read: the run is settled
+/// before the first read, and nothing between two reads changes what it reports.
+struct Results<'a> {
+    world: &'a World,
+    run: &'a str,
+    once: Option<Value>,
+}
+
+impl<'a> Results<'a> {
+    /// The run's results, read now if the prototype is selected.
+    fn of(world: &'a World, run: &'a str) -> Self {
+        let once = crate::harness::spike_variant::relaunch().then(|| {
+            let read = world.run(&["results", run, "--json"]);
+            serde_json::from_str(&read.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "`results --json` is not JSON ({error}):
+{}",
+                    read.stdout
+                )
+            })
+        });
+        Self { world, run, once }
+    }
+
+    /// The run's results as `reading` already holds them, if the prototype is selected.
+    fn already(world: &'a World, run: &'a str, reading: &Value) -> Self {
+        let once = crate::harness::spike_variant::relaunch().then(|| reading.clone());
+        Self { world, run, once }
+    }
+
+    /// The settlement the run's results report for `node`.
+    fn node(&self, node: &str) -> Value {
+        match &self.once {
+            Some(reading) => reading["nodes"]
+                .as_array()
+                .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node).cloned())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`results {} --json` does not list {node}: {reading}",
+                        self.run
+                    )
+                }),
+            None => result(self.world, self.run, node),
+        }
+    }
+}
+
 /// Where in the run's journal the first record of `kind` for `node` sits.
 fn position(world: &World, run: &str, kind: &str, node: &str) -> Option<usize> {
     world
@@ -246,7 +296,8 @@ fn a_command_exiting_non_zero_fails_with_its_status_and_stderr_and_holds_its_dep
     let read = world.run(&["results", run, "--json"]);
     let document: Value = serde_json::from_str(&read.stdout).expect("results --json is JSON");
     assert_eq!(document["schema_version"], stated("results_schema_version"));
-    let settled = result(&world, run, "check");
+    let results = Results::already(&world, run, &document);
+    let settled = results.node("check");
     assert_eq!(settled["status"], "failed", "{settled}");
     assert_eq!(
         settled["outcome"],
@@ -260,7 +311,7 @@ fn a_command_exiting_non_zero_fails_with_its_status_and_stderr_and_holds_its_dep
         !dispatched(&world, run, "after"),
         "a dependent of a failed command ran"
     );
-    assert_ne!(result(&world, run, "after")["status"], "done");
+    assert_ne!(results.node("after")["status"], "done");
 }
 
 /// A command outliving its `timeout_seconds` settles `command-timed-out` with its process
@@ -293,7 +344,8 @@ fn a_command_past_its_timeout_is_stopped_and_one_with_none_runs_to_its_end() {
         started.elapsed() < std::time::Duration::from_secs(50),
         "the run waited out the command rather than its timeout"
     );
-    let timed_out = result(&world, run, "bounded");
+    let results = Results::of(&world, run);
+    let timed_out = results.node("bounded");
     assert_eq!(timed_out["status"], "failed", "{timed_out}");
     assert_eq!(
         timed_out["outcome"],
@@ -310,7 +362,7 @@ fn a_command_past_its_timeout_is_stopped_and_one_with_none_runs_to_its_end() {
         "{}",
         world.dump()
     );
-    assert_eq!(result(&world, run, "unbounded")["status"], "done");
+    assert_eq!(results.node("unbounded")["status"], "done");
     for process in ["sleeper.pid", "sleeper.child"] {
         assert!(
             !still_running(&world, process),
@@ -901,8 +953,9 @@ fn a_schema_13_launch_and_a_plan_naming_none_of_the_primitives_run_as_before() {
     assert!(!dispatched(&world, run, "ship"));
     world.run(&["attest", run, "approve"]).exited(0);
     world.run(&["adopt", run]).exited(0);
+    let results = Results::of(&world, run);
     for node in ["build", "approve", "ship"] {
-        assert_eq!(result(&world, run, node)["status"], "done", "{node}");
+        assert_eq!(results.node(node)["status"], "done", "{node}");
     }
     let kinds = world.kinds(run);
     assert!(
@@ -958,7 +1011,8 @@ fn a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_fai
     let run = "commandendings";
     let failed = word("outcomes", "failed");
 
-    let missing = result(&world, run, "missing");
+    let results = Results::of(&world, run);
+    let missing = results.node("missing");
     assert_eq!(missing["outcome"], json!(failed), "{missing}");
     assert!(
         missing["detail"]
@@ -974,8 +1028,8 @@ fn a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_fai
         .any(|event| event["labels"]["node"] == "missing"
             && event["payload"]["ending"] == "not-started"));
 
-    assert_eq!(result(&world, run, "relative")["status"], "done");
-    let said = result(&world, run, "chatty");
+    assert_eq!(results.node("relative")["status"], "done");
+    let said = results.node("chatty");
     let detail = said["detail"].as_str().expect("a detail");
     assert_eq!(said["outcome"], json!(failed), "{said}");
     assert!(detail.contains("LATE-MARKER"), "{detail}");
@@ -996,7 +1050,7 @@ fn a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_fai
             std::fs::canonicalize(&launch_dir).expect("a directory"),
             "the command did not run from the launch directory"
         );
-        let signalled = result(&world, run, "signalled");
+        let signalled = results.node("signalled");
         assert_eq!(signalled["outcome"], json!(failed), "{signalled}");
         assert!(
             signalled["detail"]

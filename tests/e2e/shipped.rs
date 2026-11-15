@@ -409,13 +409,16 @@ fn status_on_an_adopted_run_describes_the_driver_driving_it_now() {
     world.until("the adopter to exit", |world| {
         world.events_of(RUN, "driver-exited").len() == 2
     });
-    world.until("the adopter's claim to be released", |world| {
-        !world.run(&["status", RUN]).stdout.contains("ACTIVE")
-    });
+    let released = world.until_read(
+        "the adopter's claim to be released",
+        false,
+        |world| world.run(&["status", RUN]),
+        |status| !status.stdout.contains("ACTIVE"),
+    );
     let exits = world.events_of(RUN, "driver-exited");
     let adopters_exit = exits[1]["ts"].as_str().expect("a stamped record");
     assert_ne!(exits[0]["ts"], exits[1]["ts"]);
-    let exited = world.run(&["status", RUN]);
+    let exited = released;
     exited
         .exited(0)
         .out_has("driver exited")
@@ -469,10 +472,12 @@ fn status_says_an_adopter_that_died_recorded_no_exit() {
         .as_u64()
         .expect("the adoption names its driver");
     crate::harness::end_process(u32::try_from(pid).expect("a pid"));
-    world.until("the driver to read as gone", |world| {
-        !world.run(&["status", "died"]).stdout.contains("ACTIVE")
-    });
-    let status = world.run(&["status", "died"]);
+    let status = world.until_read(
+        "the driver to read as gone",
+        false,
+        |world| world.run(&["status", "died"]),
+        |status| !status.stdout.contains("ACTIVE"),
+    );
     status
         .exited(0)
         .out_has("driver: exited without recording it, adopted");
