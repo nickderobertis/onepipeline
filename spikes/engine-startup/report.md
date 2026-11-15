@@ -8,6 +8,12 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
+### Live hosted handoff — 2026-11-15 19:18 UTC
+
+This live handoff supersedes all earlier checkpoint handoffs below, which predate the first demonstration. PR1628 is draft DO NOT MERGE, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, run 43751624389 attempt1. Run metadata and job metadata are captured in evidence/hosted/43751624389/attempt-1. test-windows job132926635983, lint132926636183 and test-linux132926636190 are in progress; test-macos132926636261 is queued. Current merge ref 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d is provisional until checkout logs prove GITHUB_SHA. Its workflow blob is db2bbe081a7b9319eb38bd014e72350b389e8b01, read from the GitHub contents API at that ref. No demonstration branch is pushed while a run is active. No timing, test outcome or cache-write result is claimed before collection. Manager a51 authorizes one startup demonstration under a plan cap of six; further rounds wait for capacity.
+
+The collector/fold is ready; remaining work is three after points per platform, outcome/cache/coverage audit, final-source comparison fold and the one final judged-lint pass under a49. Earlier local/baseline evidence and exact producer revisions follow.
+
 IN PROGRESS. Ruling c13.0 replaces hosted sampling with local attribution and existing hosted launch-trace/tier measurements. Ruling c11.1 accepts run 43684231509 attempts 1 and 2 as the before side. Rulings c7.0/c9.1 require reporting Linux merged coverage as not produced because the vendored patch audit fails test-rest and Nx skips coverage merge; floor remains 95.74 LCOV.
 
 Handoff: no hosted runs started by this dispatch; none in flight. Local prototype and checks are underway. Demonstration capacity is held by child-waits under c11.1; wait for a slot, then start round peers together. Remaining: source-identified local sampling on current debug/release builds, hosted after rounds, outcomes and cache audit, final judged lint and comparison. No performance saving is claimed yet.
