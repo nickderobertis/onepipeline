@@ -516,7 +516,9 @@ _crate-test-quick: (_tier-test-quick rest-tier)
 
 # Measurement only (spike-launch-inventory, never lands): the Windows and macOS jobs run the
 # tier through this recipe, so it records the runner first too (see `_e2e-test`).
-_e2e-test-quick: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test-quick e2e-tier)
+_e2e-test-quick: _strace-preflight _onetaskgraph-preflight _launch-host
+    @# Demonstration only (spike-launch-inventory): the Windows and macOS jobs' tier under the OS's own record of process starts.
+    @bash scripts/launch-os-observe.sh -- just _tier-test-quick "{{e2e-tier}}"
 
 _contract-test-quick: (_tier-test-quick contract-tier)
 
