@@ -1288,15 +1288,25 @@ pub fn preservation_of(word: &str) -> Option<onevcs::Preservation> {
 /// there (`docs/contract-divergences.md` entry 35). `None` where git could not
 /// answer, or answered with something this crate will not carry.
 pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
+    // Prototype (spike-git-reads, never lands): answered as onevcs's reads are,
+    // where the demonstration's mode can answer it without starting git.
+    let args = ["rev-parse", "--verify", "HEAD^{commit}"];
+    let read = onevcs::spike_reads::EngineRead::new(&args, worktree);
+    if let Some((status, stdout, _)) = read.answer() {
+        return (status == 0).then(|| usable(stdout.trim())).flatten();
+    }
     let output = onevcs::launch_trace::output(
         onevcs::launch_site!(),
         std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .args(args)
             .current_dir(worktree)
             .stdin(std::process::Stdio::null()),
     )
-    .ok()
-    .filter(|output| output.status.success())?;
+    .ok()?;
+    read.ran(output.status.code(), &output.stdout, &output.stderr);
+    if !output.status.success() {
+        return None;
+    }
     usable(String::from_utf8_lossy(&output.stdout).trim())
 }
 

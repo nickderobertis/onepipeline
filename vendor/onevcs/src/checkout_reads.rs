@@ -539,6 +539,9 @@ pub(crate) enum Holder {
 pub(crate) static TAKEN: Mutex<Vec<(PathBuf, Holder)>> = Mutex::new(Vec::new());
 
 fn take_closing(path: &Path, wait: bool, holder: Holder) -> Result<Option<Closing>> {
+    // Prototype (spike-git-reads, never lands): a batch reader holds a repository's
+    // files open, which on Windows keeps a teardown from removing them.
+    crate::spike_reads::release();
     let Some(path) = closing_path(path)? else {
         return Ok(Some(Closing {
             _guard: None,
@@ -767,6 +770,8 @@ pub(crate) fn mutating<T>(write: impl FnOnce() -> Result<T>) -> Result<T> {
 
 /// Teardown excludes every admitted reader, before probing process occupancy.
 pub(crate) fn teardown(identity: &str) -> Result<Turn> {
+    // Prototype (spike-git-reads, never lands): see `take_closing`.
+    crate::spike_reads::release();
     at(workspace::identity_dir(identity)?, Mode::Exclusive)
 }
 

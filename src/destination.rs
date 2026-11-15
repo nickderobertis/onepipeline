@@ -481,26 +481,36 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
 /// asking it is the only way to get the answer a repository configured for
 /// itself.
 fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
-    let output = onevcs::launch_trace::output(
-        onevcs::launch_site!(),
-        Command::new("git")
-            .args(["rev-parse", "--git-path", name])
-            .current_dir(checkout),
-    )
-    .map_err(|error| {
-        format!(
-            "git could not be run in the publication checkout {}: {error}",
-            checkout.display()
-        )
-    })?;
-    if !output.status.success() {
+    // Prototype (spike-git-reads, never lands): the read is answered as onevcs's
+    // are, where the demonstration's mode can answer it without starting git.
+    let read = onevcs::spike_reads::EngineRead::new(&["rev-parse", "--git-path", name], checkout);
+    let (succeeded, stdout, stderr) = match read.answer() {
+        Some((status, stdout, stderr)) => (status == 0, stdout.into_bytes(), stderr.into_bytes()),
+        None => {
+            let output = onevcs::launch_trace::output(
+                onevcs::launch_site!(),
+                Command::new("git")
+                    .args(["rev-parse", "--git-path", name])
+                    .current_dir(checkout),
+            )
+            .map_err(|error| {
+                format!(
+                    "git could not be run in the publication checkout {}: {error}",
+                    checkout.display()
+                )
+            })?;
+            read.ran(output.status.code(), &output.stdout, &output.stderr);
+            (output.status.success(), output.stdout, output.stderr)
+        }
+    };
+    if !succeeded {
         return Err(format!(
             "git does not answer for the publication checkout {}: {}",
             checkout.display(),
-            one_line(&String::from_utf8_lossy(&output.stderr))
+            one_line(&String::from_utf8_lossy(&stderr))
         ));
     }
-    let path = os_path(&output.stdout)?;
+    let path = os_path(&stdout)?;
     Ok(if path.is_absolute() {
         path
     } else {
