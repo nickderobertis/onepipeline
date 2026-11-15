@@ -1,7 +1,15 @@
 // Measurement only: exercise the comparison command with the shared recorded trace.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -31,7 +39,21 @@ function withSides(body) {
             `${names.map((n) => `2026-11-14T09:00:59Z ${status} [ 1.000s] onepipeline::e2e ${n}`).join("\n")}\n$1`,
           )
           .replace("Summary [  60.000s]", `Summary [  ${duration.toFixed(3)}s]`);
-        writeFileSync(join(dir, "job.log"), log);
+        const finalLog =
+          status === "FAIL"
+            ? log.replace("2 passed", "0 passed, 2 failed")
+            : status === "SLOW"
+              ? log.replace("2 passed", "1 passed, 1 failed")
+              : log;
+        writeFileSync(join(dir, "job.log"), finalLog);
+        if (status === "SILENT") {
+          for (const file of readdirSync(join(dir, "test-profile/e2e"))) {
+            const path = join(dir, "test-profile/e2e", file);
+            const profile = JSON.parse(readFileSync(path, "utf8"));
+            profile.run_id = "63400e03-501d-4561-9341-259ad855a180";
+            writeFileSync(path, JSON.stringify(profile));
+          }
+        }
       }
       return `${label}=${join(scratch, label)}`;
     };
@@ -62,6 +84,18 @@ test("a missing or failed outcome is never counted as passed just because its pr
     const unknown = run("compare", side("before"), side("unknown", [60], "SLOW"));
     assert.equal(unknown.status, 0, unknown.stderr);
     assert.match(unknown.stdout, /2 not passed:/);
+  });
+});
+
+test("silent passes are proven by matching invocation records and an all-passed summary", () => {
+  withSides((side) => {
+    const result = run("compare", side("before"), side("silent", [60], "SILENT"));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /all 2 passed/);
+    assert.match(result.stdout, /2 summary-supported/);
+    const unmatched = run("compare", side("before"), side("unmatched", [60], "UNMATCHED"));
+    assert.equal(unmatched.status, 0, unmatched.stderr);
+    assert.match(unmatched.stdout, /2 not passed:/);
   });
 });
 

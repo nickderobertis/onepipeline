@@ -154,8 +154,22 @@ export function summarizeJob(label, dir) {
   const run = largestRun(log);
   const { failed, retried, passedLines } = outcomes(log, run);
   const names = job.tests.map((t) => t.test).sort();
-  const passed = names.filter((n) => passedLines.has(n) && !failed.has(n));
   const trace = joinTrace(job.trace);
+  // Linux's default nextest profile suppresses individual PASS lines. An
+  // all-passed summary proves a named test only with evidence it ran in that
+  // invocation: a matching profile or a test process timestamped inside it.
+  const ran = new Set(job.tests.filter((t) => t.run_id === run?.id).map((t) => t.test));
+  if (run?.start != null && run?.end != null) {
+    for (const p of trace.procs) {
+      if (/^e2e-/.test(p.exe ?? "") && p.t / 1e9 >= run.start - 1 && p.t / 1e9 <= run.end + 1)
+        ran.add(p.test);
+    }
+  }
+  const allPassed = run != null && run.run === run.passed;
+  const passed = names.filter(
+    (n) => !failed.has(n) && (passedLines.has(n) || (allPassed && ran.has(n))),
+  );
+  const summarySupported = passed.filter((n) => !passedLines.has(n));
   const verbOf = new Map(
     trace.procs.map((r) => [
       trace.key(r.file, r.pid, r.instance),
@@ -200,6 +214,7 @@ export function summarizeJob(label, dir) {
     e2eMinutes: run ? minutes(run.seconds) : null,
     summary: run?.line ?? null,
     passed,
+    summarySupported,
     failed: [...failed].sort(),
     retried: [...retried].sort(),
     coverage: mergedCoverage(log),
@@ -308,9 +323,15 @@ function renderSide(side) {
       `- ${j.label}: workflow blob ${j.workflowBlob ?? "not recorded"}; ${j.selection ? `${j.selection.count} tasks (${j.selection.tasks.join(" ")})` : "selection not printed"}; restores: ${restores}; writes: ${writes}`,
     );
   }
-  out.push("", "Passed tests by name (profile and nextest PASS both required):", "");
+  out.push(
+    "",
+    "Passed tests by name (profile plus nextest PASS, or invocation evidence plus all-passed summary):",
+    "",
+  );
   for (const j of side.jobs)
-    out.push(`- ${j.label}: ${j.passed.length ? j.passed.join(", ") : "none proven"}`);
+    out.push(
+      `- ${j.label} (${j.summarySupported.length} summary-supported): ${j.passed.length ? j.passed.join(", ") : "none proven"}`,
+    );
   return out.join("\n");
 }
 
