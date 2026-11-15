@@ -1,0 +1,14 @@
+{
+  "source_commit": "f7f98713",
+  "reader_commit": "33edc69c",
+  "run": 43753067613,
+  "attempt": 1,
+  "job": 132931087445,
+  "head": "016c5adf2a8760d1a77134c1b1ef655aebd4c70e",
+  "github_sha": "761544439b93836fcb54049d446defb730eb385e",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/incoming/native/43753067613-1/test-windows",
+  "pricing_eligible": true,
+  "point": 1,
+  "proof": "a74: full1832 main, strict1831 plus two own diagnostic passes; third interrupted by helper timeouts/job timeout. Native Call needs repository Layout, plan/project has no Git repository or lifecycle/worktree; no engine head/hook call possible. Trace main21:53:58 contains only fake graph starts, corroborating no repository setup."
+}
