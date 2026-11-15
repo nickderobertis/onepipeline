@@ -2120,6 +2120,20 @@ Three `tool_output_is_signal` blocks in scripts/engine-startup.mjs cover phase r
 Two `changed_behavior_has_e2e` blocks in scripts/engine-startup-profile.sh cover sampler/discovery setup and privileged recording. Their evidence is the actual recorded debug/release subprocess journeys; portable parser tests cannot assume a built Rust e2e binary and perf privilege before Rust tiers finish (a1). The README’s `work_goes_through_command_surface` marker covers the narrow Node test command: the shared just recipe has no module filter, and adding a new recipe would expand this measurement-only diff. The report’s `least_privilege_grants` marker covers the exact historical Docker invocation: changing its granted permissions in the quoted provenance would misstate the command that produced the captures; the disposable container was removed. These are all added directives or existing directive regions this spike changes.
 
 
+### Baseline named outcomes and recovery
+
+The committed evidence/baseline-outcomes.json.gz preserves the existing windows-job-profile.mjs `outcomes` parser’s final status by binary/test for each saved log, plus names that had a failure and later a PASS in that same job. Producer: `node $ONEPIPELINE_NODE_SCRATCH_DIR/baseline-outcomes.mjs`, local source a7eb7ef6. These are log-reported counts, not full suite counts: Linux’s quiet output omits most individual PASS lines, so its e2e name catalog must be paired with its all-passed nextest summary. Profile presence alone is insufficient. Recovered names include other tiers; no omitted name is silently treated as passed.
+
+```text
+attempt 1 linux: 52 named results; 51 final passes; recovered []
+attempt 1 macos: 3774 named results; 3769 final passes; recovered []
+attempt 1 windows: 3405 named results; 3403 final passes; recovered []
+attempt 2 linux: 13 named results; 12 final passes; recovered ["onepipeline::narrow_write a_runs_settlement_under_a_rewriting_policy_reads_what_it_reads_under_none","onepipeline::note a_binding_note_enters_the_bar_its_judge_decides_against_as_the_workers_own","onepipeline::note a_cancel_beside_a_live_note_is_applied_as_its_envelope_is_handed","onepipeline::note a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it","onepipeline::note a_cancel_refuses_the_note_offered_to_its_node_and_the_one_queued_behind_it","onepipeline::pooled_slot a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back","onepipeline::release_channel a_channel_the_0_28_2_wheel_writes_is_the_channel_this_build_writes_and_each_reads_the_other","onepipeline::release_channel a_channel_this_build_writes_is_read_by_the_0_28_2_wheel_and_what_it_appends_is_read_back","onepipeline::release_channel extended_checkpoint::a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release","onepipeline::smoke a_lifecycle_node_opens_a_real_pull_request_merges_it_and_the_base_advances"]
+attempt 2 macos: 3774 named results; 3769 final passes; recovered []
+attempt 2 windows: 3405 named results; 3401 final passes; recovered []
+```
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
