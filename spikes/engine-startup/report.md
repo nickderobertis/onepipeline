@@ -8,14 +8,14 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 22:28 UTC
+### Live hosted handoff — 2026-11-15 23:14 UTC
 
 This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux complete; Windows/macOS running; lint cancelled at its thirty-minute limit |
-| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux complete; Windows running, macOS queued; lint cancelled after its judged tier failed |
+| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux/Windows complete; macOS running since23:00:13 UTC; lint cancelled after its judged tier failed |
 
 Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining under a67: finish collecting these two points only, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No third run starts. No hosted after timing or saving is claimed yet.
 
@@ -2323,6 +2323,67 @@ Linux therefore has measured side means39.487358 before and37.906233 after, a1.5
 ### Collection guard correction — 2026-11-15 22:55 UTC
 
 Point1 Windows artifact14184840420 became available while job132926635983 still reported in_progress. The scratch collector guarded finished-job log downloads but accidentally did not apply that guard to the artifact loop, so it downloaded this early artifact contrary to a55. No Windows fold, timing or outcome was read from it. That artifact directory and receipt were discarded; the collector now requires the corresponding job’s status to be completed before downloading its artifact. Applying the corrected predicate to the saved metadata rejects the in-progress Windows artifact and accepts the completed Linux artifact. A fresh Windows download and final job log are required before any Windows measurement is used. The saved jobs-2255.json.gz and artifacts-2255.json.gz record the state that exposed the issue. Both demonstrations remain in flight: Linux complete on both, Windows running on both, point1 macOS running and point2 macOS queued. No third run is planned under a67.
+
+
+### Completed Windows point2
+
+Source: run43756326338 attempt1, test-windows job132941105006, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14185360546 digest sha256:3d8a0ee2d52847a4ca27e9f48539bb06c015c795e4371e2ac5adf5019f8a342e was downloaded after the job’s completion. All source logs, facts and output below are committed under evidence/hosted/43756326338/attempt-1/test-windows.*.gz. Hardware: AMD EPYC9V74 80-Core Processor, four logical cores. Job20:08:13–23:00:05 UTC:171.866667 minutes, including68.711833 minutes before e2e (quiet compilation and earlier tiers; not compile-only).
+
+All1832 main-e2e profile names exactly equal both baseline catalogs (digest a91139c2b34c8c42), with1832/1832 passed in nextest. No main-e2e failure/recovery was observed. The39-task Nx selection exactly equals both baselines. The existing outcomes command finds zero lost baseline passes against either complete job log: baseline1 reports3403 passing names and baseline2 reports3401; this after point reports3403. Both baseline patch-audit failures remain, while baseline2’s codex-server timeouts pass on this point. This broader logged comparison is supplementary; the required by-name assertion is the main-e2e catalog/summary (a67). Normal tier counts and selections are retained in the capsule; no existing test was changed. Windows selects onepipeline-npm:test-launcher rather than the Linux-only full npm parser suite, so no Windows execution of the new parser journeys is claimed.
+
+Cache steps:
+
+| Step | Restore | Seconds |
+| --- | --- | ---: |
+| Nx server startup | no restore | 0.015 |
+| rust-cache | partial restore key | 75.256 |
+| setup-node | no restore recorded | 8.698 |
+| setup-python | no restore recorded | 0.170 |
+| setup-uv | no restore recorded | 3.039 |
+| bootstrap actions/cache/restore | hit | 1.655 |
+
+The approved read-only guard is unchanged; no Actions-cache save line appears and the Nx receipt records zero entries/bytes stored and zero replayed. Linux merged-coverage results for the side remain the not-produced results already reported; this Windows job does not produce merged Linux coverage.
+
+Partial Windows comparison at source276c5d44: `node scripts/engine-startup.mjs fold before/1/windows=BASELINE1_WINDOWS before/2/windows=BASELINE2_WINDOWS contributors/2/windows=AFTER2_WINDOWS`, with the same recorded baseline job paths and scratch/runs/43756326338-attempt-1/test-windows. This is an earlier-commit checkpoint and not yet the final-source fold:
+
+```text
+before/1/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 9V45 96-Core Processor                ; cores: 4
+e2e minutes: 87.112333
+start: 3375.080794 ms mean; 2083 completed / 2089 observed
+adopt: 4658.311521 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"60af6ffa-12c2-429c-848b-1cffb3033ad3","start":1794726570.108,"end":1794731796.94,"seconds":5226.74,"run":1832,"passed":1832,"line":"Summary [5226.740s] 1832 tests run: 1832 passed (54 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+before/2/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 7763 64-Core Processor                ; cores: 4
+e2e minutes: 132.993667
+start: 5663.412835 ms mean; 2083 completed / 2089 observed
+adopt: 8031.223044 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"68cf7a38-6e72-43ac-ba8c-0d9e9a850d56","start":1794748390.004,"end":1794756369.667,"seconds":7979.62,"run":1832,"passed":1832,"line":"Summary [7979.620s] 1832 tests run: 1832 passed (134 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+contributors/2/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 9V74 80-Core Processor                ; cores: 4
+e2e minutes: 102.477817
+start: 4090.868401 ms mean; 2083 completed / 2089 observed
+adopt: 5769.567378 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"76d07154-5a9c-4b46-b09f-d33b3d74a86a","start":1794777415.71,"end":1794783564.588,"seconds":6148.669,"run":1832,"passed":1832,"line":"Summary [6148.669s] 1832 tests run: 1832 passed (76 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+before/windows: e2e mean 110.053000 min; range 87.112333..132.993667; n=2
+
+contributors/windows: e2e mean 102.477817 min; range 102.477817..102.477817; n=1
+
+contributors/windows: before-minus-after 7.575183 min; undecided (inside a side's spread); typical PR estimate (27/30) 6.817665 min (undecided, not a saving)
+
+contributors/2/windows: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+```
+
+The printed difference7.575183 minutes and typical-PR estimate6.817665 minutes are undecided, not savings; only one Windows after point is collected. At the23:10 job snapshot, point1 Windows and macOS still ran; point2 macOS had started23:00:13 UTC. Both Linux points are complete. The two existing demonstrations remain the whole planned after side under a67.
 
 
 ## Candidate budgets
