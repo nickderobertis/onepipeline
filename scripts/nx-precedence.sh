@@ -13,10 +13,11 @@
 # its own, which the lowest priority would slow.
 #
 # A process belongs to the task its `NX_TASK_TARGET_PROJECT` and
-# `NX_TASK_TARGET_TARGET` name, the variables Nx gives every task's environment, and
-# to this Nx run when it descends from the process that started this task. Both are
-# read from /proc, so outside Linux, or outside an Nx task, COMMAND simply runs.
-# Nothing is ever given a higher priority, which would need privileges.
+# `NX_TASK_TARGET_TARGET` name, and to this Nx run when its `NX_INVOCATION_ROOT_PID`
+# is this task's: the variables Nx gives every task's environment, which the
+# processes a task starts inherit. They are read from /proc, so outside Linux, or
+# outside an Nx task, COMMAND simply runs. Nothing is ever given a higher priority,
+# which would need privileges.
 #
 # Output: once COMMAND ends, one line naming the tasks it ran ahead of. A process
 # that could not be listed or lowered is named on stderr when it happens, once per
@@ -47,12 +48,14 @@ done
 [ "$#" -gt 0 ] || usage "name the command to run after --"
 
 own="${NX_TASK_TARGET_PROJECT:-}:${NX_TASK_TARGET_TARGET:-}"
-if [ "$own" = ":" ] || [ ! -r /proc/self/environ ]; then
+run="${NX_INVOCATION_ROOT_PID:-}"
+if [ "$own" = ":" ] || [ -z "$run" ] || [ ! -r /proc/self/environ ]; then
   exec "$@"
 fi
 
 # The task a process runs for, as PROJECT:TARGET, read from its environment;
-# empty for a process that is no task's or has already gone.
+# empty for a process that is no task's, has already gone, or whose environment
+# could not be read whole (a process mid-exec), which is then left alone.
 task_of() {
   local entry project="" target=""
   while IFS= read -r -d '' entry; do
@@ -61,34 +64,15 @@ task_of() {
       NX_TASK_TARGET_TARGET=*) target="${entry#*=}" ;;
     esac
   done 2>/dev/null <"/proc/$1/environ" || true
-  [ -z "$project" ] || printf '%s:%s' "$project" "$target"
+  [ -z "$project" ] || [ -z "$target" ] || printf '%s:%s' "$project" "$target"
 }
-
-parent_of() {
-  local stat state parent
-  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
-  # After the command name, which may itself hold spaces and parentheses.
-  read -r state parent _ <<<"${stat##*) }"
-  [ -n "$state" ] && printf '%s' "$parent"
-}
-
-# Climb out of this task's own processes; the first that is not one of them
-# started the task, and every task of the run descends from it.
-task_root=$$
-while :; do
-  parent="$(parent_of "$task_root")" || exec "$@"
-  [ "$parent" -gt 1 ] || exec "$@"
-  [ "$(task_of "$parent")" = "$own" ] || break
-  task_root="$parent"
-done
-run_root="$parent"
 
 lowered="$(mktemp)"
 trap 'rm -f "$lowered"' EXIT
 
 yield() {
-  local kept=" " warned=" " listing candidates pid task lower tasks out alive
-  local -a pids
+  local warned=" " listing candidates pid nice task lower tasks out alive
+  local -a pids environs
   warn() {
     case "$warned" in *" $1 "*) return 0 ;; esac
     warned+="$1 "
@@ -96,28 +80,22 @@ yield() {
     echo "ACTION: $3" >&2
   }
   while kill -0 "$$" 2>/dev/null; do
-    if ! listing="$(ps -e -o pid=,ppid=,ni= 2>&1)"; then
-      warn ps "cannot list processes (${listing//$'\n'/ }), so the tasks beside $own keep their priority" \
+    if ! listing="$(ps -e -o pid=,ni= 2>&1)"; then
+      warn ps "cannot list processes (${listing//$'\n'/ }), so the tasks beside $own keep their priority until it can" \
         "put procps' ps on PATH"
       sleep 1
       continue
     fi
-    # Processes under the run's root, outside this task and the kept tasks found so
-    # far, not yet at the lowest priority.
-    candidates="$(awk -v root="$run_root" -v skip="$task_root$kept" '
-      { parent[$1] = $2; nice[$1] = $3 }
-      END {
-        n = split(skip, list, " ")
-        for (i = 1; i <= n; i++) skipped[list[i]] = 1
-        for (p in parent) {
-          if (nice[p] + 0 >= 19 || p == root) continue
-          for (q = p; ; q = parent[q]) {
-            if (q in skipped) break
-            if (parent[q] == root) { print p; break }
-            if (!(parent[q] in parent) || parent[q] <= 1) break
-          }
-        }
-      }' <<<"$listing")" || candidates=""
+    # This run's processes not yet at the lowest priority: one `grep` reads every
+    # candidate's environment for the run's root.
+    environs=()
+    while read -r pid nice; do
+      [ "$nice" -lt 19 ] 2>/dev/null && [ "$pid" != "$$" ] && environs+=("/proc/$pid/environ")
+    done <<<"$listing"
+    candidates=""
+    if [ "${#environs[@]}" -gt 0 ]; then
+      candidates="$(grep -lzx "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null | cut -d/ -f3)" || true
+    fi
     lower=""
     tasks=""
     for pid in $candidates; do
@@ -125,7 +103,7 @@ yield() {
       case "$task" in
         "" | "$own") ;;
         *) case "$keep" in
-             *" $task "*) kept+="$pid " ;;
+             *" $task "*) ;;
              *) lower+=" $pid"; tasks+="$task"$'\n' ;;
            esac ;;
       esac
@@ -146,7 +124,7 @@ yield() {
         fi
       fi
       if ! command -v ionice >/dev/null 2>&1; then
-        warn ionice "has no ionice, so the tasks beside $own keep their I/O priority" \
+        warn ionice "found no ionice, so the tasks beside $own keep their I/O priority" \
           "put util-linux's ionice on PATH"
       elif ! ionice -c 3 -p "${pids[@]}" >/dev/null 2>&1; then
         for pid in "${pids[@]}"; do

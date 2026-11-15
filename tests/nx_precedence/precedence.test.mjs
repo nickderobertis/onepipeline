@@ -2,8 +2,8 @@
 // runs beside the Linux job's other tasks, driven inside real Nx runs: the leading task
 // must keep its CPU priority, a task beside it must drop to the lowest, with what that
 // task spawns afterwards and a task Nx starts later, and a `--keep` task must keep its
-// own. A process outside the run, carrying the same task's name, stands for another Nx
-// run on the same host.
+// own. A process carrying the same task's name under another run's root stands for
+// another Nx run on the same host.
 //
 // This project's `test` runs alone (`parallelism: false`): beside the e2e tier its own
 // processes would already be at the lowest priority, and the run it starts would
@@ -47,7 +47,7 @@ const LATE = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("l
 // the wrapper's once-a-second pass to have reached them twice.
 const LEAD = `bash ${script} --keep kept:work -- bash -c 'for i in $(seq 300); do [ -e side.nice ] && [ -e kept.nice ] && [ -e late.nice ] && break; sleep 0.1; done; sleep 3; bash nice.sh > lead.nice; touch done; exit 0'`;
 
-function workspace(t) {
+function workspace(t, { churn = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "nx-precedence-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, "package.json"), '{"name":"precedence","private":true}\n');
@@ -63,6 +63,13 @@ function workspace(t) {
     pause: { command: "sleep 2" },
     late: { command: LATE, dependsOn: [{ projects: ["pause"], target: "work" }] },
   };
+  // A task that keeps starting processes that end at once, so the wrapper's lists keep
+  // naming processes that are gone before it lowers them.
+  if (churn) {
+    targets.churn = {
+      command: `bash -c 'for i in $(seq 3000); do [ -e done ] && break; env true & sleep 0.01; done; wait'`,
+    };
+  }
   for (const [name, target] of Object.entries(targets)) {
     mkdirSync(join(dir, name));
     writeFileSync(
@@ -73,25 +80,57 @@ function workspace(t) {
   return dir;
 }
 
-// A directory of stand-ins put ahead of PATH, each failing with the message given.
-function failing(t, tools) {
+// A directory of stand-ins put ahead of PATH, each failing with the message given; one
+// given `after` fails that many times and then runs the real tool.
+function failing(t, tools, after = Number.POSITIVE_INFINITY) {
   const dir = mkdtempSync(join(tmpdir(), "nx-precedence-stubs-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const [tool, message] of Object.entries(tools)) {
-    writeFileSync(join(dir, tool), `#!/bin/sh\necho "${message}" >&2\nexit 1\n`);
+    const real = spawnSync("bash", ["-c", `command -v ${tool}`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const recover = Number.isFinite(after)
+      ? `n=$(cat "$0.count" 2>/dev/null || echo 0); echo $((n + 1)) > "$0.count"\n[ "$n" -lt ${after} ] || exec ${real} "$@"\n`
+      : "";
+    writeFileSync(join(dir, tool), `#!/bin/sh\n${recover}echo "${message}" >&2\nexit 1\n`);
     chmodSync(join(dir, tool), 0o755);
   }
   return dir;
 }
 
+// A PATH holding only links to the tools named, so one left out is not found at all.
+function only(t, tools) {
+  const dir = mkdtempSync(join(tmpdir(), "nx-precedence-path-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const tool of tools) {
+    const real = spawnSync("bash", ["-c", `command -v ${tool}`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    assert.ok(real, `${tool} is not on this host's PATH`);
+    symlinkSync(real, join(dir, tool));
+  }
+  return dir;
+}
+
 function nx(dir, { direct = "true", path = process.env.PATH } = {}) {
+  // This suite's own run would otherwise be the inner one's root too.
+  const env = {
+    ...process.env,
+    PATH: path,
+    NX_DAEMON: "false",
+    NX_NO_CLOUD: "true",
+    NX_RUN_COMMANDS_DIRECTLY: direct,
+    NX_TASK_TARGET_PROJECT: "",
+    NX_TASK_TARGET_TARGET: "",
+  };
+  delete env.NX_INVOCATION_ROOT_PID;
   const { status, stdout, stderr } = spawnSync(
     join(root, "node_modules", ".bin", "nx"),
     [
       "run-many",
       "-t",
       "work",
-      "--parallel=4",
+      "--parallel=6",
       "--skip-nx-cache",
       "--outputStyle=stream-without-prefixes",
     ],
@@ -99,15 +138,7 @@ function nx(dir, { direct = "true", path = process.env.PATH } = {}) {
       cwd: dir,
       encoding: "utf8",
       timeout: 120_000,
-      env: {
-        ...process.env,
-        PATH: path,
-        NX_DAEMON: "false",
-        NX_NO_CLOUD: "true",
-        NX_RUN_COMMANDS_DIRECTLY: direct,
-        NX_TASK_TARGET_PROJECT: "",
-        NX_TASK_TARGET_TARGET: "",
-      },
+      env,
     },
   );
   return { status, log: plain(`${stdout}\n${stderr}`) };
@@ -142,7 +173,12 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     it(`lowers the run's other tasks, early and late, and nothing else (NX_RUN_COMMANDS_DIRECTLY=${direct})`, (t) => {
       const dir = workspace(t);
       const foreign = spawn("bash", ["-c", "sleep 60"], {
-        env: { ...process.env, NX_TASK_TARGET_PROJECT: "side", NX_TASK_TARGET_TARGET: "work" },
+        env: {
+          ...process.env,
+          NX_TASK_TARGET_PROJECT: "side",
+          NX_TASK_TARGET_TARGET: "work",
+          NX_INVOCATION_ROOT_PID: "1",
+        },
         stdio: "ignore",
       });
       t.after(() => foreign.kill());
@@ -194,7 +230,7 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     {
       tool: "ps",
       warning:
-        "nx-precedence: cannot list processes (ps refused here), so the tasks beside lead:work keep their priority",
+        "nx-precedence: cannot list processes (ps refused here), so the tasks beside lead:work keep their priority until it can",
       side: "0",
       summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
     },
@@ -217,6 +253,50 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     });
   }
 
+  it("lowers the run once ps answers again after refusing", (t) => {
+    const dir = workspace(t);
+    const stubs = failing(t, { ps: "ps refused here" }, 1);
+    const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+    assert.equal(status, 0, log);
+    assert.equal(read(dir, "lead.nice"), "0", log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    assert.equal(read(dir, "side.nice"), "19", log);
+    assert.equal(read(dir, "late.nice"), "19", log);
+    const [warning, summary, ...rest] = lines(log);
+    assert.match(warning, /cannot list processes \(ps refused here\)/);
+    assert.match(
+      summary,
+      /^nx-precedence: lead:work ran ahead of .*late:work .*side:work, keeping kept:work$/,
+    );
+    assert.deepEqual(rest, []);
+  });
+
+  it("names no failure for processes that ended before it lowered them", (t) => {
+    const dir = workspace(t, { churn: true });
+    const { status, log } = nx(dir);
+    assert.equal(status, 0, log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    assert.equal(read(dir, "side.nice"), "19", log);
+    assert.deepEqual(lines(log), [
+      "nx-precedence: lead:work ran ahead of churn:work late:work pause:work side:work, keeping kept:work",
+    ]);
+  });
+
+  it("still lowers the CPU priority where there is no ionice, and says so once", (t) => {
+    const dir = workspace(t);
+    const tools = ["node", "bash", "sh", "env", "git", "ps", "grep", "cut", "renice", "mktemp"];
+    tools.push("sort", "paste", "rm", "awk", "sleep", "seq", "cat", "mv", "touch", "true");
+    const { status, log } = nx(dir, { path: only(t, tools) });
+    assert.equal(status, 0, log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    assert.equal(read(dir, "side.nice"), "19", log);
+    assert.notEqual(read(dir, "side.io"), "idle", log);
+    assert.deepEqual(lines(log), [
+      "nx-precedence: found no ionice, so the tasks beside lead:work keep their I/O priority",
+      "nx-precedence: lead:work ran ahead of late:work pause:work side:work, keeping kept:work",
+    ]);
+  });
+
   it("exits with its command's status, outside an Nx task as inside one", () => {
     const env = { ...process.env, NX_TASK_TARGET_PROJECT: "", NX_TASK_TARGET_TARGET: "" };
     const outside = spawnSync("bash", [script, "--", "bash", "-c", "exit 4"], {
@@ -227,7 +307,12 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     assert.equal(outside.stderr, "", "a command outside an Nx task was told about a run");
     const inside = spawnSync("bash", [script, "--", "bash", "-c", "echo ran; exit 3"], {
       encoding: "utf8",
-      env: { ...env, NX_TASK_TARGET_PROJECT: "lead", NX_TASK_TARGET_TARGET: "work" },
+      env: {
+        ...env,
+        NX_TASK_TARGET_PROJECT: "lead",
+        NX_TASK_TARGET_TARGET: "work",
+        NX_INVOCATION_ROOT_PID: String(process.pid),
+      },
     });
     assert.equal(inside.status, 3, inside.stderr);
     assert.equal(inside.stdout, "ran\n");
