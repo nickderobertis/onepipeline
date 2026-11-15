@@ -156,12 +156,11 @@ export function runOf(side, name, dir) {
   }
   const launches = new Map();
   const passed = new Set();
+  const completed = new Set();
   for (const r of job.tests) {
     if (r.run_id !== tier.id || r.ended === "unfinished") continue;
     launches.set(r.test, (launches.get(r.test) ?? 0) + (r.programs?.onepipeline?.count ?? 0));
-    // A finished profile names an executed test, not its outcome. A summary with
-    // no failures proves these names passed even on Linux's quiet nextest profile.
-    if (tier.passed === tier.run) passed.add(r.test);
+    completed.add(r.test);
   }
   const ended = outcomes(job.log);
   const inTier = (e) => e.t >= tier.start - 1 && e.t <= tier.end;
@@ -169,6 +168,12 @@ export function runOf(side, name, dir) {
   const failedInTier = new Set(
     ended.filter((e) => inTier(e) && e.outcome !== "PASS").map((e) => e.test),
   );
+  // A completed profile proves execution, not success. When every failure the
+  // summary counts is named, the other completed names passed even in a quiet
+  // Linux log. Otherwise only explicit PASS lines establish a named success.
+  if (failedInTier.size === tier.run - tier.passed) {
+    for (const test of completed) if (!failedInTier.has(test)) passed.add(test);
+  }
   const passedLater = new Set(
     ended.filter((e) => e.t > tier.end && e.outcome === "PASS").map((e) => e.test),
   );

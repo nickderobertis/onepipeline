@@ -318,3 +318,22 @@ test("unknown commands, incomplete arguments and invalid shares are usage errors
     assert.match(out.stderr, /next: run 'node scripts\/child-waits.mjs compare/);
   }
 });
+
+test("a quiet tier with every failure named confirms the other completed profiles passed", () => {
+  const dir = copyOf("after");
+  const log = join(dir, "job.log");
+  const quiet = readFileSync(log, "utf8")
+    .split("\n")
+    .filter((line) => !line.includes("PASS"))
+    .join("\n")
+    .replace("2 passed, 2154 skipped", "1 passed, 1 failed, 2154 skipped")
+    .replace(
+      /^(.*Summary.*)$/m,
+      `2026-11-15T16:39:24.8670000Z FAIL [ 1.000s] (1/2) onepipeline::e2e ${CANNOT_START}\n$1`,
+    );
+  writeFileSync(log, quiet);
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:quiet=${dir}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /after quiet: 1 passed in the tier;/);
+  assert.match(out.stdout, new RegExp(`not run and passed here: ${CANNOT_START};`));
+});
