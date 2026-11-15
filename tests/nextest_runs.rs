@@ -350,6 +350,45 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
 }
 
 #[test]
+fn eight_slot_whole_group_tests_finish_with_competing_work_in_nine_global_slots() {
+    let config = repository_config();
+    // A one-slot journey leaves eight of the nine global slots free, enough
+    // to queue a whole-group test while that group's last slot is occupied.
+    // The older fixture's ordinary journeys now take two slots instead.
+    let e2e = SCHEDULING_E2E
+        .replace(
+            "mod a {\n    #[test]\n    fn one_thread_first() {\n        super::nap(2000)\n    }\n}\n",
+            "",
+        )
+        .replace(
+            "mod adoption {",
+            "mod adoption {\n    #[test]\n    fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() { super::nap(2000) }",
+        );
+    let fixture_for = |case: &str, config: &str| {
+        let fixture = scheduling_fixture(case, config);
+        fs::write(fixture.path("tests/e2e.rs"), &e2e)
+            .expect("the new fixture includes a real one-slot journey name");
+        fixture
+    };
+    for profile in ["default", "ci"] {
+        let fixture = fixture_for(&format!("eight-slot-priority-{profile}"), &config);
+        let (output, log) = fixture.nextest_run(&["--profile", profile, "--test-threads", "9"]);
+        assert!(
+            output.status.success() && log.contains("13 tests run: 13 passed"),
+            "{profile}: the eight-slot group stranded tests beside competing work:\n{log}"
+        );
+
+        let unprioritized = config.replace("priority = 100\n", "");
+        let fixture = fixture_for(&format!("eight-slot-no-priority-{profile}"), &unprioritized);
+        let (output, log) = fixture.nextest_run(&["--profile", profile, "--test-threads", "9"]);
+        assert!(
+            !output.status.success() && log.contains("tests were not run"),
+            "{profile}: removing priority did not reproduce the stranded queue:\n{log}"
+        );
+    }
+}
+
+#[test]
 fn eight_idle_journeys_share_the_default_slots_while_other_tests_use_the_cpu_cap() {
     let barrier = r#"
 fn meet() {
