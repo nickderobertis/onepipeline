@@ -6,11 +6,11 @@ The report is rendered from `spike-report` in
 `authoring:process-launch-speed-2026-11-14`, document
 `process-launch-speed-2026-11-14-spike-launch-inventory-report`.
 
-## Handoff: 2026-11-15 09:34 UTC
+## Handoff: 2026-11-15 11:38 UTC
 
-Producer: `076a7b6c`; fold: `99e9b97d`. Session draft PR 1591. The clean source
-has 38 passing fold-command tests and green targeted deterministic/judged lint
-(18 judged passes, zero failures). The report records exact commands and earlier
+Producer: `076a7b6c`; fold: `723522b7`. Session draft PR 1591. The clean source
+has 39 passing fold-command tests and green targeted deterministic/judged lint
+(18 source-diff passes at 99e9b97d; seven passes for the later interrupted-summary fix; zero failures). The report records exact commands and earlier
 Rust evidence, exceptions, uncertainty bounds and suppression reasons.
 
 Baseline run **43684231509, attempt 1**: Linux passed 2,155 e2e tests in 37.919
@@ -18,11 +18,18 @@ minutes; Windows passed 1,832 in 87.112 minutes. macOS is still active. The repo
 flags one Linux profile overwritten by the later budgets target. Keep the known
 Windows store exception outside the comparable passed set (ruling a2).
 
-OS run **43684237592, attempt 2**: Linux and Windows active, macOS queued. Its
+OS run **43684237592, attempt 2**: Linux hit the 180-minute job limit with
+1,607 non-version profiles (five unfinished); Windows and macOS remain active. Its
 first attempt was canceled under the manager's capacity ruling. Both demo PRs
 1592 and 1593 remain open. Do not cancel any other run.
 
-Next: collect completed artifacts/logs, finish OS coverage and macOS/Linux count
+Ruling a14 accepts the earlier full Linux OS record (43653434537, head
+2a14d00a) plus the current partial cross-check; no extra Linux OS run. All 2,155
+current journey names have earlier strace files. The two onetaskgraph spawn files
+are byte-identical across the linked 0.14.15-to-0.14.16 release change. The report
+records nested-strace failures and the remaining start-count uncertainty.
+
+Next: collect completed artifacts/logs, finish Windows OS coverage and macOS/Linux count
 reconciliation, then collect baseline attempts 2 and 3. Ruling a10 requires each
 repeat to rerun the **whole workflow after it completes**, on the same two demo
 PRs. No single-job reruns. Close the demo PRs only after all evidence is read.
