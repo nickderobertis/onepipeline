@@ -318,6 +318,7 @@ fn is_read(args: &[&str]) -> bool {
             ["config", "--get" | "--get-all", _]
                 | ["config", "--list" | "-l"]
                 | ["config", "--null", "--list"]
+                | ["config", "--null", "--list", "--show-origin"]
         ),
         Some("worktree") => args.get(1) == Some(&"list"),
         _ => false,
@@ -378,7 +379,8 @@ pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
                 break (target, Some(dir.to_path_buf()), Some(dot));
             }
             Ok(_) => return None,
-            Err(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
         }
         if is_git_dir(dir) {
             break (dir.to_path_buf(), None, None);
@@ -496,8 +498,10 @@ mod reuse {
     const RACY: Duration = Duration::from_millis(50);
     const ENTRIES: usize = 4096;
 
-    fn memo() -> &'static Mutex<HashMap<Key, (Output, Vec<Stamp>)>> {
-        static MEMO: OnceLock<Mutex<HashMap<Key, (Output, Vec<Stamp>)>>> = OnceLock::new();
+    type Memo = HashMap<Key, (Output, Vec<Stamp>)>;
+
+    fn memo() -> &'static Mutex<Memo> {
+        static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
         MEMO.get_or_init(Default::default)
     }
 
@@ -508,38 +512,20 @@ mod reuse {
             .clear();
     }
 
-    /// The reads whose answer depends on nothing the stamps miss: refs, `HEAD`,
-    /// configuration, the repository's layout, and objects, which never change once
-    /// written.
+    /// Only configuration, layout and symbolic-ref queries: object/reflog reads
+    /// delegate because external pruning and reflog writes are not stamped.
     pub(super) fn reusable(args: &[&str]) -> bool {
-        match args.first().copied() {
-            Some("--exec-path") => args.len() == 1,
-            Some("config") => {
-                args == ["config", "--null", "--list", "--show-origin"]
-                    || (args.len() == 3 && args[1] == "--get")
-            }
-            Some("remote") => args.len() == 3 && args[1] == "get-url",
-            Some("cat-file") => args.get(1) == Some(&"-e"),
-            Some(
-                "rev-parse" | "show-ref" | "for-each-ref" | "rev-list" | "merge-base" | "log"
-                | "check-ref-format",
-            ) => true,
-            // Two revisions compared, never the work tree or the index.
-            Some("diff") => {
-                args.iter()
-                    .skip(1)
-                    .take_while(|arg| **arg != "--")
-                    .filter(|arg| !arg.starts_with('-'))
-                    .count()
-                    == 2
-                    && !args.contains(&"--cached")
-                    && !args.iter().any(|arg| arg.starts_with("--no-index"))
-            }
-            Some("symbolic-ref") => {
-                args.iter().skip(1).filter(|a| !a.starts_with('-')).count() == 1
-            }
-            _ => false,
-        }
+        matches!(
+            args,
+            ["config", "--get", _]
+                | ["config", "--null", "--list", "--show-origin"]
+                | ["remote", "get-url", _]
+                | ["rev-parse", "--git-path", _]
+                | [
+                    "rev-parse",
+                    "--git-common-dir" | "--is-inside-work-tree" | "--show-toplevel"
+                ]
+        ) || args.first() == Some(&"symbolic-ref") && is_read(args)
     }
 
     /// Whether an answer may be kept. Success always; a "no" only where what it
@@ -608,11 +594,14 @@ mod reuse {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return None,
         };
-        let seen = metadata.map(|meta| {
+        let seen = if let Some(meta) = metadata {
             let nanos = |time: std::io::Result<SystemTime>| {
-                time.ok()
-                    .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(0, |since| since.as_nanos() as i128)
+                Some(
+                    time.ok()?
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos() as i128,
+                )
             };
             #[cfg(unix)]
             let (identity, changed) = {
@@ -627,8 +616,10 @@ mod reuse {
                 use std::os::windows::fs::MetadataExt;
                 (0u64, i128::from(meta.creation_time()))
             };
-            (meta.len(), nanos(meta.modified()), identity, changed)
-        });
+            Some((meta.len(), nanos(meta.modified())?, identity, changed))
+        } else {
+            None
+        };
         Some(Stamp { path, seen })
     }
 
@@ -654,37 +645,94 @@ mod reuse {
         Some(())
     }
 
-    fn global_configs(env: &[(String, String)]) -> Vec<PathBuf> {
-        let var = |key: &str| {
-            env.iter()
-                .rev()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| std::ffi::OsString::from(v))
-                .or_else(|| std::env::var_os(key))
-        };
-        let mut paths = Vec::new();
-        match var("GIT_CONFIG_GLOBAL") {
-            Some(global) => paths.push(PathBuf::from(global)),
-            None => {
-                if let Some(home) = var("HOME") {
-                    paths.push(PathBuf::from(&home).join(".gitconfig"));
-                    paths.push(match var("XDG_CONFIG_HOME") {
-                        Some(xdg) => PathBuf::from(xdg).join("git").join("config"),
-                        None => PathBuf::from(home)
-                            .join(".config")
-                            .join("git")
-                            .join("config"),
-                    });
+    type ConfigKey = (
+        Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        Vec<(String, String)>,
+    );
+    type ConfigPaths = HashMap<ConfigKey, Option<Vec<PathBuf>>>;
+
+    fn global_configs(cwd: Option<&Path>, env: &[(String, String)]) -> Option<Vec<PathBuf>> {
+        static PATHS: OnceLock<Mutex<ConfigPaths>> = OnceLock::new();
+        let mut inherited: Vec<_> = std::env::vars_os().collect();
+        inherited.sort();
+        let key = (inherited, env.to_vec());
+        let mut cache = PATHS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(paths) = cache.get(&key) {
+            return paths.clone();
+        }
+        // Git knows its installation's system prefix and platform home rules.
+        // These two traced processes per environment are part of reuse's measured cost.
+        let paths = (|| {
+            let path_variables = [
+                "HOME",
+                "USERPROFILE",
+                "XDG_CONFIG_HOME",
+                "GIT_CONFIG_SYSTEM",
+                "GIT_CONFIG_GLOBAL",
+                "GIT_EXEC_PATH",
+                "PATH",
+            ];
+            for (name, value) in key.0.iter() {
+                if path_variables
+                    .iter()
+                    .any(|n| name.as_os_str() == std::ffi::OsStr::new(n))
+                    && value.to_string_lossy().chars().any(char::is_control)
+                {
+                    return None;
                 }
             }
-        }
-        if var("GIT_CONFIG_NOSYSTEM").is_none() {
-            match var("GIT_CONFIG_SYSTEM") {
-                Some(system) => paths.push(PathBuf::from(system)),
-                None if cfg!(unix) => paths.push(PathBuf::from("/etc/gitconfig")),
-                None => {}
+            for (name, value) in env {
+                if path_variables.contains(&name.as_str()) && value.chars().any(char::is_control) {
+                    return None;
+                }
             }
+            let mut paths = Vec::new();
+            for variable in ["GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"] {
+                let mut command = Command::new("git");
+                if let Some(cwd) = cwd {
+                    command.current_dir(cwd);
+                }
+                command
+                    .args(["var", variable])
+                    .envs(env.iter().map(|(k, v)| (k, v)))
+                    .stdin(Stdio::null());
+                let output =
+                    crate::launch_trace::output(crate::launch_site!(), &mut command).ok()?;
+                if output.status.code() == Some(1)
+                    && output.stdout.is_empty()
+                    && output.stderr.is_empty()
+                {
+                    // An unset Git variable, including disabled system config.
+                    continue;
+                }
+                if !output.status.success() || !output.stderr.is_empty() {
+                    return None;
+                }
+                let stdout = std::str::from_utf8(&output.stdout).ok()?;
+                if variable == "GIT_CONFIG_SYSTEM" && stdout.lines().count() != 1 {
+                    return None;
+                }
+                for path in stdout.lines() {
+                    if path.is_empty() || path.chars().any(char::is_control) {
+                        return None;
+                    }
+                    paths.push(PathBuf::from(path));
+                }
+            }
+            if paths.is_empty() {
+                return None;
+            }
+            paths.sort();
+            paths.dedup();
+            Some(paths)
+        })();
+        if cache.len() >= 64 {
+            cache.clear();
         }
+        cache.insert(key, paths.clone());
         paths
     }
 
@@ -731,8 +779,36 @@ mod reuse {
         if layout.git_dir != layout.common_dir {
             tree(&layout.git_dir.join("refs"), &mut stamps)?;
         }
-        for config in global_configs(env) {
-            stamps.push(stamp(config)?);
+        let configs: Vec<PathBuf> = global_configs(cwd, env)?
+            .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    Some(path)
+                } else {
+                    Some(cwd?.join(path))
+                }
+            })
+            .collect::<Option<_>>()?;
+        for config in &configs {
+            stamps.push(stamp(config.clone())?);
+        }
+        // Includes can live outside every directory this snapshot owns. Rather
+        // than invent Git's includeIf rules, all such configurations delegate.
+        for path in stamps
+            .iter()
+            .map(|s| &s.path)
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n == "config" || n == "config.worktree")
+            })
+            .chain(configs.iter())
+        {
+            match std::fs::read_to_string(path) {
+                Ok(text) if text.to_ascii_lowercase().contains("include") => return None,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
         }
         let racy = now
             .checked_sub(RACY)

@@ -554,3 +554,60 @@ fn spike_safety_unreadable_refs_never_authorize_reuse() {
         "a partial refs scan cannot authorize an answer without git"
     );
 }
+
+#[test]
+fn spike_safety_reuse_observes_an_external_included_configuration_change() {
+    let w = world();
+    let included = w._root.path().join("included.conf");
+    git(
+        &w.clone,
+        &[
+            "config",
+            "--file",
+            included.to_str().unwrap(),
+            "spike.value",
+            "before",
+        ],
+    );
+    git(
+        &w.clone,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    std::thread::sleep(Duration::from_millis(80));
+    let args = ["config", "--get", "spike.value"];
+    assert_eq!(
+        asked("reuse", &w.clone, &args, &[]),
+        truth(&w.clone, &args, &[])
+    );
+    git(
+        &w.clone,
+        &[
+            "config",
+            "--file",
+            included.to_str().unwrap(),
+            "spike.value",
+            "after",
+        ],
+    );
+    assert_eq!(
+        asked("reuse", &w.clone, &args, &[]),
+        truth(&w.clone, &args, &[])
+    );
+}
+
+#[test]
+fn spike_safety_reuse_observes_an_object_another_process_prunes() {
+    let w = world();
+    let file = w._root.path().join("orphan");
+    std::fs::write(&file, "an unreachable object\n").unwrap();
+    let oid = git(&w.clone, &["hash-object", "-w", file.to_str().unwrap()]);
+    std::thread::sleep(Duration::from_millis(80));
+    let args = ["cat-file", "-e", oid.as_str()];
+    assert_eq!(asked("reuse", &w.clone, &args, &[]).0, 0);
+    git(&w.clone, &["prune", "--expire=now"]);
+    assert_ne!(truth(&w.clone, &args, &[]).0, 0);
+    assert_eq!(
+        asked("reuse", &w.clone, &args, &[]),
+        truth(&w.clone, &args, &[])
+    );
+}

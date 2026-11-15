@@ -28,6 +28,11 @@ export const TYPICAL_SHARE = 27 / 30;
  */
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] This never-landing measurement labels the frozen inventory argv shapes; SHAs pin the observed callers and unrecognized shapes remain explicit, so no shipped interface or evolving ownership table is promised.
 const SHAPES = [
+  [
+    /^var GIT_CONFIG_(SYSTEM|GLOBAL)$/,
+    "var GIT_CONFIG_* (config paths)",
+    "onevcs spike_reads::reuse::global_configs",
+  ],
   [/^show-ref --verify --quiet /, "show-ref --verify", "onevcs git::ref_exists"],
   [/^symbolic-ref --short refs\//, "symbolic-ref --short", "onevcs git::tracked_head"],
   [
