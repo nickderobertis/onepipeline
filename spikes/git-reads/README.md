@@ -22,14 +22,14 @@ the executable check evidence at its cited source commit unchanged.
 
 ## Handoff — 2026-11-15 21:52 UTC
 
-- Completed after samples: none.
+- Valid after samples: native Linux1/2; all other option/platform cells0/2.
 - Batched: draft PR1633, run43753064453 attempt1, head
   698a7d0e855c5bb04a362c385bab2508e3e4651e. Linux132931076196 finished ineligible
   (main e2e343/2155, cancellation/adoption failure). Windows132931076438 and
   macOS132931076404 running; lint cancelled.
 - Native: draft PR1634, run43753067613 attempt1, head
-  016c5adf2a8760d1a77134c1b1ef655aebd4c70e. Linux132931087404 and
-  Windows132931087445 running; macOS132931087312 queued; lint cancelled.
+  016c5adf2a8760d1a77134c1b1ef655aebd4c70e. Linux132931087404 completed2155/2155,
+  37.814 e2e minutes; Windows132931087445 running, macOS132931087312 queued; lint cancelled.
 - Both heads are frozen. Executed workflow blobs, checkout SHAs, full selection,
   cache receipts and test outcomes await finished-job logs/artifacts. The expected
   head workflow blob is db2bbe081a7b9319eb38bd014e72350b389e8b01.
@@ -65,3 +65,11 @@ still needs its two valid points; every attempt remains listed.
 
 The deferred test repair is drafted as
 20261115T220221Z-verify-cancellation-journey-waits-for-driver-exi.
+
+Native Linux point1 is preserved in evidence/native-43753067613-1-linux*.
+It has2154 individually retained passes plus one loopcost pass inferred under
+a70 from full2155-name catalog/selection/summary; strict fold stays2154. The
+canonical comparison command ran at40f3487d; its Linux row is undecided with
+2before/1after points. The corrected isolated optimized-stock cancellation
+control passes1/1;20 earlier nested-checkout configuration refusals were not
+journey outcomes.

@@ -10,5 +10,5 @@
   "proof": "2154 individually retained main passes; one named loopcost pass inferred under a70 from complete2155-name catalog/full selection/2155-of2155 summary; never inserted into strict passed list",
   "inferred_name": "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps",
   "timing": "one after point only; undecided, not a saving",
-  "fold": "readSide(native, incoming/native), render([preserved baseline facts, native]); existing exports, same reader source"
+  "fold": "node scripts/git-reads-compare.mjs compare baseline=<baseline raw root> native=<selected native root>, executed on40f3487d; stdout byte-for-byte identical to render([preserved baseline facts, readSide(native, incoming/native)])"
 }
