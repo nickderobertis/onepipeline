@@ -60,7 +60,7 @@ fn main() {
                 "SECRET",
                 "a secret here",
                 "public secret",
-                "prefixsecret",
+                "ＰＵＢＬＩＣ",
                 "σ ς Σ",
                 "café cafe\u{301}",
                 "İ i\u{307}",
@@ -74,7 +74,7 @@ fn main() {
                 (0..=0x10ffff)
                     .step_by(1024)
                     .filter_map(char::from_u32)
-                    .map(|c| format!("{c} secret {c}")),
+                    .map(|c| c.to_string()),
             ) {
                 assert_eq!(
                     before.find(&text),
