@@ -2151,6 +2151,11 @@ Capacity query at this checkpoint found seven plan demonstration heads (#1613–
 The demo selects the vendored library’s default at compile time, so all linked privateterms consumers in that build use the bypass, including helper executables that link it. A complete-tier mean difference therefore prices the compatible library option across the selected suite; it does not isolate engine-only initializer savings. The per-verb trace separately measures observed onepipeline start/adopt lifetimes. This is also why the release/adoption path names the library and its consumers, and why the full matcher behavior comparison is required. No full-tier saving is attributed exclusively to onepipeline’s own CPU.
 
 
+### Parser-test path correction
+
+After source 9902aa4c, inspection found the new parser journeys used URL.pathname for executable/fixture paths, which retains URL escapes and can produce /D:/ drive paths on Windows. They now use Node fileURLToPath consistently. Existing journeys, assertions and fixtures are unchanged; no existing repository test is modified. In a copied workspace named `native path proof`, the earlier tests failed all fifteen on encoded paths (evidence/native-path-induced-red.log.gz). After conversion all fifteen pass there (native-path-spaces-green.log.gz) and in the ordinary checkout (native-path-tests.log.gz); Biome check is green (native-path-static.log.gz). The first copied recovery attempt lacked samply-version.txt, which was added to that disposable copy before the successful run. This is Linux evidence of path handling, not a claim of a Windows run. The active hosted head dd64b7d1 still has the earlier parser tests and remains frozen; subsequent demonstration heads will carry this test-only portability repair. It cannot affect the Rust prototype’s performance, but any hosted failures of those old tests remain reported rather than relabelled as passes.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const script = new URL("../../scripts/engine-startup-cpu.py", import.meta.url).pathname;
-const profile = new URL("./golden/engine-startup/cpu.json.gz", import.meta.url).pathname;
-const symbols = new URL("./golden/engine-startup/cpu.syms.json.gz", import.meta.url).pathname;
+const script = fileURLToPath(new URL("../../scripts/engine-startup-cpu.py", import.meta.url));
+const profile = fileURLToPath(new URL("./golden/engine-startup/cpu.json.gz", import.meta.url));
+const symbols = fileURLToPath(new URL("./golden/engine-startup/cpu.syms.json.gz", import.meta.url));
 
 test("sample fold prints the captured main thread CPU and dominant module", () => {
   const run = spawnSync("python", [script, profile, symbols], { encoding: "utf8" });

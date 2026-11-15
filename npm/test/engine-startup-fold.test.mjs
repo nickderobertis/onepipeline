@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const script = new URL("../../scripts/engine-startup.mjs", import.meta.url);
-const fixture = new URL("./golden/engine-startup/", import.meta.url);
+const script = fileURLToPath(new URL("../../scripts/engine-startup.mjs", import.meta.url));
+const fixture = fileURLToPath(new URL("./golden/engine-startup/", import.meta.url));
 
 test("fold prints measured start and adopt means from a recorded real journey", () => {
-  const run = spawnSync(
-    process.execPath,
-    [script.pathname, "fold", `recorded=${fixture.pathname}`],
-    { encoding: "utf8" },
-  );
+  const run = spawnSync(process.execPath, [script, "fold", `recorded=${fixture}`], {
+    encoding: "utf8",
+  });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /recorded \(linux\)/);
   assert.match(run.stdout, /e2e minutes: not measured/);
@@ -20,26 +19,22 @@ test("fold prints measured start and adopt means from a recorded real journey", 
 });
 
 test("bad input is refused with a repair, then the recorded directory succeeds", () => {
-  const bad = spawnSync(
-    process.execPath,
-    [script.pathname, "fold", "bad=/absent-engine-startup-fixture"],
-    { encoding: "utf8" },
-  );
+  const bad = spawnSync(process.execPath, [script, "fold", "bad=/absent-engine-startup-fixture"], {
+    encoding: "utf8",
+  });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /unzip/);
-  const good = spawnSync(
-    process.execPath,
-    [script.pathname, "fold", `recorded=${fixture.pathname}`],
-    { encoding: "utf8" },
-  );
+  const good = spawnSync(process.execPath, [script, "fold", `recorded=${fixture}`], {
+    encoding: "utf8",
+  });
   assert.equal(good.status, 0, good.stderr);
 });
 
 test("fold groups hosted sides and marks a zero difference undecided", () => {
-  const job = new URL("./golden/launch-inventory/", import.meta.url).pathname;
+  const job = fileURLToPath(new URL("./golden/launch-inventory/", import.meta.url));
   const run = spawnSync(
     process.execPath,
-    [script.pathname, "fold", `before/1=${job}`, `contributors/1=${job}`],
+    [script, "fold", `before/1=${job}`, `contributors/1=${job}`],
     { encoding: "utf8" },
   );
   assert.equal(run.status, 0, run.stderr);
@@ -64,7 +59,7 @@ test("fold prices nonzero means against both observed spreads and reports missin
     join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-fold-"),
   );
   try {
-    const original = new URL("./golden/launch-inventory/", import.meta.url).pathname;
+    const original = fileURLToPath(new URL("./golden/launch-inventory/", import.meta.url));
     const jobs = [];
     for (const [label, seconds] of [
       ["before/1", 60],
@@ -88,7 +83,7 @@ test("fold prices nonzero means against both observed spreads and reports missin
     }
     const missing = readdirSync(join(root, "outside/2/test-profile/e2e"))[0];
     unlinkSync(join(root, "outside/2/test-profile/e2e", missing));
-    const run = spawnSync(process.execPath, [script.pathname, "fold", ...jobs], {
+    const run = spawnSync(process.execPath, [script, "fold", ...jobs], {
       encoding: "utf8",
     });
     assert.equal(run.status, 0, run.stderr);
@@ -108,7 +103,7 @@ test("fold prices nonzero means against both observed spreads and reports missin
 });
 
 test("profiling command refuses an unrelated executable before attempting a capture", () => {
-  const runner = new URL("../../scripts/engine-startup-profile.sh", import.meta.url).pathname;
+  const runner = fileURLToPath(new URL("../../scripts/engine-startup-profile.sh", import.meta.url));
   const run = spawnSync(
     "bash",
     [runner, process.execPath, process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? "."],
@@ -128,7 +123,7 @@ test("unfinished launches stay in observed counts and never become zero-duration
     join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-incomplete-"),
   );
   try {
-    cpSync(fixture.pathname, root, { recursive: true });
+    cpSync(fixture, root, { recursive: true });
     const dir = join(root, "test-profile/launch");
     const file = join(
       dir,
@@ -138,7 +133,7 @@ test("unfinished launches stay in observed counts and never become zero-duration
     const start = records.find((r) => r.kind === "proc" && r.verb === "start");
     const partial = { ...start, pid: start.pid + 10000000 };
     writeFileSync(file, `${[...records, partial].map(JSON.stringify).join("\n")}\n`);
-    const mixed = spawnSync(process.execPath, [script.pathname, "fold", `mixed=${root}`], {
+    const mixed = spawnSync(process.execPath, [script, "fold", `mixed=${root}`], {
       encoding: "utf8",
     });
     assert.equal(mixed.status, 0, mixed.stderr);
@@ -150,7 +145,7 @@ test("unfinished launches stay in observed counts and never become zero-duration
         .map(JSON.stringify)
         .join("\n")}\n`,
     );
-    const none = spawnSync(process.execPath, [script.pathname, "fold", `none=${root}`], {
+    const none = spawnSync(process.execPath, [script, "fold", `none=${root}`], {
       encoding: "utf8",
     });
     assert.equal(none.status, 0, none.stderr);
@@ -161,11 +156,9 @@ test("unfinished launches stay in observed counts and never become zero-duration
 });
 
 test("local phase accounting reports disjoint trace intervals and leaves CPU and filesystem uncertainty explicit", () => {
-  const run = spawnSync(
-    process.execPath,
-    [script.pathname, "phases", `recorded=${fixture.pathname}`],
-    { encoding: "utf8" },
-  );
+  const run = spawnSync(process.execPath, [script, "phases", `recorded=${fixture}`], {
+    encoding: "utf8",
+  });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /start pid .* trace window 50\.479 ms/);
   assert.match(run.stdout, /adopt pid .* trace window 62\.583 ms/);
@@ -187,19 +180,16 @@ test("unknown commands and malformed operands are refused before a valid recorde
     ["fold", "=a"],
     ["fold", "x="],
   ]) {
-    const run = spawnSync(process.execPath, [script.pathname, ...args], { encoding: "utf8" });
+    const run = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
     assert.equal(run.status, 2, run.stdout);
     assert.match(run.stderr, /use:|expected LABEL/);
   }
-  assert.equal(
-    spawnSync(process.execPath, [script.pathname, "fold", `recorded=${fixture.pathname}`]).status,
-    0,
-  );
+  assert.equal(spawnSync(process.execPath, [script, "fold", `recorded=${fixture}`]).status, 0);
 });
 
 test("the recorded kept-branch trace proves interval clipping, child programs and wait overlays", () => {
-  const input = new URL("./golden/engine-startup/phase-profile/", import.meta.url).pathname;
-  const run = spawnSync(process.execPath, [script.pathname, "phases", `baseline=${input}`], {
+  const input = fileURLToPath(new URL("./golden/engine-startup/phase-profile/", import.meta.url));
+  const run = spawnSync(process.execPath, [script, "phases", `baseline=${input}`], {
     encoding: "utf8",
   });
   assert.equal(run.status, 0, run.stderr);
@@ -223,7 +213,7 @@ test("malformed and invalid trace rows remain visible alongside completed means"
     join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-excluded-"),
   );
   try {
-    cpSync(fixture.pathname, root, { recursive: true });
+    cpSync(fixture, root, { recursive: true });
     const dir = join(root, "test-profile/launch");
     appendFileSync(
       join(
@@ -233,7 +223,7 @@ test("malformed and invalid trace rows remain visible alongside completed means"
       "{unfinished\n{}\n",
     );
     for (const verb of ["fold", "phases"]) {
-      const run = spawnSync(process.execPath, [script.pathname, verb, `recorded=${root}`], {
+      const run = spawnSync(process.execPath, [script, verb, `recorded=${root}`], {
         encoding: "utf8",
       });
       assert.equal(run.status, 0, run.stderr);
