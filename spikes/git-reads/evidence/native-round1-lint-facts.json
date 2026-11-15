@@ -1,0 +1,133 @@
+{
+  "run": 43753067613,
+  "attempt": 1,
+  "job": 132931087123,
+  "readerCommit": "33edc69c",
+  "source": "adjacent completed lint.log.gz",
+  "facts": {
+    "checkout": {
+      "merge": "76154443",
+      "head": "016c5adf2a8760d1a77134c1b1ef655aebd4c70e",
+      "base": "43649554e7105c937a5674a3c3c01ac5645ecc1c"
+    },
+    "selection": {
+      "job": "lint",
+      "count": 54,
+      "tasks": [
+        "github-workflows:format-check",
+        "github-workflows:lint",
+        "github-workflows:syntax-check",
+        "human-items-e2e:format-check",
+        "human-items-e2e:lint",
+        "onepipeline-ci-jobs:format-check",
+        "onepipeline-ci-jobs:lint",
+        "onepipeline-codex-server:format-check",
+        "onepipeline-codex-server:lint",
+        "onepipeline-contract:format-check",
+        "onepipeline-contract:lint",
+        "onepipeline-coverage-keys:format-check",
+        "onepipeline-coverage-keys:lint",
+        "onepipeline-e2e:format-check",
+        "onepipeline-e2e:lint",
+        "onepipeline-journal-workload:format-check",
+        "onepipeline-journal-workload:lint",
+        "onepipeline-narrow-write:format-check",
+        "onepipeline-narrow-write:lint",
+        "onepipeline-note-journeys:format-check",
+        "onepipeline-note-journeys:lint",
+        "onepipeline-npm:format-check",
+        "onepipeline-npm:lint",
+        "onepipeline-pool-workload:format-check",
+        "onepipeline-pool-workload:lint",
+        "onepipeline-pooled-slot:format-check",
+        "onepipeline-pooled-slot:lint",
+        "onepipeline-real-smoke:format-check",
+        "onepipeline-real-smoke:lint",
+        "onepipeline-release-compat:format-check",
+        "onepipeline-release-compat:lint",
+        "onepipeline-release-journeys:format-check",
+        "onepipeline-release-journeys:lint",
+        "onepipeline-release:format-check",
+        "onepipeline-release:lint",
+        "onepipeline-scratch-workload:format-check",
+        "onepipeline-scratch-workload:lint",
+        "onepipeline-status-read:format-check",
+        "onepipeline-status-read:lint",
+        "onepipeline-stop-verdict:format-check",
+        "onepipeline-stop-verdict:lint",
+        "onepipeline-version-contract:format-check",
+        "onepipeline-version-contract:lint",
+        "onepipeline-version-e2e:format-check",
+        "onepipeline-version-e2e:lint",
+        "onepipeline-version-package:format-check",
+        "onepipeline-version-package:lint",
+        "onepipeline:deps-check",
+        "onepipeline:format-check",
+        "onepipeline:lint",
+        "pool-maintenance:format-check",
+        "pool-maintenance:lint",
+        "report-job:format-check",
+        "report-job:lint"
+      ]
+    },
+    "steps": [
+      {
+        "name": "op-nx/github-cache/start-cache-server@91839c24885842cac86567",
+        "seconds": 0.003000020980834961,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "Swatinem/rust-cache@v2.9.2",
+        "seconds": 57.82699990272522,
+        "hit": "partial (restore key)",
+        "said": [
+          "Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-14f37604",
+          "Cache restored successfully",
+          "Restored from cache key \"v0-rust-test-linux-Linux-x64-ff458983-14f37604\" full match: false."
+        ]
+      },
+      {
+        "name": "actions/cache/restore@v4",
+        "seconds": 0.3300001621246338,
+        "hit": "miss",
+        "said": [
+          "Cache not found for input keys: ci-capture-Linux-X64-a2988fc733038fe73cb0181a1b27b5c4aaa43771a0dcdf18581de472633cd6c5"
+        ]
+      },
+      {
+        "name": "actions/setup-node@v4",
+        "seconds": 3.6440000534057617,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "actions/setup-python@v5",
+        "seconds": 15.686000108718872,
+        "hit": "miss",
+        "said": [
+          "Version 3.13.17 was not found in the local cache"
+        ]
+      },
+      {
+        "name": "astral-sh/setup-uv@v6",
+        "seconds": 2.5859999656677246,
+        "hit": "no restore",
+        "said": []
+      }
+    ],
+    "cacheSaves": [],
+    "nxStored": {
+      "entries": 0,
+      "bytes": 0,
+      "replayed": 0
+    },
+    "e2e": null,
+    "largest": null,
+    "job": {
+      "start": 1794771569.461,
+      "end": 1794773381.741,
+      "gateStart": null
+    }
+  }
+}
