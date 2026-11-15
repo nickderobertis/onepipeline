@@ -562,16 +562,18 @@ test("sleep tallies, a detached start's later exit, and inputs of no known shape
     { v: 1, kind: "start", pid: engine.pid, site: "x", program: "git", argv: "not a list", t: at },
   ].map((r) => JSON.stringify(r));
   writeFileSync(join(launch, file), [...lines, ...added, "{cut short"].join("\n"));
-  writeFileSync(
-    join(launch, "bogus.waits.json"),
-    JSON.stringify({ test: "t", sites: [{ kind: "nap", site: "x", count: 1, s: 1 }] }),
+  const waitsFile = readdirSync(launch).find(
+    (f) => f.startsWith("destination__a_rules") && f.endsWith(".waits.json"),
   );
+  const waitsDoc = JSON.parse(readFileSync(join(launch, waitsFile), "utf8"));
+  waitsDoc.sites.push({ kind: "nap", site: "x", count: 1, s: 1 });
+  writeFileSync(join(launch, waitsFile), JSON.stringify(waitsDoc));
   const e2e = join(dir, "test-profile", "e2e");
   writeFileSync(join(e2e, "old.json"), JSON.stringify({ schema: 1, test: "old", wall_s: 1 }));
   const out = run("fold", `shapes=${dir}`).stdout;
   assert.match(
     out,
-    /skipped 1 lines that are not JSON, 1 records of no known shape, 1 test-profile records not of schema 2 and 1 harness wait entries\./,
+    /skipped 1 lines that are not JSON, 1 records of no known shape, 1 test-profile records not of schema 2 and 1 harness wait entries; left out 0 trace and waits files/,
   );
   const waits = rows(out, "Waits and polls on a child, by site");
   assert.deepEqual(
@@ -758,4 +760,21 @@ test("each program's per-start floor is set against the Linux job's, with the mi
     rows_.find((c) => c[0] === "windows" && c[1] === "git"),
     ["windows", "git", "73.5", "13.5", "60.0", "52", "0.05", "1.86"],
   );
+});
+
+test("trace and waits files of a binary other than e2e that compiles the harness are left out of the tier", () => {
+  const dir = join(scratch, "others");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const file = readdirSync(launch).find(
+    (f) => f.startsWith("destination__a_hook") && f.endsWith(".jsonl"),
+  );
+  cpSync(join(launch, file), join(launch, "a_note_journey_of_the_note_binary.jsonl"));
+  writeFileSync(
+    join(launch, "a_note_journey_of_the_note_binary.waits.json"),
+    JSON.stringify({ test: "a_note_journey_of_the_note_binary", sites: [] }),
+  );
+  const out = run("fold", `others=${dir}`).stdout;
+  assert.match(out, /left out 2 trace and waits files of tests no e2e record names/);
+  assert.match(out, /Rows account for 52 traced starts \(trace holds 52\)/);
 });
