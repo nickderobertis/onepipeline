@@ -5626,3 +5626,196 @@ async fn a_copy_records_its_sources_root_and_never_one_naming_a_private_source_w
         "a destination declared private takes it"
     );
 }
+
+#[tokio::test]
+async fn a_dependents_attestation_holds_on_every_copy_its_far_end_is_withheld_from() {
+    // `vault` is declared private and `from`, `into` and `onward` are not. `vault:B` depends on
+    // `vault:A`, and `from:D` on `from:C`, which was copied out of `vault` and records it as its
+    // origin. A copy out of `vault` records no origin naming it, and one out of `from:C` hands
+    // on no lineage naming it either, so the copies of A and of C name no root of their own: a
+    // Rust caller checking the copies' records reaches the item each was copied from all the
+    // same, through `vault`'s own link to the copy — and an edge pointed elsewhere still voids.
+    use onetaskgraph_core::AttestRequest;
+    use onetaskgraph_core::attestation::{
+        AttestationKind, AttestationLabel, AttestationState, VoidReason,
+    };
+    use onetaskgraph_plugin_api::MetadataRecord;
+
+    let status = json!({"category": "todo", "name": "Todo"});
+    let edge = |from: &str, to: &str| {
+        json!({"from": {"id": from, "kind": "task"}, "to": {"id": to, "kind": "task"},
+               "kind": "blocks"})
+    };
+    // Sixty other tasks listed before them, in a vault that leaves the metadata predicate to
+    // the engine: the one linking to A's copy is past the vault's first page of fifty, and the
+    // engine's own narrowing is what finds it.
+    let mut held: Vec<Value> = (0..60)
+        .map(|n| {
+            json!({"id": format!("F-{n}"), "title": format!("Filler {n}"),
+                        "status": status, "labels": []})
+        })
+        .collect();
+    held.push(json!({"id": "A", "title": "A", "status": status, "labels": []}));
+    held.push(json!({"id": "B", "title": "B", "status": status, "labels": []}));
+    let engine = engine_over(json!({
+        "vault": {"plugin": "in-memory", "visibility": "private", "config": {
+            "capabilities": {"filter_by_metadata": "unsupported"},
+            "tasks": held,
+            "task_dependencies": [edge("B", "A")],
+        }},
+        "from": {"plugin": "in-memory", "visibility": "public", "config": {
+            "tasks": [
+                {"id": "C", "title": "C", "status": status, "labels": [],
+                 "metadata": {"onetaskgraph.origin": "vault:V-1"}},
+                {"id": "D", "title": "D", "status": status, "labels": []},
+            ],
+            "task_dependencies": [edge("D", "C")],
+        }},
+        "into": {"plugin": "in-memory", "visibility": "public", "config": {}},
+        "onward": {"plugin": "in-memory", "visibility": "public", "config": {}},
+    }))
+    .with_write_policy(Arc::new(NothingPrivate));
+    let kind = AttestationKind::new("plan-review").expect("a kind");
+    let bar = AttestationLabel::new("--bar", "bar-1").expect("a bar");
+    for item in ["vault:B", "from:D"] {
+        engine
+            .attest(
+                MetadataRecord::Task,
+                &AttestRequest {
+                    id: id(item),
+                    kind: kind.clone(),
+                    by: AttestationLabel::new("--by", "review-plan").expect("a label"),
+                    bar: bar.clone(),
+                    excludes: Vec::new(),
+                    note: None,
+                    if_version: None,
+                },
+            )
+            .await
+            .expect("the record is written");
+    }
+    let state = async |item: &GlobalId| {
+        let checked = engine
+            .check_attestation(MetadataRecord::Task, item, &kind, Some(&bar))
+            .await
+            .expect("the check answers");
+        (checked.state, checked.reason)
+    };
+    let valid = (AttestationState::Valid, None);
+    let copied = async |items: &[&str], to: &str| -> Vec<GlobalId> {
+        let mut request = many(items, CopyScope::Tasks);
+        request.destination = name(to);
+        let report = engine.copy(&request).await.expect("the copy runs");
+        report
+            .items
+            .iter()
+            .map(|outcome| outcome.destination().expect("it landed").clone())
+            .collect()
+    };
+
+    let into = copied(&["vault:A", "vault:B"], "into").await;
+    assert_eq!(
+        state(&into[1]).await,
+        valid,
+        "a copy out of the private source"
+    );
+    let onward = copied(&[&into[0].to_string(), &into[1].to_string()], "onward").await;
+    assert_eq!(state(&onward[1]).await, valid, "a copy of that copy");
+    let public = copied(&["from:C", "from:D"], "into").await;
+    assert_eq!(
+        state(&public[1]).await,
+        valid,
+        "a copy of an item whose far end was copied out of the private source"
+    );
+
+    // B's copy pointed at C's copy: the record goes void, as it does where it was written.
+    engine
+        .update_task(
+            &into[1],
+            &onetaskgraph_plugin_api::TaskUpdate {
+                depends_on: Some(vec![DependencyEdge {
+                    from: DependencyEndpoint::from_native(into[1].native.clone(), ItemKind::Task),
+                    to: DependencyEndpoint::from_native(public[0].native.clone(), ItemKind::Task),
+                    kind: DependencyKind::Blocks,
+                }]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the update lands");
+    assert_eq!(
+        state(&into[1]).await,
+        (AttestationState::Void, Some(VoidReason::ContentMoved)),
+        "the copy's edge pointed at another item"
+    );
+}
+
+#[tokio::test]
+async fn a_copy_more_than_one_private_item_links_to_is_named_by_its_own_id() {
+    // `into:Y` depends on `into:X`, which records no root. Over a private `vault` holding no
+    // task linking to `into:X`, the record a Rust caller writes on Y names X by its own id; one
+    // linking task names it by that task instead, and a page of them — more than fit on one —
+    // is no confident answer, so the record is the one nothing linking gives.
+    use onetaskgraph_core::AttestRequest;
+    use onetaskgraph_core::attestation::{AttestationKind, AttestationLabel};
+    use onetaskgraph_plugin_api::MetadataRecord;
+
+    let status = json!({"category": "todo", "name": "Todo"});
+    let digest = async |links: usize| {
+        let vault: Vec<Value> = (0..links)
+            .map(|n| {
+                json!({"id": format!("L-{n}"), "title": format!("Linked {n}"),
+                       "status": status, "labels": [],
+                       "metadata": {"onetaskgraph.copies": {"into": "into:X"}}})
+            })
+            .collect();
+        let engine = engine_over(json!({
+            "vault": {"plugin": "in-memory", "visibility": "private",
+                      "config": {"tasks": vault}},
+            "into": {"plugin": "in-memory", "visibility": "public", "config": {
+                "tasks": [
+                    {"id": "X", "title": "X", "status": status, "labels": []},
+                    {"id": "Y", "title": "Y", "status": status, "labels": []},
+                ],
+                "task_dependencies": [
+                    {"from": {"id": "Y", "kind": "task"}, "to": {"id": "X", "kind": "task"},
+                     "kind": "blocks"},
+                ],
+            }},
+        }))
+        .with_write_policy(Arc::new(NothingPrivate));
+        engine
+            .attest(
+                MetadataRecord::Task,
+                &AttestRequest {
+                    id: id("into:Y"),
+                    kind: AttestationKind::new("plan-review").expect("a kind"),
+                    by: AttestationLabel::new("--by", "review-plan").expect("a label"),
+                    bar: AttestationLabel::new("--bar", "bar-1").expect("a bar"),
+                    excludes: Vec::new(),
+                    note: None,
+                    if_version: None,
+                },
+            )
+            .await
+            .expect("the record is written")
+            .record
+            .content_digest
+    };
+    let unlinked = digest(0).await;
+    assert_ne!(
+        digest(1).await,
+        unlinked,
+        "one link names X by the item linking to it"
+    );
+    assert_eq!(
+        digest(2).await,
+        unlinked,
+        "two links are no confident answer"
+    );
+    assert_eq!(
+        digest(51).await,
+        unlinked,
+        "more links than one page holds are no confident answer"
+    );
+}
