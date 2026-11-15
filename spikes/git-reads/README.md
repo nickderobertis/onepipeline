@@ -20,7 +20,7 @@ Their provenance is in evidence/baseline-provenance.json. The before side is
 43684231509 attempts1/2, accepted under c11.0. Later archive-only commits leave
 the executable check evidence at its cited source commit unchanged.
 
-## Handoff — 2026-11-15 20:24 UTC
+## Handoff — 2026-11-15 20:52 UTC
 
 - Completed after samples: none.
 - Batched: draft PR1633, run43753064453 attempt1, head
