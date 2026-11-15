@@ -22,10 +22,11 @@ the executable check evidence at its cited source commit unchanged.
 
 ## Handoff — 2026-11-15 21:52 UTC
 
-- Valid after samples: native Linux1/2; all other option/platform cells0/2.
+- Valid after samples: native Linux1/2 and batched Windows1/2; other cells0/2.
 - Batched: draft PR1633, run43753064453 attempt1, head
   698a7d0e855c5bb04a362c385bab2508e3e4651e. Linux132931076196 finished ineligible
-  (main e2e343/2155, cancellation/adoption failure). Windows132931076438 and
+  (main e2e343/2155, cancellation/adoption failure). Windows132931076438 completed
+ 1832tests (one main failure,3/3diagnostic passes; point1 undera72);
   macOS132931076404 running; lint cancelled.
 - Native: draft PR1634, run43753067613 attempt1, head
   016c5adf2a8760d1a77134c1b1ef655aebd4c70e. Linux132931087404 completed2155/2155,
@@ -73,3 +74,10 @@ canonical comparison command ran at40f3487d; its Linux row is undecided with
 2before/1after points. The corrected isolated optimized-stock cancellation
 control passes1/1;20 earlier nested-checkout configuration refusals were not
 journey outcomes.
+
+Batched Windows point1 is preserved in evidence/batched-43753064453-1-windows*.
+Its main verdict stays red; the withdrawn duplicate-dispatch test passed3/3
+job-own reruns. A72’s no-prototype-answer condition is checked from the saved
+main trace plus process-local cache/spawn paths, documented in provenance.
+Batch mode reuse is off, no batch child/cache seed existed in that invocation.
+The duplicate-dispatch follow-up is drafted separately; test bodies stay frozen.

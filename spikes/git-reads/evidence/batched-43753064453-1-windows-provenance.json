@@ -1,0 +1,15 @@
+{
+  "run": 43753064453,
+  "attempt": 1,
+  "job": 132931076438,
+  "reader_commit": "33edc69c",
+  "raw_root": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-1/test-windows",
+  "pricing": true,
+  "point": 1,
+  "selection_rule": "a69: first two valid jobs per platform in run order; a72 conditional answered by saved-trace/source proof",
+  "main_verdict": "1832 run,1831 passed,1 failed; unchanged red",
+  "diagnostic_pass_name": "withdrawn::a_launch_leaves_out_a_task_a_person_withdrew_and_never_reopens_it",
+  "diagnostic_passes": 3,
+  "prototype_answer_exclusion": "batched mode has reuse=false; process-local registry begins empty; every successful answer must resolve->ask->start an instrumented cat-file child before inserting a Child. Saved append-only trace has main CLI proc7640 at22:17:38.714648UTC and no Git/batch starts; no child/cache seed existed, so no prototype memo or batch answer could be served. Registry cannot be inherited from another CLI process. Existing unchanged OneVcs readers are not attributed to this prototype.",
+  "note": "Strict main passed catalog remains1831 with failed name retained; its three diagnostic passes supply separate named proof, never inserted into main passed list."
+}
