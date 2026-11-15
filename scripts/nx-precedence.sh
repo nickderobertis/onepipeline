@@ -71,8 +71,8 @@ lowered="$(mktemp)"
 trap 'rm -f "$lowered"' EXIT
 
 yield() {
-  local warned=" " listing candidates pid nice task lower tasks out alive
-  local -a pids environs
+  local warned=" " listing candidates found status pid nice stat task lower tasks out alive
+  local -a pids environs fields
   warn() {
     case "$warned" in *" $1 "*) return 0 ;; esac
     warned+="$1 "
@@ -92,9 +92,19 @@ yield() {
     while read -r pid nice; do
       [ "$nice" -lt 19 ] 2>/dev/null && [ "$pid" != "$$" ] && environs+=("/proc/$pid/environ")
     done <<<"$listing"
+    # grep says 2 for a process that ended or is another user's, which is no
+    # failure here; anything above that is grep itself failing.
     candidates=""
     if [ "${#environs[@]}" -gt 0 ]; then
-      candidates="$(grep -lzxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null | cut -d/ -f3)" || true
+      found="$(grep -lszxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}")" && status=0 || status=$?
+      if [ "$status" -gt 2 ]; then
+        warn grep "cannot read which processes are this run's (grep exited $status), so the tasks beside $own keep their priority until it can" \
+          "put GNU grep on PATH"
+      fi
+      for pid in $found; do
+        pid="${pid#/proc/}"
+        candidates+=" ${pid%/environ}"
+      done
     fi
     lower=""
     tasks=""
@@ -115,7 +125,13 @@ yield() {
       if out="$(renice -n 19 -p "${pids[@]}" 2>&1 >/dev/null)"; then
         printf '%s' "$tasks" >>"$lowered"
       else
-        alive="$(IFS=,; ps -o ni= -p "${pids[*]}" 2>/dev/null | awk '$1 + 0 < 19' || true)"
+        alive=""
+        for pid in "${pids[@]}"; do
+          # Field 19 of /proc/PID/stat, after the command name, is the niceness.
+          stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || continue
+          read -ra fields <<<"${stat##*) }"
+          [ "${fields[16]}" -ge 19 ] || alive+=" $pid"
+        done
         if [ -z "$alive" ]; then
           printf '%s' "$tasks" >>"$lowered"
         else

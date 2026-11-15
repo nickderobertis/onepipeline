@@ -81,7 +81,7 @@ function workspace(t, { churn = false } = {}) {
 
 // A directory of stand-ins put ahead of PATH, each failing with the message given; one
 // given `after` fails that many times and then runs the real tool.
-function failing(t, tools, after = Number.POSITIVE_INFINITY) {
+function failing(t, tools, after = Number.POSITIVE_INFINITY, code = 1) {
   const dir = mkdtempSync(join(tmpdir(), "nx-precedence-stubs-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const [tool, message] of Object.entries(tools)) {
@@ -91,7 +91,7 @@ function failing(t, tools, after = Number.POSITIVE_INFINITY) {
     const recover = Number.isFinite(after)
       ? `n=$(cat "$0.count" 2>/dev/null || echo 0); echo $((n + 1)) > "$0.count"\n[ "$n" -lt ${after} ] || exec ${real} "$@"\n`
       : "";
-    writeFileSync(join(dir, tool), `#!/bin/sh\n${recover}echo "${message}" >&2\nexit 1\n`);
+    writeFileSync(join(dir, tool), `#!/bin/sh\n${recover}echo "${message}" >&2\nexit ${code}\n`);
     chmodSync(join(dir, tool), 0o755);
   }
   return dir;
@@ -213,6 +213,16 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
 
   const failures = [
     {
+      // 1 and 2 are grep's own answers here (no match; a file it could not read), so
+      // the stand-in fails as grep itself failing does.
+      tool: "grep",
+      code: 3,
+      warning:
+        "nx-precedence: cannot read which processes are this run's (grep exited 3), so the tasks beside lead:work keep their priority until it can",
+      side: "0",
+      summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
+    },
+    {
       tool: "renice",
       warning: "nx-precedence: cannot lower the tasks beside lead:work (renice refused here)",
       side: "0",
@@ -234,10 +244,10 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
       summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
     },
   ];
-  for (const { tool, warning, side, summary } of failures) {
+  for (const { tool, code = 1, warning, side, summary } of failures) {
     it(`says once when ${tool} fails, and its command still runs to its end`, (t) => {
       const dir = workspace(t);
-      const stubs = failing(t, { [tool]: `${tool} refused here` });
+      const stubs = failing(t, { [tool]: `${tool} refused here` }, Number.POSITIVE_INFINITY, code);
       const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
       assert.equal(status, 0, log);
       assert.ok(existsSync(join(dir, "done")), log);
