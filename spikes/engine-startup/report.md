@@ -2320,6 +2320,11 @@ contributors/2/linux: baseline test profiles missing []; profile presence does n
 Linux therefore has measured side means39.487358 before and37.906233 after, a1.581125-minute difference, inside the observed spread. The printed typical-PR estimate1.423013 minutes is undecided, not a saving. Different processor models remain a confound; this small sample does not establish an engine-only causal effect. Linux’s two required after points are complete; Windows and macOS still need collection from the two existing runs. No third run starts under a67.
 
 
+### Collection guard correction — 2026-11-15 22:55 UTC
+
+Point1 Windows artifact14184840420 became available while job132926635983 still reported in_progress. The scratch collector guarded finished-job log downloads but accidentally did not apply that guard to the artifact loop, so it downloaded this early artifact contrary to a55. No Windows fold, timing or outcome was read from it. That artifact directory and receipt were discarded; the collector now requires the corresponding job’s status to be completed before downloading its artifact. Applying the corrected predicate to the saved metadata rejects the in-progress Windows artifact and accepts the completed Linux artifact. A fresh Windows download and final job log are required before any Windows measurement is used. The saved jobs-2255.json.gz and artifacts-2255.json.gz record the state that exposed the issue. Both demonstrations remain in flight: Linux complete on both, Windows running on both, point1 macOS running and point2 macOS queued. No third run is planned under a67.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
