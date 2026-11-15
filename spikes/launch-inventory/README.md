@@ -6,7 +6,7 @@ The report is rendered from `spike-report` in
 `authoring:process-launch-speed-2026-11-14`, document
 `process-launch-speed-2026-11-14-spike-launch-inventory-report`.
 
-## Handoff: 2026-11-15 11:38 UTC
+## Handoff: after baseline point 1, 2026-11-15
 
 Producer: `076a7b6c`; fold: `723522b7`. Session draft PR 1591. The clean source
 has 39 passing fold-command tests and green targeted deterministic/judged lint
@@ -14,7 +14,9 @@ has 39 passing fold-command tests and green targeted deterministic/judged lint
 Rust evidence, exceptions, uncertainty bounds and suppression reasons.
 
 Baseline run **43684231509, attempt 1**: Linux passed 2,155 e2e tests in 37.919
-minutes; Windows passed 1,832 in 87.112 minutes. macOS is still active. The report
+minutes; Windows passed 1,832 in 87.112 minutes; macOS passed 2,121 in
+90.112 minutes (Apple M1 Virtual, three cores). Attempt 2 of the whole workflow
+has been requested on the same PR/head. The report
 flags one Linux profile overwritten by the later budgets target. Keep the known
 Windows store exception outside the comparable passed set (ruling a2).
 
@@ -29,8 +31,12 @@ current journey names have earlier strace files. The two onetaskgraph spawn file
 are byte-identical across the linked 0.14.15-to-0.14.16 release change. The report
 records nested-strace failures and the remaining start-count uncertainty.
 
-Next: collect completed artifacts/logs, finish Windows OS coverage and macOS/Linux count
-reconciliation, then collect baseline attempts 2 and 3. Ruling a10 requires each
+Ruling a15 keeps the three outside-tier macOS codex_server timeouts report-only:
+cold nested builds with optimized dependencies are the probable cause (PR 1586),
+not proved here. All measured e2e tests passed on every platform in point 1.
+
+Next: collect attempt 2 artifacts/logs, finish Windows OS coverage and macOS/Linux count
+reconciliation, then collect baseline attempt 3. Ruling a10 requires each
 repeat to rerun the **whole workflow after it completes**, on the same two demo
 PRs. No single-job reruns. Close the demo PRs only after all evidence is read.
 The report remains explicitly incomplete; no three-run mean is claimed.
