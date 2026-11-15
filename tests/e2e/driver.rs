@@ -4805,7 +4805,14 @@ fn a_stop_that_cannot_read_the_process_table_refuses_and_leaves_the_run_retryabl
 /// as it was, and the same ask works once the host answers what it was asked. The
 /// listing this stand-in gives is the real one throughout, which is what keeps the
 /// fault to the one question under test.
-#[cfg(all(unix, not(target_os = "linux")))]
+///
+/// Held wherever a start token is still asked of `ps`. On the Unix targets other
+/// than Linux and macOS that is every token. Linux asks procfs, and asks `ps` only
+/// to read a record in the older `ps lstart` spelling, so there every claim the
+/// run holds is given that spelling first, the edit
+/// `a_linux_stop_accepts_an_active_runs_legacy_ps_identity` makes to one. macOS asks
+/// the kernel and never `ps`, so a `ps` there has no start to over-answer.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals_nothing() {
     let world = World::new("driver-stop-talkative-ps");
@@ -4818,14 +4825,21 @@ fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals
         !dispatches(driver).is_empty()
     });
     let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+    #[cfg(target_os = "linux")]
+    spell_every_claim_as_ps_lstart(&world, &run, &tree);
 
     let mut command = world.cmd(&["stop", &run]);
     command.env("PATH", world.path_whose_ps_says_more_than_it_was_asked());
     let refused = world.run_on(command, "stop with a ps that says more than it was asked");
+    // Linux names the record it could not read again; the others, the host.
+    #[cfg(target_os = "linux")]
+    let unread = "older `ps` spelling and no longer reads the same";
+    #[cfg(not(target_os = "linux"))]
+    let unread = "will not say when it started";
     refused
         .exited(REFUSED)
         .err_has("was not stopped")
-        .err_has("will not say when it started");
+        .err_has(unread);
     assert!(
         !refused.stdout.contains("\"stopped\":true"),
         "a stop that could not place a single pid still announced a clean stop:\n{}",
@@ -4857,6 +4871,44 @@ fn a_stop_whose_host_says_more_than_it_was_asked_about_a_pid_refuses_and_signals
     });
     world.release("build.go");
 }
+
+/// Give every claim run `run` holds on its processes the `ps lstart` spelling an
+/// earlier Linux build recorded, so each is read again by asking `ps`.
+///
+/// The launch record and the dispatch registry carry one claim per process in
+/// `tree`; the ownership lock names the driver again and is judged with it.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its records would test packaging rather than this compatibility boundary;
+// replacing only each serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must read.
+#[cfg(target_os = "linux")]
+fn spell_every_claim_as_ps_lstart(world: &World, run: &str, tree: &[u32]) {
+    world.until(
+        "every dispatch below the driver to be registered",
+        |world| tree[1..].iter().all(|pid| world.registered(run, *pid)),
+    );
+    let record = world.run_file(run, "launch.json");
+    let mut launch = world.run_json(run, "launch.json");
+    let driver = u32::try_from(
+        launch["pid"]
+            .as_u64()
+            .expect("a launch record names its driver"),
+    )
+    .expect("a pid");
+    launch["started"] = json!(started_at_of(driver));
+    std::fs::write(&record, launch.to_string()).expect("the legacy launch record is installed");
+    for path in world.dispatch_records(run) {
+        let mut entry: Value = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("a registry entry is readable"),
+        )
+        .expect("a registry entry is JSON");
+        let pid =
+            u32::try_from(entry["pid"].as_u64().expect("an entry names its pid")).expect("a pid");
+        entry["started"] = json!(started_at_of(pid));
+        std::fs::write(&path, entry.to_string()).expect("the legacy entry is installed");
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A stop aimed at another host's driver says it reached nothing.
 ///

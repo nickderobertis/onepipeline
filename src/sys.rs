@@ -1936,7 +1936,19 @@ fn ps_process_start_token(pid: u32) -> Option<String> {
     if !listed.status.success() {
         return None;
     }
-    let answer = String::from_utf8(listed.stdout).ok()?;
+    one_line_answer(&String::from_utf8(listed.stdout).ok()?)
+}
+
+/// The one line `answer` holds once blank lines are set aside, or `None` where it
+/// holds none or more than one: `ps -p PID` was asked about one process, and an
+/// answer with anything beside that line is no answer at all, wherever the extra
+/// line falls. Taking either line as the token would make a live process read as
+/// another against its own record, for the reason on [`platform_process_start_token`].
+///
+/// Pure, so it is compiled into every target's tests and held on hosts that do not
+/// ask `ps` too.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn one_line_answer(answer: &str) -> Option<String> {
     let mut lines = answer
         .lines()
         .map(str::trim)
@@ -2843,6 +2855,36 @@ mod tests {
     /// so two processes started within one second read as two. A record a build
     /// before the microseconds wrote is `lstart` alone, and is still this
     /// process's where its second is.
+    /// A `ps` that says more than the one line it was asked for has not answered,
+    /// whichever side of the answer the extra line is on, and neither has one that
+    /// said nothing; one line, however padded, is the answer.
+    #[test]
+    fn a_ps_start_answer_is_exactly_one_line_or_none() {
+        let answer = "Sun Oct 11 19:23:36 2026";
+        assert_eq!(
+            one_line_answer(&format!("  {answer}  \n")).as_deref(),
+            Some(answer)
+        );
+        assert_eq!(
+            one_line_answer(&format!("\n{answer}\n\n")).as_deref(),
+            Some(answer)
+        );
+        for over in [
+            format!("a line nobody asked for\n{answer}\n"),
+            format!("{answer}\na line nobody asked for\n"),
+            format!("{answer}\n{answer}\n"),
+        ] {
+            assert_eq!(one_line_answer(&over), None, "{over:?} was read as a token");
+        }
+        for silent in ["", "\n", "   \n\n"] {
+            assert_eq!(
+                one_line_answer(silent),
+                None,
+                "{silent:?} was read as a token"
+            );
+        }
+    }
+
     #[test]
     fn a_macos_start_token_tells_apart_two_starts_in_one_second() {
         let now = "Sun Oct 11 19:23:36 2026 +0.004211";
