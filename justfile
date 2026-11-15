@@ -413,7 +413,7 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 _tier-test unit filter:
     @bash scripts/ensure-test-archive.sh coverage
     @prefix=(); \
-      if [ "$1" = onepipeline-e2e ]; then prefix=(bash scripts/nx-precedence.sh --keep onepipeline:install-smoke --); fi; \
+      if [ "$1" = onepipeline-e2e ]; then prefix=(bash scripts/nx-precedence.sh --keep onepipeline:install-smoke -- bash scripts/e2e-prepare.sh); fi; \
       RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/}" "${prefix[@]}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers

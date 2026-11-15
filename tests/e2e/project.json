@@ -56,9 +56,10 @@
         "e2eCoverageSource",
         "coverageTierKey",
         {
-          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test _tier-test _ensure-onetaskgraph --variable e2e-tier --variable onetaskgraph-version"
+          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test _tier-test _e2e-doubles-build _ensure-onetaskgraph --variable e2e-tier --variable llvm-cov-target-dir --variable onetaskgraph-version"
         },
         "{workspaceRoot}/scripts/nx-precedence.sh",
+        "{workspaceRoot}/scripts/e2e-prepare.sh",
         {
           "runtime": "node -p process.platform"
         }

@@ -26,6 +26,8 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/nx-precedence.sh",
+        "{workspaceRoot}/scripts/e2e-prepare.sh",
+        "{workspaceRoot}/justfile",
         "sharedGlobals",
         {
           "runtime": "node -p process.platform"
