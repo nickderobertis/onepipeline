@@ -49,7 +49,7 @@ done
 
 own="${NX_TASK_TARGET_PROJECT:-}:${NX_TASK_TARGET_TARGET:-}"
 run="${NX_INVOCATION_ROOT_PID:-}"
-if [ "$own" = ":" ] || [ -z "$run" ] || [ ! -r /proc/self/environ ]; then
+if [ "$own" = ":" ] || [[ ! "$run" =~ ^[0-9]+$ ]] || [ ! -r /proc/self/environ ]; then
   exec "$@"
 fi
 
@@ -94,7 +94,7 @@ yield() {
     done <<<"$listing"
     candidates=""
     if [ "${#environs[@]}" -gt 0 ]; then
-      candidates="$(grep -lzx "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null | cut -d/ -f3)" || true
+      candidates="$(grep -lzxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null | cut -d/ -f3)" || true
     fi
     lower=""
     tasks=""

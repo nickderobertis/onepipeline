@@ -39,7 +39,6 @@ const plain = (text) => text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 // how a lowered task's later work is lowered with it.
 const NICE_SH = 'read -ra f < /proc/$$/stat; echo "$' + '{f[18]}"\n';
 const record = (name) => `bash nice.sh > ${name}.tmp && mv ${name}.tmp ${name}.nice`;
-// Once lowered, the side task also records its I/O class.
 const SIDE = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("side")}; if [ "$(cat side.nice)" = 19 ] && [ ! -e side.io ]; then /usr/bin/ionice -p $$ > side.io 2>&1; fi; sleep 0.2; done'`;
 const KEPT = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("kept")}; sleep 0.2; done'`;
 const LATE = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("late")}; sleep 0.2; done'`;
@@ -316,6 +315,18 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     });
     assert.equal(inside.status, 3, inside.stderr);
     assert.equal(inside.stdout, "ran\n");
+    // A root that is not a pid names no run, so nothing could be scoped to it.
+    const malformed = spawnSync("bash", [script, "--", "bash", "-c", "exit 5"], {
+      encoding: "utf8",
+      env: {
+        ...env,
+        NX_TASK_TARGET_PROJECT: "lead",
+        NX_TASK_TARGET_TARGET: "work",
+        NX_INVOCATION_ROOT_PID: ".*",
+      },
+    });
+    assert.equal(malformed.status, 5, malformed.stderr);
+    assert.equal(malformed.stderr, "", "a run with no valid root was treated as one");
   });
 
   for (const [args, message] of [
