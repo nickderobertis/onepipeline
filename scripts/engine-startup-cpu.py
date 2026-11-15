@@ -4,23 +4,64 @@ import bisect
 import collections
 import gzip
 import json
+import math
 import re
 
 
 def read_json(path):
     opener = gzip.open if str(path).endswith('.gz') else open
     with opener(path, 'rt') as stream:
-        return json.load(stream)
+        return json.load(stream, parse_constant=lambda value: invalid(f'non-finite JSON number {value}'))
+
+
+def invalid(message):
+    raise ValueError(message)
+
+
+def at(values, index, label):
+    if not isinstance(values, list) or type(index) is not int or not 0 <= index < len(values):
+        invalid(f'{label}: invalid table index')
+    return values[index]
+
+
+def number(value, label):
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        invalid(f'{label}: expected a finite nonnegative number')
+    return value
+
+
+def mapping(value, label):
+    if not isinstance(value, dict):
+        invalid(f'{label}: expected an object')
+    return value
+
+
+def sequence(value, label):
+    if not isinstance(value, list):
+        invalid(f'{label}: expected an array')
+    return value
+
+
+def text(value, label):
+    if not isinstance(value, str):
+        invalid(f'{label}: expected text')
+    return value
 
 
 def fold(profile, symbols):
+    profile = mapping(profile, 'profile')
+    symbols = mapping(symbols, 'symbols')
+    mapping(profile['meta'], 'profile metadata')
+    if profile['meta']['preprocessedProfileVersion'] != 49:
+        invalid('expected samply 0.13.1 processed profile format 49; record with the pinned profiler')
     if profile['meta']['sampleUnits']['threadCPUDelta'] != 'µs':
         raise ValueError('expected samply threadCPUDelta in microseconds')
-    strings = symbols['string_table']
+    strings = sequence(symbols['string_table'], 'symbol strings')
     tables = {}
-    for entry in symbols['data']:
-        tables[(entry['debug_name'], entry['debug_id'].replace('-', '').upper())] = sorted(
-            (s['rva'], s['size'], strings[s['symbol']]) for s in entry['symbol_table'])
+    for entry in sequence(symbols['data'], 'symbol data'):
+        entry = mapping(entry, 'symbol entry')
+        tables[(text(entry['debug_name'], 'symbol debug name'), text(entry['debug_id'], 'symbol debug id').replace('-', '').upper())] = sorted(
+            (number(s['rva'], 'symbol rva'), number(s['size'], 'symbol size'), at(strings, s['symbol'], 'symbol string')) for s in (mapping(row, 'symbol row') for row in sequence(entry['symbol_table'], 'symbol table')))
 
     def symbol(lib, address):
         table = tables.get((lib['debugName'], lib['breakpadId'][:32]), [])
@@ -30,7 +71,8 @@ def fold(profile, symbols):
         return lib['debugName'] + '!unresolved'
 
     processes = collections.defaultdict(list)
-    for thread in profile['threads']:
+    for thread in sequence(profile['threads'], 'threads'):
+        thread = mapping(thread, 'thread')
         if thread.get('processName') == 'onepipeline':
             processes[thread['pid']].append(thread)
     output = []
@@ -46,22 +88,29 @@ def fold(profile, symbols):
 
             def name(frame):
                 if frame not in names:
-                    resource = thread['funcTable']['resource'][frames['func'][frame]]
-                    lib = thread['resourceTable']['lib'][resource] if resource is not None and resource >= 0 else None
-                    names[frame] = symbol(profile['libs'][lib], frames['address'][frame]) if lib is not None and frames['address'][frame] not in (None, -1) else 'unresolved'
+                    resource = at(thread['funcTable']['resource'], at(frames['func'], frame, 'frame function'), 'function resource')
+                    lib = at(thread['resourceTable']['lib'], resource, 'resource library') if resource is not None and resource != -1 else None
+                    names[frame] = symbol(at(profile['libs'], lib, 'library'), number(at(frames['address'], frame, 'frame address'), 'frame address')) if lib is not None and at(frames['address'], frame, 'frame address') not in (None, -1) else 'unresolved'
                 return names[frame]
 
             samples = thread['samples']
-            for i in range(samples['length']):
-                cpu = samples['threadCPUDelta'][i] or 0
+            length = samples['length']
+            if type(length) is not int or length < 0 or any(len(samples[key]) != length for key in ('threadCPUDelta', 'stack')):
+                invalid('sample columns do not match their declared length')
+            for i in range(length):
+                cpu = number(samples['threadCPUDelta'][i] if samples['threadCPUDelta'][i] is not None else 0, 'sample CPU')
                 if not cpu:
                     continue
                 total += cpu
                 stack = samples['stack'][i]
                 chain = []
+                visited = set()
                 while stack is not None:
-                    chain.append(name(stacks['frame'][stack]))
-                    stack = stacks['prefix'][stack]
+                    if type(stack) is not int or stack in visited:
+                        invalid('stack has an invalid index or cycle')
+                    visited.add(stack)
+                    chain.append(name(at(stacks['frame'], stack, 'stack frame')))
+                    stack = at(stacks['prefix'], stack, 'stack prefix')
                 leaf = chain[0] if chain else 'unresolved (no stack)'
                 leaves[leaf] += cpu
                 owner = next((n for n in chain if re.match(r'^<?(?:one[a-z_]*|privateterms)::', n)), leaf)
@@ -69,7 +118,13 @@ def fold(profile, symbols):
                 modules['::'.join(owner.lstrip('<').split('::')[:2])] += cpu
         first = threads[0]
         start, end = first.get('processStartupTime'), first.get('processShutdownTime')
+        if start is not None and end is not None:
+            number(start, 'process start')
+            number(end, 'process end')
+            if end < start:
+                invalid('process end precedes its start')
         life = f'{end-start:.3f} ms' if start is not None and end is not None else 'not measured'
+        # llmlint: ignore-block[tool_output_is_signal] The requested never-land CPU attribution report needs rows reaching 80 percent, with unresolved frames and uncertainty visible; a single success line loses that evidence (manager a1).
         output.append(f'pid {pid}: sampled CPU {total/1000:.3f} ms; lifetime {life}; threads {len(threads)}')
         for title, counts in [('nearest first-party module (otherwise leaf)', modules), ('nearest first-party function (otherwise leaf)', functions), ('self function', leaves)]:
             output.append(title + ':')
@@ -80,17 +135,18 @@ def fold(profile, symbols):
                 if accumulated >= total * .8:
                     break
         output.append('CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.')
+        # llmlint: ignore-end[tool_output_is_signal]
     if not output:
         raise ValueError('no onepipeline process found; record the real e2e journey with subprocess sampling')
     return '\n'.join(output) + '\n'
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__ + ' Exit codes: 0 report produced; 2 malformed input or command usage, with a repair on stderr.')
     parser.add_argument('profile')
     parser.add_argument('symbols')
     args = parser.parse_args()
     try:
         print(fold(read_json(args.profile), read_json(args.symbols)), end='')
-    except (ValueError, KeyError, OSError, TypeError) as error:
+    except (ValueError, KeyError, OSError, TypeError, IndexError, AttributeError, EOFError) as error:
         parser.exit(2, f'engine-startup-cpu: {error}; supply a samply profile and its presymbolicated sidecar\n')

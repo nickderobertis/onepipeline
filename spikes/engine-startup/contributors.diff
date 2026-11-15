@@ -1,0 +1,6 @@
+diff --git a/vendor/privateterms/src/matcher.rs b/vendor/privateterms/src/matcher.rs
+--- a/vendor/privateterms/src/matcher.rs
++++ b/vendor/privateterms/src/matcher.rs
+@@ -1 +1 @@
+-const DEFAULT_STARTUP_CUT: StartupCut = StartupCut::Baseline;
++const DEFAULT_STARTUP_CUT: StartupCut = StartupCut::Contributors;

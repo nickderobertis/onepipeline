@@ -1,3 +1,4 @@
+// Exit codes: 0 report produced, 2 invalid input (repair printed on stderr).
 // Measurement-only engine-startup spike; the inventory owns trace validation and scope.
 import { pathToFileURL } from "node:url";
 import { foldJob, readJob } from "./launch-inventory.mjs";
@@ -10,9 +11,13 @@ export function main(args) {
   const folds = [];
   const rows = args.slice(1).map((arg) => {
     const at = arg.indexOf("=");
-    if (at < 1 || at === arg.length - 1) throw new Error(`expected LABEL=UNPACKED_JOB, got ${arg}`);
+    if (at < 1 || at === arg.length - 1)
+      throw new Error(
+        `expected LABEL=UNPACKED_JOB, got ${arg}; unzip a job artifact and pass e.g. before/1=/path/to/job`,
+      );
     const f = foldJob(readJob(arg.slice(0, at), arg.slice(at + 1)));
     folds.push({ label: f.label, os: f.os, wallS: f.wallS, names: f.names });
+    // llmlint: ignore-block[tool_output_is_signal] This never-land measurement report must print each job and side, with uncertainty beside the numbers; one success line would discard the deliverable (manager a1).
     const lines = [
       `${f.label} (${f.os})`,
       `runner: ${f.host?.cpu_model ?? "not recorded"}; cores: ${f.host?.cpus ?? "not recorded"}`,
@@ -33,6 +38,7 @@ export function main(args) {
       `test profiles: ${f.testCount}; names digest: ${f.testsDigest}; scope: ${JSON.stringify(f.scope)}`,
     );
     return lines.join("\n");
+    // llmlint: ignore-end[tool_output_is_signal]
   });
   const groups = new Map();
   for (const f of folds) {
@@ -42,6 +48,7 @@ export function main(args) {
     groups.get(key).push(f);
   }
   const mean = (values) => values.reduce((a, b) => a + b, 0) / values.length;
+  // llmlint: ignore-block[tool_output_is_signal] These never-land comparison rows are the requested measurement report, not a mutation command success message (manager a1).
   for (const [key, members] of groups) {
     const minutes = members.filter((f) => f.wallS != null).map((f) => f.wallS / 60);
     if (!minutes.length) continue;
@@ -68,6 +75,7 @@ export function main(args) {
     }
   }
   return `${rows.join("\n\n")}\n`;
+  // llmlint: ignore-end[tool_output_is_signal]
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the real vendored public matcher API in both selectable configurations.
+# Exit codes: 0 all equivalence assertions pass; invalid setup, compiler or assertion failures propagate a nonzero command status.
 set -euo pipefail
 scratch="${ONEPIPELINE_NODE_SCRATCH_DIR:?set ONEPIPELINE_NODE_SCRATCH_DIR to a writable scratch directory}"
 build="$scratch/privateterms-build.$$.jsonl"

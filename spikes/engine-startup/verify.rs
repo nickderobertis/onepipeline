@@ -1,11 +1,14 @@
 //! Measurement-only public-API equivalence journey; no existing test is changed.
-use privateterms::{Action, LocatorKind, Matcher, ResolvedRule, TermMode, TermRule};
+use privateterms::{
+    Action, LocatorKind, Matcher, ResolvedRule, TermMode, TermRule, STARTUP_CONTRIBUTORS,
+    STARTUP_CUT_ENV,
+};
 
 fn matcher(cut: bool, mode: TermMode, case_sensitive: bool) -> Matcher {
     if cut {
-        std::env::set_var("ONEPIPELINE_STARTUP_CUT", "contributors");
+        std::env::set_var(STARTUP_CUT_ENV, STARTUP_CONTRIBUTORS);
     } else {
-        std::env::remove_var("ONEPIPELINE_STARTUP_CUT");
+        std::env::set_var(STARTUP_CUT_ENV, "baseline");
     }
     Matcher::new(
         ["secret", "σ", "café", "İ", "owner/repo", "ﬃ"]
@@ -31,6 +34,19 @@ fn matcher(cut: bool, mode: TermMode, case_sensitive: bool) -> Matcher {
 }
 
 fn main() {
+    std::env::set_var(STARTUP_CUT_ENV, "unsupported");
+    assert!(
+        Matcher::new(Vec::new(), &[]).is_err(),
+        "an unknown cut must be refused"
+    );
+    let baseline = matcher(false, TermMode::Substring, false);
+    std::env::remove_var(STARTUP_CUT_ENV);
+    let default = Matcher::new(baseline.rules().to_vec(), &["public secret".into()])
+        .expect("the unset selector constructs a matcher");
+    assert_eq!(
+        default.replace("ＳＥＣＲＥＴ"),
+        baseline.replace("ＳＥＣＲＥＴ")
+    );
     let mut checks = 0;
     for mode in [
         TermMode::Substring,

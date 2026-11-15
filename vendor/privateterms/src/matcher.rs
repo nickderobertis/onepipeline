@@ -43,6 +43,34 @@ pub struct Replaced {
     pub remaining: Vec<usize>,
 }
 
+/// Measurement-only selector shared with this spike's public-API verification command.
+pub const STARTUP_CUT_ENV: &str = "ONEPIPELINE_STARTUP_CUT";
+/// Measurement-only spelling of the contributor-prefilter bypass.
+pub const STARTUP_CONTRIBUTORS: &str = "contributors";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupCut {
+    Baseline,
+    Contributors,
+}
+
+// Measurement-only compile-time demonstration switch; the environment remains an explicit override.
+const DEFAULT_STARTUP_CUT: StartupCut = StartupCut::Baseline;
+
+impl StartupCut {
+    fn read() -> Result<Self, Unbuildable> {
+        let value = std::env::var_os(STARTUP_CUT_ENV);
+        match value.as_ref().map(|value| value.to_str()) {
+            None => Ok(DEFAULT_STARTUP_CUT),
+            Some(Some("baseline")) => Ok(Self::Baseline),
+            Some(Some(STARTUP_CONTRIBUTORS)) => Ok(Self::Contributors),
+            _ => Err(Unbuildable {
+                reason: "ONEPIPELINE_STARTUP_CUT must be baseline or contributors, or unset".into(),
+            }),
+        }
+    }
+}
+
 /// A set of resolved rules and public phrases, compiled once and asked of any number of
 /// texts.
 pub struct Matcher {
@@ -121,9 +149,8 @@ impl Matcher {
         // Measurement-only prototype, never lands: this conservative prefilter can
         // only avoid a full scan. Bypassing it retains normalization, matching,
         // phrase exemptions and span mapping, including Unicode input.
-        let contributors = (std::env::var_os("ONEPIPELINE_STARTUP_CUT").as_deref()
-            != Some(std::ffi::OsStr::new("contributors")))
-        .then(|| Contributors::new(rules.iter().map(|r| term_key(&r.rule.term))));
+        let contributors = (StartupCut::read()? == StartupCut::Baseline)
+            .then(|| Contributors::new(rules.iter().map(|r| term_key(&r.rule.term))));
         Ok(Matcher {
             contributors,
             candidates,

@@ -54,3 +54,66 @@ test("fold groups hosted sides and marks a zero difference undecided", () => {
   );
   assert.match(run.stdout, /baseline test profiles missing \[\]/);
 });
+
+test("fold prices nonzero means against both observed spreads and reports missing profiles", async () => {
+  const { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } =
+    await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-fold-"),
+  );
+  try {
+    const original = new URL("./golden/launch-inventory/", import.meta.url).pathname;
+    const jobs = [];
+    for (const [label, seconds] of [
+      ["before/1", 60],
+      ["before/2", 120],
+      ["inside/1", 30],
+      ["inside/2", 60],
+      ["outside/1", 10],
+      ["outside/2", 20],
+    ]) {
+      const dir = join(root, label);
+      cpSync(original, dir, { recursive: true });
+      const log = join(dir, "job.log");
+      writeFileSync(
+        log,
+        readFileSync(log, "utf8").replace(
+          /Summary \[\s*60\.000s\] 2 tests run/,
+          `Summary [${seconds.toFixed(3)}s] 2 tests run`,
+        ),
+      );
+      jobs.push(`${label}=${dir}`);
+    }
+    const missing = readdirSync(join(root, "outside/2/test-profile/e2e"))[0];
+    unlinkSync(join(root, "outside/2/test-profile/e2e", missing));
+    const run = spawnSync(process.execPath, [script.pathname, "fold", ...jobs], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(
+      run.stdout,
+      /before\/linux: e2e mean 1\.500000 min; range 1\.000000\.\.2\.000000; n=2/,
+    );
+    assert.match(run.stdout, /inside\/linux: before-minus-after 0\.750000 min; undecided/);
+    assert.match(
+      run.stdout,
+      /outside\/linux: before-minus-after 1\.250000 min; outside observed spreads; typical PR estimate \(27\/30\) 1\.125000 min/,
+    );
+    assert.match(run.stdout, /outside\/2: baseline test profiles missing \["destination::/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("profiling command refuses an unrelated executable before attempting a capture", () => {
+  const runner = new URL("../../scripts/engine-startup-profile.sh", import.meta.url).pathname;
+  const run = spawnSync(
+    "bash",
+    [runner, process.execPath, process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? "."],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 2, run.stderr);
+  assert.match(run.stderr, /expected the compiled e2e-HASH binary/);
+});

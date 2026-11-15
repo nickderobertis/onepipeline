@@ -72,7 +72,7 @@ pub use error::{
 };
 pub use levels::{discover_levels, read_dir_level, Level, LevelKind, FILE_NAMES};
 pub use locator::{Locator, LocatorKind, LOCATOR_UNFIXABLE_REASON};
-pub use matcher::{redact_all, Hit, Matcher, Replaced};
+pub use matcher::{redact_all, Hit, Matcher, Replaced, STARTUP_CONTRIBUTORS, STARTUP_CUT_ENV};
 pub use model::{Declaration, Exception, ExceptionAction, Replacement};
 pub use resolve::{resolve, Action, ResolvedRule, TermMode, TermRule};
 
