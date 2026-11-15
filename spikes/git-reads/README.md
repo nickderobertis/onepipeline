@@ -78,3 +78,10 @@ job-own reruns. A72’s no-prototype-answer condition is checked from the saved
 main trace plus process-local cache/spawn paths, documented in provenance.
 Batch mode reuse is off, no batch child/cache seed existed in that invocation.
 The duplicate-dispatch follow-up is drafted separately; test bodies stay frozen.
+
+Reuse-only demonstration is prepared locally at1c95ed5b, not pushed/opened. Its
+workflow/cache tests pass69of69. A temporary dependency link accidentally entered
+655e06fc and was removed in1c95ed5b before publication; final diff contains no link.
+First-point named set comparison is in evidence/round1-name-parity.json:
+no extra or unexplained missing main names beyond the explicitly inferred
+Linux loopcost and three positively rerun failures.

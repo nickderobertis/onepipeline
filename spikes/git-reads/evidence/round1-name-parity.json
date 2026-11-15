@@ -1,0 +1,70 @@
+{
+  "command": "compare sets of passed names from baseline facts with each first-point facts plus separate positive diagnostic records; no modification of strict fold",
+  "commit": "cc5d465d",
+  "jobs": [
+    {
+      "run": 43753067613,
+      "attempt": 1,
+      "job": 132931087404,
+      "platform": "linux",
+      "baseline_named": 2155,
+      "strict_named": 2154,
+      "missing_strict": [
+        "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps"
+      ],
+      "recovered": [],
+      "missing_after_diagnostics": [
+        "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps"
+      ],
+      "extra": []
+    },
+    {
+      "run": 43753064453,
+      "attempt": 1,
+      "job": 132931076438,
+      "platform": "windows",
+      "baseline_named": 1832,
+      "strict_named": 1831,
+      "missing_strict": [
+        "withdrawn::a_launch_leaves_out_a_task_a_person_withdrew_and_never_reopens_it"
+      ],
+      "recovered": [
+        "withdrawn::a_launch_leaves_out_a_task_a_person_withdrew_and_never_reopens_it"
+      ],
+      "missing_after_diagnostics": [],
+      "extra": []
+    },
+    {
+      "run": 43753064453,
+      "attempt": 1,
+      "job": 132931076404,
+      "platform": "macos",
+      "baseline_named": 2121,
+      "strict_named": 2120,
+      "missing_strict": [
+        "watch::a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_written"
+      ],
+      "recovered": [
+        "watch::a_logged_watch_appends_across_a_resume_and_each_line_is_readable_as_it_is_written"
+      ],
+      "missing_after_diagnostics": [],
+      "extra": []
+    },
+    {
+      "run": 43753067613,
+      "attempt": 1,
+      "job": 132931087445,
+      "platform": "windows",
+      "baseline_named": 1832,
+      "strict_named": 1831,
+      "missing_strict": [
+        "driver::a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph"
+      ],
+      "recovered": [
+        "driver::a_dependency_chain_runs_to_completion_under_start_with_no_agent_graph"
+      ],
+      "missing_after_diagnostics": [],
+      "extra": []
+    }
+  ]
+}
