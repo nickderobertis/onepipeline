@@ -412,7 +412,6 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # the run did not select; counting them would hold the floor to code no tier measures.
 _tier-test unit filter:
     @bash scripts/ensure-test-archive.sh coverage
-    @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || [ ! -f crates/testfakes/Cargo.toml ] || ! grep -Fqx 'name = "oneagentgraph"' Cargo.lock || just _e2e-doubles-build instrumented
     @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers
@@ -495,7 +494,6 @@ test-quick:
 # before allowing that share to be empty; an empty filter still fails.
 _tier-test-quick filter:
     @bash scripts/ensure-test-archive.sh quick
-    @[ -z "${ONEPIPELINE_TEST_ARCHIVE:-}" ] || [ ! -f crates/testfakes/Cargo.toml ] || ! grep -Fqx 'name = "oneagentgraph"' Cargo.lock || just _e2e-doubles-build plain
     @partition=$(bash scripts/test-partition.sh) && \
       no_tests=fail && \
       if [ -n "$partition" ]; then \
@@ -526,17 +524,6 @@ _note-test-quick: (_tier-test-quick note-tier)
 # fingerprints, so the two plain builds are separate units. `scripts/warm-rust-cache.sh`
 # builds them so main's saved cache carries them, and a pull request's test-time build is
 # a freshness check rather than a compile inside whichever journey asks first.
-#
-# Every tier that drives them also builds them before its tests, after its own test
-# build, because a test build after them leaves them stale: a coverage or `test-quick`
-# tier once the job has archived that build (only CI sets `ONEPIPELINE_TEST_ARCHIVE`),
-# and only in a workspace carrying the doubles and agent engine. The copied-tree
-# coverage fixtures retain a stub testfakes crate but remove the engine dependencies;
-# smoke and release-compat build theirs with `--no-run` first. So
-# when main's cache does not carry them (a dependency or profile change it predates),
-# the compile is not inside one journey's `terminate-after`: with every dependency at
-# `opt-level` 2 it took three `codex_server` journeys past 360 s on a 3-core macOS
-# runner (run 43660688297) and one to 534 s of Windows' 540 (run 43660699161).
 _e2e-doubles-build mode:
     @case "$1" in \
       instrumented) eval "$(cargo llvm-cov show-env --export-prefix)"; export RUSTFLAGS="-D warnings"; target="{{llvm-cov-target-dir}}" ;; \
@@ -617,8 +604,6 @@ smoke-real:
 # target's wiring can be shown without the credential: `just nx run
 # onepipeline-real-smoke:smoke --no-run` builds the binary and runs nothing.
 _smoke-run *args:
-    @cargo nextest run --locked -E 'binary(smoke)' --no-run
-    @just _e2e-doubles-build plain
     @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all "$@"
 
 # The npm launcher's process-tree journeys alone: what the installed command
@@ -632,11 +617,6 @@ _smoke-run *args:
 npm-launcher:
     @RUSTFLAGS="-D warnings" node --test npm/test/launcher-process.test.mjs npm/test/spawn-support.test.mjs
 
-# The launcher's staged debug tree is separate from the suite's. Warm it through
-# the same helpers that choose its host target, target directory and Cargo call.
-_npm-launcher-build:
-    @RUSTFLAGS="-D warnings" node --input-type=module -e 'import { hostTarget, run } from "./npm/test/install-support.mjs"; run("cargo", ["build", "--locked", "--bin", "onepipeline", "--target", hostTarget()]);'
-
 # Outside `check` and `gate` because uv fetches the wheel from a package
 # registry; CI's `release-compat` job calls this, and without uv it fails naming
 # it. It runs the `onepipeline-release-compat` project's uncached target, which
@@ -649,8 +629,6 @@ release-compat:
 # self-tests, which the e2e tier already runs. Arguments are passed through to
 # nextest, as `_smoke-run`'s are.
 _release-compat-run *args:
-    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' --no-run
-    @just _e2e-doubles-build plain-deny-warnings
     @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(release_channel) and not test(/^harness::/)' "$@"
 
 # The stop-verdict budget journeys alone: build the release binary (compilation

@@ -1824,16 +1824,21 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
-# Every dependency is optimized in debug and test builds. Most of what an e2e
-# journey's `onepipeline` process spends is the engine's own CPU in this build, and
-# most of that is dependency code, the event registry's JSON Schema validators at
-# start among it (about 140 ms unoptimized, 30 ms optimized). With every dependency
-# at 2, `onepipeline start` measured 1,794 ms to 847 ms on Linux and 3,954 ms to
-# 3,089 ms on Windows. `"*"` never matches a workspace member, so this crate and
-# `onepipeline-testfakes` stay at opt-level 0 and what coverage instruments is
-# unchanged.
-[profile.dev.package."*"]
-opt-level = 2
+# Every debug process — each `onepipeline` an e2e test spawns — builds the event
+# registry at start, compiling a JSON Schema validator per payload: about 140 ms
+# unoptimized, about 30 ms with these dependencies optimized. Workspace members stay
+# at opt-level 0, so what coverage instruments is unchanged.
+[profile.dev.package]
+ahash = { opt-level = 2 }
+fancy-regex = { opt-level = 2 }
+jsonschema = { opt-level = 2 }
+jsonschema-regex = { opt-level = 2 }
+jsonschema-value = { opt-level = 2 }
+referencing = { opt-level = 2 }
+regex = { opt-level = 2 }
+regex-automata = { opt-level = 2 }
+regex-syntax = { opt-level = 2 }
+schemars = { opt-level = 2 }
 
 # Wire-level refusal checks for the shared Codex app-server double, isolated
 # from the dispatch journeys so its backstops rerun only for their own inputs.

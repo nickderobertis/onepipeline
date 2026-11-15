@@ -5,7 +5,6 @@
 #   warm-rust-cache.sh linux    what `test-linux` builds: the instrumented test
 #                               build every coverage tier runs, the debug build
 #                               the stop-verdict tier and the npm suite run, the
-#                               staged debug build the npm launcher installs, the
 #                               release build the stop-verdict tier times and the
 #                               install proof installs, and the docs; and
 #                               clippy's build, for `lint`, which restores this
@@ -15,7 +14,6 @@
 #                               plain under denied warnings for release-compat.
 #   warm-rust-cache.sh cross    what `test-windows` and `test-macos` build: the
 #                               uninstrumented test build, clippy's, the
-#                               staged debug build the npm launcher installs, the
 #                               release build the install proof installs, and
 #                               the e2e harness's test doubles.
 #
@@ -45,7 +43,6 @@ case "${1:-}" in
   linux)
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-archive
     just _crate-build _stop-verdict-build _crate-doc _crate-lint
-    just _npm-launcher-build
     just _e2e-doubles-build instrumented
     just _e2e-doubles-build plain
     just _e2e-doubles-build plain-deny-warnings
@@ -53,7 +50,6 @@ case "${1:-}" in
   cross)
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-quick-archive
     just _crate-lint _stop-verdict-build
-    just _npm-launcher-build
     just _e2e-doubles-build plain
     ;;
   *)

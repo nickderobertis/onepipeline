@@ -148,19 +148,6 @@ test("a tier that leaves out a file only its journeys read at run time is named,
   );
 });
 
-test("copied workspace coverage tiers run with an inherited diagnostic archive", {
-  timeout: 900000,
-}, (t) => {
-  const fixture = scratch(t);
-  const archive = join(fixture, "tests.tar.zst");
-  writeFileSync(archive, "the enclosing job already archived its test build\n");
-  const result = nx(fixture, test_all, {
-    env: { ONEPIPELINE_TEST_ARCHIVE: archive },
-  });
-  assert.equal(result.status, 0, result.output);
-  assert.deepEqual(tierOutcome(result).executed, TIERS.toSorted());
-});
-
 test("readSets expands a directory the code joins at the workspace root", (t) => {
   const dir = copyTree(t);
   const reads = readSets(dir).get("onepipeline-contract");
