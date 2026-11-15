@@ -36,3 +36,11 @@ other binary here.
 - **The live tiers have no `test`.** Their journey is an uncached target of
   its own that no `check` reaches, and refuses — never skips — without its
   credential or network.
+- **An exclusive tier runs with nothing else.** A `test` or `test-quick` target
+  marked `parallelism: false` starts only once no other Nx task is running, and
+  nothing starts beside it. The e2e tiers carry it so one nextest process runs
+  at a time (#783): the `e2e` test group's process-tree cap and the overrides
+  that take the whole group are per nextest process, so a second one beside
+  them is the oversubscription the cap exists to prevent. The budget and live
+  tiers carry it because they time themselves or failed under load
+  (`status-read`, `human-items`, `smoke`, `release-compat`).
