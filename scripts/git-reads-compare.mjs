@@ -264,6 +264,8 @@ export function summarizeJob(label, dir) {
     starts: 0,
     seconds: 0,
     missingLifetimes: 0,
+    failedSpawns: 0,
+    failedSpawnSeconds: 0,
     byVerb: {},
     byShape: {},
     engineSites: {},
@@ -271,7 +273,14 @@ export function summarizeJob(label, dir) {
   for (const r of trace.starts) {
     if (r.program !== "git") continue;
     const s = (r.exit_ns ?? 0) / 1e9;
-    const missing = r.exit_ns == null ? 1 : 0;
+    // Launch::spawned writes a null child when Command::spawn failed. That
+    // attempt has a measured spawn-call cost, but no child lifetime to collect.
+    const failedSpawn = r.spawn_ns != null && r.child === null;
+    const missing = r.exit_ns == null && !failedSpawn ? 1 : 0;
+    if (failedSpawn) {
+      git.failedSpawns++;
+      git.failedSpawnSeconds += r.spawn_ns / 1e9;
+    }
     const verb = verbOf.get(trace.key(r.file, r.pid, r.instance)) ?? "(unknown)";
     const { shape, site } = classify(r.argv ?? []);
     const engineSite = /^onepipeline(?:::|_core::)/.test(r.function ?? "")
@@ -425,6 +434,9 @@ function renderSide(side) {
   );
   out.push("", "Nx selection, workflow blob, cache restores and cache writes:", "");
   for (const j of side.jobs) {
+    out.push(
+      `- ${j.label}: failed Git spawns: ${j.git.failedSpawns} (${fmt(j.git.failedSpawnSeconds, 6)} s in failed spawn calls)`,
+    );
     out.push(`- ${j.label}: unmeasured Git lifetimes: ${j.git.missingLifetimes}`);
     const restores =
       j.cacheSteps.map((s) => `${s.name}: ${s.hit}, ${fmt(s.seconds, 1)} s`).join("; ") || "none";
@@ -575,7 +587,7 @@ function renderComparison(before, after) {
 export function render(sides) {
   const [before, ...afters] = sides;
   const note =
-    "Git seconds sum recorded child lifetimes only; (+N unknown) counts starts without an exit duration, never zero-cost children.";
+    "Git starts count the frozen inventory's launch attempts, including failed spawns (reported separately with their spawn-call cost). Git seconds sum recorded child lifetimes only; (+N unknown) counts launches without an exit duration after explicit failed spawns are removed, never zero-cost children.";
   return `${[note, ...sides.map(renderSide), ...afters.map((after) => renderComparison(before, after))].join("\n\n")}\n`;
 }
 

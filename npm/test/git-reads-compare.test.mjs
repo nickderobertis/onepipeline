@@ -365,3 +365,30 @@ test("a Git start without an exit remains counted with an explicitly unknown lif
     assert.match(result.stdout, /\| linux \| 1\/1 .* \| 39 \| 39 \|/);
   });
 });
+
+test("a failed spawn is an attempted start, not an unknown child's lifetime", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const dir = join(jobOf(after), "test-profile/launch");
+    const path = join(
+      dir,
+      readdirSync(dir).find((f) => f.endsWith(".jsonl")),
+    );
+    const records = readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const first = records.find((r) => r.kind === "start" && r.program === "git");
+    first.child = null;
+    const kept = records.filter(
+      (r) => !(r.kind === "exit" && r.pid === first.pid && r.seq === first.seq),
+    );
+    writeFileSync(path, `${kept.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    const result = run("compare", before, after);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /after\/attempt-0\/test-linux: failed Git spawns: 1 \(0\.003018 s/);
+    assert.match(result.stdout, /after\/attempt-0\/test-linux: unmeasured Git lifetimes: 0/);
+    assert.doesNotMatch(result.stdout, /\(\+1\.0 unknown\)/);
+  });
+});
