@@ -47,6 +47,7 @@
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/scripts/test-profile-report.mjs",
         "{workspaceRoot}/scripts/launch-inventory.mjs",
+        "{workspaceRoot}/scripts/git-reads-compare.mjs",
         "{workspaceRoot}/scripts/launch-os-trace.sh",
         "{workspaceRoot}/scripts/windows-job-profile.mjs",
         "{workspaceRoot}/scripts/crate-split-replay.mjs",

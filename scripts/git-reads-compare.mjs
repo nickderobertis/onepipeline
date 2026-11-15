@@ -13,8 +13,9 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { jobFacts, largestRun, readJob, Refusal } from "./launch-inventory.mjs";
+import { jobFacts, joinTrace, largestRun, readJob, Refusal } from "./launch-inventory.mjs";
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: job logs contain ANSI escapes.
 const ANSI = /\x1b\[[0-9;]*m/g;
 const PLATFORMS = ["linux", "macos", "windows"];
 /** Share of non-release `main` commits whose changes include `src/` (the test-cost spike's P30: 27 of 30). */
@@ -28,15 +29,39 @@ export const TYPICAL_SHARE = 27 / 30;
 const SHAPES = [
   [/^show-ref --verify --quiet /, "show-ref --verify", "onevcs git::ref_exists"],
   [/^symbolic-ref --short refs\//, "symbolic-ref --short", "onevcs git::tracked_head"],
-  [/^symbolic-ref (-q|--quiet)/, "symbolic-ref -q", "onevcs git::carry_remote_refs/checked_out/detached_at/default_branch"],
+  [
+    /^symbolic-ref (-q|--quiet)/,
+    "symbolic-ref -q",
+    "onevcs git::carry_remote_refs/checked_out/detached_at/default_branch",
+  ],
   [/^rev-parse --abbrev-ref HEAD$/, "rev-parse --abbrev-ref HEAD", "onevcs git::current_branch"],
   [/^rev-parse --is-inside-work-tree$/, "rev-parse --is-inside-work-tree", "onevcs git::is_repo"],
   [/^cat-file -e /, "cat-file -e", "onevcs git::has_commit"],
-  [/^cat-file --batch-check/, "cat-file --batch-check (batch reader)", "onevcs spike_reads::batched::start"],
-  [/^rev-parse --verify (-q |--quiet )?\S+\^\{commit\}$/, "rev-parse --verify NAME^{commit}", "onevcs git::tip/commit_of/merge_in_progress; engine vcs::worktree_head"],
-  [/^rev-parse --verify \S+\^\{tree\}$/, "rev-parse --verify NAME^{tree}", "onevcs git::tree_of/already_integrates"],
-  [/^rev-parse --verify (-q |--quiet )?\S+$/, "rev-parse --verify NAME", "onevcs git (other --verify reads)"],
-  [/^rev-parse --git-path /, "rev-parse --git-path", "onevcs git::git_owned_path; engine destination::git_path"],
+  [
+    /^cat-file --batch-check/,
+    "cat-file --batch-check (batch reader)",
+    "onevcs spike_reads::batched::start",
+  ],
+  [
+    /^rev-parse --verify (-q |--quiet )?\S+\^\{commit\}$/,
+    "rev-parse --verify NAME^{commit}",
+    "onevcs git::tip/commit_of/merge_in_progress; engine vcs::worktree_head",
+  ],
+  [
+    /^rev-parse --verify \S+\^\{tree\}$/,
+    "rev-parse --verify NAME^{tree}",
+    "onevcs git::tree_of/already_integrates",
+  ],
+  [
+    /^rev-parse --verify (-q |--quiet )?\S+$/,
+    "rev-parse --verify NAME",
+    "onevcs git (other --verify reads)",
+  ],
+  [
+    /^rev-parse --git-path /,
+    "rev-parse --git-path",
+    "onevcs git::git_owned_path; engine destination::git_path",
+  ],
   [/^rev-parse --git-common-dir$/, "rev-parse --git-common-dir", "onevcs git::common_dir"],
   [/^rev-parse HEAD$/, "rev-parse HEAD", "onevcs git::head_sha"],
   [/^remote get-url /, "remote get-url", "onevcs git::remote_url/has_remote"],
@@ -77,14 +102,20 @@ export function outcomes(log, run) {
     const line = raw.replace(/^\S+Z\s?/, "");
     if (line.includes(`Nextest run ID ${run.id}`)) inside = true;
     if (!inside) continue;
-    const m = /^\s*(TRY \d+ )?(PASS|FAIL|FLAKY|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|ABORT|LEAK-FAIL)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?onepipeline::e2e\s+(\S+)/.exec(line);
+    const m =
+      /^\s*(TRY \d+ )?(PASS|FAIL|FLAKY|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|ABORT|LEAK-FAIL)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?onepipeline::e2e\s+(\S+)/.exec(
+        line,
+      );
     if (m) {
       const [, attempt, status, name] = m;
       if (status === "PASS") {
         passedLines.add(name);
         failed.delete(name);
-      } else if (status === "FLAKY") retried.add(name);
-      else {
+      } else if (status === "FLAKY") {
+        retried.add(name);
+        passedLines.add(name);
+        failed.delete(name);
+      } else {
         if (attempt) retried.add(name);
         failed.add(name);
       }
@@ -122,28 +153,30 @@ export function summarizeJob(label, dir) {
   const log = job.log ?? "";
   const facts = log ? jobFacts(log) : null;
   const run = largestRun(log);
-  const { failed, retried } = outcomes(log, run);
+  const { failed, retried, passedLines } = outcomes(log, run);
   const names = job.tests.map((t) => t.test).sort();
-  const passed = names.filter((n) => !failed.has(n));
-  const verbOf = new Map();
-  for (const r of job.trace)
-    if (r.kind === "proc")
-      verbOf.set(`${r.file}\u0000${r.pid}`, /^e2e-|^smoke-/.test(r.exe ?? "") ? "(test process)" : `${r.exe} ${r.verb ?? ""}`.trim());
-  const exits = new Map();
-  for (const r of job.trace) if (r.kind === "exit") exits.set(`${r.file}\u0000${r.pid}\u0000${r.seq}`, r);
+  const passed = names.filter((n) => passedLines.has(n) && !failed.has(n));
+  const trace = joinTrace(job.trace);
+  const verbOf = new Map(
+    trace.procs.map((r) => [
+      trace.key(r.file, r.pid, r.instance),
+      /^e2e-|^smoke-/.test(r.exe ?? "") ? "(test process)" : `${r.exe} ${r.verb ?? ""}`.trim(),
+    ]),
+  );
   const git = { starts: 0, seconds: 0, byVerb: {}, byShape: {} };
-  for (const r of job.trace) {
-    if (r.kind !== "start" || r.program !== "git") continue;
-    const exit = exits.get(`${r.file}\u0000${r.pid}\u0000${r.seq}`);
-    const s = (r.exit_ns ?? exit?.exit_ns ?? 0) / 1e9;
-    const verb = verbOf.get(`${r.file}\u0000${r.pid}`) ?? "(unknown)";
+  for (const r of trace.starts) {
+    if (r.program !== "git") continue;
+    const s = (r.exit_ns ?? 0) / 1e9;
+    const verb = verbOf.get(trace.key(r.file, r.pid, r.instance)) ?? "(unknown)";
     const { shape, site } = classify(r.argv ?? []);
     git.starts++;
     git.seconds += s;
-    const v = (git.byVerb[verb] ??= { starts: 0, seconds: 0 });
+    git.byVerb[verb] ??= { starts: 0, seconds: 0 };
+    const v = git.byVerb[verb];
     v.starts++;
     v.seconds += s;
-    const k = (git.byShape[shape] ??= { starts: 0, seconds: 0, site });
+    git.byShape[shape] ??= { starts: 0, seconds: 0, site };
+    const k = git.byShape[shape];
     k.starts++;
     k.seconds += s;
   }
@@ -151,7 +184,9 @@ export function summarizeJob(label, dir) {
   const jobEnd = meta.completed_at ? Date.parse(meta.completed_at) / 1000 : facts?.job.end;
   return {
     label,
-    platform: job.host?.platform ?? (/macos/.test(label) ? "macos" : /windows/.test(label) ? "windows" : "linux"),
+    platform:
+      job.host?.platform ??
+      (/macos/.test(label) ? "macos" : /windows/.test(label) ? "windows" : "linux"),
     run: meta.run_id ?? null,
     attempt: meta.attempt ?? null,
     jobId: meta.job_id ?? null,
@@ -180,23 +215,34 @@ export function summarizeJob(label, dir) {
 /** Every job of one side, from its run-attempt directories. */
 export function readSide(label, dir) {
   if (!existsSync(dir))
-    throw new Refusal(`${label}: ${dir} does not exist`, "fetch the side's runs with spikes/git-reads/fetch-run.sh");
+    throw new Refusal(
+      `${label}: ${dir} does not exist`,
+      "fetch the side's runs with spikes/git-reads/fetch-run.sh",
+    );
   const jobs = [];
   for (const attempt of readdirSync(dir).sort()) {
     for (const platform of PLATFORMS) {
       const jobDir = join(dir, attempt, `test-${platform}`);
-      if (existsSync(jobDir)) jobs.push(summarizeJob(`${label}/${attempt}/test-${platform}`, jobDir));
+      if (existsSync(jobDir))
+        jobs.push(summarizeJob(`${label}/${attempt}/test-${platform}`, jobDir));
     }
   }
   if (!jobs.length)
-    throw new Refusal(`${label}: ${dir} holds no test-<platform> job directory`, "fetch the side's runs with spikes/git-reads/fetch-run.sh");
+    throw new Refusal(
+      `${label}: ${dir} holds no test-<platform> job directory`,
+      "fetch the side's runs with spikes/git-reads/fetch-run.sh",
+    );
   return { label, jobs };
 }
 
 const fmt = (x, digits = 2) => (x == null || Number.isNaN(x) ? "-" : x.toFixed(digits));
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 const table = (head, rows) =>
-  [`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`, ...rows.map((r) => `| ${r.join(" | ")} |`)].join("\n");
+  [
+    `| ${head.join(" | ")} |`,
+    `| ${head.map(() => "---").join(" | ")} |`,
+    ...rows.map((r) => `| ${r.join(" | ")} |`),
+  ].join("\n");
 
 /** Whether two sides' e2e means differ by more than either side's own spread. */
 export function decided(before, after) {
@@ -204,15 +250,32 @@ export function decided(before, after) {
   const a = after.map((j) => j.e2eMinutes).filter((x) => x != null);
   if (!b.length || !a.length) return "not measured";
   const [mb, ma] = [mean(b), mean(a)];
-  const inside = (x, xs) => x >= Math.min(...xs) && x <= Math.max(...xs);
-  return inside(ma, b) || inside(mb, a) ? "undecided (inside a side's spread)" : "decided";
+  const spread = (xs) => Math.max(...xs) - Math.min(...xs);
+  return Math.abs(mb - ma) <= Math.max(spread(b), spread(a))
+    ? "undecided (inside a side's spread)"
+    : "decided";
 }
 
 function renderSide(side) {
   const out = [`## ${side.label}`, ""];
   out.push(
     table(
-      ["job", "run/attempt/job", "GITHUB_SHA", "head", "processor", "job min", "pre-e2e min (compile and earlier tiers)", "e2e min", "git starts", "git s", "passed", "failed", "re-run", "merged line coverage"],
+      [
+        "job",
+        "run/attempt/job",
+        "GITHUB_SHA",
+        "head",
+        "processor",
+        "job min",
+        "pre-e2e min (compile and earlier tiers)",
+        "e2e min",
+        "git starts",
+        "git s",
+        "passed",
+        "failed",
+        "re-run",
+        "merged line coverage",
+      ],
       side.jobs.map((j) => [
         j.label,
         `${j.run ?? "-"}/${j.attempt ?? "-"}/${j.jobId ?? "-"}`,
@@ -231,12 +294,21 @@ function renderSide(side) {
       ]),
     ),
   );
-  out.push("", "Nx selection, cache restores and cache writes:", "");
+  out.push("", "Nx selection, workflow blob, cache restores and cache writes:", "");
   for (const j of side.jobs) {
-    const restores = j.cacheSteps.map((s) => `${s.name}: ${s.hit}, ${fmt(s.seconds, 1)} s`).join("; ") || "none";
-    const writes = j.cacheSaves.length || j.nxStored?.entries ? `${j.cacheSaves.length} Actions-cache save lines; Nx stored ${j.nxStored?.entries ?? 0}` : "none";
-    out.push(`- ${j.label}: ${j.selection ? `${j.selection.count} tasks (${j.selection.tasks.join(" ")})` : "selection not printed"}; restores: ${restores}; writes: ${writes}`);
+    const restores =
+      j.cacheSteps.map((s) => `${s.name}: ${s.hit}, ${fmt(s.seconds, 1)} s`).join("; ") || "none";
+    const writes =
+      j.cacheSaves.length || j.nxStored?.entries
+        ? `${j.cacheSaves.length} Actions-cache save lines; Nx stored ${j.nxStored?.entries ?? 0}`
+        : "none";
+    out.push(
+      `- ${j.label}: workflow blob ${j.workflowBlob ?? "not recorded"}; ${j.selection ? `${j.selection.count} tasks (${j.selection.tasks.join(" ")})` : "selection not printed"}; restores: ${restores}; writes: ${writes}`,
+    );
   }
+  out.push("", "Passed tests by name (profile and nextest PASS both required):", "");
+  for (const j of side.jobs)
+    out.push(`- ${j.label}: ${j.passed.length ? j.passed.join(", ") : "none proven"}`);
   return out.join("\n");
 }
 
@@ -270,7 +342,19 @@ function renderComparison(before, after) {
   }
   out.push(
     table(
-      ["platform", "runs before/after", "e2e mean min before", "e2e mean min after", "saved min (before − after)", "difference", `expected min saved per typical PR (× ${fmt(TYPICAL_SHARE, 2)})`, "git starts before", "git starts after", "git s before", "git s after"],
+      [
+        "platform",
+        "runs before/after",
+        "e2e mean min before",
+        "e2e mean min after",
+        "saved min (before − after)",
+        "difference",
+        `expected min saved per typical PR (× ${fmt(TYPICAL_SHARE, 2)})`,
+        "git starts before",
+        "git starts after",
+        "git s before",
+        "git s after",
+      ],
       rows,
     ),
   );
@@ -278,7 +362,11 @@ function renderComparison(before, after) {
     const b = before.jobs.filter((j) => j.platform === platform);
     const a = after.jobs.filter((j) => j.platform === platform);
     if (!b.length || !a.length) continue;
-    out.push("", `### ${platform}: git starts by read shape (mean per e2e tier) and the call site asking it`, "");
+    out.push(
+      "",
+      `### ${platform}: git starts by read shape (mean per e2e tier) and the call site asking it`,
+      "",
+    );
     const shapes = new Set([...b, ...a].flatMap((j) => Object.keys(j.git.byShape)));
     const shapeRows = [...shapes]
       .map((shape) => {
@@ -286,11 +374,17 @@ function renderComparison(before, after) {
         const sec = (jobs) => mean(jobs.map((j) => j.git.byShape[shape]?.seconds ?? 0));
         const site = [...b, ...a].map((j) => j.git.byShape[shape]?.site).find(Boolean) ?? "-";
         const [pb, pa] = [per(b), per(a)];
-        const verdict = pa === 0 && pb > 0 ? "removed" : pa < pb ? "reduced" : pa > pb ? "added" : "left";
+        const verdict =
+          pa === 0 && pb > 0 ? "removed" : pa < pb ? "reduced" : pa > pb ? "added" : "left";
         return [shape, site, fmt(pb, 0), fmt(pa, 0), fmt(sec(b), 1), fmt(sec(a), 1), verdict];
       })
       .sort((x, y) => Number(y[2]) - Number(x[2]));
-    out.push(table(["shape", "site", "starts before", "starts after", "s before", "s after", "after"], shapeRows));
+    out.push(
+      table(
+        ["shape", "site", "starts before", "starts after", "s before", "s after", "after"],
+        shapeRows,
+      ),
+    );
     out.push("", `### ${platform}: git starts by engine verb (mean per e2e tier)`, "");
     const verbs = new Set([...b, ...a].flatMap((j) => Object.keys(j.git.byVerb)));
     const verbRows = [...verbs]
@@ -306,10 +400,14 @@ function renderComparison(before, after) {
     for (const j of a) {
       const mine = new Set(j.passed);
       const missing = [...baselinePassed].filter((n) => !mine.has(n)).sort();
-      out.push(`- ${j.label}: ${missing.length ? `${missing.length} not passed: ${missing.join(", ")}` : `all ${baselinePassed.size} passed`}; re-run on this side: ${j.retried.length ? j.retried.join(", ") : "none"}`);
+      out.push(
+        `- ${j.label}: ${missing.length ? `${missing.length} not passed: ${missing.join(", ")}` : `all ${baselinePassed.size} passed`}; re-run on this side: ${j.retried.length ? j.retried.join(", ") : "none"}`,
+      );
     }
     const beforeRetried = [...new Set(b.flatMap((j) => j.retried))].sort();
-    out.push(`- re-run on the before side: ${beforeRetried.length ? beforeRetried.join(", ") : "none"}`);
+    out.push(
+      `- re-run on the before side: ${beforeRetried.length ? beforeRetried.join(", ") : "none"}`,
+    );
   }
   return out.join("\n");
 }
@@ -321,13 +419,18 @@ export function render(sides) {
 }
 
 function usage(message) {
-  return new Refusal(message, "run 'node scripts/git-reads-compare.mjs compare BEFORE=DIR AFTER=DIR ...'", 2);
+  return new Refusal(
+    message,
+    "run 'node scripts/git-reads-compare.mjs compare BEFORE=DIR AFTER=DIR ...'",
+    2,
+  );
 }
 
 export function main(argv) {
   const [verb, ...rest] = argv;
   if (verb !== "compare") throw usage(verb ? `unknown verb '${verb}'` : "name a verb: compare");
-  if (rest.length < 2) throw usage("compare takes a before side and at least one after side, each LABEL=DIR");
+  if (rest.length < 2)
+    throw usage("compare takes a before side and at least one after side, each LABEL=DIR");
   const sides = rest.map((arg) => {
     const at = arg.indexOf("=");
     if (at < 1) throw usage(`'${arg}' is not LABEL=DIR`);
@@ -340,7 +443,13 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     process.stdout.write(main(process.argv.slice(2)));
   } catch (error) {
-    const refusal = error instanceof Refusal ? error : new Refusal(`could not compare: ${error.message}`, "check each LABEL=DIR holds run-attempt directories of test-<platform> jobs");
+    const refusal =
+      error instanceof Refusal
+        ? error
+        : new Refusal(
+            `could not compare: ${error.message}`,
+            "check each LABEL=DIR holds run-attempt directories of test-<platform> jobs",
+          );
     process.stderr.write(`git-reads-compare: ${refusal.message}\nnext: ${refusal.next}\n`);
     process.exitCode = refusal.code;
   }
