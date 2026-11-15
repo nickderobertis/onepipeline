@@ -286,6 +286,20 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     });
   }
 
+  it("keeps expected scan refusals quiet while its command runs to completion", (t) => {
+    const dir = workspace(t);
+    const message = "grep: /proc/999/environ: No such file or directory";
+    const stubs = failing(t, { grep: message }, Number.POSITIVE_INFINITY, 2);
+    const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+    assert.equal(status, 0, log);
+    assert.equal(read(dir, "lead.nice"), "0", log);
+    assert.ok(!log.includes(message), log);
+    assert.deepEqual(
+      lines(log),
+      linux ? ["nx-precedence: lead:work ran ahead of no other task, keeping kept:work"] : [],
+    );
+  });
+
   it("names no failure for processes that ended before it lowered them", (t) => {
     const dir = workspace(t, { churn: true });
     const { status, log } = nx(dir);

@@ -96,7 +96,7 @@ yield() {
     # failure here; anything above that is grep itself failing.
     candidates=""
     if [ "${#environs[@]}" -gt 0 ]; then
-      found="$(grep -lszxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}")" && status=0 || status=$?
+      found="$(grep -lszxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null)" && status=0 || status=$?
       if [ "$status" -gt 2 ]; then
         warn grep "cannot read which processes are this run's (grep exited $status), so the tasks beside $own keep their priority until it can" \
           "put GNU grep on PATH"
