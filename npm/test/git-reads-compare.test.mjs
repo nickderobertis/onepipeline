@@ -307,3 +307,31 @@ test("local verification prints counts without comparing shared-host elapsed tim
     assert.doesNotMatch(result.stdout, /minutes|seconds|saved|mean difference|git s\s*\|/);
   });
 });
+
+test("engine-owned reads are separated from onevcs starts for adoption pricing", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const dir = join(jobOf(after), "test-profile/launch");
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".jsonl"))) {
+      const path = join(dir, file);
+      const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const removed = new Set(
+        `${records
+          .filter((r) => r.kind === "start" && r.function === "onepipeline::destination::git_path")
+          .map((r) => `${r.pid}:${r.seq}`),
+      );
+      writeFileSync(
+        path,
+        `${records
+          .filter((r) => !removed.has(`${r.pid}:${r.seq}`))
+          .map((record) => JSON.stringify(record))
+          .join("\n")}\n",
+      );
+    }
+    const result = run("compare", before, after);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\| destination::git_path \| 6 \| 0 \|/);
+    assert.match(result.stdout, /\| vcs::worktree_head \| 0 \| 0 \|/);
+  });
+});
