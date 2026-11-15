@@ -883,6 +883,1222 @@ No hosted run has been started by this dispatch; none is in flight. Session PR16
 
 Manager a45 explicitly marks the hosted CPU/filesystem/wait/process-creation partition unavailable. Local CPU and trace intervals overlap; residual filesystem latency, descheduling and untraced waits are named rather than assigned invented additive figures. Trace means also exclude pre-first-trace initialization and final teardown. Manager a48 accepts the inherited ab27ccee inventory verdict plus this dispatch’s full new delta (including Cargo.toml vs 13eb521a), excluding unchanged copied vendor lines. Manager a49 caps remaining judged lint to one more pass: remaining non-measurement-correctness findings are limitations, not another repair round.
 
+### Completed local capture set (diagnostic, not pricing)
+
+The cut-enabled debug capture and both release captures passed the same kept-branch real e2e journey. Debug before/after share engine build ID BE1EC92630BD1D4C6A1A90F35B7F66840. Release before/after share 5E17C5E3EE0A65A16CFE5D4DEC85DCF60. These IDs were read from each sampler profile’s libs entry for onepipeline. Release producer command was `cargo build --release --locked --offline --bin onepipeline --config 'profile.release.strip="none"'`; its e2e binary was built with the same release profile. Real subprocess helpers were built with `cargo build --release --locked --offline --package onepipeline-testfakes --package onevcs --bins --config 'profile.release.strip="none"'`. The harness also makes its normal debug freshness calls. Symbol retention differs from the stripped distribution; launch tracing remains enabled, so these are instrumented release-code observations, not uninstrumented user-latency measurements.
+
+The recording command is the historical Docker command above, changing the binary argument to target/release/deps/e2e-2ff01934f6bdc286 and the output directory to scratch/local-release-preserve-before or -after. Cut captures add `-e ONEPIPELINE_STARTUP_CUT=contributors`. Their source commit and complete dirty-source patch are recorded by the collector: debug-after is based on 8bee35d0; both release captures are based on 0113138a. The engine implementation itself is unchanged from a792bafc. See local-*-source.diff.gz and profile evidence for exact provenance. No local before/after wall-clock difference or projected PR saving is computed.
+
+Raw profiles, symbols, source patches, launch trace and complete CPU fold output are under spikes/engine-startup/evidence/local-debug-after.*, local-release-before.* and local-release-after.*. The two primary process IDs remain 90=start and 583=adopt in all captures. Each number below is read by `python scripts/engine-startup-cpu.py PROFILE SYMBOLS` from those recorded files; the raw originals and logs remain in scratch/3469976-4/local-BUILD-preserve-SIDE.
+
+#### debug after
+
+```text
+pid 90.1: sampled CPU 595.995 ms; lifetime 2049.874 ms; threads 274
+nearest first-party module (otherwise leaf):
+  118.114 ms (19.82%; cumulative 19.82%) onevcs::git
+  47.935 ms (8.04%; cumulative 27.86%) onepipeline::ledger
+  37.770 ms (6.34%; cumulative 34.20%) onevcs::launch_trace
+  35.351 ms (5.93%; cumulative 40.13%) libc.so.6!unresolved
+  33.113 ms (5.56%; cumulative 45.69%) poll
+  25.250 ms (4.24%; cumulative 49.92%) onepipeline::writeback
+  22.171 ms (3.72%; cumulative 53.64%) onemessagebus::schema
+  18.018 ms (3.02%; cumulative 56.67%) onemessagebus::envelope
+  15.608 ms (2.62%; cumulative 59.28%) onevcs::home
+  14.919 ms (2.50%; cumulative 61.79%) onepipeline::projection
+  13.007 ms (2.18%; cumulative 63.97%) onepipeline::engine
+  12.442 ms (2.09%; cumulative 66.06%) onevcs::lock
+  9.182 ms (1.54%; cumulative 67.60%) onepipeline::plan
+  8.563 ms (1.44%; cumulative 69.03%) onepipeline::summary
+  7.725 ms (1.30%; cumulative 70.33%) onepipeline::checkpoint
+  7.717 ms (1.29%; cumulative 71.63%) fun_f230
+  5.932 ms (1.00%; cumulative 72.62%) onemessagebus::transport
+  5.214 ms (0.87%; cumulative 73.50%) onepipeline::vocabulary
+  4.976 ms (0.83%; cumulative 74.33%) _close
+  4.896 ms (0.82%; cumulative 75.15%) onetaskgraph_local_md::yaml
+  4.649 ms (0.78%; cumulative 75.93%) onepipeline::payload
+  4.635 ms (0.78%; cumulative 76.71%) onepipeline::report
+  4.094 ms (0.69%; cumulative 77.40%) onevcs::store
+  4.051 ms (0.68%; cumulative 78.08%) onepipeline::telemetry
+  4.047 ms (0.68%; cumulative 78.76%) onepipeline::executor
+  3.840 ms (0.64%; cumulative 79.40%) onetaskgraph_local_md::staged
+  3.643 ms (0.61%; cumulative 80.01%) onepipeline::vcs
+nearest first-party function (otherwise leaf):
+  40.815 ms (6.85%; cumulative 6.85%) onevcs::git::bounded::<onevcs::git::run_fed::{closure#4}::{closure#3}>
+  35.351 ms (5.93%; cumulative 12.78%) libc.so.6!unresolved
+  33.113 ms (5.56%; cumulative 18.34%) poll
+  20.830 ms (3.49%; cumulative 21.83%) <onemessagebus::schema::Registry>::register_schema
+  18.753 ms (3.15%; cumulative 24.98%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  17.381 ms (2.92%; cumulative 27.89%) onevcs::git::wait_for_exit
+  17.322 ms (2.91%; cumulative 30.80%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  14.934 ms (2.51%; cumulative 33.31%) onepipeline::ledger::publish
+  14.554 ms (2.44%; cumulative 35.75%) onevcs::git::run_fed
+  13.147 ms (2.21%; cumulative 37.95%) onevcs::home::ensure_dir
+  9.104 ms (1.53%; cumulative 39.48%) onevcs::lock::wait_for
+  7.758 ms (1.30%; cumulative 40.78%) onevcs::launch_trace::sleep
+  7.717 ms (1.29%; cumulative 42.08%) fun_f230
+  6.946 ms (1.17%; cumulative 43.24%) <onevcs::launch_trace::Tracer>::write
+  6.695 ms (1.12%; cumulative 44.37%) onepipeline::ledger::disk::publish
+  6.365 ms (1.07%; cumulative 45.43%) <onevcs::launch_trace::Launch>::spawned
+  6.341 ms (1.06%; cumulative 46.50%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>
+  4.976 ms (0.83%; cumulative 47.33%) _close
+  4.896 ms (0.82%; cumulative 48.15%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  4.847 ms (0.81%; cumulative 48.97%) onevcs::launch_trace::output
+  4.358 ms (0.73%; cumulative 49.70%) <onevcs::launch_trace::Wait>::into_launch
+  4.187 ms (0.70%; cumulative 50.40%) <onevcs::git::PipeCapture>::finish
+  4.167 ms (0.70%; cumulative 51.10%) <onepipeline::ledger::RunPaths>::create
+  3.867 ms (0.65%; cumulative 51.75%) onevcs::launch_trace::launch
+  3.840 ms (0.64%; cumulative 52.39%) onetaskgraph_local_md::staged
+  3.623 ms (0.61%; cumulative 53.00%) onepipeline::ledger::disk::read
+  3.609 ms (0.61%; cumulative 53.61%) onepipeline::engine::journalling_relay::{closure#0}
+  3.447 ms (0.58%; cumulative 54.19%) <onepipeline::projection::RunState as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  3.444 ms (0.58%; cumulative 54.76%) onetaskgraph_core::resolve::validate_sources
+  3.209 ms (0.54%; cumulative 55.30%) syscall
+  3.077 ms (0.52%; cumulative 55.82%) <onemessagebus::transport::LocalTransport as onemessagebus::transport::Transport>::fingerprint
+  3.030 ms (0.51%; cumulative 56.33%) _munmap
+  3.025 ms (0.51%; cumulative 56.83%) <onepipeline::vocabulary::Labels as serde_core::de::Deserialize>::deserialize::<serde_json::value::Value>
+  2.942 ms (0.49%; cumulative 57.33%) onepipeline::ledger::read_range
+  2.763 ms (0.46%; cumulative 57.79%) onepipeline::driver::attach
+  2.695 ms (0.45%; cumulative 58.24%) onepipeline::engine::converge
+  2.583 ms (0.43%; cumulative 58.68%) onepipeline::ledger::disk::sync_contents
+  2.567 ms (0.43%; cumulative 59.11%) onevcs::policy::parse
+  2.563 ms (0.43%; cumulative 59.54%) <onepipeline::projection::RunState as core::clone::Clone>::clone
+  2.393 ms (0.40%; cumulative 59.94%) <onepipeline::summary::RunSummary>::derive
+  2.339 ms (0.39%; cumulative 60.33%) onemessagebus::envelope::take_or_default::<serde_json::map::Map<alloc::string::String, serde_json::value::Value>, serde_json::error::Error>
+  2.336 ms (0.39%; cumulative 60.72%) <onepipeline::summary::RunSummary as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>>
+  2.317 ms (0.39%; cumulative 61.11%) onevcs::launch_trace::wait
+  2.307 ms (0.39%; cumulative 61.50%) onepipeline::release::ask_until_dropped
+  2.305 ms (0.39%; cumulative 61.89%) onepipeline::writeback::worker
+  2.296 ms (0.39%; cumulative 62.27%) <jsonschema::paths::LOCATION_BUFFER::{K#0}::{closure#0} as core::ops::function::FnOnce<(core::option::Option<&mut core::option::Option<core::cell::RefCell<alloc::string::String>>>,)>>::call_once
+  2.295 ms (0.39%; cumulative 62.66%) onepipeline::writeback::task_document
+  2.277 ms (0.38%; cumulative 63.04%) onepipeline::ledger::disk::synced
+  2.226 ms (0.37%; cumulative 63.41%) <onepipeline::checkpoint::Projected>::take_with
+  2.172 ms (0.36%; cumulative 63.78%) _madvise
+  2.107 ms (0.35%; cumulative 64.13%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  2.077 ms (0.35%; cumulative 64.48%) onevcs::lock::open_at
+  2.010 ms (0.34%; cumulative 64.82%) onevcs::native_refs::local_value
+  1.954 ms (0.33%; cumulative 65.14%) fun_188d80
+  1.913 ms (0.32%; cumulative 65.46%) onepipeline::writeback::validated_within::{closure#0}
+  1.902 ms (0.32%; cumulative 65.78%) <onepipeline::plan::Node as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  1.867 ms (0.31%; cumulative 66.10%) onepipeline::writeback::refresh_shadow
+  1.833 ms (0.31%; cumulative 66.40%) onepipeline::executor::make_node_scratch_dir
+  1.714 ms (0.29%; cumulative 66.69%) read
+  1.660 ms (0.28%; cumulative 66.97%) onevcs::store::load
+  1.642 ms (0.28%; cumulative 67.25%) <&mut serde_json::de::Deserializer<serde_json::read::SliceRead> as serde_core::de::Deserializer>::deserialize_any::<<serde_json::value::Value as serde_core::de::Deserialize>::deserialize::ValueVisitor>
+  1.631 ms (0.27%; cumulative 67.52%) onepipeline::writeback::carry_the_difference
+  1.576 ms (0.26%; cumulative 67.78%) onevcs::boundary::manifests::committed_source
+  1.521 ms (0.26%; cumulative 68.04%) <alloc::vec::Vec<regex_automata::nfa::thompson::map::Utf8BoundedEntry>>::extend_with
+  1.513 ms (0.25%; cumulative 68.29%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as schemars::JsonSchema>::json_schema
+  1.513 ms (0.25%; cumulative 68.55%) onevcs::workspace::existing
+  1.499 ms (0.25%; cumulative 68.80%) <onemessagebus::transport::LocalTransport>::lock
+  1.492 ms (0.25%; cumulative 69.05%) onepipeline::report::open_no_follow
+  1.455 ms (0.24%; cumulative 69.29%) privateterms::levels::read_dir_level
+  1.418 ms (0.24%; cumulative 69.53%) onepipeline::loopstats::journal_read
+  1.401 ms (0.24%; cumulative 69.77%) <onepipeline::ledger::LaunchRecord as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  1.371 ms (0.23%; cumulative 70.00%) onepipeline::projection::millis_of
+  1.361 ms (0.23%; cumulative 70.22%) onepipeline::vcs::helpers_for
+  1.360 ms (0.23%; cumulative 70.45%) onepipeline::engine::drain
+  1.356 ms (0.23%; cumulative 70.68%) onepipeline::report::retain
+  1.348 ms (0.23%; cumulative 70.91%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<serde_json::value::Value>
+  1.278 ms (0.21%; cumulative 71.12%) <onetaskgraph_local_md::LocalMdConfig as schemars::JsonSchema>::json_schema
+  1.273 ms (0.21%; cumulative 71.33%) <onepipeline::plan::Node as core::cmp::PartialEq>::eq
+  1.261 ms (0.21%; cumulative 71.55%) onevcs::lock::record_owner
+  1.238 ms (0.21%; cumulative 71.75%) onepipeline::ledger::temporary
+  1.235 ms (0.21%; cumulative 71.96%) onevcs::home::root
+  1.230 ms (0.21%; cumulative 72.17%) onevcs::boundary::derive::derive
+  1.226 ms (0.21%; cumulative 72.37%) onevcs::home::atomic_write_before_replace::<onevcs::home::atomic_write::{closure#0}>
+  1.220 ms (0.20%; cumulative 72.58%) onepipeline::ledger::read_appended_envelope_lines::{closure#0}::{closure#0}
+  1.220 ms (0.20%; cumulative 72.78%) onevcs::git::lfs::repository_configuration
+  1.193 ms (0.20%; cumulative 72.98%) <onevcs::checkout_reads::Hold as core::ops::drop::Drop>::drop
+  1.183 ms (0.20%; cumulative 73.18%) onepipeline::writeback::project
+  1.166 ms (0.20%; cumulative 73.38%) onepipeline::executor::available_memory
+  1.155 ms (0.19%; cumulative 73.57%) onepipeline::journal::stream_queues::<onepipeline::journal::merged_order::{closure#0}>
+  1.145 ms (0.19%; cumulative 73.76%) onevcs::store::migrate
+  1.081 ms (0.18%; cumulative 73.94%) onepipeline::ledger::open_healed
+  1.048 ms (0.18%; cumulative 74.12%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::capacity
+  1.040 ms (0.17%; cumulative 74.29%) <onepipeline::telemetry::Bucket as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>>
+  1.020 ms (0.17%; cumulative 74.47%) onetaskgraph_core::config::discovery::nearest_project_document
+  1.008 ms (0.17%; cumulative 74.63%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  0.983 ms (0.16%; cumulative 74.80%) <onepipeline::cli::Cli as clap_builder::derive::Parser>::parse
+  0.970 ms (0.16%; cumulative 74.96%) onepipeline::journal::merge_queues::<onepipeline::journal::merged_order::{closure#0}>
+  0.944 ms (0.16%; cumulative 75.12%) onepipeline::checkwatch::ending
+  0.927 ms (0.16%; cumulative 75.28%) <onepipeline::summary::Maintainer>::derived
+  0.923 ms (0.15%; cumulative 75.43%) onepipeline::agentgraph::relayed_lines::<std::io::buffered::bufreader::BufReader<std::process::ChildStdout>, <onepipeline::agentgraph::ProcessGraphRun>::events::{closure#0}>::{closure#1}
+  0.910 ms (0.15%; cumulative 75.58%) onepipeline::checkpoint::length_of
+  0.907 ms (0.15%; cumulative 75.74%) onepipeline::report::failed_verdicts
+  0.902 ms (0.15%; cumulative 75.89%) onepipeline::channel::layout::registry
+  0.900 ms (0.15%; cumulative 76.04%) onepipeline::checkpoint::fold_in_merge_order
+  0.899 ms (0.15%; cumulative 76.19%) <onepipeline::ledger::Handover>::hold_within
+  0.894 ms (0.15%; cumulative 76.34%) <onetaskgraph_local_md::LocalMdSource>::locate
+  0.894 ms (0.15%; cumulative 76.49%) <onepipeline::appendstamp::Stamp as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.890 ms (0.15%; cumulative 76.64%) <onepipeline::projection::RunState>::awaiting_human_action
+  0.885 ms (0.15%; cumulative 76.79%) <onepipeline::projection::RunState>::settled
+  0.884 ms (0.15%; cumulative 76.94%) <onepipeline::summary::Maintainer>::write
+  0.883 ms (0.15%; cumulative 77.08%) fun_11ca00
+  0.880 ms (0.15%; cumulative 77.23%) onepipeline::report::read
+  0.875 ms (0.15%; cumulative 77.38%) <onevcs::launch_trace::Launch>::exited
+  0.865 ms (0.15%; cumulative 77.52%) onepipeline::sys::platform_append_all
+  0.862 ms (0.14%; cumulative 77.67%) onepipeline::summary::journal_stamp
+  0.860 ms (0.14%; cumulative 77.81%) std::sys::backtrace::__rust_begin_short_backtrace::<<onevcs::git::PipeCapture>::start<std::process::ChildStdout>::{closure#0}, onevcs::git::Captured>
+  0.854 ms (0.14%; cumulative 77.96%) onepipeline::writeback::update
+  0.833 ms (0.14%; cumulative 78.09%) onepipeline::projection::fold_activity
+  0.822 ms (0.14%; cumulative 78.23%) onepipeline::sys::platform_process_start_token
+  0.817 ms (0.14%; cumulative 78.37%) <onepipeline::writeback::Writeback>::closing_out_until::<<onepipeline::writeback::Pending>::unlanded>
+  0.804 ms (0.13%; cumulative 78.50%) onevcs::git::make_executable
+  0.800 ms (0.13%; cumulative 78.64%) core::ptr::drop_glue::<core::option::Option<core::result::Result<(), alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
+  0.797 ms (0.13%; cumulative 78.77%) <onemessagebus::envelope::Envelope<onevcs::vocabulary::VcsEvents> as serde_core::de::Deserialize>::deserialize::<serde_json::value::Value>
+  0.793 ms (0.13%; cumulative 78.91%) onepipeline::writeback::validated_within
+  0.784 ms (0.13%; cumulative 79.04%) <onepipeline::checkpoint::Projected>::write
+  0.783 ms (0.13%; cumulative 79.17%) <onepipeline::plan::TaskRecord as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.773 ms (0.13%; cumulative 79.30%) <onepipeline::vcs::DispatchSession>::read_from
+  0.759 ms (0.13%; cumulative 79.43%) <onepipeline::writeback::Attempt>::open
+  0.748 ms (0.13%; cumulative 79.55%) <onepipeline::vocabulary::Labels as serde_core::ser::Serialize>::serialize::<serde_json::value::ser::Serializer>
+  0.731 ms (0.12%; cumulative 79.67%) <<onepipeline::plan::Node as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_map::<&mut serde_json::value::de::MapDeserializer>
+  0.725 ms (0.12%; cumulative 79.80%) <onevcs::workspace::Record as serde_core::ser::Serialize>::serialize::<serde_json::value::ser::Serializer>
+  0.675 ms (0.11%; cumulative 79.91%) <onemessagebus::redact::Redactor>::from_env
+  0.672 ms (0.11%; cumulative 80.02%) fun_ab630
+self function:
+  105.815 ms (17.75%; cumulative 17.75%) libc.so.6!unresolved
+  33.921 ms (5.69%; cumulative 23.45%) poll
+  31.777 ms (5.33%; cumulative 28.78%) _open64
+  27.687 ms (4.65%; cumulative 33.42%) syscall
+  27.468 ms (4.61%; cumulative 38.03%) mkdir
+  12.902 ms (2.16%; cumulative 40.20%) statx
+  10.955 ms (1.84%; cumulative 42.03%) _close
+  9.948 ms (1.67%; cumulative 43.70%) fun_ab630
+  9.564 ms (1.60%; cumulative 45.31%) fun_188d80
+  7.976 ms (1.34%; cumulative 46.65%) _write
+  7.963 ms (1.34%; cumulative 47.98%) rename
+  7.717 ms (1.29%; cumulative 49.28%) fun_f230
+  6.252 ms (1.05%; cumulative 50.33%) read
+  5.515 ms (0.93%; cumulative 51.25%) _munmap
+  5.357 ms (0.90%; cumulative 52.15%) malloc
+  5.299 ms (0.89%; cumulative 53.04%) clock_nanosleep
+  4.274 ms (0.72%; cumulative 53.76%) fsync
+  4.110 ms (0.69%; cumulative 54.45%) fun_188cf0
+  4.107 ms (0.69%; cumulative 55.14%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  3.569 ms (0.60%; cumulative 55.73%) core::slice::raw::from_raw_parts::precondition_check
+  3.124 ms (0.52%; cumulative 56.26%) wait4
+  3.073 ms (0.52%; cumulative 56.77%) _mmap
+  3.048 ms (0.51%; cumulative 57.29%) _libc_free
+  2.900 ms (0.49%; cumulative 57.77%) pipe2
+  2.757 ms (0.46%; cumulative 58.24%) <jsonschema::paths::LOCATION_BUFFER::{K#0}::{closure#0} as core::ops::function::FnOnce<(core::option::Option<&mut core::option::Option<core::cell::RefCell<alloc::string::String>>>,)>>::call_once
+  2.585 ms (0.43%; cumulative 58.67%) referencing::spec::draft202012::maybe_in_subresource
+  2.583 ms (0.43%; cumulative 59.10%) fun_98d50
+  2.172 ms (0.36%; cumulative 59.47%) _madvise
+  2.156 ms (0.36%; cumulative 59.83%) <*const ()>::is_aligned_to
+  2.008 ms (0.34%; cumulative 60.17%) <onepipeline::summary::RunSummary>::derive
+  1.937 ms (0.33%; cumulative 60.49%) fun_ab230
+  1.891 ms (0.32%; cumulative 60.81%) fun_188620
+  1.703 ms (0.29%; cumulative 61.09%) <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (&str, u32), (&str, u64, u64, u64), alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<(&str, u32), (&str, u64, u64, u64)>>::insert_entry::{closure#0}>
+  1.672 ms (0.28%; cumulative 61.37%) clock_gettime
+  1.658 ms (0.28%; cumulative 61.65%) _mprotect
+  1.658 ms (0.28%; cumulative 61.93%) unlinkat
+  1.642 ms (0.28%; cumulative 62.21%) <&mut serde_json::de::Deserializer<serde_json::read::SliceRead> as serde_core::de::Deserializer>::deserialize_any::<<serde_json::value::Value as serde_core::de::Deserialize>::deserialize::ValueVisitor>
+  1.596 ms (0.27%; cumulative 62.47%) core::ptr::drop_glue::<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>
+  1.530 ms (0.26%; cumulative 62.73%) <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+  1.521 ms (0.26%; cumulative 62.99%) <alloc::vec::Vec<regex_automata::nfa::thompson::map::Utf8BoundedEntry>>::extend_with
+  1.491 ms (0.25%; cumulative 63.24%) <hashbrown::raw::RawTableInner>::find_insert_index
+  1.412 ms (0.24%; cumulative 63.47%) <std::path::Components>::parse_next_component_back
+  1.368 ms (0.23%; cumulative 63.70%) <hashbrown::raw::RawTable<usize>>::reserve_rehash::<indexmap::inner::get_hash<alloc::string::String, serde_json::value::Value>::{closure#0}>
+  1.367 ms (0.23%; cumulative 63.93%) <serde_path_to_error::de::TrackedSeed<core::marker::PhantomData<alloc::collections::btree::map::BTreeMap<alloc::string::String, serde_json::value::Value>>> as serde_core::de::DeserializeSeed>::deserialize::<serde_saphyr::de::deserializer::YamlDeserializer>
+  1.334 ms (0.22%; cumulative 64.16%) pthread_create
+  1.298 ms (0.22%; cumulative 64.37%) <serde_json::read::SliceRead>::skip_to_escape
+  1.296 ms (0.22%; cumulative 64.59%) <core::slice::iter::Iter<std::sync::mpmc::waker::Entry> as core::iter::traits::iterator::Iterator>::position::<<std::sync::mpmc::waker::Waker>::try_select::{closure#0}>
+  1.239 ms (0.21%; cumulative 64.80%) fstatat
+  1.217 ms (0.20%; cumulative 65.00%) core::intrinsics::rotate_left::<u64>
+  1.204 ms (0.20%; cumulative 65.20%) fun_283e0
+  1.185 ms (0.20%; cumulative 65.40%) <std::sync::mpmc::list::Channel<std::fs::File>>::recv::{closure#1}
+  1.142 ms (0.19%; cumulative 65.60%) <std::sync::mpmc::list::Channel<onepipeline::engine::Message>>::recv
+  1.116 ms (0.19%; cumulative 65.78%) <regex_syntax::hir::Hir>::class
+  1.101 ms (0.18%; cumulative 65.97%) <jsonschema::compiler::Context>::in_subresource
+  1.082 ms (0.18%; cumulative 66.15%) fun_a9c70
+  1.065 ms (0.18%; cumulative 66.33%) <alloc::raw_vec::RawVecInner>::finish_grow
+  1.052 ms (0.18%; cumulative 66.50%) readlink
+  0.989 ms (0.17%; cumulative 66.67%) <std::thread::lifecycle::JoinInner<onevcs::git::Captured>>::join
+  0.958 ms (0.16%; cumulative 66.83%) core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>>
+  0.927 ms (0.16%; cumulative 66.99%) <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Dying, alloc::string::String, alloc::string::String>>::take_front
+  0.921 ms (0.15%; cumulative 67.14%) brk
+  0.916 ms (0.15%; cumulative 67.29%) <hashbrown::raw::RawTableInner>::ctrl
+  0.906 ms (0.15%; cumulative 67.45%) <alloc::vec::Vec<u8> as core::cmp::PartialEq>::eq
+  0.898 ms (0.15%; cumulative 67.60%) <std::sync::mpmc::waker::SyncWaker>::notify
+  0.890 ms (0.15%; cumulative 67.75%) ftruncate
+  0.883 ms (0.15%; cumulative 67.89%) fun_11ca00
+  0.869 ms (0.15%; cumulative 68.04%) <<serde_saphyr::de::deserializer::YamlDeserializer as serde_core::de::Deserializer>::deserialize_map::MA as serde_core::de::MapAccess>::next_key_seed::<core::marker::PhantomData<serde_core::de::ignored_any::IgnoredAny>>
+  0.860 ms (0.14%; cumulative 68.18%) std::sys::backtrace::__rust_begin_short_backtrace::<<onevcs::git::PipeCapture>::start<std::process::ChildStdout>::{closure#0}, onevcs::git::Captured>
+  0.835 ms (0.14%; cumulative 68.32%) <&mut serde_json::value::de::MapDeserializer as serde_core::de::MapAccess>::next_entry::<alloc::string::String, serde_json::value::Value>
+  0.822 ms (0.14%; cumulative 68.46%) core::str::converts::from_utf8
+  0.821 ms (0.14%; cumulative 68.60%) core::ptr::drop_glue::<serde_json::value::Value>
+  0.811 ms (0.14%; cumulative 68.74%) onevcs::git::bounded::<onevcs::git::run_fed::{closure#4}::{closure#3}>
+  0.804 ms (0.13%; cumulative 68.87%) chmod
+  0.800 ms (0.13%; cumulative 69.01%) core::ptr::drop_glue::<core::option::Option<core::result::Result<(), alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>
+  0.783 ms (0.13%; cumulative 69.14%) core::ptr::drop_glue::<referencing::resolver::Resolver>
+  0.783 ms (0.13%; cumulative 69.27%) <std::process::Command>::get_args
+  0.782 ms (0.13%; cumulative 69.40%) <alloc::vec::Vec<serde_json::value::Value> as core::clone::Clone>::clone
+  0.778 ms (0.13%; cumulative 69.53%) core::ptr::copy_nonoverlapping::precondition_check
+  0.768 ms (0.13%; cumulative 69.66%) serde_json::ser::format_escaped_str_contents::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>
+  0.758 ms (0.13%; cumulative 69.79%) <u64 as core::fmt::Display>::fmt
+  0.734 ms (0.12%; cumulative 69.91%) <std::fs::DirBuilder>::_create
+  0.732 ms (0.12%; cumulative 70.03%) <usize as core::convert::TryFrom<u64>>::try_from
+  0.731 ms (0.12%; cumulative 70.15%) <<onepipeline::plan::Node as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_map::<&mut serde_json::value::de::MapDeserializer>
+  0.729 ms (0.12%; cumulative 70.28%) <alloc::alloc::Global>::alloc_impl_runtime
+  0.718 ms (0.12%; cumulative 70.40%) <jsonschema::keywords::all_of::AllOfValidator<jsonschema_value::serde_json::SerdeJson> as jsonschema::validator::Validate>::validate
+  0.711 ms (0.12%; cumulative 70.52%) <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner
+  0.707 ms (0.12%; cumulative 70.64%) <hashbrown::map::HashMap<alloc::string::String, jsonschema::node::SchemaNode, ahash::random_state::RandomState>>::get::<str>
+  0.687 ms (0.12%; cumulative 70.75%) _close_nocancel
+  0.686 ms (0.12%; cumulative 70.87%) <indexmap::map::entry::Entry<alloc::string::String, serde_json::value::Value>>::new
+  0.658 ms (0.11%; cumulative 70.98%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, alloc::string::String, onepipeline::plan::Node, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<alloc::string::String>
+  0.657 ms (0.11%; cumulative 71.09%) <&mut alloc::vec::Vec<u8> as std::io::Write>::write_all
+  0.654 ms (0.11%; cumulative 71.20%) <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&serde_saphyr::de::key_nodes::KeyFingerprint>
+  0.642 ms (0.11%; cumulative 71.30%) onevcs::native_refs::pinned
+  0.640 ms (0.11%; cumulative 71.41%) <alloc::collections::btree::map::BTreeMap<onemessagebus::schema::SchemaId, onemessagebus::schema::Registered>>::insert
+  0.628 ms (0.11%; cumulative 71.52%) <schemars::generate::SchemaGenerator>::subschema_for::<core::option::Option<alloc::string::String>>
+  0.627 ms (0.11%; cumulative 71.62%) _open64_nocancel
+  0.621 ms (0.10%; cumulative 71.73%) <jsonschema::keywords::enum_::SmallStringEnumValidator<jsonschema::keywords::NotNullable> as jsonschema::validator::Validate>::is_valid
+  0.611 ms (0.10%; cumulative 71.83%) <std::time::Instant>::elapsed
+  0.610 ms (0.10%; cumulative 71.93%) access
+  0.607 ms (0.10%; cumulative 72.03%) onevcs::git::bound_for
+  0.607 ms (0.10%; cumulative 72.13%) fun_10f4e0
+  0.602 ms (0.10%; cumulative 72.24%) fun_9c7e0
+  0.598 ms (0.10%; cumulative 72.34%) <serde_json::value::de::MapDeserializer as serde_core::de::MapAccess>::next_key_seed::<core::marker::PhantomData<<onepipeline::vocabulary::Labels as serde_core::de::Deserialize>::deserialize::__Field>>
+  0.590 ms (0.10%; cumulative 72.43%) onevcs::git::default_branch
+  0.586 ms (0.10%; cumulative 72.53%) <referencing::draft::Draft>::walk_children::<referencing::registry::build::crawl_schema::{closure#0}>
+  0.586 ms (0.10%; cumulative 72.63%) <indexmap::inner::Core<alloc::string::String, serde_json::value::Value>>::push_entry
+  0.584 ms (0.10%; cumulative 72.73%) <std::thread::thread::Thread>::park_timeout
+  0.578 ms (0.10%; cumulative 72.83%) <core::fmt::Formatter>::write_str
+  0.576 ms (0.10%; cumulative 72.92%) <alloc::raw_vec::RawVec<std::sync::mpmc::waker::Entry>>::grow_one
+  0.575 ms (0.10%; cumulative 73.02%) fun_aa960
+  0.560 ms (0.09%; cumulative 73.11%) <alloc::collections::btree::dedup_sorted_iter::DedupSortedIter<alloc::string::String, serde_json::value::Value, alloc::vec::into_iter::IntoIter<(alloc::string::String, serde_json::value::Value)>> as core::iter::traits::iterator::Iterator>::next
+  0.558 ms (0.09%; cumulative 73.21%) <std::thread::local::LocalKey<core::cell::RefCell<core::option::Option<onepipeline::rendercost::Inside>>>>::try_with::<<std::thread::local::LocalKey<core::cell::RefCell<core::option::Option<onepipeline::rendercost::Inside>>>>::with_borrow<onepipeline::rendercost::inside_a_decision::{closure#0}, bool>::{closure#0}, bool>
+  0.556 ms (0.09%; cumulative 73.30%) <&std::path::Path as core::convert::AsRef<std::path::Path>>::as_ref
+  0.553 ms (0.09%; cumulative 73.39%) <<<onepipeline::checkpoint::Checkpoint as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_map::__DeserializeWith as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.552 ms (0.09%; cumulative 73.49%) onevcs::launch_trace::wait
+  0.551 ms (0.09%; cumulative 73.58%) <schemars::generate::SchemaGenerator>::add_definitions
+  0.546 ms (0.09%; cumulative 73.67%) std::env::_var_os
+  0.544 ms (0.09%; cumulative 73.76%) core::ptr::drop_glue::<<alloc::vec::into_iter::IntoIter<_, _> as core::ops::drop::Drop>::drop::DropGuard<&str, alloc::alloc::Global>>
+  0.543 ms (0.09%; cumulative 73.85%) core::ptr::drop_glue::<alloc::vec::Vec<*const i8>>
+  0.539 ms (0.09%; cumulative 73.94%) fun_189710
+  0.537 ms (0.09%; cumulative 74.03%) <alloc::vec::Vec<clap_builder::builder::str::Str> as core::ops::drop::Drop>::drop
+  0.535 ms (0.09%; cumulative 74.12%) <onevcs::store::RESOLVED::{K#0}::{closure#0} as core::ops::function::FnOnce<(core::option::Option<&mut core::option::Option<core::cell::RefCell<core::option::Option<(usize, alloc::collections::btree::map::BTreeMap<alloc::string::String, onevcs::store::Resolution>)>>>>,)>>::call_once
+  0.533 ms (0.09%; cumulative 74.21%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::graph::NodeStatus> as core::ops::drop::Drop>::drop
+  0.531 ms (0.09%; cumulative 74.30%) <alloc::vec::Vec<indexmap::Bucket<alloc::string::String, serde_json::value::Value>> as alloc::vec::spec_extend::SpecExtend<&indexmap::Bucket<alloc::string::String, serde_json::value::Value>, core::slice::iter::Iter<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>>>::spec_extend
+  0.529 ms (0.09%; cumulative 74.39%) _read_nocancel
+  0.529 ms (0.09%; cumulative 74.48%) core::ptr::drop_glue::<alloc::raw_vec::RawVec<serde_json::value::Value>>
+  0.528 ms (0.09%; cumulative 74.57%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, schemars::generate::SchemaUid, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<schemars::generate::SchemaUid>
+  0.528 ms (0.09%; cumulative 74.66%) <regex_automata::nfa::thompson::nfa::Inner>::add
+  0.526 ms (0.09%; cumulative 74.74%) onepipeline::channel::registry::{closure#0}
+  0.525 ms (0.09%; cumulative 74.83%) <std::sync::poison::Flag>::done
+  0.524 ms (0.09%; cumulative 74.92%) core::ptr::drop_glue::<alloc::vec::Vec<u8>>
+  0.523 ms (0.09%; cumulative 75.01%) <regex_syntax::ast::parse::ParserI<&mut regex_syntax::ast::parse::Parser>>::parse_with_comments
+  0.522 ms (0.09%; cumulative 75.10%) <std::io::error::Error>::kind
+  0.521 ms (0.09%; cumulative 75.18%) <std::path::PathBuf as core::convert::Into<std::path::PathBuf>>::into
+  0.521 ms (0.09%; cumulative 75.27%) <serde_path_to_error::de::TrackedSeed<core::marker::PhantomData<serde_json::value::Value>> as serde_core::de::DeserializeSeed>::deserialize::<serde_saphyr::de::deserializer::YamlDeserializer>
+  0.517 ms (0.09%; cumulative 75.36%) <core::str::pattern::MultiCharEqSearcher<<char>::is_whitespace> as core::str::pattern::Searcher>::next
+  0.516 ms (0.09%; cumulative 75.44%) <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, alloc::string::String, onepipeline::summary::NodePreserved, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>>::next_leaf_edge
+  0.515 ms (0.09%; cumulative 75.53%) <usize as core::slice::index::SliceIndex<[_]>>::get_unchecked::precondition_check
+  0.514 ms (0.09%; cumulative 75.62%) <jsonschema::keywords::additional_properties::AdditionalPropertiesValidator as jsonschema::validator::Validate>::validate
+  0.513 ms (0.09%; cumulative 75.70%) fluent_uri::normalize::normalize_estr
+  0.512 ms (0.09%; cumulative 75.79%) <usize>::unchecked_add::precondition_check
+  0.511 ms (0.09%; cumulative 75.87%) fun_adf20
+  0.508 ms (0.09%; cumulative 75.96%) <std::sync::mpmc::list::Channel<()>>::recv
+  0.508 ms (0.09%; cumulative 76.04%) getrlimit
+  0.508 ms (0.09%; cumulative 76.13%) alloc::fmt::format::format_inner
+  0.507 ms (0.09%; cumulative 76.21%) <&serde_json::map::Map<alloc::string::String, serde_json::value::Value> as jsonschema_value::Object<jsonschema_value::serde_json::SerdeJson>>::get
+  0.507 ms (0.09%; cumulative 76.30%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::plan::Node>>::contains_key::<alloc::string::String>
+  0.506 ms (0.08%; cumulative 76.38%) core::ptr::drop_glue::<core::array::iter::IntoIter<&str, 7>>
+  0.505 ms (0.08%; cumulative 76.47%) <core::option::Option<onevcs::rules::MergePolicy>>::is_none
+  0.504 ms (0.08%; cumulative 76.55%) core::ptr::drop_glue::<std::io::error::Error>
+  0.504 ms (0.08%; cumulative 76.64%) <core::option::Option<alloc::string::String>>::unwrap_or_else::<onepipeline::vcs::kind_of::{closure#1}>
+  0.503 ms (0.08%; cumulative 76.72%) <serde_json::map::Map<alloc::string::String, serde_json::value::Value> as serde_core::de::Deserializer>::deserialize_any::<<alloc::collections::btree::map::BTreeMap<_, _> as serde_core::de::Deserialize>::deserialize::MapVisitor<alloc::string::String, onevcs::registry::Identity>>
+  0.503 ms (0.08%; cumulative 76.81%) <core::option::Option<alloc::vec::Vec<onepipeline::plan::Node>>>::is_some
+  0.502 ms (0.08%; cumulative 76.89%) core::ptr::drop_glue::<onepipeline::projection::Doing>
+  0.501 ms (0.08%; cumulative 76.98%) <hashbrown::raw::RawTable<(jsonschema::compiler::LocationCacheKey, alloc::sync::Arc<std::sync::once_lock::OnceLock<jsonschema::keywords::unevaluated_items::ItemsValidators>>)>>::remove_entry::<hashbrown::map::equivalent_key<jsonschema::compiler::LocationCacheKey, jsonschema::compiler::LocationCacheKey, alloc::sync::Arc<std::sync::once_lock::OnceLock<jsonschema::keywords::unevaluated_items::ItemsValidators>>>::{closure#0}>
+  0.501 ms (0.08%; cumulative 77.06%) <std::path::Components as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
+  0.500 ms (0.08%; cumulative 77.14%) <core::ops::control_flow::ControlFlow<core::cmp::Reverse<(&str, &str, usize)>> as core::ops::try_trait::FromResidual<core::ops::control_flow::ControlFlow<core::cmp::Reverse<(&str, &str, usize)>, core::convert::Infallible>>>::from_residual
+  0.500 ms (0.08%; cumulative 77.23%) <granit_parser::parser::Parser<granit_parser::input::str::StrInput> as granit_parser::parser::ParserTrait>::next_event
+  0.500 ms (0.08%; cumulative 77.31%) <std::fs::File as fs4::file_ext::sync_impl::std_impl::FileExt>::unlock
+  0.499 ms (0.08%; cumulative 77.40%) core::ptr::drop_glue::<[std::ffi::os_str::OsString]>
+  0.499 ms (0.08%; cumulative 77.48%) <serde_json::value::de::SeqDeserializer as serde_core::de::SeqAccess>::next_element_seed::<core::marker::PhantomData<onemessagebus::envelope::ArtifactRef>>
+  0.499 ms (0.08%; cumulative 77.56%) <alloc::vec::into_iter::IntoIter<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>>::as_raw_mut_slice
+  0.499 ms (0.08%; cumulative 77.65%) <std::sys::process::unix::common::cstring_array::CStringArray as core::ops::drop::Drop>::drop
+  0.498 ms (0.08%; cumulative 77.73%) <core::num::nonzero::NonZero<u32> as core::str::traits::FromStr>::from_str
+  0.496 ms (0.08%; cumulative 77.81%) <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+  0.495 ms (0.08%; cumulative 77.90%) <core::slice::iter::Iter<u8> as core::iter::traits::double_ended::DoubleEndedIterator>::next_back
+  0.494 ms (0.08%; cumulative 77.98%) <core::result::Result<(), std::io::error::Error>>::map_err::<onepipeline::error::Error, <onepipeline::ledger::RunPaths>::create::{closure#0}>
+  0.493 ms (0.08%; cumulative 78.06%) <std::collections::hash::map::Entry<&str, alloc::vec::Vec<usize>>>::or_default
+  0.493 ms (0.08%; cumulative 78.14%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::vcs::DispatchSession>>::keys
+  0.493 ms (0.08%; cumulative 78.23%) std::sys::pal::unix::stack_overflow::imp::drop_handler
+  0.492 ms (0.08%; cumulative 78.31%) fun_25da0
+  0.491 ms (0.08%; cumulative 78.39%) <onetaskgraph_core::engine::Engine>::known
+  0.490 ms (0.08%; cumulative 78.47%) <[_]>::split_at_unchecked::precondition_check
+  0.489 ms (0.08%; cumulative 78.56%) <fluent_uri::parse::Reader>::read
+  0.489 ms (0.08%; cumulative 78.64%) <core::option::Option<onepipeline::hooks::FiredOver>>::is_none
+  0.489 ms (0.08%; cumulative 78.72%) <serde_json::value::ser::Serializer as serde_core::ser::Serializer>::serialize_map
+  0.488 ms (0.08%; cumulative 78.80%) <alloc::vec::Vec<onemessagebus::envelope::ArtifactRef> as core::default::Default>::default
+  0.488 ms (0.08%; cumulative 78.88%) <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Dying, alloc::string::String, onepipeline::graph::NodeStatus>>::init_front
+  0.487 ms (0.08%; cumulative 78.97%) core::core_arch::x86::sse2::_mm_movemask_epi8
+  0.486 ms (0.08%; cumulative 79.05%) <[usize]>::sort_by_key::<core::cmp::Reverse<core::option::Option<u64>>, onepipeline::telemetry::drain::{closure#1}>::{closure#0}
+  0.485 ms (0.08%; cumulative 79.13%) core::ptr::drop_glue::<onepipeline::projection::MemberLabel>
+  0.485 ms (0.08%; cumulative 79.21%) <<onepipeline::telemetry::Usage as serde_core::de::Deserialize>::deserialize::__FieldVisitor as serde_core::de::Visitor>::visit_str::<serde_json::error::Error>
+  0.484 ms (0.08%; cumulative 79.29%) core::ptr::drop_glue::<alloc::vec::Vec<clap_builder::util::any_value::AnyValue>>
+  0.484 ms (0.08%; cumulative 79.37%) jsonschema::keywords::type_::compile::<jsonschema_value::serde_json::SerdeJson>
+  0.482 ms (0.08%; cumulative 79.45%) <onepipeline::cli::Command as clap_builder::derive::Subcommand>::augment_subcommands
+  0.482 ms (0.08%; cumulative 79.53%) <<onepipeline::vocabulary::Labels as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_map::<&mut serde_json::value::de::MapDeserializer>
+  0.481 ms (0.08%; cumulative 79.62%) <std::path::PathBuf as core::ops::deref::Deref>::deref
+  0.480 ms (0.08%; cumulative 79.70%) <core::fmt::Formatter>::write_fmt
+  0.480 ms (0.08%; cumulative 79.78%) <alloc::collections::btree::map::entry::VacantEntry<schemars::generate::SchemaUid, alloc::collections::btree::set_val::SetValZST>>::insert_entry
+  0.480 ms (0.08%; cumulative 79.86%) <onepipeline::event::PipelineKind as core::cmp::PartialEq>::eq
+  0.479 ms (0.08%; cumulative 79.94%) <alloc::collections::btree::map::Iter<(alloc::string::String, alloc::string::String), alloc::collections::btree::set_val::SetValZST> as core::iter::traits::iterator::Iterator>::next
+  0.479 ms (0.08%; cumulative 80.02%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::agentgraph::TurnAddress> as core::clone::Clone>::clone
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+
+pid 583.1: sampled CPU 658.103 ms; lifetime 1993.949 ms; threads 332
+nearest first-party module (otherwise leaf):
+  131.713 ms (20.01%; cumulative 20.01%) onevcs::git
+  50.768 ms (7.71%; cumulative 27.73%) onepipeline::ledger
+  49.408 ms (7.51%; cumulative 35.24%) poll
+  42.282 ms (6.42%; cumulative 41.66%) onevcs::launch_trace
+  41.879 ms (6.36%; cumulative 48.02%) libc.so.6!unresolved
+  33.250 ms (5.05%; cumulative 53.08%) onemessagebus::envelope
+  25.661 ms (3.90%; cumulative 56.98%) onepipeline::projection
+  20.477 ms (3.11%; cumulative 60.09%) onepipeline::writeback
+  17.339 ms (2.63%; cumulative 62.72%) onemessagebus::schema
+  14.529 ms (2.21%; cumulative 64.93%) onepipeline::checkpoint
+  12.982 ms (1.97%; cumulative 66.90%) onepipeline::plan
+  12.025 ms (1.83%; cumulative 68.73%) onevcs::lock
+  12.012 ms (1.83%; cumulative 70.56%) onepipeline::telemetry
+  9.354 ms (1.42%; cumulative 71.98%) onepipeline::summary
+  6.499 ms (0.99%; cumulative 72.96%) onepipeline::vocabulary
+  6.051 ms (0.92%; cumulative 73.88%) onetaskgraph_local_md::staged
+  5.802 ms (0.88%; cumulative 74.77%) _close
+  5.218 ms (0.79%; cumulative 75.56%) onepipeline::engine
+  5.143 ms (0.78%; cumulative 76.34%) fun_f230
+  5.018 ms (0.76%; cumulative 77.10%) onevcs::home
+  5.012 ms (0.76%; cumulative 77.86%) onepipeline::driver
+  4.493 ms (0.68%; cumulative 78.55%) onevcs::workspace
+  4.402 ms (0.67%; cumulative 79.22%) onetaskgraph_local_md::yaml
+  4.279 ms (0.65%; cumulative 79.87%) onepipeline::graph
+  4.225 ms (0.64%; cumulative 80.51%) onetaskgraph_local_md::LocalMdSource>
+nearest first-party function (otherwise leaf):
+  50.094 ms (7.61%; cumulative 7.61%) onevcs::git::bounded::<onevcs::git::run_fed::{closure#4}::{closure#3}>
+  49.408 ms (7.51%; cumulative 15.12%) poll
+  41.879 ms (6.36%; cumulative 21.48%) libc.so.6!unresolved
+  22.065 ms (3.35%; cumulative 24.84%) onevcs::git::wait_for_exit
+  19.943 ms (3.03%; cumulative 27.87%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  16.862 ms (2.56%; cumulative 30.43%) <onemessagebus::schema::Registry>::register_schema
+  16.695 ms (2.54%; cumulative 32.97%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  14.228 ms (2.16%; cumulative 35.13%) onevcs::git::run_fed
+  11.833 ms (1.80%; cumulative 36.93%) onepipeline::ledger::disk::publish
+  10.853 ms (1.65%; cumulative 38.57%) onevcs::launch_trace::sleep
+  10.678 ms (1.62%; cumulative 40.20%) onepipeline::ledger::publish
+  9.385 ms (1.43%; cumulative 41.62%) <onevcs::launch_trace::Tracer>::write
+  8.472 ms (1.29%; cumulative 42.91%) onevcs::lock::wait_for
+  8.380 ms (1.27%; cumulative 44.18%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::SliceRead>>
+  7.502 ms (1.14%; cumulative 45.32%) <onepipeline::projection::RunState as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  6.051 ms (0.92%; cumulative 46.24%) onetaskgraph_local_md::staged
+  5.856 ms (0.89%; cumulative 47.13%) onevcs::launch_trace::wait
+  5.802 ms (0.88%; cumulative 48.01%) _close
+  5.655 ms (0.86%; cumulative 48.87%) onepipeline::ledger::disk::sync_contents
+  5.555 ms (0.84%; cumulative 49.72%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  5.528 ms (0.84%; cumulative 50.56%) <onevcs::launch_trace::Launch>::spawned
+  5.375 ms (0.82%; cumulative 51.37%) <onepipeline::plan::Node as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  5.143 ms (0.78%; cumulative 52.16%) fun_f230
+  5.137 ms (0.78%; cumulative 52.94%) <onevcs::git::PipeCapture>::finish
+  5.006 ms (0.76%; cumulative 53.70%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  4.583 ms (0.70%; cumulative 54.39%) <onepipeline::checkpoint::Projected>::take_with
+  4.277 ms (0.65%; cumulative 55.04%) <onepipeline::telemetry::Aggregate as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  4.246 ms (0.65%; cumulative 55.69%) <onepipeline::plan::Node as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  4.230 ms (0.64%; cumulative 56.33%) onepipeline::ledger::disk::read
+  3.998 ms (0.61%; cumulative 56.94%) <onepipeline::summary::Maintainer>::derived
+  3.840 ms (0.58%; cumulative 57.52%) onepipeline::driver::attach
+  3.788 ms (0.58%; cumulative 58.10%) onepipeline::projection::millis_of
+  3.626 ms (0.55%; cumulative 58.65%) syscall
+  3.600 ms (0.55%; cumulative 59.20%) _munmap
+  3.347 ms (0.51%; cumulative 59.70%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  3.260 ms (0.50%; cumulative 60.20%) <onevcs::launch_trace::Wait>::into_launch
+  3.096 ms (0.47%; cumulative 60.67%) onevcs::policy::parse
+  3.047 ms (0.46%; cumulative 61.13%) onevcs::launch_trace::launch
+  2.965 ms (0.45%; cumulative 61.58%) onevcs::native_refs::local_value
+  2.887 ms (0.44%; cumulative 62.02%) onevcs::home::ensure_dir
+  2.723 ms (0.41%; cumulative 62.44%) <onemessagebus::transport::LocalTransport as onemessagebus::transport::Transport>::fingerprint
+  2.709 ms (0.41%; cumulative 62.85%) <onepipeline::vocabulary::Labels as serde_core::de::Deserialize>::deserialize::<serde_json::value::Value>
+  2.607 ms (0.40%; cumulative 63.24%) onepipeline::ledger::disk::synced
+  2.573 ms (0.39%; cumulative 63.64%) <*const ()>::is_aligned_to
+  2.512 ms (0.38%; cumulative 64.02%) onepipeline::ledger::read_range
+  2.411 ms (0.37%; cumulative 64.38%) <onepipeline::ledger::LaunchRecord as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  2.389 ms (0.36%; cumulative 64.75%) onepipeline::ledger::write_atomic
+  2.324 ms (0.35%; cumulative 65.10%) <onetaskgraph_local_md::LocalMdSource>::directory
+  2.323 ms (0.35%; cumulative 65.45%) <onepipeline::channel::layout::CommandResult as schemars::JsonSchema>::json_schema
+  2.275 ms (0.35%; cumulative 65.80%) onevcs::launch_trace::output
+  2.268 ms (0.34%; cumulative 66.14%) onepipeline::release::ask_until_dropped
+  2.258 ms (0.34%; cumulative 66.49%) onemessagebus::envelope::take_or_default::<serde_json::map::Map<alloc::string::String, serde_json::value::Value>, serde_json::error::Error>
+  2.251 ms (0.34%; cumulative 66.83%) <onepipeline::vocabulary::Labels as core::clone::Clone>::clone
+  2.224 ms (0.34%; cumulative 67.17%) <onepipeline::projection::RunState as core::clone::Clone>::clone
+  2.177 ms (0.33%; cumulative 67.50%) onetaskgraph_local_md::compact
+  2.164 ms (0.33%; cumulative 67.83%) onepipeline::projection::fold_record
+  2.163 ms (0.33%; cumulative 68.15%) onevcs::workspace::existing
+  2.102 ms (0.32%; cumulative 68.47%) <onepipeline::writeback::Writeback>::is_handing_over::{closure#0}
+  2.092 ms (0.32%; cumulative 68.79%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as core::clone::Clone>::clone
+  2.078 ms (0.32%; cumulative 69.11%) <onevcs::launch_trace::Launch>::exited
+  1.954 ms (0.30%; cumulative 69.40%) <onepipeline::telemetry::Aggregate>::fold
+  1.902 ms (0.29%; cumulative 69.69%) onetaskgraph_core::resolve::validate_sources
+  1.895 ms (0.29%; cumulative 69.98%) onevcs::checkout_reads::managed
+  1.757 ms (0.27%; cumulative 70.25%) read
+  1.748 ms (0.27%; cumulative 70.51%) onepipeline::writeback::closer
+  1.683 ms (0.26%; cumulative 70.77%) <onepipeline::graph::Graph>::iter
+  1.671 ms (0.25%; cumulative 71.02%) <onepipeline::summary::RunSummary as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>>
+  1.632 ms (0.25%; cumulative 71.27%) <onepipeline::plan::TaskRecord as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  1.619 ms (0.25%; cumulative 71.52%) onepipeline::writeback::worker
+  1.560 ms (0.24%; cumulative 71.75%) fun_9c7e0
+  1.559 ms (0.24%; cumulative 71.99%) <onemessagebus::envelope::Envelope<onevcs::vocabulary::VcsEvents> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  1.556 ms (0.24%; cumulative 72.23%) <onepipeline::plan::Node as core::clone::Clone>::clone
+  1.492 ms (0.23%; cumulative 72.45%) onepipeline::checkpoint::fold_in_merge_order
+  1.479 ms (0.22%; cumulative 72.68%) <onepipeline::checkpoint::Projected>::write
+  1.472 ms (0.22%; cumulative 72.90%) onepipeline::writeback::shadow_front_metadata
+  1.456 ms (0.22%; cumulative 73.12%) onepipeline::journal::stream_queues::<onepipeline::journal::merged_order::{closure#0}>
+  1.438 ms (0.22%; cumulative 73.34%) onepipeline::writeback::opened_within
+  1.365 ms (0.21%; cumulative 73.55%) onepipeline::executor::make_node_scratch_dir
+  1.348 ms (0.20%; cumulative 73.76%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>>
+  1.343 ms (0.20%; cumulative 73.96%) onepipeline::ledger::records_of
+  1.341 ms (0.20%; cumulative 74.16%) onepipeline::ledger::read_json_opt::<serde_json::value::Value>::{closure#1}
+  1.302 ms (0.20%; cumulative 74.36%) _madvise
+  1.276 ms (0.19%; cumulative 74.55%) <onemessagebus::redact::Redactor>::from_env
+  1.244 ms (0.19%; cumulative 74.74%) onevcs::lock::open_at
+  1.238 ms (0.19%; cumulative 74.93%) onevcs::lock::record_owner
+  1.206 ms (0.18%; cumulative 75.11%) onepipeline::writeback::opened_within::{closure#0}
+  1.182 ms (0.18%; cumulative 75.29%) _libc_calloc
+  1.180 ms (0.18%; cumulative 75.47%) onevcs::home::root
+  1.171 ms (0.18%; cumulative 75.65%) <std::sync::mpmc::list::Channel<()>>::send
+  1.162 ms (0.18%; cumulative 75.83%) onepipeline::writeback::opened_by::<core::result::Result<onetaskgraph_core::config::Config, onetaskgraph_core::config::error::ConfigError>>
+  1.148 ms (0.17%; cumulative 76.00%) onepipeline::checkpoint::digested
+  1.115 ms (0.17%; cumulative 76.17%) onevcs::workspace::all
+  1.085 ms (0.16%; cumulative 76.34%) <onepipeline::telemetry::Aggregate as core::clone::Clone>::clone
+  1.081 ms (0.16%; cumulative 76.50%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<serde_json::value::Value>
+  1.076 ms (0.16%; cumulative 76.66%) onepipeline::checkpoint::length_of
+  1.038 ms (0.16%; cumulative 76.82%) onevcs::policy::load
+  1.022 ms (0.16%; cumulative 76.98%) onepipeline::summary::journal_stamp
+  1.016 ms (0.15%; cumulative 77.13%) onepipeline::engine::wait_for_work
+  0.995 ms (0.15%; cumulative 77.28%) onepipeline::executor::load_average
+  0.992 ms (0.15%; cumulative 77.43%) <onetaskgraph_local_md::LocalMdSource>::confined
+  0.989 ms (0.15%; cumulative 77.58%) regex_automata::util::determinize::epsilon_closure
+  0.984 ms (0.15%; cumulative 77.73%) onepipeline::agentgraph::relayed_lines::<std::io::buffered::bufreader::BufReader<std::process::ChildStdout>, <onepipeline::agentgraph::ProcessGraphRun>::events::{closure#0}>::{closure#0}
+  0.966 ms (0.15%; cumulative 77.88%) <onepipeline::continuation::ClaimWatch>::until_fence_retry
+  0.964 ms (0.15%; cumulative 78.03%) <onepipeline::checkpoint::Coverage>::absorb
+  0.954 ms (0.14%; cumulative 78.17%) <onepipeline::writeback::Lineages>::walk
+  0.949 ms (0.14%; cumulative 78.32%) onepipeline::projection::derived_already
+  0.933 ms (0.14%; cumulative 78.46%) onevcs::git::reads::remember
+  0.931 ms (0.14%; cumulative 78.60%) onepipeline::vcs::token_of
+  0.930 ms (0.14%; cumulative 78.74%) <onepipeline::projection::Doing as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.924 ms (0.14%; cumulative 78.88%) onevcs::recovery_cache::has_git_overrides
+  0.921 ms (0.14%; cumulative 79.02%) fun_ab630
+  0.921 ms (0.14%; cumulative 79.16%) <onepipeline::appendstamp::Stamp as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.909 ms (0.14%; cumulative 79.30%) <onetaskgraph_local_md::LocalMdSource>::read_text
+  0.899 ms (0.14%; cumulative 79.44%) <onepipeline::human_items::HumanItemsCommand as clap_builder::derive::Subcommand>::augment_subcommands
+  0.891 ms (0.14%; cumulative 79.57%) onepipeline::engine::journalling_relay::{closure#0}
+  0.885 ms (0.13%; cumulative 79.71%) fun_188cf0
+  0.885 ms (0.13%; cumulative 79.84%) onepipeline::ledger::open_healed
+  0.885 ms (0.13%; cumulative 79.97%) onepipeline::crossdag::resolve_with
+  0.884 ms (0.13%; cumulative 80.11%) <onepipeline::projection::RunState as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>>
+self function:
+  114.489 ms (17.40%; cumulative 17.40%) libc.so.6!unresolved
+  50.101 ms (7.61%; cumulative 25.01%) poll
+  28.195 ms (4.28%; cumulative 29.29%) _open64
+  23.530 ms (3.58%; cumulative 32.87%) syscall
+  13.078 ms (1.99%; cumulative 34.86%) rename
+  11.727 ms (1.78%; cumulative 36.64%) _close
+  11.387 ms (1.73%; cumulative 38.37%) fun_ab630
+  10.576 ms (1.61%; cumulative 39.98%) fsync
+  10.001 ms (1.52%; cumulative 41.50%) clock_nanosleep
+  9.476 ms (1.44%; cumulative 42.94%) statx
+  9.412 ms (1.43%; cumulative 44.37%) _write
+  8.464 ms (1.29%; cumulative 45.65%) mkdir
+  7.995 ms (1.21%; cumulative 46.87%) read
+  7.202 ms (1.09%; cumulative 47.96%) wait4
+  6.995 ms (1.06%; cumulative 49.02%) _munmap
+  6.633 ms (1.01%; cumulative 50.03%) malloc
+  6.440 ms (0.98%; cumulative 51.01%) fun_188d80
+  5.143 ms (0.78%; cumulative 51.79%) fun_f230
+  5.008 ms (0.76%; cumulative 52.55%) core::slice::raw::from_raw_parts::precondition_check
+  3.950 ms (0.60%; cumulative 53.15%) pipe2
+  3.652 ms (0.55%; cumulative 53.71%) fun_188cf0
+  3.362 ms (0.51%; cumulative 54.22%) <*const ()>::is_aligned_to
+  3.351 ms (0.51%; cumulative 54.73%) core::ptr::drop_glue::<jsonschema::compiler::LocationCacheKey>
+  3.307 ms (0.50%; cumulative 55.23%) _libc_free
+  3.247 ms (0.49%; cumulative 55.72%) fun_98d50
+  2.982 ms (0.45%; cumulative 56.18%) <serde_json::read::SliceRead as serde_json::read::Read>::peek
+  2.812 ms (0.43%; cumulative 56.60%) <alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>
+  2.517 ms (0.38%; cumulative 56.99%) <serde_core::de::impls::OptionVisitor<onepipeline::plan::TaskRecord> as serde_core::de::Visitor>::visit_some::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  2.504 ms (0.38%; cumulative 57.37%) fun_ab230
+  2.277 ms (0.35%; cumulative 57.71%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  2.250 ms (0.34%; cumulative 58.06%) readlink
+  2.224 ms (0.34%; cumulative 58.39%) <serde_json::de::MapAccess<serde_json::read::SliceRead> as serde_core::de::MapAccess>::next_entry::<alloc::string::String, serde_json::value::Value>
+  2.182 ms (0.33%; cumulative 58.72%) serde_json::ser::format_escaped_str_contents::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>
+  2.144 ms (0.33%; cumulative 59.05%) _mmap
+  2.128 ms (0.32%; cumulative 59.37%) <serde_json::map::Entry>::or_insert
+  2.109 ms (0.32%; cumulative 59.69%) fun_a9c70
+  2.102 ms (0.32%; cumulative 60.01%) <onepipeline::writeback::Writeback>::is_handing_over::{closure#0}
+  2.040 ms (0.31%; cumulative 60.32%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>::entry
+  2.015 ms (0.31%; cumulative 60.63%) unlinkat
+  1.954 ms (0.30%; cumulative 60.93%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::telemetry::Phase>>::remove_entry::<alloc::string::String>
+  1.954 ms (0.30%; cumulative 61.22%) <core::iter::adapters::zip::Zip<core::iter::adapters::zip::Zip<core::slice::iter::Iter<u8>, core::slice::iter::Iter<u8>>, core::slice::iter::IterMut<i64>> as core::iter::adapters::zip::ZipImpl<core::iter::adapters::zip::Zip<core::slice::iter::Iter<u8>, core::slice::iter::Iter<u8>>, core::slice::iter::IterMut<i64>>>::next
+  1.887 ms (0.29%; cumulative 61.51%) <hashbrown::raw::RawTable<usize>>::reserve_rehash::<indexmap::inner::get_hash<alloc::string::String, serde_json::value::Value>::{closure#0}>
+  1.820 ms (0.28%; cumulative 61.79%) <core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::c_rounds
+  1.796 ms (0.27%; cumulative 62.06%) <alloc::raw_vec::RawVecInner>::finish_grow
+  1.729 ms (0.26%; cumulative 62.32%) <alloc::vec::Vec<u8>>::extend_from_slice
+  1.634 ms (0.25%; cumulative 62.57%) core::ptr::copy_nonoverlapping::precondition_check
+  1.604 ms (0.24%; cumulative 62.81%) __rustc::__rust_no_alloc_shim_is_unstable_v2
+  1.560 ms (0.24%; cumulative 63.05%) fun_9c7e0
+  1.546 ms (0.23%; cumulative 63.29%) <alloc::raw_vec::RawVecInner>::deallocate
+  1.522 ms (0.23%; cumulative 63.52%) pthread_create
+  1.459 ms (0.22%; cumulative 63.74%) _open64_nocancel
+  1.424 ms (0.22%; cumulative 63.96%) <serde_json::value::Value as core::fmt::Display>::fmt
+  1.412 ms (0.21%; cumulative 64.17%) <std::path::Components as core::iter::traits::iterator::Iterator>::next
+  1.409 ms (0.21%; cumulative 64.38%) <serde_json::de::Deserializer<serde_json::read::StrRead>>::parse_whitespace
+  1.386 ms (0.21%; cumulative 64.60%) fun_11ca00
+  1.368 ms (0.21%; cumulative 64.80%) <std::sync::mpmc::Receiver<core::result::Result<onepipeline::taskgraph::Built, onetaskgraph_core::config::error::ConfigError>> as core::ops::drop::Drop>::drop::{closure#1}
+  1.330 ms (0.20%; cumulative 65.01%) <std::time::SystemTime>::now
+  1.324 ms (0.20%; cumulative 65.21%) <serde_json::de::MapAccess<serde_json::read::StrRead> as serde_core::de::MapAccess>::next_value_seed::<core::marker::PhantomData<alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::telemetry::Phase>>>
+  1.302 ms (0.20%; cumulative 65.40%) _madvise
+  1.301 ms (0.20%; cumulative 65.60%) <alloc::vec::Vec<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>>::extend_trusted::<core::iter::adapters::cloned::Cloned<core::slice::iter::Iter<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>>>
+  1.299 ms (0.20%; cumulative 65.80%) onevcs::launch_trace::wait
+  1.283 ms (0.19%; cumulative 65.99%) <alloc::raw_vec::RawVecInner>::with_capacity_in
+  1.275 ms (0.19%; cumulative 66.19%) <[alloc::string::String]>::iter
+  1.246 ms (0.19%; cumulative 66.38%) <alloc::string::String as core::clone::Clone>::clone
+  1.212 ms (0.18%; cumulative 66.56%) <alloc::collections::btree::map::IntoIter<alloc::string::String, onepipeline::projection::PendingDecision>>::dying_next
+  1.211 ms (0.18%; cumulative 66.75%) jsonschema::compiler::compile_with_internal::<jsonschema_value::serde_json::SerdeJson>
+  1.206 ms (0.18%; cumulative 66.93%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, alloc::string::String, alloc::string::String, alloc::collections::btree::node::marker::LeafOrInternal>>::deallocate_and_ascend::<alloc::alloc::Global>
+  1.187 ms (0.18%; cumulative 67.11%) <alloc::vec::Vec<u8> as alloc::vec::spec_extend::SpecExtend<&u8, core::slice::iter::Iter<u8>>>::spec_extend
+  1.182 ms (0.18%; cumulative 67.29%) _libc_calloc
+  1.171 ms (0.18%; cumulative 67.47%) <std::sync::mpmc::list::Channel<()>>::send
+  1.170 ms (0.18%; cumulative 67.64%) core::ub_checks::maybe_is_nonoverlapping::runtime
+  1.148 ms (0.17%; cumulative 67.82%) <core::slice::iter::Iter<u8> as core::iter::traits::iterator::Iterator>::fold::<u128, onepipeline::checkpoint::digested::{closure#0}>
+  1.103 ms (0.17%; cumulative 67.99%) core::ptr::drop_glue::<alloc::vec::Vec<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>>
+  1.039 ms (0.16%; cumulative 68.14%) _mprotect
+  1.019 ms (0.15%; cumulative 68.30%) fun_a9b90
+  0.989 ms (0.15%; cumulative 68.45%) regex_automata::util::determinize::epsilon_closure
+  0.982 ms (0.15%; cumulative 68.60%) <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, onepipeline::telemetry::BucketName, u64, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<onepipeline::telemetry::BucketName, u64>>::insert_entry::{closure#0}>
+  0.981 ms (0.15%; cumulative 68.75%) fun_98690
+  0.963 ms (0.15%; cumulative 68.89%) ftruncate
+  0.962 ms (0.15%; cumulative 69.04%) _close_nocancel
+  0.949 ms (0.14%; cumulative 69.18%) <core::slice::iter::Iter<onepipeline::projection::Derivation>>::new
+  0.943 ms (0.14%; cumulative 69.33%) fun_ab050
+  0.938 ms (0.14%; cumulative 69.47%) <onepipeline::plan::Node as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  0.933 ms (0.14%; cumulative 69.61%) <serde_json::de::Deserializer<serde_json::read::SliceRead>>::parse_whitespace
+  0.931 ms (0.14%; cumulative 69.75%) <[char; 2] as core::str::pattern::Pattern>::is_contained_in
+  0.925 ms (0.14%; cumulative 69.89%) <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeMap>::serialize_key::<str>
+  0.924 ms (0.14%; cumulative 70.03%) <alloc::vec::Vec<u8> as core::cmp::Ord>::cmp
+  0.924 ms (0.14%; cumulative 70.17%) fstatat
+  0.906 ms (0.14%; cumulative 70.31%) <serde::private::de::content::ContentRefDeserializer<serde_json::error::Error> as serde_core::de::Deserializer>::deserialize_string::<serde_core::de::impls::StringVisitor>
+  0.899 ms (0.14%; cumulative 70.45%) <clap_builder::util::id::Id as clap_builder::builder::resettable::IntoResettable<clap_builder::util::id::Id>>::into_resettable
+  0.897 ms (0.14%; cumulative 70.59%) <serde_json::value::Value as core::convert::From<&str>>::from
+  0.891 ms (0.14%; cumulative 70.72%) <alloc::string::String as core::fmt::Write>::write_str
+  0.885 ms (0.13%; cumulative 70.86%) core::core_arch::x86::sse2::_mm_loadu_si128
+  0.875 ms (0.13%; cumulative 70.99%) <alloc::vec::Vec<regex_automata::nfa::thompson::map::Utf8BoundedEntry>>::extend_with
+  0.849 ms (0.13%; cumulative 71.12%) alloc::fmt::format::format_inner
+  0.828 ms (0.13%; cumulative 71.24%) sysconf
+  0.822 ms (0.12%; cumulative 71.37%) unresolved
+  0.814 ms (0.12%; cumulative 71.49%) <alloc::vec::Vec<serde_json::value::Value> as core::clone::Clone>::clone
+  0.803 ms (0.12%; cumulative 71.61%) core::ptr::drop_glue::<serde_json::value::Value>
+  0.802 ms (0.12%; cumulative 71.74%) <std::sync::mpmc::list::Channel<std::fs::File>>::recv::{closure#1}
+  0.801 ms (0.12%; cumulative 71.86%) _getauxval
+  0.793 ms (0.12%; cumulative 71.98%) referencing::spec::draft202012::walk_children::<referencing::registry::build::crawl_schema::{closure#0}>
+  0.786 ms (0.12%; cumulative 72.10%) onevcs::git::bounded::<onevcs::git::run_fed::{closure#4}::{closure#3}>
+  0.784 ms (0.12%; cumulative 72.22%) fun_9e730
+  0.773 ms (0.12%; cumulative 72.33%) <core::ops::range::RangeInclusive<i64> as core::ops::range::RangeBounds<i64>>::contains::<i64>
+  0.768 ms (0.12%; cumulative 72.45%) <std::sync::mpmc::list::Channel<()>>::recv
+  0.757 ms (0.12%; cumulative 72.57%) fun_ada50
+  0.749 ms (0.11%; cumulative 72.68%) __rustc::__rdl_dealloc
+  0.746 ms (0.11%; cumulative 72.79%) core::ptr::drop_glue::<alloc::vec::Vec<u8>>
+  0.744 ms (0.11%; cumulative 72.91%) getrlimit
+  0.742 ms (0.11%; cumulative 73.02%) __rustc::__rust_dealloc
+  0.739 ms (0.11%; cumulative 73.13%) access
+  0.737 ms (0.11%; cumulative 73.24%) <serde_json::de::Deserializer<serde_json::read::StrRead>>::parse_object_colon
+  0.726 ms (0.11%; cumulative 73.35%) <core::result::Result<serde_json::map::Map<alloc::string::String, serde_json::value::Value>, serde_json::error::Error> as core::ops::try_trait::Try>::branch
+  0.726 ms (0.11%; cumulative 73.46%) fun_189710
+  0.707 ms (0.11%; cumulative 73.57%) core::ptr::drop_glue::<std::io::error::Error>
+  0.698 ms (0.11%; cumulative 73.68%) core::ptr::drop_glue::<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>
+  0.687 ms (0.10%; cumulative 73.78%) <core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match
+  0.687 ms (0.10%; cumulative 73.89%) sigaltstack
+  0.674 ms (0.10%; cumulative 73.99%) <serde_json::de::Deserializer<serde_json::read::StrRead>>::parse_integer
+  0.672 ms (0.10%; cumulative 74.09%) <core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next
+  0.655 ms (0.10%; cumulative 74.19%) <indexmap::inner::Core<alloc::string::String, serde_json::value::Value>>::insert_full
+  0.645 ms (0.10%; cumulative 74.29%) <std::hash::random::DefaultHasher as core::hash::Hasher>::write
+  0.626 ms (0.10%; cumulative 74.38%) <onevcs::launch_trace::Wait>::into_launch
+  0.626 ms (0.10%; cumulative 74.48%) <onepipeline::telemetry::Aggregate as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  0.625 ms (0.09%; cumulative 74.57%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, onepipeline::telemetry::BucketName, u64, alloc::collections::btree::node::marker::Leaf>>::new_leaf::<alloc::alloc::Global>
+  0.624 ms (0.09%; cumulative 74.67%) core::sync::atomic::atomic_load::<*mut std::sync::mpmc::list::Block<onepipeline::engine::Message>>
+  0.610 ms (0.09%; cumulative 74.76%) fun_991e0
+  0.610 ms (0.09%; cumulative 74.85%) <onemessagebus::redact::Redactor>::from_env
+  0.608 ms (0.09%; cumulative 74.95%) <std::sys::pal::unix::time::Timespec>::now
+  0.605 ms (0.09%; cumulative 75.04%) <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, alloc::string::String, u64, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_end::<alloc::alloc::Global>
+  0.597 ms (0.09%; cumulative 75.13%) <<serde_json::map::Map<alloc::string::String, serde_json::value::Value> as serde_core::de::Deserialize>::deserialize::Visitor as serde_core::de::Visitor>::visit_map::<serde_json::de::MapAccess<serde_json::read::StrRead>>
+  0.594 ms (0.09%; cumulative 75.22%) <indexmap::inner::Core<alloc::string::String, serde_json::value::Value> as core::clone::Clone>::clone
+  0.591 ms (0.09%; cumulative 75.31%) <core::option::Option<onepipeline::storeops::Context>>::is_none
+  0.590 ms (0.09%; cumulative 75.40%) <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeMap>::serialize_entry::<str, alloc::string::String>
+  0.584 ms (0.09%; cumulative 75.49%) std::sys::backtrace::__rust_begin_short_backtrace::<<onevcs::git::PipeCapture>::start<std::process::ChildStderr>::{closure#0}, onevcs::git::Captured>
+  0.581 ms (0.09%; cumulative 75.57%) <serde_json::de::MapKey<serde_json::read::StrRead> as serde_core::de::Deserializer>::deserialize_str::<serde_json::value::de::KeyClassifier>
+  0.578 ms (0.09%; cumulative 75.66%) <core::option::Option<onepipeline::rendercost::Inside>>::as_ref
+  0.578 ms (0.09%; cumulative 75.75%) <core::fmt::Formatter>::pad_integral::write_prefix
+  0.569 ms (0.09%; cumulative 75.84%) onevcs::ids::unique
+  0.565 ms (0.09%; cumulative 75.92%) <serde_json::de::MapKey<serde_json::read::StrRead> as serde_core::de::Deserializer>::deserialize_any::<<onepipeline::agentgraph::WrittenAddress as serde_core::de::Deserialize>::deserialize::__FieldVisitor>
+  0.561 ms (0.09%; cumulative 76.01%) fun_98610
+  0.551 ms (0.08%; cumulative 76.09%) <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  0.551 ms (0.08%; cumulative 76.18%) getdents64
+  0.549 ms (0.08%; cumulative 76.26%) <u8 as core::slice::cmp::SlicePartialEq<u8>>::equal_same_length
+  0.548 ms (0.08%; cumulative 76.34%) <alloc::string::String as serde_core::de::Deserialize>::deserialize::<serde_json::de::MapKey<serde_json::read::SliceRead>>
+  0.545 ms (0.08%; cumulative 76.43%) core::sync::atomic::atomic_load::<usize>
+  0.544 ms (0.08%; cumulative 76.51%) <&mut serde_json::de::Deserializer<serde_json::read::StrRead> as serde_core::de::Deserializer>::deserialize_map::<<alloc::collections::btree::map::BTreeMap<_, _> as serde_core::de::Deserialize>::deserialize::MapVisitor<alloc::string::String, onevcs::preserve::Preservation>>
+  0.542 ms (0.08%; cumulative 76.59%) <core::option::Option<alloc::string::String>>::is_none
+  0.541 ms (0.08%; cumulative 76.67%) <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, onepipeline::telemetry::BucketName, u64, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>>::next_leaf_edge
+  0.539 ms (0.08%; cumulative 76.75%) core::ptr::drop_glue::<core::option::Option<alloc::string::String>>
+  0.539 ms (0.08%; cumulative 76.84%) <indexmap::Bucket<alloc::string::String, serde_json::value::Value> as core::clone::Clone>::clone
+  0.537 ms (0.08%; cumulative 76.92%) <core::num::nonzero::NonZero<u64> as schemars::JsonSchema>::_schemars_private_is_option
+  0.537 ms (0.08%; cumulative 77.00%) realloc
+  0.531 ms (0.08%; cumulative 77.08%) <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&(core::option::Option<std::path::PathBuf>, alloc::vec::Vec<alloc::string::String>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>)>
+  0.530 ms (0.08%; cumulative 77.16%) <serde_json::ser::Compound<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter> as serde_core::ser::SerializeMap>::serialize_value::<onepipeline::vocabulary::Source>
+  0.529 ms (0.08%; cumulative 77.24%) <hashbrown::map::HashMap<alloc::string::String, jsonschema::node::SchemaNode, ahash::random_state::RandomState>>::get::<str>
+  0.529 ms (0.08%; cumulative 77.32%) <&mut serde_json::de::Deserializer<serde_json::read::StrRead> as serde_core::de::Deserializer>::deserialize_enum::<<onepipeline::projection::MemberLabel as serde_core::de::Deserialize>::deserialize::__Visitor>
+  0.528 ms (0.08%; cumulative 77.40%) linkat
+  0.524 ms (0.08%; cumulative 77.48%) <core::array::iter::IntoIter<core::option::Option<std::time::Instant>, 3> as core::ops::drop::Drop>::drop
+  0.524 ms (0.08%; cumulative 77.56%) <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Dying, alloc::string::String, alloc::collections::btree::set_val::SetValZST>>::deallocating_end::<alloc::alloc::Global>
+  0.524 ms (0.08%; cumulative 77.64%) <core::option::Option<&u64>>::copied
+  0.523 ms (0.08%; cumulative 77.72%) <serde_json::de::MapAccess<serde_json::read::StrRead> as serde_core::de::MapAccess>::next_key_seed::<core::marker::PhantomData<<onepipeline::telemetry::Aggregate as serde_core::de::Deserialize>::deserialize::__Field>>
+  0.520 ms (0.08%; cumulative 77.80%) regex_syntax::ast::visitor::visit::<regex_syntax::ast::parse::NestLimiter<&mut regex_syntax::ast::parse::Parser>>
+  0.520 ms (0.08%; cumulative 77.88%) <schemars::schema::Schema as core::convert::From<serde_json::map::Map<alloc::string::String, serde_json::value::Value>>>::from
+  0.520 ms (0.08%; cumulative 77.96%) <hashbrown::raw::RawTable<usize>>::insert_tagged_at_index
+  0.520 ms (0.08%; cumulative 78.04%) <std::thread::thread::Thread>::park_timeout
+  0.516 ms (0.08%; cumulative 78.11%) <serde_json::read::SliceRead as serde_json::read::Read>::next
+  0.515 ms (0.08%; cumulative 78.19%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, alloc::string::String, onepipeline::projection::Recorded, alloc::collections::btree::node::marker::Leaf>>::push_with_handle
+  0.514 ms (0.08%; cumulative 78.27%) onepipeline::ledger::write_atomic
+  0.514 ms (0.08%; cumulative 78.35%) <alloc::vec::Vec<u8>>::append_elements
+  0.514 ms (0.08%; cumulative 78.43%) onepipeline::review::failpoint
+  0.514 ms (0.08%; cumulative 78.51%) <alloc::collections::btree::map::Iter<alloc::string::String, onepipeline::projection::Recorded> as core::iter::traits::iterator::Iterator>::size_hint
+  0.512 ms (0.08%; cumulative 78.58%) core::ptr::drop_glue::<core::option::Option<onepipeline::human_items::HumanItemMetadata>>
+  0.512 ms (0.08%; cumulative 78.66%) fun_adf20
+  0.511 ms (0.08%; cumulative 78.74%) core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<alloc::string::String, alloc::string::String>>
+  0.508 ms (0.08%; cumulative 78.82%) core::ptr::copy::precondition_check
+  0.508 ms (0.08%; cumulative 78.89%) <alloc::collections::btree::map::BTreeMap<alloc::string::String, onepipeline::graph::NodeStatus>>::get::<alloc::string::String>
+  0.508 ms (0.08%; cumulative 78.97%) core::str::validations::next_code_point::<core::slice::iter::Iter<u8>>
+  0.508 ms (0.08%; cumulative 79.05%) <f64 as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  0.506 ms (0.08%; cumulative 79.12%) <onepipeline::projection::DriverClaim as core::convert::TryFrom<onepipeline::projection::ClaimAsWritten>>::try_from
+  0.506 ms (0.08%; cumulative 79.20%) <str as core::cmp::PartialEq>::eq
+  0.504 ms (0.08%; cumulative 79.28%) std::thread::spawnhook::run_spawn_hooks
+  0.501 ms (0.08%; cumulative 79.35%) <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, alloc::string::String, onepipeline::plan::Node, alloc::collections::btree::node::marker::LeafOrInternal>>::deallocate_and_ascend::<alloc::alloc::Global>
+  0.500 ms (0.08%; cumulative 79.43%) core::char::convert::from_u32_unchecked::precondition_check
+  0.498 ms (0.08%; cumulative 79.51%) <serde::private::de::content::ContentRefDeserializer<serde_json::error::Error> as serde_core::de::Deserializer>::deserialize_str::<serde_core::de::impls::StringVisitor>
+  0.498 ms (0.08%; cumulative 79.58%) alloc::collections::btree::mem::replace::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, onetaskgraph_plugin_api::metadata::MetadataKey, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, onetaskgraph_plugin_api::metadata::MetadataKey, serde_json::value::Value, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>, <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, onetaskgraph_plugin_api::metadata::MetadataKey, serde_json::value::Value, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked<alloc::alloc::Global>::{closure#0}>
+  0.498 ms (0.08%; cumulative 79.66%) <serde_json::ser::PrettyFormatter as serde_json::ser::Formatter>::begin_object::<&mut alloc::vec::Vec<u8>>
+  0.497 ms (0.08%; cumulative 79.73%) <core::option::Option<&core::option::Option<onevcs::checkout_reads::Managed>>>::cloned
+  0.496 ms (0.08%; cumulative 79.81%) <alloc::collections::btree::map::entry::VacantEntry<alloc::string::String, serde_json::value::Value>>::insert_entry
+  0.495 ms (0.08%; cumulative 79.88%) onepipeline::executor::load_average
+  0.494 ms (0.08%; cumulative 79.96%) core::ptr::drop_glue::<core::option::Option<serde_json::value::Value>>
+  0.494 ms (0.08%; cumulative 80.03%) <<onepipeline::plan::Node as serde_core::de::Deserialize>::deserialize::__Visitor as serde_core::de::Visitor>::visit_map::<serde_json::de::MapAccess<serde_json::read::StrRead>>
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+```
+
+#### release before
+
+```text
+pid 90.1: sampled CPU 404.486 ms; lifetime 1839.286 ms; threads 274
+nearest first-party module (otherwise leaf):
+  90.912 ms (22.48%; cumulative 22.48%) onevcs::git
+  57.249 ms (14.15%; cumulative 36.63%) privateterms::matcher
+  36.020 ms (8.91%; cumulative 45.53%) onepipeline::ledger
+  27.126 ms (6.71%; cumulative 52.24%) libc.so.6!unresolved
+  26.735 ms (6.61%; cumulative 58.85%) onevcs::launch_trace
+  17.759 ms (4.39%; cumulative 63.24%) poll
+  12.633 ms (3.12%; cumulative 66.36%) onevcs::lock
+  9.872 ms (2.44%; cumulative 68.80%) onepipeline::writeback
+  9.707 ms (2.40%; cumulative 71.20%) onemessagebus::schema
+  7.059 ms (1.75%; cumulative 72.95%) _close
+  6.652 ms (1.64%; cumulative 74.59%) onevcs::home
+  5.087 ms (1.26%; cumulative 75.85%) syscall
+  5.006 ms (1.24%; cumulative 77.09%) onevcs::store
+  4.490 ms (1.11%; cumulative 78.20%) _munmap
+  4.032 ms (1.00%; cumulative 79.20%) onepipeline::engine
+  3.605 ms (0.89%; cumulative 80.09%) onetaskgraph_core::resolve
+nearest first-party function (otherwise leaf):
+  57.249 ms (14.15%; cumulative 14.15%) <privateterms::matcher::Matcher>::new
+  31.409 ms (7.77%; cumulative 21.92%) onevcs::git::run_fed::{closure#4}
+  27.126 ms (6.71%; cumulative 28.62%) libc.so.6!unresolved
+  23.799 ms (5.88%; cumulative 34.51%) onepipeline::ledger::write_atomic
+  17.759 ms (4.39%; cumulative 38.90%) poll
+  14.538 ms (3.59%; cumulative 42.49%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  12.779 ms (3.16%; cumulative 45.65%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  9.897 ms (2.45%; cumulative 48.10%) onevcs::git::run_fed
+  9.736 ms (2.41%; cumulative 50.51%) <onevcs::launch_trace::Tracer>::write
+  9.707 ms (2.40%; cumulative 52.91%) <onemessagebus::schema::Registry>::register_schema
+  9.513 ms (2.35%; cumulative 55.26%) onevcs::lock::wait_for
+  7.059 ms (1.75%; cumulative 57.00%) _close
+  6.890 ms (1.70%; cumulative 58.71%) onevcs::git::wait_for_exit
+  6.667 ms (1.65%; cumulative 60.36%) onevcs::git::await_an_ending
+  5.460 ms (1.35%; cumulative 61.70%) onevcs::home::ensure_dir
+  5.087 ms (1.26%; cumulative 62.96%) syscall
+  4.502 ms (1.11%; cumulative 64.08%) onepipeline::ledger::read_published
+  4.490 ms (1.11%; cumulative 65.19%) _munmap
+  4.120 ms (1.02%; cumulative 66.20%) onevcs::store::load
+  3.605 ms (0.89%; cumulative 67.10%) onetaskgraph_core::resolve::validate_sources
+  3.295 ms (0.81%; cumulative 67.91%) onevcs::launch_trace::output
+  3.261 ms (0.81%; cumulative 68.72%) onevcs::launch_trace::launch
+  3.261 ms (0.81%; cumulative 69.52%) <onejudge::note::NoteWire as schemars::JsonSchema>::json_schema
+  3.078 ms (0.76%; cumulative 70.28%) onetaskgraph_local_md::staged
+  2.677 ms (0.66%; cumulative 70.95%) onevcs::boundary::scope::derive_with
+  2.539 ms (0.63%; cumulative 71.57%) onevcs::policy::read
+  2.530 ms (0.63%; cumulative 72.20%) onevcs::launch_trace::sleep
+  2.520 ms (0.62%; cumulative 72.82%) onetaskgraph_core::config::discovery::documents
+  2.346 ms (0.58%; cumulative 73.40%) <onepipeline::ledger::RunPaths>::create
+  2.223 ms (0.55%; cumulative 73.95%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  2.195 ms (0.54%; cumulative 74.49%) onevcs::git::local_setting
+  2.187 ms (0.54%; cumulative 75.03%) onepipeline::writeback::project
+  2.179 ms (0.54%; cumulative 75.57%) <onemessagebus::transport::LocalTransport as onemessagebus::transport::Transport>::fingerprint
+  2.085 ms (0.52%; cumulative 76.09%) <onevcs::git::PipeCapture>::finish
+  2.071 ms (0.51%; cumulative 76.60%) <onevcs::launch_trace::Launch>::spawned
+  1.991 ms (0.49%; cumulative 77.09%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::dispatch
+  1.952 ms (0.48%; cumulative 77.58%) <onepipeline::projection::RunState as core::clone::Clone>::clone
+  1.921 ms (0.47%; cumulative 78.05%) onevcs::lock::record_owner
+  1.846 ms (0.46%; cumulative 78.51%) <onevcs::launch_trace::Launch>::exited
+  1.821 ms (0.45%; cumulative 78.96%) <onetaskgraph_local_md::LocalMdSource as onetaskgraph_plugin_api::source::TaskSource>::update_task::{closure#0}::{closure#0}
+  1.807 ms (0.45%; cumulative 79.40%) <onevcs::launch_trace::Wait>::into_launch
+  1.776 ms (0.44%; cumulative 79.84%) onepipeline::writeback::worker
+  1.755 ms (0.43%; cumulative 80.28%) onevcs::launch_trace::wait
+self function:
+  81.428 ms (20.13%; cumulative 20.13%) libc.so.6!unresolved
+  35.837 ms (8.86%; cumulative 28.99%) <std::sync::once::Once>::call_once_force::<<std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<char, alloc::vec::Vec<usize>>>>::initialize<<std::sync::once_lock::OnceLock<std::collections::hash::map::HashMap<char, alloc::vec::Vec<usize>>>>::get_or_init<<privateterms::normalize::Contributors>::new<core::iter::adapters::map::Map<core::slice::iter::Iter<privateterms::resolve::ResolvedRule>, <privateterms::matcher::Matcher>::new::{closure#2}::{closure#0}>>::{closure#0}>::{closure#0}, !>::{closure#0}>::{closure#0}
+  18.810 ms (4.65%; cumulative 33.64%) poll
+  17.532 ms (4.33%; cumulative 37.98%) mkdir
+  16.190 ms (4.00%; cumulative 41.98%) syscall
+  14.187 ms (3.51%; cumulative 45.49%) _open64
+  12.476 ms (3.08%; cumulative 48.57%) _close
+  10.378 ms (2.57%; cumulative 51.14%) fun_188cf0
+  10.005 ms (2.47%; cumulative 53.61%) _write
+  8.709 ms (2.15%; cumulative 55.76%) fsync
+  8.398 ms (2.08%; cumulative 57.84%) <icu_normalizer::Decomposition<core::iter::sources::once::Once<char>> as core::iter::traits::iterator::Iterator>::next
+  7.623 ms (1.88%; cumulative 59.72%) _munmap
+  7.493 ms (1.85%; cumulative 61.58%) fun_188d80
+  7.232 ms (1.79%; cumulative 63.36%) rename
+  7.060 ms (1.75%; cumulative 65.11%) wait4
+  6.345 ms (1.57%; cumulative 66.68%) read
+  6.162 ms (1.52%; cumulative 68.20%) fun_ab630
+  6.126 ms (1.51%; cumulative 69.72%) statx
+  4.416 ms (1.09%; cumulative 70.81%) core::unicode::unicode_data::conversions::lookup
+  3.857 ms (0.95%; cumulative 71.76%) malloc
+  3.369 ms (0.83%; cumulative 72.59%) <serde_json::value::ser::Serializer as serde_core::ser::Serializer>::serialize_map
+  2.649 ms (0.65%; cumulative 73.25%) _libc_free
+  1.933 ms (0.48%; cumulative 73.73%) fun_98d50
+  1.907 ms (0.47%; cumulative 74.20%) _mmap
+  1.865 ms (0.46%; cumulative 74.66%) ftruncate
+  1.862 ms (0.46%; cumulative 75.12%) clock_nanosleep
+  1.677 ms (0.41%; cumulative 75.53%) fun_f230
+  1.500 ms (0.37%; cumulative 75.91%) <serde_json::value::Value as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut <serde_json::value::Value as core::fmt::Display>::fmt::WriterFormatter>>
+  1.496 ms (0.37%; cumulative 76.28%) <std::sync::mpmc::list::Channel<std::fs::File>>::recv::{closure#1}
+  1.410 ms (0.35%; cumulative 76.62%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  1.392 ms (0.34%; cumulative 76.97%) <indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value> as core::clone::Clone>::clone
+  1.339 ms (0.33%; cumulative 77.30%) _madvise
+  1.319 ms (0.33%; cumulative 77.62%) fun_189780
+  1.287 ms (0.32%; cumulative 77.94%) alloc::fmt::format::format_inner
+  1.282 ms (0.32%; cumulative 78.26%) fun_188620
+  1.261 ms (0.31%; cumulative 78.57%) access
+  1.221 ms (0.30%; cumulative 78.87%) readlink
+  1.220 ms (0.30%; cumulative 79.18%) <hashbrown::raw::RawTable<usize>>::reserve_rehash::<indexmap::inner::get_hash<alloc::string::String, serde_json::value::Value>::{closure#0}>
+  1.213 ms (0.30%; cumulative 79.48%) fun_ab230
+  1.210 ms (0.30%; cumulative 79.77%) <hashbrown::map::HashMap<&str, (), std::hash::random::RandomState>>::insert
+  1.192 ms (0.29%; cumulative 80.07%) unlinkat
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+
+pid 583.1: sampled CPU 370.232 ms; lifetime 2011.289 ms; threads 332
+nearest first-party module (otherwise leaf):
+  104.227 ms (28.15%; cumulative 28.15%) onevcs::git
+  35.930 ms (9.70%; cumulative 37.86%) libc.so.6!unresolved
+  30.021 ms (8.11%; cumulative 45.97%) onepipeline::ledger
+  29.539 ms (7.98%; cumulative 53.94%) onevcs::launch_trace
+  19.303 ms (5.21%; cumulative 59.16%) poll
+  10.550 ms (2.85%; cumulative 62.01%) _close
+  10.176 ms (2.75%; cumulative 64.76%) onemessagebus::schema
+  8.795 ms (2.38%; cumulative 67.13%) onevcs::lock
+  7.516 ms (2.03%; cumulative 69.16%) onepipeline::writeback
+  5.532 ms (1.49%; cumulative 70.66%) _munmap
+  5.516 ms (1.49%; cumulative 72.15%) onepipeline::checkpoint
+  5.274 ms (1.42%; cumulative 73.57%) onetaskgraph_local_md::staged
+  4.979 ms (1.34%; cumulative 74.91%) onemessagebus::envelope
+  4.489 ms (1.21%; cumulative 76.13%) onevcs::workspace
+  4.178 ms (1.13%; cumulative 77.26%) onetaskgraph_local_md::yaml
+  3.812 ms (1.03%; cumulative 78.29%) onepipeline::executor
+  3.805 ms (1.03%; cumulative 79.31%) syscall
+  3.464 ms (0.94%; cumulative 80.25%) onetaskgraph_local_md::LocalMdSource>
+nearest first-party function (otherwise leaf):
+  38.245 ms (10.33%; cumulative 10.33%) onevcs::git::run_fed::{closure#4}
+  35.930 ms (9.70%; cumulative 20.03%) libc.so.6!unresolved
+  21.516 ms (5.81%; cumulative 25.85%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  20.580 ms (5.56%; cumulative 31.40%) onepipeline::ledger::write_atomic
+  19.303 ms (5.21%; cumulative 36.62%) poll
+  16.808 ms (4.54%; cumulative 41.16%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  10.550 ms (2.85%; cumulative 44.01%) _close
+  10.176 ms (2.75%; cumulative 46.76%) <onemessagebus::schema::Registry>::register_schema
+  10.103 ms (2.73%; cumulative 49.49%) <onevcs::launch_trace::Tracer>::write
+  8.086 ms (2.18%; cumulative 51.67%) onevcs::git::run_fed
+  6.091 ms (1.65%; cumulative 53.31%) onevcs::lock::wait_for
+  5.532 ms (1.49%; cumulative 54.81%) _munmap
+  5.274 ms (1.42%; cumulative 56.23%) onetaskgraph_local_md::staged
+  5.078 ms (1.37%; cumulative 57.60%) onevcs::launch_trace::launch
+  5.073 ms (1.37%; cumulative 58.98%) onevcs::git::wait_for_exit
+  4.526 ms (1.22%; cumulative 60.20%) onevcs::git::await_an_ending
+  4.178 ms (1.13%; cumulative 61.33%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  3.805 ms (1.03%; cumulative 62.35%) syscall
+  3.042 ms (0.82%; cumulative 63.18%) <onevcs::launch_trace::Wait>::into_launch
+  2.987 ms (0.81%; cumulative 63.98%) onepipeline::ledger::read_published
+  2.872 ms (0.78%; cumulative 64.76%) <onevcs::launch_trace::Launch>::spawned
+  2.596 ms (0.70%; cumulative 65.46%) <onevcs::git::PipeCapture>::finish
+  2.584 ms (0.70%; cumulative 66.16%) onepipeline::checkpoint::readable
+  2.526 ms (0.68%; cumulative 66.84%) onevcs::policy::read
+  2.411 ms (0.65%; cumulative 67.49%) onevcs::launch_trace::sleep
+  2.393 ms (0.65%; cumulative 68.14%) <onevcs::launch_trace::Launch>::exited
+  2.339 ms (0.63%; cumulative 68.77%) onepipeline::driver::attach
+  2.336 ms (0.63%; cumulative 69.40%) _madvise
+  2.047 ms (0.55%; cumulative 69.95%) onevcs::workspace::existing
+  2.027 ms (0.55%; cumulative 70.50%) <onemessagebus::transport::LocalTransport>::open_records
+  2.024 ms (0.55%; cumulative 71.05%) onevcs::lock::record_owner
+  2.007 ms (0.54%; cumulative 71.59%) onepipeline::ledger::read_range
+  1.905 ms (0.51%; cumulative 72.10%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::capacity
+  1.789 ms (0.48%; cumulative 72.59%) onevcs::store::load
+  1.682 ms (0.45%; cumulative 73.04%) onetaskgraph_core::resolve::validate_sources
+  1.651 ms (0.45%; cumulative 73.49%) onepipeline::writeback::project
+  1.645 ms (0.44%; cumulative 73.93%) onevcs::git::local_setting
+  1.634 ms (0.44%; cumulative 74.37%) onevcs::launch_trace::output
+  1.568 ms (0.42%; cumulative 74.80%) <alloc::collections::btree::map::IntoIter<alloc::string::String, onepipeline::payload::ContinuedRework>>::dying_next
+  1.543 ms (0.42%; cumulative 75.21%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  1.534 ms (0.41%; cumulative 75.63%) onevcs::workspace::all
+  1.491 ms (0.40%; cumulative 76.03%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::dispatch
+  1.409 ms (0.38%; cumulative 76.41%) onevcs::home::ensure_dir
+  1.378 ms (0.37%; cumulative 76.78%) onepipeline::engine::wait_for_work
+  1.352 ms (0.37%; cumulative 77.15%) onepipeline::vcs::landings_now
+  1.348 ms (0.36%; cumulative 77.51%) onepipeline::writeback::create
+  1.315 ms (0.36%; cumulative 77.87%) fun_188620
+  1.174 ms (0.32%; cumulative 78.18%) onepipeline::ledger::read_envelope_lines
+  1.160 ms (0.31%; cumulative 78.50%) read
+  1.157 ms (0.31%; cumulative 78.81%) <onetaskgraph_local_md::LocalMdSource>::confined
+  1.122 ms (0.30%; cumulative 79.11%) onepipeline::ledger::read_appended_envelope_lines
+  1.095 ms (0.30%; cumulative 79.41%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
+  1.031 ms (0.28%; cumulative 79.69%) onevcs::home::atomic_write
+  1.029 ms (0.28%; cumulative 79.97%) <std::sys::sync::mutex::futex::Mutex>::lock_contended
+  1.028 ms (0.28%; cumulative 80.24%) <onevcs::checkout_reads::Hold as core::ops::drop::Drop>::drop
+self function:
+  98.488 ms (26.60%; cumulative 26.60%) libc.so.6!unresolved
+  19.303 ms (5.21%; cumulative 31.82%) poll
+  17.377 ms (4.69%; cumulative 36.51%) _close
+  16.536 ms (4.47%; cumulative 40.98%) _open64
+  11.363 ms (3.07%; cumulative 44.04%) rename
+  11.343 ms (3.06%; cumulative 47.11%) syscall
+  10.574 ms (2.86%; cumulative 49.96%) _write
+  10.048 ms (2.71%; cumulative 52.68%) fsync
+  9.272 ms (2.50%; cumulative 55.18%) statx
+  7.412 ms (2.00%; cumulative 57.18%) mkdir
+  7.257 ms (1.96%; cumulative 59.14%) _munmap
+  5.666 ms (1.53%; cumulative 60.68%) wait4
+  4.880 ms (1.32%; cumulative 61.99%) fun_ab630
+  4.415 ms (1.19%; cumulative 63.19%) _mmap
+  4.369 ms (1.18%; cumulative 64.37%) read
+  4.324 ms (1.17%; cumulative 65.53%) malloc
+  4.031 ms (1.09%; cumulative 66.62%) pipe2
+  3.946 ms (1.07%; cumulative 67.69%) fun_188620
+  3.032 ms (0.82%; cumulative 68.51%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  2.804 ms (0.76%; cumulative 69.26%) fun_188d80
+  2.671 ms (0.72%; cumulative 69.99%) <indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>>::insert_full
+  2.336 ms (0.63%; cumulative 70.62%) _madvise
+  2.137 ms (0.58%; cumulative 71.19%) fun_a9c70
+  1.961 ms (0.53%; cumulative 71.72%) _libc_free
+  1.793 ms (0.48%; cumulative 72.21%) <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>
+  1.770 ms (0.48%; cumulative 72.69%) fun_98d50
+  1.736 ms (0.47%; cumulative 73.16%) fun_ab230
+  1.708 ms (0.46%; cumulative 73.62%) clock_gettime
+  1.652 ms (0.45%; cumulative 74.06%) clock_nanosleep
+  1.568 ms (0.42%; cumulative 74.49%) <alloc::collections::btree::map::IntoIter<alloc::string::String, onepipeline::payload::ContinuedRework>>::dying_next
+  1.543 ms (0.42%; cumulative 74.90%) readlink
+  1.530 ms (0.41%; cumulative 75.32%) serde_json::ser::format_escaped_str_contents::<&mut alloc::vec::Vec<u8>, serde_json::ser::PrettyFormatter>
+  1.474 ms (0.40%; cumulative 75.71%) pthread_create
+  1.471 ms (0.40%; cumulative 76.11%) unlinkat
+  1.354 ms (0.37%; cumulative 76.48%) <indexmap::inner::Core<alloc::string::String, serde_json::value::Value>>::push_entry
+  1.284 ms (0.35%; cumulative 76.82%) <core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match
+  1.227 ms (0.33%; cumulative 77.16%) _mprotect
+  1.180 ms (0.32%; cumulative 77.47%) <indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value> as core::clone::Clone>::clone
+  1.082 ms (0.29%; cumulative 77.77%) fun_188cf0
+  1.029 ms (0.28%; cumulative 78.04%) <std::sys::sync::mutex::futex::Mutex>::lock_contended
+  1.018 ms (0.27%; cumulative 78.32%) fun_a9b90
+  0.979 ms (0.26%; cumulative 78.58%) ftruncate
+  0.974 ms (0.26%; cumulative 78.85%) <hashbrown::raw::RawTable<usize>>::reserve_rehash::<indexmap::inner::get_hash<alloc::string::String, serde_json::value::Value>::{closure#0}>
+  0.953 ms (0.26%; cumulative 79.10%) _open64_nocancel
+  0.951 ms (0.26%; cumulative 79.36%) <jsonschema::keywords::ref_::DirectRefValidator<jsonschema_value::serde_json::SerdeJson> as jsonschema::validator::Validate>::validate
+  0.933 ms (0.25%; cumulative 79.61%) <regex_automata::nfa::thompson::map::Utf8BoundedEntry as alloc::vec::spec_from_elem::SpecFromElem>::from_elem::<alloc::alloc::Global>
+  0.931 ms (0.25%; cumulative 79.86%) <u32 as core::fmt::Display>::fmt
+  0.918 ms (0.25%; cumulative 80.11%) <indexmap::map::IndexMap<alloc::string::String, serde_json::value::Value>>::get_index_of::<str>
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+```
+
+#### release after
+
+```text
+pid 90.1: sampled CPU 355.412 ms; lifetime 1300.908 ms; threads 274
+nearest first-party module (otherwise leaf):
+  98.151 ms (27.62%; cumulative 27.62%) onevcs::git
+  40.047 ms (11.27%; cumulative 38.88%) onepipeline::ledger
+  31.686 ms (8.92%; cumulative 47.80%) libc.so.6!unresolved
+  23.307 ms (6.56%; cumulative 54.36%) onevcs::launch_trace
+  15.891 ms (4.47%; cumulative 58.83%) poll
+  9.968 ms (2.80%; cumulative 61.63%) onevcs::lock
+  9.391 ms (2.64%; cumulative 64.27%) onemessagebus::schema
+  9.370 ms (2.64%; cumulative 66.91%) onepipeline::writeback
+  8.974 ms (2.52%; cumulative 69.44%) onevcs::home
+  7.087 ms (1.99%; cumulative 71.43%) _close
+  5.378 ms (1.51%; cumulative 72.94%) onepipeline::engine
+  4.849 ms (1.36%; cumulative 74.31%) _munmap
+  4.757 ms (1.34%; cumulative 75.65%) onetaskgraph_core::resolve
+  4.277 ms (1.20%; cumulative 76.85%) syscall
+  3.794 ms (1.07%; cumulative 77.92%) onevcs::boundary
+  3.493 ms (0.98%; cumulative 78.90%) onetaskgraph_local_md::LocalMdSource>
+  3.491 ms (0.98%; cumulative 79.88%) onevcs::policy
+  3.439 ms (0.97%; cumulative 80.85%) onevcs::store
+nearest first-party function (otherwise leaf):
+  36.597 ms (10.30%; cumulative 10.30%) onevcs::git::run_fed::{closure#4}
+  31.686 ms (8.92%; cumulative 19.21%) libc.so.6!unresolved
+  28.871 ms (8.12%; cumulative 27.34%) onepipeline::ledger::write_atomic
+  15.891 ms (4.47%; cumulative 31.81%) poll
+  14.483 ms (4.07%; cumulative 35.88%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  10.822 ms (3.04%; cumulative 38.93%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  10.279 ms (2.89%; cumulative 41.82%) onevcs::git::await_an_ending
+  9.559 ms (2.69%; cumulative 44.51%) onevcs::git::run_fed
+  9.068 ms (2.55%; cumulative 47.06%) <onemessagebus::schema::Registry>::register_schema
+  8.822 ms (2.48%; cumulative 49.54%) <onevcs::launch_trace::Tracer>::write
+  7.414 ms (2.09%; cumulative 51.63%) onevcs::lock::wait_for
+  7.216 ms (2.03%; cumulative 53.66%) onevcs::home::ensure_dir
+  7.087 ms (1.99%; cumulative 55.65%) _close
+  6.449 ms (1.81%; cumulative 57.47%) onevcs::git::wait_for_exit
+  4.849 ms (1.36%; cumulative 58.83%) _munmap
+  4.757 ms (1.34%; cumulative 60.17%) onetaskgraph_core::resolve::validate_sources
+  4.277 ms (1.20%; cumulative 61.37%) syscall
+  3.476 ms (0.98%; cumulative 62.35%) onevcs::launch_trace::output
+  3.285 ms (0.92%; cumulative 63.28%) <onepipeline::ledger::RunPaths>::create
+  3.161 ms (0.89%; cumulative 64.16%) onepipeline::writeback::project
+  3.094 ms (0.87%; cumulative 65.04%) onevcs::policy::read
+  2.971 ms (0.84%; cumulative 65.87%) onetaskgraph_local_md::staged
+  2.932 ms (0.82%; cumulative 66.70%) onevcs::boundary::scope::derive_with
+  2.896 ms (0.81%; cumulative 67.51%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  2.796 ms (0.79%; cumulative 68.30%) <onevcs::checkout_reads::Hold as core::ops::drop::Drop>::drop
+  2.732 ms (0.77%; cumulative 69.07%) <onevcs::git::PipeCapture>::finish
+  2.729 ms (0.77%; cumulative 69.83%) onepipeline::ledger::read_published
+  2.572 ms (0.72%; cumulative 70.56%) <onevcs::launch_trace::Launch>::exited
+  2.453 ms (0.69%; cumulative 71.25%) onevcs::launch_trace::launch
+  2.217 ms (0.62%; cumulative 71.87%) onevcs::git::local_setting
+  2.185 ms (0.61%; cumulative 72.49%) read
+  2.112 ms (0.59%; cumulative 73.08%) onevcs::store::migrate
+  2.016 ms (0.57%; cumulative 73.65%) onepipeline::ledger::read_appended_envelope_lines
+  1.998 ms (0.56%; cumulative 74.21%) <onevcs::launch_trace::Launch>::spawned
+  1.893 ms (0.53%; cumulative 74.74%) <onetaskgraph_local_md::LocalMdSource>::directory
+  1.859 ms (0.52%; cumulative 75.27%) onepipeline::driver::attach
+  1.804 ms (0.51%; cumulative 75.77%) onevcs::launch_trace::sleep
+  1.579 ms (0.44%; cumulative 76.22%) onevcs::lock::record_owner
+  1.569 ms (0.44%; cumulative 76.66%) onepipeline::engine::watch_releases
+  1.528 ms (0.43%; cumulative 77.09%) <onemessagebus::transport::LocalTransport>::lock
+  1.469 ms (0.41%; cumulative 77.50%) <onevcs::launch_trace::Wait>::into_launch
+  1.422 ms (0.40%; cumulative 77.90%) fun_9c7e0
+  1.410 ms (0.40%; cumulative 78.30%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::dispatch
+  1.377 ms (0.39%; cumulative 78.69%) onepipeline::engine::converge
+  1.334 ms (0.38%; cumulative 79.06%) onepipeline::vcs::landings_now
+  1.327 ms (0.37%; cumulative 79.44%) onevcs::store::load
+  1.265 ms (0.36%; cumulative 79.79%) onepipeline::writeback::closer
+  1.155 ms (0.32%; cumulative 80.12%) _madvise
+self function:
+  80.552 ms (22.66%; cumulative 22.66%) libc.so.6!unresolved
+  20.735 ms (5.83%; cumulative 28.50%) _close
+  19.600 ms (5.51%; cumulative 34.01%) _open64
+  18.703 ms (5.26%; cumulative 39.28%) syscall
+  17.819 ms (5.01%; cumulative 44.29%) mkdir
+  16.158 ms (4.55%; cumulative 48.84%) poll
+  10.810 ms (3.04%; cumulative 51.88%) rename
+  9.619 ms (2.71%; cumulative 54.58%) _write
+  8.389 ms (2.36%; cumulative 56.94%) _munmap
+  6.225 ms (1.75%; cumulative 58.70%) fsync
+  6.022 ms (1.69%; cumulative 60.39%) fun_ab630
+  5.667 ms (1.59%; cumulative 61.98%) pipe2
+  5.477 ms (1.54%; cumulative 63.53%) wait4
+  5.176 ms (1.46%; cumulative 64.98%) statx
+  5.006 ms (1.41%; cumulative 66.39%) jsonschema::compiler::compile_with_internal::<jsonschema_value::serde_json::SerdeJson>
+  4.208 ms (1.18%; cumulative 67.57%) fun_188d80
+  3.715 ms (1.05%; cumulative 68.62%) fun_a9c70
+  3.331 ms (0.94%; cumulative 69.56%) _libc_free
+  2.974 ms (0.84%; cumulative 70.39%) fun_ab230
+  2.961 ms (0.83%; cumulative 71.23%) read
+  2.935 ms (0.83%; cumulative 72.05%) fun_98d50
+  2.489 ms (0.70%; cumulative 72.75%) malloc
+  2.233 ms (0.63%; cumulative 73.38%) _mmap
+  2.221 ms (0.62%; cumulative 74.01%) fstatat
+  2.030 ms (0.57%; cumulative 74.58%) fun_188cf0
+  1.804 ms (0.51%; cumulative 75.08%) clock_nanosleep
+  1.572 ms (0.44%; cumulative 75.53%) <onevcs::launch_trace::Launch>::exited
+  1.569 ms (0.44%; cumulative 75.97%) onepipeline::engine::watch_releases
+  1.422 ms (0.40%; cumulative 76.37%) fun_9c7e0
+  1.375 ms (0.39%; cumulative 76.76%) readlink
+  1.364 ms (0.38%; cumulative 77.14%) foldhash::hash_bytes_long
+  1.332 ms (0.37%; cumulative 77.51%) <hashbrown::raw::RawTable<(&str, ())>>::reserve_rehash::<hashbrown::map::make_hasher<&str, (), std::hash::random::RandomState>::{closure#0}>
+  1.155 ms (0.32%; cumulative 77.84%) _madvise
+  1.126 ms (0.32%; cumulative 78.16%) unlinkat
+  0.993 ms (0.28%; cumulative 78.43%) <alloc::raw_vec::RawVecInner>::finish_grow
+  0.990 ms (0.28%; cumulative 78.71%) <regex_automata::nfa::thompson::map::Utf8BoundedEntry as alloc::vec::spec_from_elem::SpecFromElem>::from_elem::<alloc::alloc::Global>
+  0.979 ms (0.28%; cumulative 78.99%) core::ptr::drop_glue::<indexmap::Bucket<alloc::string::String, serde_json::value::Value>>
+  0.977 ms (0.27%; cumulative 79.26%) getdents64
+  0.894 ms (0.25%; cumulative 79.52%) referencing::registry::build::index_resources::<ahash::hash_map::AHashMap<fluent_uri::imp::Uri<alloc::string::String>, referencing::registry::input::PendingResource>>
+  0.887 ms (0.25%; cumulative 79.76%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  0.876 ms (0.25%; cumulative 80.01%) chmod
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+
+pid 583.1: sampled CPU 457.114 ms; lifetime 2166.491 ms; threads 332
+nearest first-party module (otherwise leaf):
+  126.825 ms (27.74%; cumulative 27.74%) onevcs::git
+  57.214 ms (12.52%; cumulative 40.26%) poll
+  41.429 ms (9.06%; cumulative 49.32%) libc.so.6!unresolved
+  38.404 ms (8.40%; cumulative 57.73%) onevcs::launch_trace
+  29.031 ms (6.35%; cumulative 64.08%) onepipeline::ledger
+  11.794 ms (2.58%; cumulative 66.66%) onetaskgraph_local_md::yaml
+  10.989 ms (2.40%; cumulative 69.06%) onevcs::lock
+  10.578 ms (2.31%; cumulative 71.37%) onemessagebus::schema
+  9.516 ms (2.08%; cumulative 73.46%) onepipeline::writeback
+  8.525 ms (1.86%; cumulative 75.32%) _close
+  5.302 ms (1.16%; cumulative 76.48%) syscall
+  4.626 ms (1.01%; cumulative 77.49%) onepipeline::checkpoint
+  4.384 ms (0.96%; cumulative 78.45%) onepipeline::engine
+  4.187 ms (0.92%; cumulative 79.37%) onemessagebus::envelope
+  3.753 ms (0.82%; cumulative 80.19%) onepipeline::driver
+nearest first-party function (otherwise leaf):
+  57.214 ms (12.52%; cumulative 12.52%) poll
+  46.648 ms (10.20%; cumulative 22.72%) onevcs::git::run_fed::{closure#4}
+  41.429 ms (9.06%; cumulative 31.78%) libc.so.6!unresolved
+  24.153 ms (5.28%; cumulative 37.07%) <onevcs::git::PipeCapture>::start::<std::process::ChildStdout>
+  21.540 ms (4.71%; cumulative 41.78%) onepipeline::ledger::write_atomic
+  14.453 ms (3.16%; cumulative 44.94%) <onevcs::git::PipeCapture>::start::<std::process::ChildStderr>
+  14.062 ms (3.08%; cumulative 48.02%) <onevcs::launch_trace::Tracer>::write
+  11.431 ms (2.50%; cumulative 50.52%) onetaskgraph_local_md::yaml::from_str::<onetaskgraph_local_md::FrontMatter>
+  11.337 ms (2.48%; cumulative 53.00%) onevcs::git::await_an_ending
+  10.578 ms (2.31%; cumulative 55.31%) <onemessagebus::schema::Registry>::register_schema
+  10.383 ms (2.27%; cumulative 57.58%) onevcs::git::run_fed
+  9.678 ms (2.12%; cumulative 59.70%) onevcs::git::wait_for_exit
+  8.525 ms (1.86%; cumulative 61.57%) _close
+  7.702 ms (1.68%; cumulative 63.25%) onevcs::lock::wait_for
+  6.172 ms (1.35%; cumulative 64.60%) onevcs::launch_trace::sleep
+  5.302 ms (1.16%; cumulative 65.76%) syscall
+  4.635 ms (1.01%; cumulative 66.78%) <onevcs::git::PipeCapture>::finish
+  4.245 ms (0.93%; cumulative 67.70%) onevcs::launch_trace::launch
+  4.125 ms (0.90%; cumulative 68.61%) <onevcs::launch_trace::Launch>::exited
+  3.704 ms (0.81%; cumulative 69.42%) onepipeline::driver::attach
+  3.660 ms (0.80%; cumulative 70.22%) _munmap
+  3.460 ms (0.76%; cumulative 70.97%) onetaskgraph_local_md::staged
+  3.142 ms (0.69%; cumulative 71.66%) <onevcs::launch_trace::Launch>::spawned
+  2.743 ms (0.60%; cumulative 72.26%) jsonschema::compiler::compile_with_internal::<jsonschema_value::serde_json::SerdeJson>
+  2.539 ms (0.56%; cumulative 72.82%) <onevcs::launch_trace::Wait>::into_launch
+  2.473 ms (0.54%; cumulative 73.36%) onevcs::workspace::existing
+  2.451 ms (0.54%; cumulative 73.89%) <onepipeline::checkpoint::Coverage>::sealed_with
+  2.299 ms (0.50%; cumulative 74.40%) onetaskgraph_core::resolve::validate_sources
+  2.210 ms (0.48%; cumulative 74.88%) onevcs::policy::read
+  2.203 ms (0.48%; cumulative 75.36%) onevcs::launch_trace::wait
+  2.165 ms (0.47%; cumulative 75.84%) onepipeline::verbs::render_adopted
+  2.069 ms (0.45%; cumulative 76.29%) onepipeline::ledger::read_published
+  1.942 ms (0.42%; cumulative 76.71%) onepipeline::writeback::project
+  1.898 ms (0.42%; cumulative 77.13%) _madvise
+  1.888 ms (0.41%; cumulative 77.54%) <onepipeline::executor::LocalExecutor as onepipeline::executor::Executor>::dispatch
+  1.842 ms (0.40%; cumulative 77.95%) <onemessagebus::envelope::Envelope<onepipeline::vocabulary::Agent> as serde_core::de::Deserialize>::deserialize::<&mut serde_json::de::Deserializer<serde_json::read::StrRead>>
+  1.840 ms (0.40%; cumulative 78.35%) onevcs::lock::open_at
+  1.717 ms (0.38%; cumulative 78.72%) onepipeline::engine::wait_for_work
+  1.642 ms (0.36%; cumulative 79.08%) onevcs::home::ensure_dir
+  1.633 ms (0.36%; cumulative 79.44%) read
+  1.581 ms (0.35%; cumulative 79.79%) <onepipeline::projection::RunState>::settled
+  1.456 ms (0.32%; cumulative 80.10%) onevcs::launch_trace::output
+self function:
+  113.894 ms (24.92%; cumulative 24.92%) libc.so.6!unresolved
+  57.809 ms (12.65%; cumulative 37.56%) poll
+  21.838 ms (4.78%; cumulative 42.34%) syscall
+  19.746 ms (4.32%; cumulative 46.66%) _open64
+  12.952 ms (2.83%; cumulative 49.49%) _write
+  12.344 ms (2.70%; cumulative 52.19%) _close
+  9.149 ms (2.00%; cumulative 54.19%) rename
+  9.101 ms (1.99%; cumulative 56.19%) fun_ab630
+  8.989 ms (1.97%; cumulative 58.15%) wait4
+  8.231 ms (1.80%; cumulative 59.95%) mkdir
+  7.249 ms (1.59%; cumulative 61.54%) fsync
+  7.208 ms (1.58%; cumulative 63.12%) _munmap
+  6.860 ms (1.50%; cumulative 64.62%) statx
+  6.721 ms (1.47%; cumulative 66.09%) fun_188d80
+  6.046 ms (1.32%; cumulative 67.41%) <str>::trim_matches::<<char>::is_whitespace>
+  5.735 ms (1.25%; cumulative 68.66%) clock_nanosleep
+  4.926 ms (1.08%; cumulative 69.74%) malloc
+  4.327 ms (0.95%; cumulative 70.69%) fun_98d50
+  4.125 ms (0.90%; cumulative 71.59%) _libc_free
+  3.925 ms (0.86%; cumulative 72.45%) read
+  3.468 ms (0.76%; cumulative 73.21%) _mmap
+  3.391 ms (0.74%; cumulative 73.95%) core::slice::sort::shared::smallsort::insertion_sort_shift_left::<(jsonschema::keywords::Keyword, alloc::boxed::Box<dyn jsonschema::validator::Validate>), <[(jsonschema::keywords::Keyword, alloc::boxed::Box<dyn jsonschema::validator::Validate>)]>::sort_by_key<u8, <jsonschema::node::SchemaNode>::from_keywords::{closure#0}>::{closure#0}>
+  3.311 ms (0.72%; cumulative 74.67%) jsonschema::compiler::compile_with_internal::<jsonschema_value::serde_json::SerdeJson>
+  3.276 ms (0.72%; cumulative 75.39%) pipe2
+  3.238 ms (0.71%; cumulative 76.10%) fun_ab230
+  2.683 ms (0.59%; cumulative 76.69%) fun_a9c70
+  2.569 ms (0.56%; cumulative 77.25%) <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+  2.416 ms (0.53%; cumulative 77.78%) fun_a9b90
+  2.165 ms (0.47%; cumulative 78.25%) onepipeline::verbs::render_adopted
+  2.144 ms (0.47%; cumulative 78.72%) _open64_nocancel
+  2.051 ms (0.45%; cumulative 79.17%) unlinkat
+  1.898 ms (0.42%; cumulative 79.58%) _madvise
+  1.581 ms (0.35%; cumulative 79.93%) <onepipeline::projection::RunState>::settled
+  1.564 ms (0.34%; cumulative 80.27%) fun_188cf0
+CPU attribution only: child lifetimes, filesystem latency, waits and process creation are not disjointly measured here.
+```
+
+On release before, the largest attributed start module is onevcs::git (90.912 ms, 22.48% of 404.486 ms observed CPU). privateterms::matcher accounts for 57.249 ms (14.15%); release optimization inlines the contributor initializer into matcher construction, so that figure is not an initializer-only measurement. Release adopt is led by onevcs::git (104.227 ms, 28.15% of 370.232 ms observed CPU). The cut’s source omits the initializer; it is absent from the reported dominant cut stacks. Observed CPU varies between captures even for adopt, which had no initializer before, so these CPU observations are not a causal saving estimate. Hosted means alone price the option.
+
+### Local interval accounting and residual
+
+Command: `node scripts/engine-startup.mjs phases LABEL=LOCAL_CAPTURE_DIR`. It consumes the unchanged shared launch trace through its existing reader. The following command outputs are from scratch/local-debug-baseline-partition.txt and local-release-partition.txt, on source 7d949434 plus the subsequently recorded fixture test. Each figure cites the corresponding local capture and recorded trace above. Intervals are clipped to the first-proc-to-final-end trace window, with overlap removed: known spawn-call intervals take precedence, then other known operation-live intervals, then unallocated time. Program rows and wait overlays are deliberately not added to the partition or to sampled CPU.
+
+#### debug baseline trace
+
+```text
+before: local trace intervals (not a hosted wall-clock estimate)
+start pid 90: trace window 2432.921 ms; 119 timed / 119 observed child or opaque operations
+partition: spawn-call 346.662 ms + operation-live outside spawn 1065.186 ms + unallocated 1021.073 ms = trace window 2432.921 ms
+  git: 116/116 timed; inclusive operation 1206.399 ms; spawn-call 343.355 ms (program rows can overlap)
+  onevcs: 2/2 timed; inclusive operation 170.753 ms; spawn-call 0.000 ms (program rows can overlap)
+  fake-oneagentgraph: 1/1 timed; inclusive operation 34.696 ms; spawn-call 3.308 ms (program rows can overlap)
+recorded child-wait loops: 768.402 ms over 113 records (overlays, not an additive partition)
+adopt pid 583: trace window 2832.135 ms; 144 timed / 144 observed child or opaque operations
+partition: spawn-call 411.823 ms + operation-live outside spawn 1069.268 ms + unallocated 1351.045 ms = trace window 2832.135 ms
+  git: 143/143 timed; inclusive operation 1462.177 ms; spawn-call 409.132 ms (program rows can overlap)
+  fake-oneagentgraph: 1/1 timed; inclusive operation 18.914 ms; spawn-call 2.690 ms (program rows can overlap)
+recorded child-wait loops: 951.300 ms over 141 records (overlays, not an additive partition)
+Unallocated wall includes own CPU, filesystem latency, descheduling, non-child waits and unmeasured children, not separately measured. Operation-live means observed child/opaque-call presence, not proof the engine was waiting. Separately sampled engine CPU overlaps all timeline buckets and must not be added to them. Untimed operations remain uncertainty; clocks exclude creation of the engine, pre-first-trace initialization and teardown.
+```
+
+#### release baseline trace
+
+```text
+release: local trace intervals (not a hosted wall-clock estimate)
+start pid 90: trace window 1817.150 ms; 119 timed / 119 observed child or opaque operations
+partition: spawn-call 83.052 ms + operation-live outside spawn 491.812 ms + unallocated 1242.287 ms = trace window 1817.150 ms
+  git: 116/116 timed; inclusive operation 517.272 ms; spawn-call 81.917 ms (program rows can overlap)
+  onevcs: 2/2 timed; inclusive operation 38.947 ms; spawn-call 0.000 ms (program rows can overlap)
+  fake-oneagentgraph: 1/1 timed; inclusive operation 18.645 ms; spawn-call 1.135 ms (program rows can overlap)
+recorded child-wait loops: 381.575 ms over 113 records (overlays, not an additive partition)
+adopt pid 583: trace window 1964.572 ms; 144 timed / 144 observed child or opaque operations
+partition: spawn-call 105.363 ms + operation-live outside spawn 526.096 ms + unallocated 1333.113 ms = trace window 1964.572 ms
+  git: 143/143 timed; inclusive operation 622.786 ms; spawn-call 104.216 ms (program rows can overlap)
+  fake-oneagentgraph: 1/1 timed; inclusive operation 8.673 ms; spawn-call 1.147 ms (program rows can overlap)
+recorded child-wait loops: 456.129 ms over 141 records (overlays, not an additive partition)
+Unallocated wall includes own CPU, filesystem latency, descheduling, non-child waits and unmeasured children, not separately measured. Operation-live means observed child/opaque-call presence, not proof the engine was waiting. Separately sampled engine CPU overlaps all timeline buckets and must not be added to them. Untimed operations remain uncertainty; clocks exclude creation of the engine, pre-first-trace initialization and teardown.
+```
+
+Filesystem wall latency is not independently measured. The unallocated bucket includes own CPU, filesystem latency, descheduling, non-child waits and children whose duration is unmeasured. Known operation-live intervals can themselves overlap those activities. CPU samples are an overlay, not a disjoint wall bucket. Per-platform hosted partitioning remains unavailable under a45, and no new engine phase instrumentation was added. The trace excludes process creation of the engine, pre-first-trace initialization and final teardown. Attached start/adopt windows include the plan execution they drive; these means are not a time-to-first-output metric.
+
+The new phase command is exercised over the recorded driver fixture and 543 verbatim primary-process records from the kept-branch capture. Its regression test asserts the actual interval totals, program totals and child-wait overlays. Parser test count is now fourteen, all passing. One UTF-8 test was deliberately observed failing with an ASCII input decoder, then the decoder was restored and all tests passed. The strengthened public matcher verifier still passes 6,588 cases; the earlier exhaustive positive-context verifier also completed 6,672,456 comparisons, but is not claimed as exhaustive negative-path coverage.
+
+The existing workspace-nx module had one build-reuse assertion fail while other Cargo builds were active (scratch/workspace-input-tests.log); after compilation became idle, `node --test --test-name-pattern='leaves nothing to compile for the debug build the npm publish journey packs' npm/test/workspace-nx.test.mjs` ran that actual case and passed, with no skipped cases (workspace-build-reuse-recovery.log). No shared test, lint threshold or workflow guard was changed to clear it. The demo workflow blob remains byte-identical to the accepted baseline, and its actual events CI-shape test passed after linking the installed dependency directory (demo-actual-ci-shape-green.log).
+
+### Handoff after local evidence
+
+Hosted after runs: none; none in flight. Prepared local demonstration head dd64b7d1 uses the contributor switch, optimized dependencies, the byte-identical source touch, and workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. It is not pushed or opened, because a41’s four plan slots are occupied by child-waits PRs1613-1616 (confirmed by branch-name query). Git-reads gets the next slot, then this spike. Remaining work is hosted rounds, their pass-name/cache/coverage audits, final-source comparison fold, and the single remaining judged-lint pass under a49. No hosted saving is claimed.
+
 
 ## Candidate budgets
 
