@@ -32,7 +32,7 @@ the executable check evidence at its cited source commit unchanged.
 - Both heads are frozen. Executed workflow blobs, checkout SHAs, full selection,
   cache receipts and test outcomes await finished-job logs/artifacts. The expected
   head workflow blob is db2bbe081a7b9319eb38bd014e72350b389e8b01.
-- Remaining: three full samples per option/platform; select the combination from
+- Remaining: two full samples per option/platform under a62 (no third run); select the combination from
   batched/native means; measure reuse and that combination; verify names/cache
   evidence, price internal/API scopes, quote final fold, close demos and remove
   their worktrees/branches. Further rounds wait for child-waits completion under
@@ -42,3 +42,7 @@ Local code proof: 62 fold/command tests,17 prototype tests, the six-mode slice's
 12 e2e and18 engine-read unit executions pass at the source commits cited in the
 report. The final judged pass was red; a47 caps further passes and directs its
 remaining demands into report limitations. No green judged result is claimed.
+
+Ruling a62: named parity covers every main e2e-tier test. Report the separate
+version summary and other selected Rust tiers’ counts with the unchanged Nx
+selection; disclose every other job failure. No broader name inference is built.
