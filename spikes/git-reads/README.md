@@ -53,6 +53,15 @@ failure journal are in evidence/rejected-43753064453-1-linux*. Reader33edc69c
 refuses the partial invocation instead of pricing a smaller unit tier. Ruling
 a65 says aborted attempts do not consume the two-valid-point quota. Investigation
 found no Git starts in the failed journey and an original driver consuming requeue
-before exit; the manager is deciding the test-rendezvous repair scope. Stock and
+before exit. Ruling a68 freezes the test, classifies a pre-existing race, and
+authorizes a same-head whole-workflow replacement after current jobs finish. Stock and
 batched each pass10 local unoptimized repetitions; an optimized stock control is
 compiling. No replacement hosted run has started.
+
+Ruling a69 fixes sample selection before timings: per platform, use the first two
+valid jobs in run order. Later valid jobs are supplementary and excluded from the
+mean. Whole-workflow reruns may produce such extra platform jobs while Linux
+still needs its two valid points; every attempt remains listed.
+
+The deferred test repair is drafted as
+20261115T220221Z-verify-cancellation-journey-waits-for-driver-exi.
