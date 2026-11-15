@@ -626,7 +626,61 @@ export function parseStrace(text, file = "") {
 }
 
 /** The trace's records, joined: starts with durations, processes, waits. */
+/** Separate process lifetimes without changing the recorded schema. Linked copies emit
+ * duplicate proc/end records; a new proc after an end, a changed argv, or a repeated
+ * per-copy start sequence proves a new lifetime for a reused PID. */
+function processInstances(trace) {
+  const byPid = new Map();
+  for (const r of trace) {
+    const k = `${r.file}\u0000${r.pid}`;
+    if (!byPid.has(k)) byPid.set(k, []);
+    if (r.t != null) byPid.get(k).push(r);
+  }
+  for (const events of byPid.values()) {
+    events.sort((a, b) => a.t - b.t);
+    let part = [];
+    let instance = 0;
+    let ended = false;
+    let signature = null;
+    let lastProc = 0;
+    let sequences = new Set();
+    const finish = (records) => {
+      for (const r of records) r.instance = instance;
+      instance++;
+    };
+    for (const r of events) {
+      if (r.kind === "proc") {
+        const next = JSON.stringify([r.exe, r.argv]);
+        if (part.length && (ended || (signature != null && signature !== next))) {
+          finish(part);
+          part = [];
+          sequences = new Set();
+          ended = false;
+        }
+        signature = next;
+        lastProc = part.length;
+      }
+      if (r.kind === "start" && r.seq != null && sequences.has(r.seq)) {
+        // The same linked copy cannot initialize its sequence twice in one process.
+        // Its most recent proc record starts the replacement lifetime, even if the
+        // previous process was killed before its end marker could be written.
+        const split = lastProc > 0 ? lastProc : part.length;
+        finish(part.slice(0, split));
+        part = part.slice(split);
+        sequences = new Set(part.filter((e) => e.kind === "start").map((e) => e.seq));
+        ended = false;
+        lastProc = 0;
+      }
+      part.push(r);
+      if (r.kind === "start" && r.seq != null) sequences.add(r.seq);
+      if (r.kind === "end") ended = true;
+    }
+    finish(part);
+  }
+}
+
 export function joinTrace(trace) {
+  processInstances(trace);
   const procs = new Map();
   const ends = new Map();
   const exits = new Map();
@@ -635,20 +689,22 @@ export function joinTrace(trace) {
   const sleeps = [];
   const envs = new Map();
   const bySeq = new Map();
-  const key = (file, pid) => `${file}\u0000${pid}`;
+  const key = (file, pid, instance = 0) => `${file}\u0000${pid}\u0000${instance}`;
+  const recordKey = (r) => key(r.file, r.pid, r.instance);
+  // Environment ids are local to a linked copy and may restart when a PID is reused.
+  // Resolve each reference against the preceding definition in the append-only file.
   for (const r of trace) {
-    if (r.kind === "env") envs.set(`${key(r.file, r.pid)}\u0000${r.id}`, r.env);
+    const envKey = (id) => `${r.file}\u0000${r.pid}\u0000${id}`;
+    if (r.kind === "env") envs.set(envKey(r.id), r.env);
+    else if (r.kind === "start" && (typeof r.env === "number" || typeof r.env === "string"))
+      r.env = envs.get(envKey(r.env)) ?? { unresolved: r.env };
   }
   for (const r of trace) {
-    if (r.kind === "proc") procs.set(key(r.file, r.pid), r);
-    else if (r.kind === "end") ends.set(key(r.file, r.pid), r.t);
-    else if (r.kind === "exit" && r.seq != null)
-      bySeq.set(`${key(r.file, r.pid)}\u0000${r.seq}`, r);
-    else if (r.kind === "exit") exits.set(`${key(r.file, r.pid)}\u0000${r.child}`, r.t);
+    if (r.kind === "proc" && !procs.has(recordKey(r))) procs.set(recordKey(r), r);
+    else if (r.kind === "end") ends.set(recordKey(r), r.t);
+    else if (r.kind === "exit" && r.seq != null) bySeq.set(`${recordKey(r)}\u0000${r.seq}`, r);
+    else if (r.kind === "exit") exits.set(`${recordKey(r)}\u0000${r.child}`, r.t);
     else if (r.kind === "start") {
-      // Each writer names a GIT_* set once per process, by an id like `onevcs:0`.
-      if (typeof r.env === "number" || typeof r.env === "string")
-        r.env = envs.get(`${key(r.file, r.pid)}\u0000${r.env}`) ?? { unresolved: r.env };
       starts.push(r);
     } else if (r.kind === "wait") waits.push(r);
     else if (r.kind === "sleeps") sleeps.push(r);
@@ -656,13 +712,13 @@ export function joinTrace(trace) {
   // A start written at its spawn has its exit, and any wait folded into it, in an
   // `exit` record of the same seq.
   for (const s of starts) {
-    const e = s.seq != null ? bySeq.get(`${key(s.file, s.pid)}\u0000${s.seq}`) : null;
+    const e = s.seq != null ? bySeq.get(`${recordKey(s)}\u0000${s.seq}`) : null;
     if (!e) continue;
     for (const f of ["exit_ns", "status", "wait_site", "wait_ns", "polls", "interval_ns"])
       if (e[f] != null) s[f] = e[f];
   }
   for (const r of [...starts, ...waits, ...sleeps]) {
-    const p = procs.get(key(r.file, r.pid));
+    const p = procs.get(recordKey(r));
     r.verb ??= isTestBinary(p) ? "(test process)" : (p?.verb ?? "");
     r.test ??= p?.test ?? r.file;
   }
@@ -673,8 +729,7 @@ export function joinTrace(trace) {
   for (const s of starts) {
     s.dur = s.exit_ns ?? null;
     if (s.dur == null && s.child != null) {
-      const at =
-        exits.get(`${key(s.file, s.pid)}\u0000${s.child}`) ?? ends.get(key(s.file, s.child));
+      const at = exits.get(`${recordKey(s)}\u0000${s.child}`);
       if (at != null && at >= s.t) s.dur = at - s.t;
     }
   }
@@ -689,7 +744,11 @@ export function joinTrace(trace) {
   for (const s of [...starts].sort((a, b) => a.t - b.t)) {
     const candidates = byFile.get(s.file) ?? [];
     let child = null;
-    if (s.child != null) child = candidates.find((p) => p.pid === s.child && p.t >= s.t) ?? null;
+    if (s.child != null)
+      child =
+        candidates.find(
+          (p) => p.pid === s.child && p.t >= s.t && (s.dur == null || p.t <= s.t + s.dur),
+        ) ?? null;
     else if (["onepipeline", "onevcs"].includes(s.program))
       child =
         candidates.find(
@@ -704,19 +763,19 @@ export function joinTrace(trace) {
       s.childProc = child;
       child.parentStart = s;
       if (s.dur == null) {
-        const end = ends.get(key(child.file, child.pid));
+        const end = ends.get(recordKey(child));
         if (end != null) s.dur = end - s.t;
       }
     }
   }
   const startsOf = new Map();
   for (const s of starts) {
-    const k = key(s.file, s.pid);
+    const k = recordKey(s);
     if (!startsOf.has(k)) startsOf.set(k, []);
     startsOf.get(k).push(s);
   }
   for (const s of starts) {
-    const inner = s.childProc ? (startsOf.get(key(s.file, s.childProc.pid)) ?? []) : [];
+    const inner = s.childProc ? (startsOf.get(recordKey(s.childProc)) ?? []) : [];
     s.nested = union(
       inner.filter((c) => c.dur != null).map((c) => [c.t, c.t + c.dur]),
       s.t,
@@ -756,9 +815,10 @@ export function foldJob(job) {
   const summary = largestRun(job.log);
   const wallS = summary?.seconds ?? null;
   const toWallMin = (ns) => (wallS && testSeconds ? ((ns / 1e9 / testSeconds) * wallS) / 60 : null);
-  const procOf = (s) => t.procs.find((p) => p.file === s.file && p.pid === s.pid);
-  const procIndex = new Map(t.procs.map((p) => [t.key(p.file, p.pid), p]));
-  const startedBy = (s) => procIndex.get(t.key(s.file, s.pid));
+  const procOf = (s) =>
+    t.procs.find((p) => p.file === s.file && p.pid === s.pid && p.instance === s.instance);
+  const procIndex = new Map(t.procs.map((p) => [t.key(p.file, p.pid, p.instance), p]));
+  const startedBy = (s) => procIndex.get(t.key(s.file, s.pid, s.instance));
 
   const engine = new Map();
   const bySite = new Map();
@@ -785,9 +845,10 @@ export function foldJob(job) {
   const nestedInTest = new Map();
   for (const p of t.procs) {
     if (isTestBinary(p) || p.parentStart) continue;
-    const inner = t.startsOf.get(t.key(p.file, p.pid)) ?? [];
+    const inner = t.startsOf.get(t.key(p.file, p.pid, p.instance)) ?? [];
     const end =
-      t.ends.get(t.key(p.file, p.pid)) ?? Math.max(p.t, ...inner.map((c) => c.t + (c.dur ?? 0)));
+      t.ends.get(t.key(p.file, p.pid, p.instance)) ??
+      Math.max(p.t, ...inner.map((c) => c.t + (c.dur ?? 0)));
     const k = `${p.file}\u0000${p.exe}`;
     nestedInTest.set(
       k,
@@ -818,7 +879,7 @@ export function foldJob(job) {
     if (!verbs.has(k)) verbs.set(k, { key: k, count: 0, lives: [] });
     const e = verbs.get(k);
     e.count++;
-    const end = t.ends.get(t.key(p.file, p.pid));
+    const end = t.ends.get(t.key(p.file, p.pid, p.instance));
     if (end != null) e.lives.push(end - p.t);
   }
 
@@ -911,7 +972,7 @@ export function foldJob(job) {
   for (const r of job.trace) {
     records++;
     traceNs += r.trace_ns ?? 0;
-    const k = t.key(r.file, r.pid);
+    const k = t.key(r.file, r.pid, r.instance);
     lastWrite.set(k, Math.max(lastWrite.get(k) ?? 0, r.write_ns_before ?? 0));
   }
   const writeNs = [...lastWrite.values()].reduce((a, b) => a + b, 0);
@@ -962,7 +1023,7 @@ export function coverage(os, t, records) {
   // allowing SLACK, because ETW's clock drifts tens of milliseconds from the trace's.
   // A start the trace knows the child of is only ever matched by that child; the fallback
   // counts, per traced process and program, only the starts that name none.
-  const SLACK = 1e9;
+  const SLACK = 100e6;
   const procsByPid = new Map();
   for (const p of t.procs) {
     if (!procsByPid.has(p.pid)) procsByPid.set(p.pid, []);
@@ -1020,10 +1081,10 @@ export function coverage(os, t, records) {
       if (p.t >= parent.t - SLACK && p.t <= e.t + SLACK && (best == null || p.t < best.t)) best = p;
     return best;
   };
-  const id = (file, pid) => `${file}\u0000${pid}`;
+  const id = (file, pid, instance = 0) => `${file}\u0000${pid}\u0000${instance}`;
   const expected = new Map();
   const byChild = new Map();
-  const keyOf = (s) => `${id(s.file, s.pid)}\u0000${s.program.toLowerCase()}`;
+  const keyOf = (s) => `${id(s.file, s.pid, s.instance)}\u0000${s.program.toLowerCase()}`;
   // A spawn that returned no child (`spawn_ns` set, `child` null) started no process: it is
   // reported as one the OS has no exec for, and never absorbs a start the OS did see.
   const failed = [];
@@ -1043,9 +1104,12 @@ export function coverage(os, t, records) {
   const namedBy = (e) => {
     let best = null;
     for (const s of byChild.get(e.pid) ?? []) {
-      if (claimed.has(s) || s.program.toLowerCase() !== e.exe) continue;
+      if (claimed.has(s)) continue;
+      // Windows executes .cmd/.bat programs through this very child, cmd.exe.
+      if (s.program.toLowerCase() !== e.exe && e.exe !== "cmd") continue;
+      if (e.ppid != null && s.pid !== e.ppid) continue;
       if (e.test != null && s.file !== e.test) continue;
-      if (e.t != null && Math.abs(e.t - s.t) > SLACK) continue;
+      if (e.t != null && (e.t < s.t - SLACK || e.t > s.t + (s.spawn_ns ?? 0) + SLACK)) continue;
       if (best == null || (e.t != null && Math.abs(e.t - s.t) < Math.abs(e.t - best.t))) best = s;
     }
     return best;
@@ -1066,6 +1130,12 @@ export function coverage(os, t, records) {
     if (named) {
       claimed.add(named);
       traced++;
+      if (named.program.toLowerCase() !== e.exe) {
+        const kind = "OS shell image of a traced script";
+        const starter = `${named.program} (requested program)`;
+        const k = `${kind}\u0000${starter}\u0000${e.exe}`;
+        rows.set(k, { kind, starter, program: e.exe, count: (rows.get(k)?.count ?? 0) + 1 });
+      }
       continue;
     }
     const parent = parentOf(e);
@@ -1081,7 +1151,7 @@ export function coverage(os, t, records) {
       continue;
     }
     const starterName = starter ? starter.exe : (parent?.exe ?? "?");
-    const key = starter ? `${id(starter.file, starter.pid)}\u0000${e.exe}` : null;
+    const key = starter ? `${id(starter.file, starter.pid, starter.instance)}\u0000${e.exe}` : null;
     let kind;
     if (starter && !isTestBinary(starter)) {
       const k = key;
@@ -1120,7 +1190,7 @@ export function coverage(os, t, records) {
     }
   for (const [k, n] of expected) {
     if (n <= 0) continue;
-    const program = k.split("\u0000")[2];
+    const program = k.split("\u0000")[3];
     unseen.set(program, (unseen.get(program) ?? 0) + n);
   }
   const recordStarts = records.reduce(

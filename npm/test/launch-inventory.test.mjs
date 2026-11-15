@@ -873,3 +873,62 @@ test("a fractional test-profile polling count is rejected rather than folded", (
   writeFileSync(file, JSON.stringify(record));
   assert.match(run("fold", `valid=${dir}`).stdout, /0 test-profile records not of schema 2/);
 });
+
+test("reusing every PID in a later invocation preserves both lifetimes and their own git reads", () => {
+  const dir = join(scratch, "same-test-pid-reuse");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  for (const f of readdirSync(launch).filter((f) => f.endsWith(".jsonl"))) {
+    const path = join(launch, f);
+    const events = readFileSync(path, "utf8").trim().split("\n").map(JSON.parse);
+    const later = events.map((e) => ({ ...e, ...(e.t == null ? {} : { t: e.t + 100e9 }) }));
+    writeFileSync(path, `${[...events, ...later].map(JSON.stringify).join("\n")}\n`);
+  }
+  const original = run("fold", `original=${recorded}`);
+  const repeated = run("fold", `repeated=${dir}`);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  const section =
+    "Engine runs the tests started, by verb (each process's own first-to-last record)";
+  const before = rows(original.stdout, section);
+  const after = rows(repeated.stdout, section);
+  for (const row of before) {
+    const twice = after.find((r) => r[0] === row[0]);
+    assert.equal(Number(twice[1]), 2 * Number(row[1]), row[0]);
+    assert.equal(twice[2], row[2], "PID reuse must preserve the invocation's median lifetime");
+  }
+  const repeats = (out) => Number(/(\d+) repeats,/.exec(out)[1]);
+  assert.equal(repeats(repeated.stdout), 2 * repeats(original.stdout));
+});
+
+test("ETW matches a script's shell image and a slow spawn, while rejecting another parent", () => {
+  const dir = join(scratch, "etw-images");
+  cpSync(recorded, dir, { recursive: true });
+  const os = join(dir, "os");
+  for (const f of readdirSync(os)) rmSync(join(os, f));
+  const launch = join(dir, "test-profile", "launch");
+  const file = join(
+    launch,
+    readdirSync(launch).find((f) => f.endsWith(".jsonl")),
+  );
+  const events = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+  const starts = events.filter((e) => e.kind === "start" && e.child != null).slice(0, 3);
+  assert.equal(starts.length, 3);
+  starts[1].spawn_ns = 2e9;
+  writeFileSync(file, `${events.map(JSON.stringify).join("\n")}\n`);
+  const rowsIn = starts.map((s, i) => ({
+    pid: s.child,
+    ppid: i === 2 ? 999999 : s.pid,
+    image: i === 0 ? "cmd.exe" : `${s.program}.exe`,
+    t: new Date((s.t + (i === 1 ? 1.5e9 : 0)) / 1e6).toISOString(),
+  }));
+  writeFileSync(join(os, "starts.jsonl"), `${rowsIn.map(JSON.stringify).join("\n")}\n`);
+  const r = run("fold", `etw=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /3 process starts observed; 2 matched a traced start/);
+  assert.ok(
+    rows(r.stdout, "Coverage against the operating system's own record").some(
+      (r) => r[0] === "OS shell image of a traced script" && r[2] === "cmd" && r[3] === "1",
+    ),
+    r.stdout,
+  );
+});
