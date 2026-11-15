@@ -383,7 +383,7 @@ export function readJob(label, dir) {
       "unzip the job's test-profile artifact there",
     );
   const root = existsSync(join(dir, "test-profile")) ? join(dir, "test-profile") : dir;
-  const skipped = { malformed: 0, invalid: 0, records: 0, waits: 0 };
+  const skipped = { malformed: 0, invalid: 0, records: 0, waits: 0, otherBinaries: 0 };
   const tests = [];
   const e2e = join(root, "e2e");
   if (existsSync(e2e)) {
@@ -397,9 +397,18 @@ export function readJob(label, dir) {
   const trace = [];
   const harnessWaits = [];
   const launch = join(root, "launch");
+  // The note, smoke and other binaries that compile the e2e harness write into the same
+  // directory: with e2e records present, only the files of the tests they name are the
+  // e2e tier's.
+  const e2eTests = new Set(tests.map((r) => r.test.replaceAll("::", "__")));
+  const ours = (file) => e2eTests.size === 0 || e2eTests.has(file);
   if (existsSync(launch)) {
     for (const f of readdirSync(launch)) {
       if (f.endsWith(".waits.json")) {
+        if (!ours(basename(f, ".waits.json"))) {
+          skipped.otherBinaries++;
+          continue;
+        }
         const doc = readJson(join(launch, f));
         const sites =
           doc && typeof doc.test === "string" && Array.isArray(doc.sites) ? doc.sites : [];
@@ -410,6 +419,10 @@ export function readJob(label, dir) {
       }
       if (!f.endsWith(".jsonl")) continue;
       const file = basename(f, ".jsonl");
+      if (!ours(file)) {
+        skipped.otherBinaries++;
+        continue;
+      }
       for (const r of readJsonl(join(launch, f), skipped)) trace.push({ ...r, file });
     }
   }
@@ -881,7 +894,7 @@ export function foldJob(job) {
   const names = job.tests.map((r) => r.test).sort();
   return {
     label: job.label,
-    skipped: job.skipped ?? { malformed: 0, invalid: 0, records: 0, waits: 0 },
+    skipped: job.skipped ?? { malformed: 0, invalid: 0, records: 0, waits: 0, otherBinaries: 0 },
     os: job.tests[0]?.os ?? "?",
     host: job.host,
     summary,
@@ -1063,7 +1076,7 @@ export function render(folds, { top = 20 } = {}) {
     );
     const k = f.skipped;
     out.push(
-      `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries.\n`,
+      `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries; left out ${k.otherBinaries} trace and waits files of tests no e2e record names (the other binaries that compile the harness).\n`,
     );
     const ts = f.testSeconds * 1e9;
     const wm = (ns) => (f.toWallMin(ns) == null ? "-" : f.toWallMin(ns).toFixed(2));
