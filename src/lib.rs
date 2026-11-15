@@ -188,3 +188,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// DO NOT MERGE: a demonstration-only comment; it changes no behaviour.
