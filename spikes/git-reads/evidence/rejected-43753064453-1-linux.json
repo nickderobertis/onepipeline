@@ -1,0 +1,129 @@
+{
+  "run": 43753064453,
+  "attempt": 1,
+  "jobId": 132931076196,
+  "headSha": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "workflowBlob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "githubSha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "cpus": 4,
+  "physicalCpus": null,
+  "jobMinutes": 117.36666666666666,
+  "selection": {
+    "job": "test-linux",
+    "count": 37,
+    "tasks": [
+      "github-workflows:budgets",
+      "github-workflows:test",
+      "github-workflows:test-ci-shape",
+      "human-items-e2e:build",
+      "human-items-e2e:test",
+      "onepipeline-ci-jobs:test",
+      "onepipeline-codex-server:test",
+      "onepipeline-contract:test",
+      "onepipeline-coverage-keys:test",
+      "onepipeline-e2e:test",
+      "onepipeline-narrow-write:test",
+      "onepipeline-note-journeys:test",
+      "onepipeline-npm:test",
+      "onepipeline-pooled-slot:test",
+      "onepipeline-real-smoke:smoke",
+      "onepipeline-release-compat:release-compat",
+      "onepipeline-release:test",
+      "onepipeline-status-read:build",
+      "onepipeline-status-read:test",
+      "onepipeline-stop-verdict:test",
+      "onepipeline-stop-verdict:test-build",
+      "onepipeline-version-contract:test",
+      "onepipeline-version-e2e:test",
+      "onepipeline-version-package:test",
+      "onepipeline:budgets",
+      "onepipeline:build",
+      "onepipeline:coverage-clean",
+      "onepipeline:doc",
+      "onepipeline:install-documented",
+      "onepipeline:install-smoke",
+      "onepipeline:msrv",
+      "onepipeline:test",
+      "onepipeline:test-rest",
+      "onepipeline:wheel-smoke",
+      "pool-maintenance:test",
+      "report-job:budgets",
+      "report-job:test"
+    ]
+  },
+  "cacheSteps": [
+    {
+      "name": "op-nx/github-cache/start-cache-server@91839c24885842cac86567",
+      "seconds": 0.005000114440917969,
+      "hit": "no restore",
+      "said": []
+    },
+    {
+      "name": "Swatinem/rust-cache@v2.9.2",
+      "seconds": 59.64699983596802,
+      "hit": "partial (restore key)",
+      "said": [
+        "Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-14f37604",
+        "Cache restored successfully",
+        "Restored from cache key \"v0-rust-test-linux-Linux-x64-ff458983-14f37604\" full match: false."
+      ]
+    },
+    {
+      "name": "actions/setup-node@v4",
+      "seconds": 0.4809999465942383,
+      "hit": "no restore",
+      "said": []
+    },
+    {
+      "name": "actions/setup-python@v5",
+      "seconds": 9.283999919891357,
+      "hit": "miss",
+      "said": [
+        "Version 3.13.17 was not found in the local cache"
+      ]
+    },
+    {
+      "name": "astral-sh/setup-uv@v6",
+      "seconds": 2.2150001525878906,
+      "hit": "no restore",
+      "said": []
+    },
+    {
+      "name": "actions/cache/restore@v4",
+      "seconds": 0.5130000114440918,
+      "hit": "hit",
+      "said": [
+        "Cache hit for: bootstrap-tools-Linux-X64-0.14.16-0.2.0-0.1.1-b73ec04eeb2dbbd64084f3bb78bc5a714d12663ba265bb13e13a2cced304899a",
+        "Cache restored successfully",
+        "Cache restored from key: bootstrap-tools-Linux-X64-0.14.16-0.2.0-0.1.1-b73ec04eeb2dbbd64084f3bb78bc5a714d12663ba265bb13e13a2cced304899a"
+      ]
+    }
+  ],
+  "cacheSaves": [],
+  "nxStored": {
+    "entries": 0,
+    "bytes": 0,
+    "replayed": 0
+  },
+  "coverage": null,
+  "eligible": false,
+  "reason": "Main e2e aborted343/2155 after command_step::a_cancel_drop_or_retry_stops_a_running_command failed; no full-tier mean may be priced.",
+  "main_partial_summary": "2026-11-15T21:30:03.4155826Z      Summary [ 847.760s] 343/2155 tests run: 342 passed (6 slow), 1 failed, 1 skipped",
+  "failure_lines": {
+    "9829": "2026-11-15T21:29:25.6579820Z         FAIL [   0.940s] ( 340/2155) onepipeline::e2e command_step::a_cancel_drop_or_retry_stops_a_running_command",
+    "9844": "2026-11-15T21:29:25.6591113Z     thread 'command_step::a_cancel_drop_or_retry_stops_a_running_command' (726049) panicked at tests/e2e/harness.rs:5910:9:",
+    "9845": "2026-11-15T21:29:25.6592361Z     assertion `left == right` failed: `onepipeline adopt commandcancel --detach` exited 2 not 0",
+    "9847": "2026-11-15T21:29:25.6593921Z     stderr: onepipeline: refused: run 'commandcancel' is still being driven by driver pid 726052 (ACTIVE); end it with `onepipeline stop commandcancel` first",
+    "10253": "2026-11-15T21:30:03.4155826Z      Summary [ 847.760s] 343/2155 tests run: 342 passed (6 slow), 1 failed, 1 skipped",
+    "10419": "2026-11-15T21:30:17.2818007Z      Summary [   2.299s] 2 tests run: 1 passed, 1 failed, 2161 skipped",
+    "10870": "2026-11-15T21:30:25.9274686Z      Summary [   4.228s] 2 tests run: 0 passed, 2 failed, 2161 skipped",
+    "11332": "2026-11-15T21:30:34.2456984Z      Summary [   3.479s] 2 tests run: 0 passed, 2 failed, 2161 skipped",
+    "11364": "2026-11-15T21:30:34.3287119Z Nx cache: stored 0 entries, 0 bytes; replayed 0 entries"
+  },
+  "artifact": {
+    "id": 14181596135,
+    "digest": "sha256:52979928bc66b423ed03c961999992c8a66b1673eb8b5a779283f3aa53db2d06"
+  },
+  "source": "GitHub run43753064453 attempt1 job132931076196 log/profile, collected2026-11-15; metadata fields read byb7fca28e, whose smaller-tier timing was wrong and is explicitly excluded. Refused by33edc69c."
+}
