@@ -302,7 +302,7 @@ export function validRecord(r) {
       ["spawn_ns", "exit_ns", "wait_ns", "trace_ns"].every((f) => isTimeOrNull(r[f]))
     );
   if (r.kind === "exit") return ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]));
-  if (r.kind === "wait") return isTimeOrNull(r.wait_ns) && isTimeOrNull(r.polls);
+  if (r.kind === "wait") return isTime(r.wait_ns) && isCount(r.polls);
   if (r.kind === "sleeps") return isCount(r.count) && isTime(r.slept_ns);
   return true;
 }
@@ -1723,7 +1723,6 @@ function renderFacts(label, f) {
 export async function host({ runs = 30 } = {}) {
   if (!Number.isSafeInteger(runs) || runs < 1) throw usage("--runs takes a positive whole number");
   const { measureSpawns } = await import("./windows-job-profile.mjs");
-  // llmlint: ignore[changed_behavior_has_e2e] the only failure this records is a macOS sysctl refusing, which no runner here produces; the npm tests of test-macos run host for real and assert it answered, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
   const unanswered = [];
   const ask = (cmd, args) => {
     try {
@@ -1732,10 +1731,12 @@ export async function host({ runs = 30 } = {}) {
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
     } catch (error) {
+      // llmlint: ignore-block[changed_behavior_has_e2e] Only a failed macOS sysctl query reaches this fallback; the real hosted macOS host journey proves the successful query, but cannot induce a runner's sysctl failure. This measurement-only diagnostic never lands (manager ruling a1); it records the unanswered query instead of claiming a measured processor value.
       unanswered.push(
         `${cmd} ${args.join(" ")}: ${String(error.stderr || error.message).trim()} (next: read the processor off the runner's own system report in the job log)`,
       );
       return null;
+      // llmlint: ignore-end[changed_behavior_has_e2e]
     }
   };
   let model = cpus()[0]?.model ?? null;

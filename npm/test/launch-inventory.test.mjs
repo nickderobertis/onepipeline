@@ -953,3 +953,33 @@ test("trace overhead includes each linked copy's cumulative writer total", () =>
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /3.0 s writing them/);
 });
+
+test("a child wait without its duration or poll count is rejected", () => {
+  const dir = join(scratch, "incomplete-wait");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const path = join(
+    launch,
+    readdirSync(launch).find((f) => f.endsWith(".jsonl")),
+  );
+  const original = readFileSync(path, "utf8");
+  const proc = original
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .find((e) => e.kind === "proc");
+  const wait = {
+    v: 1,
+    kind: "wait",
+    pid: proc.pid,
+    t: proc.t + 1,
+    site: "x:1",
+    function: "child_wait",
+  };
+  writeFileSync(path, `${original}\n${JSON.stringify(wait)}\n`);
+  assert.match(run("fold", `incomplete=${dir}`).stdout, /1 records of no known shape/);
+  wait.wait_ns = 10;
+  wait.polls = 0;
+  writeFileSync(path, `${original}\n${JSON.stringify(wait)}\n`);
+  assert.match(run("fold", `complete=${dir}`).stdout, /0 records of no known shape/);
+});
