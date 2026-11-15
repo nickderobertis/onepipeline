@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.16](https://github.com/nickderobertis/onetaskgraph/compare/onetaskgraph-core-v0.14.15...onetaskgraph-core-v0.14.16) - 2026-11-14
+
+### Fixed
+
+- keep an attestation valid through a copy that renumbers its dependency edges ([#4033](https://github.com/nickderobertis/onetaskgraph/pull/4033))
+
 ## [0.14.15](https://github.com/nickderobertis/onetaskgraph/compare/onetaskgraph-core-v0.14.14...onetaskgraph-core-v0.14.15) - 2026-11-13
 
 ### Added
