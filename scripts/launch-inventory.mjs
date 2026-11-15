@@ -264,6 +264,7 @@ export function validRecord(r) {
   if (!fields?.every((f) => r[f] != null) || !isCount(r.pid)) return false;
   if (r.child != null && !isCount(r.child)) return false;
   if (r.polls != null && !isCount(r.polls)) return false;
+  if (r.wait_site != null && (!isTime(r.wait_ns) || !isCount(r.polls))) return false;
   if (r.t != null && !isTime(r.t)) return false;
   const scalar = (x) => x == null || typeof x === "string" || Number.isFinite(x);
   if (

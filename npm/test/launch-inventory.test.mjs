@@ -1019,3 +1019,27 @@ test("the version-only Nx tier is left out even though it uses the e2e binary", 
   assert.equal(onlyVersion.status, 1);
   assert.match(onlyVersion.stderr, /holds no e2e test-profile record and no launch trace/);
 });
+
+test("a wait folded into a start or exit requires its measured duration and poll count", () => {
+  const dir = join(scratch, "incomplete-folded-wait");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const path = join(
+    launch,
+    readdirSync(launch).find((f) => f.endsWith(".jsonl")),
+  );
+  const original = readFileSync(path, "utf8");
+  for (const kind of ["start", "exit"]) {
+    const events = original.trim().split("\n").map(JSON.parse);
+    const event = events.find((e) => e.kind === kind);
+    event.wait_site = "bounded_wait:1";
+    delete event.wait_ns;
+    delete event.polls;
+    writeFileSync(path, `${events.map(JSON.stringify).join("\n")}\n`);
+    assert.match(run("fold", `${kind}=${dir}`).stdout, /1 records of no known shape/);
+    event.wait_ns = 0;
+    event.polls = 0;
+    writeFileSync(path, `${events.map(JSON.stringify).join("\n")}\n`);
+    assert.match(run("fold", `${kind}Recovered=${dir}`).stdout, /0 records of no known shape/);
+  }
+});
