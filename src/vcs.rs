@@ -1288,13 +1288,15 @@ pub fn preservation_of(word: &str) -> Option<onevcs::Preservation> {
 /// there (`docs/contract-divergences.md` entry 35). `None` where git could not
 /// answer, or answered with something this crate will not carry.
 pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD^{commit}"])
-        .current_dir(worktree)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
+    let output = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null()),
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
     usable(String::from_utf8_lossy(&output.stdout).trim())
 }
 
@@ -1433,7 +1435,7 @@ pub fn wait_out_the_second(began: std::time::SystemTime) {
         if remaining.is_zero() {
             break;
         }
-        std::thread::sleep(remaining);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), remaining);
     }
 }
 
@@ -1471,19 +1473,21 @@ pub fn level_with_base(
     began: std::time::SystemTime,
 ) -> Option<LevelBranch> {
     let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| {
-                eprintln!(
-                    "onepipeline: cannot run `git {}` in {}: {error}",
-                    args.join(" "),
-                    worktree.display()
-                );
-            })
-            .ok()?;
+        let output = onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(worktree)
+                .stdin(std::process::Stdio::null()),
+        )
+        .map_err(|error| {
+            eprintln!(
+                "onepipeline: cannot run `git {}` in {}: {error}",
+                args.join(" "),
+                worktree.display()
+            );
+        })
+        .ok()?;
         if !output.status.success() {
             eprintln!(
                 "onepipeline: `git {}` in {} exited {}: {}",
@@ -1508,12 +1512,13 @@ pub fn level_with_base(
     // content comparison over every tracked path, staged or not — exit 1 is
     // git's answer "different", and only a refusal to answer exits higher — and
     // the untracked files are asked for separately, since no diff lists them.
-    match std::process::Command::new("git")
-        .args(["diff", "--quiet", "HEAD", "--"])
-        .current_dir(worktree)
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
+    match onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        std::process::Command::new("git")
+            .args(["diff", "--quiet", "HEAD", "--"])
+            .current_dir(worktree)
+            .stdin(std::process::Stdio::null()),
+    ) {
         Ok(compared) if compared.status.success() => {}
         Ok(compared) if compared.status.code() == Some(1) => return None,
         Ok(refused) => {
@@ -1591,12 +1596,13 @@ pub fn level_with_base(
         // Exit 1 is git's answer "not an ancestor", which the closure reports as
         // a refusal; only a refusal to answer at all leaves the read undecided,
         // and that one exits higher than 1.
-        match std::process::Command::new("git")
-            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
-            .current_dir(worktree)
-            .stdin(std::process::Stdio::null())
-            .output()
-        {
+        match onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+                .current_dir(worktree)
+                .stdin(std::process::Stdio::null()),
+        ) {
             Ok(answered) if answered.status.success() => {
                 wrote = Wrote::ACommitTheBaseCarries;
                 break;
@@ -2114,7 +2120,7 @@ pub fn follow(
                     }
                     asked = std::time::Instant::now();
                 }
-                std::thread::sleep(FOLLOW_POLL);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), FOLLOW_POLL);
             }
         });
     match reader {
@@ -2410,14 +2416,16 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
     let conflict = session.conflict.clone()?;
     let range = format!("{}..{}", conflict.branch_tip, conflict.base_commit);
     let git = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .arg("--")
-            .args(&conflict.paths)
-            .current_dir(&session.worktree)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()?;
+        let output = onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            std::process::Command::new("git")
+                .args(args)
+                .arg("--")
+                .args(&conflict.paths)
+                .current_dir(&session.worktree)
+                .stdin(std::process::Stdio::null()),
+        )
+        .ok()?;
         output
             .status
             .success()
@@ -2481,12 +2489,14 @@ pub(crate) fn bring_base_in(
 ) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
     let at = &session.worktree;
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(at)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("git {args:?}: {error}"))
+        onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(at)
+                .stdin(std::process::Stdio::null()),
+        )
+        .map_err(|error| format!("git {args:?}: {error}"))
     };
     let resolve = |name: &str| -> Option<String> {
         git(&[
@@ -2810,13 +2820,15 @@ pub(crate) fn net_diff(
         crate::sys::now_millis()
     ));
     let git = |args: &[&str]| -> std::result::Result<String, String> {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(worktree)
-            .env("GIT_INDEX_FILE", &scratch)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("cannot run `git {}`: {error}", args.join(" ")))?;
+        let output = onevcs::launch_trace::output(
+            onevcs::launch_site!(),
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(worktree)
+                .env("GIT_INDEX_FILE", &scratch)
+                .stdin(std::process::Stdio::null()),
+        )
+        .map_err(|error| format!("cannot run `git {}`: {error}", args.join(" ")))?;
         if !output.status.success() {
             return Err(format!(
                 "`git {}` exited {}: {}",

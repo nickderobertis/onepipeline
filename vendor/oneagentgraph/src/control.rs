@@ -1,0 +1,880 @@
+//! Out-of-band turn control: where a member's in-flight turn is addressed, and
+//! the `oneharness interrupt` process that redirects it.
+//!
+//! `cancel` ends a turn and the worker's whole accumulated context goes with it.
+//! `interrupt` is its sibling — same addressing, different intent — and redirects
+//! a turn that keeps running, which is the difference between correcting a worker
+//! and restarting it.
+//!
+//! **This crate owns none of the mechanism.** onejudge asks both sides of a
+//! two-party member for a controllable turn (`provider.control`), a single-sided
+//! member's turn asks through `RunRequest::control` where oneharness's registry
+//! says its whole chain is interrupted in place (`crate::harness`), oneharness
+//! opens the socket and knows which harnesses have a lever at all, and a separate
+//! `oneharness interrupt` process delivers the redirection. What lives here is the composition: the
+//! address a run recorded for one member, and the mapping from oneharness's own
+//! answer onto the verb's exit codes.
+//!
+//! # Why the address is written down rather than derived
+//!
+//! [`Address`] is the three values `oneharness interrupt` takes, and every one of
+//! them is either this crate's own or read back from onejudge's report:
+//!
+//! * `session` is the handle [`crate::invoke::Context::session`] mints and writes
+//!   into the member's onejudge config, which onejudge threads as
+//!   `oneharness run --session`. oneharness sanitizes it the same way when it
+//!   names the socket and when `interrupt` resolves one, so the handle this crate
+//!   minted addresses the turn it started.
+//! * `cwd` is the member's own worktree, which this crate chose.
+//! * `session_dir` is oneharness's, and is left [`None`] until its report names
+//!   one. `oneharness run --session-dir` has no config or environment layer, and
+//!   onejudge never passes it, so a run and an `interrupt` that both say nothing
+//!   resolve the same store — recomputing that platform default here would be a
+//!   second source for one fact, and wrong for any run whose store *was* named.
+//!   Both ends do resolve it through any link, with oneharness's own resolver
+//!   (`default_store`), because a socket's name is fitted to the store's
+//!   spelled length.
+//!
+//! The record is written twice: [`Turn::Open`] when the member starts, so the
+//! lever exists while the turn an operator wants to redirect is the one in flight,
+//! and again when the member's report arrives — which is the first moment this
+//! process learns whether the ask was honored at all, because onejudge reports
+//! `control` only on the finished run.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use oneharness_core::domain::control::{ControlReason, ControlResponse};
+use serde::{Deserialize, Serialize};
+
+use crate::error::Error;
+use crate::run::{MemberName, RunId, MEMBERS_DIR};
+
+/// The file a run records one member's turn control in, inside that member's own
+/// scratch — beside the `report.json` the same settle stores.
+pub const CONTROL_FILE: &str = "control.json";
+
+/// The shape this build writes into every [`Record`].
+///
+/// A run's state outlives the binary that wrote it, and `interrupt` reads it back
+/// from a run that may have started under an earlier version. A record from a
+/// *later* one is refused by number rather than parsed, because those were
+/// written by a build that knew something this one does not.
+pub const CONTROL_SCHEMA_VERSION: u32 = 3;
+
+/// The oldest shape this build can read, which is also the first this file ever
+/// had — there is no unversioned `control.json`, so anything below it is a value
+/// no build of this crate wrote.
+///
+/// Version `1` is still read, and that is what the note endpoint's optionality
+/// buys: a run that started under a build with no note seam recorded no
+/// [`Record::notes`], and an `interrupt` against it goes on working exactly as it
+/// did. A record naming version `2` and no endpoint says the same thing about a
+/// member of *this* build — a single-sided one binds none. Version `3` added
+/// [`Record::supervisor`].
+const FIRST_CONTROL_SCHEMA_VERSION: u32 = 1;
+
+/// Where an `oneharness interrupt` process addresses a member's controllable
+/// turn.
+///
+/// Exactly the three values that verb takes (`--session`, `--session-dir`,
+/// `--cwd`) and nothing else: the socket path is not among them because
+/// `interrupt` derives it from the store directory and the handle, and carrying
+/// it here would be a second source for one fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Address {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a handle newtype
+    // would promise a guarantee this crate cannot hold. The shape a handle must
+    // have is oneharness's — it sanitizes the value on the way in and again when
+    // it resolves a socket — and this field carries *its* answer, read back from
+    // the report. A type validating it here would either restate rules this crate
+    // does not own, or reject the very value the producer says it bound; the same
+    // reasoning `src/cli.rs` records for the arguments it parses. The two fields
+    // that *are* paths carry `PathBuf`, which is where the rule does apply.
+    /// The caller-owned session handle the turn is addressed by.
+    pub session: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The session store holding the handle and its control socket; absent when
+    /// the run left oneharness's own default, which an `interrupt` that says
+    /// nothing resolves the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_dir: Option<PathBuf>,
+    /// The working directory the turn runs in, which is how `interrupt` reports
+    /// which project's session the handle belongs to.
+    pub cwd: PathBuf,
+}
+
+/// What a run recorded about one member's turn control.
+///
+/// Two states rather than an `Option<Address>`, because "there is a turn to
+/// address" and "control was asked for and refused" are different answers and the
+/// second carries the reason an operator needs — a harness with no lever, a
+/// platform with no unix sockets, a run shape oneharness will not control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
+pub enum Turn {
+    /// The member's turn — a two-party member's agent side, or a single-sided
+    /// member's one turn — asked for control, and is addressed here.
+    Open {
+        /// Where to reach it.
+        address: Address,
+    },
+    /// Control was asked for and could not be provided; this is what said so.
+    Unavailable {
+        /// oneharness's own reason, carried through untouched.
+        reason: String,
+    },
+}
+
+/// One member's turn control, as the run wrote it down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Record {
+    /// The shape this record was written under — see [`CONTROL_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// What the run knew about the member's turn when it last wrote.
+    pub turn: Turn,
+    /// Where the member's own thread receives role-addressed notes for the
+    /// conversation's life — the address of the bus [`crate::note::Spool`] it
+    /// bound, as the backend states it, a sibling of this file in the same member
+    /// scratch.
+    ///
+    /// Absent for a member that binds none: a single-sided `kind: oneharness`
+    /// member has no second party for a note to be addressed *away* from, so
+    /// [`offer_note`] falls through to [`interrupt`] for it; and so does a record
+    /// written by a build that had no note seam at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<PathBuf>,
+    /// What the run knew about the member's **supervisor** turn — the judge
+    /// side of a two-party member, which asks for a controllable turn of its own
+    /// so a note can redirect a decision in flight.
+    ///
+    /// Absent for a member with no supervisor, and in a record written before
+    /// the judge side asked (versions `1` and `2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Turn>,
+}
+
+/// Write what this run knows about `member`'s turn control into its scratch.
+///
+/// Best-effort, and deliberately: a member whose control record could not be
+/// written is a member with no lever, which `interrupt` reports as the fact it is
+/// — losing the file is not a reason to fail a run that is otherwise fine.
+pub fn write(scratch: &Path, turn: &Turn) {
+    write_with_notes(scratch, turn, None);
+}
+
+/// [`write()`], additionally naming the note endpoint this member's own thread
+/// bound — see [`Record::notes`].
+///
+/// Best-effort on the same terms, and for the same reason: a member whose record
+/// could not be written is a member with no lever and no endpoint, which both
+/// verbs report as the fact it is.
+pub fn write_with_notes(scratch: &Path, turn: &Turn, notes: Option<&Path>) {
+    write_parties(scratch, turn, None, notes);
+}
+
+/// [`write_with_notes()`], additionally naming where the member's supervisor
+/// turn is addressed — see [`Record::supervisor`].
+///
+/// Best-effort on the same terms as [`write()`].
+pub fn write_parties(scratch: &Path, turn: &Turn, supervisor: Option<&Turn>, notes: Option<&Path>) {
+    let record = Record {
+        schema_version: CONTROL_SCHEMA_VERSION,
+        turn: turn.clone(),
+        notes: notes.map(Path::to_path_buf),
+        supervisor: supervisor.cloned(),
+    };
+    if let Ok(rendered) = serde_json::to_string(&record) {
+        // Whole, because `interrupt` and `note` read it from another process
+        // while a turn is rewriting it — see [`crate::run::replace_whole`].
+        let _ = crate::run::replace_whole(&path(scratch), rendered.as_bytes());
+    }
+}
+
+/// Read back what a run recorded for one member, or say why there is nothing to
+/// act on.
+///
+/// # Errors
+///
+/// The reason the record cannot be acted on, in the words `interrupt` reports:
+/// no member ever recorded one, or one written by a build this one cannot read.
+pub fn read(scratch: &Path) -> Result<Turn, String> {
+    record(scratch).map(|record| record.turn)
+}
+
+/// The whole record, for a caller that needs the note endpoint as well as the
+/// turn.
+///
+/// # Errors
+///
+/// As [`read`].
+pub fn record(scratch: &Path) -> Result<Record, String> {
+    let path = path(scratch);
+    // Only an absent record is no turn control — `crate::run::read_whole` says
+    // why; anything else that does not read is the file's, which is named.
+    let raw = match crate::run::read_whole(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(
+                "this member opened no controllable turn: this run recorded no turn control \
+                 for it"
+                    .to_string(),
+            );
+        }
+        Err(err) => {
+            return Err(format!(
+                "the turn-control record at {} does not read ({err})",
+                path.display()
+            ));
+        }
+    };
+    let record: Record = serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "the turn-control record at {} is not one this build can read ({err})",
+            path.display()
+        )
+    })?;
+    // Both directions, and there is no default: `1` is the first shape this file
+    // ever had, so a record claiming `0` was written by nothing — it is a value
+    // somebody typed or a field that was zeroed, and acting on the address under
+    // it would be acting on a document whose shape is unknown.
+    if !(FIRST_CONTROL_SCHEMA_VERSION..=CONTROL_SCHEMA_VERSION).contains(&record.schema_version) {
+        return Err(format!(
+            "the turn-control record at {} names schema version {}, and this build reads \
+             {FIRST_CONTROL_SCHEMA_VERSION} to {CONTROL_SCHEMA_VERSION}",
+            path.display(),
+            record.schema_version
+        ));
+    }
+    Ok(record)
+}
+
+/// One place both the run and the `interrupt` process compose the record's
+/// location, so a rename cannot leave one of them reading a file nothing writes.
+fn path(scratch: &Path) -> PathBuf {
+    scratch.join(CONTROL_FILE)
+}
+
+/// What one `oneharness interrupt` answered.
+///
+/// A closed set because it is what the verb's exit code is decided from, and the
+/// three outcomes are not interchangeable: a redirection that landed, a turn
+/// there was nothing to redirect (a *fact*), and a delivery that was attempted
+/// and failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// The run took ownership of the redirection.
+    Delivered,
+    /// There was no controllable turn to reach, and this is which of the reasons
+    /// applied.
+    NoTurn(String),
+    /// The delivery was attempted and failed.
+    Failed(String),
+    /// The redirection itself was not one oneharness would take.
+    Invalid(String),
+}
+
+/// Redirect one member's in-flight turn, the way `oneagentgraph interrupt`
+/// does.
+///
+/// The whole verb short of the answer it prints: the run's record says which
+/// members exist and whether this one has already settled, the member's own
+/// scratch is where the run wrote down where its turn is addressed, and
+/// [`deliver`] is what reaches it. One implementation serves the command and a
+/// library caller, so the addressing and the order the refusals are decided in
+/// cannot land on only one.
+///
+/// What is *not* here is the CLI's own two halves: the exit code, and the
+/// `turn-interrupted` envelope it publishes on this process's stdout. A library
+/// caller is handed the [`Delivery`] those are both derived from, and has no
+/// stream of this process's to publish on.
+///
+/// Every input is a parameter, `oneharness_bin` included, because there is no
+/// environment this call may consult: the binary the CLI names with
+/// `ONEAGENTGRAPH_ONEHARNESS_BIN` is a caller's choice, and a library that read
+/// it from the process would give one answer to a consumer holding two runs on
+/// two installs.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when there is no such run, or when `member` is not
+/// one of its members. Everything else — a member with no lever, a turn already
+/// over, a delivery that failed, a redirection oneharness refused — is a
+/// [`Delivery`], because each of those is an answer about the turn rather than a
+/// reason the ask could not be made.
+pub fn interrupt(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    input: Option<&str>,
+    oneharness_bin: &str,
+) -> Result<Delivery, Error> {
+    let record = crate::history::show(state_dir, run_id.as_str())?;
+    record.require_member(member.as_str())?;
+    // Derived from the run's *id*, exactly as `cancel` derives the directory it
+    // reaps: `events_path` is a string this crate wrote into a file it reads
+    // back, and following it would let a record point this call at any directory
+    // the process can reach.
+    let scratch = state_dir
+        .join(&record.run_id)
+        .join(MEMBERS_DIR)
+        .join(member.as_str());
+    Ok(match read(&scratch) {
+        // An ask that was refused is the permanent fact and beats every other
+        // answer: a member on a harness with no lever has none whether it is
+        // running, between turns, or long settled.
+        Ok(Turn::Unavailable { reason }) => Delivery::NoTurn(reason),
+        Ok(Turn::Open { address }) => {
+            if settled(&record, member.as_str()) {
+                Delivery::NoTurn("the member has already settled, so its turn is over".to_string())
+            } else {
+                deliver(oneharness_bin, &address, input)
+            }
+        }
+        Err(reason) => Delivery::NoTurn(reason),
+    })
+}
+
+/// What [`offer_note()`] and [`note()`] take and what they answer, reachable
+/// beside the verbs that use them rather than declared a second time.
+///
+/// [`crate::note`] is where they live, because the member's own end of the seam
+/// reads and writes the same shapes: one definition on both ends is what keeps a
+/// caller's reading of an outcome the member's own answer rather than a
+/// translation of it.
+pub use crate::note::{
+    Accepted, Addressee, Criterion, DeliveredNote, Delivery as NoteDeliveryMode, NotWithdrawn,
+    Note, NoteDelivery, NoteOffer, NoteOffered, NoteRefused, NoteText, NoteWithdrawer, Party,
+    Undelivered,
+};
+
+/// Route one role-addressed note to whichever side of `member`'s conversation is
+/// live, and answer what became of it: [`offer_note`], then [`NoteOffer::wait`].
+///
+/// The answers a caller acts on, and they are the conversation's own — see
+/// [`crate::note`] for which side of a member each one means:
+///
+/// * [`Accepted::Interrupted`] — it reached that party's live turn by
+///   interrupting it: the turn was redirected and its replacement opened with the
+///   note.
+/// * [`Accepted::AtTurnEnd`] — it reached a live turn only once that turn ended,
+///   in the turn that followed.
+/// * [`Accepted::JudgedWith`] — the supervisor passed the work with it in hand.
+/// * [`Accepted::Queued`] — nobody was taking a turn, so the next turn to open
+///   took it.
+/// * [`NoteDelivery::Undelivered`] — it was **not** delivered, naming why.
+///
+/// # Errors
+///
+/// As [`offer_note`].
+pub fn note(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    note: &Note,
+    oneharness_bin: &str,
+) -> Result<NoteDelivery, Error> {
+    match offer_note(state_dir, run_id, member, note, oneharness_bin)? {
+        NoteOffered::Admitted(offer) => offer.wait(),
+        NoteOffered::Undelivered(undelivered) => Ok(NoteDelivery::Undelivered(undelivered)),
+    }
+}
+
+/// Offer one role-addressed note to `member`, and answer whether it is in —
+/// before any turn has answered it.
+///
+/// The sibling of [`interrupt`], not a replacement for it. `interrupt` aims one
+/// redirection at the agent side's socket; this offers the note to the member
+/// itself, which is the only thing that knows which side of its conversation is
+/// taking a turn right now, and carries the addressed role through unchanged.
+///
+/// [`NoteOffered::Admitted`] means the note sits in the member's onejudge inbox,
+/// untaken, and the run's stream has published `note-admitted` naming
+/// [`NoteOffer::id`]. What the caller does next is the offer's:
+/// [`NoteOffer::wait`] for the conversation's answer,
+/// [`NoteOffer::wait_until`] to bound that wait — [`NoteDelivery::Expired`]
+/// exactly when the deadline passed with the note untaken, which then no turn
+/// ever takes — or [`NoteOffer::withdraw`] to take it back, which succeeds only
+/// while no turn has taken it. [`NoteOffer::withdrawer`] takes it back from
+/// another thread while a wait is in flight, and that wait then answers
+/// [`NoteDelivery::Withdrawn`].
+///
+/// A single-sided `kind: oneharness` member binds no note endpoint — it has no
+/// second party for a note to be addressed away from — so a note to one is
+/// carried by the lever it does have, [`interrupt`]: a default
+/// [`NoteDeliveryMode::Interrupt`] note is answered [`Accepted::Interrupted`]
+/// naming [`Party::Worker`] only when that interrupt reports the redirection
+/// delivered, and [`Undelivered`] carrying the refusal's reason otherwise. A
+/// [`NoteDeliveryMode::TurnEnd`] note to one is refused rather than turned into an
+/// interrupt it asked not to be: holding a note for a turn's end is the
+/// conversation's to do, and such a member has none.
+///
+/// `oneharness_bin` is a parameter for [`interrupt`]'s reason, unchanged: there
+/// is no environment a library call may consult for it.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when there is no such run or when `member` is not one
+/// of its members — the two cases that are a bad ask rather than an answer about
+/// the note. A note with nothing in it is not among them: [`Note`] is
+/// `non_exhaustive` and carries a [`NoteText`], which refuses blank text in the
+/// constructors *and* in the conversion it deserializes through, so an unreadable
+/// note cannot reach this call to be refused by it.
+pub fn offer_note(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    note: &Note,
+    oneharness_bin: &str,
+) -> Result<NoteOffered, Error> {
+    let record = crate::history::show(state_dir, run_id.as_str())?;
+    record.require_member(member.as_str())?;
+    // Derived from the run's *id*, exactly as [`interrupt`] derives it and for
+    // the same reason.
+    let scratch = state_dir
+        .join(&record.run_id)
+        .join(MEMBERS_DIR)
+        .join(member.as_str());
+    // The run's own evidence first, and it beats every answer a member could
+    // give: a settled member is not servicing anything, and a note left in its
+    // spool would be an acceptance nobody reads.
+    if settled(&record, member.as_str()) {
+        return Ok(NoteOffered::Undelivered(Undelivered::MemberSettled {
+            outcome: outcome(&record, member.as_str()),
+        }));
+    }
+    // The record is read for *whether* this member bound an endpoint, and the
+    // endpoint itself is derived from the scratch above — [`interrupt`]'s rule,
+    // for [`interrupt`]'s reason: following a path out of a file the run wrote
+    // would let a record point this call at any directory the process can reach.
+    let bound = self::record(&scratch).is_ok_and(|record| record.notes.is_some());
+    if bound {
+        return Ok(crate::note::offer(&scratch, note));
+    }
+    // No endpoint: a single-sided member, or a run from a build that had none.
+    if note.delivery == NoteDeliveryMode::TurnEnd {
+        return Ok(NoteOffered::Undelivered(Undelivered::NoConversation {
+            reason: "turn-end delivery needs a two-party member: this member has no conversation \
+                     to hold a note until its turn ends, and its one lever, `interrupt`, would \
+                     redirect the turn this note asked not to interrupt"
+                .to_string(),
+        }));
+    }
+    // The lever that member *does* have is the one it always had.
+    Ok(
+        match interrupt(
+            state_dir,
+            run_id,
+            member,
+            Some(&crate::note::framed(note)),
+            oneharness_bin,
+        )? {
+            // A single-sided member has one party, and it is the one doing the
+            // work — there is no supervisor for a delivery to have reached
+            // instead.
+            Delivery::Delivered => NoteOffered::Admitted(NoteOffer::answered(
+                NoteDelivery::Accepted(Accepted::Interrupted {
+                    party: Party::Worker,
+                }),
+            )),
+            Delivery::NoTurn(reason) | Delivery::Failed(reason) | Delivery::Invalid(reason) => {
+                NoteOffered::Undelivered(Undelivered::NoConversation { reason })
+            }
+        },
+    )
+}
+
+/// What the run recorded for a member it has already settled, in the words the
+/// refusal names.
+fn outcome(record: &crate::run::Record, member: &str) -> String {
+    record.members.get(member).map_or_else(
+        || "the run itself is over".to_string(),
+        |outcome| format!("the run recorded {outcome:?} for it"),
+    )
+}
+
+/// Whether the run already recorded an outcome for `member`.
+///
+/// The run's record — [`crate::run::Record`], not the [`Record`] this module
+/// writes — is the run's own evidence, so a member it has settled needs no
+/// socket asked: `members` fills in as members settle, and a finished run has an
+/// exit code of its own.
+fn settled(record: &crate::run::Record, member: &str) -> bool {
+    record.exit_code.is_some() || record.members.contains_key(member)
+}
+
+/// Ask the run listening at `address` to stop what it is doing and do `input`
+/// instead.
+///
+/// The whole delivery is `oneharness interrupt`, run as its own process. That is
+/// **not** the general "compose through the CLI" reflex — [`crate::health`] used
+/// to argue that way and was wrong: calling a sibling's library is more
+/// composition than spawning its binary, not less, and every piece of this
+/// delivery is in fact exposed as a library call
+/// ([`oneharness_core::domain::control::RedirectInput::new`],
+/// [`oneharness_core::io::session::resolve_dir`],
+/// [`oneharness_core::domain::control::socket_path`],
+/// [`oneharness_core::io::control::send`]).
+///
+/// The hop stays for one thing those calls cannot give a *separately versioned*
+/// process: **an interrupt client that speaks the listening run's protocol**.
+/// [`oneharness_core::domain::control::PROTOCOL_VERSION`] is checked for
+/// equality on the way in, deliberately — a frame carrying any other version is
+/// refused as `unsupported` rather than half-understood. The run that bound the
+/// socket is the operator's installed `oneharness`; spawning its `interrupt` verb
+/// makes both ends the same build by construction, so an operator upgrading
+/// oneharness moves them together. Linking `send` here would make the client
+/// whichever `oneharness-core` this crate's `Cargo.lock` pins, and the first
+/// upstream bump of that constant would refuse every `oneagentgraph interrupt`
+/// against a run that is perfectly interruptible — a break only a release of
+/// *this* crate could repair.
+///
+/// A second, smaller thing goes with it: the verb answers `unsupported` from the
+/// **session store** before it dials anything, by reading the record's harness
+/// and asking oneharness's registry whether that harness has a lever at all.
+/// That composition lives in the `oneharness` binary rather than in
+/// `oneharness-core`, and rebuilding it here would be this crate deciding which
+/// harnesses can be interrupted — the harness logic `AGENTS.md` forbids.
+///
+/// The second collapses when oneharness-core grows the whole verb as a call — an
+/// `io::control::interrupt(&InterruptRequest) -> ControlResponse` alongside
+/// [`oneharness_core::io::run::run`] and [`oneharness_core::io::usage::report`].
+/// The first collapses only if that protocol becomes negotiated rather than
+/// version-equal, because the process on the other end of the socket is started
+/// by a binary this build does not choose.
+#[must_use]
+pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
+    // A record naming no store left the run on oneharness's default, which the
+    // run spelled as it resolves before its first member started
+    // ([`crate::run`]'s `settle_session_store`): a socket's file name is fitted
+    // to the store's length, so dialling the default as this process's
+    // environment spells it — through a link the run resolved — would name a
+    // different file. The same resolution here is what keeps a run and an
+    // `interrupt` that both say nothing on one store.
+    let resolved;
+    let address = match (&address.session_dir, default_store()) {
+        (None, Some(store)) => {
+            resolved = Address {
+                session_dir: Some(store),
+                ..address.clone()
+            };
+            &resolved
+        }
+        _ => address,
+    };
+    let mut command = std::process::Command::new(bin);
+    command.args(argv(address, input));
+    // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+    let output = match crate::launch_trace::output(crate::launch_site!(), &mut command) {
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+        Ok(output) => output,
+        Err(err) => {
+            return Delivery::Failed(format!(
+                "cannot run `{bin} interrupt`: {err}. Is oneharness installed and on PATH?"
+            ))
+        }
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    // The answer frame first, whatever the exit code: it is the typed thing
+    // oneharness produces, and reading the code alone would turn every refusal
+    // into one undifferentiated failure — which is exactly the distinction this
+    // verb's exit 3 exists to make.
+    match serde_json::from_slice::<ControlResponse>(&output.stdout) {
+        // A redirection is delivered only when the run says it wrote it as the
+        // replacement turn's prompt: an abort served without it is a turn that
+        // stopped and a message nobody will read.
+        Ok(ControlResponse::Served {
+            redirected: false, ..
+        }) if input.is_some() => Delivery::NoTurn(
+            "the turn was stopped but the run did not deliver the redirection, so nothing will \
+             read it"
+                .to_string(),
+        ),
+        Ok(ControlResponse::Served { .. }) => Delivery::Delivered,
+        Ok(ControlResponse::Refused { reason, error }) => {
+            Delivery::NoTurn(format!("{} ({error})", explain(reason)))
+        }
+        // No frame at all. oneharness answers a redirection it will not take
+        // before it opens anything, on stderr and with its own usage code, and
+        // that is an argument this caller got wrong rather than a lever that
+        // broke.
+        Err(_) if output.status.code() == Some(crate::error::EXIT_INVALID_CONFIG) => {
+            Delivery::Invalid(stderr)
+        }
+        Err(err) => Delivery::Failed(format!(
+            "`{bin} interrupt` answered nothing this build could read ({err}); its standard error \
+             said: {stderr}"
+        )),
+    }
+}
+
+/// oneharness's default session store as a run binds sockets under it: the
+/// directory oneharness resolves when it is named none, with the part of it that
+/// exists resolved through any link. `None` off unix, where there is no
+/// `sun_path` for a spelling to overrun, and where no default resolves at all.
+pub(crate) fn default_store() -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    oneharness_core::io::session::resolve_dir(None).map(|store| resolve_existing(&store))
+}
+
+/// `path` with its deepest existing ancestor resolved and the rest kept as
+/// written — the directory a later `create_dir_all` and `canonicalize` of it
+/// would produce, without creating anything.
+pub(crate) fn resolve_existing(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(at) {
+            return rest
+                .iter()
+                .rev()
+                .fold(resolved, |built, part| built.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The argument vector one delivery runs, built apart from the spawn so the
+/// flags it depends on are a test's to hold rather than an inspection's.
+///
+/// **`--format json` is asked for rather than assumed.** This verb reads the
+/// answer back as a [`ControlResponse`], which makes it a program consuming
+/// oneharness's machine contract, and a program says so with the flag rather than
+/// relying on which view the CLI happens to print by default — that default is
+/// becoming the human-readable one. `--compact` puts that JSON on one line; it
+/// selects no format of its own, so the pair is what states the ask. The flag is
+/// why the justfile's `oneharness-version` pins the release it does: an older CLI
+/// refuses it outright, which here would read as an answer this build could not
+/// parse.
+fn argv(address: &Address, input: Option<&str>) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec![
+        "interrupt".into(),
+        "--session".into(),
+        address.session.as_str().into(),
+    ];
+    if let Some(dir) = &address.session_dir {
+        argv.push("--session-dir".into());
+        argv.push(dir.as_os_str().into());
+    }
+    argv.push("--cwd".into());
+    argv.push(address.cwd.as_os_str().into());
+    argv.extend(
+        ["--format", "json", "--compact"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    if let Some(text) = input {
+        argv.push("--input".into());
+        argv.push(text.into());
+    }
+    argv
+}
+
+/// One refusal, in the words the contract gives an operator.
+///
+/// Total over oneharness's own taxonomy, so a reason added upstream is a compile
+/// error here rather than a refusal this verb reports without saying which.
+fn explain(reason: ControlReason) -> String {
+    match reason {
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+        // because nothing this suite can build reaches it. oneharness answers
+        // `no_active_turn` only from a mechanism that *drives* its turn over a
+        // protocol — the HTTP and JSON-RPC ones — and the single seam these
+        // journeys may fake is a claude-code stand-in, whose control frame rides
+        // the run's own stdin and is always deliverable while the run is
+        // listening. The two refusals that suite *can* produce are both driven in
+        // `tests/e2e/interrupt.rs`; this arm exists because the match over
+        // oneharness's taxonomy is total, which is what makes a reason added
+        // upstream a compile error here rather than an answer that says nothing.
+        ControlReason::NoActiveTurn => {
+            "the member is between turns: its run is alive but nothing is in flight to redirect"
+                .to_string()
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        ControlReason::NotRunning => {
+            "nothing is listening on the member's control socket, so its turn has already ended"
+                .to_string()
+        }
+        ControlReason::Unsupported => {
+            "the member's run has no out-of-band turn control to serve the request".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn address() -> Address {
+        Address {
+            session: "node-scope-1-worker".into(),
+            session_dir: None,
+            cwd: "/work/repo".into(),
+        }
+    }
+
+    /// The record round-trips, and an absent one is the fact `interrupt` reports
+    /// rather than a failure it invents.
+    #[test]
+    fn a_recorded_turn_reads_back_as_what_the_run_wrote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read(dir.path())
+            .unwrap_err()
+            .contains("opened no controllable turn"));
+
+        write(dir.path(), &Turn::Open { address: address() });
+        assert_eq!(
+            read(dir.path()).expect("a record"),
+            Turn::Open { address: address() }
+        );
+
+        // The second write is the report's answer, and it replaces the first:
+        // a member whose ask was refused must not still read as addressable.
+        write(
+            dir.path(),
+            &Turn::Unavailable {
+                reason: "harness `qwen` has no out-of-band turn control".into(),
+            },
+        );
+        assert!(
+            matches!(read(dir.path()).expect("a record"), Turn::Unavailable { reason }
+                if reason.contains("no out-of-band turn control")),
+            "the refusal did not replace the address"
+        );
+    }
+
+    /// A record from a build that knew more is refused by version, and one that
+    /// is not a record at all is refused by name — neither is guessed at.
+    #[test]
+    fn an_unreadable_record_is_refused_rather_than_guessed_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Both ends of the range: a build that knew more, and a version no build
+        // of this crate ever wrote.
+        for version in [0, 99] {
+            std::fs::write(
+                path(dir.path()),
+                format!(
+                    "{{\"schema_version\":{version},\"turn\":{{\"state\":\"open\",\"address\":\
+                     {{\"session\":\"s\",\"cwd\":\"/w\"}}}}}}"
+                ),
+            )
+            .expect("write");
+            assert!(
+                read(dir.path())
+                    .unwrap_err()
+                    .contains(&format!("schema version {version}")),
+                "version {version} was acted on"
+            );
+        }
+
+        std::fs::write(path(dir.path()), "not a record").expect("write");
+        assert!(read(dir.path())
+            .unwrap_err()
+            .contains("not one this build can read"));
+
+        // A field this build does not know is refused rather than dropped, at
+        // every level of the record: the file is external input like any other,
+        // and a typo silently ignored is an address that is not the one the
+        // writer meant.
+        for hostile in [
+            "{\"schema_version\":1,\"turn\":{\"state\":\"open\",\"address\":{\"session\":\"s\",\"cwd\":\"/w\"}},\"extra\":1}",
+            "{\"schema_version\":1,\"turn\":{\"state\":\"open\",\"addres\":{\"session\":\"s\",\"cwd\":\"/w\"},\"address\":{\"session\":\"s\",\"cwd\":\"/w\"}}}",
+            "{\"schema_version\":1,\"turn\":{\"state\":\"unavailable\",\"reason\":\"no lever\",\"why\":\"no lever\"}}",
+        ] {
+            std::fs::write(path(dir.path()), hostile).expect("write");
+            assert!(
+                read(dir.path())
+                    .unwrap_err()
+                    .contains("not one this build can read"),
+                "{hostile} was accepted"
+            );
+        }
+    }
+
+    /// Every delivery asks for the machine contract by name: `--format json`,
+    /// beside the `--compact` that puts it on one line.
+    ///
+    /// Held by a test rather than by eye because the failure it guards is
+    /// silent. `--compact` selects no format of its own, so a delivery that
+    /// only said `--compact` would, against a CLI whose default view is the
+    /// human-readable one, get prose back — which this verb reports as an answer
+    /// it could not read, leaving the turn an operator meant to redirect running.
+    ///
+    /// Driven over both address shapes and both asks, because each adds argv of
+    /// its own around the pair.
+    #[test]
+    fn every_delivery_asks_for_json_by_name() {
+        let named = Address {
+            session_dir: Some("/state/oneharness/sessions".into()),
+            ..address()
+        };
+        for target in [address(), named] {
+            for input in [None, Some("do this instead")] {
+                let words: Vec<String> = argv(&target, input)
+                    .iter()
+                    .map(|word| word.to_string_lossy().into_owned())
+                    .collect();
+                let format = words
+                    .iter()
+                    .position(|word| word == "--format")
+                    .unwrap_or_else(|| panic!("no `--format` in {words:?}"));
+                assert_eq!(
+                    words.get(format + 1).map(String::as_str),
+                    Some("json"),
+                    "`--format` is not followed by `json` in {words:?}"
+                );
+                assert!(
+                    words.iter().any(|word| word == "--compact"),
+                    "no `--compact` in {words:?}"
+                );
+            }
+        }
+    }
+
+    /// Every refusal oneharness can answer with says which of the exit-3 causes
+    /// applies, in words rather than in its own token.
+    #[test]
+    fn every_refusal_names_which_cause_applies() {
+        assert!(explain(ControlReason::NoActiveTurn).contains("between turns"));
+        assert!(explain(ControlReason::NotRunning).contains("already ended"));
+        assert!(explain(ControlReason::Unsupported).contains("no out-of-band turn control"));
+    }
+
+    /// A delivery to a binary that is not there is a failure naming the binary,
+    /// not a turn that was found to be absent — the two are different exit codes
+    /// and an operator acts on them differently.
+    ///
+    /// Driven for both shapes of address, because the store directory is the one
+    /// part of it that is only sometimes on the command line: absent while the
+    /// run left oneharness's own default, and named once the report says which
+    /// store it bound.
+    #[test]
+    fn a_missing_oneharness_is_a_failed_delivery_rather_than_an_absent_turn() {
+        let named = Address {
+            session_dir: Some("/state/oneharness/sessions".into()),
+            ..address()
+        };
+        for target in [address(), named] {
+            let delivery = deliver(
+                "oneagentgraph-no-such-oneharness",
+                &target,
+                Some("do this instead"),
+            );
+            assert!(
+                matches!(&delivery, Delivery::Failed(reason)
+                    if reason.contains("oneagentgraph-no-such-oneharness")),
+                "a binary that is not there was not reported as a failed delivery: {delivery:?}"
+            );
+        }
+    }
+}

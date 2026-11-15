@@ -1,0 +1,1790 @@
+//! Running a single-sided member through oneharness's library, in this process.
+//!
+//! A `kind: oneharness` member's turn is `oneharness_core::io::run::run_supervised`
+//! on a thread of this process, so the member has no argv, exit status or stderr
+//! of its own. [`crate::judge`] is this module for the other member kind and has
+//! the same shape; both reach the shared settle and death in [`crate::member`].
+//!
+//! `docs/oneharness-library.md` owns why each seam below is shaped as it is.
+
+use std::path::Path;
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use oneharness_core::domain::events::ActionEvent;
+use oneharness_core::domain::report::{FallbackReport, RunReport, RunResult};
+use oneharness_core::domain::signals::Usage;
+use oneharness_core::io::cancel::CancelToken;
+use oneharness_core::io::run::{
+    run_supervised, EventSink, RunControls, RunOutcome, RunRequest, SinkStep,
+};
+use oneharness_core::io::runner::ProcessSupervisor;
+use serde_json::Value;
+
+use crate::event::{
+    bound_text, AttemptedCandidate, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    Origin, Party, TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+};
+use crate::invoke::HarnessLaunch;
+use crate::member::{
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Heartbeat, Kind,
+    Outcome, Rule, Stall, HEARTBEAT_INTERVAL,
+};
+
+/// How long a condemned member's engine is given to answer the cancellation
+/// before its thread is abandoned and the member reported dead regardless.
+///
+/// The same bound [`crate::judge`] gives its engine, and for the same reason: a
+/// run that waited on a member it has already condemned hangs on it, which is the
+/// failure the watchdog exists to prevent. Long enough for oneharness's own
+/// `Finish::Terminate` — a TERM, a grace, then a KILL — to run to its end.
+const TEARDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// How often the teardown re-reaps while it waits.
+///
+/// Repeated for [`crate::judge`]'s reason: a fallback chain that steps to another
+/// candidate after the first was reaped starts a new harness, and one that is not
+/// reaped in turn is a paid turn the member was already condemned for.
+const TEARDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// The engine a single-sided member is driven by, as its `member-started` names
+/// it.
+pub(crate) const ONEHARNESS_ENGINE: &str = "oneharness";
+
+/// Run one single-sided member to its end.
+///
+/// Returns only when the member has settled or been condemned: the engine runs
+/// on its own thread, and this call is the supervision around it.
+#[must_use]
+pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
+    // Opened before the engine runs, because it is what the spawns go into.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] no input reaches this arm:
+    // opening a group fails only on a kernel refusal or an unwritable scratch.
+    // The reachable half is tests/e2e/liveness.rs.
+    let group = match crate::scratch::Group::open(scratch) {
+        Ok(group) => Arc::new(group),
+        Err(err) => {
+            let reason = err.to_string();
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
+            return Outcome::Unstartable(reason);
+        }
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+
+    // Before the request, because it is what the request carries: every view this
+    // member declared runs now, and what they printed goes in front of the prose
+    // its turn answers. A member that declared none is handed its prose untouched
+    // and nothing here starts a process — see [`crate::preturn`], which also owns
+    // why none of these can fail the member.
+    let prompt = crate::preturn::instruction(
+        &launch.views,
+        &launch.worktree,
+        &group,
+        scratch,
+        emitter,
+        &launch.prompt,
+    );
+    let request = with_control(launch.request(&prompt), launch, scratch);
+    // Minted before the engine is handed the request: this member's one turn
+    // begins here, and its opening and its close have to name the same instant.
+    // Over the instruction the turn really receives, views and all, because that
+    // is what `turn-started` is read to see.
+    let turn = TheTurn::new(&prompt);
+    let activity = Arc::new(AtomicU64::new(0));
+    let cancel = CancelToken::new();
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+
+    let engine = {
+        let (emitter, activity, cancel, group, turn, recorded) = (
+            emitter.clone(),
+            Arc::clone(&activity),
+            cancel.clone(),
+            Arc::clone(&group),
+            turn.clone(),
+            scratch.to_path_buf(),
+        );
+        // `Builder`, not `thread::spawn`: a host that cannot give this run one
+        // more thread is a recoverable refusal, and the plain spawn answers it by
+        // panicking — which would take the whole graph down over one member. A
+        // run of many members is exactly where that limit is met.
+        std::thread::Builder::new().spawn(move || {
+            let supervisor = HarnessSpawn {
+                group,
+                cancel: cancel.clone(),
+                ungrouped: Mutex::new(None),
+            };
+            let mut sink = Events {
+                transcript: None,
+                emitter,
+                activity,
+                started,
+                cancel: cancel.clone(),
+                turn,
+            };
+            let mut turn_on = |request: &RunRequest| {
+                run_supervised(
+                    request,
+                    RunControls {
+                        events: Some(&mut sink),
+                        cancel: cancel.clone(),
+                        // This process is a graph of many members and installs
+                        // its own disposition; a run that took the host's
+                        // handlers would be one member deciding what a signal
+                        // means for all of them.
+                        signal_cancel: false,
+                        // The engine names itself: unlike the CLI, there is no
+                        // separately-versioned binary here for the report to
+                        // name.
+                        version: None,
+                    },
+                    Some(&supervisor),
+                )
+            };
+            let mut outcome = turn_on(&request);
+            // A control ask oneharness refuses is refused before anything
+            // spawns, so the same turn is asked again without it — the ladder
+            // onejudge runs for a two-party member's sides — and the refusal is
+            // what `interrupt` reports from here on.
+            if let Err(refused) = outcome.as_ref().map(|_| ()) {
+                if request.control && refused_control(refused) {
+                    crate::control::write(
+                        &recorded,
+                        &crate::control::Turn::Unavailable {
+                            reason: refused.to_string(),
+                        },
+                    );
+                    outcome = turn_on(&RunRequest {
+                        control: false,
+                        session: None,
+                        ..request.clone()
+                    });
+                }
+            }
+            // A send that fails means the supervisor already condemned this
+            // member and stopped listening; the engine still tore itself down on
+            // the way here, which is what that teardown was waiting for.
+            let _ = tx.send(Answer {
+                outcome: outcome.map_err(|err| err.to_string()),
+                ungrouped: supervisor.ungrouped(),
+            });
+        })
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // because no input a user can give reaches it: it is taken only when the OS
+    // refuses a thread, which is a host resource limit rather than anything a
+    // graph, a task or a config can ask for, and no seam this crate sanctions
+    // fakes `pthread_create`. What it decides is the direction of an unreachable
+    // failure, and it is the safe one — nothing was spawned, so the member is
+    // refused rather than reported as running.
+    if let Err(err) = engine {
+        let reason = format!("cannot start this member's engine thread: {err}");
+        emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
+        return Outcome::Unstartable(reason);
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+
+    // Started once the engine is: the beat is what says this member's
+    // supervision is alive, and it is kept by a thread of its own for
+    // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
+    let heartbeat = Heartbeat::start(scratch, started, &launch.prompt);
+    supervise(
+        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn, heartbeat,
+    )
+}
+
+/// Open this member's turn with control where oneharness says it can be
+/// interrupted in place, and write down where it is addressed — or why it is not.
+///
+/// Where is decided by oneharness's own registry, never by a list kept here: the
+/// turn asks for control only when **every** candidate its resolved chain could
+/// serve it with declares a control mechanism that does not drive the turn —
+/// one whose interrupt rides the harness's own run rather than moving the turn
+/// onto another transport
+/// ([`oneharness_core::domain::control::ControlShape::drives_turn`]). A chain holding any
+/// other candidate is left exactly as it ran before: one `--control` covers the
+/// whole chain, so asking for it would move that candidate's turn — a Codex
+/// candidate onto `codex app-server`, say — even when another candidate serves.
+/// Such a member opens no controllable turn, and `interrupt` says so.
+///
+/// Each turn takes a handle of its own under the member's — a scheduled member's
+/// firings never continue one another's conversation — in the store the run
+/// itself resolves when it is handed none.
+fn with_control(mut request: RunRequest, launch: &HarnessLaunch, scratch: &Path) -> RunRequest {
+    let refused = |reason: String| {
+        crate::control::write(scratch, &crate::control::Turn::Unavailable { reason });
+    };
+    if let Err(reason) = interruptible(&request) {
+        refused(reason);
+        return request;
+    }
+    let Some(store) = oneharness_core::io::session::resolve_dir(None) else {
+        refused(
+            "no session store directory could be resolved, so a controllable turn would have no \
+             address"
+                .to_string(),
+        );
+        return request;
+    };
+    // The store as it will be bound: oneharness fits the socket's file name to
+    // the platform's `sun_path` budget against the directory it is handed, and
+    // then binds through the *resolved* one — so a store reached through a
+    // symlink (macOS's `/tmp` -> `/private/tmp`, or `/var` -> `/private/var`)
+    // would be budgeted short and refused at bind, killing a member that ran
+    // uncontrolled before. Handing it the resolved directory budgets what is
+    // bound, and the record names the same one `interrupt` connects to.
+    let store = std::fs::create_dir_all(&store)
+        .and_then(|()| std::fs::canonicalize(&store))
+        .unwrap_or(store);
+    let session = format!(
+        "{}-{}",
+        launch.session,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos())
+    );
+    crate::control::write(
+        scratch,
+        &crate::control::Turn::Open {
+            address: crate::control::Address {
+                session: session.clone(),
+                session_dir: Some(store.clone()),
+                cwd: launch.worktree.clone(),
+            },
+        },
+    );
+    request.control = true;
+    request.session = Some(session);
+    request.session_dir = Some(store);
+    request
+}
+
+/// Whether every candidate `request` could be served by is interrupted in place,
+/// read from the config and the registry the run itself resolves — or why not.
+fn interruptible(request: &RunRequest) -> Result<(), String> {
+    let start = request
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let loaded = oneharness_core::io::config::load(&request.config, request.no_config, &start)
+        .map_err(|err| format!("this member's oneharness config could not be read: {err}"))?;
+    let config = &loaded.config;
+    let (all, include) = if request.all || !request.harness.is_empty() {
+        (request.all, request.harness.clone())
+    } else {
+        (
+            config.all.unwrap_or(false),
+            config.harnesses.clone().unwrap_or_default(),
+        )
+    };
+    let exclude = if request.exclude.is_empty() {
+        config.exclude.clone().unwrap_or_default()
+    } else {
+        request.exclude.clone()
+    };
+    let specs = oneharness_core::domain::select::select_specs(all, &include, &exclude)
+        .map_err(|err| format!("this member's harness chain could not be resolved: {err}"))?;
+    let moved: Vec<&str> = specs
+        .iter()
+        .filter(|spec| !spec.control.is_some_and(|shape| !shape.drives_turn()))
+        .map(|spec| spec.id)
+        .collect();
+    if moved.is_empty() && !specs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "this member opened no controllable turn: its chain holds {}, which oneharness either \
+         cannot interrupt or would move onto another transport to interrupt, so the turn ran as it \
+         always did",
+        moved.join(", ")
+    ))
+}
+
+/// Whether `err` is oneharness refusing the control ask — or the session handle
+/// that ask needs — rather than failing the turn: every such refusal is decided
+/// before a harness spawns.
+fn refused_control(err: &oneharness_core::errors::OneharnessError) -> bool {
+    use oneharness_core::errors::OneharnessError as E;
+    matches!(
+        err,
+        E::ControlNeedsSession
+            | E::ControlUnsupported { .. }
+            | E::ControlSingleHarness { .. }
+            | E::ControlBatch
+            | E::ControlPlatform
+            | E::ControlStreamUnsupported { .. }
+            | E::ControlSchema
+            | E::ControlModeUnsupported { .. }
+            | E::ControlOutputFormat { .. }
+            | E::ControlSocketAddress { .. }
+            // The socket could not be bound — an address resolving past the
+            // budget, one already served — which oneharness decides before the
+            // harness spawns; onejudge's ladder drops the ask on it for the same
+            // reason. The one other place it is raised is a listener path that
+            // is not absolute after `bind` canonicalized it, which cannot occur.
+            | E::ControlSocket { .. }
+            | E::ControlNoSessionDir
+            | E::MultiModelConflict { .. }
+            | E::SessionMultipleHarnesses { .. }
+            | E::SessionBatch
+            | E::SessionUnsupported { .. }
+            | E::SessionControlNoResume { .. }
+    )
+}
+
+/// Watch a member's engine to its end: the two watchdogs, and the answer.
+///
+/// Split from [`run`] so the containment this module promises can be driven
+/// against a real thread that really panics — see
+/// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
+// Nine values, none derivable from another: where the answer arrives, the lever
+// that stops the engine, where the events go, the bounds, the member's scratch,
+// the two halves of the activity clock, the turn a settle closes, and the beat
+// the heartbeat rule reads.
+#[allow(clippy::too_many_arguments)]
+fn supervise(
+    rx: &mpsc::Receiver<Answer>,
+    cancel: &CancelToken,
+    emitter: &Emitter,
+    bounds: Bounds,
+    scratch: &Path,
+    started: Instant,
+    activity: &Arc<AtomicU64>,
+    turn: &TheTurn,
+    mut heartbeat: Heartbeat,
+) -> Outcome {
+    // Published far more rarely than the beat is refreshed, for the reason
+    // `crate::member` gives: a stream that is mostly heartbeats buries the events
+    // it exists to carry.
+    let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
+    let mut published = Instant::now();
+    let mut stall = Stall::new(bounds.stall, started);
+    loop {
+        match rx.recv_timeout(HEARTBEAT_INTERVAL) {
+            Ok(answer) => return finish(answer, emitter, scratch, turn),
+            // A sender dropped without an answer means the engine thread
+            // panicked: this member's failure, not the graph's.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] nothing a graph,
+            // task or config can ask for makes `oneharness_core` panic, so this
+            // arm has no journey; forcing one would mean replacing the engine it
+            // protects. Covered by
+            // `tests::a_panicking_engine_kills_its_own_member_and_not_the_process`.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return died(
+                    emitter,
+                    Rule::ProviderFailure,
+                    Cause::Unclassified,
+                    "the oneharness engine ended without answering",
+                );
+            }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        // The suite's lever for a loop delayed past the bound; a no-op outside it.
+        heartbeat.hold_turn_loop();
+        // Read off the beat rather than off this loop's own lateness: a loop that
+        // comes back late to a beat that kept going has a live member, and one
+        // that comes back to a beat that stopped has the member the rule is for.
+        if heartbeat.since_last() > bounds.heartbeat {
+            return condemn(rx, cancel, emitter, Rule::Heartbeat, scratch);
+        }
+        let now = Instant::now();
+        if now.duration_since(published) >= publish_every {
+            published = now;
+            emitter.emit(EventKind::MemberHeartbeat, payload([]));
+        }
+        if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
+            return condemn(rx, cancel, emitter, Rule::Activity, scratch);
+        }
+    }
+}
+
+struct Answer {
+    /// The run, or the reason oneharness refused the *request* — a shape it will
+    /// not honour, reported before anything was spawned. A harness's own
+    /// behaviour is never an error here: a missing binary, a non-zero exit and a
+    /// hang all arrive as an `Ok` carrying a report that says so.
+    outcome: Result<RunOutcome, String>,
+    /// The reason a harness child could not be put in this member's group, when
+    /// one could not. Carried beside the outcome rather than replacing it because
+    /// the run answers either way — see [`HarnessSpawn`].
+    ungrouped: Option<String>,
+}
+
+/// Puts every harness oneharness starts for this member into the member's
+/// [`crate::scratch::Group`] — the same pair of moments
+/// [`crate::judge::MemberSpawn`] hands onejudge.
+///
+/// Neither hook can refuse a spawn (upstream's methods return nothing), so a
+/// grouping failure cancels the run instead and is kept for the death it becomes.
+struct HarnessSpawn {
+    group: Arc<crate::scratch::Group>,
+    cancel: CancelToken,
+    ungrouped: Mutex<Option<String>>,
+}
+
+impl HarnessSpawn {
+    /// Record a harness that could not be grouped, and stop the run.
+    fn refuse(&self, moment: &str, err: &std::io::Error) {
+        let mut held = self
+            .ungrouped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.is_none() {
+            *held = Some(format!(
+                "this member's harness could not be put in the process group that a cancel and \
+                 the activity watchdog reach it through ({moment}: {err}), so the run was stopped \
+                 rather than left billing outside it"
+            ));
+        }
+        drop(held);
+        self.cancel.cancel();
+    }
+
+    fn ungrouped(&self) -> Option<String> {
+        self.ungrouped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+// llmlint: ignore-block[changed_behavior_has_e2e] the refusal arms have no
+// journey of their own for `crate::scratch::Group`'s own reason: `prepare` and
+// `join` fail only when the kernel refuses a job object assignment or a scratch
+// this run created moments ago has become unwritable, and no seam this crate
+// sanctions fakes either. The reachable half — that the harness a member runs is
+// *in* the group, and that a cancel and the watchdog reach it there — is driven
+// end to end in tests/e2e/liveness.rs.
+impl ProcessSupervisor for HarnessSpawn {
+    fn spawning(&self, command: &mut Command) {
+        if let Err(err) = self.group.prepare(command) {
+            self.refuse("preparing the command", &err);
+        }
+    }
+
+    fn spawned(&self, child: &Child) {
+        // `join`, not `adopt`: on Windows this child is still suspended and
+        // oneharness resumes it once this returns. Resuming here would race that.
+        if let Err(err) = self.group.join(child) {
+            self.refuse("adding the process to the group", &err);
+        }
+    }
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Where the engine publishes each normalized event as it occurs.
+///
+/// This is what replaces the NDJSON hop: the same `tool_call`/`tool_result`
+/// events the `--stream` lines carried, arriving typed instead of as a document
+/// this crate parsed back apart.
+struct Events {
+    transcript: Option<crate::event::Transcript>,
+    emitter: Emitter,
+    activity: Arc<AtomicU64>,
+    started: Instant,
+    /// Answered as [`SinkStep::Stop`] once cancelled, which is oneharness's own
+    /// documented short-circuit — a condemned member stops at its next event
+    /// rather than only when the terminate path reaches it.
+    cancel: CancelToken,
+    turn: TheTurn,
+}
+
+impl EventSink for Events {
+    fn run_began(&mut self, begun: &oneharness_core::io::run::RunBegun) -> SinkStep {
+        let transcript = crate::event::Transcript::from_begun(begun);
+        if !transcript.available() {
+            self.transcript = None;
+            return SinkStep::Continue;
+        }
+        transcript.announce(
+            &self.emitter,
+            crate::event::Role::Agent,
+            THE_ONLY_TURN,
+            begun.harness_id.to_string(),
+        );
+        self.turn.open_referenced(&self.emitter, Some(&transcript));
+        self.transcript = Some(transcript);
+        SinkStep::Continue
+    }
+
+    fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
+        self.activity
+            .store(elapsed_millis(self.started), Ordering::SeqCst);
+        self.turn.open(&self.emitter);
+        ingest_referenced(event, &self.emitter, self.transcript.as_ref());
+        if self.cancel.is_cancelled() {
+            SinkStep::Stop
+        } else {
+            SinkStep::Continue
+        }
+    }
+}
+
+/// The one turn a single-sided member takes: `oneharness run` is a single turn,
+/// so this member's turn *is* its run, and the run's bounds are the turn's.
+///
+/// Held from before the engine is handed the request, because `started_at` has to
+/// be the same instant on the turn's opening and on its close — and the close is
+/// read off a report that arrives minutes later.
+#[derive(Clone)]
+struct TheTurn {
+    /// The task prose this turn is answering, head-bounded — a turn's opening is
+    /// what an operator watching a dispatch reads it for.
+    instruction: String,
+    instruction_truncated: bool,
+    started_at: String,
+    /// Whether this turn has already been announced on the stream. Shared,
+    /// because two places announce it and neither knows about the other: the
+    /// event sink on the member's first tool event, and [`close`](Self::close)
+    /// for a member whose run published none — a config that asks not to stream,
+    /// or a harness whose output exposes no machine-readable trace. The turn
+    /// happened either way, so a `turn-completed` is never served without the
+    /// `turn-started` it answers.
+    opened: Arc<AtomicBool>,
+}
+
+impl TheTurn {
+    fn new(prompt: &str) -> Self {
+        // Head-bounded: `bound_text` keeps a tail, so a field that keeps its
+        // opening trims to the same constant on a character boundary first and
+        // counts that trim as a cut. See `bound_text`'s own doc for why this
+        // field is the head-keeping one.
+        let mut head = MAX_PAYLOAD_TEXT_BYTES.min(prompt.len());
+        while !prompt.is_char_boundary(head) {
+            head -= 1;
+        }
+        let (instruction, cut) = bound_text(&prompt[..head]);
+        let instruction_truncated = cut || head < prompt.len();
+        Self {
+            instruction,
+            instruction_truncated,
+            started_at: crate::clock::now_rfc3339(),
+            opened: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Announce the turn, once however often this is called.
+    fn open(&self, emitter: &Emitter) {
+        self.open_referenced(emitter, None);
+    }
+
+    fn open_referenced(&self, emitter: &Emitter, transcript: Option<&crate::event::Transcript>) {
+        if self.opened.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        emitter.emit(
+            EventKind::TurnStarted,
+            as_payload(&TurnStarted {
+                transcript: transcript.cloned(),
+                turn: THE_ONLY_TURN,
+                role: THE_ONLY_ROLE.as_str().to_string(),
+                instruction: transcript.is_none().then(|| self.instruction.clone()),
+                instruction_truncated: transcript.is_none() && self.instruction_truncated,
+                started_at: self.started_at.clone(),
+                // A single-sided member's one turn is opened on the composed
+                // task and on nothing else: it has no supervising side to
+                // generate an instruction, and the lever a caller has against it
+                // — `interrupt` — redirects the turn already open rather than
+                // announcing a new one.
+                origin: Some(Origin::Task),
+            }),
+        );
+    }
+
+    /// Close the turn on what the report says it consumed.
+    fn close(&self, emitter: &Emitter, report: &RunReport) {
+        self.open(emitter);
+        emitter.emit(
+            EventKind::TurnCompleted,
+            as_payload(&TurnCompleted {
+                turn: THE_ONLY_TURN,
+                role: THE_ONLY_ROLE.as_str().to_string(),
+                usage: ran(report).map(usage).unwrap_or_default(),
+                started_at: self.started_at.clone(),
+                finished_at: crate::clock::now_rfc3339(),
+            }),
+        );
+    }
+}
+
+/// The turn index every event of a single-sided member's run is attributed to.
+///
+/// `oneharness run` is one turn and its stream envelope carries no index, so
+/// this is the number the NDJSON reader this replaces defaulted to.
+const THE_ONLY_TURN: u64 = 1;
+
+/// Who takes that turn. A single-sided member has no supervisor to answer it, so
+/// the one party there is is the agent.
+const THE_ONLY_ROLE: Party = Party::Assistant;
+
+/// The candidate whose result is this member's turn, when one ran.
+///
+/// oneharness's own ordering rule, read the way onejudge reads it: a fallback run
+/// holds the candidates it stepped past *before* the one that ran, so the last
+/// result carrying the named id is the turn.
+fn ran(report: &RunReport) -> Option<&RunResult> {
+    let Some(fallback) = report.fallback.as_ref() else {
+        // Not a fallback run: the results are the candidates that were asked, in
+        // order, and the first of them is this member's turn.
+        return report.results.first();
+    };
+    // A chain that fell through every candidate names none, and there is no turn
+    // to account for. Matched from the end because a model fan-out repeats a
+    // harness id across candidates, so the *last* one carrying it is the one that
+    // ran.
+    let ran = fallback.ran.as_deref()?;
+    report
+        .results
+        .iter()
+        .rev()
+        .find(|result| result.harness_id == ran || result.harness == ran)
+        .or_else(|| report.results.last())
+}
+
+/// One turn's accounting, field for field with oneharness's own.
+///
+/// Spelled out rather than round-tripped through JSON so a signal added upstream
+/// is a compile error here rather than a figure silently dropped.
+fn usage(result: &RunResult) -> crate::event::Usage {
+    let Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    } = result.usage;
+    crate::event::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    }
+}
+
+/// Publish one live event, through the payload builder both member kinds share —
+/// see [`crate::member::activity`].
+///
+/// Every kind the sink is handed is relayed as `turn-activity` under its own
+/// `kind`: a tool call or result as it always was, and the agent's `message` and
+/// `reasoning` items as themselves — their text in `output`, with no `name` and
+/// no `tool_call_id` — never dressed as a tool call. A consumer counting tool
+/// calls filters on `kind`, not on `index`, which counts every kind.
+#[cfg(test)]
+fn ingest(event: &ActionEvent, emitter: &Emitter) {
+    ingest_referenced(event, emitter, None);
+}
+
+fn ingest_referenced(
+    event: &ActionEvent,
+    emitter: &Emitter,
+    transcript: Option<&crate::event::Transcript>,
+) {
+    emitter.emit(
+        EventKind::TurnActivity,
+        as_payload(
+            &activity(
+                &event.kind,
+                event.name.as_deref(),
+                event.input.as_ref(),
+                event.output.as_deref(),
+                event.tool_call_id.as_deref(),
+                event.index,
+            )
+            .reference(transcript),
+        ),
+    );
+}
+
+/// An answered run is not automatically a settled member: a grouping failure or
+/// a non-zero exit outranks whatever report came back with it.
+fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, turn: &TheTurn) -> Outcome {
+    let Answer { outcome, ungrouped } = answer;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        // The *request* could not be honoured, which oneharness decides before
+        // anything is spawned — so no process ever existed, exactly as a failed
+        // `Command::spawn` meant here before.
+        Err(reason) => {
+            turn.open(emitter);
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
+            return Outcome::Unstartable(reason);
+        }
+    };
+    // A chain names every candidate it stepped past whether or not a later one
+    // ran: which subscription to restore is exactly what an operator needs from a
+    // member that reached nothing, so these publish before the verdict rather
+    // than conditionally on it.
+    advance(emitter, outcome.report.fallback.as_ref());
+    // A harness this run could not group outranks whatever the report says: the
+    // run was stopped for that reason, so reporting the cancelled run's own
+    // verdict would name the symptom instead of the cause.
+    if let Some(reason) = ungrouped {
+        return died(emitter, Rule::ProviderFailure, Cause::Spawn, &reason);
+    }
+    let document = serde_json::to_value(&outcome.report).unwrap_or(Value::Null);
+    if !Kind::Oneharness.settled(outcome.exit_code) {
+        let summary = outcome
+            .failure_summary
+            .unwrap_or_else(|| format!("the turn exited {} without a report", outcome.exit_code));
+        // A chain that reached nothing is the chain's death rather than any one
+        // candidate's, and it is reported as that: the cause names the chain,
+        // and every candidate it stepped past rides the payload with its own
+        // classification and its own words. Reporting the run's summary alone
+        // kept the same facts as free text an operator had to read back apart.
+        if let Some(candidates) = exhausted(&outcome.report) {
+            return died_with(
+                emitter,
+                Rule::ProviderFailure,
+                Cause::FallbackChainExhausted,
+                &summary,
+                candidates,
+            );
+        }
+        return died(
+            emitter,
+            Rule::ProviderFailure,
+            // Five of oneharness's ten `FailureKind`s — `session_not_found`,
+            // `tool_deferred`, `untrusted_directory`, `input_too_large`,
+            // `model_mismatch` — have no `cause` in `docs/contract.md`'s closed
+            // set, so `unclassified` is the honest answer inside it and the
+            // summary names the harness. A partial map would report those five
+            // as something they are not. Widening `cause` is a contract
+            // proposal, recorded in `docs/oneharness-library.md`.
+            Cause::Unclassified,
+            &summary,
+        );
+    }
+    // The turn closes before the member settles, carrying what this one turn
+    // consumed: a single-sided member's turn *is* its run, so the accounting the
+    // report holds is that turn's own rather than a total over several.
+    turn.close(emitter, &outcome.report);
+    settle_report(emitter, &document, true, scratch)
+}
+
+/// Every candidate an exhausted chain attempted, in attempt order — or `None`
+/// for a run that was not that.
+///
+/// *Exhausted* is oneharness's own reading of its chain: a fallback run whose
+/// `ran` names nobody, because every candidate was stepped past. A chain that
+/// **stopped** at a candidate which ran and failed is deliberately not this —
+/// the candidates behind it were never tried, so it is that candidate's death,
+/// reported by the cause it always had, with the ones stepped past before it on
+/// the stream as `fallback-advanced`.
+///
+/// Read off `results` rather than off the fall-through summary, because on an
+/// exhausted chain the two are the same candidates in the same order and only
+/// the result carries what the aggregate is for: the candidate's normalized
+/// `failure_kind`, its own words, and `harness_id` — the field oneharness
+/// defines as the composed id that selects the same candidate again, where the
+/// summary's `harness` is defined as the canonical one.
+fn exhausted(report: &RunReport) -> Option<Vec<AttemptedCandidate>> {
+    let fallback = report.fallback.as_ref()?;
+    if fallback.ran.is_some() {
+        return None;
+    }
+    Some(report.results.iter().map(attempted).collect())
+}
+
+/// One attempted candidate, as the death of an exhausted chain carries it.
+///
+/// Its words are oneharness's `error` for it where one was composed — a missing
+/// binary's diagnostic, a refusal the provider stated in machine-readable terms
+/// — and otherwise the tail of what the candidate itself wrote, standard error
+/// first: a refusal classified off a stderr line composes no `error`, and the
+/// line is what an operator reads to see which account refused. Standard output
+/// last, for a refusal declared in the terminal record alone.
+fn attempted(result: &RunResult) -> AttemptedCandidate {
+    let account = [
+        result.error.as_deref().unwrap_or_default(),
+        &result.stderr,
+        &result.stdout,
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|words| !words.is_empty())
+    .unwrap_or_default();
+    let (detail, truncated) = bound_text(account);
+    AttemptedCandidate {
+        identity: result.harness_id.clone(),
+        // oneharness's own spelling, through its own `as_str` — the same route
+        // `advance` takes for a reason — so a respelling upstream fails a test
+        // here rather than reaching a consumer.
+        failure_kind: result.failure_kind.map(|kind| kind.as_str().to_string()),
+        detail,
+        truncated,
+    }
+}
+
+/// Publish every candidate this member's chain stepped past.
+///
+/// Read off [`FallbackReport`] as the type it already is, rather than out of a
+/// terminal `result` line this crate parsed: the identity and oneharness's own
+/// closed classification, spelled the way oneharness spells them.
+fn advance(emitter: &Emitter, fallback: Option<&FallbackReport>) {
+    let Some(fallback) = fallback else {
+        return;
+    };
+    for candidate in &fallback.fell_through {
+        let advanced = FallbackAdvanced {
+            identity: candidate.harness.clone(),
+            reason: candidate.reason.as_str().to_string(),
+            // A single-sided member has one chain, so there is no side and no
+            // turn to attribute it to — those belong to a two-party member's
+            // per-side, per-turn chains.
+            role: None,
+            turn: None,
+            truncated: false,
+        };
+        emitter.emit(EventKind::FallbackAdvanced, as_payload(&advanced));
+    }
+}
+
+/// Stop a member a watchdog condemned, then report it.
+///
+/// Shorter than [`crate::judge`]'s escalation because the engine takes a cancel
+/// token: cancelling terminates each harness tree through oneharness's own
+/// `Finish::Terminate`, so there is no second ask to make — there is one lever,
+/// the reap beside it for anything the stamp still finds, and a bounded wait
+/// before the run gives up on the thread rather than on itself. That reap is
+/// [`crate::scratch::reap_after_cancel`], which is what leaves the lever a
+/// moment to be answered.
+fn condemn(
+    rx: &mpsc::Receiver<Answer>,
+    cancel: &CancelToken,
+    emitter: &Emitter,
+    rule: Rule,
+    scratch: &Path,
+) -> Outcome {
+    cancel.cancel();
+    let deadline = Instant::now() + TEARDOWN_GRACE;
+    // llmlint: ignore-block[changed_behavior_has_e2e] the grace this reap leaves
+    // the cancel is Windows-only — POSIX already spent it — so no journey on a
+    // POSIX runner can be red before this line and green after it. Asserted at
+    // the seam it lives in, by `scratch::platform`'s two timing tests; the
+    // condemnation around it is `tests/e2e/liveness.rs`.
+    let mut reaped = crate::scratch::reap_after_cancel(scratch);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    while Instant::now() < deadline {
+        match rx.recv_timeout(TEARDOWN_POLL) {
+            // The engine tore itself down and answered. What it says is evidence
+            // — the chain it attempted above all — but the member is still dead
+            // by the rule that condemned it, not settled by a report it only
+            // produced because it was stopped.
+            Ok(answer) => {
+                if let Ok(outcome) = &answer.outcome {
+                    advance(emitter, outcome.report.fallback.as_ref());
+                }
+                return died(
+                    emitter,
+                    rule,
+                    Cause::Cancelled,
+                    &format!(
+                        "the {} rule condemned this member; its engine tore down {reaped} \
+                         process(es) and stopped",
+                        rule.as_str()
+                    ),
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => reaped += crate::scratch::reap(scratch),
+        }
+    }
+    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this sentence
+    // means holding `oneharness_core` past its own bounded teardown, which would
+    // mean replacing the layer under test. Covered by
+    // `tests::a_condemned_member_whose_engine_never_answers_is_still_reported_dead`.
+    died(
+        emitter,
+        rule,
+        Cause::Cancelled,
+        &format!(
+            "the {} rule condemned this member; {reaped} process(es) were signalled and its \
+             engine did not answer inside {}s, so the run gave up on it",
+            rule.as_str(),
+            TEARDOWN_GRACE.as_secs()
+        ),
+    )
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
+    died_with(emitter, rule, cause, detail, Vec::new())
+}
+
+/// [`died`], carrying the candidates an exhausted chain attempted.
+///
+/// The list is a property of one cause and no other, which is why [`died`]
+/// exists beside this rather than every caller passing an empty one.
+fn died_with(
+    emitter: &Emitter,
+    rule: Rule,
+    cause: Cause,
+    detail: &str,
+    candidates: Vec<AttemptedCandidate>,
+) -> Outcome {
+    let (detail, truncated) = bound_text(detail.trim());
+    let payload = MemberDied {
+        rule: rule.as_str().to_string(),
+        cause,
+        detail,
+        truncated,
+        // A member this process ran in-library was never a process of its own, so
+        // it has none of the three facts one leaves behind — `docs/contract.md`
+        // scopes all three to "a member that was one".
+        exit_code: None,
+        disposition: None,
+        stderr_tail: None,
+        candidates,
+    };
+    emitter.emit(EventKind::MemberDied, as_payload(&payload));
+    Outcome::Died(Death { rule, payload })
+}
+
+fn elapsed_millis(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A `RunRequest` this crate can also assert on, rather than one assembled at the
+/// call.
+///
+/// The argument-by-argument mapping from the argv this replaces is
+/// `docs/oneharness-library.md`'s table, and `tests/inventory.rs` holds this
+/// literal's field names against it.
+impl HarnessLaunch {
+    /// The request for one turn, answering `prompt`.
+    ///
+    /// The prompt is a parameter rather than the launch's own field because it is
+    /// the one thing about a turn that is decided *per turn*: a member's declared
+    /// views run immediately before each of them, and what they printed goes in
+    /// front of the prose. A member with no views is handed
+    /// [`HarnessLaunch::prompt`] exactly.
+    pub(crate) fn request(&self, prompt: &str) -> RunRequest {
+        RunRequest {
+            // The member's one resolved config, as oneharness's layered list of
+            // one. Never empty: a `kind: oneharness` member must name
+            // `oneharness_config`, so this crate never asks for discovery.
+            config: vec![self.config.clone()],
+            // A parameter, never `set_current_dir`: one process hosts every
+            // member, so a member that moved the process's own directory would
+            // move the members that never asked, and move them mid-run.
+            cwd: Some(self.worktree.clone()),
+            events: true,
+            // The member's own resolved config decided this — see
+            // `crate::invoke::Reporting`. `Some` either way, because a flag beat
+            // config on the argv this replaces and leaving it `None` would hand
+            // the decision back to a layer that already made it.
+            stream: Some(self.reporting.streams()),
+            prompt: vec![prompt.to_string()],
+            ..RunRequest::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+
+    use serde_json::json;
+
+    use crate::event::MAX_PAYLOAD_TEXT_BYTES;
+
+    use super::*;
+    use crate::event::Envelope;
+    use crate::invoke::Reporting;
+
+    /// A sink a test can read its own events back out of.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("recorder").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<Envelope> {
+            let raw = self.0.lock().expect("recorder").clone();
+            String::from_utf8(raw)
+                .expect("utf-8")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("an envelope"))
+                .collect()
+        }
+    }
+
+    fn recorded() -> (Emitter, Recorder) {
+        let recorder = Recorder::default();
+        (Emitter::new("s", Box::new(recorder.clone())), recorder)
+    }
+
+    fn call(name: Option<&str>) -> ActionEvent {
+        ActionEvent {
+            kind: "tool_call".into(),
+            name: name.map(ToOwned::to_owned),
+            input: Some(json!({"command": "just check", "n": 3})),
+            output: None,
+            index: 0,
+            tool_call_id: Some("t1".into()),
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+            status: None,
+            timing_source: None,
+        }
+    }
+
+    /// The first live event opens the member's one turn and reports what it acted
+    /// on; every event after it publishes under that same turn.
+    ///
+    /// One turn is not a simplification: `oneharness run` is a single turn and its
+    /// stream envelope carries no index, so the NDJSON reader this replaces
+    /// defaulted every event to turn 1 as well.
+    #[test]
+    fn the_first_live_event_opens_the_only_turn_and_the_rest_publish_under_it() {
+        let (emitter, recorder) = recorded();
+        let mut sink = Events {
+            transcript: None,
+            emitter,
+            activity: Arc::new(AtomicU64::new(0)),
+            started: Instant::now(),
+            cancel: CancelToken::new(),
+            turn: TheTurn::new("write the thing"),
+        };
+        for _ in 0..3 {
+            assert!(matches!(
+                sink.event("claude-code", &call(Some("bash"))),
+                SinkStep::Continue
+            ));
+        }
+
+        let events = recorder.events();
+        let kinds: Vec<_> = events.iter().map(|event| event.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::TurnStarted,
+                EventKind::TurnActivity,
+                EventKind::TurnActivity,
+                EventKind::TurnActivity,
+            ]
+        );
+        assert_eq!(events[0].payload["turn"], json!(1));
+        // The turn names who takes it, what it was asked, and when it began —
+        // the three an operator watching a live dispatch has no other source for.
+        assert_eq!(events[0].payload["role"], json!("assistant"));
+        assert_eq!(events[0].payload["instruction"], json!("write the thing"));
+        assert!(
+            events[0].payload["started_at"]
+                .as_str()
+                .is_some_and(|at| at.ends_with('Z')),
+            "the turn opened at no instant: {:?}",
+            events[0].payload
+        );
+        assert_eq!(events[1].payload["name"], json!("bash"));
+        assert_eq!(events[1].payload["kind"], json!("tool_call"));
+        assert_eq!(events[1].payload["detail"], json!("just check"));
+        assert!(
+            sink.activity.load(Ordering::SeqCst) < u64::MAX,
+            "the watchdog clock was never touched"
+        );
+    }
+
+    /// The agent's own `message` and `reasoning` items are relayed as themselves:
+    /// `turn-activity` under their own kind, their text in `output`, with no tool
+    /// name, no call identity and nothing summarized as a tool's input.
+    #[test]
+    fn an_agents_words_are_relayed_under_their_own_kind_never_as_a_tool_call() {
+        let (emitter, recorder) = recorded();
+        for (kind, text, index) in [
+            ("reasoning", "The gate is the quickest proof.", 0),
+            ("message", "Running the gate first.", 1),
+        ] {
+            ingest(
+                &ActionEvent {
+                    kind: kind.into(),
+                    name: None,
+                    input: None,
+                    output: Some(text.into()),
+                    index,
+                    tool_call_id: None,
+                    ..call(None)
+                },
+                &emitter,
+            );
+        }
+        let events = recorder.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        for (event, (kind, text)) in events.iter().zip([
+            ("reasoning", "The gate is the quickest proof."),
+            ("message", "Running the gate first."),
+        ]) {
+            assert_eq!(event.kind, EventKind::TurnActivity);
+            assert_eq!(event.payload["kind"], json!(kind));
+            assert_eq!(event.payload["output"], json!(text));
+            assert_eq!(event.payload["name"], Value::Null);
+            assert_eq!(event.payload["detail"], json!(""));
+            assert!(!event.payload.contains_key("tool_call_id"), "{event:?}");
+        }
+        assert_eq!(events[1].payload["index"], json!(1));
+    }
+
+    /// A `tool_result` names no tool because it answers one already named, and it
+    /// is published all the same: the observation, and the call identity that
+    /// joins it back. Discarding it for having no name is what threw away every
+    /// observation this member's tools returned.
+    #[test]
+    fn an_observation_reaches_the_stream_with_the_identity_of_the_call_it_answers() {
+        let (emitter, recorder) = recorded();
+        ingest(
+            &ActionEvent {
+                kind: "tool_result".into(),
+                output: Some("2 passed; 0 failed".into()),
+                input: None,
+                index: 4,
+                ..call(None)
+            },
+            &emitter,
+        );
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "the observation was discarded: {events:?}");
+        assert_eq!(events[0].kind, EventKind::TurnActivity);
+        assert_eq!(events[0].payload["kind"], json!("tool_result"));
+        assert_eq!(events[0].payload["name"], Value::Null);
+        assert_eq!(events[0].payload["output"], json!("2 passed; 0 failed"));
+        assert_eq!(events[0].payload["tool_call_id"], json!("t1"));
+        assert_eq!(events[0].payload["index"], json!(4));
+    }
+
+    /// An observation the trace did not expose is absent; one that was genuinely
+    /// empty is an empty string. A consumer can tell the two apart, and a call
+    /// carries neither.
+    #[test]
+    fn an_absent_observation_and_an_empty_one_are_different_facts() {
+        let (emitter, recorder) = recorded();
+        let unexposed = ActionEvent {
+            kind: "tool_result".into(),
+            output: None,
+            input: None,
+            ..call(None)
+        };
+        ingest(&unexposed, &emitter);
+        ingest(
+            &ActionEvent {
+                output: Some(String::new()),
+                ..unexposed
+            },
+            &emitter,
+        );
+        ingest(&call(Some("bash")), &emitter);
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 3);
+        assert!(
+            !events[0].payload.contains_key("output"),
+            "an observation the trace never exposed was published as one: {:?}",
+            events[0].payload
+        );
+        assert_eq!(events[1].payload["output"], json!(""));
+        assert!(
+            !events[2].payload.contains_key("output"),
+            "a call was published carrying an observation: {:?}",
+            events[2].payload
+        );
+    }
+
+    /// A long observation keeps its **tail** at this crate's own payload bound,
+    /// and says it was cut — what names a failure is the last of a tool's output.
+    #[test]
+    fn a_long_observation_keeps_its_tail_at_the_published_payload_bound() {
+        let (emitter, recorder) = recorded();
+        let long = format!(
+            "{}the test suite failed",
+            "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+        );
+        ingest(
+            &ActionEvent {
+                kind: "tool_result".into(),
+                output: Some(long),
+                input: None,
+                ..call(None)
+            },
+            &emitter,
+        );
+        let events = recorder.events();
+        let output = events[0].payload["output"]
+            .as_str()
+            .expect("an observation");
+        assert!(output.ends_with("the test suite failed"), "{output}");
+        assert!(output.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert_eq!(events[0].payload["output_truncated"], json!(true));
+        // The summary bound is its own and is untouched by the new field.
+        assert!(!events[0].payload.contains_key("truncated"));
+    }
+
+    /// The instruction this member's one turn answers keeps its **head** at the
+    /// same bound, and says it was cut — a turn's opening is where the model says
+    /// what it is about to do.
+    ///
+    /// This side owns its own head-trim, so it is driven here rather than
+    /// inherited from the judge side's. `é` is two bytes behind a fifteen-byte
+    /// ASCII opening, so every boundary past that opening is odd and the even
+    /// bound falls *inside* a character — the case a naive slice panics on.
+    #[test]
+    fn a_long_instruction_keeps_its_opening_at_the_published_payload_bound() {
+        let (emitter, recorder) = recorded();
+        let long = format!("write the thing{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        TheTurn::new(&long).open(&emitter);
+
+        let events = recorder.events();
+        let instruction = events[0].payload["instruction"]
+            .as_str()
+            .expect("an instruction");
+        assert!(instruction.starts_with("write the thing"), "{instruction}");
+        assert!(
+            instruction.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not walk back to a boundary: {}",
+            instruction.len()
+        );
+        assert_eq!(events[0].payload["instruction_truncated"], json!(true));
+
+        // And a prompt inside the bound is served whole, saying nothing about a
+        // cut that never happened.
+        let (emitter, recorder) = recorded();
+        TheTurn::new("write the thing").open(&emitter);
+        let events = recorder.events();
+        assert_eq!(events[0].payload["instruction"], json!("write the thing"));
+        assert_eq!(
+            events[0].payload.get("instruction_truncated"),
+            None,
+            "an uncut instruction claimed a cut: {:?}",
+            events[0].payload
+        );
+    }
+
+    /// A cancelled run's next event answers oneharness's own short-circuit, so a
+    /// condemned member stops at that event rather than only when the terminate
+    /// path reaches it.
+    #[test]
+    fn a_cancelled_run_answers_the_next_event_with_stop() {
+        let (emitter, _recorder) = recorded();
+        let cancel = CancelToken::new();
+        let mut sink = Events {
+            transcript: None,
+            emitter,
+            activity: Arc::new(AtomicU64::new(0)),
+            started: Instant::now(),
+            cancel: cancel.clone(),
+            turn: TheTurn::new("write the thing"),
+        };
+        assert!(matches!(
+            sink.event("claude-code", &call(Some("bash"))),
+            SinkStep::Continue
+        ));
+        cancel.cancel();
+        assert!(matches!(
+            sink.event("claude-code", &call(Some("bash"))),
+            SinkStep::Stop
+        ));
+    }
+
+    /// A member whose engine thread **panics** fails that member and leaves the
+    /// process it shares with every other one running.
+    ///
+    /// Driven through the real supervision loop with a real panicking thread —
+    /// the panic drops the sender, which is what the loop reads as an engine that
+    /// ended without answering. Nothing here stands in for the loop; what is
+    /// substituted is the engine, because no request can make oneharness panic on
+    /// demand and the containment being proven is this crate's.
+    #[test]
+    fn a_panicking_engine_kills_its_own_member_and_not_the_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let (tx, rx) = mpsc::channel::<Answer>();
+        let panicked = std::thread::spawn(move || {
+            let _tx = tx;
+            panic!("the engine came apart mid-turn");
+        });
+        assert!(panicked.join().is_err(), "the engine thread did not panic");
+
+        let cancel = CancelToken::new();
+        let started = Instant::now();
+        let outcome = supervise(
+            &rx,
+            &cancel,
+            &emitter,
+            Bounds::default(),
+            dir.path(),
+            started,
+            &Arc::new(AtomicU64::new(0)),
+            &TheTurn::new("write the thing"),
+            Heartbeat::start(dir.path(), started, "write the thing"),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("a panicking engine did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::ProviderFailure);
+        assert_eq!(death.payload.cause, Cause::Unclassified);
+        assert!(
+            death.payload.detail.contains("without answering"),
+            "{death:?}"
+        );
+        // None of the three a child process leaves behind: this member was not one.
+        assert!(death.payload.exit_code.is_none());
+        assert!(death.payload.disposition.is_none());
+        assert!(death.payload.stderr_tail.is_none());
+
+        let kinds: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(kinds, vec![EventKind::MemberDied]);
+    }
+
+    /// A condemned member whose engine never answers is reported dead anyway, and
+    /// the run is not left waiting on it — the cancel is issued either way, which
+    /// is what stops a paid harness the member was already condemned for.
+    #[test]
+    fn a_condemned_member_whose_engine_never_answers_is_still_reported_dead() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let cancel = CancelToken::new();
+        // A sender dropped immediately: the engine is gone without an answer,
+        // which is the shape a thread abandoned mid-turn leaves behind.
+        let (tx, rx) = mpsc::channel::<Answer>();
+        drop(tx);
+
+        let outcome = condemn(&rx, &cancel, &emitter, Rule::Activity, dir.path());
+        assert!(cancel.is_cancelled(), "the engine was never asked to stop");
+        let Outcome::Died(death) = outcome else {
+            panic!("a condemned member settled: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::Activity);
+        assert_eq!(death.payload.cause, Cause::Cancelled);
+        assert!(death.payload.detail.contains("activity"), "{death:?}");
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::MemberDied);
+    }
+
+    /// Every candidate the chain stepped past is published with oneharness's own
+    /// spelling of why, and a run with no chain publishes nothing rather than an
+    /// invented one.
+    #[test]
+    fn every_candidate_the_chain_stepped_past_is_published() {
+        let fallback: FallbackReport = serde_json::from_value(json!({
+            "ran": "codex",
+            "fell_through": [
+                {"harness": "claude-code", "reason": "quota", "detail": null},
+            ],
+        }))
+        .expect("a fallback block");
+
+        let (emitter, recorder) = recorded();
+        advance(&emitter, Some(&fallback));
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::FallbackAdvanced);
+        assert_eq!(events[0].payload["identity"], json!("claude-code"));
+        assert_eq!(events[0].payload["reason"], json!("quota"));
+
+        let (quiet, unwritten) = recorded();
+        advance(&quiet, None);
+        assert!(unwritten.events().is_empty());
+    }
+
+    /// The reasons a **precondition refusal** classifies as, published as the
+    /// tokens oneharness spells them with.
+    ///
+    /// A harness refusing the working directory or the input's size before making
+    /// a request falls the chain through to the next candidate instead of ending
+    /// it, so these are reasons a report can carry and a consumer joins on.
+    /// Pinned as the tokens rather than the variants, because the token is what
+    /// crosses the wire — and it is oneharness's `as_str()` that produces it, so a
+    /// respelling upstream fails here rather than reaching a consumer.
+    #[test]
+    fn a_precondition_refusal_publishes_its_own_reason() {
+        let fallback: FallbackReport = serde_json::from_value(json!({
+            "ran": "codex",
+            "fell_through": [
+                {"harness": "claude-code", "reason": "untrusted-directory", "detail": null},
+                {"harness": "cursor-agent", "reason": "input-too-large", "detail": null},
+            ],
+        }))
+        .expect("a fallback block");
+
+        let (emitter, recorder) = recorded();
+        advance(&emitter, Some(&fallback));
+        let reasons: Vec<Value> = recorder
+            .events()
+            .into_iter()
+            .map(|event| event.payload["reason"].clone())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![json!("untrusted-directory"), json!("input-too-large")]
+        );
+    }
+
+    /// One candidate's entry in a report, as oneharness writes it: `identity` is
+    /// the composed id the chain named, `kind` its normalized classification when
+    /// it has one, and `error` its own account.
+    ///
+    /// The composed `error` is what a missing binary and a machine-readable
+    /// refusal carry; a refusal classified off a stderr line carries none, and
+    /// says its piece on `stderr` instead — so the account goes there for a
+    /// classified candidate, and on `error` for the rest.
+    fn result(identity: &str, kind: Option<&str>, error: Option<&str>) -> Value {
+        let (harness, variant) = identity
+            .split_once(':')
+            .map_or((identity, Value::Null), |(base, variant)| {
+                (base, json!(variant))
+            });
+        let (error, stderr) = if kind.is_some() {
+            (Value::Null, error.unwrap_or_default())
+        } else {
+            (json!(error), "")
+        };
+        json!({
+            "harness": harness, "variant": variant, "harness_id": identity,
+            "bin": harness, "available": kind.is_some(),
+            "status": if kind.is_some() { "nonzero" } else { "skipped" },
+            "prompt": null, "model": null, "observed_model": null,
+            "exit_code": kind.map(|_| 1), "duration_ms": null,
+            "command": [harness], "output_format": "stream-json",
+            "text": null, "text_source": null, "usage": {}, "usage_source": null,
+            "session_id": null, "events": null, "events_source": null,
+            "structured": null, "schema_valid": null, "schema_attempts": null,
+            "schema_error": null, "failure_kind": kind, "failure_kind_source": null,
+            "stdout": "", "stderr": stderr, "error": error,
+        })
+    }
+
+    /// A fallback run's report over `results`, whose chain `ran` names — or
+    /// nobody, for a chain that reached nothing.
+    fn report(ran: Option<&str>, results: Vec<Value>) -> RunReport {
+        let fell_through: Vec<Value> = results
+            .iter()
+            .filter(|result| ran != result["harness"].as_str())
+            .map(|result| {
+                json!({"harness": result["harness"], "reason": "auth", "detail": result["error"]})
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "schema_version": "0.8", "oneharness_version": "0.17.0", "prompt": "report in",
+            "model": null, "models": null, "resume": null, "fork": false, "session": null,
+            "permission_mode": "bypass", "bypass_permissions": true, "dry_run": false,
+            "schema": null, "schema_max_retries": null, "batch": null,
+            "fallback": {"ran": ran, "fell_through": fell_through, "stopped_without_work": false},
+            "mock_rules": null, "spy_file": null, "history_file": null, "config_files": [],
+            "control": null, "results": results,
+        }))
+        .expect("a report")
+    }
+
+    fn answer(report: RunReport, exit_code: i32) -> Answer {
+        Answer {
+            outcome: Ok(RunOutcome {
+                report,
+                exit_code,
+                streamed: true,
+                failure_summary: (exit_code != 0).then(|| "claude-code [auth]".to_string()),
+            }),
+            ungrouped: None,
+        }
+    }
+
+    /// A chain that stepped past every candidate dies as the chain's own death,
+    /// carrying each candidate it attempted in attempt order — the identity as
+    /// the chain named it, variant included, oneharness's classification, and
+    /// the candidate's own words, from wherever it said them — so no candidate's
+    /// failure is discarded for another's.
+    #[test]
+    fn an_exhausted_chain_dies_naming_every_candidate_it_attempted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let long = format!(
+            "{}the subscription is exhausted",
+            "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+        );
+        let outcome = finish(
+            answer(
+                report(
+                    None,
+                    vec![
+                        result(
+                            "claude-code",
+                            Some("auth"),
+                            Some("claude-code: not logged in"),
+                        ),
+                        result("claude-code:alternate", Some("quota"), Some(&long)),
+                        result(
+                            "codex",
+                            None,
+                            Some("`codex` not found on PATH; harness skipped"),
+                        ),
+                    ],
+                ),
+                1,
+            ),
+            &emitter,
+            dir.path(),
+            &TheTurn::new("report in"),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("an exhausted chain did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::ProviderFailure);
+        assert_eq!(death.payload.cause, Cause::FallbackChainExhausted);
+        assert_eq!(death.payload.detail, "claude-code [auth]");
+        let identities: Vec<&str> = death
+            .payload
+            .candidates
+            .iter()
+            .map(|candidate| candidate.identity.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            vec!["claude-code", "claude-code:alternate", "codex"],
+            "{:?}",
+            death.payload.candidates
+        );
+        let kinds: Vec<Option<&str>> = death
+            .payload
+            .candidates
+            .iter()
+            .map(|candidate| candidate.failure_kind.as_deref())
+            .collect();
+        assert_eq!(kinds, vec![Some("auth"), Some("quota"), None]);
+        assert_eq!(
+            death.payload.candidates[0].detail,
+            "claude-code: not logged in"
+        );
+        assert!(!death.payload.candidates[0].truncated);
+        // A candidate's words are bounded like every payload text field, keeping
+        // the tail that names the refusal.
+        let cut = &death.payload.candidates[1];
+        assert!(cut.truncated, "{cut:?}");
+        assert!(cut.detail.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert!(cut.detail.ends_with("the subscription is exhausted"));
+
+        // On the wire: every candidate stepped past is still its own
+        // `fallback-advanced`, before the death; and the death's candidates are
+        // the structured list, with an unclassified kind written as `null`
+        // rather than dropped.
+        let events = recorder.events();
+        let kinds: Vec<_> = events.iter().map(|event| event.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::FallbackAdvanced,
+                EventKind::FallbackAdvanced,
+                EventKind::FallbackAdvanced,
+                EventKind::MemberDied,
+            ]
+        );
+        let died = &events[3].payload;
+        assert_eq!(died["cause"], json!("fallback_chain_exhausted"));
+        assert_eq!(died["candidates"][2]["failure_kind"], Value::Null);
+        assert_eq!(died["candidates"][2]["identity"], json!("codex"));
+        assert!(
+            died["candidates"][2].get("truncated").is_none(),
+            "an uncut detail claimed a cut: {died:?}"
+        );
+    }
+
+    /// A chain that **stopped** at a candidate which ran and failed is that
+    /// candidate's death and keeps the cause it always had: the candidates
+    /// behind it were never tried, so there is no exhausted chain to report, and
+    /// the payload carries no candidate list at all rather than an empty one.
+    #[test]
+    fn a_chain_that_stopped_at_a_candidate_which_ran_keeps_its_cause() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let outcome = finish(
+            answer(
+                report(
+                    Some("codex"),
+                    vec![
+                        result(
+                            "claude-code",
+                            Some("auth"),
+                            Some("claude-code: not logged in"),
+                        ),
+                        result("codex", None, Some("codex exited 1")),
+                    ],
+                ),
+                1,
+            ),
+            &emitter,
+            dir.path(),
+            &TheTurn::new("report in"),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("a stopped chain did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.payload.cause, Cause::Unclassified);
+        assert!(death.payload.candidates.is_empty());
+        let events = recorder.events();
+        let died = events.last().expect("a death");
+        assert_eq!(died.kind, EventKind::MemberDied);
+        assert!(
+            died.payload.get("candidates").is_none(),
+            "a death that was not the chain's carried a candidate list: {:?}",
+            died.payload
+        );
+    }
+
+    /// The turn a member's config asked for is the request oneharness is handed,
+    /// argument for argument — the mapping `docs/oneharness-library.md` tabulates.
+    #[test]
+    fn a_members_launch_becomes_the_request_its_argv_used_to_be() {
+        let launch = HarnessLaunch {
+            config: std::path::PathBuf::from("/scratch/oneharness.toml"),
+            worktree: std::path::PathBuf::from("/work/api"),
+            prompt: "report in".to_string(),
+            reporting: Reporting::Streamed,
+            views: Vec::new(),
+            session: "node-scope-1-reporter".to_string(),
+        };
+        let request = launch.request(&launch.prompt);
+        assert_eq!(
+            request.config,
+            vec![std::path::PathBuf::from("/scratch/oneharness.toml")]
+        );
+        assert_eq!(request.cwd.as_deref(), Some(Path::new("/work/api")));
+        assert!(request.events, "the turn asked for no tool events");
+        assert_eq!(request.stream, Some(true));
+        assert_eq!(request.prompt, vec!["report in".to_string()]);
+        // Nothing here discards the config or the `ONEHARNESS_*` layer: the
+        // process's own environment is the one `crate::run`'s `export` built.
+        assert!(!request.no_config);
+        assert!(request.env.is_empty());
+        assert!(request.bin.is_empty());
+
+        // A member whose own config asked for a buffered report carries that
+        // decision rather than deferring it back to the layer that made it.
+        let buffered = HarnessLaunch {
+            reporting: Reporting::Buffered,
+            ..launch
+        };
+        assert_eq!(buffered.request(&buffered.prompt).stream, Some(false));
+    }
+
+    /// A launch whose one config is `chain`, written into `dir`.
+    fn launch_on(dir: &Path, chain: &str) -> HarnessLaunch {
+        let config = dir.join("oneharness.toml");
+        std::fs::write(&config, chain).expect("the member's config");
+        HarnessLaunch {
+            config,
+            worktree: dir.to_path_buf(),
+            prompt: "report in".to_string(),
+            reporting: Reporting::Streamed,
+            views: Vec::new(),
+            session: "node-scope-1-reporter".to_string(),
+        }
+    }
+
+    /// A single-sided turn opens with control exactly when oneharness's registry
+    /// says every candidate of its chain is interrupted in place — and otherwise
+    /// it runs as it always did, its control record naming the candidate that
+    /// kept it uncontrolled. A Codex candidate is never moved onto another
+    /// transport by a chain it merely shares with one that could be interrupted.
+    #[test]
+    fn a_turn_asks_for_control_only_where_every_candidate_is_interrupted_in_place() {
+        for (chain, controlled, named) in [
+            ("run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n", true, ""),
+            (
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"claude-code:alternate\"]\n\
+                 [harness.claude-code.variant.alternate]\nbin = \"claude\"\n",
+                true,
+                "",
+            ),
+            ("run_mode = \"fallback\"\nharnesses = [\"codex\"]\n", false, "codex"),
+            (
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n",
+                false,
+                "codex",
+            ),
+            ("run_mode = \"fallback\"\nharnesses = [\"qwen\"]\n", false, "qwen"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let launch = launch_on(dir.path(), chain);
+            let request = with_control(launch.request(&launch.prompt), &launch, dir.path());
+            let record = crate::control::read(dir.path()).expect("a control record");
+            if controlled {
+                assert!(request.control, "{chain} was not opened with control");
+                let session = request.session.clone().expect("a controlled turn's handle");
+                assert!(
+                    session.starts_with("node-scope-1-reporter-"),
+                    "the turn's handle is not its own under the member's: {session}"
+                );
+                assert!(
+                    matches!(&record, crate::control::Turn::Open { address }
+                        if address.session == session
+                            && address.session_dir.is_some()
+                            && address.cwd == dir.path()),
+                    "{record:?}"
+                );
+            } else {
+                assert!(!request.control, "{chain} was opened with control");
+                assert_eq!(request.session, None);
+                assert!(
+                    matches!(&record, crate::control::Turn::Unavailable { reason }
+                        if reason.contains("opened no controllable turn") && reason.contains(named)),
+                    "{chain}: {record:?}"
+                );
+            }
+        }
+    }
+
+    /// A config that cannot be read, or a chain that does not resolve, is a turn
+    /// with no lever rather than a member that fails over it: the run itself is
+    /// what reports the config's own problem.
+    #[test]
+    fn a_chain_that_cannot_be_resolved_opens_no_controllable_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unreadable = HarnessLaunch {
+            config: dir.path().join("missing.toml"),
+            ..launch_on(dir.path(), "")
+        };
+        assert!(interruptible(&unreadable.request("x"))
+            .unwrap_err()
+            .contains("could not be read"));
+        let empty = launch_on(dir.path(), "harnesses = []\n");
+        assert!(interruptible(&empty.request("x"))
+            .unwrap_err()
+            .contains("could not be resolved"));
+    }
+
+    /// Every refusal oneharness answers a control ask with before it spawns is
+    /// one the turn is asked again without; a failure of the turn itself is not.
+    #[test]
+    fn only_a_refused_control_ask_is_asked_again_without_it() {
+        use oneharness_core::errors::OneharnessError as E;
+        assert!(refused_control(&E::ControlNeedsSession));
+        assert!(refused_control(&E::ControlSchema));
+        assert!(refused_control(&E::ControlUnsupported {
+            id: "qwen".into(),
+            supported: "claude-code".into(),
+        }));
+        assert!(refused_control(&E::SessionBatch));
+        assert!(refused_control(&E::ControlSocket {
+            path: "/private/tmp/store/control/run-reporter.sock".into(),
+            source: std::io::Error::other("past this platform's 104-byte limit"),
+        }));
+        assert!(!refused_control(&E::NoSelection));
+    }
+}

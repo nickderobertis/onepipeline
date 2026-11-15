@@ -606,19 +606,21 @@ fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reporte
         stderr,
     };
     let resolved = Path::new(check.argv.program());
-    let mut child = Command::new(resolved)
-        .args(check.argv.arguments())
-        .env(SCHEMA_ENV, SCHEMA_VERSION)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            cannot(
-                None,
-                format!("{} cannot be run: {error}", resolved.display()),
-            )
-        })?;
+    let (spawned, launch) = onevcs::launch_trace::spawn(
+        onevcs::launch_site!(),
+        Command::new(resolved)
+            .args(check.argv.arguments())
+            .env(SCHEMA_ENV, SCHEMA_VERSION)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let mut child = spawned.map_err(|error| {
+        cannot(
+            None,
+            format!("{} cannot be run: {error}", resolved.display()),
+        )
+    })?;
     if let Some(stdin) = child.stdin.as_mut() {
         // A check that read what it wanted and closed its stdin is answering,
         // not failing, so a broken pipe here is left to the answer to settle.
@@ -672,8 +674,17 @@ fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reporte
             ));
         }
     };
-    let status = child
-        .wait()
+    let status = {
+        let _watch = onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), None);
+        child.wait()
+    };
+    launch.exited(
+        status
+            .as_ref()
+            .ok()
+            .and_then(std::process::ExitStatus::code),
+    );
+    let status = status
         .map_err(|error| cannot(None, format!("{named} could not be waited for: {error}")))?;
     // The overrun is said rather than dropped: a diagnosis cut off at the bound
     // reads as the whole of what a check said, and a reader acting on it would

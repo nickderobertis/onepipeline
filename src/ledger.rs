@@ -1461,7 +1461,10 @@ fn read_published(path: &Path) -> io::Result<String> {
                 if e.kind() == io::ErrorKind::PermissionDenied
                     && std::time::Instant::now() < deadline =>
             {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(1),
+                );
             }
             read => return read,
         }
@@ -2443,7 +2446,10 @@ fn read_lock_file(path: &Path) -> Result<LockFile> {
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LockFile::Absent),
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(1),
+                );
             }
             Err(e) => {
                 return Err(Error::Ledger {
@@ -2559,14 +2565,20 @@ fn reclaim(path: &Path, dead: &LockRecord, body: &str, driving: bool) -> Result<
             // needs, so what this process reports is the lock the run is left
             // with rather than a record the lock does not name yet.
             LockFile::Record(_) if std::time::Instant::now() < patience => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(1),
+                );
             }
             // A takeover that would drive the run waits it out for as long as
             // the reclaimer lives: it exits naming whoever drives the run, so it
             // answers only once the lock names somebody — or takes the run
             // itself, by the step above, if the reclaimer dies first.
             LockFile::Record(_) if driving => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(20),
+                );
             }
             // Any other claim stops waiting there. The lock still names the dead
             // holder, so the reclaimer is not named as driving the run: what is
@@ -2889,7 +2901,10 @@ impl Handover {
                         ),
                     ));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                onevcs::launch_trace::sleep(
+                    onevcs::launch_site!(),
+                    std::time::Duration::from_millis(5),
+                );
                 continue;
             }
             // A gate numbered to the ceiling is one nothing can be taken above,

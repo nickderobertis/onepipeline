@@ -116,7 +116,7 @@ pub(crate) fn requested(
         if std::time::Instant::now() >= deadline {
             return Ok(Answered::Requested(id));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), std::time::Duration::from_millis(10));
     }
 }
 

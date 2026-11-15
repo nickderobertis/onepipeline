@@ -1,0 +1,247 @@
+//! The one error type every fallible entry point in this crate returns.
+//!
+//! The variants are the failures `docs/contract.md` gives `onevcs publish` a
+//! distinct exit code for, plus the refusal an interface-only build owes a
+//! caller. Marked `#[non_exhaustive]` so a later seam can add its own failure
+//! without breaking a matching consumer.
+
+use thiserror::Error;
+
+/// Everything an `onevcs` operation can fail with.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// The request parsed and validated, but the seam behind it has no
+    /// implementation yet. The CLI reports this as exit code 70.
+    #[error(
+        "{operation} is not implemented yet: this build of onevcs is interface-only \
+         (the approved contract is in docs/contract.md)"
+    )]
+    NotImplemented {
+        /// The contract operation that was asked for, e.g. `Vcs::open_session`.
+        operation: &'static str,
+    },
+
+    /// A publication was refused by something that judged it, where no narrower
+    /// kind says which. Today that is the repository's own `commit-msg` hook turning
+    /// down the subject the publication would land under, and a host that took a
+    /// merge and then reported it unperformed. The CLI reports this as exit code 1.
+    ///
+    /// What the *host's checks* reported is [`Error::ChecksFailed`] or
+    /// [`Error::ChecksUnsettled`], and what its `pre-push` hook said is
+    /// [`Error::PushRejected`].
+    ///
+    /// Named for the tier this crate used to run itself and kept under that name:
+    /// the contract fixes this vocabulary across the three libraries that route on
+    /// it, so a variant is not renamed because the tier behind it went away.
+    // llmlint: ignore[names_match_behavior] the approved contract fixes the spelling.
+    #[error("gate failed: {reason}")]
+    GateFailed {
+        /// What failed, and what turned it down.
+        reason: String,
+    },
+
+    /// Input was rejected at a trust boundary — a malformed registry document, a
+    /// rules file that does not parse, an unusable argument. The CLI reports this
+    /// as exit code 2.
+    #[error("invalid input: {reason}")]
+    Invalid {
+        /// What was rejected and why.
+        reason: String,
+    },
+
+    /// The base moved under a publication and the bounded resolve-and-requeue did
+    /// not converge. The CLI reports this as exit code 3.
+    #[error("sync conflict: {reason}")]
+    SyncConflict {
+        /// The conflict that survived the bounded retry.
+        reason: String,
+    },
+
+    /// A required check the host reports concluded red. The CLI reports this as
+    /// exit code 1, which is the code the contract fixes for a verification
+    /// failure — this says *which* verification failed, not a different one.
+    #[error("required check failed: {reason}")]
+    ChecksFailed {
+        /// The check that concluded red, named, and a bounded excerpt of its log.
+        reason: String,
+    },
+
+    /// The bound on watching the host elapsed with the change still outstanding.
+    /// The CLI reports this as exit code 1.
+    ///
+    /// Named for the commonest way that happens and shared with the others,
+    /// because the failure vocabulary is fixed across the three libraries that
+    /// route on it. Distinct from [`Error::ChecksFailed`] because the operator's
+    /// next move differs: nothing has failed, and the publication stopped watching.
+    // The vocabulary is fixed across the three libraries that route on it, and gives
+    // the bound one kind whichever of its endings this was; `reason` says which.
+    #[error("checks unsettled: {reason}")]
+    // llmlint: ignore[names_match_behavior] one fixed kind for the bound's three endings.
+    ChecksUnsettled {
+        /// What was still outstanding when the bound elapsed: the required checks
+        /// that had not settled, that the host declared none at all, or — where
+        /// every one of them had settled — that it never performed the merge.
+        reason: String,
+    },
+
+    /// The publishing push was refused by the merge path. The CLI reports this as
+    /// exit code 1.
+    #[error("push rejected: {reason}")]
+    PushRejected {
+        /// git's own per-ref refusal, which is what an operator acts on.
+        reason: String,
+    },
+
+    /// The publishing push was refused by the merge path because this host is
+    /// missing a tool or a credential one of its hooks needs — a failure that does not
+    /// depend on the tree being pushed. The CLI reports this as exit code 1.
+    ///
+    /// Said by the hook itself, on the one line
+    /// [`HOST_PREREQUISITE_MARKER`](crate::HOST_PREREQUISITE_MARKER) begins, and never
+    /// inferred: a refused push carrying no such line is [`Error::PushRejected`]. A
+    /// kind of its own for the reason [`Error::PushedUnverified`] is one: a router
+    /// branches on the kind, and no change to the work can clear this refusal.
+    #[error("host prerequisite missing: {reason}")]
+    // llmlint: ignore[invalid_states_unrepresentable] the approved contract fixes every
+    // variant of this enum as one `reason: String`, and three libraries route on that
+    // shape; the remediation and the evidence pointers are both prose for a reader.
+    HostPrerequisite {
+        /// What the hook said is missing and how to install it, and where the whole
+        /// of what the merge path wrote is kept.
+        reason: String,
+    },
+
+    /// The publishing push **reached the remote**, and the merge path could not
+    /// then be read. The CLI reports this as exit code 1.
+    ///
+    /// A kind of its own rather than a reason clause on the three above, because a
+    /// router branches on the *kind*: a sentence added to [`Error::ChecksFailed`]
+    /// still routes as "the checks said no". Widening a vocabulary fixed across the
+    /// libraries that route on it is the amendment in `docs/contract.md`, which
+    /// records why.
+    #[error("pushed, merge path unverified: {reason}")]
+    // llmlint: ignore[invalid_states_unrepresentable] the approved contract fixes every
+    // variant of this enum as one `reason: String`, and three libraries route on that
+    // shape. Splitting this one into a landing field and a cause field would add public
+    // surface the contract does not name and leave one variant unlike its siblings.
+    PushedUnverified {
+        /// Where the push landed, and what stopped the merge path being read.
+        reason: String,
+    },
+
+    /// A publication its caller cancelled, through
+    /// [`publish_with_cancellation`](crate::publish_with_cancellation), while it waited
+    /// on the host or on the identity's merge queue. The CLI never produces it.
+    ///
+    /// A kind of its own for the reason [`Error::PushedUnverified`] is one: a router
+    /// branches on the kind, and "the caller stopped waiting" is neither a verdict on
+    /// the work nor a merge path that could not be read. Nothing is undone by it — the
+    /// branch stays on its remote and any change request stays open — so publishing the
+    /// same session again continues the same branch.
+    #[error("publication cancelled: {reason}")]
+    // llmlint: ignore[invalid_states_unrepresentable] one `reason: String` like every
+    // sibling variant, which is the shape three libraries route on; where the branch is
+    // and which change request stays open are prose for the reader of the failure.
+    Cancelled {
+        /// What the publication was waiting on when it was cancelled, and where its
+        /// branch and change request were left.
+        reason: String,
+    },
+
+    /// A session could not be placed: every slot of the identity's pool is held and
+    /// its overflow admits no more. `onevcs session open` reports this as exit code 4,
+    /// and nothing waits — a caller decides whether to queue, close something, or open
+    /// with `--overflow unlimited`.
+    ///
+    /// Never a publication failure, so [`FailureKind`](crate::FailureKind) — the
+    /// vocabulary fixed across the three libraries that route a publication's outcome
+    /// — has no kind for it and reports it as `Invalid` should one ever reach there.
+    #[error("pool exhausted: {reason}")]
+    // llmlint: ignore[invalid_states_unrepresentable] one `reason: String` like every
+    // sibling variant, which is the shape three libraries route on; the identity, the
+    // limits with their sources, and every holder are prose for the operator who reads
+    // the refusal, and `workspace_capacity` is the typed form of the same answer.
+    PoolExhausted {
+        /// The identity, its pool and overflow with where each limit came from, and
+        /// every holder: token, branch, worktree, owner pid and liveness.
+        reason: String,
+    },
+
+    /// A reference named no work this host knows — it is not a change request
+    /// `onevcs` opened, a session token it printed, a branch any checkout or run
+    /// clone of a registered identity holds, or a commit one of those branches
+    /// carries. The CLI reports this as exit code 2.
+    ///
+    /// A kind of its own for the reason [`Error::PushedUnverified`] is one: a caller
+    /// branches on the *kind*. A consumer that falls back from one spelling of a
+    /// reference to another — onepipeline's release asker, from a squash commit to
+    /// the change request it settled — has to fire on exactly this case and never on
+    /// an I/O failure or a host that refused, and telling them apart by matching the
+    /// reason's prose breaks silently the day the wording changes.
+    ///
+    /// It says nothing new to whoever reads the refusal, so it renders and exits
+    /// exactly as [`Error::Invalid`] does, down to the `invalid input:` prefix: the
+    /// typed answer is for the router, and a rewording of the CLI's output would be
+    /// the breaking change this exists to prevent. [`FailureKind`](crate::FailureKind)
+    /// — the vocabulary fixed across the three libraries that route a publication's
+    /// outcome — gains no kind for it and reports it as `Invalid`, which is what fixes
+    /// the exit code at 2.
+    // llmlint: ignore[names_match_behavior] the wording of the refusal an operator
+    // reads is unchanged on purpose, so this renders under `Invalid`'s prefix rather
+    // than its own; the variant name is what the router matches on.
+    #[error("invalid input: {reason}")]
+    UnresolvableReference {
+        /// The reference as it was asked about, so a caller that routes on this kind
+        /// names what it could not resolve without parsing the reason.
+        reference: String,
+        /// What the reference was searched for as, and where the spellings that do
+        /// answer are listed.
+        reason: String,
+    },
+
+    /// A publication that defers its checks named a change request this host holds no
+    /// record of the head branch of — no standings read that saw it and no
+    /// `change-opened` it wrote — and asks the host nothing, so it cannot tell whether
+    /// the change request is the session's. Nothing was pushed. The CLI reports this as
+    /// exit code 2.
+    ///
+    /// A kind of its own for the reason [`Error::UnresolvableReference`] is one: a
+    /// caller falls back from it — reads the change request's standing, or publishes
+    /// watching the checks — and must never do so on a change request a record shows to
+    /// be another branch's, which is [`Error::Invalid`]. It renders and exits exactly as
+    /// that one does, under the `invalid input:` prefix, and
+    /// [`FailureKind`](crate::FailureKind) gains no kind for it.
+    // llmlint: ignore[names_match_behavior] rendered under `Invalid`'s prefix on purpose,
+    // as `UnresolvableReference` is; the variant name is what a caller routes on.
+    #[error("invalid input: {reason}")]
+    UnrecordedChangeHead {
+        /// The change request, as the publication named it.
+        change: String,
+        /// What this host holds no record of, and the two ways forward.
+        reason: String,
+    },
+}
+
+/// The result type every fallible entry point in this crate returns.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Reject something, naming what was wrong with it.
+pub(crate) fn invalid(reason: impl Into<String>) -> Error {
+    Error::Invalid {
+        reason: reason.into(),
+    }
+}
+
+/// An operation on a path that the filesystem refused, as the rejection a caller
+/// reads: what was being done, where, and what the system said.
+///
+/// One helper rather than a closure at each site, so the message every one of them
+/// produces has the same shape — and so a path that cannot be written reads the
+/// same whether it was the registry, a session record, or an artifact.
+pub(crate) fn at<'a, E: std::fmt::Display>(
+    action: &'static str,
+    path: &'a std::path::Path,
+) -> impl FnOnce(E) -> Error + 'a {
+    move |error| invalid(format!("cannot {action} {}: {error}", path.display()))
+}
