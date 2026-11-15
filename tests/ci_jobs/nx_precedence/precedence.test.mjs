@@ -211,6 +211,63 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     });
   }
 
+  it("accumulates kept tasks while lowering an unkept task", (t) => {
+    const dir = workspace(t);
+    const path = join(dir, "lead", "project.json");
+    const project = JSON.parse(readFileSync(path, "utf8"));
+    project.targets.work.command = LEAD.replace(
+      "--keep kept:work --",
+      "--keep kept:work --keep late:work --",
+    );
+    writeFileSync(path, JSON.stringify(project));
+    const { status, log } = nx(dir);
+    assert.equal(status, 0, log);
+    assert.equal(read(dir, "lead.nice"), "0", log);
+    assert.equal(read(dir, "kept.nice"), "0", log);
+    assert.equal(read(dir, "late.nice"), "0", log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    assert.equal(read(dir, "side.nice"), "19", log);
+    assert.deepEqual(lines(log), [
+      "nx-precedence: lead:work ran ahead of pause:work side:work, keeping kept:work late:work",
+    ]);
+  });
+
+  it("moves each surviving process to idle I/O after a batch refusal", (t) => {
+    const dir = workspace(t);
+    const path = join(dir, "side", "project.json");
+    const project = JSON.parse(readFileSync(path, "utf8"));
+    project.targets.work.command = SIDE.replace(" && [ ! -e side.io ]", "");
+    writeFileSync(path, JSON.stringify(project));
+    const stubs = failing(t, { ionice: "unused" });
+    const trace = join(dir, "ionice-trace");
+    const quotedTrace = `'${trace.replaceAll("'", `'"'"'`)}'`;
+    writeFileSync(
+      join(stubs, "ionice"),
+      `#!/bin/sh
+if [ "$#" -gt 4 ]; then
+  echo batch-refused >> ${quotedTrace}
+  echo 'one process in the batch disappeared' >&2
+  exit 1
+fi
+/usr/bin/ionice "$@"
+status=$?
+[ "$status" -ne 0 ] || echo single-succeeded >> ${quotedTrace}
+exit "$status"
+`,
+    );
+    const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+    assert.equal(status, 0, log);
+    assert.equal(read(dir, "lead.nice"), "0", log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    const calls = readFileSync(trace, "utf8");
+    assert.match(calls, /batch-refused\nsingle-succeeded/);
+    assert.equal(read(dir, "side.nice"), "19", log);
+    assert.match(read(dir, "side.io"), /^idle/);
+    assert.deepEqual(lines(log), [
+      "nx-precedence: lead:work ran ahead of late:work pause:work side:work, keeping kept:work",
+    ]);
+  });
+
   const failures = [
     {
       // A status outside grep's documented no-match and read-error statuses
