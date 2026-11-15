@@ -297,3 +297,13 @@ test("malformed coverage evidence is refused and job diagnostic re-runs are name
     assert.match(result.stdout, /all 2 passed/);
   });
 });
+
+test("local verification prints counts without comparing shared-host elapsed times", () => {
+  withSides((side) => {
+    const result = run("counts", side("before"), side("after"));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\| before \| linux \| .* \| 39 \| 2 \| 0 \|/);
+    assert.match(result.stdout, /\| onepipeline plan \| 24 \|/);
+    assert.doesNotMatch(result.stdout, /minutes|seconds|saved|mean difference|git s\s*\|/);
+  });
+});

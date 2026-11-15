@@ -6,7 +6,8 @@
 //
 //   node scripts/git-reads-compare.mjs compare baseline=DIR native=DIR ...
 //
-// Exit 0: comparison produced; 1: unreadable or invalid evidence; 2: usage error.
+// Use `counts LABEL=DIR ...` for local instrumentation verification without elapsed comparisons.
+// Exit 0: requested report produced; 1: unreadable or invalid evidence; 2: usage error.
 // Each DIR holds one directory per hosted run attempt, each holding `test-linux`,
 // `test-macos` and `test-windows` job directories with the unzipped test-profile artifact, timestamped `job.log` and `meta.json`. The first
 // side is the before side every other side is compared with.
@@ -533,6 +534,60 @@ export function render(sides) {
   return `${[...sides.map(renderSide), ...afters.map((after) => renderComparison(before, after))].join("\n\n")}\n`;
 }
 
+/** Local instrumentation verification deliberately omits elapsed comparisons. */
+export function renderCounts(sides) {
+  const jobs = sides.flatMap((side) => side.jobs.map((job) => ({ side: side.label, job })));
+  const out = [
+    "## Launch counts",
+    "",
+    table(
+      ["side", "platform", "job", "git starts", "passed", "failed"],
+      jobs.map(({ side, job }) => [
+        side,
+        job.platform,
+        job.label,
+        String(job.git.starts),
+        String(job.passed.length),
+        String(job.failed.length),
+      ]),
+    ),
+    "",
+    "## By engine verb",
+    "",
+  ];
+  out.push(
+    table(
+      ["side", "platform", "verb", "git starts"],
+      jobs.flatMap(({ side, job }) =>
+        Object.entries(job.git.byVerb).map(([verb, count]) => [
+          side,
+          job.platform,
+          verb,
+          String(count.starts),
+        ]),
+      ),
+    ),
+  );
+  out.push(
+    "",
+    "## By read shape",
+    "",
+    table(
+      ["side", "platform", "shape", "site", "git starts"],
+      jobs.flatMap(({ side, job }) =>
+        Object.entries(job.git.byShape).map(([shape, count]) => [
+          side,
+          job.platform,
+          shape,
+          count.site,
+          String(count.starts),
+        ]),
+      ),
+    ),
+  );
+  return `${out.join("\n")}\n`;
+}
+
 function usage(message) {
   return new Refusal(
     message,
@@ -543,15 +598,16 @@ function usage(message) {
 
 export function main(argv) {
   const [verb, ...rest] = argv;
-  if (verb !== "compare") throw usage(verb ? `unknown verb '${verb}'` : "name a verb: compare");
-  if (rest.length < 2)
+  if (verb !== "compare" && verb !== "counts")
+    throw usage(verb ? `unknown verb '${verb}'` : "name a verb: compare or counts");
+  if (rest.length < (verb === "counts" ? 1 : 2))
     throw usage("compare takes a before side and at least one after side, each LABEL=DIR");
   const sides = rest.map((arg) => {
     const at = arg.indexOf("=");
     if (at < 1) throw usage(`'${arg}' is not LABEL=DIR`);
     return readSide(arg.slice(0, at), arg.slice(at + 1));
   });
-  return render(sides);
+  return verb === "counts" ? renderCounts(sides) : render(sides);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

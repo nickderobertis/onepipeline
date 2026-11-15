@@ -36,5 +36,5 @@ for mode in stock batched native reuse reuse+batched reuse+native; do
   sides+=("$mode=$out/$mode")
 done
 # llmlint: ignore-end[changed_behavior_has_e2e]
-node scripts/git-reads-compare.mjs compare "${sides[@]}" > "$out/comparison.md"
+node scripts/git-reads-compare.mjs counts "${sides[@]}" > "$out/comparison.md"
 echo "Trace counts and fold: $out/comparison.md (local timings are not priced)"
