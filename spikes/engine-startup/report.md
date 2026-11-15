@@ -2250,7 +2250,7 @@ The measured difference printed above is2.657725 e2e minutes, inside the baselin
 
 ### Linux two-point comparison complete
 
-Hosted point2 source: run43756326338 attempt1, test-linux job132941104723, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14183665542 has digest sha256:6eba0a7b5b91e3330981602e5f7a06ab3ced6399b13ac49fbc1b5e44583c18f8. Source log, capsule and comparison output are under evidence/hosted/43756326338/attempt-1. Processor AMD EPYC9V45 96-Core Processor, four logical cores. The job ran20:08:13–22:19:09 UTC:130.933333 minutes, with89.705850 minutes before the e2e tier including quiet compilation/earlier tiers.
+Hosted point2 source: run43756326338 attempt1, test-linux job132941104723, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14183665542 has digest sha256:6eba0a7b5b91e3330981602e5f7a06ab3ced6399b13ac49fbc1b5e44583c18f8. Source log, capsule and comparison output are under evidence/hosted/43756326338/attempt-1. Processor AMD EPYC 9V45 96-Core Processor, four logical cores. The job ran20:08:13–22:19:09 UTC:130.933333 minutes, with89.705850 minutes before the e2e tier including quiet compilation/earlier tiers.
 
 Both after points have the exact baseline2155-name main-e2e catalog (digest83531b68a69ebaf7) and2155/2155 passed summaries. No main-e2e failure/recovery was observed. Both full37-task Nx selections equal both baseline selections. Point2’s normal complete-count nextest sequence exactly matches point1 and baseline1; interrupted baseline2 executions remain identified in the prior section. No source test or workflow guard changed. Native-path parser journeys are included in point2, adding their requested measurement proof without changing existing journeys.
 
@@ -2327,7 +2327,7 @@ Point1 Windows artifact14184840420 became available while job132926635983 still 
 
 ### Completed Windows point2
 
-Source: run43756326338 attempt1, test-windows job132941105006, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14185360546 digest sha256:3d8a0ee2d52847a4ca27e9f48539bb06c015c795e4371e2ac5adf5019f8a342e was downloaded after the job’s completion. All source logs, facts and output below are committed under evidence/hosted/43756326338/attempt-1/test-windows.*.gz. Hardware: AMD EPYC9V74 80-Core Processor, four logical cores. Job20:08:13–23:00:05 UTC:171.866667 minutes, including68.711833 minutes before e2e (quiet compilation and earlier tiers; not compile-only).
+Source: run43756326338 attempt1, test-windows job132941105006, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14185360546 digest sha256:3d8a0ee2d52847a4ca27e9f48539bb06c015c795e4371e2ac5adf5019f8a342e was downloaded after the job’s completion. All source logs, facts and output below are committed under evidence/hosted/43756326338/attempt-1/test-windows.*.gz. Hardware: AMD EPYC 9V74 80-Core Processor, four logical cores. Job20:08:13–23:00:05 UTC:171.866667 minutes, including68.711833 minutes before e2e (quiet compilation and earlier tiers; not compile-only).
 
 All1832 main-e2e profile names exactly equal both baseline catalogs (digest a91139c2b34c8c42), with1832/1832 passed in nextest. No main-e2e failure/recovery was observed. The39-task Nx selection exactly equals both baselines. The existing outcomes command finds zero lost baseline passes against either complete job log: baseline1 reports3403 passing names and baseline2 reports3401; this after point reports3403. Both baseline patch-audit failures remain, while baseline2’s codex-server timeouts pass on this point. This broader logged comparison is supplementary; the required by-name assertion is the main-e2e catalog/summary (a67). Normal tier counts and selections are retained in the capsule; no existing test was changed. Windows selects onepipeline-npm:test-launcher rather than the Linux-only full npm parser suite, so no Windows execution of the new parser journeys is claimed.
 
@@ -2388,9 +2388,19 @@ The printed difference7.575183 minutes and typical-PR estimate6.817665 minutes a
 
 ### Point1 complete; Windows two-point comparison complete
 
-Run43751624389 attempt1 finished23:21:52 UTC. Its final five-job catalog is preserved in jobs.final.json.gz and all-jobs.facts.json.gz: test-windows132926635983242.550000 minutes, lint13292663618330.283333, test-linux132926636190131.950000, test-macos132926636261181.800000, budgets1329968607531.350000. Budgets passed; the test jobs failed on the known non-main-tier checks and lint was cancelled. These are not claims that CI is green. The four cache-enabled jobs all show zero Nx entries/bytes stored or replayed and no Actions-cache save lines; budgets has no cache-restore step or Nx execution configured, and no save line/receipt. The unchanged executed workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01 supplies that no-cache budget-job path. Every cache step’s status/time is in all-jobs.facts.json.gz, including the lint bootstrap cache miss0.378seconds and rust partial restore67.187seconds. The raw budgets log is retained too.
+Run43751624389 attempt1 finished23:21:52 UTC. Its final five-job catalog is preserved in jobs.final.json.gz and all-jobs.facts.json.gz:
 
-Fresh point1 Windows artifact14184840420 was collected only after completion, following discard of the premature copy; digest sha256:cbcd57a1088c6d3ef3b54a7412ce0ed6a1bc2b80b9e10e4eabb9ab42f9593057. Source remains head dd64b7d141e0326cfeb4991b420bdb25387e0b53 / GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d. Hardware Intel(R)Xeon(R)Platinum8370C CPU@2.80GHz, four logical cores. The job ran19:17:56–23:20:29 UTC,242.550000 minutes;88.161217 minutes preceded e2e, including quiet compilation/earlier tiers. Its main e2e tier passed all1832 tests with both baseline name catalogs equal. There was no main-e2e recovery. The two codex-server double timeouts also seen in baseline2 remain outside the main e2e tier; the separate repeat step reached its existing25-minute limit (log line containing23:20:19.645). The full39-task selection is unchanged. Existing outcomes output exposes those two missing baseline1 non-e2e passes rather than concealing them; a67’s required main-e2e by-name proof is intact, while all selected non-e2e test counts remain recorded.
+| Job | Id | Job minutes | Result |
+| --- | --- | ---: | --- |
+| test-windows | 132926635983 | 242.550000 | failed other-tier checks |
+| lint | 132926636183 | 30.283333 | cancelled at job limit |
+| test-linux | 132926636190 | 131.950000 | failed known patch audit |
+| test-macos | 132926636261 | 181.800000 | failed other-tier checks |
+| budgets | 132996860753 | 1.350000 | passed |
+
+ Budgets passed; the test jobs failed on the known non-main-tier checks and lint was cancelled. These are not claims that CI is green. The four cache-enabled jobs all show zero Nx entries/bytes stored or replayed and no Actions-cache save lines; budgets has no cache-restore step or Nx execution configured, and no save line/receipt. The unchanged executed workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01 supplies that no-cache budget-job path. Every cache step’s status/time is in all-jobs.facts.json.gz, including the lint bootstrap cache miss0.378seconds and rust partial restore67.187seconds. The raw budgets log is retained too.
+
+Fresh point1 Windows artifact14184840420 was collected only after completion, following discard of the premature copy; digest sha256:cbcd57a1088c6d3ef3b54a7412ce0ed6a1bc2b80b9e10e4eabb9ab42f9593057. Source remains head dd64b7d141e0326cfeb4991b420bdb25387e0b53 / GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d. Hardware Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz, four logical cores. The job ran19:17:56–23:20:29 UTC,242.550000 minutes;88.161217 minutes preceded e2e, including quiet compilation/earlier tiers. Its main e2e tier passed all1832 tests with both baseline name catalogs equal. There was no main-e2e recovery. The two codex-server double timeouts also seen in baseline2 remain outside the main e2e tier; the separate repeat step reached its existing25-minute limit (log line containing23:20:19.645). The full39-task selection is unchanged. Existing outcomes output exposes those two missing baseline1 non-e2e passes rather than concealing them; a67’s required main-e2e by-name proof is intact, while all selected non-e2e test counts remain recorded.
 
 Windows point1 cache steps:
 
@@ -2457,7 +2467,7 @@ The measured after mean115.668767 minutes exceeds the before mean110.053000 by5.
 
 ### Completed macOS point1
 
-Source run43751624389/1, job132926636261, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d; same workflow blob. Artifact14184876470 digest sha256:183e4933324ace4140299f051527a8272e938edf476f2c96566ff8c217418ea7. Processor Apple M1(Virtual), three logical cores. Job20:15:54–23:17:42 UTC:181.800000 minutes,76.846250 minutes before e2e, including quiet compilation/earlier tiers. All2121 main-e2e profiles exactly match both baseline catalogs (digest224faf8a6439b9ed) and2121/2121 passed; no main-e2e recovery. Its39-task Nx selection equals both baselines. The existing logged-outcomes comparison also preserves all3769 baseline passing names; the same two patch-audit and three codex-server double failures remain in all those macOS logs. No existing test or timeout is changed. The recurring doubles are recorded outside this subtask in follow-up drafts:brief-process-launch-speed-2026-11-14-spikes/drafts/20261115T233054Z-investigate-recurring-hosted-codex-server-double.
+Source run43751624389/1, job132926636261, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d; same workflow blob. Artifact14184876470 digest sha256:183e4933324ace4140299f051527a8272e938edf476f2c96566ff8c217418ea7. Processor Apple M1 (Virtual), three logical cores. Job20:15:54–23:17:42 UTC:181.800000 minutes,76.846250 minutes before e2e, including quiet compilation/earlier tiers. All2121 main-e2e profiles exactly match both baseline catalogs (digest224faf8a6439b9ed) and2121/2121 passed; no main-e2e recovery. Its39-task Nx selection equals both baselines. The existing logged-outcomes comparison also preserves all3769 baseline passing names; the same two patch-audit and three codex-server double failures remain in all those macOS logs. No existing test or timeout is changed. The recurring doubles are recorded outside this subtask in follow-up drafts:brief-process-launch-speed-2026-11-14-spikes/drafts/20261115T233054Z-investigate-recurring-hosted-codex-server-double.
 
 macOS point1 cache steps:
 
@@ -2486,6 +2496,11 @@ contributors/macos: e2e mean 86.304883 min; range 86.304883..86.304883; n=1
 ```
 
 The remaining second macOS point is running on run43756326338, started23:00:13 UTC. Point1’s comments, checks and reviews were read and saved under pr1628.*.gz; PR1628 is ready to close once this evidence commit is published. No third run starts. Final comparison, source-identified final fold and the single final local judged pass remain after point2 macOS completes.
+
+
+### Demonstration cleanup checkpoint — 2026-11-15 23:38 UTC
+
+PR1628 was closed after its complete run, artifacts, comments, reviews and checks were read and preserved. Its remote demonstration branch, local worktree and local branch were deleted. Run43756326338/PR1635 remains active only on macOS (started23:00:13 UTC); its Linux and Windows points are complete. No third run starts. Remaining work: collect second macOS and its final budget job, finish the all-platform comparison and final-source fold, run the final local diff lint under a48/a49, close PR1635 and remove its local demonstration checkout.
 
 
 ## Candidate budgets
