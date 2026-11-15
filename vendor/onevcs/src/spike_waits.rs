@@ -78,6 +78,42 @@ pub fn adaptive() -> bool {
     is_selected(Variant::Adaptive)
 }
 
+// Test-only observation of the actual kernel result. Production callers and
+// their syscalls/intervals stay unchanged; no elapsed-time inference is needed.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Notification {
+    Exited,
+    Bound,
+    Unavailable,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NOTIFICATION: std::cell::Cell<Option<Notification>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn observed(notification: Notification) {
+    NOTIFICATION.with(|last| last.set(Some(notification)));
+}
+
+// One syscall expression for both builds; only unit-test builds retain its
+// outcome. The non-test expansion is the original discarded-result statement.
+macro_rules! observe_wait {
+    ($call:expr, $result:ident => $notification:expr) => {{
+        #[cfg(test)]
+        {
+            let $result = $call;
+            observed($notification);
+        }
+        #[cfg(not(test))]
+        {
+            $call;
+        }
+    }};
+}
+
 /// Wait at most `upto` for `child` to exit, returning as soon as it does.
 ///
 /// The child is never reaped here — its caller's `try_wait` still collects it — so
@@ -117,6 +153,14 @@ pub fn await_pid_exit(site: crate::launch_trace::Site, pid: u32, upto: Duration)
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
         // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): portable hosted journeys cannot safely force OpenProcess access failure without mocking the kernel or changing host privileges. It keeps the old bounded sleep on failure; successful and already-gone child paths are exercised. Production adoption must cover platform permission failures separately.
         if handle.is_null() {
+            #[cfg(test)]
+            observed(
+                if std::io::Error::last_os_error().raw_os_error() == Some(87) {
+                    Notification::Exited
+                } else {
+                    Notification::Unavailable
+                },
+            );
             // ERROR_INVALID_PARAMETER: no such process, so it is already gone.
             if std::io::Error::last_os_error().raw_os_error() != Some(87) {
                 std::thread::sleep(upto);
@@ -143,7 +187,11 @@ fn wait_handle(handle: std::os::windows::raw::HANDLE, upto: Duration) {
     let millis = u32::try_from(upto.as_millis()).unwrap_or(u32::MAX - 1);
     // SAFETY: the handle is live for the call; the wait only reads its state.
     unsafe {
-        WaitForSingleObject(handle as _, millis);
+        observe_wait!(WaitForSingleObject(handle as _, millis), ready => match ready {
+            windows_sys::Win32::Foundation::WAIT_OBJECT_0 => Notification::Exited,
+            windows_sys::Win32::Foundation::WAIT_TIMEOUT => Notification::Bound,
+            _ => Notification::Unavailable,
+        });
     }
 }
 
@@ -151,6 +199,8 @@ fn wait_handle(handle: std::os::windows::raw::HANDLE, upto: Duration) {
 fn await_pid(pid: u32, upto: Duration) {
     // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): real spawned PIDs fit pid_t, so this defensive conversion arm is outside the hosted workload. It retains the caller's bounded sleep; no saving is attributed to it, and testing an invented PID is not a realistic child journey.
     let Ok(raw) = libc::pid_t::try_from(pid) else {
+        #[cfg(test)]
+        observed(Notification::Unavailable);
         return std::thread::sleep(upto);
     };
     // SAFETY: `pidfd_open` takes a pid and flags and returns a descriptor this
@@ -158,14 +208,20 @@ fn await_pid(pid: u32, upto: Duration) {
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, raw, 0) };
     // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): the kernel returns an int descriptor, so an out-of-int syscall result is defensive only. Resource exhaustion or syscall interception would change the measured host; this preserves the old bounded sleep and is not priced as an optimization.
     let Ok(descriptor) = libc::c_int::try_from(descriptor) else {
+        #[cfg(test)]
+        observed(Notification::Unavailable);
         return std::thread::sleep(upto);
     };
     // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): safely forcing pidfd_open to be unavailable requires a different kernel/seccomp policy, outside these hosted runners. ESRCH is exercised by the already-gone child test; other errors keep the original bounded sleep. Production adoption must validate unsupported-kernel behavior.
     if descriptor < 0 {
         // ESRCH: the process is already gone, and that is the answer.
         if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            #[cfg(test)]
+            observed(Notification::Exited);
             return;
         }
+        #[cfg(test)]
+        observed(Notification::Unavailable);
         return std::thread::sleep(upto);
     }
     let mut watched = libc::pollfd {
@@ -176,7 +232,15 @@ fn await_pid(pid: u32, upto: Duration) {
     let millis = libc::c_int::try_from(upto.as_millis()).unwrap_or(libc::c_int::MAX);
     // SAFETY: one descriptor owned here, live for the call; closed once after.
     unsafe {
-        libc::poll(&raw mut watched, 1, millis);
+        observe_wait!(libc::poll(&raw mut watched, 1, millis), ready => {
+            if ready == 0 {
+                Notification::Bound
+            } else if ready > 0 && watched.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                Notification::Exited
+            } else {
+                Notification::Unavailable
+            }
+        });
         libc::close(descriptor);
     }
 }
@@ -187,6 +251,8 @@ fn await_pid(pid: u32, upto: Duration) {
     let queue = unsafe { libc::kqueue() };
     // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): kqueue allocation failure cannot be forced safely in the hosted workload without exhausting descriptors or mocking the kernel. This retains the caller's bounded sleep; no saving is claimed for it, and production adoption must validate that resource-failure branch.
     if queue < 0 {
+        #[cfg(test)]
+        observed(Notification::Unavailable);
         return std::thread::sleep(upto);
     }
     let change = libc::kevent {
@@ -206,14 +272,25 @@ fn await_pid(pid: u32, upto: Duration) {
     // is closed once after. A registration refused with ESRCH is a process
     // already exited, which returns at once, as it should.
     unsafe {
-        libc::kevent(
+        observe_wait!(libc::kevent(
             queue,
             &raw const change,
             1,
             &raw mut fired,
             1,
             &raw const timeout,
-        );
+        ), ready => {
+            if ready == 0 {
+                Notification::Bound
+            } else if (ready > 0 && (fired.flags & libc::EV_ERROR == 0
+                || fired.data == libc::ESRCH as libc::intptr_t))
+                || (ready < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+            {
+                Notification::Exited
+            } else {
+                Notification::Unavailable
+            }
+        });
         libc::close(queue);
     }
 }
@@ -223,6 +300,8 @@ fn await_pid(pid: u32, upto: Duration) {
     not(any(target_os = "linux", target_os = "macos", target_os = "ios"))
 ))]
 fn await_pid(_pid: u32, upto: Duration) {
+    #[cfg(test)]
+    observed(Notification::Unavailable);
     std::thread::sleep(upto);
 }
 
@@ -250,39 +329,58 @@ mod tests {
         assert_eq!(backoff(u32::MAX, first, ceiling), ceiling);
     }
 
-    #[test]
-    fn a_wait_on_a_child_returns_at_its_exit_rather_than_at_its_bound() {
-        let mut child = quick_child();
-        let began = Instant::now();
-        let bound = Duration::from_secs(20);
-        let mut exited = None;
-        while began.elapsed() < bound {
-            if let Some(status) = child.try_wait().expect("the child can be asked about") {
-                exited = Some(status);
-                break;
-            }
-            await_child_exit(&child, bound);
-        }
-        if exited.is_none() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-        assert!(exited.is_some(), "the child never exited");
-        assert!(
-            began.elapsed() < Duration::from_secs(10),
-            "the wait ran to its bound: {:?}",
-            began.elapsed()
-        );
+    fn notification(wait: impl FnOnce()) -> Option<Notification> {
+        NOTIFICATION.with(|last| last.set(None));
+        wait();
+        NOTIFICATION.with(std::cell::Cell::take)
     }
 
     #[test]
-    fn a_wait_on_a_pid_already_gone_returns_without_waiting_its_bound() {
+    fn a_wait_on_a_child_reports_its_exit_notification() {
+        let mut child = quick_child();
+        let result = notification(|| await_child_exit(&child, Duration::from_secs(20)));
+        let status = child.wait().expect("the child is reaped");
+        assert_eq!(result, Some(Notification::Exited));
+        assert!(status.success());
+    }
+
+    #[test]
+    fn a_wait_on_a_pid_already_gone_reports_it_exited() {
         let mut child = quick_child();
         let pid = child.id();
-        child.wait().expect("the child is reaped");
-        let began = Instant::now();
-        await_pid_exit(crate::launch_site!(), pid, Duration::from_secs(20));
-        assert!(began.elapsed() < Duration::from_secs(10));
+        assert!(child.wait().expect("the child is reaped").success());
+        let result = notification(|| {
+            await_pid_exit(crate::launch_site!(), pid, Duration::from_secs(20));
+        });
+        assert_eq!(result, Some(Notification::Exited));
+    }
+
+    #[test]
+    fn a_live_child_reaches_the_wait_bound_and_remains_alive_until_released() {
+        #[cfg(windows)]
+        let mut command = std::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "set /p answer= & exit /b 0"]);
+        #[cfg(not(windows))]
+        let mut command = std::process::Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "read answer; exit 0"]);
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("the held child starts");
+        let result = notification(|| await_child_exit(&child, Duration::from_millis(10)));
+        let still_live = child
+            .try_wait()
+            .expect("the held child can be read")
+            .is_none();
+        drop(child.stdin.take());
+        let status = child
+            .wait()
+            .expect("closing stdin releases and reaps the child");
+        assert_eq!(result, Some(Notification::Bound));
+        assert!(still_live, "the child exited before being released");
+        assert!(status.success());
     }
 
     #[test]
