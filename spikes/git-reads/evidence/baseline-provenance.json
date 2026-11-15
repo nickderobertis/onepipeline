@@ -1,0 +1,16 @@
+{
+  "source_commit": "43649554",
+  "runs": [
+    {
+      "id": 43684231509,
+      "attempt": 1
+    },
+    {
+      "id": 43684231509,
+      "attempt": 2
+    }
+  ],
+  "raw_artifact_root": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-2/sides/baseline",
+  "fold": "readSide(\"baseline\", raw_artifact_root), then render([side]); exports from scripts/git-reads-compare.mjs at source_commit",
+  "scope": "Earlier-commit hosted baseline, not prototype timing. Linux attempt1 has2154 individually retained passes and one inferred pass under a47; attempt2 has2155 retained passes. No after measurements."
+}
