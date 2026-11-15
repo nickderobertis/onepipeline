@@ -315,9 +315,12 @@ test("engine-owned reads are separated from onevcs starts for adoption pricing",
     const dir = join(jobOf(after), "test-profile/launch");
     for (const file of readdirSync(dir).filter((f) => f.endsWith(".jsonl"))) {
       const path = join(dir, file);
-      const records = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      const records = readFileSync(path, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
       const removed = new Set(
-        `${records
+        records
           .filter((r) => r.kind === "start" && r.function === "onepipeline::destination::git_path")
           .map((r) => `${r.pid}:${r.seq}`),
       );
@@ -326,7 +329,7 @@ test("engine-owned reads are separated from onevcs starts for adoption pricing",
         `${records
           .filter((r) => !removed.has(`${r.pid}:${r.seq}`))
           .map((record) => JSON.stringify(record))
-          .join("\n")}\n",
+          .join("\n")}\n`,
       );
     }
     const result = run("compare", before, after);
