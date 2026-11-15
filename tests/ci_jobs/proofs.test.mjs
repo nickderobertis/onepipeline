@@ -9,7 +9,9 @@
 // a proof does once it gets past them is what the jobs themselves run, on every
 // pull request that reaches the crate.
 // The capture's clone of HEAD is the one thing past them proved here, against a
-// stand-in `docker` that only records how it was run.
+// stand-in `docker` that only records how it was run. The test tiers' recipes are
+// driven the same way, against a stand-in `cargo`, for the order they build the
+// test doubles in.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -440,4 +442,171 @@ describe("the warm build's test doubles", () => {
       assert.ok(tail.length < lines.length, family);
     }
   });
+});
+
+describe("the test tiers' test doubles", () => {
+  // Each recipe is the real one, run by the real `just` over this workspace, with a
+  // stand-in `cargo` that only records how it was asked: so a doubles build that
+  // came after the test build, or one a fixture crate would refuse, shows in the
+  // order of the record without compiling anything.
+  function standInCargo(t) {
+    const bin = mkdtempSync(join(tmpdir(), "tier-doubles-cargo-"));
+    t.after(() => rmSync(bin, { recursive: true, force: true }));
+    writeFileSync(
+      join(bin, "cargo"),
+      '#!/bin/sh\nprintf "%s|%s|%s\\n" "$PWD" "$(printenv RUSTFLAGS || echo unset)" "$*" >> "$CARGO_ASKED"\n',
+    );
+    chmodSync(join(bin, "cargo"), 0o755);
+    const archive = join(bin, "tests.tar.zst");
+    writeFileSync(archive, "the job's archived test build");
+    return {
+      bin,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        CARGO_ASKED: join(bin, "asked"),
+        ONEPIPELINE_TEST_ARCHIVE: archive,
+        ONEPIPELINE_TEST_PARTITION: "",
+        RUSTFLAGS: "",
+      },
+      asked: () =>
+        existsSync(join(bin, "asked"))
+          ? readFileSync(join(bin, "asked"), "utf8")
+              .trim()
+              .split("\n")
+              .map((line) => {
+                const [cwd, rustflags, args] = line.split("|");
+                return { cwd, rustflags, args };
+              })
+          : [],
+    };
+  }
+  const doubles = [
+    "--package onepipeline-testfakes",
+    "--package oneagentgraph --bin oneagentgraph --locked",
+    "--package oneharness --bin oneharness --locked",
+    "--package onevcs --bin onevcs --locked",
+  ];
+  const builds = (target) =>
+    doubles.map((selection) => `build --offline ${selection} --target-dir ${target}`);
+
+  it("are built by a test-quick tier after the job's test build and before its tests", (t) => {
+    const cargo = standInCargo(t);
+    const { status, log } = run(root, "just", ["_tier-test-quick", "binary(e2e)"], cargo.env);
+    assert.equal(status, 0, log);
+    const asked = cargo.asked();
+    assert.deepEqual(
+      asked.map((call) => call.args),
+      [...builds(join(root, "target")), "nextest run --locked --no-tests fail -E binary(e2e)"],
+    );
+    assert.ok(
+      asked.every((call) => call.cwd === root),
+      JSON.stringify(asked),
+    );
+    // The plain doubles, as a `test-quick` tier's journeys ask for them: under no RUSTFLAGS.
+    assert.ok(
+      asked.slice(0, 4).every((call) => call.rustflags === "unset"),
+      JSON.stringify(asked),
+    );
+  });
+
+  it("are left to the journeys where no test build was archived", (t) => {
+    const cargo = standInCargo(t);
+    const { status, log } = run(root, "just", ["_tier-test-quick", "binary(e2e)"], {
+      ...cargo.env,
+      ONEPIPELINE_TEST_ARCHIVE: "",
+    });
+    assert.equal(status, 0, log);
+    assert.deepEqual(
+      cargo.asked().map((call) => call.args),
+      ["nextest run --locked --no-tests fail -E binary(e2e)"],
+    );
+  });
+
+  it("are not asked of a fixture crate a test runs a tier recipe over", (t) => {
+    const cargo = standInCargo(t);
+    const fixture = mkdtempSync(join(tmpdir(), "tier-doubles-fixture-"));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    // A crate of its own, as `tests/nextest_runs.rs`'s fixtures are: the justfile reads it.
+    writeFileSync(
+      join(fixture, "Cargo.toml"),
+      '[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n',
+    );
+    mkdirSync(join(fixture, "scripts"));
+    for (const script of ["ensure-test-archive.sh", "test-partition.sh", "nextest-run.sh"]) {
+      writeFileSync(
+        join(fixture, "scripts", script),
+        readFileSync(join(root, "scripts", script), "utf8"),
+      );
+    }
+    const { status, log } = run(
+      fixture,
+      "just",
+      [
+        "--justfile",
+        join(root, "justfile"),
+        "--working-directory",
+        fixture,
+        "_tier-test-quick",
+        "all()",
+      ],
+      cargo.env,
+    );
+    assert.equal(status, 0, log);
+    assert.deepEqual(
+      cargo.asked().map((call) => call.args),
+      ["nextest run --locked --no-tests fail -E all()"],
+    );
+  });
+
+  it("are built by a coverage tier, instrumented, before its tests", (t) => {
+    const cargo = standInCargo(t);
+    // The coverage unit itself needs the profiles a real run writes, which a stand-in
+    // cannot: what is read here is everything the recipe asked of cargo before that.
+    run(root, "just", ["_tier-test", "onepipeline-e2e", "binary(e2e)"], cargo.env);
+    const asked = cargo.asked();
+    const tests = asked.findIndex((call) => /^llvm-cov --no-report nextest /.test(call.args));
+    assert.ok(tests > 0, JSON.stringify(asked));
+    const before = asked.slice(0, tests).filter((call) => call.args.startsWith("build "));
+    assert.deepEqual(
+      before.map((call) => call.args),
+      builds(join(root, "target", "llvm-cov-target")),
+    );
+    assert.ok(
+      before.every((call) => call.rustflags === "-D warnings"),
+      JSON.stringify(before),
+    );
+  });
+
+  // The doubles' flags are the ones the recipe's tests run under: none for smoke, whose
+  // RUSTFLAGS here is the empty one the stand-in's environment gives every call.
+  for (const [recipe, filter, tests, rustflags] of [
+    ["_smoke-run", "binary(smoke)", "", "unset"],
+    [
+      "_release-compat-run",
+      "binary(release_channel) and not test(/^harness::/)",
+      "-D warnings",
+      "-D warnings",
+    ],
+  ]) {
+    it(`are built by ${recipe} after its test build and before its tests`, (t) => {
+      const cargo = standInCargo(t);
+      const { status, log } = run(root, "just", [recipe], cargo.env);
+      assert.equal(status, 0, log);
+      const asked = cargo.asked();
+      assert.deepEqual(
+        asked.slice(0, 5).map((call) => call.args),
+        [`nextest run --locked -E ${filter} --no-run`, ...builds(join(root, "target"))],
+      );
+      assert.equal(asked.length, 6, JSON.stringify(asked));
+      assert.match(
+        asked[5].args,
+        new RegExp(`^nextest run --locked -E ${filter.replace(/[()^/]/g, "\\$&")}`),
+      );
+      assert.doesNotMatch(asked[5].args, /--no-run/);
+      assert.deepEqual(
+        asked.map((call) => call.rustflags),
+        [tests, rustflags, rustflags, rustflags, rustflags, tests],
+      );
+    });
+  }
 });
