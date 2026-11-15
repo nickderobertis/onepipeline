@@ -49,7 +49,7 @@ pub struct Matcher {
     rules: Vec<ResolvedRule>,
     /// A conservative candidate search on stable text, ignoring ASCII case.
     candidates: AhoCorasick,
-    contributors: Contributors,
+    contributors: Option<Contributors>,
     /// The automaton over every rule that ignores case, matched against folded text.
     folded: Option<Automaton>,
     /// The automaton over every case-sensitive rule, matched against normalized text.
@@ -118,7 +118,12 @@ impl Matcher {
             .map_err(|error| Unbuildable {
                 reason: error.to_string(),
             })?;
-        let contributors = Contributors::new(rules.iter().map(|r| term_key(&r.rule.term)));
+        // Measurement-only prototype, never lands: this conservative prefilter can
+        // only avoid a full scan. Bypassing it retains normalization, matching,
+        // phrase exemptions and span mapping, including Unicode input.
+        let contributors = (std::env::var_os("ONEPIPELINE_STARTUP_CUT").as_deref()
+            != Some(std::ffi::OsStr::new("contributors")))
+        .then(|| Contributors::new(rules.iter().map(|r| term_key(&r.rule.term))));
         Ok(Matcher {
             contributors,
             candidates,
@@ -306,7 +311,11 @@ impl Matcher {
         if text.is_ascii() && !self.candidates.is_match(text) {
             return found;
         }
-        if !self.contributors.possible(text) {
+        if self
+            .contributors
+            .as_ref()
+            .is_some_and(|contributors| !contributors.possible(text))
+        {
             return found;
         }
         if !self.candidates.is_match(text) && candidate_text_is_stable(text) {
