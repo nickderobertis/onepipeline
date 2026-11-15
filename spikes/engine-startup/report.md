@@ -2167,6 +2167,11 @@ The 20:23 snapshots (jobs-2023.json.gz for each point) record point1 macOS job13
 Collection at approximately 20:38 UTC stopped at the shared GitHub allowance floor before any run read; second-point collection was not attempted. Under a55, the next read waits for the approximate 20:52 UTC reset. No newer job state or result is inferred from this pause. The active demo heads remain frozen.
 
 
+### Adoption effort by file and repository
+
+Estimated implementation effort for this option is two dispatches, not a measured duration. In github.com/nickderobertis/privateterms, change src/matcher.rs and add a public-API equivalence journey (proposed tests/startup_equivalence.rs); validate negative-text throughput before choosing this eager-table/full-scan trade for a release. The existing src/normalize.rs contributor implementation becomes unused by the cut but need not be rewritten to demonstrate it. A compatible performance-only implementation takes a patch release. In github.com/nickderobertis/onepipeline, move Cargo.lock’s privateterms resolution to that patch, keep the existing caret requirements, run the consumer proofs and take a performance patch release. onevcs and onetaskgraph-core already admit the compatible privateterms patch; neither needs a release for this lock adoption. These are proposed production files/dispatches, not changes made by this never-land measurement branch. The prototype’s files are vendor/privateterms/src/matcher.rs and src/lib.rs, plus the root Cargo.toml/Cargo.lock path adoption; the measurement commands, fixtures and report remain measurement artifacts.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
