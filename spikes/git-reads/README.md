@@ -20,15 +20,15 @@ Their provenance is in evidence/baseline-provenance.json. The before side is
 43684231509 attempts1/2, accepted under c11.0. Later archive-only commits leave
 the executable check evidence at its cited source commit unchanged.
 
-## Handoff — 2026-11-15 20:09 UTC
+## Handoff — 2026-11-15 20:24 UTC
 
 - Completed after samples: none.
 - Batched: draft PR1633, run43753064453 attempt1, head
   698a7d0e855c5bb04a362c385bab2508e3e4651e. Linux132931076196 and
-  Windows132931076438 running; macOS132931076404 queued; lint cancelled.
+  Windows132931076438 and macOS132931076404 running; lint cancelled.
 - Native: draft PR1634, run43753067613 attempt1, head
   016c5adf2a8760d1a77134c1b1ef655aebd4c70e. Linux132931087404 and
-  Windows132931087445 running; macOS132931087312 queued; lint running.
+  Windows132931087445 running; macOS132931087312 queued; lint cancelled.
 - Both heads are frozen. Executed workflow blobs, checkout SHAs, full selection,
   cache receipts and test outcomes await finished-job logs/artifacts. The expected
   head workflow blob is db2bbe081a7b9319eb38bd014e72350b389e8b01.
