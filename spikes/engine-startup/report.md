@@ -2134,6 +2134,11 @@ attempt 2 windows: 3405 named results; 3401 final passes; recovered []
 ```
 
 
+### Round-two local rehearsal
+
+Before starting the remaining hosted round, source 01a5186d drove the same real debug e2e journey with the contributor environment selector and launch tracing, then folded it with `node scripts/engine-startup.mjs phases contributors-round2=$ONEPIPELINE_NODE_SCRATCH_DIR/round2-local-slice`. Both commands exited zero. The journey, phase output and trace are committed as evidence/round2-local-slice.*.gz. This is a trace-integrity rehearsal, not a local before/after timing comparison. The engine implementation is the same sampled build a792bafc; no rebuild-dependent claim is made. The second demonstration is prepared locally at identical head dd64b7d1 and has not been pushed while collection is paused.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
