@@ -7,8 +7,7 @@
 //   node scripts/git-reads-compare.mjs compare baseline=DIR native=DIR ...
 //
 // Each DIR holds one directory per hosted run attempt, each holding `test-linux`,
-// `test-macos` and `test-windows` job directories as `spikes/git-reads/fetch-run.sh`
-// writes them: the unzipped test-profile artifact, `job.log` and `meta.json`. The first
+// `test-macos` and `test-windows` job directories with the unzipped test-profile artifact, timestamped `job.log` and `meta.json`. The first
 // side is the before side every other side is compared with.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -217,7 +216,7 @@ export function readSide(label, dir) {
   if (!existsSync(dir))
     throw new Refusal(
       `${label}: ${dir} does not exist`,
-      "fetch the side's runs with spikes/git-reads/fetch-run.sh",
+      "download the side's test-profile artifacts, timestamped job logs and run metadata",
     );
   const jobs = [];
   for (const attempt of readdirSync(dir).sort()) {
@@ -230,7 +229,7 @@ export function readSide(label, dir) {
   if (!jobs.length)
     throw new Refusal(
       `${label}: ${dir} holds no test-<platform> job directory`,
-      "fetch the side's runs with spikes/git-reads/fetch-run.sh",
+      "download the side's test-profile artifacts, timestamped job logs and run metadata",
     );
   return { label, jobs };
 }
@@ -249,6 +248,7 @@ export function decided(before, after) {
   const b = before.map((j) => j.e2eMinutes).filter((x) => x != null);
   const a = after.map((j) => j.e2eMinutes).filter((x) => x != null);
   if (!b.length || !a.length) return "not measured";
+  if (b.length < 2 || a.length < 2) return "undecided (fewer than two runs)";
   const [mb, ma] = [mean(b), mean(a)];
   const spread = (xs) => Math.max(...xs) - Math.min(...xs);
   return Math.abs(mb - ma) <= Math.max(spread(b), spread(a))
@@ -301,7 +301,9 @@ function renderSide(side) {
     const writes =
       j.cacheSaves.length || j.nxStored?.entries
         ? `${j.cacheSaves.length} Actions-cache save lines; Nx stored ${j.nxStored?.entries ?? 0}`
-        : "none";
+        : j.nxStored == null
+          ? "no Actions save lines; Nx write evidence missing"
+          : "none";
     out.push(
       `- ${j.label}: workflow blob ${j.workflowBlob ?? "not recorded"}; ${j.selection ? `${j.selection.count} tasks (${j.selection.tasks.join(" ")})` : "selection not printed"}; restores: ${restores}; writes: ${writes}`,
     );
