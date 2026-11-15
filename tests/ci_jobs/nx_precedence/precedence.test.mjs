@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const script = join(root, "scripts", "nx-precedence.sh");
 const linux = process.platform === "linux";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape is what is stripped.
