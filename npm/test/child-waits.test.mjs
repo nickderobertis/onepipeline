@@ -451,3 +451,122 @@ test("a successful LEAK warning remains a pass rather than a failed test", () =>
     /after leak: 2 passed in the tier;[^\n]+failed and not passed again: none\./,
   );
 });
+
+/** One recorded invocation restricted to one of its actual journeys. */
+function onlyJourney(side, prefix) {
+  const dir = copyOf(side);
+  const profiles = join(dir, "test-profile", "e2e");
+  let wanted;
+  for (const file of readdirSync(profiles)) {
+    const path = join(profiles, file);
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    if (record.test.startsWith(prefix)) wanted = record.test;
+    else rmSync(path);
+  }
+  assert.ok(wanted);
+  const log = readFileSync(join(dir, "job.log"), "utf8")
+    .split("\n")
+    .filter((line) => !line.includes("onepipeline::e2e") || line.includes(wanted))
+    .join("\n")
+    .replace("Starting 2 tests", "Starting 1 test")
+    .replace("2 tests run: 2 passed", "1 test run: 1 passed");
+  writeFileSync(join(dir, "job.log"), log);
+  return dir;
+}
+
+test("unequal wait totals include an absent site's zero in the per-run mean", () => {
+  const dirs = [copyOf("before"), copyOf("before"), copyOf("before")];
+  for (const [index, dir] of dirs.entries()) {
+    const launch = join(dir, "test-profile", "launch");
+    for (const file of readdirSync(launch)) {
+      const path = join(launch, file);
+      if (file.endsWith(".jsonl")) {
+        const records = readFileSync(path, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map(JSON.parse)
+          .filter(
+            (r) =>
+              !(index === 2 && r.kind === "wait" && r.function === "onepipeline::commandstep::run"),
+          );
+        for (const record of records) {
+          if (record.kind === "wait" && record.function === "onepipeline::commandstep::run")
+            record.wait_ns = index === 0 ? 100_000_000 : 300_000_000;
+        }
+        writeFileSync(path, `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+      } else if (file.endsWith(".waits.json")) {
+        const record = JSON.parse(readFileSync(path, "utf8"));
+        record.sites = record.sites.filter((site) => !(index === 2 && site.kind === "poll"));
+        for (const site of record.sites) {
+          if (site.kind === "poll") {
+            site.count = index === 0 ? 3 : 6;
+            site.s = index === 0 ? 0.3 : 0.9;
+          }
+        }
+        writeFileSync(path, JSON.stringify(record));
+      }
+    }
+  }
+  const out = compare(
+    ...dirs.map((dir, index) => `before:b${index}=${dir}`),
+    `after:on=${join(recorded, "after")}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  const waits = Object.fromEntries(
+    rows(out.stdout, "Waits at the changed sites").map((r) => [`${r[0]} ${r[1]}`, r]),
+  );
+  assert.deepEqual(waits["onepipeline::commandstep::run wait"].slice(2, 5), ["2.0", "4.0", "0.4"]);
+  assert.deepEqual(waits["harness::waited_on poll"].slice(2, 5), ["6.0", "0.0", "0.8"]);
+});
+
+test("journey launch means use unequal recorded counts and exclude a run without that journey", () => {
+  const high = copyOf("before");
+  const profiles = join(high, "test-profile", "e2e");
+  const file = readdirSync(profiles).find((name) => name.startsWith("command_step."));
+  const path = join(profiles, file);
+  const record = JSON.parse(readFileSync(path, "utf8"));
+  record.programs.onepipeline.count = 9;
+  writeFileSync(path, JSON.stringify(record));
+  const absent = onlyJourney("before", "dispatch_env_hook::");
+  const out = compare(
+    `before:low=${join(recorded, "before")}`,
+    `before:high=${high}`,
+    `before:absent=${absent}`,
+    `after:on=${join(recorded, "after")}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.deepEqual(rows(out.stdout, "CLI launches per changed journey"), [
+    [CANNOT_START, "7.0", "2.0"],
+  ]);
+});
+
+test("distinct passing sets from before runs are unioned for each after comparison", () => {
+  const command = onlyJourney("before", "command_step::");
+  const dispatch = onlyJourney("before", "dispatch_env_hook::");
+  const after = onlyJourney("after", "command_step::");
+  const out = compare(
+    `before:command=${command}`,
+    `before:dispatch=${dispatch}`,
+    `after:command=${after}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /2 e2e tests passed in a before run\./);
+  assert.match(
+    out.stdout,
+    /after command: 1 passed in the tier; of the before runs' passes, not run and passed here: dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone;/,
+  );
+});
+
+test("malformed metadata JSON reports its cause and recovery on stderr with a failure status", () => {
+  const dir = copyOf("after");
+  writeFileSync(join(dir, "meta.json"), "{");
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:badjson=${dir}`);
+  assert.equal(out.status, 1);
+  assert.equal(out.stdout, "");
+  assert.match(out.stderr, /child-waits: could not compare the input: .*JSON/);
+  assert.match(
+    out.stderr,
+    /\nnext: check that each DIR is one job's unzipped test-profile artifact beside its job\.log\n/,
+  );
+});
