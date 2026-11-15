@@ -10,3 +10,11 @@ values from the previous dispatch's local samply capture in scratch/3469976-1/p1
 and p1.json.syms.json. Exact producing source commit was not saved, so this is a
 parser regression fixture, not evidence about the finished branch. The whole capture
 is retained in that scratch directory. Its measured values are tested as recorded.
+
+The phase-profile fixture copies the 543 primary-process records (pids 90 and
+583) verbatim from the successful local kept-branch sample in
+scratch/3469976-4/local-debug-preserve-before/launch. Its complete sampled profile,
+symbols and source patch are committed under spikes/engine-startup/evidence.
+The engine implementation was committed as a792bafc; the original capture records
+8f51bf37 plus that saved working diff. It is local diagnostic evidence, never a
+hosted timing comparison.

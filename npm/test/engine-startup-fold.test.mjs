@@ -196,3 +196,21 @@ test("unknown commands and malformed operands are refused before a valid recorde
     0,
   );
 });
+
+test("the recorded kept-branch trace proves interval clipping, child programs and wait overlays", () => {
+  const input = new URL("./golden/engine-startup/phase-profile/", import.meta.url).pathname;
+  const run = spawnSync(process.execPath, [script.pathname, "phases", `baseline=${input}`], {
+    encoding: "utf8",
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(
+    run.stdout,
+    /spawn-call 346\.662 ms \+ operation-live outside spawn 1065\.186 ms \+ unallocated 1021\.073 ms = trace window 2432\.921 ms/,
+  );
+  assert.match(
+    run.stdout,
+    /git: 116\/116 timed; inclusive operation 1206\.399 ms; spawn-call 343\.355 ms/,
+  );
+  assert.match(run.stdout, /recorded child-wait loops: 768\.402 ms over 113 records/);
+  assert.match(run.stdout, /recorded child-wait loops: 951\.300 ms over 141 records/);
+});
