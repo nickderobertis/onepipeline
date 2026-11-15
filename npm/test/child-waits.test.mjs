@@ -6,7 +6,15 @@
 // and are never asserted: the comparison's figures come from hosted runs only.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  cpSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
@@ -163,4 +171,73 @@ test("a difference outside both spreads and with non-overlapping ranges is decid
   );
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, /Difference, after − before: 10.00 min — decided:/);
+});
+
+test("means, ranges, spreads and the share-scaled difference are calculated from every run", () => {
+  const out = compare(
+    "--share",
+    "0.5",
+    `before:low=${withMinutes("before", 10)}`,
+    `before:high=${withMinutes("before", 20)}`,
+    `after:low=${withMinutes("after", 40)}`,
+    `after:high=${withMinutes("after", 60)}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.deepEqual(rows(out.stdout, "E2e tier minutes"), [
+    ["before", "15.00", "10.00–20.00", "10.00"],
+    ["after", "50.00", "40.00–60.00", "20.00"],
+  ]);
+  assert.match(out.stdout, /Difference, after − before: 35.00 min — decided:/);
+  assert.match(
+    out.stdout,
+    /Typical pull request \(estimate, the difference × 0.500[^\n]+17.50 min/,
+  );
+});
+
+test("a missing baseline test and a failure with no successful rerun are both named", () => {
+  const missing = copyOf("after");
+  const profiles = join(missing, "test-profile", "e2e");
+  const profile = readdirSync(profiles).find((name) => name.startsWith("command_step."));
+  assert.ok(profile);
+  rmSync(join(profiles, profile));
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:missing=${missing}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, new RegExp(`not run and passed here: ${CANNOT_START};`));
+  const failed = copyOf("after");
+  appendFileSync(
+    join(failed, "job.log"),
+    `2026-11-15T16:39:24.0000000Z FAIL [ 1.000s] (1/2) onepipeline::e2e ${CANNOT_START}\n`,
+  );
+  const failure = compare(`before:off=${join(recorded, "before")}`, `after:failed=${failed}`);
+  assert.equal(failure.status, 0, failure.stderr);
+  assert.match(failure.stdout, new RegExp(`failed and not passed again: ${CANNOT_START}\\.`));
+});
+
+test("records without a completed e2e summary are refused with a recovery action", () => {
+  const dir = copyOf("after");
+  const log = join(dir, "job.log");
+  writeFileSync(log, readFileSync(log, "utf8").replace(/^.*Summary.*$/m, ""));
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:unfinished=${dir}`);
+  assert.equal(out.status, 1);
+  assert.match(out.stderr, /holds no completed e2e nextest run\nnext: fold a job/);
+});
+
+test("invalid metadata is refused instead of being rendered as a hosted run identity", () => {
+  for (const meta of [
+    null,
+    [],
+    { run: "one" },
+    { attempt: 0 },
+    { job: -1 },
+    { head: 4 },
+    { github_sha: [] },
+    { typo: 1 },
+  ]) {
+    const dir = copyOf("after");
+    writeFileSync(join(dir, "meta.json"), JSON.stringify(meta));
+    const out = compare(`before:off=${join(recorded, "before")}`, `after:bad=${dir}`);
+    assert.equal(out.status, 1, `accepted ${JSON.stringify(meta)}`);
+    assert.match(out.stderr, /meta.json.*invalid run metadata/);
+    assert.match(out.stderr, /next: use only/);
+  }
 });

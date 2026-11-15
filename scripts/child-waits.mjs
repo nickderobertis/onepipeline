@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { foldJob, jobFacts, readJob, Refusal } from "./launch-inventory.mjs";
 
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] This is the manually audited source-analysis selection for the frozen cabae915 experiment, not a producer schema or a continuing interface. The report quotes that commit's changed functions; deriving this selection from trace observations would hide sites that ran zero times. Nothing here lands, and any later prototype revision requires a new report audit.
 /** Every function whose child wait or poll a prototype changes, by prototype. */
 export const CHANGED_SITES = {
   exit: [
@@ -52,6 +53,7 @@ export const CHANGED_SITES = {
   ],
 };
 
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] The report audits every changed test body against 13eb521a and cabae915; this is that fixed experiment's explicit selection, including journeys absent on one platform. It is not a new independently versioned test registry, and this measurement branch never lands.
 /** Every journey whose test body the re-launch prototype changes. */
 export const CHANGED_JOURNEYS = [
   "adoption::a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_once",
@@ -115,6 +117,22 @@ export function runOf(side, name, dir) {
   const fold = foldJob(job);
   const metaFile = join(dir, "meta.json");
   const meta = existsSync(metaFile) ? JSON.parse(readFileSync(metaFile, "utf8")) : {};
+  const numeric = new Set(["run", "attempt", "job"]);
+  const textual = new Set(["head", "github_sha"]);
+  if (
+    meta === null ||
+    typeof meta !== "object" ||
+    Array.isArray(meta) ||
+    Object.entries(meta).some(([key, value]) =>
+      numeric.has(key)
+        ? !Number.isSafeInteger(value) || value <= 0
+        : !textual.has(key) || typeof value !== "string" || !/^[0-9a-f]{1,40}$/.test(value),
+    )
+  )
+    throw new Refusal(
+      `${metaFile}: invalid run metadata`,
+      "use only positive integer run, attempt and job fields, and hexadecimal head and github_sha strings",
+    );
   const waits = new Map();
   for (const w of fold.waits) {
     const key = `${functionOf(w.site)}\u0000${w.kind}`;

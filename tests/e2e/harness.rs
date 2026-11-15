@@ -68,15 +68,15 @@ pub mod spike_variant {
     /// names them.
     pub const SELECTED: &str = "";
 
-    /// Whether `name` is in effect: [`SELECTED`], unless the environment this test
+    /// Whether `variant` is in effect: [`SELECTED`], unless the environment this test
     /// process started in already chose, which is how a local slice tries one.
-    fn is_selected(name: &str) -> bool {
-        onevcs::spike_waits::is_selected(name)
+    fn is_selected(variant: onevcs::spike_waits::Variant) -> bool {
+        onevcs::spike_waits::is_selected(variant)
     }
 
     /// Whether the journeys that re-launch the CLI for one reading read it once.
     pub fn relaunch() -> bool {
-        is_selected("relaunch")
+        is_selected(onevcs::spike_waits::Variant::Relaunch)
     }
 
     /// The pause before the `looks`-th look again of a harness wait polling every
@@ -84,7 +84,9 @@ pub mod spike_variant {
     /// first and backing off to it. A wait every quarter second or longer is left as
     /// it is, because its predicate starts a process or re-reads a whole journal.
     pub fn pause(interval: std::time::Duration, looks: u32) -> std::time::Duration {
-        if !is_selected("adaptive") || interval >= std::time::Duration::from_millis(250) {
+        if !is_selected(onevcs::spike_waits::Variant::Adaptive)
+            || interval >= std::time::Duration::from_millis(250)
+        {
             return interval;
         }
         onevcs::spike_waits::backoff(looks, std::time::Duration::from_millis(1), interval)

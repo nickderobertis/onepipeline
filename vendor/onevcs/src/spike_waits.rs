@@ -24,32 +24,57 @@ use std::time::{Duration, Instant};
 /// The switch.
 pub const ENV: &str = "ONEPIPELINE_SPIKE_CHILD_WAITS";
 
-fn selected() -> &'static [String] {
-    static SELECTED: OnceLock<Vec<String>> = OnceLock::new();
+/// The closed vocabulary of this measurement's independently selectable options.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Variant {
+    /// Wake on a child exit or finished output capture.
+    Exit,
+    /// Start file polls short and cap at their original interval.
+    Adaptive,
+    /// Reuse stable CLI readings inside the selected journeys.
+    Relaunch,
+}
+
+fn invalid_selection(reason: &str) -> ! {
+    eprintln!("{ENV}: {reason}; expected a comma-separated list of exit, adaptive, relaunch");
+    std::process::exit(2)
+}
+
+fn selected() -> &'static [Variant] {
+    static SELECTED: OnceLock<Vec<Variant>> = OnceLock::new();
     SELECTED.get_or_init(|| {
-        std::env::var(ENV)
-            .unwrap_or_default()
+        let value = match std::env::var(ENV) {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(std::env::VarError::NotUnicode(_)) => invalid_selection("not valid Unicode"),
+        };
+        value
             .split(',')
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .map(str::to_owned)
+            .map(|name| match name {
+                "exit" => Variant::Exit,
+                "adaptive" => Variant::Adaptive,
+                "relaunch" => Variant::Relaunch,
+                _ => invalid_selection(&format!("unknown prototype {name:?}")),
+            })
             .collect()
     })
 }
 
 /// Whether the named prototype is in effect in this process.
-pub fn is_selected(name: &str) -> bool {
-    selected().iter().any(|chosen| chosen == name)
+pub fn is_selected(variant: Variant) -> bool {
+    selected().contains(&variant)
 }
 
 /// Whether exit notification is in effect.
 pub fn exit_notify() -> bool {
-    is_selected("exit")
+    is_selected(Variant::Exit)
 }
 
 /// Whether adaptive polls are in effect.
 pub fn adaptive() -> bool {
-    is_selected("adaptive")
+    is_selected(Variant::Adaptive)
 }
 
 /// Wait at most `upto` for `child` to exit, returning as soon as it does.
@@ -89,6 +114,7 @@ pub fn await_pid_exit(site: crate::launch_trace::Site, pid: u32, upto: Duration)
         // answer (a process already gone, or one this user cannot open) is
         // waited out as a plain sleep would have been.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): portable hosted journeys cannot safely force OpenProcess access failure without mocking the kernel or changing host privileges. It keeps the old bounded sleep on failure; successful and already-gone child paths are exercised. Production adoption must cover platform permission failures separately.
         if handle.is_null() {
             // ERROR_INVALID_PARAMETER: no such process, so it is already gone.
             if std::io::Error::last_os_error().raw_os_error() != Some(87) {
@@ -122,15 +148,18 @@ fn wait_handle(handle: std::os::windows::raw::HANDLE, upto: Duration) {
 
 #[cfg(target_os = "linux")]
 fn await_pid(pid: u32, upto: Duration) {
+    // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): real spawned PIDs fit pid_t, so this defensive conversion arm is outside the hosted workload. It retains the caller's bounded sleep; no saving is attributed to it, and testing an invented PID is not a realistic child journey.
     let Ok(raw) = libc::pid_t::try_from(pid) else {
         return std::thread::sleep(upto);
     };
     // SAFETY: `pidfd_open` takes a pid and flags and returns a descriptor this
     // function owns, or -1.
     let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, raw, 0) };
+    // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): the kernel returns an int descriptor, so an out-of-int syscall result is defensive only. Resource exhaustion or syscall interception would change the measured host; this preserves the old bounded sleep and is not priced as an optimization.
     let Ok(descriptor) = libc::c_int::try_from(descriptor) else {
         return std::thread::sleep(upto);
     };
+    // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): safely forcing pidfd_open to be unavailable requires a different kernel/seccomp policy, outside these hosted runners. ESRCH is exercised by the already-gone child test; other errors keep the original bounded sleep. Production adoption must validate unsupported-kernel behavior.
     if descriptor < 0 {
         // ESRCH: the process is already gone, and that is the answer.
         if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
@@ -155,6 +184,7 @@ fn await_pid(pid: u32, upto: Duration) {
 fn await_pid(pid: u32, upto: Duration) {
     // SAFETY: a fresh kqueue this function owns and closes below.
     let queue = unsafe { libc::kqueue() };
+    // llmlint: ignore[changed_behavior_has_e2e] Measurement-only fallback, never landed (a1): kqueue allocation failure cannot be forced safely in the hosted workload without exhausting descriptors or mocking the kernel. This retains the caller's bounded sleep; no saving is claimed for it, and production adoption must validate that resource-failure branch.
     if queue < 0 {
         return std::thread::sleep(upto);
     }
@@ -252,6 +282,63 @@ mod tests {
         let began = Instant::now();
         await_pid_exit(crate::launch_site!(), pid, Duration::from_secs(20));
         assert!(began.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn selection_probe() {
+        println!("selected={:?}", selected());
+    }
+
+    #[test]
+    fn the_selector_reads_only_known_variants_and_refuses_a_typo_in_a_fresh_process() {
+        let probe = |value: &str| {
+            std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                .args([
+                    "--exact",
+                    "spike_waits::tests::selection_probe",
+                    "--nocapture",
+                ])
+                .env(ENV, value)
+                .output()
+                .expect("the selector probe starts")
+        };
+        for (value, expected) in [
+            ("", "selected=[]"),
+            ("exit", "selected=[Exit]"),
+            ("adaptive", "selected=[Adaptive]"),
+            ("relaunch", "selected=[Relaunch]"),
+            (
+                "exit, adaptive,relaunch",
+                "selected=[Exit, Adaptive, Relaunch]",
+            ),
+        ] {
+            let output = probe(value);
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(expected),
+                "{output:?}"
+            );
+        }
+        let output = probe("adpative");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown prototype"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_selector_is_refused_in_a_fresh_process() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                "spike_waits::tests::selection_probe",
+                "--nocapture",
+            ])
+            .env(ENV, std::ffi::OsString::from_vec(vec![0xff]))
+            .output()
+            .expect("the selector probe starts");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not valid Unicode"));
     }
 
     fn quick_child() -> Child {

@@ -17,9 +17,7 @@
       {
         "name": "onepipeline",
         "path": "/work/onepipeline/target/debug/onepipeline",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 16.216591,
         "p10_ms": 15.738287,
@@ -28,9 +26,7 @@
       {
         "name": "onevcs",
         "path": "/work/onepipeline/target/debug/onevcs",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 8.386458,
         "p10_ms": 7.715077,
@@ -39,9 +35,7 @@
       {
         "name": "oneagentgraph",
         "path": "/work/onepipeline/target/debug/oneagentgraph",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 7.14017,
         "p10_ms": 6.792323,
@@ -50,9 +44,7 @@
       {
         "name": "oneharness",
         "path": "/work/onepipeline/target/debug/oneharness",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 6.814344,
         "p10_ms": 6.649352,
@@ -61,9 +53,7 @@
       {
         "name": "fake-gh",
         "path": "/work/onepipeline/target/debug/fake-gh",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 3.776671,
         "p10_ms": 3.515768,
@@ -72,9 +62,7 @@
       {
         "name": "git",
         "path": "/usr/bin/git",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 3.94035,
         "p10_ms": 3.853005,
@@ -83,9 +71,7 @@
       {
         "name": "onevcs (PATH)",
         "path": "/usr/local/bin/onevcs",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 4.842135,
         "p10_ms": 4.833639,
@@ -94,9 +80,7 @@
       {
         "name": "onetaskgraph",
         "path": "/usr/local/bin/onetaskgraph",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 7.99704,
         "p10_ms": 7.445958,
@@ -105,10 +89,7 @@
       {
         "name": "node",
         "path": "/usr/local/bin/node",
-        "args": [
-          "-e",
-          "0"
-        ],
+        "args": ["-e", "0"],
         "runs": 3,
         "median_ms": 33.373837,
         "p10_ms": 33.280685,
@@ -117,10 +98,7 @@
       {
         "name": "python3",
         "path": "/usr/local/bin/python3",
-        "args": [
-          "-c",
-          "pass"
-        ],
+        "args": ["-c", "pass"],
         "runs": 3,
         "median_ms": 22.738853,
         "p10_ms": 22.676627,
@@ -129,10 +107,7 @@
       {
         "name": "python",
         "path": "/usr/local/bin/python",
-        "args": [
-          "-c",
-          "pass"
-        ],
+        "args": ["-c", "pass"],
         "runs": 3,
         "median_ms": 24.152305,
         "p10_ms": 23.801984,
@@ -141,10 +116,7 @@
       {
         "name": "bash",
         "path": "/usr/bin/bash",
-        "args": [
-          "-c",
-          ":"
-        ],
+        "args": ["-c", ":"],
         "runs": 3,
         "median_ms": 4.373098,
         "p10_ms": 3.947694,
@@ -153,10 +125,7 @@
       {
         "name": "sh",
         "path": "/usr/bin/sh",
-        "args": [
-          "-c",
-          ":"
-        ],
+        "args": ["-c", ":"],
         "runs": 3,
         "median_ms": 3.216472,
         "p10_ms": 3.162299,
@@ -165,9 +134,7 @@
       {
         "name": "just",
         "path": "/usr/local/bin/just",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 3.783915,
         "p10_ms": 3.214776,
@@ -176,9 +143,7 @@
       {
         "name": "cargo",
         "path": "/usr/local/bin/cargo",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 45.357113,
         "p10_ms": 43.843568,
@@ -187,18 +152,13 @@
       {
         "name": "onepipeline (instrumented)",
         "path": "/work/onepipeline/target/llvm-cov-target/debug/onepipeline",
-        "args": [
-          "--version"
-        ],
+        "args": ["--version"],
         "runs": 3,
         "median_ms": 18.562186,
         "p10_ms": 18.316491,
         "p90_ms": 19.85472
       }
     ],
-    "git_on_path": [
-      "/usr/bin/git",
-      "/bin/git"
-    ]
+    "git_on_path": ["/usr/bin/git", "/bin/git"]
   }
 }

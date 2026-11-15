@@ -1,1 +1,26 @@
-{"test":"dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone","sites":[{"kind":"poll","site":"tests/e2e/harness.rs:4350","count":4,"s":0.452288843,"interval_s":null},{"kind":"sleep","site":"tests/e2e/harness.rs:4387","count":29,"s":0.446461179,"interval_s":0.02},{"kind":"span","site":"tests/e2e/harness.rs:6926","count":2,"s":0.314807495,"interval_s":null}]}
+{
+  "test": "dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone",
+  "sites": [
+    {
+      "kind": "poll",
+      "site": "tests/e2e/harness.rs:4350",
+      "count": 4,
+      "s": 0.452288843,
+      "interval_s": null
+    },
+    {
+      "kind": "sleep",
+      "site": "tests/e2e/harness.rs:4387",
+      "count": 29,
+      "s": 0.446461179,
+      "interval_s": 0.02
+    },
+    {
+      "kind": "span",
+      "site": "tests/e2e/harness.rs:6926",
+      "count": 2,
+      "s": 0.314807495,
+      "interval_s": null
+    }
+  ]
+}
