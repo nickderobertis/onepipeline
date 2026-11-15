@@ -632,6 +632,11 @@ _smoke-run *args:
 npm-launcher:
     @RUSTFLAGS="-D warnings" node --test npm/test/launcher-process.test.mjs npm/test/spawn-support.test.mjs
 
+# The launcher's staged debug tree is separate from the suite's. Warm it through
+# the same helpers that choose its host target, target directory and Cargo call.
+_npm-launcher-build:
+    @RUSTFLAGS="-D warnings" node --input-type=module -e 'import { hostTarget, run } from "./npm/test/install-support.mjs"; run("cargo", ["build", "--locked", "--bin", "onepipeline", "--target", hostTarget()]);'
+
 # Outside `check` and `gate` because uv fetches the wheel from a package
 # registry; CI's `release-compat` job calls this, and without uv it fails naming
 # it. It runs the `onepipeline-release-compat` project's uncached target, which
