@@ -812,7 +812,8 @@ function union(intervals, from, to) {
 }
 
 const programOf = (s) => (s.program === "git" && s.sub ? `git ${s.sub}` : s.program);
-const siteOf = (s) => `${s.function} (${s.site.replace(/^.*?(src\/|vendor\/)/, "$1")})`;
+const siteOf = (s) =>
+  `${s.function} (${s.site.replaceAll("\\", "/").replace(/^.*?(src\/|vendor\/)/, "$1")})`;
 const isTestBinary = (p) => Boolean(p) && /^[a-z0-9_]+-[0-9a-f]{16}$/.test(p.exe);
 
 /** A job folded: every figure the tables print, as data. */

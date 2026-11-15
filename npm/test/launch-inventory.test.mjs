@@ -1043,3 +1043,33 @@ test("a wait folded into a start or exit requires its measured duration and poll
     assert.match(run("fold", `${kind}Recovered=${dir}`).stdout, /0 records of no known shape/);
   }
 });
+
+test("Windows source separators match the same Linux call sites across jobs", () => {
+  const dir = join(scratch, "windows-sites");
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  for (const f of readdirSync(e2e)) {
+    const path = join(e2e, f);
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    record.os = "windows";
+    writeFileSync(path, JSON.stringify(record));
+  }
+  const launch = join(dir, "test-profile", "launch");
+  for (const f of readdirSync(launch).filter((f) => f.endsWith(".jsonl"))) {
+    const path = join(launch, f);
+    const events = readFileSync(path, "utf8").trim().split("\n").map(JSON.parse);
+    for (const event of events)
+      for (const field of ["site", "wait_site"])
+        if (typeof event[field] === "string")
+          event[field] = event[field].replaceAll("/", String.fromCharCode(92));
+    writeFileSync(path, `${events.map(JSON.stringify).join("\n")}\n`);
+  }
+  const r = run("fold", `linux=${recorded}`, `windows=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  const sites = rows(r.stdout, "The 20 call sites starting the most on windows, beside the others");
+  assert.ok(sites.length > 0);
+  for (const site of sites) {
+    assert.equal(site[1], site[2], site[0]);
+    assert.ok(Number(site[1]) > 0, site[0]);
+  }
+});
