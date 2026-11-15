@@ -851,7 +851,7 @@ test("OS coverage joins reused PIDs by time and program, and never consumes a fa
     r.stdout,
   );
   assert.ok(
-    coverage.some((c) => c[0] === "uninstrumented descendant" && c[1] === "sh" && c[2] === "git"),
+    coverage.some((c) => c[0] === "unproven OS lineage" && c[1] === "sh" && c[2] === "git"),
     r.stdout,
   );
   assert.match(r.stdout, /Traced starts the OS record has no exec for .*git 2/);
@@ -1226,4 +1226,72 @@ test("OS scope excludes another journey and out-of-window ETW while retaining un
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /and 3 OS records outside the tier/);
   assert.match(r.stdout, /88 process starts observed/);
+});
+
+test("ETW separates rooted descendants from unknown ancestry without pricing host processes", () => {
+  const dir = join(scratch, "etw-lineage");
+  cpSync(recorded, dir, { recursive: true });
+  const os = join(dir, "os");
+  const observed = withModule(
+    `process.stdout.write(JSON.stringify(m.readOs(${JSON.stringify(os)})));`,
+  );
+  const parent = observed.find((e) => e.exe === "git-upload-pack");
+  assert.ok(parent, "the recorded fixture has a nested git child");
+  const events = observed
+    .filter((e) => !e.reexec)
+    .map((e) => ({
+      pid: e.pid,
+      ppid: e.ppid ?? 0,
+      image: `C:\\x\\${e.exe}.exe`,
+    }));
+  events.push(
+    { pid: 900001, ppid: 999999, image: "C:\\host\\sidecar.exe" },
+    { pid: 900002, ppid: 900001, image: "C:\\host\\sidecar-helper.exe" },
+    { pid: 900003, ppid: parent.pid, image: "C:\\test\\rooted-extra.exe" },
+    { pid: 900004, ppid: 900005, image: "C:\\host\\cycle-a.exe" },
+    { pid: 900005, ppid: 900004, image: "C:\\host\\cycle-b.exe" },
+    { pid: 901000, ppid: 999998, image: "C:\\test\\e2e-0123456789abcdef.exe" },
+    { pid: 901001, ppid: 901000, image: "C:\\test\\native-tool.exe" },
+    { pid: 901002, ppid: 901001, image: "C:\\test\\native-grandchild.exe" },
+    { pid: 902000, ppid: 999997, image: "C:\\host\\onepipeline.exe" },
+    { pid: 902001, ppid: 902000, image: "C:\\host\\git.exe" },
+    { pid: 903000, ppid: 901000, image: "C:\\test\\onevcs.exe" },
+    { pid: 903001, ppid: 903000, image: "C:\\test\\git.exe" },
+  );
+  for (const f of readdirSync(os)) rmSync(join(os, f));
+  writeFileSync(
+    join(os, "etw-starts.jsonl"),
+    `${events.map((e) => JSON.stringify(e)).join("\n")}\n`,
+  );
+  const r = run("fold", `etw=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  const coverage = rows(r.stdout, "Coverage against the operating system's own record");
+  for (const program of ["sidecar", "sidecar-helper", "cycle-a", "cycle-b"]) {
+    const row = coverage.find((c) => c[2] === program);
+    assert.ok(row, program);
+    assert.equal(row[0], "unproven OS lineage", program);
+  }
+  assert.deepEqual(
+    coverage.find((c) => c[2] === "rooted-extra"),
+    ["uninstrumented descendant", "git-upload-pack", "rooted-extra", "1"],
+  );
+  assert.deepEqual(
+    coverage.find((c) => c[2] === "native-grandchild"),
+    ["uninstrumented descendant", "native-tool", "native-grandchild", "1"],
+  );
+  assert.deepEqual(
+    coverage.find(
+      (c) => c[0] === "unproven OS lineage" && c[1] === "onepipeline" && c[2] === "git",
+    ),
+    ["unproven OS lineage", "onepipeline", "git", "1"],
+  );
+  assert.deepEqual(
+    coverage.find(
+      (c) =>
+        c[0] === "MISSED: an engine process with no trace" && c[1] === "onevcs" && c[2] === "git",
+    ),
+    ["MISSED: an engine process with no trace", "onevcs", "git", "1"],
+  );
+  assert.ok(rows(r.stdout, "Programs started").every((c) => !c[2].startsWith("sidecar")));
+  assert.ok(rows(r.stdout, "Per-start cost").every((c) => !c[0].startsWith("sidecar")));
 });

@@ -1136,6 +1136,31 @@ export function coverage(os, t, records) {
       if (p.t >= parent.t - SLACK && p.t <= e.t + SLACK && (best == null || p.t < best.t)) best = p;
     return best;
   };
+  const lineage = new Map();
+  const descendsFromTier = (event) => {
+    const path = [];
+    const seen = new Set();
+    let current = event;
+    let proven = false;
+    while (current) {
+      if (lineage.has(current)) {
+        proven = lineage.get(current);
+        break;
+      }
+      // Corrupt input or a reused PID must not turn an ancestry walk into a loop.
+      if (seen.has(current)) break;
+      seen.add(current);
+      path.push(current);
+      const parent = parentOf(current);
+      if (/^e2e(?:-[0-9a-f]{16})?$/.test(current.exe) || starterOf(current, parent)) {
+        proven = true;
+        break;
+      }
+      current = parent;
+    }
+    for (const e of path) lineage.set(e, proven);
+    return proven;
+  };
   const id = (file, pid, instance = 0) => `${file}\u0000${pid}\u0000${instance}`;
   const expected = new Map();
   const byChild = new Map();
@@ -1225,9 +1250,9 @@ export function coverage(os, t, records) {
       const left = recorded.get(e.exe) ?? 0;
       if (left > 0) recorded.set(e.exe, left - 1);
       kind = left > 0 ? "test process (records)" : "test process, beyond the records";
-    } else if (["onepipeline", "onevcs"].includes(starterName))
+    } else if (["onepipeline", "onevcs"].includes(starterName) && descendsFromTier(e))
       kind = "MISSED: an engine process with no trace";
-    else kind = "uninstrumented descendant";
+    else kind = descendsFromTier(e) ? "uninstrumented descendant" : "unproven OS lineage";
     const k = `${kind}\u0000${starterName}\u0000${e.exe}`;
     rows.set(k, {
       kind,
