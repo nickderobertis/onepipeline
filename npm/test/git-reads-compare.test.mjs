@@ -28,11 +28,15 @@ function withSides(body) {
     join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "compare-test-"),
   );
   try {
-    const side = (label, seconds = [60], status = "PASS") => {
+    const side = (label, seconds = [60], status = "PASS", platform = "linux") => {
       for (const [i, duration] of seconds.entries()) {
-        const dir = join(scratch, label, `attempt-${i}`, "test-linux");
+        const dir = join(scratch, label, `attempt-${i}`, `test-${platform}`);
         mkdirSync(dir, { recursive: true });
         cpSync(recorded, dir, { recursive: true });
+        const hostPath = join(dir, "test-profile/launch-host.json");
+        const host = JSON.parse(readFileSync(hostPath, "utf8"));
+        host.platform = { linux: "linux", macos: "darwin", windows: "win32" }[platform];
+        writeFileSync(hostPath, JSON.stringify(host));
         const log = readFileSync(join(dir, "job.log"), "utf8")
           .replace(
             /(^.*Summary \[ {2}60\.000s\].*$)/m,
@@ -224,5 +228,72 @@ test("the vendored-test wrapper refuses missing and unowned destinations without
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /unowned existing destination/);
     assert.equal(readFileSync(keep, "utf8"), "keep this checkout");
+  });
+});
+
+test("macOS and Windows producer platforms are normalized into their comparison rows", () => {
+  withSides((side) => {
+    for (const platform of ["macos", "windows"]) {
+      const result = run(
+        "compare",
+        side(`before-${platform}`, [60, 60, 60], "PASS", platform),
+        side(`after-${platform}`, [30, 30, 30], "PASS", platform),
+      );
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(result.stdout.includes(`| ${platform} | 3/3 | 1.000 | 0.500 | 0.500 | decided |`));
+    }
+    const before = side("before");
+    const after = side("after");
+    const path = join(jobOf(after), "test-profile/launch-host.json");
+    const host = JSON.parse(readFileSync(path, "utf8"));
+    host.platform = "unknown-platform";
+    writeFileSync(path, JSON.stringify(host));
+    const refused = run("compare", before, after);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unsupported host platform/);
+  });
+});
+
+test("the local collector refuses old output and points at a real cargo failure's log", () => {
+  const collector = join(root, "spikes/git-reads/local-slice.sh");
+  withSides((side) => {
+    const dir = jobOf(side("collector"));
+    const old = spawnSync("bash", [collector, dir], { encoding: "utf8" });
+    assert.equal(old.status, 1);
+    assert.match(old.stderr, /next: choose a new output directory/);
+    const failed = spawnSync("bash", [collector, join(dir, "fresh")], {
+      cwd: "/",
+      encoding: "utf8",
+    });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /command failed; evidence: .*job.log/);
+    assert.match(failed.stderr, /next: read that log/);
+    assert.match(
+      readFileSync(join(dir, "fresh/stock/local/test-linux/job.log"), "utf8"),
+      /could not find.*Cargo.toml/,
+    );
+  });
+});
+
+test("malformed coverage evidence is refused and job diagnostic re-runs are named separately", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const path = join(jobOf(after), "job.log");
+    const log = readFileSync(path, "utf8");
+    for (const percent of ["1..2", "101", "-1", "NaN"]) {
+      writeFileSync(path, `${log}\n2026-11-14T09:30:00Z lines percent: ${percent}\n`);
+      const result = run("compare", before, after);
+      assert.equal(result.status, 1, percent);
+      assert.match(result.stderr, /invalid coverage percentage/);
+    }
+    writeFileSync(
+      path,
+      `${log}\n2026-11-14T09:30:00Z rerun-failed: re-run 1 of 3: onepipeline::e2e ${names[0]} passed\n2026-11-14T09:30:01Z rerun-failed: re-run 2 of 3: onepipeline::e2e ${names[0]} FAILED\n`,
+    );
+    const result = run("compare", before, after);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /diagnostic re-runs: .*1 passed, 1 failed/);
+    assert.match(result.stdout, /all 2 passed/);
   });
 });

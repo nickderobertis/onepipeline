@@ -113,7 +113,6 @@ pub mod rules;
 mod rules_apply;
 mod session;
 mod significance;
-// Prototype (spike-git-reads, never lands): see the module.
 pub mod spike_reads;
 mod stack_base;
 mod standing_comment;
