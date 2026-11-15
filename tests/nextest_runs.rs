@@ -349,6 +349,150 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
     );
 }
 
+#[test]
+fn eight_idle_journeys_share_the_default_slots_while_other_tests_use_the_cpu_cap() {
+    let barrier = r#"
+fn meet() {
+    let name = std::thread::current().name().unwrap().replace("::", "-");
+    std::fs::write(format!("ready-{name}"), "ready").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::read_dir(".").unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("ready-"))
+        .count() < 8
+    {
+        assert!(std::time::Instant::now() < deadline, "eight idle journeys never shared the default slots");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+"#;
+    let config = repository_config();
+    let mut tests = barrier.to_owned();
+    tests.push_str("mod adoption {\n");
+    let idle_names = [
+        "a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger",
+        "a_delivery_that_broke_leaves_the_note_owed_and_is_tried_again",
+        "a_dependency_inside_the_nodes_own_repository_is_not_pinned_against_git",
+        "a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_once",
+        "a_fast_local_direct_node_naming_no_target_is_held_for_its_producers_default_target",
+        "a_fast_node_pins_against_git_and_is_told_when_the_release_arrives",
+        "a_fast_node_whose_probe_could_not_answer_is_held_as_a_draft",
+        "a_held_node_survives_its_driver_stop_and_shutdown_and_lands_once_adopted",
+    ];
+    for function in idle_names {
+        tests.push_str(&format!("#[test] fn {function}() {{ super::meet(); }}\n"));
+    }
+    tests.push_str("}\n");
+    for profile in ["default", "ci"] {
+        let fixture = Fixture::new(
+            &format!("idle-default-{profile}"),
+            SCHEDULING_MANIFEST,
+            &[
+                ("src/lib.rs", ""),
+                (".config/nextest.toml", &config),
+                ("tests/e2e.rs", &tests),
+                ("tests/note.rs", ""),
+                ("tests/release_channel.rs", ""),
+                ("tests/pooled_slot.rs", ""),
+                ("tests/narrow_write.rs", ""),
+                (
+                    "tests/oneagentgraph_liveness.rs",
+                    "#[test] fn cpu_work() {}\n",
+                ),
+            ],
+        );
+        let groups = fixture
+            .command("cargo")
+            .args([
+                "nextest",
+                "show-config",
+                "test-groups",
+                "--profile",
+                profile,
+                "--show-default",
+                "--no-pager",
+                "--color",
+                "never",
+            ])
+            .output()
+            .expect("nextest reports the real configured groups");
+        let groups_log = format!("{}{}", stdout(&groups), stderr(&groups));
+        assert!(groups.status.success(), "{groups_log}");
+        let cpu = groups_log
+            .split("group: cpu (max threads = num-cpus)")
+            .nth(1)
+            .expect("the CPU group retains the per-core cap")
+            .split("group:")
+            .next()
+            .unwrap();
+        assert!(
+            cpu.contains("oneagentgraph_liveness:") && cpu.contains("cpu_work"),
+            "{groups_log}"
+        );
+        assert!(
+            groups_log.contains("group: e2e (max threads = 8)"),
+            "{groups_log}"
+        );
+        let (output, log) = fixture.nextest_run(&["--profile", profile]);
+        assert!(
+            output.status.success() && log.contains("9 tests run: 9 passed"),
+            "{profile}: {log}"
+        );
+    }
+}
+
+#[test]
+fn a_load_sensitive_adoption_keeps_two_slots_beside_wait_bound_journeys() {
+    let tests = r#"
+fn work() {
+    let claim = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open("running")
+        .expect("two process trees overlapped in two global slots");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    drop(claim);
+    std::fs::remove_file("running").unwrap();
+}
+mod adoption_check {
+    #[test]
+    fn adopting_a_run_onevcs_says_can_no_longer_complete_drives_it_on_and_surfaces_the_rule() {
+        super::work();
+    }
+}
+mod adoption {
+    #[test]
+    fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
+        super::work();
+    }
+}
+"#;
+    // Two global slots distinguish the adoption's two-slot process tree from a
+    // one-slot waiter. The real scheduler must serialize them, on both profiles.
+    for profile in ["default", "ci"] {
+        let fixture = Fixture::new(
+            &format!("adoption-load-{profile}"),
+            SCHEDULING_MANIFEST,
+            &[
+                ("src/lib.rs", ""),
+                (".config/nextest.toml", &repository_config()),
+                ("tests/e2e.rs", tests),
+                ("tests/note.rs", ""),
+                ("tests/release_channel.rs", ""),
+                ("tests/pooled_slot.rs", ""),
+                ("tests/narrow_write.rs", ""),
+                ("tests/oneagentgraph_liveness.rs", ""),
+            ],
+        );
+        let (output, log) = fixture.nextest_run(&["--profile", profile, "--test-threads", "2"]);
+        assert!(output.status.success(), "{profile}: {log}");
+        assert!(
+            log.contains("2 tests run: 2 passed"),
+            "both journeys ran under {profile}: {log}"
+        );
+    }
+}
+
 /// The wrapper and reporter must explain an incomplete run even if nextest's
 /// scheduler no longer reproduces the bug that first produced this output.
 /// A subprocess fixture supplies that boundary condition; the real scripts
