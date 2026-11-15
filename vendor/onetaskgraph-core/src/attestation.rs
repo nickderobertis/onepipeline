@@ -37,7 +37,17 @@
 //!   own, for an item copied from nowhere. A copy files the far end under another id and
 //!   records where it came from and the root that came from, so every copy of one far end
 //!   names one root without any copy between them being read — or being there at all — while
-//!   two items sharing a title never do. A document has none;
+//!   two items sharing a title never do. A copy out of a source declared private into one that
+//!   is not records neither, so as not to name that source: where any source is declared
+//!   private, a root in a source that is not — a far end recording none, or the item a far
+//!   end records, which is read once for the root it records in turn — is named instead by the
+//!   root of the one item of a source declared private whose `onetaskgraph.copies` link names
+//!   it: the item it was copied from.
+//!   So an edge to `authoring:a` and its copy's edge to `plans:I_x`, where `authoring:a` links
+//!   to `plans:I_x`, are both `[<kind>, "task", "lineage:authoring:a"]`. No link, two links,
+//!   or a private source that cannot be asked leave the far end its own id, exactly as before.
+//!   Every edge whose far end no copy made is spelled as it always was, so a record taken over
+//!   one reads the same in every release since attestations landed. A document has none;
 //! - `metadata`: every caller-owned metadata key and its value, but those the record
 //!   `excludes`.
 //!

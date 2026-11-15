@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.97"
 name = "onetaskgraph-core"
-version = "0.14.15"
+version = "0.14.16"
 authors = ["Nick DeRobertis"]
 build = false
 autolib = false
@@ -209,21 +209,21 @@ features = [
 ]
 
 [dependencies.onetaskgraph-github-projects]
-version = "=0.14.15"
+version = "=0.14.16"
 optional = true
 
 [dependencies.onetaskgraph-in-memory]
-version = "=0.14.15"
+version = "=0.14.16"
 
 [dependencies.onetaskgraph-linear]
-version = "=0.14.15"
+version = "=0.14.16"
 optional = true
 
 [dependencies.onetaskgraph-local-md]
-version = "=0.14.15"
+version = "=0.14.16"
 
 [dependencies.onetaskgraph-plugin-api]
-version = "=0.14.15"
+version = "=0.14.16"
 
 [dependencies.privateterms]
 version = "0.1.0"

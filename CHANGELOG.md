@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.1](https://github.com/nickderobertis/onepipeline/compare/v0.113.0...v0.113.1) - 2026-11-14
+
+### Fixed
+
+- *(deps)* link the plan store whose attestations survive a copy ([#1582](https://github.com/nickderobertis/onepipeline/pull/1582))
+
+## [0.113.0](https://github.com/nickderobertis/onepipeline/compare/v0.112.0...v0.113.0) - 2026-11-14
+
+### Added
+
+- *(deps)* [**breaking**] link the onetaskgraph release that projects lists and maps onto board fields ([#1583](https://github.com/nickderobertis/onepipeline/pull/1583))
+
 ## [0.112.0](https://github.com/nickderobertis/onepipeline/compare/v0.111.0...v0.112.0) - 2026-11-14
 
 ### Added
