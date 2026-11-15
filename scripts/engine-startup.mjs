@@ -28,7 +28,7 @@ export function main(args) {
       const n = r?.lives.length ?? 0;
       const mean = n ? r.lives.reduce((a, b) => a + b, 0) / n / 1e6 : null;
       lines.push(
-        `${verb}: ${mean == null ? "not measured" : `${mean.toFixed(6)} ms mean; ${n} completed / ${r.count} observed`}`,
+        `${verb}: ${mean == null ? "not measured" : `${mean.toFixed(6)} ms mean`}; ${n} completed / ${r?.count ?? 0} observed`,
       );
     }
     lines.push(

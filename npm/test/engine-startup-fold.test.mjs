@@ -117,3 +117,45 @@ test("profiling command refuses an unrelated executable before attempting a capt
   assert.equal(run.status, 2, run.stderr);
   assert.match(run.stderr, /expected the compiled e2e-HASH binary/);
 });
+
+test("unfinished launches stay in observed counts and never become zero-duration samples", async () => {
+  const { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import(
+    "node:fs"
+  );
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-incomplete-"),
+  );
+  try {
+    cpSync(fixture.pathname, root, { recursive: true });
+    const dir = join(root, "test-profile/launch");
+    const file = join(
+      dir,
+      readdirSync(dir).find((name) => name.endsWith(".jsonl")),
+    );
+    const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+    const start = records.find((r) => r.kind === "proc" && r.verb === "start");
+    const partial = { ...start, pid: start.pid + 10000000 };
+    writeFileSync(file, [...records, partial].map(JSON.stringify).join("\n") + "\n");
+    const mixed = spawnSync(process.execPath, [script.pathname, "fold", `mixed=${root}`], {
+      encoding: "utf8",
+    });
+    assert.equal(mixed.status, 0, mixed.stderr);
+    assert.match(mixed.stdout, /start: 50\.479360 ms mean; 1 completed \/ 2 observed/);
+    writeFileSync(
+      file,
+      records
+        .filter((r) => !(r.kind === "end" && r.pid === start.pid))
+        .map(JSON.stringify)
+        .join("\n") + "\n",
+    );
+    const none = spawnSync(process.execPath, [script.pathname, "fold", `none=${root}`], {
+      encoding: "utf8",
+    });
+    assert.equal(none.status, 0, none.stderr);
+    assert.match(none.stdout, /start: not measured; 0 completed \/ 1 observed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

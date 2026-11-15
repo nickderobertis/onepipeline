@@ -6,6 +6,7 @@ import gzip
 import json
 import math
 import re
+from pathlib import Path
 
 
 def read_json(path):
@@ -25,7 +26,11 @@ def at(values, index, label):
 
 
 def number(value, label):
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+    try:
+        valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        valid = False
+    if not valid:
         invalid(f'{label}: expected a finite nonnegative number')
     return value
 
@@ -53,7 +58,8 @@ def fold(profile, symbols):
     symbols = mapping(symbols, 'symbols')
     mapping(profile['meta'], 'profile metadata')
     if profile['meta']['preprocessedProfileVersion'] != 49:
-        invalid('expected samply 0.13.1 processed profile format 49; record with the pinned profiler')
+        version = (Path(__file__).resolve().parent.parent / 'spikes/engine-startup/samply-version.txt').read_text().strip()
+        invalid(f'expected samply {version} processed profile format 49; record with the pinned profiler')
     if profile['meta']['sampleUnits']['threadCPUDelta'] != 'µs':
         raise ValueError('expected samply threadCPUDelta in microseconds')
     strings = sequence(symbols['string_table'], 'symbol strings')
@@ -118,9 +124,11 @@ def fold(profile, symbols):
                 modules['::'.join(owner.lstrip('<').split('::')[:2])] += cpu
         first = threads[0]
         start, end = first.get('processStartupTime'), first.get('processShutdownTime')
-        if start is not None and end is not None:
+        if start is not None:
             number(start, 'process start')
+        if end is not None:
             number(end, 'process end')
+        if start is not None and end is not None:
             if end < start:
                 invalid('process end precedes its start')
         life = f'{end-start:.3f} ms' if start is not None and end is not None else 'not measured'

@@ -53,6 +53,21 @@ test("sample fold validates corrupt tables and preserves multithread and unresol
     for (const [change, message] of [
       [
         (p) => {
+          delete p.threads[0].processShutdownTime;
+          p.threads[0].processStartupTime = -1;
+        },
+        /finite nonnegative/,
+      ],
+      [
+        (p) => {
+          delete p.threads[0].processStartupTime;
+          p.threads[0].processShutdownTime = -1;
+        },
+        /finite nonnegative/,
+      ],
+
+      [
+        (p) => {
           p.threads[0].samples.length += 1;
         },
         /sample columns/,
@@ -117,8 +132,47 @@ test("sample fold validates corrupt tables and preserves multithread and unresol
       assert.equal(bad.status, 2, bad.stdout);
       assert.match(bad.stderr, message);
     }
+    const fallback = run((p) => {
+      for (const lib of p.libs) lib.debugName = "missing-symbol-library";
+    });
+    assert.equal(fallback.status, 0, fallback.stderr);
+    assert.match(fallback.stdout, /missing-symbol-library!unresolved/);
+    const huge = structuredClone(saved);
+    huge.threads[0].samples.threadCPUDelta[0] = "huge-integer-placeholder";
+    writeFileSync(
+      path,
+      JSON.stringify(huge).replace('"huge-integer-placeholder"', "1" + "0".repeat(400)),
+    );
+    const overflow = spawnSync("python", [script, path, symbols], { encoding: "utf8" });
+    assert.equal(overflow.status, 2);
+    assert.match(overflow.stderr, /finite nonnegative/);
+    assert.doesNotMatch(overflow.stderr, /Traceback/);
     assert.equal(run(() => {}).status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recorded attribution rows conserve CPU and stop at the first 80-percent crossing", () => {
+  const run = spawnSync("python", [script, profile, symbols], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  for (const [heading, expected] of [
+    ["nearest first-party module", 81.28],
+    ["nearest first-party function", 80.22],
+    ["self function", 80.14],
+  ]) {
+    const lines = run.stdout.slice(run.stdout.indexOf(heading)).split("\n").slice(1);
+    const rows = [];
+    for (const line of lines) {
+      if (!line.startsWith("  ")) break;
+      const m = /^  ([\d.]+) ms \(([\d.]+)%; cumulative ([\d.]+)%\)/.exec(line);
+      assert.ok(m, line);
+      rows.push({ ms: Number(m[1]), cumulative: Number(m[3]) });
+    }
+    assert.equal(rows.at(-1).cumulative, expected);
+    assert.ok(rows.at(-2).cumulative < 80);
+    const sum = rows.reduce((total, row) => total + row.ms, 0);
+    const rounding = ((rows.length * 0.0005) / 265.121) * 100 + 0.01;
+    assert.ok(Math.abs((sum / 265.121) * 100 - expected) < rounding);
   }
 });
