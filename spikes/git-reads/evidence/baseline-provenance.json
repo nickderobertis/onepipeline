@@ -11,6 +11,6 @@
     }
   ],
   "raw_artifact_root": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-2/sides/baseline",
-  "fold": "readSide(\"baseline\", raw_artifact_root) at30cf54eb, then render([side]) atb7fca28e; only explanatory duration wording changed between those commits",
+  "fold": "readSide(\"baseline\", raw_artifact_root) at30cf54eb, then render([side]) atb7fca28e; only explanatory duration wording changed between those commits; supplementary baseline-nextest-summaries.json.gz uses existing nextestRuns(log) export and each version profile run_id at9619c9c3, retaining nonpassing/diagnostic summary records without inferring absent names",
   "scope": "Earlier-commit hosted baseline, not prototype timing. Counts preserve frozen inventory launch attempts, including explicit failed spawns; their known spawn-call cost is separate from recorded launch durations and launches lacking an exit duration. Linux attempt1 has2154 retained passes plus one inferred under a47; attempt2 has2155 retained passes. No after measurements."
 }
