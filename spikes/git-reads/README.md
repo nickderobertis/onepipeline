@@ -11,7 +11,8 @@ with test-profile/, timestamped job.log and meta.json):
 
 The output contains run/job identities, processors, timing, selection, cache
 receipts, named outcomes, mean differences, spread decisions, PR scaling and Git
-starts/lifetimes by verb, shape and engine-owned site. Use `counts` instead of
+launch attempts/recorded durations by verb, shape and engine-owned site.
+Failed spawn calls are costed separately; missing exit durations remain unknown. Use `counts` instead of
 `compare` for local verification; shared-host durations are never priced.
 
 Preserved baseline facts and named outcomes are in evidence/*.gz; use gzip -dc.
@@ -37,7 +38,7 @@ the executable check evidence at its cited source commit unchanged.
   their worktrees/branches. Further rounds wait for child-waits completion under
   a52. Poll about every15minutes and respect the API reserve.
 
-Local code proof: 60 fold/command tests,17 prototype tests, the six-mode slice's
+Local code proof: 62 fold/command tests,17 prototype tests, the six-mode slice's
 12 e2e and18 engine-read unit executions pass at the source commits cited in the
 report. The final judged pass was red; a47 caps further passes and directs its
 remaining demands into report limitations. No green judged result is claimed.

@@ -587,7 +587,7 @@ function renderComparison(before, after) {
 export function render(sides) {
   const [before, ...afters] = sides;
   const note =
-    "Git starts count the frozen inventory's launch attempts, including failed spawns (reported separately with their spawn-call cost). Git seconds sum recorded child lifetimes only; (+N unknown) counts launches without an exit duration after explicit failed spawns are removed, never zero-cost children.";
+    "Git starts count the frozen inventory's launch attempts, including failed spawns (reported separately with their spawn-call cost). Git seconds sum recorded launch durations only; (+N unknown) counts launches without an exit duration after explicit failed spawns are removed, never zero-cost children.";
   return `${[note, ...sides.map(renderSide), ...afters.map((after) => renderComparison(before, after))].join("\n\n")}\n`;
 }
 
