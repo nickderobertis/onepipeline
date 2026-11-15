@@ -92,8 +92,12 @@ jobs:
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
+        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+        env:
+          SPIKE_TEST_COST_READ_ONLY: "1"
         run: |
           node scripts/nx-remote-cache.mjs trust
+          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -152,6 +156,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # Whether the lock still resolves the sibling engines the manifest permits
@@ -297,8 +303,12 @@ jobs:
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
+        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+        env:
+          SPIKE_TEST_COST_READ_ONLY: "1"
         run: |
           node scripts/nx-remote-cache.mjs trust
+          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -366,6 +376,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       # The released tools `just bootstrap` compiles — two into `target/tools`,
       # the pool pruner onto cargo's PATH — keyed on the versions the justfile
       # pins and the toolchain that compiles them.
@@ -476,8 +488,12 @@ jobs:
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
+        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+        env:
+          SPIKE_TEST_COST_READ_ONLY: "1"
         run: |
           node scripts/nx-remote-cache.mjs trust
+          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -539,6 +555,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: What the bootstrap tools are built from
         id: pins
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -622,8 +640,12 @@ jobs:
         id: nx-cache-trust
         shell: bash
         working-directory: ${{ github.workspace }}
+        # Measurement only (spike-onepipeline-test-cost): this run writes no Nx remote-cache entry.
+        env:
+          SPIKE_TEST_COST_READ_ONLY: "1"
         run: |
           node scripts/nx-remote-cache.mjs trust
+          if [ -n "${SPIKE_TEST_COST_READ_ONLY:-}" ]; then printf 'read_only=true\npromotable=false\n' >> "$GITHUB_OUTPUT"; fi
           token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
@@ -665,6 +687,8 @@ jobs:
         with:
           version: ${{ steps.ci-tools.outputs.uv }}
           enable-cache: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          # Measurement only (spike-onepipeline-test-cost): this run writes no Actions-cache entry.
+          save-cache: false
       - name: What the bootstrap tools are built from
         id: pins
         run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
