@@ -932,3 +932,24 @@ test("ETW matches a script's shell image and a slow spawn, while rejecting anoth
     r.stdout,
   );
 });
+
+test("trace overhead includes each linked copy's cumulative writer total", () => {
+  const dir = join(scratch, "writer-copies");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const file = join(
+    launch,
+    readdirSync(launch).find((f) => f.endsWith(".jsonl")),
+  );
+  const events = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+  for (const e of events) e.write_ns_before = 0;
+  const proc = events.find((e) => e.kind === "proc" && e.exe === "onepipeline");
+  const end = events.find((e) => e.kind === "end" && e.pid === proc.pid);
+  assert.ok(end);
+  end.write_ns_before = 1e9;
+  events.push({ ...proc, t: proc.t + 1 }, { ...end, t: end.t + 1, write_ns_before: 2e9 });
+  writeFileSync(file, `${events.map(JSON.stringify).join("\n")}\n`);
+  const r = run("fold", `writers=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /3.0 s writing them/);
+});

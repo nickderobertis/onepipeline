@@ -969,13 +969,17 @@ export function foldJob(job) {
   let traceNs = 0;
   let records = 0;
   const lastWrite = new Map();
+  const endedWrites = new Map();
   for (const r of job.trace) {
     records++;
     traceNs += r.trace_ns ?? 0;
     const k = t.key(r.file, r.pid, r.instance);
     lastWrite.set(k, Math.max(lastWrite.get(k) ?? 0, r.write_ns_before ?? 0));
+    // Every linked copy owns its own cumulative writer counter and emits its own end.
+    // Summing those ends retains all writers; taking one PID's maximum loses copies.
+    if (r.kind === "end") endedWrites.set(k, (endedWrites.get(k) ?? 0) + (r.write_ns_before ?? 0));
   }
-  const writeNs = [...lastWrite.values()].reduce((a, b) => a + b, 0);
+  const writeNs = [...lastWrite].reduce((a, [k, latest]) => a + (endedWrites.get(k) ?? latest), 0);
 
   const names = job.tests.map((r) => r.test).sort();
   return {
@@ -1485,7 +1489,7 @@ export function render(folds, { top = 20 } = {}) {
     out.push("### Trace cost\n");
     const per = f.trace.records ? (f.trace.traceNs + f.trace.writeNs) / f.trace.records : 0;
     out.push(
-      `${f.trace.records} records from ${f.trace.procs} processes: ${sec(f.trace.traceNs)} s building them and ${sec(f.trace.writeNs)} s writing them, ${(per / 1000).toFixed(1)} µs per record (each process's last write is not in its own total).\n`,
+      `${f.trace.records} records from ${f.trace.procs} processes: ${sec(f.trace.traceNs)} s building them and ${sec(f.trace.writeNs)} s writing them, ${(per / 1000).toFixed(1)} µs per record (each writer's last write is not in its own total; a process killed before its end contributes only its largest observed writer total).\n`,
     );
 
     if (f.coverage) {
