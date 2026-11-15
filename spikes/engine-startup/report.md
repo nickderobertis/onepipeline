@@ -8,13 +8,13 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 23:14 UTC
+### Live hosted handoff — 2026-11-15 23:34 UTC
 
-This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
+This handoff supersedes earlier dated checkpoint status statements below. Point1 is complete and collected; point2 macOS remains in flight. No active demonstration head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux complete; Windows/macOS running; lint cancelled at its thirty-minute limit |
+| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | All jobs complete; three main e2e tiers passed; known other-tier failures and lint timeout recorded |
 | 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux/Windows complete; macOS running since23:00:13 UTC; lint cancelled after its judged tier failed |
 
 Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining under a67: finish collecting these two points only, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No third run starts. No hosted after timing or saving is claimed yet.
@@ -2384,6 +2384,108 @@ contributors/2/windows: baseline test profiles missing []; profile presence does
 ```
 
 The printed difference7.575183 minutes and typical-PR estimate6.817665 minutes are undecided, not savings; only one Windows after point is collected. At the23:10 job snapshot, point1 Windows and macOS still ran; point2 macOS had started23:00:13 UTC. Both Linux points are complete. The two existing demonstrations remain the whole planned after side under a67.
+
+
+### Point1 complete; Windows two-point comparison complete
+
+Run43751624389 attempt1 finished23:21:52 UTC. Its final five-job catalog is preserved in jobs.final.json.gz and all-jobs.facts.json.gz: test-windows132926635983242.550000 minutes, lint13292663618330.283333, test-linux132926636190131.950000, test-macos132926636261181.800000, budgets1329968607531.350000. Budgets passed; the test jobs failed on the known non-main-tier checks and lint was cancelled. These are not claims that CI is green. The four cache-enabled jobs all show zero Nx entries/bytes stored or replayed and no Actions-cache save lines; budgets has no cache-restore step or Nx execution configured, and no save line/receipt. The unchanged executed workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01 supplies that no-cache budget-job path. Every cache step’s status/time is in all-jobs.facts.json.gz, including the lint bootstrap cache miss0.378seconds and rust partial restore67.187seconds. The raw budgets log is retained too.
+
+Fresh point1 Windows artifact14184840420 was collected only after completion, following discard of the premature copy; digest sha256:cbcd57a1088c6d3ef3b54a7412ce0ed6a1bc2b80b9e10e4eabb9ab42f9593057. Source remains head dd64b7d141e0326cfeb4991b420bdb25387e0b53 / GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d. Hardware Intel(R)Xeon(R)Platinum8370C CPU@2.80GHz, four logical cores. The job ran19:17:56–23:20:29 UTC,242.550000 minutes;88.161217 minutes preceded e2e, including quiet compilation/earlier tiers. Its main e2e tier passed all1832 tests with both baseline name catalogs equal. There was no main-e2e recovery. The two codex-server double timeouts also seen in baseline2 remain outside the main e2e tier; the separate repeat step reached its existing25-minute limit (log line containing23:20:19.645). The full39-task selection is unchanged. Existing outcomes output exposes those two missing baseline1 non-e2e passes rather than concealing them; a67’s required main-e2e by-name proof is intact, while all selected non-e2e test counts remain recorded.
+
+Windows point1 cache steps:
+
+| Step | Restore | Seconds |
+| --- | --- | ---: |
+| Nx server startup | no restore | 0.021 |
+| rust-cache | partial restore key | 50.467 |
+| setup-node | no restore recorded | 6.427 |
+| setup-python | no restore recorded | 0.204 |
+| setup-uv | no restore recorded | 4.667 |
+| bootstrap actions/cache/restore | hit | 1.589 |
+
+Both Windows after points are now collected. Comparison command at source8b4ba971: `node scripts/engine-startup.mjs fold before/1/windows=BASELINE1_WINDOWS before/2/windows=BASELINE2_WINDOWS contributors/1/windows=AFTER1_WINDOWS contributors/2/windows=AFTER2_WINDOWS`, with the previously recorded job directories. This is an earlier-commit checkpoint; final-source rerun still remains:
+
+```text
+before/1/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 9V45 96-Core Processor                ; cores: 4
+e2e minutes: 87.112333
+start: 3375.080794 ms mean; 2083 completed / 2089 observed
+adopt: 4658.311521 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"60af6ffa-12c2-429c-848b-1cffb3033ad3","start":1794726570.108,"end":1794731796.94,"seconds":5226.74,"run":1832,"passed":1832,"line":"Summary [5226.740s] 1832 tests run: 1832 passed (54 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+before/2/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 7763 64-Core Processor                ; cores: 4
+e2e minutes: 132.993667
+start: 5663.412835 ms mean; 2083 completed / 2089 observed
+adopt: 8031.223044 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"68cf7a38-6e72-43ac-ba8c-0d9e9a850d56","start":1794748390.004,"end":1794756369.667,"seconds":7979.62,"run":1832,"passed":1832,"line":"Summary [7979.620s] 1832 tests run: 1832 passed (134 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+contributors/1/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz; cores: 4
+e2e minutes: 128.859717
+start: 5401.270427 ms mean; 2083 completed / 2089 observed
+adopt: 7845.953505 ms mean; 301 completed / 304 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"44494c6d-6077-4953-98d6-ee3b7499226a","start":1794775565.673,"end":1794783297.25,"seconds":7731.583,"run":1832,"passed":1832,"line":"Summary [7731.583s] 1832 tests run: 1832 passed (126 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+contributors/2/windows (windows)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":134}
+runner: AMD EPYC 9V74 80-Core Processor                ; cores: 4
+e2e minutes: 102.477817
+start: 4090.868401 ms mean; 2083 completed / 2089 observed
+adopt: 5769.567378 ms mean; 302 completed / 305 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 1832; names digest: a91139c2b34c8c42; scope: {"id":"76d07154-5a9c-4b46-b09f-d33b3d74a86a","start":1794777415.71,"end":1794783564.588,"seconds":6148.669,"run":1832,"passed":1832,"line":"Summary [6148.669s] 1832 tests run: 1832 passed (76 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+before/windows: e2e mean 110.053000 min; range 87.112333..132.993667; n=2
+
+contributors/windows: e2e mean 115.668767 min; range 102.477817..128.859717; n=2
+
+contributors/windows: before-minus-after -5.615767 min; undecided (inside a side's spread); typical PR estimate (27/30) -5.054190 min (undecided, not a saving)
+
+contributors/1/windows: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+
+contributors/2/windows: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+```
+
+The measured after mean115.668767 minutes exceeds the before mean110.053000 by5.615767 minutes, but the signed difference is inside the observed spread. The signed typical-PR estimate is-5.054190 minutes saved, meaning a possible additional cost rather than a saving; the direction is undecided. The processor mix differs across sides. This is not evidence to recommend the cut on Windows, and it does not exceed one standard deviation of either side’s two run times.
+
+### Completed macOS point1
+
+Source run43751624389/1, job132926636261, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d; same workflow blob. Artifact14184876470 digest sha256:183e4933324ace4140299f051527a8272e938edf476f2c96566ff8c217418ea7. Processor Apple M1(Virtual), three logical cores. Job20:15:54–23:17:42 UTC:181.800000 minutes,76.846250 minutes before e2e, including quiet compilation/earlier tiers. All2121 main-e2e profiles exactly match both baseline catalogs (digest224faf8a6439b9ed) and2121/2121 passed; no main-e2e recovery. Its39-task Nx selection equals both baselines. The existing logged-outcomes comparison also preserves all3769 baseline passing names; the same two patch-audit and three codex-server double failures remain in all those macOS logs. No existing test or timeout is changed. The recurring doubles are recorded outside this subtask in follow-up drafts:brief-process-launch-speed-2026-11-14-spikes/drafts/20261115T233054Z-investigate-recurring-hosted-codex-server-double.
+
+macOS point1 cache steps:
+
+| Step | Restore | Seconds |
+| --- | --- | ---: |
+| Nx server startup | no restore | 0.050 |
+| rust-cache | partial restore key | 43.818 |
+| setup-node | no restore recorded | 0.682 |
+| setup-python | no restore recorded | 0.147 |
+| setup-uv | no restore recorded | 1.929 |
+| bootstrap actions/cache/restore | hit | 2.009 |
+
+The cache receipt is zero entries/bytes stored or replayed, with no Actions-cache save line; the read-only guard is unchanged. Source8b4ba971 command `node scripts/engine-startup.mjs fold contributors/1/macos=AFTER1_MACOS` prints:
+
+```text
+contributors/1/macos (macos)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":160}
+runner: Apple M1 (Virtual); cores: 3
+e2e minutes: 86.304883
+start: 1806.195780 ms mean; 2328 completed / 2348 observed
+adopt: 2542.874239 ms mean; 349 completed / 354 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2121; names digest: 224faf8a6439b9ed; scope: {"id":"36db2ce0-1abf-4d59-a1da-ca9ba0551da9","start":1794778364.775,"end":1794783543.071,"seconds":5178.293,"run":2121,"passed":2121,"line":"Summary [5178.293s] 2121 tests run: 2121 passed (38 slow), 1 skipped","records":0,"starts":0,"os":0,"otherProfiles":0}
+
+contributors/macos: e2e mean 86.304883 min; range 86.304883..86.304883; n=1
+```
+
+The remaining second macOS point is running on run43756326338, started23:00:13 UTC. Point1’s comments, checks and reviews were read and saved under pr1628.*.gz; PR1628 is ready to close once this evidence commit is published. No third run starts. Final comparison, source-identified final fold and the single final local judged pass remain after point2 macOS completes.
 
 
 ## Candidate budgets
