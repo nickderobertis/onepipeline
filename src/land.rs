@@ -1118,12 +1118,26 @@ struct Scratch {
 struct Leftover {
     checkout: PathBuf,
     made: Made,
-    /// Whether the landing's thread is anywhere but [`Turn::idle`]. True from the
-    /// turn's start: it is that thread that starts it.
-    in_use: bool,
-    /// Whether an interrupt has taken the turn. Never unset: the process is
-    /// ending of it, and nothing more may be made for the removal to miss.
-    interrupted: bool,
+    phase: Phase,
+}
+
+/// Where a drafting turn's two threads are with it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The landing's thread is in the turn and may be making something in it.
+    /// Where every turn starts: it is that thread that starts it.
+    Active,
+    /// The landing's thread is inside [`Turn::idle`], making nothing.
+    Idle,
+    /// The landing's thread is done with the turn for good.
+    Finished,
+    /// An interrupt has taken the turn and waits for the landing's thread to
+    /// stop making things in it.
+    Interrupting,
+    /// An interrupt has taken the turn and the landing's thread makes nothing
+    /// more in it. Never left: the process is ending of the signal, and nothing
+    /// more may be made for the removal to miss.
+    Interrupted,
 }
 
 /// A drafting turn's [`Leftover`], shared by the landing's thread and the one an
@@ -1150,17 +1164,27 @@ impl Turn {
     /// until the process ends of its signal, which is what keeps the rest of the
     /// landing from making, or landing, anything after the removal.
     fn idle<T>(&self, wait: impl FnOnce() -> T) -> T {
-        self.lock().in_use = false;
+        {
+            let mut left = self.lock();
+            left.phase = match left.phase {
+                Phase::Active => Phase::Idle,
+                Phase::Interrupting => Phase::Interrupted,
+                settled @ (Phase::Idle | Phase::Finished | Phase::Interrupted) => settled,
+            };
+        }
         self.idled.notify_all();
         let waited = wait();
         let mut left = self.lock();
-        if left.interrupted {
-            drop(left);
-            loop {
-                std::thread::park();
+        match left.phase {
+            Phase::Interrupting | Phase::Interrupted => {
+                drop(left);
+                loop {
+                    std::thread::park();
+                }
             }
+            Phase::Idle | Phase::Active => left.phase = Phase::Active,
+            Phase::Finished => {}
         }
-        left.in_use = true;
         waited
     }
 
@@ -1169,7 +1193,10 @@ impl Turn {
     fn finish(&self) {
         let mut left = self.lock();
         left.remove();
-        left.in_use = false;
+        left.phase = match left.phase {
+            Phase::Interrupting | Phase::Interrupted => Phase::Interrupted,
+            Phase::Active | Phase::Idle | Phase::Finished => Phase::Finished,
+        };
         drop(left);
         self.idled.notify_all();
     }
@@ -1178,8 +1205,11 @@ impl Turn {
     /// idle, and remove what was made.
     fn interrupt(&self) {
         let mut left = self.lock();
-        left.interrupted = true;
-        while left.in_use {
+        left.phase = match left.phase {
+            Phase::Active | Phase::Interrupting => Phase::Interrupting,
+            Phase::Idle | Phase::Finished | Phase::Interrupted => Phase::Interrupted,
+        };
+        while left.phase == Phase::Interrupting {
             left = self
                 .idled
                 .wait(left)
@@ -1312,8 +1342,7 @@ impl Scratch {
             left: Mutex::new(Leftover {
                 checkout: checkout.to_path_buf(),
                 made: Made::Nothing,
-                in_use: true,
-                interrupted: false,
+                phase: Phase::Active,
             }),
             idled: std::sync::Condvar::new(),
         });
