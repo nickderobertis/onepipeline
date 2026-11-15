@@ -16,7 +16,7 @@ The collector/fold is ready; remaining work is three after points per platform, 
 
 IN PROGRESS. Ruling c13.0 replaces hosted sampling with local attribution and existing hosted launch-trace/tier measurements. Ruling c11.1 accepts run 43684231509 attempts 1 and 2 as the before side. Rulings c7.0/c9.1 require reporting Linux merged coverage as not produced because the vendored patch audit fails test-rest and Nx skips coverage merge; floor remains 95.74 LCOV.
 
-Handoff: no hosted runs started by this dispatch; none in flight. Local prototype and checks are underway. Demonstration capacity is held by child-waits under c11.1; wait for a slot, then start round peers together. Remaining: source-identified local sampling on current debug/release builds, hosted after rounds, outcomes and cache audit, final judged lint and comparison. No performance saving is claimed yet.
+Earlier pre-host checkpoint omitted; the live handoff above is authoritative.
 
 
 
@@ -2097,13 +2097,27 @@ Unallocated wall includes own CPU, filesystem latency, descheduling, non-child w
 
 Filesystem wall latency is not independently measured. The unallocated bucket includes own CPU, filesystem latency, descheduling, non-child waits and children whose duration is unmeasured. Known operation-live intervals can themselves overlap those activities. CPU samples are an overlay, not a disjoint wall bucket. Per-platform hosted partitioning remains unavailable under a45, and no new engine phase instrumentation was added. The trace excludes process creation of the engine, pre-first-trace initialization and final teardown. Attached start/adopt windows include the plan execution they drive; these means are not a time-to-first-output metric.
 
-The new phase command is exercised over the recorded driver fixture and 543 verbatim primary-process records from the kept-branch capture. Its regression test asserts the actual interval totals, program totals and child-wait overlays. Parser test count is now fourteen, all passing. One UTF-8 test was deliberately observed failing with an ASCII input decoder, then the decoder was restored and all tests passed. The strengthened public matcher verifier still passes 6,588 cases; the earlier exhaustive positive-context verifier also completed 6,672,456 comparisons, but is not claimed as exhaustive negative-path coverage.
+The new phase command is exercised over the recorded driver fixture and 543 verbatim primary-process records from the kept-branch capture. Its regression test asserts the actual interval totals, program totals and child-wait overlays. At that checkpoint fourteen parser tests passed; the later excluded-record regression brings the current total to fifteen, all passing (exclusion-tests.log). One UTF-8 test was deliberately observed failing with an ASCII input decoder, then the decoder was restored and all tests passed. The strengthened public matcher verifier still passes 6,588 cases; the earlier exhaustive positive-context verifier also completed 6,672,456 comparisons, but is not claimed as exhaustive negative-path coverage.
 
 The existing workspace-nx module had one build-reuse assertion fail while other Cargo builds were active (scratch/workspace-input-tests.log); after compilation became idle, `node --test --test-name-pattern='leaves nothing to compile for the debug build the npm publish journey packs' npm/test/workspace-nx.test.mjs` ran that actual case and passed, with no skipped cases (workspace-build-reuse-recovery.log). No shared test, lint threshold or workflow guard was changed to clear it. The demo workflow blob remains byte-identical to the accepted baseline, and its actual events CI-shape test passed after linking the installed dependency directory (demo-actual-ci-shape-green.log).
 
-### Handoff after local evidence
+### Baseline audit
 
-Hosted after runs: none; none in flight. Prepared local demonstration head dd64b7d1 uses the contributor switch, optimized dependencies, the byte-identical source touch, and workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. It is not pushed or opened, because a41’s four plan slots are occupied by child-waits PRs1613-1616 (confirmed by branch-name query). Git-reads gets the next slot, then this spike. Remaining work is hosted rounds, their pass-name/cache/coverage audits, final-source comparison fold, and the single remaining judged-lint pass under a49. No hosted saving is claimed.
+The companion [baseline job audit](baseline-audit.md) gives every baseline job’s processor, full Nx selection, cache-step restore result/time, pre-e2e time and available compile log lines, coverage refusal lines, and capsule references for complete test-name catalogs. Quiet Cargo archive builds do not print compile-only durations on every platform; those are explicitly unavailable rather than inferred from the tier duration.
+
+
+### Collection pause — 2026-11-15 19:30 UTC
+
+The read-only collector stopped before reading run status because the shared GitHub rate allowance fell below the a0 floor. No additional run result is claimed. Manager a55 directs resuming after the approximate 19:52 UTC reset, collecting only finished jobs about every fifteen minutes. It raises the plan-wide open demonstration cap to seven; the per-spike two-open limit remains. No run is cancelled and no demonstration head is pushed.
+
+
+### Suppression inventory for this spike’s diff
+
+The inherited Cargo.toml `crates_stay_in_one_cargo_workspace` block covers the added privateterms path patch: retaining the released dependency layout makes this never-land prototype comparable. The new Cargo.lock marker immediately above the privateterms package gives the same measurement-only reason and preserves upstream package metadata (a1/a49). No workspace enforcement configuration changes.
+
+Three `tool_output_is_signal` blocks in scripts/engine-startup.mjs cover phase rows, per-job fold rows and side-comparison rows; the block in scripts/engine-startup-cpu.py covers the CPU attribution rows. Each explains that the requested measurement deliverable needs multiple rows and explicit uncertainty rather than a mutation-success line (a1).
+
+Two `changed_behavior_has_e2e` blocks in scripts/engine-startup-profile.sh cover sampler/discovery setup and privileged recording. Their evidence is the actual recorded debug/release subprocess journeys; portable parser tests cannot assume a built Rust e2e binary and perf privilege before Rust tiers finish (a1). The README’s `work_goes_through_command_surface` marker covers the narrow Node test command: the shared just recipe has no module filter, and adding a new recipe would expand this measurement-only diff. The report’s `least_privilege_grants` marker covers the exact historical Docker invocation: changing its granted permissions in the quoted provenance would misstate the command that produced the captures; the disposable container was removed. These are all added directives or existing directive regions this spike changes.
 
 
 ## Candidate budgets
@@ -2112,4 +2126,5 @@ This spike measured no candidate budget itself.
 
 ## Design findings
 
-- The baseline test-profile programs are keyed by executable, not by verb. Manager question c-c079002ebedf688e823b2c9cea9a6c46 asks whether completed launch-trace start/adopt lifetimes may replace unavailable per-verb profile means on both sides; these exclude process creation.
+- Completed start/adopt launch-trace means replace unavailable per-verb test-profile executable totals identically on both sides under manager a37. They exclude engine creation, pre-trace initialization and teardown.
+- Only hosted after runs can decide whether the contributor bypass saves e2e minutes; local profiles justify the candidate but do not price it.
