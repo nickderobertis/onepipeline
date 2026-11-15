@@ -8,11 +8,16 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 19:18 UTC
+### Live hosted handoff — 2026-11-15 20:08 UTC
 
-This live handoff supersedes all earlier checkpoint handoffs below, which predate the first demonstration. PR1628 is draft DO NOT MERGE, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, run 43751624389 attempt1. Run metadata and job metadata are captured in evidence/hosted/43751624389/attempt-1. test-windows job132926635983, lint132926636183 and test-linux132926636190 are in progress; test-macos132926636261 is queued. Current merge ref 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d is provisional until checkout logs prove GITHUB_SHA. Its workflow blob is db2bbe081a7b9319eb38bd014e72350b389e8b01, read from the GitHub contents API at that ref. No demonstration branch is pushed while a run is active. No timing, test outcome or cache-write result is claimed before collection. Manager a51 authorizes one startup demonstration under a plan cap of six; further rounds wait for capacity.
+This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
-The collector/fold is ready; remaining work is three after points per platform, outcome/cache/coverage audit, final-source comparison fold and the one final judged-lint pass under a49. Earlier local/baseline evidence and exact producer revisions follow.
+| Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux/Windows running, macOS queued; lint cancelled at its thirty-minute limit |
+| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (awaits checkout log) | Linux/Windows/lint running, macOS queued |
+
+Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining: collect both points, start the third once a slot frees, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No hosted after timing or saving is claimed yet.
 
 IN PROGRESS. Ruling c13.0 replaces hosted sampling with local attribution and existing hosted launch-trace/tier measurements. Ruling c11.1 accepts run 43684231509 attempts 1 and 2 as the before side. Rulings c7.0/c9.1 require reporting Linux merged coverage as not produced because the vendored patch audit fails test-rest and Nx skips coverage merge; floor remains 95.74 LCOV.
 
