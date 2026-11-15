@@ -11,7 +11,7 @@
 // by NAME alone.
 //
 // It prints, in Markdown: every run with its merge commit (GITHUB_SHA), head, processor,
-// job minutes, the minutes before the e2e tier and the e2e tier's nextest minutes; each
+// job log span minutes, the minutes before the e2e tier and the e2e tier's nextest minutes; each
 // side's mean, range and spread of e2e minutes, their difference, and whether that
 // difference is decided (non-overlapping ranges and larger than either spread) or undecided; the
 // minutes a typical pull request would save (an estimate: the difference scaled by
@@ -78,7 +78,7 @@ export const CHANGED_JOURNEYS = [
 // biome-ignore lint/suspicious/noControlCharactersInRegex: a job log carries ANSI colour codes.
 const ANSI = /\u001b\[[0-9;]*m/g;
 const OUTCOME =
-  /^\s*(PASS|FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|SIGTERM|LEAK-FAIL)\s+\[[^\]]*\]\s+(?:\(\s*\d+\/\d+\)\s+)?onepipeline::e2e\s+(\S+)/;
+  /^\s*([A-Z][A-Z-]*)\s+\[\s*\d+(?:\.\d+)?s\]\s+(?:\(\s*\d+\/\d+\)\s+)?onepipeline::e2e\s+(\S+)/;
 
 /**
  * Every e2e test the log's nextest runs ended, in order: `{ t, outcome, test }`, so a
@@ -244,7 +244,7 @@ export function render(before, after, share) {
         "GITHUB_SHA",
         "head",
         "processor (logical cores)",
-        "job min",
+        "job log span min",
         "pre-e2e min (compile, earlier tiers)",
         "e2e nextest min",
         "e2e passed/ran",
@@ -325,7 +325,7 @@ export function render(before, after, share) {
           ],
           rows,
         )
-      : "No changed site waited in these runs.",
+      : "No wait at a changed site was recorded.",
   );
   const launchRows = CHANGED_JOURNEYS.map((t) => {
     const per = (side) => {
@@ -338,7 +338,7 @@ export function render(before, after, share) {
     "\n### CLI launches per changed journey, mean per recorded run (test-profile records)\n",
     launchRows.length
       ? table(["journey", "before", "after"], launchRows)
-      : "None of the changed journeys ran in these runs.",
+      : "No CLI launch count for a changed journey was recorded.",
   );
   const baseline = new Set();
   for (const r of before) for (const t of r.passed) baseline.add(t);

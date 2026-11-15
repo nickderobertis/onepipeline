@@ -2,8 +2,8 @@
 // command over a recorded pair of jobs — two e2e journeys run locally with every
 // prototype off (`before`) and on (`after`), each job's test-profile records, launch
 // trace and timestamped nextest output — and over copies of it changed the one way each
-// part of the comparison exists to notice. The recording's timings are a local slice's
-// and are never asserted: the comparison's figures come from hosted runs only.
+// part of the comparison exists to notice. Its local timings verify parsing and
+// arithmetic only; pull-request savings figures come from hosted runs alone.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -336,4 +336,100 @@ test("a quiet tier with every failure named confirms the other completed profile
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, /after quiet: 1 passed in the tier;/);
   assert.match(out.stdout, new RegExp(`not run and passed here: ${CANNOT_START};`));
+});
+
+test("terminal non-PASS outcomes survive ANSI formatting, while malformed timestamps and progress do not become failures", () => {
+  for (const outcome of [
+    "TIMEOUT",
+    "SIGSEGV",
+    "SIGABRT",
+    "SIGKILL",
+    "SIGTERM",
+    "LEAK-FAIL",
+    "EXEC-FAIL",
+  ]) {
+    const dir = copyOf("after");
+    const log = join(dir, "job.log");
+    const other =
+      "dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone";
+    const text = readFileSync(log, "utf8")
+      .split("\n")
+      .map((line) =>
+        line.includes(CANNOT_START)
+          ? line
+              .replace("PASS", `\u001b[31;1m${outcome}\u001b[0m`)
+              .replace("onepipeline::e2e", "\u001b[35;1monepipeline::e2e\u001b[0m")
+          : line,
+      )
+      .join("\n")
+      .replace("2 passed, 2154 skipped", "1 passed, 1 failed, 2154 skipped");
+    writeFileSync(
+      log,
+      `${text}\nnot-a-timestamp FAIL [ 1.000s] onepipeline::e2e ${other}\n2026-11-15T16:39:24.0000000Z SLOW [> 60.000s] onepipeline::e2e ${other}\n`,
+    );
+    const out = compare(`before:off=${join(recorded, "before")}`, `after:decorated=${dir}`);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /after decorated: 1 passed in the tier;/);
+    assert.match(out.stdout, new RegExp(`failed and not passed again: ${CANNOT_START}\\.`));
+  }
+});
+
+test("wait seconds and harness totals are means across every supplied run", () => {
+  const out = compare(
+    `before:one=${join(recorded, "before")}`,
+    `before:two=${join(recorded, "before")}`,
+    `after:one=${join(recorded, "after")}`,
+    `after:two=${join(recorded, "after")}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  const waits = Object.fromEntries(
+    rows(out.stdout, "Waits at the changed sites").map((r) => [`${r[0]} ${r[1]}`, r.slice(2)]),
+  );
+  assert.deepEqual(waits["onepipeline::commandstep::run wait"], [
+    "3.0",
+    "6.0",
+    "0.2",
+    "3.0",
+    "6.0",
+    "0.0",
+  ]);
+  assert.deepEqual(waits["harness::waited_on poll"], ["6.0", "0.0", "0.5", "6.0", "0.0", "0.5"]);
+});
+
+test("processor identity and timestamp-derived log spans are printed, with an explicit missing-host fallback", () => {
+  const args = [`before:off=${join(recorded, "before")}`, `after:on=${join(recorded, "after")}`];
+  const out = compare(...args);
+  assert.equal(out.status, 0, out.stderr);
+  assert.deepEqual(
+    rows(out.stdout, "Runs").map((r) => r.slice(4, 7)),
+    [
+      ["AMD Ryzen Threadripper 1920X 12-Core Processor (20)", "0.08", "0.02"],
+      ["AMD Ryzen Threadripper 1920X 12-Core Processor (20)", "0.07", "0.01"],
+    ],
+  );
+  const dir = copyOf("after");
+  rmSync(join(dir, "test-profile", "launch-host.json"));
+  const missing = compare(args[0], `after:nohost=${dir}`);
+  assert.equal(missing.status, 0, missing.stderr);
+  assert.equal(rows(missing.stdout, "Runs")[1][4], "not recorded");
+});
+
+test("an artifact with no changed-site or changed-journey records says what was not recorded", () => {
+  const dir = copyOf("after");
+  const profiles = join(dir, "test-profile", "e2e");
+  let log = readFileSync(join(dir, "job.log"), "utf8");
+  for (const [index, file] of readdirSync(profiles).entries()) {
+    const path = join(profiles, file);
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    const name = `control::journey_${index}`;
+    log = log.replaceAll(record.test, name);
+    record.test = name;
+    writeFileSync(path, JSON.stringify(record));
+  }
+  writeFileSync(join(dir, "job.log"), log);
+  rmSync(join(dir, "test-profile", "launch"), { recursive: true });
+  const out = compare(`before:control=${dir}`, `after:control=${dir}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /No wait at a changed site was recorded\./);
+  assert.match(out.stdout, /No CLI launch count for a changed journey was recorded\./);
 });
