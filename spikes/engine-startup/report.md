@@ -8,13 +8,13 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 20:08 UTC
+### Live hosted handoff — 2026-11-15 20:23 UTC
 
 This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux/Windows running, macOS queued; lint cancelled at its thirty-minute limit |
+| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux/Windows/macOS running; macOS started 20:15:54 UTC; lint cancelled at its thirty-minute limit |
 | 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (awaits checkout log) | Linux/Windows/lint running, macOS queued |
 
 Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining: collect both points, start the third once a slot frees, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No hosted after timing or saving is claimed yet.
@@ -2159,6 +2159,9 @@ The demo selects the vendored library’s default at compile time, so all linked
 ### Parser-test path correction
 
 After source 9902aa4c, inspection found the new parser journeys used URL.pathname for executable/fixture paths, which retains URL escapes and can produce /D:/ drive paths on Windows. They now use Node fileURLToPath consistently. Existing journeys, assertions and fixtures are unchanged; no existing repository test is modified. In a copied workspace named `native path proof`, the earlier tests failed all fifteen on encoded paths (evidence/native-path-induced-red.log.gz). After conversion all fifteen pass there (native-path-spaces-green.log.gz) and in the ordinary checkout (native-path-tests.log.gz); Biome check is green (native-path-static.log.gz). The first copied recovery attempt lacked samply-version.txt, which was added to that disposable copy before the successful run. This is Linux evidence of path handling, not a claim of a Windows run. The active hosted head dd64b7d1 still has the earlier parser tests and remains frozen; subsequent demonstration heads will carry this test-only portability repair. It cannot affect the Rust prototype’s performance, but any hosted failures of those old tests remain reported rather than relabelled as passes.
+
+
+The 20:23 snapshots (jobs-2023.json.gz for each point) record point1 macOS job132926636261 starting at 20:15:54 UTC. Point2 job ids are Linux132941104723, lint132941104952, macOS132941104978 and Windows132941105006; macOS is still queued. No test job has completed and no after figure is inferred from in-progress logs.
 
 
 ## Candidate budgets
