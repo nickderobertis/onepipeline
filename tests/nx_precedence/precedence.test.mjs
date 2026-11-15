@@ -213,12 +213,12 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
 
   const failures = [
     {
-      // 1 and 2 are grep's own answers here (no match; a file it could not read), so
-      // the stand-in fails as grep itself failing does.
+      // A status outside grep's documented no-match and read-error statuses
+      // must also name its cause rather than being treated as no task found.
       tool: "grep",
       code: 3,
       warning:
-        "nx-precedence: cannot read which processes are this run's (grep exited 3), so the tasks beside lead:work keep their priority until it can",
+        "nx-precedence: cannot read which processes are this run's (grep exited 3: grep refused here), so the tasks beside lead:work keep their priority until it can",
       side: "0",
       summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
     },
@@ -264,7 +264,7 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
 
   for (const [tool, code, warning] of [
     ["ps", 1, /cannot list processes \(ps refused here\)/],
-    ["grep", 3, /cannot read which processes are this run's \(grep exited 3\)/],
+    ["grep", 3, /cannot read which processes are this run's \(grep exited 3: grep refused here\)/],
     ["renice", 1, /cannot lower the tasks beside lead:work \(renice refused here\)/],
   ]) {
     it(`lowers the run once ${tool} answers again after refusing`, (t) => {
@@ -299,6 +299,87 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
       linux ? ["nx-precedence: lead:work ran ahead of no other task, keeping kept:work"] : [],
     );
   });
+
+  it("reports an operational grep failure with its cause", (t) => {
+    const dir = workspace(t);
+    const stubs = failing(t, { grep: "grep: invalid option" }, Number.POSITIVE_INFINITY, 2);
+    const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+    assert.equal(status, 0, log);
+    assert.equal(read(dir, "lead.nice"), "0", log);
+    if (!linux) return assert.deepEqual(lines(log), []);
+    const [warning, summary, ...rest] = lines(log);
+    assert.match(warning, /grep exited 2: grep: invalid option/);
+    assert.match(log, /ACTION: put GNU grep on PATH and fix the reported scanner error/);
+    assert.match(summary, /ran ahead of no other task/);
+    assert.deepEqual(rest, []);
+  });
+
+  it("still runs its command when temporary state cannot be created", (t) => {
+    const stubs = failing(t, { mktemp: "mktemp: no space left" });
+    const { status, stdout, stderr } = spawnSync(
+      "bash",
+      [script, "--", "bash", "-c", "echo command-ran; exit 23"],
+      {
+        env: {
+          ...process.env,
+          PATH: `${stubs}:${process.env.PATH}`,
+          NX_TASK_TARGET_PROJECT: "lead",
+          NX_TASK_TARGET_TARGET: "work",
+          NX_INVOCATION_ROOT_PID: String(process.pid),
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(status, 23, stderr);
+    assert.equal(stdout.trim(), "command-ran");
+    if (!linux) return assert.equal(stderr, "");
+    assert.match(stderr, /cannot create temporary state \(mktemp: no space left\)/);
+    assert.match(stderr, /ACTION: set TMPDIR to a writable directory with free space/);
+  });
+
+  it("still runs its command when temporary state cannot be written", (t) => {
+    const dir = workspace(t);
+    const state = join(dir, "state");
+    mkdirSync(state, { mode: 0o500 });
+    const stubs = failing(t, { mktemp: "unused" });
+    writeFileSync(join(stubs, "mktemp"), `#!/bin/sh\necho '${state}'\n`);
+    const { status, stdout, stderr } = spawnSync(
+      "bash",
+      [script, "--", "bash", "-c", "echo command-ran; exit 23"],
+      {
+        env: {
+          ...process.env,
+          PATH: `${stubs}:${process.env.PATH}`,
+          NX_TASK_TARGET_PROJECT: "lead",
+          NX_TASK_TARGET_TARGET: "work",
+          NX_INVOCATION_ROOT_PID: String(process.pid),
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(status, 23, stderr);
+    assert.equal(stdout.trim(), "command-ran");
+    if (!linux) return assert.equal(stderr, "");
+    assert.match(stderr, /cannot write temporary state/);
+    assert.match(stderr, /ACTION: restore free space and write access in TMPDIR/);
+    assert.ok(!existsSync(state), "temporary state was removed");
+  });
+
+  for (const tool of ["sort", "paste"]) {
+    it(`keeps its command's result when ${tool} cannot summarize the tasks`, (t) => {
+      const dir = workspace(t);
+      const stubs = failing(t, { [tool]: `${tool} refused here` });
+      const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+      assert.equal(status, 0, log);
+      assert.equal(read(dir, "lead.nice"), "0", log);
+      if (!linux) return assert.deepEqual(lines(log), []);
+      assert.equal(read(dir, "side.nice"), "19", log);
+      assert.deepEqual(lines(log), [
+        `nx-precedence: cannot summarize the tasks beside lead:work (${tool} refused here)`,
+      ]);
+      assert.match(log, /ACTION: put working sort and paste tools on PATH/);
+    });
+  }
 
   it("names no failure for processes that ended before it lowered them", (t) => {
     const dir = workspace(t, { churn: true });

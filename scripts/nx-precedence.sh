@@ -67,11 +67,25 @@ task_of() {
   [ -z "$project" ] || [ -z "$target" ] || printf '%s:%s' "$project" "$target"
 }
 
-lowered="$(mktemp)"
-trap 'rm -f "$lowered"' EXIT
+if state="$(mktemp -d 2>&1)"; then
+  lowered="$state/lowered"
+  scan_errors="$state/scan-errors"
+else
+  echo "nx-precedence: cannot create temporary state ($state), so $own keeps its priority without lowering other tasks" >&2
+  echo "ACTION: set TMPDIR to a writable directory with free space, then run again" >&2
+  exec "$@"
+fi
+trap 'rm -rf "$state"' EXIT
+if ! : >"$lowered"; then
+  echo "nx-precedence: cannot write temporary state at $lowered, so $own keeps its priority without lowering other tasks" >&2
+  echo "ACTION: restore free space and write access in TMPDIR, then run again" >&2
+  rm -rf "$state"
+  trap - EXIT
+  exec "$@"
+fi
 
 yield() {
-  local warned=" " listing candidates found status pid nice stat task lower tasks out alive
+  local warned=" " listing candidates found status pid nice stat task lower tasks out alive diagnostic expected scan_detail
   local -a pids environs fields
   warn() {
     case "$warned" in *" $1 "*) return 0 ;; esac
@@ -92,14 +106,23 @@ yield() {
     while read -r pid nice; do
       [ "$nice" -lt 19 ] 2>/dev/null && [ "$pid" != "$$" ] && environs+=("/proc/$pid/environ")
     done <<<"$listing"
-    # grep says 2 for a process that ended or is another user's, which is no
-    # failure here; anything above that is grep itself failing.
+    # Keep real scanner failures distinct from processes that disappear or deny
+    # access between the listing and this read. LC_ALL fixes those diagnostics so
+    # only those two known /proc races are quiet.
     candidates=""
     if [ "${#environs[@]}" -gt 0 ]; then
-      found="$(grep -lszxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>/dev/null)" && status=0 || status=$?
-      if [ "$status" -gt 2 ]; then
-        warn grep "cannot read which processes are this run's (grep exited $status), so the tasks beside $own keep their priority until it can" \
-          "put GNU grep on PATH"
+      found="$(LC_ALL=C grep -lzxF "NX_INVOCATION_ROOT_PID=$run" "${environs[@]}" 2>"$scan_errors")" && status=0 || status=$?
+      expected=false
+      scan_detail=""
+      while IFS= read -r diagnostic; do
+        case "$diagnostic" in
+          "grep: /proc/"*"/environ: No such file or directory" | "grep: /proc/"*"/environ: Permission denied") expected=true ;;
+          *) scan_detail+="${scan_detail:+; }$diagnostic" ;;
+        esac
+      done <"$scan_errors"
+      if [ "$status" -gt 2 ] || [ -n "$scan_detail" ] || { [ "$status" -eq 2 ] && [ "$expected" = false ]; }; then
+        warn grep "cannot read which processes are this run's (grep exited $status: ${scan_detail:-no diagnostic}), so the tasks beside $own keep their priority until it can" \
+          "put GNU grep on PATH and fix the reported scanner error"
       fi
       for pid in $found; do
         pid="${pid#/proc/}"
@@ -160,8 +183,14 @@ status=0
 "$@" || status=$?
 kill "$yielder" 2>/dev/null || true
 wait "$yielder" 2>/dev/null || true
-ahead="$(sort -u "$lowered" | paste -sd ' ' -)"
+if ahead="$( { sort -u "$lowered" | paste -sd ' ' -; } 2>&1)"; then
+  summary=true
+else
+  summary=false
+  echo "nx-precedence: cannot summarize the tasks beside $own (${ahead//$'\n'/ })" >&2
+  echo "ACTION: put working sort and paste tools on PATH and restore read access to $lowered" >&2
+fi
 kept_names="${keep# }"
 kept_names="${kept_names% }"
-echo "nx-precedence: $own ran ahead of ${ahead:-no other task}${kept_names:+, keeping $kept_names}" >&2
+[ "$summary" = false ] || echo "nx-precedence: $own ran ahead of ${ahead:-no other task}${kept_names:+, keeping $kept_names}" >&2
 exit "$status"
