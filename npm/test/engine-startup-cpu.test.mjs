@@ -141,7 +141,7 @@ test("sample fold validates corrupt tables and preserves multithread and unresol
     huge.threads[0].samples.threadCPUDelta[0] = "huge-integer-placeholder";
     writeFileSync(
       path,
-      JSON.stringify(huge).replace('"huge-integer-placeholder"', "1" + "0".repeat(400)),
+      JSON.stringify(huge).replace('"huge-integer-placeholder"', `1${"0".repeat(400)}`),
     );
     const overflow = spawnSync("python", [script, path, symbols], { encoding: "utf8" });
     assert.equal(overflow.status, 2);
@@ -165,7 +165,7 @@ test("recorded attribution rows conserve CPU and stop at the first 80-percent cr
     const rows = [];
     for (const line of lines) {
       if (!line.startsWith("  ")) break;
-      const m = /^  ([\d.]+) ms \(([\d.]+)%; cumulative ([\d.]+)%\)/.exec(line);
+      const m = /^ {2}([\d.]+) ms \(([\d.]+)%; cumulative ([\d.]+)%\)/.exec(line);
       assert.ok(m, line);
       rows.push({ ms: Number(m[1]), cumulative: Number(m[3]) });
     }

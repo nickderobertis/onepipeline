@@ -137,7 +137,7 @@ test("unfinished launches stay in observed counts and never become zero-duration
     const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
     const start = records.find((r) => r.kind === "proc" && r.verb === "start");
     const partial = { ...start, pid: start.pid + 10000000 };
-    writeFileSync(file, [...records, partial].map(JSON.stringify).join("\n") + "\n");
+    writeFileSync(file, `${[...records, partial].map(JSON.stringify).join("\n")}\n`);
     const mixed = spawnSync(process.execPath, [script.pathname, "fold", `mixed=${root}`], {
       encoding: "utf8",
     });
@@ -145,10 +145,10 @@ test("unfinished launches stay in observed counts and never become zero-duration
     assert.match(mixed.stdout, /start: 50\.479360 ms mean; 1 completed \/ 2 observed/);
     writeFileSync(
       file,
-      records
+      `${records
         .filter((r) => !(r.kind === "end" && r.pid === start.pid))
         .map(JSON.stringify)
-        .join("\n") + "\n",
+        .join("\n")}\n`,
     );
     const none = spawnSync(process.execPath, [script.pathname, "fold", `none=${root}`], {
       encoding: "utf8",
