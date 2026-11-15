@@ -2146,6 +2146,11 @@ Run 43751624389 attempt 1 remains in flight: Windows and Linux running, macOS qu
 Capacity query at this checkpoint found seven plan demonstration heads (#1613–1616, #1628, #1633–1634), exactly the a55 cap. The second startup head remains local; no additional run starts until a slot is free. Completed local work is committed/published, and remaining work is the three after points per platform, their audits, final comparison and final judged pass.
 
 
+### Scope of the contributor option
+
+The demo selects the vendored library’s default at compile time, so all linked privateterms consumers in that build use the bypass, including helper executables that link it. A complete-tier mean difference therefore prices the compatible library option across the selected suite; it does not isolate engine-only initializer savings. The per-verb trace separately measures observed onepipeline start/adopt lifetimes. This is also why the release/adoption path names the library and its consumers, and why the full matcher behavior comparison is required. No full-tier saving is attributed exclusively to onepipeline’s own CPU.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
