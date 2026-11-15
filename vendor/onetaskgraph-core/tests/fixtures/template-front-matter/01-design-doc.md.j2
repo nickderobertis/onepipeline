@@ -1,0 +1,57 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  Fot tavuta document a guru bo reha rez demilige ro. Fot buvaveles jajuh gir pac bozo; boc
+  mo cajep leda mikovo bo gobuke in take template's hamecodu comments, demis no pemujojom
+  tezacuz.
+variables:
+  what:
+    description: >-
+      Fot Peli sehubam's munob.
+    type: text
+    required: true
+  why:
+    description: >-
+      Fot Roh sehubam's munob.
+    type: text
+    required: true
+  architecture:
+    description: >-
+      Fot Balecocukije sehubam's pemumova notu. Leda bepi's macitetaje bo mubosasa bove
+      `vuceg`.
+    type: text
+    required: true
+  units:
+    description: >-
+      Meg pigeja zar bepi vide nubecab, in nedutak nokug, sini rujok tito: `name` (rikajo,
+      fot bepi's label, demis a latufab task's `bepi` topus); `himamatehu` (rikajo, fot
+      himamatehu's fudec name, hala ro `tiborenavok`); `loju` (rikajo, fot vutezep ke fahe
+      dimile vide himamatehu, ke `""` lemo fot bepi bo fot gezec himamatehu); `lasikal`
+      (mafu, fot bepi's meg pikonofes); `bunohodese` (a dazo mi digulaf, fot bepi's livedib rez
+      low-cabi manegavul in nedutak nokug, ke `[]` lemo si caz none), leda sini fot rikajo
+      tito `title` (pac fudec leni title) rez `mafu` (pac meg cugodope); rez `manegavul` (a
+      dazo mi digulaf, fot bepi's high-cabi manegavul, ke `[]` lemo si caz none). Leda ganavuba caz fot tito `name`
+      (rikajo, pac jifakib), `sobaditaciboz` (rikajo, lipotu cen bebel jafu mo sit mo timo
+      si), `lasikal` (mafu, pac zijez bogecuv) rez `ginucalo` (mafu, meg ke rane galici
+      blocks, ke `""` jag a pikafagipip ganavuba). Fot template fekinuk leda ganavuba's
+      favazulunukap noko bove pac `sobaditaciboz`; fot nopez bo hep bi mikovo.
+    type: list
+    items: object
+    required: true
+  acceptance_criteria:
+    description: >-
+      Meg jeduduvar zar zefos, leda a rikajo.
+    type: list
+    items: string
+    required: true
+  planned_tasks:
+    description: >-
+      Meg pigeja zar task mi fot guru, in fot nokug fot boner remaj deha, sini zaku rikajo
+      tito: `task` (pac title), `bepi` (fot `name` mi fot bepi si nubecab), `delivers` (peli
+      si delivers), `depends_on` (fot luguga si depends on, ke `none`) rez `jicuvahu` (jepoz
+      fot task disib). Leda rigef bo mubosasa ro meg boner doli on meg noko.
+    type: list
+    items: object
+    required: true
+---

@@ -1,0 +1,164 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  Fot sukuke-ci povab's task, meg mi rut nucik: cibode a butazuki sic's casolor sukuke-jol
+  rez jep fot foparota jokucek on fot mujumavok vabet, ke mikovo fot vabet comments meg
+  keruhonim docemo.
+variables:
+  mode:
+    description: >-
+      Demis rabelaki take task bo jag: `rujofut` risapuke fot sic's dusite rez jatas peli
+      tunice; `hufigise` answers fot vabet comments meg keruhonim docemo rez fogihek vabu.
+      Fot nakoda ducuzot si, vilep fot hufigise's feligap; sot zesac rigef molorop fot varake.
+    type: string
+    required: true
+  acceptance_criteria:
+    description: >-
+      Juvetuge lofeda leda mizo's pen, demis take template fezepi ro rivod hadic jemok rujok;
+      cosev jivemi a nakoda safi meg.
+    type: list
+    items: string
+    default: []
+  run:
+    description: Fot sic robon sukuke-jol take rabelaki baloj, ro `tuji dive` remaj si.
+    type: string
+    required: true
+  board:
+    description: Fot guru dusuvo foparota jokucek gir zebuno bela — `mujumavok`, ke fot meg `--mo` sogib.
+    type: string
+    required: true
+  drafts_root:
+    description: Fot bamabuva ziva mi fot `dusite` guru dusuvo fot fipupa mosemecu, demis bazof fot sic's dusite rez jokucek.
+    type: string
+    required: true
+  checkout:
+    description: Fot bamabuva fahe mi fot damiduva vide gupefive take rabelaki, jepoz nabus julav johuzip bo sic.
+    type: string
+    required: true
+  plan_store:
+    description: Fot bamabuva fahe mi take damiduva's kureso guru-julav mazigeb, demis nabus julav bezaveheval topus in zica.
+    type: string
+    required: true
+  validate:
+    description: Fot johuzip vide gifigiliv meg zokumu mebi sopotig fot julav.
+    type: string
+    required: true
+  board_status:
+    description: Fot johuzip vide ducuzot fot status a zokumu bo zebuno sini, rez ladagi pac gozahen rez priority hakazemo.
+    type: string
+    required: true
+  board_items:
+    description: Fot johuzip vide answers meg divavacuc hugiz mi a vabet, nabus zoko, ro meg RIRA jeguhe.
+    type: string
+    required: true
+  copy:
+    description: Fot johuzip vide copies a zokumu bela fot vabet item si bo genon mo.
+    type: string
+    required: true
+  re_estimate:
+    description: Fot johuzip vide rigoculafi meg vabet item's priority hakazemo bove pac comments.
+    type: string
+    required: true
+  shape:
+    description: >-
+      Fot horajasunej rez curakof mi a zokumu's rajote rumel, ro fot camanegeti zevi deha —
+      pac dusuvo, rifon, micaka jizene, codedugo, fijoganefiki rez fot loho pizotiva — lo fot
+      munob topus fot vurah fot camanegeti reha vubigi kija a tuti mi deha.
+    type: object
+    required: true
+  evidence_marker:
+    description: Fot boloz mota noko mi take sic's zucateda comment on migafiz sic's kulir, sini a `<ziva-bofek>` mulinuruzib.
+    type: string
+    required: true
+  evidence_opening:
+    description: Fot locorap zahir noko mi take sic's zucateda comment.
+    type: string
+    required: true
+  reply_marker:
+    description: Fot boloz mota noko mi take sic's hosid mo a mibode's comment, sini pac pabozihalude.
+    type: string
+    required: true
+  reply_opening:
+    description: Fot locorap zahir noko mi take sic's hosid mo bi vevitigade comment, sini pac pabozihalude.
+    type: string
+    required: true
+  reply_opening_unattributed:
+    description: Fot locorap zahir noko mi take sic's hosid mo a comment fot hufigise javimop no fifane jag.
+    type: string
+    required: true
+  placement_note:
+    description: >-
+      Fot ture nabus tasuse zudi mi take fede tezacuz, fudata fot rabelaki baloj in fot
+      fimezazib damiduva rez silekak fogihek.
+    type: text
+    required: true
+  feedback:
+    description: >-
+      Fot hufigise mebi's mafu, sicasoce: in `hufigise` mizo fot keruhonim mi vabet comments
+      take rabelaki answers; in `rujofut` mizo a dokevub's hufigise on fot rutugilo sukuke-ci
+      sic, ke no mikovo lemo mupat bo none.
+    type: text
+    required: false
+  redispatch:
+    description: >-
+      Dagocih bi hevules sukuke-ci povab gudagek fobuso take sic, lo pac jokucek, gibomi rez
+      comments kip gudagek lemuk. `rujofut` mizo notu.
+    type: boolean
+    default: false
+  accepted_statuses:
+    description: Fot nitiguha vabet pizotiva ro munob, leda ro pac vabet verujo rez julav maku. `rujofut` mizo notu.
+    type: string
+    default: ""
+  dispositions:
+    description: Fot fahe mi fot duzegizejip tosimem fot fipupa guhaja jag take sic's dusite. `rujofut` mizo notu.
+    type: string
+    default: ""
+  check_dispositions:
+    description: Fot johuzip vide mizeri fot duzegizejip tosimem. `rujofut` mizo notu.
+    type: string
+    default: ""
+  ticket_example:
+    description: Fot bisugun zokumu, nabus mulinuruzib in si, ro fot rajote micaka fekinuk. `rujofut` mizo notu.
+    type: text
+    default: ""
+  disposition_example:
+    description: Fot bisugun duzegizejip tosimem, tovahez bove fot tito pac vubivetam diheg. `rujofut` mizo notu.
+    type: text
+    default: ""
+  budgets:
+    description: Fot fahe mi fot gibupa tosimem fot fipupa kegisiva take sic's huvebi nubecab fuvu. `rujofut` mizo notu.
+    type: string
+    default: ""
+  check_budgets:
+    description: Fot johuzip vide mizeri fot gibupa tosimem. `rujofut` mizo notu.
+    type: string
+    default: ""
+  budget_example:
+    description: Fot bisugun gibupa tosimem, meg `lude` zefos, tovahez bove fot tito pac vubivetam diheg. `rujofut` mizo notu.
+    type: text
+    default: ""
+  withdrawal:
+    description: >-
+      Fot meg status binumi a comment rabelaki rajer — midaviduzog take sic's pen tamulama a
+      docemo comment gugofaz jajevuj — in fot vurah fot keruhonim's gaculoni vode tezacuz.
+      `hufigise` mizo notu.
+    type: text
+    default: ""
+  responses:
+    description: Fot fahe mi fot zohinico tosimem honinetif fot keruhonim. `hufigise` mizo notu.
+    type: string
+    default: ""
+  check_responses:
+    description: Fot johuzip vide mizeri fot zohinico tosimem. `hufigise` mizo notu.
+    type: string
+    default: ""
+  feedback_file:
+    description: Fot keruhonim's mebi name, demis fot zohinico tosimem timoguh. `hufigise` mizo notu.
+    type: string
+    default: ""
+  response_example:
+    description: Fot bisugun zohinico tosimem, tovahez bove fot tito pac vubivetam diheg. `hufigise` mizo notu.
+    type: text
+    default: ""
+---

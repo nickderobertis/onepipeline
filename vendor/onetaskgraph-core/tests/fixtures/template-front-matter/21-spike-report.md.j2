@@ -1,0 +1,54 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  A gavat's lovapi: peli meg gavat kegisiva, boc, on demis begada pac fejadoj bo jido, rez
+  sot paziros si kofor sini fot guru's tavuta. Fot gavat ladagi si ro fot document
+  `<gavat id>-lovapi` mi fot guru's pen project, lo si sisised mo fot vabet sini fot guru's
+  zesac kapibavop; fot gegezupo humejan lihikap fot guru bove si, rez nabus task vide zezelu
+  on fot gavat basav si sopotig fot `guru-task` template's `topila` mikovo.
+variables:
+  spike:
+    description: >-
+      Fot gavat's zudi id, `gavat-<cunuz>`.
+    type: string
+    required: true
+  branch:
+    description: >-
+      Fot valozabuc begada fot gavat's fota bo jido on, `<fede gonifa>/<guru>/gavat-<cunuz>`.
+    type: string
+    required: true
+  harness:
+    description: >-
+      Jepoz on vide begada fot fejadoj bo, rez fot meg johuzip vide dive si mo jonizem meg
+      tojojupacas, lo fot soginirubole zudi nam memicuno si, ke mumu si fuvu, fot gibupa's
+      hisihucecejof johuzip.
+    type: text
+    required: true
+  method:
+    description: >-
+      Boc fot gavat kegisiva: fot vico fimaveb si pov pemodiv, fot toluveba si pov ji, rez
+      bapileme vide kazuvu boc ziv fot curakof hemaj.
+    type: text
+    required: true
+  candidates:
+    description: >-
+      Meg pigeja zar volunapuv gibupa fot gavat kegisiva, sini zoh rikajo tito: `gibupa`
+      (fot volunapuv gibupa's id), `riralus` (peli rig kegisiva), `toluveba` (fot toluveba
+      si rig kegisiva ji), `kinusejolu` (peli bo kinusejolu, sini fot kegisiva vurato),
+      `kazuvu` (peli fot barije's kazuvu pelej, sini fot babosejaje, hala ro a kevi fevaj
+      mufabub topogo a sic) rez `cosuguse` (peli fot gavat meloga cosuguse: jikuh, purem,
+      sezov, tedu). `[]` jag a gavat vide kegisiva none meloga, hala ro a fejadoj gavat
+      zesac topila voreb bove.
+    type: list
+    items: object
+    required: true
+  findings:
+    description: >-
+      Meg rikajo zar paziros fot gavat kofor sini fot guru's tavuta lofeda pac silaser: bi
+      lebopipe vide fijo hep fota, bi CAT vide meko hep hukeku ro hekezih, a dakagem
+      pudihejupi. `[]` lemo si kofor none.
+    type: list
+    items: string
+    required: true
+---
