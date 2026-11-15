@@ -2344,7 +2344,7 @@ Cache steps:
 
 The approved read-only guard is unchanged; no Actions-cache save line appears and the Nx receipt records zero entries/bytes stored and zero replayed. Linux merged-coverage results for the side remain the not-produced results already reported; this Windows job does not produce merged Linux coverage.
 
-Partial Windows comparison at source276c5d44: `node scripts/engine-startup.mjs fold before/1/windows=BASELINE1_WINDOWS before/2/windows=BASELINE2_WINDOWS contributors/2/windows=AFTER2_WINDOWS`, with the same recorded baseline job paths and scratch/runs/43756326338-attempt-1/test-windows. This is an earlier-commit checkpoint and not yet the final-source fold:
+Partial Windows comparison at source2f6f0076: `node scripts/engine-startup.mjs fold before/1/windows=BASELINE1_WINDOWS before/2/windows=BASELINE2_WINDOWS contributors/2/windows=AFTER2_WINDOWS`, with the same recorded baseline job paths and scratch/runs/43756326338-attempt-1/test-windows. This is an earlier-commit checkpoint and not yet the final-source fold:
 
 ```text
 before/1/windows (windows)
