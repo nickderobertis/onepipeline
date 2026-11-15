@@ -260,10 +260,18 @@ export function summarizeJob(label, dir) {
       /^e2e-|^smoke-/.test(r.exe ?? "") ? "(test process)" : `${r.exe} ${r.verb ?? ""}`.trim(),
     ]),
   );
-  const git = { starts: 0, seconds: 0, byVerb: {}, byShape: {}, engineSites: {} };
+  const git = {
+    starts: 0,
+    seconds: 0,
+    missingLifetimes: 0,
+    byVerb: {},
+    byShape: {},
+    engineSites: {},
+  };
   for (const r of trace.starts) {
     if (r.program !== "git") continue;
     const s = (r.exit_ns ?? 0) / 1e9;
+    const missing = r.exit_ns == null ? 1 : 0;
     const verb = verbOf.get(trace.key(r.file, r.pid, r.instance)) ?? "(unknown)";
     const { shape, site } = classify(r.argv ?? []);
     const engineSite = /^onepipeline(?:::|_core::)/.test(r.function ?? "")
@@ -272,20 +280,24 @@ export function summarizeJob(label, dir) {
         )
       : null;
     if (engineSite) {
-      git.engineSites[engineSite] ??= { starts: 0, seconds: 0 };
+      git.engineSites[engineSite] ??= { starts: 0, seconds: 0, missingLifetimes: 0 };
       git.engineSites[engineSite].starts++;
       git.engineSites[engineSite].seconds += s;
+      git.engineSites[engineSite].missingLifetimes += missing;
     }
     git.starts++;
     git.seconds += s;
-    git.byVerb[verb] ??= { starts: 0, seconds: 0 };
+    git.missingLifetimes += missing;
+    git.byVerb[verb] ??= { starts: 0, seconds: 0, missingLifetimes: 0 };
     const v = git.byVerb[verb];
     v.starts++;
     v.seconds += s;
-    git.byShape[shape] ??= { starts: 0, seconds: 0, site };
+    v.missingLifetimes += missing;
+    git.byShape[shape] ??= { starts: 0, seconds: 0, missingLifetimes: 0, site };
     const k = git.byShape[shape];
     k.starts++;
     k.seconds += s;
+    k.missingLifetimes += missing;
   }
   const jobStart = meta.started_at ? Date.parse(meta.started_at) / 1000 : facts?.job.start;
   const jobEnd = meta.completed_at ? Date.parse(meta.completed_at) / 1000 : facts?.job.end;
@@ -346,6 +358,13 @@ export function readSide(label, dir) {
 
 const fmt = (x, digits = 2) => (x == null || Number.isNaN(x) ? "-" : x.toFixed(digits));
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const gitTime = (seconds, missing) =>
+  `${fmt(seconds, 1)}${missing > 0 ? ` (+${fmt(missing, 1)} unknown)` : ""}`;
+const groupTime = (jobs, group) =>
+  gitTime(
+    mean(jobs.map((j) => group(j)?.seconds ?? 0)),
+    mean(jobs.map((j) => group(j)?.missingLifetimes ?? 0)),
+  );
 const table = (head, rows) =>
   [
     `| ${head.join(" | ")} |`,
@@ -396,7 +415,7 @@ function renderSide(side) {
         fmt(j.preE2eMinutes),
         fmt(j.e2eMinutes, 3),
         String(j.git.starts),
-        fmt(j.git.seconds, 1),
+        gitTime(j.git.seconds, j.git.missingLifetimes),
         String(j.passed.length),
         j.failed.length ? j.failed.join(", ") : "0",
         j.retried.length ? j.retried.join(", ") : "0",
@@ -406,6 +425,7 @@ function renderSide(side) {
   );
   out.push("", "Nx selection, workflow blob, cache restores and cache writes:", "");
   for (const j of side.jobs) {
+    out.push(`- ${j.label}: unmeasured Git lifetimes: ${j.git.missingLifetimes}`);
     const restores =
       j.cacheSteps.map((s) => `${s.name}: ${s.hit}, ${fmt(s.seconds, 1)} s`).join("; ") || "none";
     const writes =
@@ -462,8 +482,8 @@ function renderComparison(before, after) {
       diff == null ? "-" : fmt(diff * TYPICAL_SHARE, 2),
       fmt(sb, 0),
       fmt(sa, 0),
-      fmt(gb, 1),
-      fmt(ga, 1),
+      gitTime(gb, mean(b.map((j) => j.git.missingLifetimes))),
+      gitTime(ga, mean(a.map((j) => j.git.missingLifetimes))),
     ]);
   }
   out.push(
@@ -497,12 +517,12 @@ function renderComparison(before, after) {
     const shapeRows = [...shapes]
       .map((shape) => {
         const per = (jobs) => mean(jobs.map((j) => j.git.byShape[shape]?.starts ?? 0));
-        const sec = (jobs) => mean(jobs.map((j) => j.git.byShape[shape]?.seconds ?? 0));
+        const sec = (jobs) => groupTime(jobs, (j) => j.git.byShape[shape]);
         const site = [...b, ...a].map((j) => j.git.byShape[shape]?.site).find(Boolean) ?? "-";
         const [pb, pa] = [per(b), per(a)];
         const verdict =
           pa === 0 && pb > 0 ? "removed" : pa < pb ? "reduced" : pa > pb ? "added" : "left";
-        return [shape, site, fmt(pb, 0), fmt(pa, 0), fmt(sec(b), 1), fmt(sec(a), 1), verdict];
+        return [shape, site, fmt(pb, 0), fmt(pa, 0), sec(b), sec(a), verdict];
       })
       .sort((x, y) => Number(y[2]) - Number(x[2]));
     out.push(
@@ -516,8 +536,8 @@ function renderComparison(before, after) {
     const verbRows = [...verbs]
       .map((verb) => {
         const per = (jobs) => mean(jobs.map((j) => j.git.byVerb[verb]?.starts ?? 0));
-        const sec = (jobs) => mean(jobs.map((j) => j.git.byVerb[verb]?.seconds ?? 0));
-        return [verb, fmt(per(b), 0), fmt(per(a), 0), fmt(sec(b), 1), fmt(sec(a), 1)];
+        const sec = (jobs) => groupTime(jobs, (j) => j.git.byVerb[verb]);
+        return [verb, fmt(per(b), 0), fmt(per(a), 0), sec(b), sec(a)];
       })
       .sort((x, y) => Number(y[1]) - Number(x[1]));
     out.push(table(["verb", "starts before", "starts after", "s before", "s after"], verbRows));
@@ -529,8 +549,8 @@ function renderComparison(before, after) {
         ["site", "starts before", "starts after", "s before", "s after"],
         ["destination::git_path", "vcs::worktree_head"].map((site) => {
           const per = (jobs) => mean(jobs.map((j) => j.git.engineSites[site]?.starts ?? 0));
-          const sec = (jobs) => mean(jobs.map((j) => j.git.engineSites[site]?.seconds ?? 0));
-          return [site, fmt(per(b), 0), fmt(per(a), 0), fmt(sec(b), 1), fmt(sec(a), 1)];
+          const sec = (jobs) => groupTime(jobs, (j) => j.git.engineSites[site]);
+          return [site, fmt(per(b), 0), fmt(per(a), 0), sec(b), sec(a)];
         }),
       ),
     );
@@ -554,7 +574,9 @@ function renderComparison(before, after) {
 /** The whole comparison, as Markdown. */
 export function render(sides) {
   const [before, ...afters] = sides;
-  return `${[...sides.map(renderSide), ...afters.map((after) => renderComparison(before, after))].join("\n\n")}\n`;
+  const note =
+    "Git seconds sum recorded child lifetimes only; (+N unknown) counts starts without an exit duration, never zero-cost children.";
+  return `${[note, ...sides.map(renderSide), ...afters.map((after) => renderComparison(before, after))].join("\n\n")}\n`;
 }
 
 /** Local instrumentation verification deliberately omits elapsed comparisons. */

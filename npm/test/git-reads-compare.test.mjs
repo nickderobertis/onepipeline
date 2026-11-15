@@ -338,3 +338,30 @@ test("engine-owned reads are separated from onevcs starts for adoption pricing",
     assert.match(result.stdout, /\| vcs::worktree_head \| 0 \| 0 \|/);
   });
 });
+
+test("a Git start without an exit remains counted with an explicitly unknown lifetime", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const dir = join(jobOf(after), "test-profile/launch");
+    const path = join(
+      dir,
+      readdirSync(dir).find((f) => f.endsWith(".jsonl")),
+    );
+    const records = readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const first = records.find((r) => r.kind === "start" && r.program === "git");
+    const kept = records.filter(
+      (r) => !(r.kind === "exit" && r.pid === first.pid && r.seq === first.seq),
+    );
+    assert.ok(kept.length < records.length, "the recorded Git start had a paired exit to remove");
+    writeFileSync(path, `${kept.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    const result = run("compare", before, after);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /after\/attempt-0\/test-linux: unmeasured Git lifetimes: 1/);
+    assert.match(result.stdout, /\(\+1\.0 unknown\)/);
+    assert.match(result.stdout, /\| linux \| 1\/1 .* \| 39 \| 39 \|/);
+  });
+});
