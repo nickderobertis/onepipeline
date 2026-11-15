@@ -1,5 +1,5 @@
 {
-  "source_commit": "43649554",
+  "source_commit": "30cf54eb",
   "runs": [
     {
       "id": 43684231509,
@@ -11,6 +11,6 @@
     }
   ],
   "raw_artifact_root": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-2/sides/baseline",
-  "fold": "readSide(\"baseline\", raw_artifact_root), then render([side]); exports from scripts/git-reads-compare.mjs at source_commit",
-  "scope": "Earlier-commit hosted baseline, not prototype timing. Linux attempt1 has2154 individually retained passes and one inferred pass under a47; attempt2 has2155 retained passes. No after measurements."
+  "fold": "readSide(\"baseline\", raw_artifact_root) at30cf54eb, then render([side]) atb7fca28e; only explanatory duration wording changed between those commits",
+  "scope": "Earlier-commit hosted baseline, not prototype timing. Counts preserve frozen inventory launch attempts, including explicit failed spawns; their known spawn-call cost is separate from recorded launch durations and launches lacking an exit duration. Linux attempt1 has2154 retained passes plus one inferred under a47; attempt2 has2155 retained passes. No after measurements."
 }
