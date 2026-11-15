@@ -214,3 +214,33 @@ test("the recorded kept-branch trace proves interval clipping, child programs an
   assert.match(run.stdout, /recorded child-wait loops: 768\.402 ms over 113 records/);
   assert.match(run.stdout, /recorded child-wait loops: 951\.300 ms over 141 records/);
 });
+
+test("malformed and invalid trace rows remain visible alongside completed means", async () => {
+  const { appendFileSync, cpSync, mkdtempSync, readdirSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-excluded-"),
+  );
+  try {
+    cpSync(fixture.pathname, root, { recursive: true });
+    const dir = join(root, "test-profile/launch");
+    appendFileSync(
+      join(
+        dir,
+        readdirSync(dir).find((name) => name.endsWith(".jsonl")),
+      ),
+      "{unfinished\n{}\n",
+    );
+    for (const verb of ["fold", "phases"]) {
+      const run = spawnSync(process.execPath, [script.pathname, verb, `recorded=${root}`], {
+        encoding: "utf8",
+      });
+      assert.equal(run.status, 0, run.stderr);
+      assert.match(run.stdout, /excluded input records: .*"malformed":1.*"invalid":1/);
+      assert.match(run.stdout, /50\.479/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -22,7 +22,10 @@ function intervalUnion(intervals, from, to) {
 function localPhases(label, dir) {
   const job = readJob(label, dir);
   const trace = joinTrace(job.trace);
-  const lines = [`${label}: local trace intervals (not a hosted wall-clock estimate)`];
+  const lines = [
+    `${label}: local trace intervals (not a hosted wall-clock estimate)`,
+    `excluded input records: ${JSON.stringify(job.skipped)}`,
+  ];
   for (const proc of trace.procs.filter(
     (p) => p.exe === "onepipeline" && ["start", "adopt"].includes(p.verb) && !p.parentStart,
   )) {
@@ -106,6 +109,7 @@ export function main(args) {
     // llmlint: ignore-block[tool_output_is_signal] This never-land measurement report must print each job and side, with uncertainty beside the numbers; one success line would discard the deliverable (manager a1).
     const lines = [
       `${f.label} (${f.os})`,
+      `excluded input records: ${JSON.stringify(f.skipped)}`,
       `runner: ${f.host?.cpu_model ?? "not recorded"}; cores: ${f.host?.cpus ?? "not recorded"}`,
       `e2e minutes: ${f.wallS == null ? "not measured" : (f.wallS / 60).toFixed(6)}`,
     ];
