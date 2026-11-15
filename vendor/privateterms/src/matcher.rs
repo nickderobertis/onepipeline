@@ -55,7 +55,7 @@ enum StartupCut {
 }
 
 // Measurement-only compile-time demonstration switch; the environment remains an explicit override.
-const DEFAULT_STARTUP_CUT: StartupCut = StartupCut::Baseline;
+const DEFAULT_STARTUP_CUT: StartupCut = StartupCut::Contributors;
 
 impl StartupCut {
     fn read() -> Result<Self, Unbuildable> {
