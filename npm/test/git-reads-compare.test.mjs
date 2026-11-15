@@ -274,3 +274,26 @@ test("the local collector refuses old output and points at a real cargo failure'
     );
   });
 });
+
+test("malformed coverage evidence is refused and job diagnostic re-runs are named separately", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const path = join(jobOf(after), "job.log");
+    const log = readFileSync(path, "utf8");
+    for (const percent of ["1..2", "101", "-1", "NaN"]) {
+      writeFileSync(path, `${log}\n2026-11-14T09:30:00Z lines percent: ${percent}\n`);
+      const result = run("compare", before, after);
+      assert.equal(result.status, 1, percent);
+      assert.match(result.stderr, /invalid coverage percentage/);
+    }
+    writeFileSync(
+      path,
+      `${log}\n2026-11-14T09:30:00Z rerun-failed: re-run 1 of 3: onepipeline::e2e ${names[0]} passed\n2026-11-14T09:30:01Z rerun-failed: re-run 2 of 3: onepipeline::e2e ${names[0]} FAILED\n`,
+    );
+    const result = run("compare", before, after);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /diagnostic re-runs: .*1 passed, 1 failed/);
+    assert.match(result.stdout, /all 2 passed/);
+  });
+});

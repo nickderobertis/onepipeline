@@ -132,6 +132,23 @@ export function outcomes(log, run) {
   return { failed, retried, passedLines };
 }
 
+/** Diagnostic job-step reruns never replace the original tier's verdict. */
+export function diagnosticReruns(log) {
+  const results = {};
+  for (const raw of (log ?? "").replace(ANSI, "").split(/\r?\n/)) {
+    const line = raw.replace(/^\S+Z\s?/, "");
+    const match =
+      /^rerun-failed: re-run \d+ of \d+: onepipeline::e2e (\S+) (passed|FAILED|did not run)(?:.*)$/.exec(
+        line,
+      );
+    if (!match) continue;
+    const [, name, status] = match;
+    results[name] ??= { passed: 0, failed: 0, unrun: 0 };
+    results[name][status === "passed" ? "passed" : status === "FAILED" ? "failed" : "unrun"]++;
+  }
+  return results;
+}
+
 /** The full commit id `actions/checkout` printed for the merge it checked out (GITHUB_SHA). */
 export function githubSha(log) {
   const lines = (log ?? "").replace(ANSI, "").split(/\r?\n/);
@@ -145,8 +162,20 @@ export function githubSha(log) {
 
 /** The merged line coverage `coverage-merge.mjs` printed, or null where it never ran. */
 export function mergedCoverage(log) {
-  const m = /lines percent: ([\d.]+)/.exec((log ?? "").replace(ANSI, ""));
-  return m ? Number(m[1]) : null;
+  const m = /lines percent: (\S+)/.exec((log ?? "").replace(ANSI, ""));
+  if (!m) return null;
+  const value = Number(m[1]);
+  if (
+    !/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(m[1]) ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 100
+  )
+    throw new Refusal(
+      "invalid coverage percentage in job log",
+      "restore an unmodified coverage-merge log with a finite percentage from 0 to 100",
+    );
+  return value;
 }
 
 const minutes = (seconds) => seconds / 60;
@@ -269,6 +298,7 @@ export function summarizeJob(label, dir) {
     summary: run?.line ?? null,
     passed,
     summarySupported,
+    diagnosticReruns: diagnosticReruns(log),
     failed: [...failed].sort(),
     retried: [...retried].sort(),
     coverage: mergedCoverage(log),
@@ -386,6 +416,14 @@ function renderSide(side) {
     out.push(
       `- ${j.label} (${j.summarySupported.length} summary-supported): ${j.passed.length ? j.passed.join(", ") : "none proven"}`,
     );
+  out.push("", "Diagnostic job-step re-runs (the original tier verdict is retained):", "");
+  for (const j of side.jobs) {
+    const names = Object.entries(j.diagnosticReruns).map(
+      ([name, counts]) =>
+        `${name}: ${counts.passed} passed, ${counts.failed} failed, ${counts.unrun} unrun`,
+    );
+    out.push(`- ${j.label}: diagnostic re-runs: ${names.length ? names.join("; ") : "none"}`);
+  }
   return out.join("\n");
 }
 

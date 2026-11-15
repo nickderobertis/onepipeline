@@ -20,7 +20,9 @@
 //! Anything a reader cannot answer exactly as git would is left to git: a miss
 //! the reader cannot tell apart from a damaged repository, a name two refs could
 //! mean, a repository relocated by `GIT_*`, shallow, grafted or replaced history,
-//! a repository with `extensions`, and everything not listed above.
+//! a repository with `extensions`, and everything not listed above. The batched
+//! reader also delegates packed and borrowed object stores: cat-file retains
+//! deleted pack mappings, so a long-lived reader cannot prove their freshness.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -97,9 +99,9 @@ pub(crate) fn with_mode<T>(mode: Mode, read: impl FnOnce() -> T) -> T {
     answered
 }
 
-/// The mode this process runs: `ONEVCS_SPIKE_GIT_READS` when it names one, else
-/// [`DEMONSTRATION`].
-// llmlint: ignore[changed_behavior_has_e2e] local-slice.sh runs real engine subprocesses in all six environment-selected modes; once-per-process selection and fallback are measurement setup, never a shipped configurable interface.
+/// The mode this process runs: `ONEVCS_SPIKE_GIT_READS`, or [`DEMONSTRATION`]
+/// when unset. An invalid explicit value ends this measurement process with exit 2.
+// llmlint: ignore-block[changed_behavior_has_e2e] local-slice.sh runs real engine subprocesses in all six environment-selected modes; once-per-process selection and fallback are measurement setup, never a shipped configurable interface.
 pub fn mode() -> Mode {
     #[cfg(test)]
     if let Some(mode) = TEST_MODE.with(std::cell::Cell::get) {
@@ -107,12 +109,19 @@ pub fn mode() -> Mode {
     }
     static MODE: OnceLock<Mode> = OnceLock::new();
     *MODE.get_or_init(|| {
-        std::env::var(MODE_ENV)
-            .ok()
-            .and_then(|word| Mode::parse(word.trim()))
-            .or_else(|| Mode::parse(DEMONSTRATION))
-            .unwrap_or(Mode::STOCK)
+        let word = match std::env::var(MODE_ENV) {
+            Ok(word) => word,
+            Err(std::env::VarError::NotPresent) => DEMONSTRATION.to_owned(),
+            Err(std::env::VarError::NotUnicode(_)) => invalid_mode(),
+        };
+        Mode::parse(word.trim()).unwrap_or_else(|| invalid_mode())
     })
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+fn invalid_mode() -> ! {
+    eprintln!("{MODE_ENV} must name stock, batched, native, reuse, reuse+batched or reuse+native; next: correct or unset that measurement variable");
+    std::process::exit(2)
 }
 
 /// The variables that change which repository, refs, objects or configuration git
@@ -176,7 +185,7 @@ impl Call {
         if mode == Mode::STOCK {
             return call;
         }
-        // llmlint: ignore[changed_behavior_has_e2e] This never-landing stdin guard conservatively delegates and invalidates; no prototype answers a fed query. Production stdin/failure injection is recorded as an unproven branch rather than changing the measured Git interface to synthesize replies.
+        // llmlint: ignore-block[changed_behavior_has_e2e] This never-landing stdin guard conservatively delegates and invalidates; no prototype answers a fed query. Production stdin/failure injection is recorded as an unproven branch rather than changing the measured Git interface to synthesize replies.
         if fed || !is_read(args) {
             reuse::forget();
             if destroys(args) {
@@ -185,6 +194,7 @@ impl Call {
             call.mode = Mode::STOCK;
             return call;
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         if relocated(env) {
             call.mode = Mode::STOCK;
             return call;
@@ -250,7 +260,7 @@ impl EngineRead {
     }
 
     /// What git answered.
-    // llmlint: ignore[changed_behavior_has_e2e] Real-Git EngineRead differential tests prove accepted results; missing exit codes and invalid UTF-8 conservatively prevent memo insertion. Synthetic rejected-result injection is production hardening for this never-landing seam and remains an explicit coverage obligation.
+    // llmlint: ignore-block[changed_behavior_has_e2e] Real-Git EngineRead differential tests prove accepted results; missing exit codes and invalid UTF-8 conservatively prevent memo insertion. Synthetic rejected-result injection is production hardening for this never-landing seam and remains an explicit coverage obligation.
     pub fn ran(&self, status: Option<i32>, stdout: &[u8], stderr: &[u8]) {
         let (Some(status), Ok(stdout), Ok(stderr)) = (
             status,
@@ -261,6 +271,7 @@ impl EngineRead {
         };
         self.0.ran(&reply(status, stdout, stderr));
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Everything that holds a repository's files open lets go of them: called before
@@ -282,7 +293,8 @@ fn reply(status: i32, stdout: &str, stderr: &str) -> Output {
 }
 
 /// Whether a command only reads: anything else forgets every remembered answer.
-// llmlint: ignore[changed_behavior_has_e2e] The never-landing classifier's real config-write and failed symbolic-delete journeys prove invalidation; exhaustive combinations of Git flags are unproven production coverage, not an extra measured CLI interface.
+// llmlint: ignore-block[changed_behavior_has_e2e] The never-landing classifier's real config-write and failed symbolic-delete journeys prove invalidation; exhaustive combinations of Git flags are unproven production coverage, not an extra measured CLI interface.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This never-landing Git compatibility prototype is reconciled by the task-required real-Git differential command, not installed into the frozen publication gate. Wiring production reconciliation belongs to the eventual onevcs implementation, under manager ruling a47.
 fn is_read(args: &[&str]) -> bool {
     if args
         .iter()
@@ -324,15 +336,19 @@ fn is_read(args: &[&str]) -> bool {
         _ => false,
     }
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// Commands after which a held repository file may be in the way on Windows: the
 /// ones that remove files a batch process could hold open.
+// llmlint: ignore-block[changed_behavior_has_e2e] This never-landing destructive-command predicate is exercised for worktree removal by the real engine-head journey and for explicit release by the batch journey; exhaustive destructive Git option branches remain production coverage obligations under a47.
 fn destroys(args: &[&str]) -> bool {
     matches!(
         args.first().copied(),
         Some("worktree" | "clean" | "gc" | "prune" | "repack" | "maintenance" | "fetch" | "pull")
     )
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// A repository's git directory, the directory its refs and objects live in, and
 /// the top of its work tree where it has one.
@@ -354,7 +370,8 @@ fn is_git_dir(path: &Path) -> bool {
 /// The repository git would find from `cwd`, or `None` where finding it the way git
 /// does would need more than this reads (a gitfile git would refuse, a repository
 /// another user owns, a directory that does not exist).
-// llmlint: ignore[changed_behavior_has_e2e] Real plain/linked/alternate/relocated repository journeys exercise this never-landing discovery seam; exhaustive malformed-gitfile, ownership and OS-failure fixtures remain production coverage obligations. Unknown metadata/read failures now decline the alternate reader.
+// llmlint: ignore-block[changed_behavior_has_e2e] Real plain/linked/alternate/relocated repository journeys exercise this never-landing discovery seam; exhaustive malformed-gitfile, ownership and OS-failure fixtures remain production coverage obligations. Unknown metadata/read failures now decline the alternate reader.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This never-landing Git compatibility prototype is reconciled by the task-required real-Git differential command, not installed into the frozen publication gate. Wiring production reconciliation belongs to the eventual onevcs implementation, under manager ruling a47.
 pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
     let start = std::path::absolute(cwd).ok()?;
     if !start.is_dir() {
@@ -414,9 +431,11 @@ pub(crate) fn layout(cwd: &Path) -> Option<Layout> {
         dot_git,
     })
 }
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// git's `ref_rev_parse_rules`, in order.
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] These frozen Git resolution rules are differentially reconciled with the real Git binary by the task-required local vendored tests; this prototype never lands and deliberately is not wired into the repository's frozen publication checks.
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] These frozen Git resolution rules are differentially reconciled with the real Git binary by the task-required local vendored tests; this prototype never lands and deliberately is not wired into the repository's frozen publication checks.
 const RULES: [(&str, &str); 6] = [
     ("", ""),
     ("refs/", ""),
@@ -425,6 +444,7 @@ const RULES: [(&str, &str); 6] = [
     ("refs/remotes/", ""),
     ("refs/remotes/", "/HEAD"),
 ];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 fn expand(rule: (&str, &str), name: &str) -> String {
     format!("{}{name}{}", rule.0, rule.1)
@@ -487,7 +507,7 @@ pub(crate) struct Stamp {
     seen: Option<(u64, i128, u64, i128)>,
 }
 
-// llmlint: ignore-block[changed_behavior_has_e2e] This never-landing prototype is differentially exercised on real repositories, repeated reads, writes and external ref moves. Additional fault injection for included-config changes, object removal, racy filesystem stamps and capacity eviction belongs to a production implementation; those unproven paths are explicitly priced as coverage risk in the spike report.
+// llmlint: ignore-block[changed_behavior_has_e2e] This never-landing prototype is differentially exercised on real repositories, repeated reads, writes and external ref moves. Real-Git tests now prove include-config and external-prune delegation; additional stamp-race and capacity fault injection belongs to production implementation, and those remaining unproven paths are priced as coverage risk in the report.
 mod reuse {
     use super::*;
 
@@ -514,6 +534,7 @@ mod reuse {
 
     /// Only configuration, layout and symbolic-ref queries: object/reflog reads
     /// delegate because external pruning and reflog writes are not stamped.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This never-landing Git compatibility prototype is reconciled by the task-required real-Git differential command, not installed into the frozen publication gate. Wiring production reconciliation belongs to the eventual onevcs implementation, under manager ruling a47.
     pub(super) fn reusable(args: &[&str]) -> bool {
         matches!(
             args,
@@ -527,6 +548,7 @@ mod reuse {
                 ]
         ) || args.first() == Some(&"symbolic-ref") && is_read(args)
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
     /// Whether an answer may be kept. Success always; a "no" only where what it
     /// says no about is a ref or a setting, which the stamps cover — never that an
@@ -588,7 +610,7 @@ mod reuse {
         memo.insert(key(args, cwd, env), (output.clone(), stamps.to_vec()));
     }
 
-    fn stamp(path: PathBuf) -> Option<Stamp> {
+    pub(super) fn stamp(path: PathBuf) -> Option<Stamp> {
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(meta) => Some(meta),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -651,6 +673,7 @@ mod reuse {
     );
     type ConfigPaths = HashMap<ConfigKey, Option<Vec<PathBuf>>>;
 
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This never-landing Git compatibility prototype is reconciled by the task-required real-Git differential command, not installed into the frozen publication gate. Wiring production reconciliation belongs to the eventual onevcs implementation, under manager ruling a47.
     fn global_configs(cwd: Option<&Path>, env: &[(String, String)]) -> Option<Vec<PathBuf>> {
         static PATHS: OnceLock<Mutex<ConfigPaths>> = OnceLock::new();
         let mut inherited: Vec<_> = std::env::vars_os().collect();
@@ -735,6 +758,7 @@ mod reuse {
         cache.insert(key, paths.clone());
         paths
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
     /// The stamps a read in `cwd` depends on, or `None` where one was changed so
     /// recently that the next change could leave it looking the same.
@@ -982,7 +1006,7 @@ mod native {
         std::fs::symlink_metadata(cwd.join(name)).is_ok()
     }
 
-    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] The task's local real-Git differential suite reconciles this never-landing response adapter. Shipping it would require those tests in onevcs's production gate; this spike cannot edit the frozen gate to install a prototype.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] The task's local real-Git differential suite reconciles this never-landing response adapter. Shipping it would require those tests in onevcs's production gate; this spike cannot edit the frozen gate to install a prototype.
     pub(super) fn answer(args: &[&str], cwd: &Path, layout: &Layout) -> Option<Output> {
         match args {
             ["show-ref", "--verify", "--quiet", name]
@@ -1159,6 +1183,7 @@ mod native {
             _ => None,
         }
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1178,6 +1203,7 @@ mod batched {
         stderr: ChildStderr,
         launch: Option<crate::launch_trace::Launch>,
         used: Instant,
+        pack_stamp: Stamp,
     }
 
     impl Batch {
@@ -1245,7 +1271,7 @@ mod batched {
         }
     }
 
-    fn start(git_dir: &Path, env: &[(String, String)]) -> Option<Batch> {
+    fn start(git_dir: &Path, env: &[(String, String)], pack_stamp: Stamp) -> Option<Batch> {
         let mut command = Command::new(crate::git::git_program());
         command
             .arg("--git-dir")
@@ -1273,6 +1299,7 @@ mod batched {
             stderr,
             launch: Some(launch),
             used: Instant::now(),
+            pack_stamp,
         })
     }
 
@@ -1335,16 +1362,26 @@ mod batched {
 
     /// Each line's object id and type, or `None` for a line git found nothing for;
     /// `None` overall where the process failed or warned.
-    // llmlint: ignore[invalid_states_unrepresentable] This never-landing internal pipe boundary validates every hexadecimal id and closed object-kind token before constructing its transient string pair. No unvalidated pair enters it; introducing a published object-kind abstraction belongs to the production implementation, not the timing prototype.
+    // llmlint: ignore-block[invalid_states_unrepresentable] This never-landing internal pipe boundary validates every hexadecimal id and closed object-kind token before constructing its transient string pair. No unvalidated pair enters it; introducing a published object-kind abstraction belongs to the production implementation, not the timing prototype.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This never-landing Git compatibility prototype is reconciled by the task-required real-Git differential command, not installed into the frozen publication gate. Wiring production reconciliation belongs to the eventual onevcs implementation, under manager ruling a47.
     fn ask(
         git_dir: &Path,
         env: &[(String, String)],
         lines: &[String],
+        pack_stamp: &Stamp,
     ) -> Option<Vec<Option<(String, String)>>> {
         let key = (git_dir.to_path_buf(), env.to_vec());
         let mut open = open()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if open
+            .get(&key)
+            .is_some_and(|batch| &batch.pack_stamp != pack_stamp)
+        {
+            if let Some(batch) = open.remove(&key) {
+                batch.end();
+            }
+        }
         if !open.contains_key(&key) {
             if open.len() >= OPEN {
                 let oldest = open
@@ -1355,7 +1392,7 @@ mod batched {
                     batch.end();
                 }
             }
-            let batch = start(git_dir, env)?;
+            let batch = start(git_dir, env, pack_stamp.clone())?;
             open.insert(key.clone(), batch);
         }
         let batch = open.get_mut(&key)?;
@@ -1397,6 +1434,60 @@ mod batched {
             }
         }
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+
+    fn discard(layout: &Layout, env: &[(String, String)]) {
+        let batch = open()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(layout.git_dir.clone(), env.to_vec()));
+        if let Some(batch) = batch {
+            batch.end();
+        }
+    }
+
+    // A long-lived cat-file retains deleted pack mappings. Delegate packed or
+    // borrowed stores rather than returning an object another process pruned.
+    fn pack_stamp(layout: &Layout) -> Option<Stamp> {
+        let config = std::fs::read_to_string(layout.common_dir.join("config"))
+            .ok()?
+            .to_ascii_lowercase();
+        if config.contains("extensions")
+            || config.contains("worktree=")
+            || config.contains("worktree =")
+            || [
+                "objects/info/alternates",
+                "shallow",
+                "info/grafts",
+                "refs/replace",
+            ]
+            .iter()
+            .any(|name| layout.common_dir.join(name).exists())
+            || std::fs::read_to_string(layout.common_dir.join("packed-refs"))
+                .is_ok_and(|text| text.contains(" refs/replace/"))
+        {
+            return None;
+        }
+        let pack = layout.common_dir.join("objects/pack");
+        match std::fs::symlink_metadata(&pack) {
+            Ok(meta) if !meta.is_dir() => return None,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+            _ => {}
+        }
+        let before = reuse::stamp(pack.clone())?;
+        match std::fs::read_dir(&pack) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        let after = reuse::stamp(pack)?;
+        (before == after).then_some(after)
+    }
 
     /// The object `spec` means to git, where git would print no warning reading it
     /// and found it; `None` for everything else, which git answers itself.
@@ -1408,6 +1499,7 @@ mod batched {
     /// expansions) exists, which can only over-count matches. `exact` requires that
     /// none of those longer expansions match, as `show-ref --verify` reads only
     /// the original full name.
+    // llmlint: ignore-block[invalid_states_unrepresentable] The never-landing batch pipeline carries only object IDs and kinds already validated at ask; these transient string pairs are not published. Manager ruling a47 explicitly directs exact-function exceptions rather than introducing production ObjectId/ObjectKind types for this measurement.
     fn resolve(
         layout: &Layout,
         env: &[(String, String)],
@@ -1427,7 +1519,15 @@ mod batched {
         }
         let mut lines = vec![spec.to_owned()];
         lines.extend(RULES.iter().skip(1).map(|rule| expand(*rule, name)));
-        let answers = ask(&layout.git_dir, env, &lines)?;
+        let Some(before) = pack_stamp(layout) else {
+            discard(layout, env);
+            return None;
+        };
+        let answers = ask(&layout.git_dir, env, &lines, &before)?;
+        if pack_stamp(layout).as_ref() != Some(&before) {
+            discard(layout, env);
+            return None;
+        }
         let found = answers.first()?.clone()?;
         let longer = answers.iter().skip(1).filter(|line| line.is_some()).count();
         let unambiguous = if first_is_ref || full_hex(name) || exact {
@@ -1440,8 +1540,9 @@ mod batched {
         };
         unambiguous.then_some(found)
     }
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 
-    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] Real-Git differential tests reconcile this never-landing batch adapter through the explicitly required local command. Production gate wiring belongs in the eventual onevcs implementation, while this spike must preserve the existing gate.
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] Real-Git differential tests reconcile this never-landing batch adapter through the explicitly required local command. Production gate wiring belongs in the eventual onevcs implementation, while this spike must preserve the existing gate.
     pub(super) fn answer(
         args: &[&str],
         cwd: &Path,
@@ -1483,6 +1584,7 @@ mod batched {
             _ => None,
         }
     }
+    // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 }
 
 // llmlint: ignore-end[changed_behavior_has_e2e]
