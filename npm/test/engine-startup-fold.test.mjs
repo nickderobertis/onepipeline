@@ -159,3 +159,40 @@ test("unfinished launches stay in observed counts and never become zero-duration
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("local phase accounting reports disjoint trace intervals and leaves CPU and filesystem uncertainty explicit", () => {
+  const run = spawnSync(
+    process.execPath,
+    [script.pathname, "phases", `recorded=${fixture.pathname}`],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /start pid .* trace window 50\.479 ms/);
+  assert.match(run.stdout, /adopt pid .* trace window 62\.583 ms/);
+  assert.match(run.stdout, /filesystem latency.*not separately measured/);
+  assert.match(run.stdout, /sampled engine CPU overlaps/);
+  for (const line of run.stdout.split("\n").filter((line) => line.startsWith("partition:"))) {
+    const values = [...line.matchAll(/([\d.]+) ms/g)].map((m) => Number(m[1]));
+    assert.equal(values.length, 4, line);
+    assert.ok(Math.abs(values[0] + values[1] + values[2] - values[3]) <= 0.002, line);
+  }
+});
+
+test("unknown commands and malformed operands are refused before a valid recorded fold recovers", () => {
+  for (const args of [
+    ["fold"],
+    ["unknown", "x=a"],
+    ["fold", "broken"],
+    ["phases", "broken"],
+    ["fold", "=a"],
+    ["fold", "x="],
+  ]) {
+    const run = spawnSync(process.execPath, [script.pathname, ...args], { encoding: "utf8" });
+    assert.equal(run.status, 2, run.stdout);
+    assert.match(run.stderr, /use:|expected LABEL/);
+  }
+  assert.equal(
+    spawnSync(process.execPath, [script.pathname, "fold", `recorded=${fixture.pathname}`]).status,
+    0,
+  );
+});
