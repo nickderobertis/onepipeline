@@ -799,3 +799,60 @@ test("an OS-observed image is named as the trace names a program: everything bef
     [102, 100, "git"],
   ]);
 });
+
+test("OS coverage joins reused PIDs by time and program, and never consumes a failed spawn", () => {
+  const dir = join(scratch, "reused-pids");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const source = readdirSync(launch).find((f) => f.endsWith(".jsonl"));
+  const events = readFileSync(join(launch, source), "utf8").trim().split("\n").map(JSON.parse);
+  const proc = events.find((e) => e.kind === "proc");
+  const start = events.find((e) => e.kind === "start");
+  const t = Date.parse("2026-11-14T00:00:00Z") * 1e6;
+  for (const f of readdirSync(launch)) rmSync(join(launch, f));
+  writeFileSync(
+    join(launch, source),
+    `${[
+      { ...proc, pid: 100, exe: "onepipeline", verb: "plan", t },
+      { ...start, pid: 100, seq: "onevcs:0", child: 200, t: t + 1e8 },
+      { ...start, pid: 100, seq: "onevcs:1", child: null, spawn_ns: 10, t: t + 2e8 },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n")}\n`,
+  );
+  const os = join(dir, "os");
+  rmSync(os, { recursive: true });
+  // Artifacts unpack OS records beside launch/ inside test-profile/.
+  const artifactOs = join(dir, "test-profile", "os");
+  cpSync(join(recorded, "os"), artifactOs, { recursive: true });
+  for (const f of readdirSync(artifactOs)) rmSync(join(artifactOs, f));
+  const iso = (ns) => new Date(ns / 1e6).toISOString();
+  const starts = [
+    { pid: 100, ppid: 1, image: "onepipeline.exe", t: iso(t) },
+    // The child PID matches, but the program does not.
+    { pid: 200, ppid: 100, image: "sh.exe", t: iso(t + 1e8) },
+    // A failed git spawn must not absorb this OS-observed git start.
+    { pid: 201, ppid: 100, image: "git.exe", t: iso(t + 2e8) },
+    // PID 100 is now an uninstrumented shell, not the old engine.
+    { pid: 100, ppid: 1, image: "sh.exe", t: iso(t + 10e9) },
+    { pid: 202, ppid: 100, image: "git.exe", t: iso(t + 11e9) },
+  ];
+  writeFileSync(join(artifactOs, "starts.jsonl"), `${starts.map(JSON.stringify).join("\n")}\n`);
+  const r = run("fold", `reused=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /5 process starts observed; 0 matched a traced start/);
+  const coverage = rows(r.stdout, "Coverage against the operating system's own record");
+  assert.ok(
+    coverage.some((c) => c[0] === "MISSED by the trace" && c[2] === "sh"),
+    r.stdout,
+  );
+  assert.ok(
+    coverage.some((c) => c[0] === "MISSED by the trace" && c[2] === "git"),
+    r.stdout,
+  );
+  assert.ok(
+    coverage.some((c) => c[0] === "uninstrumented descendant" && c[1] === "sh" && c[2] === "git"),
+    r.stdout,
+  );
+  assert.match(r.stdout, /Traced starts the OS record has no exec for .*git 2/);
+});

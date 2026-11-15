@@ -514,8 +514,7 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
       // `<test>.<runner pid>.strace`: its starts are that test's alone.
       const test = f.replace(/\.\d+\.strace$/, "");
       for (const e of parseStrace(readFileSync(path, "utf8"), f)) starts.push({ ...e, test });
-    }
-    else if (f.endsWith(".jsonl"))
+    } else if (f.endsWith(".jsonl"))
       for (const line of readFileSync(path, "utf8").split("\n")) {
         if (!line.trim()) continue;
         let r;
@@ -559,7 +558,7 @@ export function etwTime(iso) {
   if (!m) return null;
   const ms = Date.parse(`${m[1]}${m[3]}`);
   if (!Number.isFinite(ms)) return null;
-  return ms * 1e6 + Number(((m[2] ?? "") + "000000000").slice(0, 9));
+  return ms * 1e6 + Number(`${m[2] ?? ""}000000000`.slice(0, 9));
 }
 
 // The trace names a program by Rust's `Path::file_stem` (everything before the last dot),
@@ -993,7 +992,13 @@ export function coverage(os, t, records) {
   };
   // The parent itself, as the OS saw it start: on ETW's own clock, so with no slack.
   const parentOf = (e) => {
-    if (e.t == null) return latest(osByPid.get(e.ppid), e, (o) => o.t, (o) => o.test);
+    if (e.t == null)
+      return latest(
+        osByPid.get(e.ppid),
+        e,
+        (o) => o.t,
+        (o) => o.test,
+      );
     let best = null;
     for (const o of osByPid.get(e.ppid) ?? [])
       if (o.t != null && o.t <= e.t && (best == null || o.t > best.t)) best = o;
@@ -1004,11 +1009,15 @@ export function coverage(os, t, records) {
   // engine's.
   const starterOf = (e, parent) => {
     if (e.t == null || parent?.t == null)
-      return latest(procsByPid.get(e.ppid), e, (p) => p.t, (p) => p.file);
+      return latest(
+        procsByPid.get(e.ppid),
+        e,
+        (p) => p.t,
+        (p) => p.file,
+      );
     let best = null;
     for (const p of procsByPid.get(e.ppid) ?? [])
-      if (p.t >= parent.t - SLACK && p.t <= e.t + SLACK && (best == null || p.t < best.t))
-        best = p;
+      if (p.t >= parent.t - SLACK && p.t <= e.t + SLACK && (best == null || p.t < best.t)) best = p;
     return best;
   };
   const id = (file, pid) => `${file}\u0000${pid}`;
