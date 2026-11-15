@@ -1295,3 +1295,62 @@ test("ETW separates rooted descendants from unknown ancestry without pricing hos
   assert.ok(rows(r.stdout, "Programs started").every((c) => !c[2].startsWith("sidecar")));
   assert.ok(rows(r.stdout, "Per-start cost").every((c) => !c[0].startsWith("sidecar")));
 });
+
+test("profile invocation IDs reject malformed shape and preserve the producer's nullable strings", () => {
+  for (const [name, value] of [
+    ["missing", undefined],
+    ["number", 17],
+    ["null", null],
+    ["empty", ""],
+    ["string", "local-run"],
+  ]) {
+    const dir = join(scratch, `profile-run-id-${name}`);
+    cpSync(recorded, dir, { recursive: true });
+    const e2e = join(dir, "test-profile", "e2e");
+    const path = join(e2e, readdirSync(e2e)[0]);
+    const profile = JSON.parse(readFileSync(path, "utf8"));
+    if (value === undefined) delete profile.run_id;
+    else profile.run_id = value;
+    writeFileSync(path, JSON.stringify(profile));
+    const r = run("fold", `profile=${dir}`);
+    assert.equal(r.status, 0, r.stderr);
+    const invalid = name === "missing" || name === "number";
+    assert.match(r.stdout, new RegExp(`Tier: ${invalid ? 1 : 2} test-profile records`));
+    assert.match(r.stdout, new RegExp(`${invalid ? 1 : 0} test-profile records not of schema 2`));
+    if (!invalid) assert.match(r.stdout, /Time scope unavailable/);
+  }
+});
+
+test("exit records need the producer's sequence timing or detached-child identity", () => {
+  const dir = join(scratch, "exit-record-identities");
+  cpSync(recorded, dir, { recursive: true });
+  const launch = join(dir, "test-profile", "launch");
+  const path = join(
+    launch,
+    readdirSync(launch).find((f) => f.endsWith(".jsonl")),
+  );
+  const events = readFileSync(path, "utf8").trim().split("\n").map(JSON.parse);
+  const start = events.find((e) => e.kind === "start");
+  events.push(
+    { v: 1, kind: "exit", pid: start.pid },
+    { v: 1, kind: "exit", pid: start.pid, t: start.t },
+    { v: 1, kind: "exit", pid: start.pid, child: 77777 },
+    { v: 1, kind: "exit", pid: start.pid, seq: "broken", t: start.t },
+    { ...start, seq: "sequence-exit", child: 77778, exit_ns: null },
+    {
+      v: 1,
+      kind: "exit",
+      pid: start.pid,
+      seq: "sequence-exit",
+      child: 77778,
+      exit_ns: 1e6,
+    },
+    { ...start, seq: "detached-exit", child: 77779, exit_ns: null },
+    { v: 1, kind: "exit", pid: start.pid, child: 77779, t: start.t + 2e6 },
+  );
+  writeFileSync(path, `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+  const r = run("fold", `exits=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /4 records of no known shape/);
+  assert.match(r.stdout, /Rows account for 54 traced starts \(trace holds 54\)/);
+});

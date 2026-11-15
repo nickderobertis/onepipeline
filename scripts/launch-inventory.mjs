@@ -302,7 +302,13 @@ export function validRecord(r) {
       r.argv.every((a) => typeof a === "string") &&
       ["spawn_ns", "exit_ns", "wait_ns", "trace_ns"].every((f) => isTimeOrNull(r[f]))
     );
-  if (r.kind === "exit") return ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]));
+  // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] This measurement reader never lands and consumes the frozen 076a7b6c producer's v1 records; the recorded producer output and subprocess regressions prove both exit forms. A new cross-language producer harness would add a long-lived drift gate for a deliberately fixed, throwaway format (manager ruling a1).
+  if (r.kind === "exit")
+    return (
+      (r.seq != null ? isTime(r.exit_ns) : r.child != null && isTime(r.t)) &&
+      ["exit_ns", "t", "wait_ns"].every((f) => isTimeOrNull(r[f]))
+    );
+  // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
   if (r.kind === "wait") return isTime(r.wait_ns) && isCount(r.polls);
   if (r.kind === "sleeps") return isCount(r.count) && isTime(r.slept_ns);
   return true;
@@ -318,6 +324,8 @@ export function validProfile(r) {
     Boolean(r) &&
     typeof r === "object" &&
     r.schema === 2 &&
+    Object.hasOwn(r, "run_id") &&
+    (r.run_id === null || typeof r.run_id === "string") &&
     typeof r.test === "string" &&
     typeof r.os === "string" &&
     ["test-thread", "process-exit", "unfinished"].includes(r.ended) &&
