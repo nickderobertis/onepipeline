@@ -1,0 +1,111 @@
+{
+  "//": "The wire shapes of docs/plugin-protocol.md §3.16, §4.9 and §4.25, added to protocol version 2 without a bump. `reference_host` is what this build's own stdio host answers, its handshake without `capabilities`, which §4.2 reconciles on its own; `stored_form`, which §4.25 retired, is answered by neither; the other entries are a plugin declaring `stored_forms` and one written before it, each round-tripped through the engine's own wire types. Both readers are crates/onetaskgraph-core/tests/subprocess.rs and src/subprocess/wire.rs.",
+  "reference_host": {
+    "initialize": {
+      "protocol_version": 2,
+      "kind": "in-memory",
+      "writes": "supported",
+      "meters": false,
+      "statuses": [
+        "draft",
+        "backlog",
+        "todo",
+        "queued",
+        "in-progress",
+        "done",
+        "cancelled",
+        "unknown"
+      ],
+      "task_updates": true,
+      "metadata_updates": true,
+      "content_updates": true,
+      "targeted_updates": true,
+      "ends_commands": true,
+      "comment_copies": true,
+      "task_details": true,
+      "write_checks": true,
+      "project_status": true,
+      "stored_forms": true
+    },
+    "stored_status": {
+      "status": {
+        "category": "done",
+        "name": "Finished"
+      }
+    },
+    "write_task": {
+      "id": "T-9"
+    }
+  },
+  "requests": {
+    "stored_status": {
+      "kind": "project",
+      "status": {
+        "category": "done",
+        "name": "done"
+      }
+    }
+  },
+  "declaring_plugin": {
+    "initialize": {
+      "protocol_version": 2,
+      "kind": "rewriting",
+      "capabilities": {
+        "projects": "native",
+        "orphan_tasks": "native",
+        "filter_by_label": "native",
+        "filter_by_status": "native",
+        "search_title": "native",
+        "search_content": "native",
+        "task_dependencies": "both-directions",
+        "project_dependencies": "both-directions",
+        "max_page_size": 10
+      },
+      "writes": "supported",
+      "meters": false,
+      "statuses": ["draft", "backlog", "todo", "in-progress", "done", "cancelled", "unknown"],
+      "task_updates": false,
+      "metadata_updates": false,
+      "content_updates": false,
+      "targeted_updates": false,
+      "stored_forms": true
+    },
+    "stored_status": {
+      "status": {
+        "category": "done",
+        "name": "Shipped"
+      }
+    },
+    "write_task": {
+      "id": "I-1",
+      "stored_content": "* one"
+    }
+  },
+  "silent_plugin": {
+    "initialize": {
+      "protocol_version": 2,
+      "kind": "ancient",
+      "capabilities": {
+        "projects": "native",
+        "orphan_tasks": "native",
+        "filter_by_label": "native",
+        "filter_by_status": "native",
+        "search_title": "native",
+        "search_content": "native",
+        "task_dependencies": "both-directions",
+        "project_dependencies": "both-directions",
+        "max_page_size": 10
+      },
+      "writes": "supported",
+      "meters": false,
+      "statuses": ["draft", "backlog", "todo", "in-progress", "done", "cancelled", "unknown"],
+      "task_updates": false,
+      "metadata_updates": false,
+      "content_updates": false,
+      "targeted_updates": false
+    },
+    "write_task": {
+      "id": "I-2"
+    }
+  }
+}
