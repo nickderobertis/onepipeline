@@ -1,8 +1,9 @@
 // `scripts/nx-precedence.sh`, which the e2e tier's coverage run goes through now that it
-// runs beside the Linux job's other tasks: driven inside a real Nx run of three tasks
-// started together, where the leading task must keep its CPU priority, one other task
-// must drop to the lowest, and a `--keep` task must keep its own. A process outside the
-// run, carrying the same task's name, stands for another Nx run on the same host.
+// runs beside the Linux job's other tasks, driven inside real Nx runs: the leading task
+// must keep its CPU priority, a task beside it must drop to the lowest, with what that
+// task spawns afterwards and a task Nx starts later, and a `--keep` task must keep its
+// own. A process outside the run, carrying the same task's name, stands for another Nx
+// run on the same host.
 //
 // This project's `test` runs alone (`parallelism: false`): beside the e2e tier its own
 // processes would already be at the lowest priority, and the run it starts would
@@ -10,10 +11,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -24,18 +28,24 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const script = join(root, "scripts", "nx-precedence.sh");
+const linux = process.platform === "linux";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape is what is stripped.
 const plain = (text) => text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
 
-const script = join(root, "scripts", "nx-precedence.sh");
-
-// Each side task records its own niceness every 0.2s until the leading task is done.
-const recorder = (name) =>
-  `bash -c 'for i in $(seq 300); do [ -e done ] && break; ps -o ni= -p $$ > ${name}.tmp && mv ${name}.tmp ${name}.nice; sleep 0.2; done'`;
-
-// The leading task waits until both others have recorded once, then long enough for
-// the wrapper's once-a-second pass to have reached them twice, and records its own.
-const lead = `bash ${script} --keep kept:work -- bash -c 'for i in $(seq 300); do [ -e side.nice ] && [ -e kept.nice ] && break; sleep 0.1; done; sleep 3; ps -o ni= -p $$ > lead.nice; touch done'`;
+// Each record is the niceness of a process the task starts at that moment, read by
+// `nice.sh` from /proc rather than through `ps`, which one case below replaces with a
+// stand-in that fails: a task's new process inherits what the task then has, which is
+// how a lowered task's later work is lowered with it.
+const NICE_SH = 'read -ra f < /proc/$$/stat; echo "$' + '{f[18]}"\n';
+const record = (name) => `bash nice.sh > ${name}.tmp && mv ${name}.tmp ${name}.nice`;
+// Once lowered, the side task also records its I/O class.
+const SIDE = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("side")}; if [ "$(cat side.nice)" = 19 ] && [ ! -e side.io ]; then /usr/bin/ionice -p $$ > side.io 2>&1; fi; sleep 0.2; done'`;
+const KEPT = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("kept")}; sleep 0.2; done'`;
+const LATE = `bash -c 'for i in $(seq 300); do [ -e done ] && break; ${record("late")}; sleep 0.2; done'`;
+// The leading task waits until every other task has recorded once, then long enough for
+// the wrapper's once-a-second pass to have reached them twice.
+const LEAD = `bash ${script} --keep kept:work -- bash -c 'for i in $(seq 300); do [ -e side.nice ] && [ -e kept.nice ] && [ -e late.nice ] && break; sleep 0.1; done; sleep 3; bash nice.sh > lead.nice; touch done; exit 0'`;
 
 function workspace(t) {
   const dir = mkdtempSync(join(tmpdir(), "nx-precedence-"));
@@ -43,78 +53,167 @@ function workspace(t) {
   writeFileSync(join(dir, "package.json"), '{"name":"precedence","private":true}\n');
   writeFileSync(join(dir, "nx.json"), "{}\n");
   symlinkSync(join(root, "node_modules"), join(dir, "node_modules"));
-  for (const [name, command] of [
-    ["lead", lead],
-    ["side", recorder("side")],
-    ["kept", recorder("kept")],
-  ]) {
+  writeFileSync(join(dir, "nice.sh"), NICE_SH);
+  const targets = {
+    lead: { command: LEAD },
+    side: { command: SIDE },
+    kept: { command: KEPT },
+    // `late` starts only after `pause`, two seconds in, when the wrapper has already
+    // passed over the run at least once.
+    pause: { command: "sleep 2" },
+    late: { command: LATE, dependsOn: [{ projects: ["pause"], target: "work" }] },
+  };
+  for (const [name, target] of Object.entries(targets)) {
     mkdirSync(join(dir, name));
     writeFileSync(
       join(dir, name, "project.json"),
-      JSON.stringify({ name, targets: { work: { command, cache: false } } }),
+      JSON.stringify({ name, targets: { work: { ...target, cache: false } } }),
     );
   }
   return dir;
 }
 
-const niceness = (dir, name) => readFileSync(join(dir, `${name}.nice`), "utf8").trim();
+// A directory of stand-ins put ahead of PATH, each failing with the message given.
+function failing(t, tools) {
+  const dir = mkdtempSync(join(tmpdir(), "nx-precedence-stubs-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const [tool, message] of Object.entries(tools)) {
+    writeFileSync(join(dir, tool), `#!/bin/sh\necho "${message}" >&2\nexit 1\n`);
+    chmodSync(join(dir, tool), 0o755);
+  }
+  return dir;
+}
+
+function nx(dir, { direct = "true", path = process.env.PATH } = {}) {
+  const { status, stdout, stderr } = spawnSync(
+    join(root, "node_modules", ".bin", "nx"),
+    [
+      "run-many",
+      "-t",
+      "work",
+      "--parallel=4",
+      "--skip-nx-cache",
+      "--outputStyle=stream-without-prefixes",
+    ],
+    {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        PATH: path,
+        NX_DAEMON: "false",
+        NX_NO_CLOUD: "true",
+        NX_RUN_COMMANDS_DIRECTLY: direct,
+        NX_TASK_TARGET_PROJECT: "",
+        NX_TASK_TARGET_TARGET: "",
+      },
+    },
+  );
+  return { status, log: plain(`${stdout}\n${stderr}`) };
+}
+
+const read = (dir, file) => readFileSync(join(dir, file), "utf8").trim();
+const lines = (log) => log.split("\n").filter((line) => line.startsWith("nx-precedence:"));
+
+// Every process still working in the run's directory: the wrapper's watcher would be
+// one. A watcher ended mid-sleep leaves its `sleep 1` behind for at most that second.
+function leftIn(dir) {
+  const deadline = Date.now() + 3000;
+  let left = [];
+  do {
+    left = readdirSync("/proc")
+      .filter((pid) => /^\d+$/.test(pid))
+      .filter((pid) => {
+        try {
+          return readlinkSync(`/proc/${pid}/cwd`) === dir;
+        } catch {
+          return false;
+        }
+      });
+    if (left.length === 0) return left;
+    spawnSync("sleep", ["0.2"]);
+  } while (Date.now() < deadline);
+  return left.map((pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " "));
+}
 
 describe("the e2e tier's precedence over the tasks beside it", () => {
   for (const direct of ["true", "false"]) {
-    it(`lowers the run's other tasks and nothing else (NX_RUN_COMMANDS_DIRECTLY=${direct})`, (t) => {
+    it(`lowers the run's other tasks, early and late, and nothing else (NX_RUN_COMMANDS_DIRECTLY=${direct})`, (t) => {
       const dir = workspace(t);
-      const foreign = spawn("bash", ["-c", "sleep 30"], {
+      const foreign = spawn("bash", ["-c", "sleep 60"], {
         env: { ...process.env, NX_TASK_TARGET_PROJECT: "side", NX_TASK_TARGET_TARGET: "work" },
         stdio: "ignore",
       });
       t.after(() => foreign.kill());
-      const { status, stdout, stderr } = spawnSync(
-        "node_modules/.bin/nx",
-        [
-          "run-many",
-          "-t",
-          "work",
-          "--parallel=3",
-          "--skip-nx-cache",
-          "--outputStyle=stream-without-prefixes",
-        ],
-        {
-          cwd: dir,
-          encoding: "utf8",
-          timeout: 120_000,
-          env: {
-            ...process.env,
-            NX_DAEMON: "false",
-            NX_NO_CLOUD: "true",
-            NX_RUN_COMMANDS_DIRECTLY: direct,
-            NX_TASK_TARGET_PROJECT: "",
-            NX_TASK_TARGET_TARGET: "",
-          },
-        },
-      );
-      const log = plain(`${stdout}\n${stderr}`);
+      const { status, log } = nx(dir, { direct });
       assert.equal(status, 0, log);
+      assert.ok(existsSync(join(dir, "done")), log);
       const foreignNice = spawnSync("ps", ["-o", "ni=", "-p", String(foreign.pid)], {
         encoding: "utf8",
       });
       assert.equal(foreignNice.stdout.trim(), "0", "a process of no task of this run was lowered");
-      assert.equal(niceness(dir, "lead"), "0", log);
-      assert.equal(niceness(dir, "kept"), "0", `the --keep task was lowered\n${log}`);
-      if (process.platform === "linux") {
-        assert.equal(niceness(dir, "side"), "19", log);
-        assert.match(
-          log,
-          /nx-precedence: lead:work takes the CPU before the other tasks of its Nx run but kept:work/,
+      assert.equal(read(dir, "lead.nice"), "0", log);
+      assert.equal(read(dir, "kept.nice"), "0", `the --keep task was lowered\n${log}`);
+      if (linux) {
+        assert.equal(read(dir, "side.nice"), "19", log);
+        assert.equal(read(dir, "side.io"), "idle", "the lowered task kept its I/O class");
+        assert.equal(
+          read(dir, "late.nice"),
+          "19",
+          `a task that started later was not lowered\n${log}`,
         );
-        assert.match(log, /nx-precedence: side:work runs at the lowest priority beside lead:work/);
-        assert.doesNotMatch(log, /kept:work runs at the lowest priority/);
+        assert.deepEqual(lines(log), [
+          "nx-precedence: lead:work ran ahead of late:work pause:work side:work, keeping kept:work",
+        ]);
+        assert.deepEqual(leftIn(dir), [], "the wrapper's watcher outlived its command");
       } else {
         // Without /proc there is nothing to tell the run's tasks apart by, so the
         // command simply runs and nothing is lowered.
-        assert.equal(niceness(dir, "side"), "0", log);
-        assert.doesNotMatch(log, /nx-precedence:/);
+        assert.equal(read(dir, "side.nice"), "0", log);
+        assert.deepEqual(lines(log), []);
       }
+    });
+  }
+
+  const failures = [
+    {
+      tool: "renice",
+      warning: "nx-precedence: cannot lower the tasks beside lead:work (renice refused here)",
+      side: "0",
+      summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
+    },
+    {
+      tool: "ionice",
+      warning:
+        "nx-precedence: cannot move the tasks beside lead:work to the idle I/O class (ionice refused here)",
+      side: "19",
+      summary:
+        "nx-precedence: lead:work ran ahead of late:work pause:work side:work, keeping kept:work",
+    },
+    {
+      tool: "ps",
+      warning:
+        "nx-precedence: cannot list processes (ps refused here), so the tasks beside lead:work keep their priority",
+      side: "0",
+      summary: "nx-precedence: lead:work ran ahead of no other task, keeping kept:work",
+    },
+  ];
+  for (const { tool, warning, side, summary } of failures) {
+    it(`says once when ${tool} fails, and its command still runs to its end`, (t) => {
+      const dir = workspace(t);
+      const stubs = failing(t, { [tool]: `${tool} refused here` });
+      const { status, log } = nx(dir, { path: `${stubs}:${process.env.PATH}` });
+      assert.equal(status, 0, log);
       assert.ok(existsSync(join(dir, "done")), log);
+      assert.equal(read(dir, "lead.nice"), "0", log);
+      if (!linux) {
+        assert.deepEqual(lines(log), []);
+        return;
+      }
+      assert.equal(read(dir, "side.nice"), side, log);
+      assert.deepEqual(lines(log), [warning, summary]);
+      assert.equal(log.split("\n").filter((line) => line.startsWith("ACTION: ")).length, 1, log);
     });
   }
 
@@ -138,8 +237,9 @@ describe("the e2e tier's precedence over the tasks beside it", () => {
     [[], /name the command to run after --/],
     [
       ["--keep", "install-smoke", "--", "true"],
-      /--keep needs a PROJECT:TARGET, not 'install-smoke'/,
+      /--keep needs one PROJECT:TARGET, not 'install-smoke'/,
     ],
+    [["--keep", "a:b c:d", "--", "true"], /--keep needs one PROJECT:TARGET, not 'a:b c:d'/],
     [["--first", "--", "true"], /unknown argument '--first'/],
   ]) {
     it(`refuses ${JSON.stringify(args)} and runs nothing`, () => {
