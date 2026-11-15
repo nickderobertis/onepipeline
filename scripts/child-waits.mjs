@@ -13,7 +13,7 @@
 // It prints, in Markdown: every run with its merge commit (GITHUB_SHA), head, processor,
 // job minutes, the minutes before the e2e tier and the e2e tier's nextest minutes; each
 // side's mean, range and spread of e2e minutes, their difference, and whether that
-// difference is decided (the two sides' ranges do not overlap) or inside the spread; the
+// difference is decided (non-overlapping ranges and larger than either spread) or undecided; the
 // minutes a typical pull request would save (an estimate: the difference scaled by
 // `--share`, the share of pull requests whose diff reaches `src/`, 27/30 by default);
 // waits and polls at the sites the prototypes change, per e2e tier; CLI launches in each
@@ -180,7 +180,11 @@ export function verdict(before, after, share) {
   const b = before.map((r) => r.e2eMinutes);
   const a = after.map((r) => r.e2eMinutes);
   const diff = mean(a) - mean(b);
-  const decided = Math.max(...a) < Math.min(...b) || Math.min(...a) > Math.max(...b);
+  const disjoint = Math.max(...a) < Math.min(...b) || Math.min(...a) > Math.max(...b);
+  const decided =
+    disjoint &&
+    Math.abs(diff) > Math.max(...b) - Math.min(...b) &&
+    Math.abs(diff) > Math.max(...a) - Math.min(...a);
   return {
     before: { mean: mean(b), min: Math.min(...b), max: Math.max(...b) },
     after: { mean: mean(a), min: Math.min(...a), max: Math.max(...a) },
@@ -251,7 +255,7 @@ export function render(before, after, share) {
       ],
     ),
     "",
-    `Difference, after − before: ${f2(v.diff)} min — ${v.decided ? "decided: the two sides' ranges do not overlap" : "undecided: inside the spread of the runs"}.`,
+    `Difference, after − before: ${f2(v.diff)} min — ${v.decided ? "decided: non-overlapping ranges and mean difference outside both spreads" : "undecided: inside the spread of the runs"}.`,
     `Typical pull request (estimate, the difference × ${share.toFixed(3)} of pull requests reaching src/): ${f2(v.typical)} min.`,
   );
   const keys = new Set();

@@ -6,7 +6,7 @@
 // and are never asserted: the comparison's figures come from hosted runs only.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
@@ -129,4 +129,38 @@ test("a job without its log is refused with what to do, and a missing side is a 
   const usage = compare(`before:off=${join(recorded, "before")}`);
   assert.equal(usage.status, 2);
   assert.match(usage.stderr, /name at least one before and one after run/);
+});
+
+// Alter only the summary's measured duration in copies of the recording: this
+// isolates the comparison's decision without inventing test outcomes or traces.
+function withMinutes(side, minutes) {
+  const dir = copyOf(side);
+  const log = join(dir, "job.log");
+  writeFileSync(
+    log,
+    readFileSync(log, "utf8").replace(/Summary \[\s*[\d.]+s\]/, `Summary [ ${minutes * 60}s]`),
+  );
+  return dir;
+}
+
+test("non-overlapping ranges stay undecided when their mean difference is inside either side's spread", () => {
+  const out = compare(
+    `before:low=${withMinutes("before", 10)}`,
+    `before:high=${withMinutes("before", 100)}`,
+    `after:low=${withMinutes("after", 101)}`,
+    `after:high=${withMinutes("after", 102)}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /Difference, after − before: 46.50 min — undecided:/);
+});
+
+test("a difference outside both spreads and with non-overlapping ranges is decided", () => {
+  const out = compare(
+    `before:low=${withMinutes("before", 10)}`,
+    `before:high=${withMinutes("before", 11)}`,
+    `after:low=${withMinutes("after", 20)}`,
+    `after:high=${withMinutes("after", 21)}`,
+  );
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /Difference, after − before: 10.00 min — decided:/);
 });
