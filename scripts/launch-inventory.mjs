@@ -539,10 +539,13 @@ export function readOs(dir, skipped = { malformed: 0, invalid: 0 }) {
   return starts;
 }
 
-const stem = (path) =>
-  basename(String(path).replace(/\\/g, "/"))
-    .replace(/\.(exe|cmd|bat)$/i, "")
-    .toLowerCase();
+// The trace names a program by Rust's `Path::file_stem` (everything before the last dot),
+// so the OS's image is named the same way: `probe.sh` and `git.exe` are `probe` and `git`.
+const stem = (path) => {
+  const name = basename(String(path).replace(/\\/g, "/"));
+  const dot = name.lastIndexOf(".");
+  return (dot > 0 ? name.slice(0, dot) : name).toLowerCase();
+};
 function splitCmd(cmd) {
   const out = [];
   for (const m of cmd.matchAll(/"([^"]*)"|(\S+)/g)) out.push(m[1] ?? m[2]);

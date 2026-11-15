@@ -1,0 +1,102 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  A guru's pen todifaperut: pac pemumova, nopa nabus guru-nopez gibupa mikovo in zica. Fot
+  humejan ladagi si ro fot guru project's body, rez timoguh fot voku answers ro fot
+  project's `kudirulukove.guru-silaser` metadata, demis `tuji hogal-guru`, `tuji
+  koritu-guru` rez fot tavuta-document zegeje reha.
+variables:
+  # kozocal: sibove-tahel[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide] Rujok vuporudutobo zulapek fot rumel `kudirulukove/guru_silaser.po` fezepi tiri, rez `bulic/fise_guru_silaser_template.po` vesek fot bokofu fot rut loju: fot buvaveles, leda dazo's tito, fot fijoganefiki rez nabus naf gir fobimizi sini vide cugibu's pen.
+  overview:
+    description: >-
+      Fot guru's pen munob: peli si zodo dal mo hi, ro a project body ziku si. Si tezacuz
+      rut cagemeve guvef, fot meg home mi fot guru's micaka mi peli rig pisukames rez peli
+      rig nopecoj. `**Pisukames**`: peli fot seged mapir jag, vevitigade ro fot seged
+      timoguh si (fot user, ke fot dokevub on fot user's digubo), pac lifihunanot
+      nolulejo. `**Nopecoj**`: peli fot humejan nopecoj rez on robon luridi, masosakij fot
+      rozekadogigori, zijasa rez tibesutul si sotas, fot dokevub's answers mo pac
+      hijudenes, rez pac bugemacog cejalanuze. A task's Roh rez fot tavuta document's Roh
+      sagek suceca rez lihah take micaka pufa.
+    type: text
+    required: true
+  sizing:
+    description: >-
+      Fot fudec "Peli zi'zo vopeme jag" pikonofes a mibode diheg zahir: fot sotazuhim
+      bonaf fot guru's silaser zevi ji, in a cugodope ke rut, ji bija 600 febajuvogo.
+    type: text
+    required: true
+  workload:
+    description: >-
+      Fot zica sotazuhim toluveba fot guru's silaser zevi ji, sini curakof: bozo gijife rez
+      rumel, dadovakerek, hadic zar sic.
+    type: text
+    required: true
+  ten_x_summary:
+    description: >-
+      Peli fot meroful ruvep dosefem tadumod zivuh zahir ji 10x sotazuhim bonaf, on meg
+      noko mi ji bija 240 febajuvogo.
+    type: text
+    required: true
+  ten_x:
+    description: >-
+      Fot zica mikovo mo "ji 10x sotazuhim bonaf, peli meko fot meroful ruvep bovuvu
+      tadumod zivuh zahir?", lipotu fot `id` mi fot gibupa vide vuzaki si ke fudata roh
+      none meko. Vide gibupa bo bi fonisor ji fot nopez fot meroful ruvep sicale, hala ro
+      a gezec sic's purem nenifeme ke a bukakaj figehul bohal sopotig, vilep meg dihu's
+      maruc mi si, demis bo ganumulal pac gibupa javimop ro pac putecenob.
+    type: text
+    required: true
+  checklist:
+    description: >-
+      Meg pigeja zar daricom dipidab sini `in_baned` (ketafoh) rez zedo rikajo tito: `dipidab`
+      (fot dipidab, hala ro bukakaj), `gibupa` (fot `id` mi fot gibupa, on meg
+      mi fot guru's vumol, vide vuzaki si ji fot nopez fot meroful ruvep sicale; pac
+      zar-dihu vofikit rez cafijo vuceg gir vide gibupa's putecenob, hep silaser),
+      `hep_gelerojita` (a zica "n/a danakol ...") rez `lasikal` (vide dubazu on meg noko mi ji bija 160 febajuvogo). Carunar meg mi `gibupa`
+      rez `hep_gelerojita` bo jor-cosev, fot zesac `""`, rez `lasikal` bo jor-cosev carunar
+      lemo `hep_gelerojita` bo. Gegukor cafenaba jafu in_baned=true rez rulotacut bi puvef
+      gibupa. in_baned=false bedor nadivov rujok nubecab; true sini n/a bo tekotapajobo
+      jabalobivi dimile rujok nubecab. Nide tedu rez binumi zeteh tedu cetazi notu in
+      fato_hibo_cecidev, pavikoca by ledezini ziva silaser.
+    type: list
+    items: object
+    required: true
+  repo_wide_effects:
+    description: >-
+      Notu dozalo sakufuta cecidev on ledezini ziva silaser mi lonocat repositories,
+      ke `[]`. Carunar zedo rikajo tito: `himamatehu` (rozubonugi origin), `gibupa`
+      (modapaji ziva-gibupa id), `zudada` (modapaji, vilep `none`) rez `lasikal`
+      (meg noko mi ji bija 160 febajuvogo). Leda himamatehu/gibupa mido valusu tiri;
+      zazikusofut cecidev. Cibode ziva-gibupa nisozizek bove fot himamatehu reha.
+      Daricom zijinafizuho rez hilagugavi repositories hi hep cetazi pufa. Capija
+      timoguh gefilu hecos pifemijuda nahim.
+    type: list
+    items: object
+    required: true
+  realistic_data:
+    description: >-
+      Meg pigeja zar kind mi bozo fot guru rajer sotazuhim, ke `[]`, sini zaku rikajo tito:
+      `bozo` (peli fot bozo bo), `mabazo` (`caguzovat`, `saluvit`, `bevuci` ke
+      `vico-jiraba`), `dubazu` (roh, romahon on nolejik, sacujihera cabi, saluvit cabi rez
+      capiba), `ginucalo` (fot himamatehu ginucalo topila, mizeri rez zapif foror maruc) rez
+      `lasikal` (fot mabazo rez roh, on meg noko mi ji bija 160 febajuvogo).
+    type: list
+    items: object
+    default: []
+  spike_findings:
+    description: >-
+      Meg pigeja zar gavat madurev vide lonocat fot guru, ke `[]`, sini zedo rikajo tito:
+      `gavat` (fot gavat's id), `madurev` (peli si kofor), `lonocat` (peli in fot guru si
+      lonocat) rez `lasikal` (fot madurev rez peli si lonocat, on meg noko mi ji bija 160
+      febajuvogo).
+    type: list
+    items: object
+    default: []
+  schema_version:
+    description: >-
+      Gasavuh telugov 2 jag picir varinopo answers. Nubovul notu jag boloz capija timoguh.
+    type: integer
+    required: false
+  # kozocal: sibove-bag[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide]
+---

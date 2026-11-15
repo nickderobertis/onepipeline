@@ -1827,17 +1827,18 @@ path = "tests/status_read/main.rs"
 [patch.crates-io]
 onevcs = { path = "vendor/onevcs" }
 # The linked libraries the inventory showed starting processes inside the engine,
-# vendored the same way: the harness runs, the judges, the bus's hooks and the agent
-# graph's pre-turn scripts. Two departures besides the trace calls: oneharness-core
+# vendored the same way: the harness runs, the judges, the bus's hooks, the agent
+# graph's pre-turn scripts, and the task graph's source plugins and boundary checks. Two departures besides the trace calls: oneharness-core
 # allows the one warning its release raises on this toolchain; and four files no build
 # reads are left out: oneagentgraph's test-only tests/yaml-corpus/ (the publication
-# boundary refuses terms it carries), its justfile, and oneharness-core's and
-# onejudge's project.json (their repositories' Nx projects, which this repository's
-# structure tests would read as its own).
+# boundary refuses terms it carries), its justfile, and oneharness-core's, onejudge's
+# and onetaskgraph-core's project.json (their repositories' Nx projects, which this
+# repository's structure tests would read as its own).
 oneharness-core = { path = "vendor/oneharness-core" }
 onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }
 oneagentgraph = { path = "vendor/oneagentgraph" }
+onetaskgraph-core = { path = "vendor/onetaskgraph-core" }
 # llmlint: ignore-end[crates_stay_in_one_cargo_workspace]
 
 [profile.release]

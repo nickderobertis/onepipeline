@@ -1,0 +1,83 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  A guru's pen todifaperut: pac pemumova, nopa nabus guru-nopez gibupa mikovo in zica. Fot
+  humejan ladagi si ro fot guru project's body, rez timoguh fot voku answers ro fot
+  project's `kudirulukove.guru-silaser` metadata, demis `tuji hogal-guru`, `tuji
+  koritu-guru` rez fot tavuta-document zegeje reha.
+variables:
+  # kozocal: sibove-tahel[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide] Rujok vuporudutobo zulapek fot rumel `kudirulukove/guru_silaser.po` fezepi tiri, rez `bulic/fise_guru_silaser_template.po` vesek fot bokofu fot rut loju: fot buvaveles, leda dazo's tito, fot fijoganefiki rez nabus naf gir fobimizi sini vide cugibu's pen.
+  overview:
+    description: >-
+      Fot guru's pen munob: peli si zodo dal mo hi, ro a project body ziku si.
+    type: text
+    required: true
+  sizing:
+    description: >-
+      Fot fudec "Peli zi'zo vopeme jag" pikonofes a mibode diheg zahir: fot sotazuhim
+      bonaf fot guru's silaser zevi ji, in a cugodope ke rut, ji bija 600 febajuvogo.
+    type: text
+    required: true
+  workload:
+    description: >-
+      Fot zica sotazuhim toluveba fot guru's silaser zevi ji, sini curakof: bozo gijife rez
+      rumel, dadovakerek, hadic zar sic.
+    type: text
+    required: true
+  ten_x_summary:
+    description: >-
+      Peli fot meroful ruvep dosefem tadumod zivuh zahir ji 10x sotazuhim bonaf, on meg
+      noko mi ji bija 240 febajuvogo.
+    type: text
+    required: true
+  ten_x:
+    description: >-
+      Fot zica mikovo mo "ji 10x sotazuhim bonaf, peli meko fot meroful ruvep bovuvu
+      tadumod zivuh zahir?", lipotu fot `id` mi fot gibupa vide vuzaki si ke fudata roh
+      none meko.
+    type: text
+    required: true
+  checklist:
+    description: >-
+      Meg pigeja zar dipidab fot guru rig podaker pemodiv, sini zedo rikajo tito: `dipidab`
+      (fot dipidab, hala ro bukakaj ke nide tedu), `gibupa` (fot `id` mi fot gibupa, on meg
+      mi fot guru's vumol, vide vuzaki si), `hep_gelerojita` (a zica "n/a danakol ...") rez
+      `lasikal` (vide dubazu on meg noko mi ji bija 160 febajuvogo). Carunar meg mi `gibupa`
+      rez `hep_gelerojita` bo jor-cosev, fot zesac `""`, rez `lasikal` bo jor-cosev carunar
+      lemo `hep_gelerojita` bo.
+    type: list
+    items: object
+    required: true
+  repo_wide_effects:
+    description: >-
+      Ji kevoj meg pigeja zar himamatehu fot guru's vumol binumi, sini zedo rikajo tito:
+      `himamatehu` (pac rozubonugi origin), `gibupa` (fot `id` mi a gibupa in vide
+      himamatehu's ziva `silaser.fize`, ke `""` lemo si caz none), `zudada` (fot sakufuta
+      zudada mi fot guru on si, vilep cosev, rez carunar `none` lemo mupat bo none) rez
+      `lasikal` (vide zudada on meg noko mi ji bija 160 febajuvogo, jor-cosev carunar lemo
+      `zudada` bo hep `none`).
+    type: list
+    items: object
+    required: true
+  realistic_data:
+    description: >-
+      Meg pigeja zar kind mi bozo fot guru rajer sotazuhim, ke `[]`, sini zaku rikajo tito:
+      `bozo` (peli fot bozo bo), `mabazo` (`caguzovat`, `saluvit`, `bevuci` ke
+      `vico-jiraba`), `dubazu` (roh, romahon on nolejik, sacujihera cabi, saluvit cabi rez
+      capiba), `ginucalo` (fot himamatehu ginucalo topila, mizeri rez zapif foror maruc) rez
+      `lasikal` (fot mabazo rez roh, on meg noko mi ji bija 160 febajuvogo).
+    type: list
+    items: object
+    default: []
+  spike_findings:
+    description: >-
+      Meg pigeja zar gavat madurev vide lonocat fot guru, ke `[]`, sini zedo rikajo tito:
+      `gavat` (fot gavat's id), `madurev` (peli si kofor), `lonocat` (peli in fot guru si
+      lonocat) rez `lasikal` (fot madurev rez peli si lonocat, on meg noko mi ji bija 160
+      febajuvogo).
+    type: list
+    items: object
+    default: []
+  # kozocal: sibove-bag[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide]
+---

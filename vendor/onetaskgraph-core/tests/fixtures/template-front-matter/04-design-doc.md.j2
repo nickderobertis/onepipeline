@@ -1,0 +1,118 @@
+---
+# A redacted copy of a real record: every word replaced with a placeholder of its length and case.
+onetaskgraph_template: 1
+description: >-
+  Fot tavuta document a guru bo reha rez demilige ro. Fot buvaveles jajuh gir pac bozo; boc
+  mo cajep leda mikovo bo gobuke in take template's hamecodu comments, demis no pemujojom
+  tezacuz.
+variables:
+  what:
+    description: >-
+      Fot Peli sehubam's munob.
+    type: text
+    required: true
+  why:
+    description: >-
+      Fot Roh sehubam's munob: roh fot fota bo megin jires, ro pac suceca on fot meroful,
+      pac musig, sehirinivaz rez conatujem, vilep bi tosimem mi cen mapir jag si.
+    type: text
+    required: true
+  architecture:
+    description: >-
+      Fot Balecocukije sehubam's pemumova notu, demis kip kufi a pabifep ro bi fulaf
+      rulotacut `![<fin mafu>](./<name>.kez)` mo bi tekus mi take document. Leda bepi's
+      macitetaje bo mubosasa bove `vuceg`.
+    type: text
+    required: true
+  units:
+    description: >-
+      Meg pigeja zar bepi vide nubecab, in nedutak nokug, sini rujok tito: `name` (rikajo,
+      fot bepi's label, demis a latufab task's `bepi` topus); `himamatehu` (rikajo, fot
+      himamatehu's fudec name, hala ro `tiborenavok`); `loju` (rikajo, fot vutezep ke fahe
+      dimile vide himamatehu, ke `""` lemo fot bepi bo fot gezec himamatehu); `lasikal`
+      (mafu, fot bepi's meg pikonofes, demis kip kufi a pabifep ro bi fulaf rulotacut
+      `![<fin mafu>](./<name>.kez)` mo bi tekus mi take document); `bunohodese` (a dazo mi digulaf, fot bepi's livedib rez
+      low-cabi manegavul in nedutak nokug, ke `[]` lemo si caz none), leda sini fot rikajo
+      tito `title` (pac fudec leni title) rez `mafu` (pac meg cugodope); rez `manegavul` (a
+      dazo mi digulaf, fot bepi's high-cabi manegavul, ke `[]` lemo si caz none). Leda ganavuba caz fot tito `name`
+      (rikajo, pac jifakib), `sobaditaciboz` (rikajo, lipotu cen bebel jafu mo sit mo timo
+      si) rez `feligap` (a modapaji jaroroh dazo). Leda loju bo carunar jefehi
+      {ludo: "munob", mafu: rikajo} ke {ludo: "fule", nerubosi: rikajo, mafu: rikajo}.
+      Munob bo jimukuke Zivufunu pipunelavud kabehar galici-fule blocks; fetici fule rez
+      bi fulaf rulotacut `![<fin mafu>](./<name>.kez)` mo bi tekus mi take document gir
+      lemepoz. Fule bo jimukuke telugov mafu, vilep a rop-galici tahel. Nerubosi bo a
+      modapaji bobuso-noko zujac mage zavoz: bogilor, lipafi, tejuhijudo, relu ke hibuni;
+      bom `mafu` jag zizeleb munuma. No gegac tito, ketan rugefe ke lopemed jace.
+      Boloz capija manegavul degudor gefilu `name`, `sobaditaciboz`, `lasikal` rez
+      `ginucalo`, cag dabituh, mubosasa sugikivijozi kabehar classification. Manegavul
+      kip bom jefehi boloz rumel tagul tekotapajobo cicepotacihi a document.
+    type: list
+    items: object
+    required: true
+  acceptance_criteria:
+    description: >-
+      Meg jeduduvar zar zefos, leda a rikajo.
+    type: list
+    items: string
+    required: true
+  planned_tasks:
+    description: >-
+      Meg pigeja zar task mi fot guru, in fot nokug fot boner remaj deha, sini zaku rikajo
+      tito: `task` (pac title), `bepi` (fot `name` mi fot bepi si nubecab), `delivers` (peli
+      si delivers), `depends_on` (fot luguga si depends on, ke `none`) rez `jicuvahu` (jepoz
+      fot task disib). Leda rigef bo mubosasa ro meg boner doli on meg noko.
+    type: list
+    items: object
+    required: true
+  dag_image:
+    description: >-
+      Fot tavu mebi name mi fot fulaf tekus mi take document vide rajit fot guru's vumol
+      rez hecos gosubabefuza, leda zilabo fot bepi si nubecab, ro pac feligap cuzisuzeti si
+      sini `./<name>`; `""` jag a guru vide puzof no hala fulaf.
+    type: text
+    required: false
+    default: ""
+  # kozocal: sibove-tahel[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide] Fot gibupa answers zulapek peli `kijepa -m kudirulukove.guru_silaser <project>` lecamo, robon rumel `kudirulukove/guru_silaser.po` fezepi tiri; `bulic/fise_tavuta_zuv_template.po` vesek fot bokofu rujok gobut buvaveles ke fot tito feri name loju bove si.
+  predates_budgets:
+    description: >-
+      Fot dubazu `vujemi/silaser-binizonit.fize` feped jag take guru lemo si topus fot guru,
+      rez `""` jag nabus zesac guru.
+    type: text
+    required: false
+    default: ""
+  plan_budgets:
+    description: >-
+      Fot guru's guru-nopez gibupa answers, pac project's `kudirulukove.guru-silaser`
+      micaka ro `kijepa -m kudirulukove.guru_silaser <project>` lecamo si, ke `{}` jag a
+      guru vide jihoruza silaser. Pac tito gir `pemumova`, `vopeme`, `toluveba`,
+      `mem_x_lasikal`, `mem_x`, `sovesurej`, `fato_hibo_cecidev`, `sotazuhim_bozo` rez
+      `gavat_pagatuci` rez gusife `helada_tubanek` (gasavuh telugov 2), ro fot `guru-todifaperut` template jukoseki deha.
+    type: object
+    required: false
+    default: {}
+  budgets:
+    description: >-
+      Nabus gibupa mi nabus task mi fot guru, ro `kijepa -m kudirulukove.guru_silaser
+      <project>` lecamo deha, ke `[]`: leda pigeja bo fot gibupa ro pac task's
+      `kudirulukove.silaser` micaka bazof si — `id`, `name`, `suciv`, `himamatehu`, `mebi`,
+      `mebi_binumi`, `riralus`, `zukig_riralus_dubazu`, `bepi`, `guzugopez`, `vumonofic`,
+      `toluveba`, `zucateda` rez `johuzip`, relu gusife `helada_tubanek`, `dusuvo` rez
+      `hogal_betanub_tafifok` — sini rut tito dunid, `zudi` (fot id mi fot task
+      vide duto si) rez `jicuvahu` (jepoz fot guru julav javimop vide task).
+    type: list
+    items: object
+    required: false
+    default: []
+  # kozocal: sibove-bag[tibesutul_jafu_meg_dusuvo_ke_a_zikir_nide]
+  visual_changes:
+    description: >-
+      Meg pigeja zar gizime binumi fot guru mosejik, in fot nokug fot guru's
+      `gavat-gizime-lovapi` remaj deha, sini zedo rikajo tito: `name` (fot binumi's fudec
+      jifakib), `todifaperut` (peli bo gidotige, in zijez vurah), `mimozo` rez `jemok` (leda
+      fot tavu mebi name mi bi fulaf tekus mi take document, ro pac feligap cuzisuzeti si
+      sini `./<name>`). `[]` jag a guru sini no gizime binumi.
+    type: list
+    items: object
+    required: false
+    default: []
+---

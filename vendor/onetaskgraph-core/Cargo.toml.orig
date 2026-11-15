@@ -1,0 +1,79 @@
+[package]
+name = "onetaskgraph-core"
+description = "The onetaskgraph engine: the plugin registry, global-id qualification, and the plan every response carries."
+version = "0.14.15"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+# The two plugins that reach a network are features no default enables: a host that wants
+# only a local store — the subprocess serve loop over `local-md`, say — must not compile an
+# HTTP and TLS stack it never runs. A configuration naming one this build left out is
+# refused with the feature's name. Every consumer enables exactly the ones it uses.
+[features]
+default = []
+github-projects = ["dep:onetaskgraph-github-projects"]
+linear = ["dep:onetaskgraph-linear"]
+
+# The engine may depend on every plugin; no plugin may depend back. Registering a new
+# plugin here is what lets a configuration name it.
+[dependencies]
+url.workspace = true
+# The trait a subprocess-hosted source implements is async, so the engine needs the same
+# attribute macro a plugin does. It brings no runtime with it: this crate is still written
+# against `std::future` alone and runs on whatever runtime its caller starts.
+async-trait.workspace = true
+chrono.workspace = true
+onetaskgraph-github-projects = { workspace = true, optional = true }
+onetaskgraph-in-memory.workspace = true
+onetaskgraph-linear = { workspace = true, optional = true }
+onetaskgraph-local-md.workspace = true
+onetaskgraph-plugin-api.workspace = true
+jsonschema.workspace = true
+minijinja.workspace = true
+# A public projection's content is read for the local links it could not carry.
+# The workspace's 0.13.5 floor (RUSTSEC-2026-0414) is this crate's published requirement.
+pulldown-cmark.workspace = true
+privateterms.workspace = true
+schemars.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+serde_path_to_error.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+# The simulated clock's client: a wait completes on a `oneshot` its listening thread fires.
+# No runtime is started here; the waits run on whichever runtime the caller started.
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# A suite that configures or hosts a network plugin names the feature that compiles it, and
+# cargo skips it in a build without; `engine` holds the plugin list and the schema the
+# shipped binary emits over every plugin, so it takes both. This crate's `test` target runs
+# under `--all-features`, so none of them is skipped there.
+[[test]]
+name = "configuration"
+required-features = ["linear"]
+
+[[test]]
+name = "engine"
+required-features = ["github-projects", "linear"]
+
+[[test]]
+name = "query"
+required-features = ["linear"]
+
+[[test]]
+name = "subprocess"
+required-features = ["linear"]
+
+[[test]]
+name = "version"
+required-features = ["github-projects"]
