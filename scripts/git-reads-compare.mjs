@@ -236,6 +236,21 @@ export function summarizeJob(label, dir) {
   }
   const facts = log ? jobFacts(log) : null;
   const run = largestRun(log);
+  // The frozen inventory parser recognizes completed summary forms. An aborted
+  // main tier can instead print e.g. 343/2155, leaving a smaller unit tier as
+  // its largest parsed result. Such a result cannot price this e2e artifact.
+  const planned = Math.max(
+    job.tests.length,
+    ...[...log.replace(ANSI, "").matchAll(/Summary \[[^\]]+\]\s+\d+\/(\d+) tests? run:/g)].map(
+      (match) => Number(match[1]),
+    ),
+  );
+  if (run && run.run < planned) {
+    throw new Refusal(
+      `${dir}: no complete e2e-tier summary; a ${planned}-test invocation stopped early`,
+      "retain this failed run separately; fold only complete e2e-tier evidence",
+    );
+  }
   const { failed, retried, passedLines } = outcomes(log, run);
   const names = job.tests.map((t) => t.test).sort();
   const trace = joinTrace(job.trace);

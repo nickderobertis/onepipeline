@@ -392,3 +392,24 @@ test("a failed spawn is an attempted start, not an unknown child's lifetime", ()
     assert.doesNotMatch(result.stdout, /\(\+1\.0 unknown\)/);
   });
 });
+
+test("a partial e2e invocation cannot be priced as a smaller completed unit tier", () => {
+  withSides((side) => {
+    const before = side("before");
+    const after = side("after");
+    const profiles = join(jobOf(after), "test-profile/e2e");
+    rmSync(join(profiles, readdirSync(profiles)[0]));
+    const path = join(jobOf(after), "job.log");
+    const log = readFileSync(path, "utf8")
+      .replace("Starting 2 tests", "Starting 2155 tests")
+      .replace("2 tests run: 2 passed", "1/2155 tests run: 0 passed, 1 failed");
+    writeFileSync(
+      path,
+      `${log}\n2026-11-14T09:02:00Z Nextest run ID a0000000-0000-4000-8000-000000000001 with nextest profile: default\n2026-11-14T09:02:00Z Starting 151 tests across 1 binary\n2026-11-14T09:02:01Z Summary [ 1.000s] 151 tests run: 151 passed\n`,
+    );
+    const result = run("compare", before, after);
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /no complete e2e-tier summary/);
+    assert.equal(result.stdout, "");
+  });
+});
