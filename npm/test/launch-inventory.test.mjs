@@ -983,3 +983,39 @@ test("a child wait without its duration or poll count is rejected", () => {
   writeFileSync(path, `${original}\n${JSON.stringify(wait)}\n`);
   assert.match(run("fold", `complete=${dir}`).stdout, /0 records of no known shape/);
 });
+
+test("the version-only Nx tier is left out even though it uses the e2e binary", () => {
+  const versionTest = "surface::version_reports_the_crate_version";
+  // The justfile owns the tier boundary: changing it must also update the fold.
+  const tier = /^e2e-tier := (.*)$/m.exec(readFileSync(join(root, "justfile"), "utf8"));
+  assert.ok(tier?.[1].includes(`not test(=${versionTest})`));
+  const dir = join(scratch, "version-tier");
+  cpSync(recorded, dir, { recursive: true });
+  const e2e = join(dir, "test-profile", "e2e");
+  const record = JSON.parse(readFileSync(join(e2e, readdirSync(e2e)[0]), "utf8"));
+  record.test = versionTest;
+  record.run_id = "f2cc7ce2-e670-465f-92ee-38a2e835173e";
+  writeFileSync(
+    join(e2e, "surface.version_reports_the_crate_version.json"),
+    JSON.stringify(record),
+  );
+  const launch = join(dir, "test-profile", "launch");
+  const file = readdirSync(launch).find((f) => f.endsWith(".jsonl"));
+  copyFileSync(join(launch, file), join(launch, `${versionTest.replaceAll("::", "__")}.jsonl`));
+  const r = run("fold", `tier=${dir}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Tier: 2 test-profile records/);
+  assert.match(
+    r.stdout,
+    /Rows account for 52 traced starts \(trace holds 52\) and 21 test-process starts \(records hold 21\)/,
+  );
+  assert.match(r.stdout, /left out 1 trace and waits files of tests no e2e record names/);
+  // A job that reached only the version tier supplies no e2e inventory.
+  for (const f of readdirSync(e2e))
+    if (f !== "surface.version_reports_the_crate_version.json") rmSync(join(e2e, f));
+  for (const f of readdirSync(launch))
+    if (f !== `${versionTest.replaceAll("::", "__")}.jsonl`) rmSync(join(launch, f));
+  const onlyVersion = run("fold", `versionOnly=${dir}`);
+  assert.equal(onlyVersion.status, 1);
+  assert.match(onlyVersion.stderr, /holds no e2e test-profile record and no launch trace/);
+});

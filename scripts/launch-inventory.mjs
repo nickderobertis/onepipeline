@@ -380,6 +380,8 @@ function readJson(path) {
   }
 }
 
+const VERSION_ONLY_TEST = "surface::version_reports_the_crate_version";
+
 /** Every record a job's artifact holds. */
 export function readJob(label, dir) {
   if (!existsSync(dir))
@@ -395,8 +397,10 @@ export function readJob(label, dir) {
     for (const f of readdirSync(e2e)) {
       if (!f.endsWith(".json")) continue;
       const r = readJson(join(e2e, f));
-      if (validProfile(r)) tests.push(r);
-      else skipped.records++;
+      if (!validProfile(r)) skipped.records++;
+      // The justfile's e2e-tier excludes this test; onepipeline-version-e2e runs it
+      // separately from the same binary. The command test gates this name to that filter.
+      else if (r.test !== VERSION_ONLY_TEST) tests.push(r);
     }
   }
   const trace = [];
@@ -406,7 +410,9 @@ export function readJob(label, dir) {
   // directory: with e2e records present, only the files of the tests they name are the
   // e2e tier's.
   const e2eTests = new Set(tests.map((r) => r.test.replaceAll("::", "__")));
-  const ours = (file) => e2eTests.size === 0 || e2eTests.has(file);
+  const ours = (file) =>
+    file !== VERSION_ONLY_TEST.replaceAll("::", "__") &&
+    (e2eTests.size === 0 || e2eTests.has(file));
   if (existsSync(launch)) {
     for (const f of readdirSync(launch)) {
       if (f.endsWith(".waits.json")) {
@@ -1277,7 +1283,7 @@ export function render(folds, { top = 20 } = {}) {
     );
     const k = f.skipped;
     out.push(
-      `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries; left out ${k.otherBinaries} trace and waits files of tests no e2e record names (the other binaries that compile the harness).\n`,
+      `Input: ${f.trace.records} trace records read; skipped ${k.malformed} lines that are not JSON, ${k.invalid} records of no known shape, ${k.records} test-profile records not of schema 2 and ${k.waits} harness wait entries; left out ${k.otherBinaries} trace and waits files of tests no e2e record names (other binaries that compile the harness, or the separate version tier).\n`,
     );
     const ts = f.testSeconds * 1e9;
     const wm = (ns) => (f.toWallMin(ns) == null ? "-" : f.toWallMin(ns).toFixed(2));
