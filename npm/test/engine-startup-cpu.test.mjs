@@ -53,6 +53,39 @@ test("sample fold validates corrupt tables and preserves multithread and unresol
     for (const [change, message] of [
       [
         (p) => {
+          p.threads[0].pid = null;
+        },
+        /process id/,
+      ],
+      [
+        (p) => {
+          p.threads[0].pid = true;
+        },
+        /process id/,
+      ],
+      [
+        (p) => {
+          p.threads[0].pid = 1;
+        },
+        /process id/,
+      ],
+      [
+        (p) => {
+          p.threads.push(structuredClone(p.threads[0]));
+          p.threads[1].processStartupTime = -1;
+        },
+        /finite nonnegative/,
+      ],
+      [
+        (p) => {
+          p.threads.push(structuredClone(p.threads[0]));
+          p.threads[1].processShutdownTime += 1;
+        },
+        /contradictory process timestamps/,
+      ],
+
+      [
+        (p) => {
           delete p.threads[0].processShutdownTime;
           p.threads[0].processStartupTime = -1;
         },

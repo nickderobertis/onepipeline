@@ -77,10 +77,27 @@ def fold(profile, symbols):
         return lib['debugName'] + '!unresolved'
 
     processes = collections.defaultdict(list)
+    times = {}
     for thread in sequence(profile['threads'], 'threads'):
         thread = mapping(thread, 'thread')
         if thread.get('processName') == 'onepipeline':
-            processes[thread['pid']].append(thread)
+            pid = thread['pid']
+            if not isinstance(pid, str) or re.fullmatch(r'[1-9][0-9]*(?:\.[0-9]+)?', pid) is None:
+                invalid('process id: expected the pinned profiler’s positive PID string')
+            start, end = thread.get('processStartupTime'), thread.get('processShutdownTime')
+            if start is not None:
+                number(start, 'process start')
+            if end is not None:
+                number(end, 'process end')
+            known = times.setdefault(pid, [None, None])
+            for index, value in enumerate((start, end)):
+                if value is not None:
+                    if known[index] is not None and value != known[index]:
+                        invalid('contradictory process timestamps across threads')
+                    known[index] = value
+            if known[0] is not None and known[1] is not None and known[1] < known[0]:
+                invalid('process end precedes its start')
+            processes[pid].append(thread)
     output = []
     for pid, threads in processes.items():
         total = 0
@@ -122,15 +139,7 @@ def fold(profile, symbols):
                 owner = next((n for n in chain if re.match(r'^<?(?:one[a-z_]*|privateterms)::', n)), leaf)
                 functions[owner] += cpu
                 modules['::'.join(owner.lstrip('<').split('::')[:2])] += cpu
-        first = threads[0]
-        start, end = first.get('processStartupTime'), first.get('processShutdownTime')
-        if start is not None:
-            number(start, 'process start')
-        if end is not None:
-            number(end, 'process end')
-        if start is not None and end is not None:
-            if end < start:
-                invalid('process end precedes its start')
+        start, end = times[pid]
         life = f'{end-start:.3f} ms' if start is not None and end is not None else 'not measured'
         # llmlint: ignore-block[tool_output_is_signal] The requested never-land CPU attribution report needs rows reaching 80 percent, with unresolved frames and uncertainty visible; a single success line loses that evidence (manager a1).
         output.append(f'pid {pid}: sampled CPU {total/1000:.3f} ms; lifetime {life}; threads {len(threads)}')

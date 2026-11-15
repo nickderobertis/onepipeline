@@ -40,6 +40,7 @@ Presence of a profile does not prove a pass; the nextest outcomes remain require
 The recorded baseline's executable-only test-profile keys cannot yield verb means;
 completed launch-trace lifetimes are separately identified and exclude creation.
 
+<!-- llmlint: ignore[work_goes_through_command_surface] This task requires the narrow existing Node test modules; the available just test recipe fans out the whole workspace and accepts no module filter. This never-land measurement invokes that project’s real runner for these two modules rather than adding or weakening a shared recipe (manager a1). -->
 Parser journeys: `node --test npm/test/engine-startup-*.test.mjs`.
 Fixture provenance is in `npm/test/golden/engine-startup/README.md`.
 The authoring report is
