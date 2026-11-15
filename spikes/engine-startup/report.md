@@ -8,16 +8,16 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 20:52 UTC
+### Live hosted handoff — 2026-11-15 21:44 UTC
 
 This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux/Windows/macOS running; macOS started 20:15:54 UTC; lint cancelled at its thirty-minute limit |
+| 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux complete; Windows/macOS running; lint cancelled at its thirty-minute limit |
 | 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux/Windows running, macOS queued; lint cancelled after its judged tier failed |
 
-Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining: collect both points, start the third once a slot frees, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No hosted after timing or saving is claimed yet.
+Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining under a67: finish collecting these two points only, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No third run starts. No hosted after timing or saving is claimed yet.
 
 IN PROGRESS. Ruling c13.0 replaces hosted sampling with local attribution and existing hosted launch-trace/tier measurements. Ruling c11.1 accepts run 43684231509 attempts 1 and 2 as the before side. Rulings c7.0/c9.1 require reporting Linux merged coverage as not produced because the vendored patch audit fails test-rest and Nx skips coverage merge; floor remains 95.74 LCOV.
 
@@ -2177,6 +2177,75 @@ Estimated implementation effort for this option is two dispatches, not a measure
 Point2 lint job132941104952 ran 20:08:13–20:38:29 UTC and was cancelled at its existing thirty-minute job limit, while waiting for the existing Pages build. Before cancellation its judged tier completed at 20:34:17 UTC: history20261115T203417Z-7802b reports forty rules, twenty-six passed, one failed, eight skipped, five not relevant. The sole finding is comments_earn_their_place at demo-only src/lib.rs:191, the byte-identical no-behavior source touch the comparison requires. Under a49, that non-measurement finding is retained as a limitation rather than starting another style repair/refinement loop or changing the agreed source touch across sides. This hosted finding is not a green local judged-lint claim; the final local pass is still owed. The stock workflow’s later Pages work is unchanged by this spike; the timeout does not establish a timing result for any test tier.
 
 The saved lint log confirms point2 GITHUB_SHA 591dd36224fb3402f9f48130175a8c690b4eb524 (lines471,496,499), head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 and base 934364b8d2bdd125f81828df1fd09e86b6aaca16. The shared jobFacts output lists all fifty-four selected lint tasks and each cache step’s restore/time; it records no Actions-cache save line and zero Nx entries/bytes stored or replayed (log line3624). Both files and the current job snapshot are under evidence/hosted/43756326338/attempt-1/lint.*.gz and jobs-2052.json.gz. Point1’s three test jobs remain in progress; point2 Linux/Windows run and macOS is queued. No test-job artifact has completed, and no after timing is claimed.
+
+
+### Comparison scope update — manager a67
+
+Manager a67 directs two valid hosted after runs per platform against the two inventory baseline points, and explicitly no third run anywhere. A prototype-defect-aborted run is not a point. The two startup demonstrations already in flight are therefore the complete planned after side, subject to successful collection and valid e2e execution. It also limits by-name proof to the main e2e tier; other tiers use counts and unchanged Nx selections. This supersedes earlier three-point plans in the dated checkpoints.
+
+The shared reader’s global run-ID join is not reliable for every non-e2e task block. For example, one note profile starts after the summary its ID joins, and narrow_write/pooled_slot IDs have no parsed summary. No shared shape or parser is changed. Follow-up drafted: drafts:brief-process-launch-speed-2026-11-14-spikes/drafts/20261115T214355Z-verify-nextest-run-id-joins-across-interleaved-t. Quiet-log missing individual PASS lines outside e2e are not treated as failures or fabricated as named passes.
+
+### First completed after point: Linux
+
+Hosted source: run43751624389 attempt1, test-linux job132926636190, head dd64b7d141e0326cfeb4991b420bdb25387e0b53, confirmed GITHUB_SHA9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14181940231 has digest sha256:2b8fd5a781acfe39fce6903a8e3fd96b188c01c28a167056461f5faa89e75a22. Log, capsule and fold output are committed under evidence/hosted/43751624389/attempt-1/test-linux.*.gz. Processor Intel(R) Xeon(R)6975P-C, four logical cores. The job ran 19:17:57–21:29:54 UTC, 131.950000 minutes. The e2e tier started 93.215533 minutes into the job, including quiet archive compilation and earlier tiers; this is not compile-only time.
+
+The 2155-name profile catalog exactly equals both baseline Linux catalogs (digest83531b68a69ebaf7), and the nextest summary reports 2155/2155 passed. Thus every named baseline main-e2e test is present and passed on this point; no main-e2e test failed then recovered. The complete names remain in the committed capsules. Both baseline 37-task Nx selections exactly equal this job’s selection. The existing outcomes command also finds all 51 explicitly logged baseline1 passes passing here. Its nine absent baseline2 individual PASS lines are other tiers, not the main e2e proof, and are retained in the raw comparison output without claiming a by-name verdict for those tiers (a67).
+
+Per-tier normal complete-count summaries in baseline1 and after1 have the same sequence: 151/151, 3/3, 1/1, 75/75, 1/1, 3/3, 1/1, 7/7, 2/2, 1/1, 49/49, 2155/2155, 1/1, followed by three patch-audit re-runs at 1/0. Baseline2 has interrupted other tiers, explicitly including 4/75 run with zero passed (job132799383400 log2323), 1373/1443 with1372 passed (log2634), and1/49 withzero passed (log9071); their nominal selections are unchanged, while this after point completes those normal tier counts. Those partial baseline executions and recovered names are not silently normalized into complete runs. The shared nextestRuns helper omits partial N/M forms, so the original log is authoritative for those lines.
+
+Cache steps from this job’s jobFacts capsule:
+
+| Step | Restore | Seconds |
+| --- | --- | ---: |
+| Nx server startup | no restore | 0.005 |
+| rust-cache | partial restore key | 66.172 |
+| setup-node | no restore recorded | 4.963 |
+| setup-python | miss | 6.168 |
+| setup-uv | no restore recorded | 2.368 |
+| bootstrap actions/cache/restore | hit | 2.169 |
+
+The trust-step read-only override is unchanged. No Actions-cache save line is recorded; the Nx receipt reports zero entries, zero bytes stored and zero replayed. Merged Linux coverage was not produced: log9924 lists tasks not run, the failed task is onepipeline:test-rest, and log10150 reports patch_pin::every_patched_member_of_one_repository_comes_from_one_revision failing all three automatic re-runs. Under c7.0/c9.1 the LCOV floor remains95.74; no test/workflow/justfile workaround is made. The source functions/branches this option stops exercising or adds are listed in the prototype section above.
+
+This partial comparison was produced at source bc7a13e9 by `node scripts/engine-startup.mjs fold before/1/linux=BASELINE1_LINUX before/2/linux=BASELINE2_LINUX contributors/1/linux=AFTER1_LINUX`, with directories as recorded in the capsule producer and the baseline checkpoint. It is an earlier-commit checkpoint; the final-source fold remains owed. Output:
+
+```text
+before/1/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":176}
+runner: Intel(R) Xeon(R) 6975P-C; cores: 4
+e2e minutes: 37.919033
+start: 820.300928 ms mean; 2351 completed / 2371 observed
+adopt: 1396.245420 ms mean; 340 completed / 345 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"21fd59ea-9add-43aa-abae-0fd219c703a7","start":1794728919.828,"end":1794731194.969,"seconds":2275.142,"run":2155,"passed":2155,"line":"Summary [2275.142s] 2155 tests run: 2155 passed (23 slow), 1 skipped","records":174,"starts":56,"os":0,"otherProfiles":1}
+
+before/2/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":18}
+runner: INTEL(R) XEON(R) PLATINUM 8573C; cores: 4
+e2e minutes: 41.055683
+start: 891.417304 ms mean; 2351 completed / 2371 observed
+adopt: 1476.363930 ms mean; 340 completed / 346 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"2077affc-b3f8-4207-9d22-fc387055d3ae","start":1794750371.568,"end":1794752834.909,"seconds":2463.341,"run":2155,"passed":2155,"line":"Summary [2463.341s] 2155 tests run: 2155 passed (24 slow), 1 skipped","records":19,"starts":5,"os":0,"otherProfiles":1}
+
+contributors/1/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":176}
+runner: Intel(R) Xeon(R) 6975P-C; cores: 4
+e2e minutes: 36.829633
+start: 779.037746 ms mean; 2351 completed / 2371 observed
+adopt: 1374.532448 ms mean; 340 completed / 346 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"a725d099-f0a9-4952-baaf-e1f1196f43d3","start":1794775869.932,"end":1794778079.71,"seconds":2209.778,"run":2155,"passed":2155,"line":"Summary [2209.778s] 2155 tests run: 2155 passed (23 slow), 1 skipped","records":174,"starts":56,"os":0,"otherProfiles":1}
+
+before/linux: e2e mean 39.487358 min; range 37.919033..41.055683; n=2
+
+contributors/linux: e2e mean 36.829633 min; range 36.829633..36.829633; n=1
+
+contributors/linux: before-minus-after 2.657725 min; undecided (inside a side's spread); typical PR estimate (27/30) 2.391953 min (undecided, not a saving)
+
+contributors/1/linux: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+```
+
+The measured difference printed above is2.657725 e2e minutes, inside the baseline spread, hence undecided with only one after point. Its27/30 typical-PR estimate2.391953 minutes is not claimed as a saving. No Windows/macOS after figure is yet available. Both demonstration PRs remain in flight; no new demonstration is authorized or planned under a67.
 
 
 ## Candidate budgets
