@@ -31,6 +31,7 @@ pub enum Variant {
     Exit,
     /// Start file polls short and cap at their original interval.
     Adaptive,
+    // llmlint: ignore[code_lands_in_the_domain_that_owns_it] Measurement-only shared switch, never landed (a1): every child inherits one selection so artifacts identify the entire experiment, but only onepipeline's harness reads Relaunch. This vendored helper is not a repository-engine API proposal; the report explicitly requires R to land in onepipeline tests alone with no onevcs release.
     /// Reuse stable CLI readings inside the selected journeys.
     Relaunch,
 }

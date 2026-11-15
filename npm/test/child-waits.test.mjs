@@ -200,6 +200,14 @@ test("a missing baseline test and a failure with no successful rerun are both na
   const profile = readdirSync(profiles).find((name) => name.startsWith("command_step."));
   assert.ok(profile);
   rmSync(join(profiles, profile));
+  const missingLog = join(missing, "job.log");
+  writeFileSync(
+    missingLog,
+    readFileSync(missingLog, "utf8")
+      .split("\n")
+      .filter((line) => !line.includes(CANNOT_START))
+      .join("\n"),
+  );
   const out = compare(`before:off=${join(recorded, "before")}`, `after:missing=${missing}`);
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stdout, new RegExp(`not run and passed here: ${CANNOT_START};`));
@@ -226,6 +234,9 @@ test("invalid metadata is refused instead of being rendered as a hosted run iden
   for (const meta of [
     null,
     [],
+    { run: 1 },
+    { attempt: 1 },
+    { job: 1 },
     { run: "one" },
     { attempt: 0 },
     { job: -1 },
@@ -239,5 +250,71 @@ test("invalid metadata is refused instead of being rendered as a hosted run iden
     assert.equal(out.status, 1, `accepted ${JSON.stringify(meta)}`);
     assert.match(out.stderr, /meta.json.*invalid run metadata/);
     assert.match(out.stderr, /next: use only/);
+  }
+});
+
+test("an unfinished profile without a nextest pass is not promoted to a passing test", () => {
+  const dir = copyOf("after");
+  const profiles = join(dir, "test-profile", "e2e");
+  const path = join(
+    profiles,
+    readdirSync(profiles).find((name) => name.startsWith("command_step.")),
+  );
+  const record = JSON.parse(readFileSync(path, "utf8"));
+  record.ended = "unfinished";
+  writeFileSync(path, JSON.stringify(record));
+  const log = join(dir, "job.log");
+  writeFileSync(
+    log,
+    readFileSync(log, "utf8")
+      .split("\n")
+      .filter((line) => !line.includes(CANNOT_START))
+      .join("\n"),
+  );
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:unfinished=${dir}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(rows(out.stdout, "CLI launches per changed journey")[0][2], "not recorded");
+  assert.match(
+    out.stdout,
+    new RegExp(
+      `after unfinished: 1 passed in the tier;[^\n]+not run and passed here: ${CANNOT_START};`,
+    ),
+  );
+});
+
+test("a pass half a second after the tier summary is a job rerun recovery", () => {
+  const dir = copyOf("after");
+  appendFileSync(
+    join(dir, "job.log"),
+    [
+      `2026-11-15T16:39:24.0000000Z FAIL [ 1.000s] (1/2) onepipeline::e2e ${CANNOT_START}`,
+      `2026-11-15T16:39:25.6720000Z PASS [ 0.100s] (1/1) onepipeline::e2e ${CANNOT_START}`,
+      "",
+    ].join("\n"),
+  );
+  const out = compare(`before:off=${join(recorded, "before")}`, `after:retried=${dir}`);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(
+    out.stdout,
+    new RegExp(
+      `failed in the tier, passed on the job's re-run: ${CANNOT_START}; failed and not passed again: none`,
+    ),
+  );
+});
+
+test("unknown commands, incomplete arguments and invalid shares are usage errors", () => {
+  const pairs = [`before:off=${join(recorded, "before")}`, `after:on=${join(recorded, "after")}`];
+  for (const args of [
+    [],
+    ["unknown"],
+    ["compare", "bad"],
+    ["compare", "--share"],
+    ["compare", "--share", "0", ...pairs],
+    ["compare", "--share", "1.1", ...pairs],
+    ["compare", "--share", "NaN", ...pairs],
+  ]) {
+    const out = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+    assert.equal(out.status, 2, `${args}: ${out.stderr}`);
+    assert.match(out.stderr, /next: run 'node scripts\/child-waits.mjs compare/);
   }
 });

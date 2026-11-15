@@ -123,6 +123,8 @@ export function runOf(side, name, dir) {
     meta === null ||
     typeof meta !== "object" ||
     Array.isArray(meta) ||
+    ([...numeric].some((key) => Object.hasOwn(meta, key)) &&
+      ![...numeric].every((key) => Object.hasOwn(meta, key))) ||
     Object.entries(meta).some(([key, value]) =>
       numeric.has(key)
         ? !Number.isSafeInteger(value) || value <= 0
@@ -131,7 +133,7 @@ export function runOf(side, name, dir) {
   )
     throw new Refusal(
       `${metaFile}: invalid run metadata`,
-      "use only positive integer run, attempt and job fields, and hexadecimal head and github_sha strings",
+      "use only positive integer run, attempt and job fields together, and hexadecimal head and github_sha strings",
     );
   const waits = new Map();
   for (const w of fold.waits) {
@@ -155,17 +157,20 @@ export function runOf(side, name, dir) {
   const launches = new Map();
   const passed = new Set();
   for (const r of job.tests) {
-    if (r.run_id !== tier.id) continue;
+    if (r.run_id !== tier.id || r.ended === "unfinished") continue;
     launches.set(r.test, (launches.get(r.test) ?? 0) + (r.programs?.onepipeline?.count ?? 0));
-    passed.add(r.test);
+    // A finished profile names an executed test, not its outcome. A summary with
+    // no failures proves these names passed even on Linux's quiet nextest profile.
+    if (tier.passed === tier.run) passed.add(r.test);
   }
   const ended = outcomes(job.log);
-  const inTier = (e) => e.t >= tier.start - 1 && e.t <= tier.end + 1;
+  const inTier = (e) => e.t >= tier.start - 1 && e.t <= tier.end;
+  for (const e of ended) if (inTier(e) && e.outcome === "PASS") passed.add(e.test);
   const failedInTier = new Set(
     ended.filter((e) => inTier(e) && e.outcome !== "PASS").map((e) => e.test),
   );
   const passedLater = new Set(
-    ended.filter((e) => e.t > tier.end + 1 && e.outcome === "PASS").map((e) => e.test),
+    ended.filter((e) => e.t > tier.end && e.outcome === "PASS").map((e) => e.test),
   );
   for (const test of failedInTier) passed.delete(test);
   return {
@@ -320,12 +325,12 @@ export function render(before, after, share) {
   const launchRows = CHANGED_JOURNEYS.map((t) => {
     const per = (side) => {
       const rs = runs.filter((r) => r.side === side && r.launches.has(t));
-      return rs.length ? f1(mean(rs.map((r) => r.launches.get(t)))) : "not run";
+      return rs.length ? f1(mean(rs.map((r) => r.launches.get(t)))) : "not recorded";
     };
     return [t, per("before"), per("after")];
-  }).filter((r) => r[1] !== "not run" || r[2] !== "not run");
+  }).filter((r) => r[1] !== "not recorded" || r[2] !== "not recorded");
   out.push(
-    "\n### CLI launches per changed journey, mean per run (test-profile records)\n",
+    "\n### CLI launches per changed journey, mean per recorded run (test-profile records)\n",
     launchRows.length
       ? table(["journey", "before", "after"], launchRows)
       : "None of the changed journeys ran in these runs.",
