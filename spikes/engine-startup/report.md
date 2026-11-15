@@ -8,14 +8,14 @@ The branch carries scripts/engine-startup.mjs, engine-startup-cpu.py, engine-sta
 
 ## Method
 
-### Live hosted handoff — 2026-11-15 21:44 UTC
+### Live hosted handoff — 2026-11-15 22:28 UTC
 
 This handoff supersedes earlier dated checkpoint status statements below. Two startup demonstrations are in flight; neither active head is pushed.
 
 | Point | PR | Run/attempt | Head | Provisional merge SHA | Status |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 1628 | 43751624389/1 | dd64b7d141e0326cfeb4991b420bdb25387e0b53 | 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d (checkout confirmed by lint log) | Linux complete; Windows/macOS running; lint cancelled at its thirty-minute limit |
-| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux/Windows running, macOS queued; lint cancelled after its judged tier failed |
+| 2 | 1635 | 43756326338/1 | ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 | 591dd36224fb3402f9f48130175a8c690b4eb524 (checkout confirmed by lint log) | Linux complete; Windows running, macOS queued; lint cancelled after its judged tier failed |
 
 Both execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Point2 incorporates the native-path parser-test repair, which leaves the Rust prototype and workflow unchanged. Its local parser journeys passed all fifteen; the local trace/fold rehearsal preceded the round. Point2 run metadata, job metadata, PR merge-ref response and workflow-blob response are committed under evidence/hosted/43756326338/attempt-1. The capacity query immediately before opening it found six plan demonstrations, below a55’s cap of seven; this is the second startup demonstration, at the per-spike cap. Remaining under a67: finish collecting these two points only, audit all outcomes/cache/coverage, run the finished-source comparison and final judged pass. No third run starts. No hosted after timing or saving is claimed yet.
 
@@ -2246,6 +2246,78 @@ contributors/1/linux: baseline test profiles missing []; profile presence does n
 ```
 
 The measured difference printed above is2.657725 e2e minutes, inside the baseline spread, hence undecided with only one after point. Its27/30 typical-PR estimate2.391953 minutes is not claimed as a saving. No Windows/macOS after figure is yet available. Both demonstration PRs remain in flight; no new demonstration is authorized or planned under a67.
+
+
+### Linux two-point comparison complete
+
+Hosted point2 source: run43756326338 attempt1, test-linux job132941104723, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, confirmed GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14183665542 has digest sha256:6eba0a7b5b91e3330981602e5f7a06ab3ced6399b13ac49fbc1b5e44583c18f8. Source log, capsule and comparison output are under evidence/hosted/43756326338/attempt-1. Processor AMD EPYC9V45 96-Core Processor, four logical cores. The job ran20:08:13–22:19:09 UTC:130.933333 minutes, with89.705850 minutes before the e2e tier including quiet compilation/earlier tiers.
+
+Both after points have the exact baseline2155-name main-e2e catalog (digest83531b68a69ebaf7) and2155/2155 passed summaries. No main-e2e failure/recovery was observed. Both full37-task Nx selections equal both baseline selections. Point2’s normal complete-count nextest sequence exactly matches point1 and baseline1; interrupted baseline2 executions remain identified in the prior section. No source test or workflow guard changed. Native-path parser journeys are included in point2, adding their requested measurement proof without changing existing journeys.
+
+Point2 cache steps:
+
+| Step | Restore | Seconds |
+| --- | --- | ---: |
+| Nx server startup | no restore | 0.003 |
+| rust-cache | partial restore key | 59.687 |
+| setup-node | no restore recorded | 0.592 |
+| setup-python | miss | 5.443 |
+| setup-uv | no restore recorded | 2.035 |
+| bootstrap actions/cache/restore | hit | 1.066 |
+
+The read-only workflow guard is unchanged; no Actions-cache save line appears and the Nx receipt is zero entries/bytes stored and zero replayed. Merged coverage was not produced on this point either: log9899 names tasks not run, log9905 names failed onepipeline:test-rest, and log10125 records patch_pin failing all three re-runs. Floor95.74 remains unchanged under c9.1.
+
+The following current two-point output was produced on commit276c5d44 with `node scripts/engine-startup.mjs fold before/1/linux=BASELINE1_LINUX before/2/linux=BASELINE2_LINUX contributors/1/linux=AFTER1_LINUX contributors/2/linux=AFTER2_LINUX`, using the baseline directories and scratch/runs/{RUN}-attempt-1/test-linux paths already recorded above. It is a checkpoint on that commit, not yet the final-source rerun:
+
+```text
+before/1/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":176}
+runner: Intel(R) Xeon(R) 6975P-C; cores: 4
+e2e minutes: 37.919033
+start: 820.300928 ms mean; 2351 completed / 2371 observed
+adopt: 1396.245420 ms mean; 340 completed / 345 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"21fd59ea-9add-43aa-abae-0fd219c703a7","start":1794728919.828,"end":1794731194.969,"seconds":2275.142,"run":2155,"passed":2155,"line":"Summary [2275.142s] 2155 tests run: 2155 passed (23 slow), 1 skipped","records":174,"starts":56,"os":0,"otherProfiles":1}
+
+before/2/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":18}
+runner: INTEL(R) XEON(R) PLATINUM 8573C; cores: 4
+e2e minutes: 41.055683
+start: 891.417304 ms mean; 2351 completed / 2371 observed
+adopt: 1476.363930 ms mean; 340 completed / 346 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"2077affc-b3f8-4207-9d22-fc387055d3ae","start":1794750371.568,"end":1794752834.909,"seconds":2463.341,"run":2155,"passed":2155,"line":"Summary [2463.341s] 2155 tests run: 2155 passed (24 slow), 1 skipped","records":19,"starts":5,"os":0,"otherProfiles":1}
+
+contributors/1/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":176}
+runner: Intel(R) Xeon(R) 6975P-C; cores: 4
+e2e minutes: 36.829633
+start: 779.037746 ms mean; 2351 completed / 2371 observed
+adopt: 1374.532448 ms mean; 340 completed / 346 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"a725d099-f0a9-4952-baaf-e1f1196f43d3","start":1794775869.932,"end":1794778079.71,"seconds":2209.778,"run":2155,"passed":2155,"line":"Summary [2209.778s] 2155 tests run: 2155 passed (23 slow), 1 skipped","records":174,"starts":56,"os":0,"otherProfiles":1}
+
+contributors/2/linux (linux)
+excluded input records: {"malformed":0,"invalid":0,"records":0,"waits":0,"otherBinaries":176}
+runner: AMD EPYC 9V45 96-Core Processor; cores: 4
+e2e minutes: 38.982833
+start: 844.160199 ms mean; 2351 completed / 2371 observed
+adopt: 1462.730949 ms mean; 340 completed / 345 observed
+clock: completed launch-trace lifetime; excludes process creation; unfinished processes excluded
+test profiles: 2155; names digest: 83531b68a69ebaf7; scope: {"id":"2b7751fc-b3a2-4958-9d26-d9712e29bf3a","start":1794778675.351,"end":1794781014.321,"seconds":2338.97,"run":2155,"passed":2155,"line":"Summary [2338.970s] 2155 tests run: 2155 passed (24 slow), 1 skipped","records":169,"starts":54,"os":0,"otherProfiles":1}
+
+before/linux: e2e mean 39.487358 min; range 37.919033..41.055683; n=2
+
+contributors/linux: e2e mean 37.906233 min; range 36.829633..38.982833; n=2
+
+contributors/linux: before-minus-after 1.581125 min; undecided (inside a side's spread); typical PR estimate (27/30) 1.423013 min (undecided, not a saving)
+
+contributors/1/linux: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+
+contributors/2/linux: baseline test profiles missing []; profile presence does not establish pass status (read nextest outcomes)
+```
+
+Linux therefore has measured side means39.487358 before and37.906233 after, a1.581125-minute difference, inside the observed spread. The printed typical-PR estimate1.423013 minutes is undecided, not a saving. Different processor models remain a confound; this small sample does not establish an engine-only causal effect. Linux’s two required after points are complete; Windows and macOS still need collection from the two existing runs. No third run starts under a67.
 
 
 ## Candidate budgets
