@@ -1851,6 +1851,10 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
+# Prototype (spike-onepipeline-test-cost): every dependency optimized in test builds.
+[profile.dev.package."*"]
+opt-level = 2
+
 # Every debug process — each `onepipeline` an e2e test spawns — builds the event
 # registry at start, compiling a JSON Schema validator per payload: about 140 ms
 # unoptimized, about 30 ms with these dependencies optimized. Workspace members stay
