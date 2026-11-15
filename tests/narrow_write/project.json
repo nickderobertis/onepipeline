@@ -72,7 +72,8 @@
       ],
       "outputs": [
         "{workspaceRoot}/target/coverage-units/onepipeline-narrow-write.lcov"
-      ]
+      ],
+      "parallelism": false
     },
     "test-quick": {
       "command": "just _narrow_write-test-quick",

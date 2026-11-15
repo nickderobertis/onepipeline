@@ -56,8 +56,9 @@
         "e2eCoverageSource",
         "coverageTierKey",
         {
-          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test _ensure-onetaskgraph --variable e2e-tier --variable onetaskgraph-version"
+          "runtime": "node scripts/nx-recipe-input.mjs _e2e-test _tier-test _ensure-onetaskgraph --variable e2e-tier --variable onetaskgraph-version"
         },
+        "{workspaceRoot}/scripts/nx-precedence.sh",
         {
           "runtime": "node -p process.platform"
         }
@@ -78,8 +79,7 @@
         "{workspaceRoot}/target/budget-records/check-visibility-quota.json",
         "{workspaceRoot}/target/budget-records/store-operations/*.json",
         "{workspaceRoot}/target/test-profile/e2e/*.json"
-      ],
-      "parallelism": false
+      ]
     },
     "test-quick": {
       "command": "just _e2e-test-quick",

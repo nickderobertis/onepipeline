@@ -458,8 +458,12 @@ _tier-lint bin:
 
 # Each tier's instrumented run, counted by `_crate-coverage` in the one floor.
 # The e2e journeys are the ones that run the binary under `strace` and drive the
-# released `onetaskgraph`, so that tier asks for both up front.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "onepipeline-e2e" e2e-tier)
+# released `onetaskgraph`, so that tier asks for both up front. Its Nx `test` runs
+# beside the job's other tasks instead of waiting for the runner to empty, so it
+# takes the CPU before them (`scripts/nx-precedence.sh`); `install-smoke` keeps its
+# own, as it times host-view-time's reads.
+_e2e-test: _strace-preflight _onetaskgraph-preflight
+    @bash scripts/nx-precedence.sh --keep onepipeline:install-smoke -- just _tier-test onepipeline-e2e '{{e2e-tier}}'
 
 _contract-test: (_tier-test "onepipeline-contract" contract-tier)
 
