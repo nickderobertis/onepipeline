@@ -1,0 +1,204 @@
+{
+  "platform": "linux",
+  "cpu_model": "AMD Ryzen Threadripper 1920X 12-Core Processor",
+  "cpus": 20,
+  "physical_cpus": null,
+  "unanswered": [],
+  "runner": {
+    "name": null,
+    "image": null,
+    "version": null
+  },
+  "spawn": {
+    "platform": "linux",
+    "arch": "x64",
+    "runs": 3,
+    "results": [
+      {
+        "name": "onepipeline",
+        "path": "/work/onepipeline/target/debug/onepipeline",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 16.216591,
+        "p10_ms": 15.738287,
+        "p90_ms": 17.294229
+      },
+      {
+        "name": "onevcs",
+        "path": "/work/onepipeline/target/debug/onevcs",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 8.386458,
+        "p10_ms": 7.715077,
+        "p90_ms": 9.517525
+      },
+      {
+        "name": "oneagentgraph",
+        "path": "/work/onepipeline/target/debug/oneagentgraph",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 7.14017,
+        "p10_ms": 6.792323,
+        "p90_ms": 7.427379
+      },
+      {
+        "name": "oneharness",
+        "path": "/work/onepipeline/target/debug/oneharness",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 6.814344,
+        "p10_ms": 6.649352,
+        "p90_ms": 6.989796
+      },
+      {
+        "name": "fake-gh",
+        "path": "/work/onepipeline/target/debug/fake-gh",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 3.776671,
+        "p10_ms": 3.515768,
+        "p90_ms": 4.616141
+      },
+      {
+        "name": "git",
+        "path": "/usr/bin/git",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 3.94035,
+        "p10_ms": 3.853005,
+        "p90_ms": 4.09769
+      },
+      {
+        "name": "onevcs (PATH)",
+        "path": "/usr/local/bin/onevcs",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 4.842135,
+        "p10_ms": 4.833639,
+        "p90_ms": 4.988422
+      },
+      {
+        "name": "onetaskgraph",
+        "path": "/usr/local/bin/onetaskgraph",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 7.99704,
+        "p10_ms": 7.445958,
+        "p90_ms": 8.32485
+      },
+      {
+        "name": "node",
+        "path": "/usr/local/bin/node",
+        "args": [
+          "-e",
+          "0"
+        ],
+        "runs": 3,
+        "median_ms": 33.373837,
+        "p10_ms": 33.280685,
+        "p90_ms": 36.105918
+      },
+      {
+        "name": "python3",
+        "path": "/usr/local/bin/python3",
+        "args": [
+          "-c",
+          "pass"
+        ],
+        "runs": 3,
+        "median_ms": 22.738853,
+        "p10_ms": 22.676627,
+        "p90_ms": 25.183704
+      },
+      {
+        "name": "python",
+        "path": "/usr/local/bin/python",
+        "args": [
+          "-c",
+          "pass"
+        ],
+        "runs": 3,
+        "median_ms": 24.152305,
+        "p10_ms": 23.801984,
+        "p90_ms": 24.42416
+      },
+      {
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "args": [
+          "-c",
+          ":"
+        ],
+        "runs": 3,
+        "median_ms": 4.373098,
+        "p10_ms": 3.947694,
+        "p90_ms": 4.683606
+      },
+      {
+        "name": "sh",
+        "path": "/usr/bin/sh",
+        "args": [
+          "-c",
+          ":"
+        ],
+        "runs": 3,
+        "median_ms": 3.216472,
+        "p10_ms": 3.162299,
+        "p90_ms": 3.282254
+      },
+      {
+        "name": "just",
+        "path": "/usr/local/bin/just",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 3.783915,
+        "p10_ms": 3.214776,
+        "p90_ms": 3.855896
+      },
+      {
+        "name": "cargo",
+        "path": "/usr/local/bin/cargo",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 45.357113,
+        "p10_ms": 43.843568,
+        "p90_ms": 45.424718
+      },
+      {
+        "name": "onepipeline (instrumented)",
+        "path": "/work/onepipeline/target/llvm-cov-target/debug/onepipeline",
+        "args": [
+          "--version"
+        ],
+        "runs": 3,
+        "median_ms": 18.562186,
+        "p10_ms": 18.316491,
+        "p90_ms": 19.85472
+      }
+    ],
+    "git_on_path": [
+      "/usr/bin/git",
+      "/bin/git"
+    ]
+  }
+}

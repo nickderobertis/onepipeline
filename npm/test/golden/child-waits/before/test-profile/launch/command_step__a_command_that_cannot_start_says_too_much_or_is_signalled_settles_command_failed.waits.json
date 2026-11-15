@@ -1,0 +1,1 @@
+{"test":"command_step::a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_failed","sites":[{"kind":"poll","site":"tests/e2e/harness.rs:4350","count":2,"s":0.000861018,"interval_s":null},{"kind":"span","site":"tests/e2e/harness.rs:6926","count":2,"s":0.784823753,"interval_s":null}]}
