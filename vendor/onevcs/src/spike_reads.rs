@@ -33,7 +33,7 @@ use crate::git::{Ended, Output};
 
 /// The mode a build answers with when `ONEVCS_SPIKE_GIT_READS` is unset: the one
 /// line a demonstration commit edits.
-const DEMONSTRATION: &str = "stock";
+const DEMONSTRATION: &str = "batched";
 
 /// Overrides [`DEMONSTRATION`] for one process.
 pub const MODE_ENV: &str = "ONEVCS_SPIKE_GIT_READS";

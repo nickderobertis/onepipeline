@@ -188,3 +188,4 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+// Demonstration only (process-launch-speed-2026-11-14): a no-behaviour src/ edit, so the run executes the Nx selection a typical pull request induces.
