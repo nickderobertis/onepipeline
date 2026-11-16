@@ -901,6 +901,18 @@ resolver = "2"
 # three launch paths, and `graphs/dag-scope.yaml` declares the `reset_on` its
 # `check-in` used to get from the engine.
 #
+# `oneagentgraph` 0.13.1 is the floor because its shipped `engineer` persona
+# states the proportionate-proof policy (oneagentgraph #288): durable behaviour
+# gets a committed, realistic test, and one-off work — a pin adoption with no
+# local reader among it — is proved by commands run once with their output
+# shown. A dispatch naming the bare `engineer` role resolves it through this
+# link, so the policy reaches no dispatch until the floor moves. The persona is
+# the release's only change, and no test here pins its wording: one would
+# duplicate oneagentgraph's own `tests/persona_bar.rs` and break on every upstream
+# rewording. The adoption was proved once by reading the bare role back through
+# this build's link, and the `shipped_engineer_stance` tests in
+# `src/agentgraph.rs` still hold the bar's other demands over it.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -921,7 +933,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.13.0"
+oneagentgraph = "0.13.1"
 # 0.60.0 carries full-file exports, accepted opaque content and Git LFS objects;
 # it also carries term replacements and screened sanitizer locators.
 # 0.62 records each `post-checkout` run as `worktree-provisioned` or
