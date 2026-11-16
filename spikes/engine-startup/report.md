@@ -2513,6 +2513,17 @@ PR1628 was closed after its complete run, artifacts, comments, reviews and check
 Manager a82 confirms that patch_pin audit failures caused by measurement-only vendoring are known retained limitations of every spike branch, including the shared baseline. They are not an additional test this spike must make green, and the vendoring is not undone. Their exact failures and coverage consequences remain reported above. The scoped matcher/parser/existing-input checks and final diff-scoped deterministic/judged audit remain the local verification bar under a48/a49. No test, rule, threshold or workflow is weakened to clear the audit.
 
 
+### All platform test points collected — 2026-11-16 02:20 UTC
+
+Second macOS point: run43756326338 attempt1, job132941104978, head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5, GITHUB_SHA591dd36224fb3402f9f48130175a8c690b4eb524, workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. Artifact14191706427 digest sha256:2686ef9559c85965c7c0d9a0fe7aec072ef59c45576430da35376dc56650213c. Apple M1(Virtual), three logical cores. Job2026-11-15T23:00:13Z–2026-11-16T02:10:29Z:190.266667 minutes,87.268983 before e2e including quiet compilation/earlier tiers. All2121 main profiles match both baselines (digest224faf8a6439b9ed),2121/2121 passed, and no main-e2e recovery. The39-task selection is unchanged. All3769 explicitly logged baseline passes remain passed too; the same five other-tier failures remain.
+
+The completed point prints start1773.685307ms (2328/2348 completed/observed), adopt2505.763243ms (349/354), and84.236383e2e minutes. Cache steps: Nx startup no restore0.068seconds; rust partial restore36.572; node no restore1.034; Python no restore0.197; uv no restore2.796; bootstrap cache hit0.807. It records zero Nx entries/bytes stored or replayed and no Actions-cache save line, under the same read-only guard.
+
+The all-twelve-job fold was run on d615d898 with the exact command saved in comparison-command.checkpoint.sh.gz; all output is all-platforms.checkpoint.fold.txt.gz. It reports macOS before92.244742 and after85.270633 e2e minutes, a6.974108-minute reduction outside both observed spreads, with27/30 typical-PR estimate6.276698minutes. Linux’s1.581125-minute reduction and Windows’-5.615767-minute signed difference remain undecided. All six after main-e2e name sets equal their two corresponding baseline catalogs and all six summaries are all-passed. These are source-identified checkpoints, not yet the finished-commit fold rerun.
+
+Only the second run’s final budgets job133047690876 was still in progress at collection. Remaining: its final log/metadata, close PR1635 and delete its demo checkout, render the consolidated report, run the final diff audit and verify the quoted fold on the finished commit. No third run starts.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
