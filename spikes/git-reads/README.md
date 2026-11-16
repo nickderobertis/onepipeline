@@ -20,15 +20,16 @@ Their provenance is in evidence/baseline-provenance.json. The before side is
 43684231509 attempts1/2, accepted under c11.0. Later archive-only commits leave
 the executable check evidence at its cited source commit unchanged.
 
-## Handoff — 2026-11-16 01:56 UTC
+## Handoff — 2026-11-16 02:56 UTC
 
 - Valid after points are batched Linux/macOS/Windows1of2 and nativeLinux/Windows1of2;
   other cells0of2. Strict main failures and positive diagnostic reruns stay separate.
-- Batched PR1633 run43753064453 attempt2: Linux132996793865/Windows132996793856
-  running, macOS132996793757 queued; head698a7d0e855c5bb04a362c385bab2508e3e4651e.
+- Batched PR1633 run43753064453 attempt2: Linux132996793865 validpoint1, Windows132996793856
+  HELD undera84, macOS132996793757 running; head698a7d0e855c5bb04a362c385bab2508e3e4651e.
 - Native PR1634 run43753067613 attempt1: macOS132931087312 queued; other jobs read;
   head016c5adf2a8760d1a77134c1b1ef655aebd4c70e.
-- Reuse PR1653 run43789062933 attempt1 queued, head1c95ed5b6de89074c982d810662b5577fc67621a.
+- Reuse PR1653 run43789062933 attempt1: Linux133043119134/Windows133043119352
+  running, macOS133043119250 queued, head1c95ed5b6de89074c982d810662b5577fc67621a.
   Opened after fresh six-mode local trace/fold passed, with69workflow/cache tests green.
 - A79 raises own cap to3; plan cap7 remains. Opening followed the01:54 cap6read.
   All three heads frozen. Expected workflowdb2bbe081a7b9319eb38bd014e72350b389e8b01;
