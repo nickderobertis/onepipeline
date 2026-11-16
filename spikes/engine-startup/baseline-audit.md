@@ -635,4 +635,3 @@ Cache-related steps: durations span each step to the next timestamped step; “n
 | --- | --- | ---: |
 
 Observed Actions cache-save lines: []. Nx store receipt: null. The read-only trust-step override suppresses writes; an empty save list alone would not prove that guard.
-
