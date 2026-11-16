@@ -118,6 +118,8 @@ def fold(profile, symbols):
                 return names[frame]
 
             samples = thread['samples']
+            if not isinstance(samples, dict) or any(not isinstance(samples.get(key), list) for key in ('threadCPUDelta', 'stack')):
+                invalid('samples must be an object with stack and threadCPUDelta arrays')
             length = samples['length']
             if type(length) is not int or length < 0 or any(len(samples[key]) != length for key in ('threadCPUDelta', 'stack')):
                 invalid('sample columns do not match their declared length')

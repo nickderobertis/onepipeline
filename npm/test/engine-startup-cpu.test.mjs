@@ -23,6 +23,47 @@ test("sample fold refuses a non-profile with a repair and accepts the capture af
   assert.equal(spawnSync("python", [script, profile, symbols]).status, 0);
 });
 
+test("sample fold refuses malformed empty sample columns and recovers", async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { gunzipSync } = await import("node:zlib");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(
+    join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "startup-columns-"),
+  );
+  const captured = JSON.parse(gunzipSync(readFileSync(profile)));
+  const path = join(root, "profile.json");
+  const run = (samples) => {
+    const copy = structuredClone(captured);
+    copy.threads[0].samples = samples;
+    writeFileSync(path, JSON.stringify(copy));
+    return spawnSync("python", [script, path, symbols], { encoding: "utf8" });
+  };
+  try {
+    for (const samples of [
+      { length: 0, stack: "", threadCPUDelta: "" },
+      { length: 0, stack: {}, threadCPUDelta: {} },
+      { length: 0, stack: [], threadCPUDelta: "" },
+      { length: 0, stack: "", threadCPUDelta: [] },
+      [],
+      "",
+      null,
+    ]) {
+      const bad = run(samples);
+      assert.equal(bad.status, 2, bad.stdout);
+      assert.match(bad.stderr, /samples.*arrays/);
+    }
+    const empty = run({ length: 0, stack: [], threadCPUDelta: [] });
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.match(empty.stdout, /sampled CPU 0\.000 ms/);
+    const recovered = run(captured.threads[0].samples);
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.match(recovered.stdout, /sampled CPU 265\.121 ms/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sample fold validates corrupt tables and preserves multithread and unresolved accounting", async () => {
   const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
   const { gunzipSync } = await import("node:zlib");
