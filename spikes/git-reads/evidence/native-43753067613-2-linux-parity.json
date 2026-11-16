@@ -1,0 +1,10 @@
+{
+  "jobId": 133127607507,
+  "expected": 2155,
+  "strictPassed": 2155,
+  "missing": [],
+  "extra": [],
+  "failed": [],
+  "diagnosticReruns": {},
+  "proof": "Full2155/2155main; strictallnames; no inference/recovery needed."
+}

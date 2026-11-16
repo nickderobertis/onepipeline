@@ -113,6 +113,7 @@ pub mod rules;
 mod rules_apply;
 mod session;
 mod significance;
+pub mod spike_reads;
 mod stack_base;
 mod standing_comment;
 mod standings;

@@ -373,6 +373,13 @@ fn run_fed(
         reads::remember(args, cwd, env, &output);
         return Ok(output);
     }
+    // Prototype (spike-git-reads, never lands): the reads this process may answer
+    // without a new git process, after every answer the crate already reuses.
+    let spike = crate::spike_reads::Call::new(args, cwd, env, input.is_some());
+    if let Some(output) = spike.answer() {
+        reads::remember(args, cwd, env, &output);
+        return Ok(output);
+    }
     let hooked = runs_repository_hooks(args);
     // A command that runs the repository's hooks reaches them through shims that
     // hand each hook the environment of the tree it starts in — see [`HookShims`].
@@ -436,6 +443,7 @@ fn run_fed(
     if let Some(reusable) = reusable {
         reusable.write(&output);
     }
+    spike.ran(&output);
     if input.is_none() {
         reads::remember(args, cwd, env, &output);
     }
@@ -1325,12 +1333,12 @@ fn unstarted(error: &std::io::Error, args: &[&str], cwd: Option<&Path>) -> Error
 /// metadata. Keep canonical paths in our records, but simplify them where they
 /// leave this process for Git.
 #[cfg(windows)]
-fn git_path(path: &Path) -> &Path {
+pub(crate) fn git_path(path: &Path) -> &Path {
     dunce::simplified(path)
 }
 
 #[cfg(not(windows))]
-fn git_path(path: &Path) -> &Path {
+pub(crate) fn git_path(path: &Path) -> &Path {
     path
 }
 

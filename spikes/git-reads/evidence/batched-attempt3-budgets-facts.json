@@ -1,0 +1,24 @@
+{
+  "run": 43753064453,
+  "attempt": 3,
+  "job": 133205900515,
+  "facts": {
+    "checkout": {
+      "merge": "3a841969",
+      "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+      "base": "43649554e7105c937a5674a3c3c01ac5645ecc1c"
+    },
+    "selection": null,
+    "steps": [],
+    "cacheSaves": [],
+    "nxStored": null,
+    "e2e": null,
+    "largest": null,
+    "job": {
+      "start": 1794821278.5,
+      "end": 1794821356.554,
+      "gateStart": null
+    }
+  },
+  "workflowScope": "budgets has no Actions-cache or Nx cache step; missing Nx telemetry is not inferred as a measured zero"
+}

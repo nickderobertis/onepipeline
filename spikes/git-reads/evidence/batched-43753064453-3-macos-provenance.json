@@ -1,0 +1,15 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "e1b9cd5fbe3a6a4e16a2dbdb1b366ba752277cc9",
+  "run": 43753064453,
+  "attempt": 3,
+  "job": 133114993991,
+  "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "github_sha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": false,
+  "evidence_valid": true,
+  "status": "supplementary valid observation, excluded by preselected first-two rule a69",
+  "proof": "Full2121/2121 main, strictallnames,no mainfailures. Third chronological validMacpoint; primaryattempts1/2stayselected regardlessofthis timing.",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-3/test-macos"
+}

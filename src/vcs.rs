@@ -1288,15 +1288,26 @@ pub fn preservation_of(word: &str) -> Option<onevcs::Preservation> {
 /// there (`docs/contract-divergences.md` entry 35). `None` where git could not
 /// answer, or answered with something this crate will not carry.
 pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
+    // Prototype (spike-git-reads, never lands): answered as onevcs's reads are,
+    // where the demonstration's mode can answer it without starting git.
+    let args = ["rev-parse", "--verify", "HEAD^{commit}"];
+    let read = onevcs::spike_reads::EngineRead::new(&args, worktree);
+    if let Some((status, stdout, _)) = read.answer() {
+        // llmlint: ignore[changed_behavior_has_e2e] The real-Git spike_worktree_head test covers unborn, repeated, externally moved and missing repositories in all six modes via local-slice.sh. A successful real Git read emits an object id; injecting an unusable remembered stdout would test fabricated output rather than this never-landing adapter.
+        return (status == 0).then(|| usable(stdout.trim())).flatten();
+    }
     let output = onevcs::launch_trace::output(
         onevcs::launch_site!(),
         std::process::Command::new("git")
-            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .args(args)
             .current_dir(worktree)
             .stdin(std::process::Stdio::null()),
     )
-    .ok()
-    .filter(|output| output.status.success())?;
+    .ok()?;
+    read.ran(output.status.code(), &output.stdout, &output.stderr);
+    if !output.status.success() {
+        return None;
+    }
     usable(String::from_utf8_lossy(&output.stdout).trim())
 }
 
@@ -3127,6 +3138,34 @@ mod tests {
             .expect("git runs");
         assert!(output.status.success(), "git {args:?}: {output:?}");
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn spike_worktree_head_reads_and_refreshes_real_git_and_refuses_an_unborn_head() {
+        let root = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("spike-head-{}", std::process::id()));
+        std::fs::create_dir(&root).expect("a fresh repository directory");
+        git_out(&root, &["init", "--quiet", "--initial-branch=main"]);
+        assert_eq!(worktree_head(&root), None);
+        git_out(
+            &root,
+            &["commit", "--quiet", "--allow-empty", "-m", "first"],
+        );
+        let first = git_out(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(worktree_head(&root), Some(first.clone()));
+        assert_eq!(worktree_head(&root), Some(first.clone()));
+        git_out(
+            &root,
+            &["commit", "--quiet", "--allow-empty", "-m", "second"],
+        );
+        let second = git_out(&root, &["rev-parse", "HEAD"]);
+        assert_ne!(first, second);
+        assert_eq!(worktree_head(&root), Some(second));
+        onevcs::spike_reads::EngineRead::new(&["worktree", "remove"], &root);
+        std::fs::remove_dir_all(&root).expect("remove the repository");
+        assert_eq!(worktree_head(&root), None);
     }
 
     /// A repository with `main` and a branch `draft` off it, each having written

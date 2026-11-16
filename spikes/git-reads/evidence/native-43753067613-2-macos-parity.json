@@ -1,0 +1,22 @@
+{
+  "jobId": 133127607304,
+  "expected": 2121,
+  "strictPassed": 2121,
+  "missing": [],
+  "extra": [],
+  "failed": [],
+  "diagnosticReruns": {},
+  "summary_citation": 5320,
+  "other_tier_failure": {
+    "test": "onepipeline::note a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict",
+    "initial": "74/75",
+    "diagnostic_passes": 3,
+    "lines": [
+      3079,
+      3147,
+      6059,
+      6111,
+      6163
+    ]
+  }
+}

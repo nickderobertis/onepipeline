@@ -1,0 +1,14 @@
+{
+  "source_commit": "f7f98713",
+  "reader_commit": "33edc69c",
+  "run": 43753064453,
+  "attempt": 1,
+  "job": 132931076404,
+  "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "github_sha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-1/test-macos",
+  "pricing_eligible": true,
+  "point": 1,
+  "proof": "a75: full2121 main, strict2120 plus three own diagnostic passes; no batch children or reuse; all proc records main22:39:48\u201350, no Git child."
+}

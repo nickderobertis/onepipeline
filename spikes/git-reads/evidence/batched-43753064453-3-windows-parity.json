@@ -1,0 +1,18 @@
+{
+  "jobId": 133114994131,
+  "expected": 1832,
+  "strictPassed": 1831,
+  "missing": [],
+  "extra": [],
+  "failed": [
+    "human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold"
+  ],
+  "diagnosticReruns": {
+    "human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold": {
+      "passed": 3,
+      "failed": 0,
+      "unrun": 0
+    }
+  },
+  "proof": "Full1832 main, strict1831; human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold fails a,a,b thenpasses3/3ownreruns. Mainpids5500/10604/8712 have no Git/batchchild; nonreuse mode and empty process-local OPEN exclude a served prototype answer undera72/a74/a75. Fifth duplicate observation across four names, not causally cleared."
+}

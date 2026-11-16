@@ -1,0 +1,133 @@
+{
+  "run": 43753064453,
+  "attempt": 3,
+  "job": 133114993842,
+  "facts": {
+    "checkout": {
+      "merge": "3a841969",
+      "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+      "base": "43649554e7105c937a5674a3c3c01ac5645ecc1c"
+    },
+    "selection": {
+      "job": "lint",
+      "count": 54,
+      "tasks": [
+        "github-workflows:format-check",
+        "github-workflows:lint",
+        "github-workflows:syntax-check",
+        "human-items-e2e:format-check",
+        "human-items-e2e:lint",
+        "onepipeline-ci-jobs:format-check",
+        "onepipeline-ci-jobs:lint",
+        "onepipeline-codex-server:format-check",
+        "onepipeline-codex-server:lint",
+        "onepipeline-contract:format-check",
+        "onepipeline-contract:lint",
+        "onepipeline-coverage-keys:format-check",
+        "onepipeline-coverage-keys:lint",
+        "onepipeline-e2e:format-check",
+        "onepipeline-e2e:lint",
+        "onepipeline-journal-workload:format-check",
+        "onepipeline-journal-workload:lint",
+        "onepipeline-narrow-write:format-check",
+        "onepipeline-narrow-write:lint",
+        "onepipeline-note-journeys:format-check",
+        "onepipeline-note-journeys:lint",
+        "onepipeline-npm:format-check",
+        "onepipeline-npm:lint",
+        "onepipeline-pool-workload:format-check",
+        "onepipeline-pool-workload:lint",
+        "onepipeline-pooled-slot:format-check",
+        "onepipeline-pooled-slot:lint",
+        "onepipeline-real-smoke:format-check",
+        "onepipeline-real-smoke:lint",
+        "onepipeline-release-compat:format-check",
+        "onepipeline-release-compat:lint",
+        "onepipeline-release-journeys:format-check",
+        "onepipeline-release-journeys:lint",
+        "onepipeline-release:format-check",
+        "onepipeline-release:lint",
+        "onepipeline-scratch-workload:format-check",
+        "onepipeline-scratch-workload:lint",
+        "onepipeline-status-read:format-check",
+        "onepipeline-status-read:lint",
+        "onepipeline-stop-verdict:format-check",
+        "onepipeline-stop-verdict:lint",
+        "onepipeline-version-contract:format-check",
+        "onepipeline-version-contract:lint",
+        "onepipeline-version-e2e:format-check",
+        "onepipeline-version-e2e:lint",
+        "onepipeline-version-package:format-check",
+        "onepipeline-version-package:lint",
+        "onepipeline:deps-check",
+        "onepipeline:format-check",
+        "onepipeline:lint",
+        "pool-maintenance:format-check",
+        "pool-maintenance:lint",
+        "report-job:format-check",
+        "report-job:lint"
+      ]
+    },
+    "steps": [
+      {
+        "name": "op-nx/github-cache/start-cache-server@91839c24885842cac86567",
+        "seconds": 0.003999948501586914,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "Swatinem/rust-cache@v2.9.2",
+        "seconds": 65.90000009536743,
+        "hit": "partial (restore key)",
+        "said": [
+          "Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-14f37604",
+          "Cache restored successfully",
+          "Restored from cache key \"v0-rust-test-linux-Linux-x64-ff458983-14f37604\" full match: false."
+        ]
+      },
+      {
+        "name": "actions/cache/restore@v4",
+        "seconds": 0.36299991607666016,
+        "hit": "miss",
+        "said": [
+          "Cache not found for input keys: ci-capture-Linux-X64-a2988fc733038fe73cb0181a1b27b5c4aaa43771a0dcdf18581de472633cd6c5"
+        ]
+      },
+      {
+        "name": "actions/setup-node@v4",
+        "seconds": 1.880000114440918,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "actions/setup-python@v5",
+        "seconds": 9.73199987411499,
+        "hit": "miss",
+        "said": [
+          "Version 3.13.17 was not found in the local cache"
+        ]
+      },
+      {
+        "name": "astral-sh/setup-uv@v6",
+        "seconds": 3.1050000190734863,
+        "hit": "no restore",
+        "said": []
+      }
+    ],
+    "cacheSaves": [],
+    "nxStored": {
+      "entries": 0,
+      "bytes": 0,
+      "replayed": 0
+    },
+    "e2e": null,
+    "largest": null,
+    "job": {
+      "start": 1794807669.536,
+      "end": 1794809254.836,
+      "gateStart": null
+    }
+  },
+  "judged": "25 passed, 1 failed, 8 skipped, 6 not relevant; comments_earn_their_place at demo-only src/lib.rs:191; review 20261116T060721Z-187da",
+  "otherFailure": "Required DO NOT MERGE demonstration title has no conventional release type; advisory engines-current also fails."
+}

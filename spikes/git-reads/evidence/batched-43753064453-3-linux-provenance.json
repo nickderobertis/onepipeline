@@ -1,0 +1,18 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "3430d1dd773819523986c8d0593aa70d02805192",
+  "run": 43753064453,
+  "attempt": 3,
+  "job": 133114993964,
+  "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "github_sha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": true,
+  "point": 2,
+  "status": "eligible point 2",
+  "proof": "2155/2155 main summary at job.log:9849, full baseline named catalog present; strict2154 plus loopcost inferred under a70 because profile overwritten by later budget invocation; zero main failures",
+  "inferred_names": [
+    "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps"
+  ],
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-3/test-linux"
+}

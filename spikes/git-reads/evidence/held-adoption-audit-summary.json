@@ -1,0 +1,26 @@
+{
+  "base_commit": "7b1df470",
+  "scratch_patch_sha256": "057189af8689bcde1617c8b757c3c6941aa90f1333560492832a9409069d997f",
+  "ordinary_stock_passes": 10,
+  "ordinary_batched_passes": 10,
+  "audited_batched_passes_before_atomic_logging": 10,
+  "records": 297,
+  "stable": 297,
+  "stable_mismatches": 0,
+  "unstable": 0,
+  "all_mismatches": 0,
+  "query_families": {
+    "show-ref": 172,
+    "rev-parse": 43,
+    "cat-file": 82
+  },
+  "negative_exit": 100,
+  "positive_exit": 0,
+  "stock_optimized_exit": 0,
+  "actual_hosted_query_replay": false,
+  "replay_limit": "Frozen launch trace records batch child argv, not batch stdin/query results or historical repo objects. This compares real same-journey admitted queries against fresh Git with identical before/after ref snapshots on local fixture refs, not original hosted refs.",
+  "pricing_eligible": false,
+  "reason": "a83 stock race did not reproduce; held Windows remains excluded.",
+  "all_recorded_output_ascii": true,
+  "original_interleaved_audit_log": "10passing audit journeys,3046lines ofwhich10interleaved/malformed; no complete-record count claimed; final atomic rerun supplies297parseable rows"
+}

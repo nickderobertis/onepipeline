@@ -1,0 +1,18 @@
+{
+  "jobId": 133127607621,
+  "expected": 1832,
+  "strictPassed": 1831,
+  "missing": [],
+  "extra": [],
+  "failed": [
+    "human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold"
+  ],
+  "diagnosticReruns": {
+    "human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold": {
+      "passed": 2,
+      "failed": 0,
+      "unrun": 0
+    }
+  },
+  "proof": "Full1832main,strict1831; human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold fails a,a,b, bothretained ownreruns pass. Mainpids5528/11004/4568 noGit; World::at plainproject, plan has no repository/lifecycle/worktree, native admission needs Layout and engine adapters require worktree/checkout. No prototype answer could serve undera74/a75. Sixth duplicate observation across four names; causality/shipping safety not cleared."
+}

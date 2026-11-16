@@ -1,0 +1,16 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "6633a252",
+  "run": 43789062933,
+  "attempt": 1,
+  "job": 133043119134,
+  "head": "1c95ed5b6de89074c982d810662b5577fc67621a",
+  "github_sha": "6d30ca5b08eca2f584bc3ffd62912fda60b589ce",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": false,
+  "proof": "full2155/2155,strict2155names,no mainfailures; a91 keep fixed option and finish two valid points",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/incoming/reuse/43789062933-1/test-linux",
+  "evidence_valid": true,
+  "observation_rank": 1,
+  "status": "REJECTED a93/a94; valid first observation, no further cohort/pricing"
+}

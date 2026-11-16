@@ -1,0 +1,14 @@
+{
+  "run": 43753067613,
+  "attempt": 1,
+  "job": 132931087404,
+  "reader_commit": "33edc69c",
+  "raw_root": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/incoming/native/43753067613-1/test-linux",
+  "pricing": true,
+  "point": 1,
+  "selection_rule": "a69: first two valid jobs per platform in run order",
+  "proof": "2154 individually retained main passes; one named loopcost pass inferred under a70 from complete2155-name catalog/full selection/2155-of2155 summary; never inserted into strict passed list",
+  "inferred_name": "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps",
+  "timing": "one after point only; undecided, not a saving",
+  "fold": "node scripts/git-reads-compare.mjs compare baseline=<baseline raw root> native=<selected native root>, executed on40f3487d; stdout byte-for-byte identical to render([preserved baseline facts, readSide(native, incoming/native)])"
+}
