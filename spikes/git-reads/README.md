@@ -20,23 +20,22 @@ Their provenance is in evidence/baseline-provenance.json. The before side is
 43684231509 attempts1/2, accepted under c11.0. Later archive-only commits leave
 the executable check evidence at its cited source commit unchanged.
 
-## Handoff — 2026-11-15 23:22 UTC
+## Handoff — 2026-11-16 01:56 UTC
 
-- Valid after points: batched macOS1/2, Windows1/2; native Linux1/2,
-  Windows1/2. Other cells0/2. Main failures remain visible alongside diagnostic passes.
-- Batched PR1633 run43753064453 attempt1 is finished: Linux partial343/2155 is
-  ineligible; macOS2121 and Windows1832 completed with one recovered failure each.
-  Attempt2 whole-workflow replacement is queued on unchanged head698a7d0e855c5bb04a362c385bab2508e3e4651e, authorized a73 after the local six-mode trace/fold passed.
-- Native PR1634 run43753067613 attempt1: Linux complete2155; Windows complete1832
-  with one main failure and two own-rerun passes; macOS132931087312 remains queued.
-  Head016c5adf2a8760d1a77134c1b1ef655aebd4c70e stays frozen.
-- Both lint jobs cancelled after the inherited vendor/Nx judged finding; deterministic
-  affected lint passed. No cache writes; executed workflow db2bbe081a7b9319eb38bd014e72350b389e8b01.
-- Two distinct Windows duplicate-dispatch failures appeared after; neither baseline
-  Windows log contains such evidence. Attribution is unproven; this is a shipping risk.
-- Remaining: two valid points per option/platform, choose combination from measured
-  batched/native means, measure reuse/combination, complete pricing/parity, close
-  demos and remove their worktrees. No new PR while plan-wide cap7 remains full.
+- Valid after points remain batched macOS/Windows1of2 and nativeLinux/Windows1of2;
+  other cells0of2. Strict main failures and positive diagnostic reruns stay separate.
+- Batched PR1633 run43753064453 attempt2: Linux132996793865/Windows132996793856
+  running, macOS132996793757 queued; head698a7d0e855c5bb04a362c385bab2508e3e4651e.
+- Native PR1634 run43753067613 attempt1: macOS132931087312 queued; other jobs read;
+  head016c5adf2a8760d1a77134c1b1ef655aebd4c70e.
+- Reuse PR1653 run43789062933 attempt1 queued, head1c95ed5b6de89074c982d810662b5577fc67621a.
+  Opened after fresh six-mode local trace/fold passed, with69workflow/cache tests green.
+- A79 raises own cap to3; plan cap7 remains. Opening followed the01:54 cap6read.
+  All three heads frozen. Expected workflowdb2bbe081a7b9319eb38bd014e72350b389e8b01;
+  actual receipts await finished jobs. Original incomplete batched Linux remains quarantined.
+- Remaining: two valid points/platform/option, choose reader from measured means,
+  measure reuse/combination, final fold/pricing/proof, close/remove demos. No final saving.
+  Read about15minutes apart with core2500/GraphQL2000 reserve. No cache writes/deletions.
 
 Local code proof: 63 fold/command tests,17 prototype tests, the six-mode slice's
 12 e2e and18 engine-read unit executions pass at the source commits cited in the
@@ -79,7 +78,7 @@ main trace plus process-local cache/spawn paths, documented in provenance.
 Batch mode reuse is off, no batch child/cache seed existed in that invocation.
 The duplicate-dispatch follow-up is drafted separately; test bodies stay frozen.
 
-Reuse-only demonstration is prepared locally at1c95ed5b, not pushed/opened. Its
+Reuse-only demonstration was prepared at1c95ed5b and is now open asPR1653. Its
 workflow/cache tests pass69of69. A temporary dependency link accidentally entered
 655e06fc and was removed in1c95ed5b before publication; final diff contains no link.
 First-point named set comparison is in evidence/round1-name-parity.json:
