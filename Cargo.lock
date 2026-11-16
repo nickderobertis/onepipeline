@@ -2033,11 +2033,10 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
+# llmlint: ignore[crates_stay_in_one_cargo_workspace] Measurement-only vendored copy of the released crate, never lands; preserving its upstream metadata is necessary to price the dependency cut against that release (manager a1, a49).
 [[package]]
 name = "privateterms"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e3051afde0476a5588107df0b03d26aa26679f20457540137cabc79ca1ea79a"
 dependencies = [
  "aho-corasick",
  "icu_normalizer",

@@ -1844,6 +1844,10 @@ onejudge = { path = "vendor/onejudge" }
 onemessagebus = { path = "vendor/onemessagebus" }
 oneagentgraph = { path = "vendor/oneagentgraph" }
 onetaskgraph-core = { path = "vendor/onetaskgraph-core" }
+# Measurement only (spike-engine-startup, never lands): the `privateterms` release the
+# lock resolved, vendored byte-identical, so the startup cut prototyped in it is a diff
+# against the released crate.
+privateterms = { path = "vendor/privateterms" }
 # llmlint: ignore-end[crates_stay_in_one_cargo_workspace]
 
 [profile.release]
