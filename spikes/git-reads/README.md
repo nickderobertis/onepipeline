@@ -118,3 +118,10 @@ frommeans. Whole-workflowattempt3 started on unchanged698a7d0e after fresh
 e0f5e5b8six-mode12e2e/18unit trace/fold. It suppliesLinuxpoint2 and the next
 eligibleWindows replacement undera84; no demoheadpush. Native/reusecurrentjobs
 continue. Actualattempt3jobs/checkout/blob/cache receipts await finished logs.
+
+A93/a94amendment: REUSEisREJECTED; no run2/no furtherinvestigation. ItsWindows
+check_visibilityworkloadfailedmainandbothretainedreruns, despitebaselinepasses;
+stalememo versuslayoutcostunknown. Human-itemsduplicateisfourthafterobservation
+versus0baseline. COMBINATIONisNOTMEASURED/rejectedbecauseitincludesunsafeReuse;
+runno combinationCI. Originalreuse/combinationtwo-valid-pointquotasareintentionally
+unmetunderthisruling. Finishafterreadinginflightbatched3/native2andclosingdemos.
