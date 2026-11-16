@@ -2503,6 +2503,11 @@ The remaining second macOS point is running on run43756326338, started23:00:13 U
 PR1628 was closed after its complete run, artifacts, comments, reviews and checks were read and preserved. Its remote demonstration branch, local worktree and local branch were deleted. Run43756326338/PR1635 remains active only on macOS (started23:00:13 UTC); its Linux and Windows points are complete. No third run starts. Remaining work: collect second macOS and its final budget job, finish the all-platform comparison and final-source fold, run the final local diff lint under a48/a49, close PR1635 and remove its local demonstration checkout.
 
 
+### Current-code verification — source b92daab1
+
+`bash scripts/engine-startup-verify.sh` exited zero and compared6588 inputs with identical find, hits, replace and locator results across all modes/case policies. `node --test npm/test/engine-startup-*.test.mjs` exited zero with15 passed, zero failed/skipped. These were run on b92daab1 without code changes; logs are evidence/verify-b92daab1.log.gz and parser-b92daab1.log.gz. No local elapsed time from those verification logs prices the option. The worktree remained clean after the Cargo invocation. The final report can retain this source-identified evidence because subsequent hosted-data/report changes do not alter the verifier, matcher implementation, parser scripts, pinned sampler version or their fixtures.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
