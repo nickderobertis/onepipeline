@@ -2335,6 +2335,13 @@ Manager a85 explicitly replaces the fully green whole-diff clause: “Record the
 Retained findings: changed_behavior_has_e2e identifies no dedicated subprocess cases for phases’ unfinished-process output (engine-startup.mjs:34–36), backwards-clock refusal/recovery (:38–41), or the matcher’s non-Unicode selector rejection (matcher.rs:63–69). The principal paths and invalid Unicode-string selector are covered, but those specific paths remain unexercised. tool_output_is_signal identifies the required phase header/excluded-record rows (:25–28) and uncertainty footer (:78–80) outside the existing output-suppression blocks. They remain explicit never-land reporting limitations under a85. The repair changes validation and its realistic fixture test; the suppression inventory is unchanged.
 
 
+### Scoped confirmation receipt
+
+Both a85 confirmation parts passed on b7c463f9: `llmlint --diff --diff-base e70ea3b1 scripts/engine-startup-cpu.py npm/test/engine-startup-cpu.test.mjs` reported seven passed rules, zero failed (history20261116T031436Z-9e66e); `llmlint --diff --diff-base 13eb521a Cargo.toml` reported five passed, zero failed (history20261116T031356Z-13c7d). Raw transcripts are evidence/final-fix-judged-b7c463f9.log.gz and final-manifest-judged-b7c463f9.log.gz. Static validation passed on that same commit. The final report/audit-evidence commit changes no file in either judged scope, nor any matcher/parser fixture input, so those scoped results remain applicable without another judged round. The earlier whole-diff verdict remains non-green with the expressly retained a85 limitations; it is not relabelled as green.
+
+All demonstrations are closed and no hosted run is in flight. The final-source twelve-job comparison is rerun after this report commit; its commit, exact command and byte-for-byte quote verification are recorded in the authoring receipt. No hosted cache entry was written or deleted, and no test, rule, threshold or workflow was weakened to finish the spike.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
