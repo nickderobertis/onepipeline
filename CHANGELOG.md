@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.3](https://github.com/nickderobertis/onepipeline/compare/v0.113.2...v0.113.3) - 2026-11-16
+
+### Fixed
+
+- *(deps)* link the onevcs whose warm host-wide read answers in under a second ([#1629](https://github.com/nickderobertis/onepipeline/pull/1629))
+
 ## [0.113.2](https://github.com/nickderobertis/onepipeline/compare/v0.113.1...v0.113.2) - 2026-11-15
 
 ### Fixed
