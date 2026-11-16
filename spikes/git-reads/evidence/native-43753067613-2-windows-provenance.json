@@ -1,0 +1,15 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "73a2ae961ebb4fae96e6297a0db0bf32aa563516",
+  "run": 43753067613,
+  "attempt": 2,
+  "job": 133127607621,
+  "head": "016c5adf2a8760d1a77134c1b1ef655aebd4c70e",
+  "github_sha": "761544439b93836fcb54049d446defb730eb385e",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": true,
+  "point": 2,
+  "status": "eligible point 2",
+  "proof": "Full1832main,strict1831; human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold fails a,a,b, bothretained ownreruns pass. Mainpids5528/11004/4568 noGit; World::at plainproject, plan has no repository/lifecycle/worktree, native admission needs Layout and engine adapters require worktree/checkout. No prototype answer could serve undera74/a75. Sixth duplicate observation across four names; causality/shipping safety not cleared.",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/incoming/native/43753067613-2/test-windows"
+}
