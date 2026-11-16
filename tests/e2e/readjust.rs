@@ -883,9 +883,36 @@ fn is_check_read(call: &Value) -> bool {
 /// The outcome `results --json` reports for `node`: its settlement's word, as a later
 /// verdict read moved it.
 fn outcome_of(world: &World, run: &str, node: &str) -> Value {
+    outcome_in(&results_of(world, run), node)
+}
+
+/// The run's `results --json`, from a launch that exited 0.
+fn results_of(world: &World, run: &str) -> Value {
     let output = world.run(&["results", run, "--json"]);
     output.exited(0);
-    let results: Value = serde_json::from_str(&output.stdout).expect("results as JSON");
+    serde_json::from_str(&output.stdout).expect("results as JSON")
+}
+
+/// Measurement only (spike-child-waits, never lands): each named node's outcome, read
+/// from one `results --json` where the re-launch prototype is selected and from one
+/// launch per node, as measured, otherwise. Nothing moves the run between the reads.
+fn outcomes_of(world: &World, run: &str, nodes: &[&str]) -> Vec<Value> {
+    if crate::harness::spike_variant::relaunch() {
+        let results = results_of(world, run);
+        nodes
+            .iter()
+            .map(|node| outcome_in(&results, node))
+            .collect()
+    } else {
+        nodes
+            .iter()
+            .map(|node| outcome_of(world, run, node))
+            .collect()
+    }
+}
+
+/// `node`'s outcome in a `results --json` already read.
+fn outcome_in(results: &Value, node: &str) -> Value {
     results["nodes"]
         .as_array()
         .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
@@ -1024,8 +1051,9 @@ fn deferred_republications_are_read_by_the_next_trigger_green_or_repaired_red() 
         readjust_line.stdout
     );
     assert_eq!(read("y").expect("read")["verdict"], "passed");
-    assert_eq!(outcome_of(&world, run, "y"), "change-review-draft");
-    assert_eq!(outcome_of(&world, run, "b"), "change-review-draft");
+    let outcomes = outcomes_of(&world, run, &["y", "b"]);
+    assert_eq!(outcomes[0], "change-review-draft");
+    assert_eq!(outcomes[1], "change-review-draft");
 }
 
 /// A restack whose read is claimed only after its parent's republication settled still
@@ -2609,17 +2637,11 @@ fn every_deferred_verdict_word_is_recorded_and_only_pending_stays_outstanding() 
         assert_eq!(read["verdict"], verdict, "{node}: {read}");
     }
     assert_eq!(receipt["outstanding"], json!(["b"]), "{receipt}");
-    for node in ["c", "d"] {
-        assert_eq!(
-            outcome_of(&world, run, node),
-            "change-review-draft",
-            "{node}"
-        );
+    let outcomes = outcomes_of(&world, run, &["c", "d", "b"]);
+    for (node, outcome) in ["c", "d"].iter().zip(&outcomes) {
+        assert_eq!(outcome, "change-review-draft", "{node}");
     }
-    assert_eq!(
-        outcome_of(&world, run, "b"),
-        "change-review-draft-unchecked"
-    );
+    assert_eq!(outcomes[2], "change-review-draft-unchecked");
     let (status, _) = views(&world, run);
     assert!(status.contains("b: check verdict outstanding"), "{status}");
     assert!(!status.contains("c: check verdict outstanding"), "{status}");

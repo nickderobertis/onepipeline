@@ -1,0 +1,164 @@
+{
+  "platform": "linux",
+  "cpu_model": "AMD Ryzen Threadripper 1920X 12-Core Processor",
+  "cpus": 20,
+  "physical_cpus": null,
+  "unanswered": [],
+  "runner": {
+    "name": null,
+    "image": null,
+    "version": null
+  },
+  "spawn": {
+    "platform": "linux",
+    "arch": "x64",
+    "runs": 3,
+    "results": [
+      {
+        "name": "onepipeline",
+        "path": "/work/onepipeline/target/debug/onepipeline",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 16.134207,
+        "p10_ms": 15.810534,
+        "p90_ms": 17.704796
+      },
+      {
+        "name": "onevcs",
+        "path": "/work/onepipeline/target/debug/onevcs",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 8.124211,
+        "p10_ms": 8.094946,
+        "p90_ms": 8.297318
+      },
+      {
+        "name": "oneagentgraph",
+        "path": "/work/onepipeline/target/debug/oneagentgraph",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 6.569311,
+        "p10_ms": 6.350337,
+        "p90_ms": 6.814304
+      },
+      {
+        "name": "oneharness",
+        "path": "/work/onepipeline/target/debug/oneharness",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 6.317194,
+        "p10_ms": 6.079976,
+        "p90_ms": 7.205814
+      },
+      {
+        "name": "fake-gh",
+        "path": "/work/onepipeline/target/debug/fake-gh",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 3.468288,
+        "p10_ms": 3.262929,
+        "p90_ms": 3.812489
+      },
+      {
+        "name": "git",
+        "path": "/usr/bin/git",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 3.495502,
+        "p10_ms": 3.298785,
+        "p90_ms": 4.263472
+      },
+      {
+        "name": "onevcs (PATH)",
+        "path": "/usr/local/bin/onevcs",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 4.981694,
+        "p10_ms": 4.495067,
+        "p90_ms": 5.374259
+      },
+      {
+        "name": "onetaskgraph",
+        "path": "/usr/local/bin/onetaskgraph",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 8.092585,
+        "p10_ms": 7.155018,
+        "p90_ms": 8.961475
+      },
+      {
+        "name": "node",
+        "path": "/usr/local/bin/node",
+        "args": ["-e", "0"],
+        "runs": 3,
+        "median_ms": 33.160337,
+        "p10_ms": 31.794706,
+        "p90_ms": 34.211493
+      },
+      {
+        "name": "python3",
+        "path": "/usr/local/bin/python3",
+        "args": ["-c", "pass"],
+        "runs": 3,
+        "median_ms": 22.326193,
+        "p10_ms": 21.992964,
+        "p90_ms": 22.54241
+      },
+      {
+        "name": "python",
+        "path": "/usr/local/bin/python",
+        "args": ["-c", "pass"],
+        "runs": 3,
+        "median_ms": 22.535201,
+        "p10_ms": 22.073225,
+        "p90_ms": 22.985897
+      },
+      {
+        "name": "bash",
+        "path": "/usr/bin/bash",
+        "args": ["-c", ":"],
+        "runs": 3,
+        "median_ms": 4.362769,
+        "p10_ms": 4.277969,
+        "p90_ms": 4.703376
+      },
+      {
+        "name": "sh",
+        "path": "/usr/bin/sh",
+        "args": ["-c", ":"],
+        "runs": 3,
+        "median_ms": 3.196671,
+        "p10_ms": 3.181295,
+        "p90_ms": 3.530689
+      },
+      {
+        "name": "just",
+        "path": "/usr/local/bin/just",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 3.273849,
+        "p10_ms": 3.22121,
+        "p90_ms": 3.618021
+      },
+      {
+        "name": "cargo",
+        "path": "/usr/local/bin/cargo",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 44.690959,
+        "p10_ms": 43.065182,
+        "p90_ms": 44.723906
+      },
+      {
+        "name": "onepipeline (instrumented)",
+        "path": "/work/onepipeline/target/llvm-cov-target/debug/onepipeline",
+        "args": ["--version"],
+        "runs": 3,
+        "median_ms": 18.942977,
+        "p10_ms": 18.456347,
+        "p90_ms": 19.396795
+      }
+    ],
+    "git_on_path": ["/usr/bin/git", "/bin/git"]
+  }
+}

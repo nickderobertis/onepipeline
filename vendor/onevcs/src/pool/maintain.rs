@@ -608,6 +608,10 @@ fn exited_within(
             Ok(Some(status)) => return Some(Ok(status)),
             Err(failure) => return Some(Err(failure)),
             Ok(None) if started.elapsed() >= bound => return None,
+            // Measurement only (spike-child-waits, never lands): woken by the exit.
+            Ok(None) if crate::spike_waits::exit_notify() => {
+                crate::spike_waits::await_child_exit(child, POLL);
+            }
             Ok(None) => git::await_an_ending(endings, POLL),
         }
     }

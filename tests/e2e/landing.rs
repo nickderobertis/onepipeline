@@ -519,11 +519,12 @@ fn the_counting_views_report_what_a_read_taken_now_says() {
 
     // `goals` and `runs` are the summary line; `status` carries it too, above its
     // own per-node lines.
-    for view in [
+    let mut views = vec![
         world.run(&["goals", &run]),
         world.run(&["runs"]),
         world.run(&["status", &run]),
-    ] {
+    ];
+    for view in &views {
         view.exited(0);
         assert!(
             view.stdout.contains("2 not landed, 1 landing undecided"),
@@ -531,7 +532,13 @@ fn the_counting_views_report_what_a_read_taken_now_says() {
             view.stdout
         );
     }
-    let status = world.run(&["status", &run]);
+    // Measurement only (spike-child-waits, never lands): under the re-launch prototype
+    // the `status` read above is the one these lines are asserted on.
+    let status = if crate::harness::spike_variant::relaunch() {
+        views.pop().expect("the status read")
+    } else {
+        world.run(&["status", &run])
+    };
     status.exited(0);
     status.out_has("2 node(s) have not landed: landed-in-part, still-open");
     status.out_has("1 node(s) whose landing this host could not decide: merged-quietly");

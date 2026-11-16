@@ -1,0 +1,72 @@
+{
+  "schema": 2,
+  "binary": "e2e",
+  "test": "dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone",
+  "run_id": "5593c1b5-b0d6-44ad-af76-38cb8a658fa4",
+  "attempt": 1,
+  "os": "linux",
+  "arch": "x86_64",
+  "started_at": 1794760761.6660962,
+  "wall_s": 3.492326067,
+  "ended": "test-thread",
+  "categories": {
+    "spawn": {
+      "count": 10,
+      "s": 2.278819784,
+      "inclusive_s": 2.278819784,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "git": {
+      "count": 0,
+      "s": 0.0,
+      "inclusive_s": 0.0,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "build": {
+      "count": 1,
+      "s": 0.316061275,
+      "inclusive_s": 0.316061275,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "fixture": {
+      "count": 5,
+      "s": 0.004226305,
+      "inclusive_s": 0.015948691,
+      "background_count": 0,
+      "background_s": 0.0
+    },
+    "wait": {
+      "count": 31,
+      "s": 0.766520795,
+      "inclusive_s": 0.767084985,
+      "background_count": 0,
+      "background_s": 0.0,
+      "polls": 4
+    },
+    "fs": {
+      "count": 347,
+      "s": 0.021758428,
+      "inclusive_s": 0.021758428,
+      "background_count": 0,
+      "background_s": 0.0
+    }
+  },
+  "unattributed_s": 0.10493948,
+  "programs": {
+    "cargo": {
+      "count": 1,
+      "s": 0.316061275
+    },
+    "onepipeline": {
+      "count": 9,
+      "s": 2.264128219
+    },
+    "ps": {
+      "count": 1,
+      "s": 0.014691565
+    }
+  }
+}

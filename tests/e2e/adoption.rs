@@ -5186,11 +5186,12 @@ fn a_stated_landing_reads_landed_in_every_surface(name: &str, spelling: Spelling
         "landed on its base — {}: stated from evidence at {landing}",
         tier_of(spelling)
     );
-    world.until("results to read the stated landing", |world| {
-        let results = world.run(&["results", &run]);
-        line_about(&results.stdout, "broken").contains(&stated)
-    });
-    let results = world.run(&["results", &run]);
+    let results = world.until_read(
+        "results to read the stated landing",
+        false,
+        |world| world.run(&["results", &run]),
+        |results| line_about(&results.stdout, "broken").contains(&stated),
+    );
     let line = line_about(&results.stdout, "broken");
     for contradiction in ["NOT landed", "UNDECIDED", "the run observed"] {
         assert!(
@@ -7033,7 +7034,11 @@ fn held_consumer(consumes: Option<&str>) -> Value {
 
 /// One node's entry in `status <RUN> --json`'s `nodes`.
 fn reading_node(world: &World, run: &str, node: &str) -> Value {
-    let reading = world.run(&["status", run, "--json"]).json();
+    node_in(&world.run(&["status", run, "--json"]).json(), node)
+}
+
+/// `node`'s entry in a `status --json` reading already taken.
+fn node_in(reading: &Value, node: &str) -> Value {
     reading["nodes"]
         .as_array()
         .unwrap_or_else(|| panic!("the reading lists no nodes: {reading}"))
@@ -7192,12 +7197,23 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
     // Every reader says the same: `status --json` reports it held with that detail
     // and what it awaits as data, the run is neither settled nor dead, and
     // `unpublished` counts the branch as owed.
-    let entry = reading_node(world, &run, "consumer");
+    // Measurement only (spike-child-waits, never lands): under the re-launch
+    // prototype one reading answers for every node, since nothing moves until the
+    // release below.
+    let once = crate::harness::spike_variant::relaunch()
+        .then(|| world.run(&["status", &run, "--json"]).json());
+    let node_of = |node: &str| match &once {
+        Some(reading) => node_in(reading, node),
+        None => reading_node(world, &run, node),
+    };
+    let entry = node_of("consumer");
     assert_eq!(entry["status"], "complete-but-held", "{entry}");
     assert_eq!(entry["outcome"], "held-for-release", "{entry}");
     assert_eq!(entry["detail"], json!(detail), "{entry}");
     assert_eq!(entry["awaiting"], awaited, "{entry}");
-    let reading = world.run(&["status", &run, "--json"]).json();
+    let reading = once
+        .clone()
+        .unwrap_or_else(|| world.run(&["status", &run, "--json"]).json());
     assert_eq!(reading["ending"], Value::Null, "{reading}");
     assert_ne!(reading["word"], "SETTLED", "{reading}");
     assert_ne!(reading["word"], "DRIVER DEAD", "{reading}");
@@ -7210,12 +7226,12 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
         .filter_map(|entry| entry["id"].as_str())
         .collect();
     assert_eq!(listed, [ENGINE, "consumer", "follower"], "{reading}");
-    let producer = reading_node(world, &run, ENGINE);
+    let producer = node_of(ENGINE);
     assert_eq!(producer["status"], "done", "{producer}");
     assert_eq!(producer["outcome"], "merged", "{producer}");
     assert!(producer.get("awaiting").is_none(), "{producer}");
     assert_eq!(
-        reading_node(world, &run, "follower"),
+        node_of("follower"),
         json!({"id": "follower", "status": "pending", "outcome": null, "detail": null})
     );
     world

@@ -275,6 +275,10 @@ fn run(
                 stopped(&mut child);
                 break Err(CommandEnding::TimedOut);
             }
+            // Measurement only (spike-child-waits, never lands): woken by the exit.
+            Ok(None) if onevcs::spike_waits::exit_notify() => {
+                onevcs::spike_waits::await_child_exit(&child, POLL);
+            }
             Ok(None) => std::thread::sleep(POLL),
             Err(error) => {
                 stopped(&mut child);

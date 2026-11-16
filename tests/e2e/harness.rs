@@ -57,11 +57,52 @@ use serde_json::{json, Value};
 #[cfg_attr(windows, link_section = ".CRT$XCU")]
 static PROFILED: extern "C" fn() = profiled;
 
+/// Measurement only (spike-child-waits, never lands): which of the child-wait
+/// prototypes this build demonstrates.
+///
+/// A demonstration commit changes [`SELECTED`] and nothing else: a comma-separated
+/// list of `exit`, `adaptive` and `relaunch`, as `onevcs::spike_waits` reads it.
+/// Empty, every site and every journey behaves as on the measured baseline.
+pub mod spike_variant {
+    /// The prototypes in effect for this build, unless the environment already
+    /// names them.
+    pub const SELECTED: &str = "";
+
+    /// Whether `variant` is in effect: [`SELECTED`], unless the environment this test
+    /// process started in already chose, which is how a local slice tries one.
+    fn is_selected(variant: onevcs::spike_waits::Variant) -> bool {
+        onevcs::spike_waits::is_selected(variant)
+    }
+
+    /// Whether the journeys that re-launch the CLI for one reading read it once.
+    pub fn relaunch() -> bool {
+        is_selected(onevcs::spike_waits::Variant::Relaunch)
+    }
+
+    /// The pause before the `looks`-th look again of a harness wait polling every
+    /// `interval`: `interval` as measured, or, under the adaptive prototype, short at
+    /// first and backing off to it. A wait every quarter second or longer is left as
+    /// it is, because its predicate starts a process or re-reads a whole journal.
+    pub fn pause(interval: std::time::Duration, looks: u32) -> std::time::Duration {
+        if !is_selected(onevcs::spike_waits::Variant::Adaptive)
+            || interval >= std::time::Duration::from_millis(250)
+        {
+            return interval;
+        }
+        onevcs::spike_waits::backoff(looks, std::time::Duration::from_millis(1), interval)
+    }
+}
+
 extern "C" fn profiled() {
     // llmlint: ignore[changed_behavior_has_e2e] the switch's proof is every e2e test of the hosted baseline runs writing the records the report folds, and the fold's test reads two of them recorded at this commit; a journey asserting them would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
     // Measurement only (spike-launch-inventory, never lands): every engine this
     // process starts inherits the launch trace's switch, and writes its records
     // beside this binary's test-profile records. Set before any thread exists.
+    // Measurement only (spike-child-waits, never lands): the prototypes this build
+    // demonstrates, inherited by every engine it starts. Set before any thread exists.
+    if std::env::var_os(onevcs::spike_waits::ENV).is_none() {
+        std::env::set_var(onevcs::spike_waits::ENV, spike_variant::SELECTED);
+    }
     if std::env::var_os(onevcs::launch_trace::ENV).is_none() {
         std::env::set_var(
             onevcs::launch_trace::ENV,
@@ -3361,6 +3402,40 @@ impl World {
         );
     }
 
+    /// Measurement only (spike-child-waits, never lands): wait until `ready` holds of
+    /// what `read` launches, and answer a reading that held.
+    ///
+    /// Under the re-launch prototype the answer is the very reading that first held;
+    /// otherwise, as measured, `read` is launched once more after the wait. `store`
+    /// waits as [`until_store`](Self::until_store) does, for a `read` the host must
+    /// not be asked too often.
+    pub fn until_read(
+        &self,
+        what: &str,
+        store: bool,
+        read: impl Fn(&Self) -> Run,
+        ready: impl Fn(&Run) -> bool,
+    ) -> Run {
+        let mut held = None;
+        let mut look = |world: &Self| {
+            let reading = read(world);
+            let holds = ready(&reading);
+            if holds {
+                held = Some(reading);
+            }
+            holds
+        };
+        if store {
+            self.until_store(what, &mut look);
+        } else {
+            self.until(what, &mut look);
+        }
+        match held {
+            Some(reading) if spike_variant::relaunch() => reading,
+            _ => read(self),
+        }
+    }
+
     /// Wait until a predicate holds within `patience`, or fail with what was seen
     /// instead.
     ///
@@ -4276,11 +4351,13 @@ fn waited_on(
 ) -> bool {
     profile::polled(|| {
         let deadline = clock.elapsed().saturating_add(duration);
+        let mut looks: u32 = 0;
         while clock.elapsed() < deadline {
             if ready() {
                 return true;
             }
-            clock.pause(interval);
+            clock.pause(spike_variant::pause(interval, looks));
+            looks = looks.saturating_add(1);
         }
         false
     })

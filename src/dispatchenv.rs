@@ -273,7 +273,12 @@ fn run(
                 });
             }
         }
-        std::thread::sleep(POLL);
+        // Measurement only (spike-child-waits, never lands): woken by the exit.
+        if onevcs::spike_waits::exit_notify() {
+            onevcs::spike_waits::await_child_exit(&child, POLL);
+        } else {
+            std::thread::sleep(POLL);
+        }
     };
     drop(watch);
     launch.exited(None);

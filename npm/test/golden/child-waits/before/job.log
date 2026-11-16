@@ -1,0 +1,7 @@
+2026-11-15T16:39:14.5020000Z HEAD is now at 0000000 Merge 1111111 into 2222222
+2026-11-15T16:39:14.5040000Z ##[group]Run just ci-test-linux
+2026-11-15T16:39:15.4100000Z  Nextest run ID 11804d57-da10-4104-b5a7-6ab05b8b6d63 with nextest profile: default
+2026-11-15T16:39:15.4110000Z     Starting 2 tests across 1 binary (2154 tests and 47 binaries skipped)
+2026-11-15T16:39:19.1220000Z         PASS [   3.683s] (1/2) onepipeline::e2e command_step::a_command_that_cannot_start_says_too_much_or_is_signalled_settles_command_failed
+2026-11-15T16:39:19.4450000Z         PASS [   4.006s] (2/2) onepipeline::e2e dispatch_env_hook::a_named_hook_runs_before_every_node_dispatch_and_its_env_reaches_that_child_alone
+2026-11-15T16:39:19.4450000Z      Summary [   4.035s] 2 tests run: 2 passed, 2154 skipped

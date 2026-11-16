@@ -347,13 +347,14 @@ fn a_run_wide_set_edit_is_replayed_when_a_driver_adopts() {
         committed(world, "sets-adopted").contains(&"set-run-node-sets".to_string())
     });
     world.release("held.go");
-    world.until("the blocked driver to exit", |world| {
-        world
-            .run(&["status", "sets-adopted"])
-            .stdout
-            .contains("PAUSED")
-    });
-    world.run(&["status", "sets-adopted"]).exited(0);
+    world
+        .until_read(
+            "the blocked driver to exit",
+            false,
+            |world| world.run(&["status", "sets-adopted"]),
+            |status| status.stdout.contains("PAUSED"),
+        )
+        .exited(0);
     let checkpoint = world.run_json("sets-adopted", "checkpoint.json");
     assert_eq!(
         checkpoint["state"]["run_node_sets"],

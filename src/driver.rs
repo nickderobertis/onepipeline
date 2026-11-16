@@ -2293,6 +2293,7 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
     // driver does is placed on a chosen side of each.
     let _ = crate::ordering::meet(HANDOVER_UNREAD_GATE_ENV);
     let mut first = true;
+    let mut idle: u32 = 0;
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline {
         if claimed() {
@@ -2315,7 +2316,8 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
             }
             break;
         }
-        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
+        // Measurement only (spike-child-waits, never lands): adaptive poll.
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), attach_pause(&mut idle));
     }
     Err(Error::Refused(format!(
         "the driver retained for run '{}' did not claim it: {}",
@@ -3200,6 +3202,9 @@ fn attach(
     // How long the journal was when the run was last read, so it is read again
     // only once it has grown.
     let mut read_at: Option<u64> = None;
+    // Measurement only (spike-child-waits, never lands): how many looks in a row
+    // found nothing new, for the adaptive poll.
+    let mut idle: u32 = 0;
     let mut observer_gone = false;
     let mut journal = Journal::open(paths);
     // What the observer's stream says about its members' identity chains, for
@@ -3294,9 +3299,10 @@ fn attach(
         // that has concluded is read regardless: its settlement is read off it.
         let length = std::fs::metadata(paths.journal()).map_or(0, |about| about.len());
         if !concluded && read_at == Some(length) {
-            onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), attach_pause(&mut idle));
             continue;
         }
+        idle = 0;
         read_at = Some(length);
         projected.refresh(paths);
         let appended = journal::finished_records_from(&paths.journal(), printed_to);
@@ -3364,8 +3370,20 @@ fn attach(
             }
             return Ok(settlement);
         }
-        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), attach_pause(&mut idle));
     }
+}
+
+/// Measurement only (spike-child-waits, never lands): the attach loop's next pause —
+/// [`ATTACH_POLL`] as released, or, under the adaptive prototype, short after the
+/// journal last grew and backing off to it.
+fn attach_pause(idle: &mut u32) -> Duration {
+    if !onevcs::spike_waits::adaptive() {
+        return ATTACH_POLL;
+    }
+    let pause = onevcs::spike_waits::backoff(*idle, Duration::from_millis(2), ATTACH_POLL);
+    *idle = idle.saturating_add(1);
+    pause
 }
 
 /// How a run that has stopped advancing settled.
@@ -5068,12 +5086,14 @@ pub(crate) fn submit_offered(
         engine::Accepted::Queued(id) => {
             let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
             let mut answered = None;
+            let mut idle: u32 = 0;
             while Instant::now() < deadline {
                 if let Some(outcome) = channel.outcome_of(id) {
                     answered = Some(outcome);
                     break;
                 }
-                onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
+                // Measurement only (spike-child-waits, never lands): adaptive poll.
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), attach_pause(&mut idle));
             }
             // The wait ran out with nothing answering, so the question this fork
             // was taken on is asked again: is anything still driving this run?

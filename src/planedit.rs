@@ -283,7 +283,12 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {
-                std::thread::sleep(POLL);
+                // Measurement only (spike-child-waits, never lands): woken by the exit.
+                if onevcs::spike_waits::exit_notify() {
+                    onevcs::spike_waits::await_child_exit(&child, POLL);
+                } else {
+                    std::thread::sleep(POLL);
+                }
             }
             waited => {
                 let _ = crate::sys::stop(child.id(), crate::sys::Stop::Now);

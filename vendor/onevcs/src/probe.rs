@@ -186,7 +186,7 @@ fn read(mut command: Command, bound: Duration, label: &str) -> ReleaseAnswer {
     // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
     let (spawned, launch) = crate::launch_trace::spawn(crate::launch_site!(), &mut command);
     let mut child = match spawned {
-    // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Ok(child) => child,
         Err(failure) => return not_answered(format!("{label} could not be started: {failure}")),
     };
@@ -317,6 +317,10 @@ fn exited_within(
             Ok(Some(status)) => return Some(Ok(status)),
             Err(failure) => return Some(Err(failure)),
             Ok(None) if started.elapsed() >= bound => return None,
+            // Measurement only (spike-child-waits, never lands): woken by the exit.
+            Ok(None) if crate::spike_waits::exit_notify() => {
+                crate::spike_waits::await_child_exit(child, POLL);
+            }
             Ok(None) => git::await_an_ending(endings, POLL),
         }
     }

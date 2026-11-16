@@ -2120,7 +2120,21 @@ pub fn follow(
                     }
                     asked = std::time::Instant::now();
                 }
-                onevcs::launch_trace::sleep(onevcs::launch_site!(), FOLLOW_POLL);
+                // Measurement only (spike-child-waits, never lands): the tick is cut
+                // short by `finish`, which unparks this thread.
+                if onevcs::spike_waits::adaptive() {
+                    let began = std::time::Instant::now();
+                    if !stopping.load(Ordering::SeqCst) {
+                        std::thread::park_timeout(FOLLOW_POLL);
+                    }
+                    onevcs::launch_trace::waited(
+                        onevcs::launch_site!(),
+                        began.elapsed(),
+                        Some(FOLLOW_POLL),
+                    );
+                } else {
+                    onevcs::launch_trace::sleep(onevcs::launch_site!(), FOLLOW_POLL);
+                }
             }
         });
     match reader {
@@ -2286,6 +2300,10 @@ impl Follower {
     pub fn finish(mut self) -> Watermarks {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = self.reader.take() {
+            // Measurement only (spike-child-waits, never lands): see the follow loop.
+            if onevcs::spike_waits::adaptive() {
+                reader.thread().unpark();
+            }
             let _ = reader.join();
         }
         let mut reached = self
