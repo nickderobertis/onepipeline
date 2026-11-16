@@ -1,0 +1,134 @@
+{
+  "run": 43789062933,
+  "attempt": 1,
+  "job": 133043119334,
+  "head": "1c95ed5b6de89074c982d810662b5577fc67621a",
+  "judged": "25 passed,1 failed crates_stay_in_one_cargo_workspace on inherited vendor/onejudge Cargo.lock andCargo.toml; review20261116T022123Z-0abbb",
+  "otherFailure": "required DO NOT MERGE title has no conventional release type; advisory engines-current",
+  "facts": {
+    "checkout": {
+      "merge": "6d30ca5b",
+      "head": "1c95ed5b6de89074c982d810662b5577fc67621a",
+      "base": "48f24ade7a21d18e9bc850961a429ae20189c16b"
+    },
+    "selection": {
+      "job": "lint",
+      "count": 54,
+      "tasks": [
+        "github-workflows:format-check",
+        "github-workflows:lint",
+        "github-workflows:syntax-check",
+        "human-items-e2e:format-check",
+        "human-items-e2e:lint",
+        "onepipeline-ci-jobs:format-check",
+        "onepipeline-ci-jobs:lint",
+        "onepipeline-codex-server:format-check",
+        "onepipeline-codex-server:lint",
+        "onepipeline-contract:format-check",
+        "onepipeline-contract:lint",
+        "onepipeline-coverage-keys:format-check",
+        "onepipeline-coverage-keys:lint",
+        "onepipeline-e2e:format-check",
+        "onepipeline-e2e:lint",
+        "onepipeline-journal-workload:format-check",
+        "onepipeline-journal-workload:lint",
+        "onepipeline-narrow-write:format-check",
+        "onepipeline-narrow-write:lint",
+        "onepipeline-note-journeys:format-check",
+        "onepipeline-note-journeys:lint",
+        "onepipeline-npm:format-check",
+        "onepipeline-npm:lint",
+        "onepipeline-pool-workload:format-check",
+        "onepipeline-pool-workload:lint",
+        "onepipeline-pooled-slot:format-check",
+        "onepipeline-pooled-slot:lint",
+        "onepipeline-real-smoke:format-check",
+        "onepipeline-real-smoke:lint",
+        "onepipeline-release-compat:format-check",
+        "onepipeline-release-compat:lint",
+        "onepipeline-release-journeys:format-check",
+        "onepipeline-release-journeys:lint",
+        "onepipeline-release:format-check",
+        "onepipeline-release:lint",
+        "onepipeline-scratch-workload:format-check",
+        "onepipeline-scratch-workload:lint",
+        "onepipeline-status-read:format-check",
+        "onepipeline-status-read:lint",
+        "onepipeline-stop-verdict:format-check",
+        "onepipeline-stop-verdict:lint",
+        "onepipeline-version-contract:format-check",
+        "onepipeline-version-contract:lint",
+        "onepipeline-version-e2e:format-check",
+        "onepipeline-version-e2e:lint",
+        "onepipeline-version-package:format-check",
+        "onepipeline-version-package:lint",
+        "onepipeline:deps-check",
+        "onepipeline:format-check",
+        "onepipeline:lint",
+        "pool-maintenance:format-check",
+        "pool-maintenance:lint",
+        "report-job:format-check",
+        "report-job:lint"
+      ]
+    },
+    "steps": [
+      {
+        "name": "op-nx/github-cache/start-cache-server@91839c24885842cac86567",
+        "seconds": 0.003999948501586914,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "Swatinem/rust-cache@v2.9.2",
+        "seconds": 68.35700011253357,
+        "hit": "partial (restore key)",
+        "said": [
+          "Cache hit for restore-key: v0-rust-test-linux-Linux-x64-ff458983-14f37604",
+          "Cache restored successfully",
+          "Restored from cache key \"v0-rust-test-linux-Linux-x64-ff458983-14f37604\" full match: false."
+        ]
+      },
+      {
+        "name": "actions/cache/restore@v4",
+        "seconds": 0.3489999771118164,
+        "hit": "miss",
+        "said": [
+          "Cache not found for input keys: ci-capture-Linux-X64-a2988fc733038fe73cb0181a1b27b5c4aaa43771a0dcdf18581de472633cd6c5"
+        ]
+      },
+      {
+        "name": "actions/setup-node@v4",
+        "seconds": 5.075000047683716,
+        "hit": "no restore",
+        "said": []
+      },
+      {
+        "name": "actions/setup-python@v5",
+        "seconds": 9.677000045776367,
+        "hit": "miss",
+        "said": [
+          "Version 3.13.17 was not found in the local cache"
+        ]
+      },
+      {
+        "name": "astral-sh/setup-uv@v6",
+        "seconds": 3.0160000324249268,
+        "hit": "no restore",
+        "said": []
+      }
+    ],
+    "cacheSaves": [],
+    "nxStored": {
+      "entries": 0,
+      "bytes": 0,
+      "replayed": 0
+    },
+    "e2e": null,
+    "largest": null,
+    "job": {
+      "start": 1794794131.12,
+      "end": 1794795739.701,
+      "gateStart": null
+    }
+  }
+}

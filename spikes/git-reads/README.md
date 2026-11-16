@@ -22,7 +22,7 @@ the executable check evidence at its cited source commit unchanged.
 
 ## Handoff — 2026-11-16 01:56 UTC
 
-- Valid after points remain batched macOS/Windows1of2 and nativeLinux/Windows1of2;
+- Valid after points are batched Linux/macOS/Windows1of2 and nativeLinux/Windows1of2;
   other cells0of2. Strict main failures and positive diagnostic reruns stay separate.
 - Batched PR1633 run43753064453 attempt2: Linux132996793865/Windows132996793856
   running, macOS132996793757 queued; head698a7d0e855c5bb04a362c385bab2508e3e4651e.
@@ -84,3 +84,13 @@ workflow/cache tests pass69of69. A temporary dependency link accidentally entere
 First-point named set comparison is in evidence/round1-name-parity.json:
 no extra or unexplained missing main names beyond the explicitly inferred
 Linux loopcost and three positively rerun failures.
+
+02:23UTC delta: batched attempt2Linux132996793865 is valid2155of2155,41.114383e2e
+minutes (all2155names retained). Windows132996793856 completed1832main with2failures
+and3of3own-rerun passes each, but is HELD undera83 because the prototype served the
+failed held-adoption journey. It is not in the pricing directory pending bounded
+real-Git answer audit and10stock/10batched correctness repetitions. Human-items
+duplicate dispatch has no prototype answer; shipping signal now3after versus0baseline.
+Batched attempt2Macstarted; original nativeMacstillqueued. ReuseLinux/Windowsrunning,
+Macqueued. Completed reuse lint reports inherited vendor/onejudge workspace/lock
+finding and required-title failure; cache receipts/log preserved, no cache writes.
