@@ -1,0 +1,28 @@
+[
+  {
+    "mode": "batched",
+    "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+    "comparison_base_validated_runtime": "074446536a2001ac3323596fbf6f235a83202396",
+    "scope": [
+      ".github/workflows/ci.yml",
+      "Cargo.toml",
+      "src/lib.rs",
+      "vendor/onevcs/src/spike_reads.rs"
+    ],
+    "note": "Content diff for measurement configuration/runtime only, not a complete head diff. Demonstration comparison-script revisions predate final comparer33edc69c. Runtime differs only by selector; production source adapters are byte-identical.",
+    "diff_file": "batched-demonstration.diff.gz"
+  },
+  {
+    "mode": "native",
+    "head": "016c5adf2a8760d1a77134c1b1ef655aebd4c70e",
+    "comparison_base_validated_runtime": "074446536a2001ac3323596fbf6f235a83202396",
+    "scope": [
+      ".github/workflows/ci.yml",
+      "Cargo.toml",
+      "src/lib.rs",
+      "vendor/onevcs/src/spike_reads.rs"
+    ],
+    "note": "Content diff for measurement configuration/runtime only, not a complete head diff. Demonstration comparison-script revisions predate final comparer33edc69c. Runtime differs only by selector; production source adapters are byte-identical.",
+    "diff_file": "native-demonstration.diff.gz"
+  }
+]
