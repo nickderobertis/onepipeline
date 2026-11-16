@@ -53,7 +53,7 @@ a65 says aborted attempts do not consume the two-valid-point quota. Investigatio
 found no Git starts in the failed journey and an original driver consuming requeue
 before exit. Ruling a68 freezes the test, classifies a pre-existing race, and
 authorizes a same-head whole-workflow replacement after current jobs finish. Stock and
-batched each pass10 local unoptimized repetitions; the isolated optimized stock control passed. Attempt2 subsequently started as the replacement.
+batched each pass10 local unoptimized repetitions; the isolated stock control passed (its earlier CLI-only optimized label is discarded). Attempt2 subsequently started as the replacement.
 
 Ruling a69 fixes sample selection before timings: per platform, use the first two
 valid jobs in run order. Later valid jobs are supplementary and excluded from the
@@ -67,8 +67,8 @@ Native Linux point1 is preserved in evidence/native-43753067613-1-linux*.
 It has2154 individually retained passes plus one loopcost pass inferred under
 a70 from full2155-name catalog/selection/summary; strict fold stays2154. The
 canonical comparison command ran at40f3487d; its Linux row is undecided with
-2before/1after points. The corrected isolated optimized-stock cancellation
-control passes1/1;20 earlier nested-checkout configuration refusals were not
+2before/1after points. The isolated stock cancellation
+control passes1/1; its original CLI-only optimized label is discarded;20 earlier nested-checkout configuration refusals were not
 journey outcomes.
 
 Batched Windows point1 is preserved in evidence/batched-43753064453-1-windows*.
