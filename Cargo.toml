@@ -902,15 +902,10 @@ resolver = "2"
 # `check-in` used to get from the engine.
 #
 # `oneagentgraph` 0.13.1 is the floor because its shipped `engineer` persona
-# states the proportionate-proof policy (oneagentgraph #288): durable behaviour
-# gets a committed, realistic test, and one-off work — a pin adoption with no
-# local reader among it — is proved by commands run once with their output
-# shown. A dispatch naming the bare `engineer` role resolves it through this
-# link, so the policy reaches no dispatch until the floor moves. The persona is
-# the release's only change, and no test here pins its wording: one would
-# duplicate oneagentgraph's own `tests/persona_bar.rs` and break on every upstream
-# rewording. The adoption was proved once by reading the bare role back through
-# this build's link, and the `shipped_engineer_stance` tests in
+# carries the proportionate-proof policy (oneagentgraph #288), and a dispatch
+# naming the bare `engineer` role resolves it through this link. No test here
+# pins that wording, which oneagentgraph's `tests/persona_bar.rs` holds and a
+# copy would break on every rewording; the `shipped_engineer_stance` tests in
 # `src/agentgraph.rs` still hold the bar's other demands over it.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
