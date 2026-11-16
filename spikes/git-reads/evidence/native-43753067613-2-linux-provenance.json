@@ -1,0 +1,15 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "423cd04dd903437a4cd33836101804a282692bc6",
+  "run": 43753067613,
+  "attempt": 2,
+  "job": 133127607507,
+  "head": "016c5adf2a8760d1a77134c1b1ef655aebd4c70e",
+  "github_sha": "761544439b93836fcb54049d446defb730eb385e",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": true,
+  "point": 2,
+  "status": "eligible point 2",
+  "proof": "Full2155/2155main; strictallnames; no inference/recovery needed.",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/incoming/native/43753067613-2/test-linux"
+}

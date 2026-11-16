@@ -1,0 +1,15 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "423cd04dd903437a4cd33836101804a282692bc6",
+  "run": 43753064453,
+  "attempt": 3,
+  "job": 133114994131,
+  "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "github_sha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": true,
+  "point": 2,
+  "status": "eligible point 2",
+  "proof": "Full1832 main, strict1831; human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold fails a,a,b thenpasses3/3ownreruns. Mainpids5500/10604/8712 have no Git/batchchild; nonreuse mode and empty process-local OPEN exclude a served prototype answer undera72/a74/a75. Fifth duplicate observation across four names, not causally cleared.",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-3/test-windows"
+}
