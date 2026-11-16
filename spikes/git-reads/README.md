@@ -57,6 +57,17 @@ rerun passes. No-answer checks do not exclude admission/interleaving effects.
 The held-adoption audit's 297 matching local answers do not clear the historical
 hosted failure. Reuse's stale-memo versus admission-cost cause is unresolved.
 
+Expanded-workload comparison (c20.1). Every job's `ci-job` selection line, on
+both sides, selects 37 Linux tasks and 39 macOS and Windows tasks. A src-only
+change selects 29 Linux tasks. Within each OS, all 24 jobs select the same task
+list, because both sides run workflow blob db2bbe08 (the read-only Nx-cache
+trust-step env) and carry the opt-level `Cargo.toml` edit. The pairs are valid,
+and they compare a widened workload that includes `github-workflows:test-ci-shape`.
+Job minutes therefore exceed a typical PR's. The e2e-tier nextest minutes, the
+figures priced here, come from the same `onepipeline-e2e:test` task on both
+sides. `evidence/nx-selection-parity.json` gives every job's count, log line
+and task-list hash.
+
 ## Source and local checks
 
 `ONEVCS_SPIKE_GIT_READS` selects `stock`, `batched`, `native`, `reuse`,
