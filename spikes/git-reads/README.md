@@ -130,3 +130,10 @@ Reuse PR1653 closed; remote/local branch and worktree removed after all data was
 read. Native macOS point1 passed2121/2121,80.238450e2e minutes. Native attempt2
 started unchanged after fresh35657b66six-mode12e2e/18unit proof. Read batched3
 and native2, close remaining demos, then finish undera94; no reuse/combination CI.
+
+
+### Final reader lint receipts (2026-11-16 07:00 UTC)
+
+Batched run 43753064453 attempt 3 lint job 133114993842 reports 25 judged rules passed, one failed, eight skipped and six not relevant (review 20261116T060721Z-187da). The finding is comments_earn_their_place at demonstration-only src/lib.rs:191: the no-behaviour source edit required to select the full Nx tier. Native run 43753067613 attempt 2 lint job 133127607591 reports 26 passed, zero failed, eight skipped and six not relevant. Both lint jobs still fail their required Conventional Commit title check because their authorized titles begin DO NOT MERGE, and their advisory engines-current check also fails. These are hosted results on the unchanged demonstration heads, not a green final local judged-lint claim. Ruling a47 caps further local judged refinement; in-flight heads remain untouched. Both logs and parsed restore receipts are checked in as evidence/{batched-attempt3,native-attempt2}-lint*. Their cache-save arrays are empty and Nx reports zero stored entries, zero stored bytes and zero replayed entries.
+
+Handoff: batched attempt 3 and native attempt 2 are the only in-flight runs. Reuse PR 1653 is closed and the combination is not measured under a94. Finish by reading those two runs and closing PRs 1633 and 1634.
