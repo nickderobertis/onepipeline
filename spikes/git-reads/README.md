@@ -103,3 +103,11 @@ and receipts are preserved under evidence/held-adoption*. Continue unchanged
 prototype; the needed Linuxpoint2whole-workflow replacement can supply its next
 validWindows point once currentMacfinishes. Both active-path failure and3duplicate
 dispatches versus0baseline are shipping risks; investigation effort is unpriced.
+
+ReuseLinux43789062933/1 job133043119134 is validpoint1: full2155/2155, allnames
+retained,41.717517e2e minutes,378387Gitattempts versus377822baseline mean. Only2
+config-path probes occurred. A91 keeps this fixed never-landing option unchanged
+for its two-point measurement: report adverse/undecided result, do not retune/profile
+a new cohort. Snapshot/layout admission overhead is suspected; cheaper admission
+for nonmemoizable queries is an untested design step. Original nativeMac is now
+running; a90 withdraws cancellation, none performed.
