@@ -53,7 +53,7 @@ a65 says aborted attempts do not consume the two-valid-point quota. Investigatio
 found no Git starts in the failed journey and an original driver consuming requeue
 before exit. Ruling a68 freezes the test, classifies a pre-existing race, and
 authorizes a same-head whole-workflow replacement after current jobs finish. Stock and
-batched each pass10 local unoptimized repetitions; the isolated optimized stock control passed. Attempt2 is now queued.
+batched each pass10 local unoptimized repetitions; the isolated optimized stock control passed. Attempt2 subsequently started as the replacement.
 
 Ruling a69 fixes sample selection before timings: per platform, use the first two
 valid jobs in run order. Later valid jobs are supplementary and excluded from the
