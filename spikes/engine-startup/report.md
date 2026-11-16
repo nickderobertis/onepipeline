@@ -2508,6 +2508,11 @@ PR1628 was closed after its complete run, artifacts, comments, reviews and check
 `bash scripts/engine-startup-verify.sh` exited zero and compared6588 inputs with identical find, hits, replace and locator results across all modes/case policies. `node --test npm/test/engine-startup-*.test.mjs` exited zero with15 passed, zero failed/skipped. These were run on b92daab1 without code changes; logs are evidence/verify-b92daab1.log.gz and parser-b92daab1.log.gz. No local elapsed time from those verification logs prices the option. The worktree remained clean after the Cargo invocation. The final report can retain this source-identified evidence because subsequent hosted-data/report changes do not alter the verifier, matcher implementation, parser scripts, pinned sampler version or their fixtures.
 
 
+### Final check scope — manager a82
+
+Manager a82 confirms that patch_pin audit failures caused by measurement-only vendoring are known retained limitations of every spike branch, including the shared baseline. They are not an additional test this spike must make green, and the vendoring is not undone. Their exact failures and coverage consequences remain reported above. The scoped matcher/parser/existing-input checks and final diff-scoped deterministic/judged audit remain the local verification bar under a48/a49. No test, rule, threshold or workflow is weakened to clear the audit.
+
+
 ## Candidate budgets
 
 This spike measured no candidate budget itself.
