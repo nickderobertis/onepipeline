@@ -1,184 +1,105 @@
 # Git-read measurement record
 
-Nothing on this branch lands. The report is
-`authoring:process-launch-speed-2026-11-14-spike-git-reads-report`, rendered
-from `spike-report` in `authoring:process-launch-speed-2026-11-14`.
+Preserved experimental branch; nothing here lands. Report:
+`authoring:process-launch-speed-2026-11-14-spike-git-reads-report` in
+`authoring:process-launch-speed-2026-11-14`, rendered from `spike-report`.
 
-Fold hosted artifacts (each side contains run-attempt/test-platform directories
-with test-profile/, timestamped job.log and meta.json):
+## Fold the hosted evidence
 
-    node scripts/git-reads-compare.mjs compare baseline=DIR batched=DIR native=DIR reuse=DIR combination=DIR
+Each side contains `RUN-ATTEMPT/test-PLATFORM/` with `test-profile/`, timestamped
+`job.log` and `meta.json`. The command is:
 
-The output contains run/job identities, processors, timing, selection, cache
-receipts, named outcomes, mean differences, spread decisions, PR scaling and Git
-launch attempts/recorded durations by verb, shape and engine-owned site.
-Failed spawn calls are costed separately; missing exit durations remain unknown. Use `counts` instead of
-`compare` for local verification; shared-host durations are never priced.
+    node scripts/git-reads-compare.mjs compare baseline=DIR batched=DIR native=DIR
 
-Preserved baseline facts and named outcomes are in evidence/*.gz; use gzip -dc.
-Their provenance is in evidence/baseline-provenance.json. The before side is
-43684231509 attempts1/2, accepted under c11.0. Later archive-only commits leave
-the executable check evidence at its cited source commit unchanged.
+It prints run/job identities, checkout/head/workflow SHAs, CPU/core counts,
+job/pre-e2e/e2e minutes, Nx selection, cache restore receipts, named main outcomes,
+separate diagnostic reruns, means/spread decisions, PR scaling, and Git attempts
+and recorded durations by engine verb, read shape and engine-owned read site.
+`counts` replaces `compare` for local traces and omits elapsed comparisons.
+Shared-host timings are never priced. Missing exit durations stay unknown;
+batch-child lifetimes include idle residency and are not wall-time savings.
 
-## Handoff — 2026-11-16 02:56 UTC
+`evidence/final-readers-comparison.md.gz` is actual command stdout from c7977aa6,
+with empty stderr and exit 0. The report names its later identical re-execution
+on the finished commit. One quoted Windows batched row is:
 
-- Valid after points are batched Linux/macOS/Windows1of2 and nativeLinux/Windows1of2;
-  other cells0of2. Strict main failures and positive diagnostic reruns stay separate.
-- Batched PR1633 run43753064453 attempt2: Linux132996793865 validpoint1, Windows132996793856
-  HELD undera84, macOS132996793757 running; head698a7d0e855c5bb04a362c385bab2508e3e4651e.
-- Native PR1634 run43753067613 attempt1: macOS132931087312 queued; other jobs read;
-  head016c5adf2a8760d1a77134c1b1ef655aebd4c70e.
-- Reuse PR1653 run43789062933 attempt1: Linux133043119134/Windows133043119352
-  running, macOS133043119250 queued, head1c95ed5b6de89074c982d810662b5577fc67621a.
-  Opened after fresh six-mode local trace/fold passed, with69workflow/cache tests green.
-- A79 raises own cap to3; plan cap7 remains. Opening followed the01:54 cap6read.
-  All three heads frozen. Expected workflowdb2bbe081a7b9319eb38bd014e72350b389e8b01;
-  actual receipts await finished jobs. Original incomplete batched Linux remains quarantined.
-- Remaining: two valid points/platform/option, choose reader from measured means,
-  measure reuse/combination, final fold/pricing/proof, close/remove demos. No final saving.
-  Read about15minutes apart with core2500/GraphQL2000 reserve. No cache writes/deletions.
+    | windows | 2/2 | 110.053 | 100.685 | 9.368 | undecided (inside a side's spread) | 8.43 | 398027 | 358029 | 19365.6 (+192.5 unknown) | 22290.9 (+382.5 unknown) |
 
-Local code proof: 63 fold/command tests,17 prototype tests, the six-mode slice's
-12 e2e and18 engine-read unit executions pass at the source commits cited in the
-report. The final judged pass was red; a47 caps further passes and directs its
-remaining demands into report limitations. No green judged result is claimed.
+The columns and complete named catalogs are in that archive. All six
+platform/reader timing comparisons are undecided. Native has the lower observed
+means and roughly halves Git starts, but these samples establish no reliable
+expected Windows minutes saved. Native macOS includes a five-core M2 point
+against the three-core M1 baselines; the report retains this hardware confounder.
 
-Ruling a62: named parity covers every main e2e-tier test. Report the separate
-version summary and other selected Rust tiers’ counts with the unchanged Nx
-selection; disclose every other job failure. No broader name inference is built.
+## Selection and stopped options
 
-Linux run43753064453/1 is quarantined, not a timing point. Evidence and the
-failure journal are in evidence/rejected-43753064453-1-linux*. Reader33edc69c
-refuses the partial invocation instead of pricing a smaller unit tier. Ruling
-a65 says aborted attempts do not consume the two-valid-point quota. Investigation
-found no Git starts in the failed journey and an original driver consuming requeue
-before exit. Ruling a68 freezes the test, classifies a pre-existing race, and
-authorizes a same-head whole-workflow replacement after current jobs finish. Stock and
-batched each pass10 local unoptimized repetitions; the isolated stock control passed (its earlier CLI-only optimized label is discarded). Attempt2 subsequently started as the replacement.
+Baseline: 43684231509 attempts 1/2, accepted under c11.0. User decision a62
+requires two valid after points/platform. A69 selects the first two valid
+chronological jobs before looking at their timing:
 
-Ruling a69 fixes sample selection before timings: per platform, use the first two
-valid jobs in run order. Later valid jobs are supplementary and excluded from the
-mean. Whole-workflow reruns may produce such extra platform jobs while Linux
-still needs its two valid points; every attempt remains listed.
+- Batched 43753064453: Linux attempts 2/3; macOS 1/2; Windows 1/3.
+- Native 43753067613: attempts 1/2 on all three platforms.
+- Batched Linux attempt 1 is partial and rejected. Windows attempt 2 is held
+  under a84 after an active-path adoption failure. macOS attempt 3 is
+  supplementary and excluded.
+- Reuse 43789062933 attempt 1 is rejected under a93: Windows check_visibility
+  fails main and both retained reruns. Linux/macOS observations are retained,
+  with no candidate pricing. No second reuse run.
+- Combination is NOT MEASURED/rejected under a94 because it includes unsafe
+  reuse. Its native-reader variant would have the better observed reader means;
+  no combination saving is inferred. Original reuse/combination valid-point
+  quotas are intentionally unmet under that amendment.
 
-The deferred test repair is drafted as
-20261115T220221Z-verify-cancellation-journey-waits-for-driver-exi.
+Six Windows duplicate-dispatch observations across four journey names, versus
+none found on either baseline, remain a shipping risk. Recovered no-answer
+journeys qualify under a75; their strict main failures stay separate from own
+rerun passes. No-answer checks do not exclude admission/interleaving effects.
+The held-adoption audit's 297 matching local answers do not clear the historical
+hosted failure. Reuse's stale-memo versus admission-cost cause is unresolved.
 
-Native Linux point1 is preserved in evidence/native-43753067613-1-linux*.
-It has2154 individually retained passes plus one loopcost pass inferred under
-a70 from full2155-name catalog/selection/summary; strict fold stays2154. The
-canonical comparison command ran at40f3487d; its Linux row is undecided with
-2before/1after points. The isolated stock cancellation
-control passes1/1; its original CLI-only optimized label is discarded;20 earlier nested-checkout configuration refusals were not
-journey outcomes.
+## Source and local checks
 
-Batched Windows point1 is preserved in evidence/batched-43753064453-1-windows*.
-Its main verdict stays red; the withdrawn duplicate-dispatch test passed3/3
-job-own reruns. A72’s no-prototype-answer condition is checked from the saved
-main trace plus process-local cache/spawn paths, documented in provenance.
-Batch mode reuse is off, no batch child/cache seed existed in that invocation.
-The duplicate-dispatch follow-up is drafted separately; test bodies stay frozen.
+`ONEVCS_SPIKE_GIT_READS` selects `stock`, `batched`, `native`, `reuse`,
+`reuse+batched` or `reuse+native`. Runtime source is 07444653; reader/test source
+is 33edc69c. Demonstration runtime content differs only by selector; archived
+scoped patches name their comparison base. Engine adapters are unchanged.
 
-Reuse-only demonstration was prepared at1c95ed5b and is now open asPR1653. Its
-workflow/cache tests pass69of69. A temporary dependency link accidentally entered
-655e06fc and was removed in1c95ed5b before publication; final diff contains no link.
-First-point named set comparison is in evidence/round1-name-parity.json:
-no extra or unexplained missing main names beyond the explicitly inferred
-Linux loopcost and three positively rerun failures.
+Recorded local proof, at the exact commits/commands cited in the report:
+17 real-Git differential prototype tests, existing Git 25 and checkout-reader
+13 tests, 63 Node command/fixture tests, root clippy, formatting, shellcheck,
+Biome and static llmlint validation passed. The six-mode local slice passed
+12 e2e and 18 engine-read unit executions. Fresh trace/fold slices precede every
+hosted round. Later evidence/docs changes do not alter those code inputs.
 
-02:23UTC delta: batched attempt2Linux132996793865 is valid2155of2155,41.114383e2e
-minutes (all2155names retained). Windows132996793856 completed1832main with2failures
-and3of3own-rerun passes each, but is HELD undera83 because the prototype served the
-failed held-adoption journey. It is not in the pricing directory pending bounded
-real-Git answer audit and10stock/10batched correctness repetitions. Human-items
-duplicate dispatch has no prototype answer; shipping signal now3after versus0baseline.
-Batched attempt2Macstarted; original nativeMacstillqueued. ReuseLinux/Windowsrunning,
-Macqueued. Completed reuse lint reports inherited vendor/onejudge workspace/lock
-finding and required-title failure; cache receipts/log preserved, no cache writes.
+The final local judged pass remains RED; a47 caps refinement and requires
+remaining proof limits in the report. No green final judged/gate claim is made.
+The unchanged vendored pool/maintain.rs:507 clippy finding is excluded under
+that ruling. Every own suppression and its reason is inventoried in the report.
+Merged Linux coverage is NOT PRODUCED on either side: tests/patch_pin.rs's
+vendored patch audit stops test-rest and the merge. The LCOV floor stays 95.74;
+no test, justfile or workflow was changed to manufacture coverage.
 
-A84: Windowsattempt2 stays quarantined after10of10stock/10of10batched passes and
-297of297same-ref Git comparisons,0mismatch. Exact hosted historical replay is
-unavailable; this does not clear the failure. Audit negative/positive calibration
-and receipts are preserved under evidence/held-adoption*. Continue unchanged
-prototype; the needed Linuxpoint2whole-workflow replacement can supply its next
-validWindows point once currentMacfinishes. Both active-path failure and3duplicate
-dispatches versus0baseline are shipping risks; investigation effort is unpriced.
+## Evidence and handoff
 
-ReuseLinux43789062933/1 job133043119134 is validpoint1: full2155/2155, allnames
-retained,41.717517e2e minutes,378387Gitattempts versus377822baseline mean. Only2
-config-path probes occurred. A91 keeps this fixed never-landing option unchanged
-for its two-point measurement: report adverse/undecided result, do not retune/profile
-a new cohort. Snapshot/layout admission overhead is suspected; cheaper admission
-for nonmemoizable queries is an untested design step. Original nativeMac is now
-running; a90 withdraws cancellation, none performed.
+Use `gzip -dc` for compressed files. Per-job facts/provenance retain identities,
+models, timings, starts, per-verb/shape/site durations, selection, named results
+and each restore's hit/miss/time. Host-metadata archives retain all six started
+workflow attempts. Lint/budgets receipts are separate. Cache-bearing jobs show
+no Actions-cache saves and zero Nx stored entries/bytes; budgets has no
+cache-bearing step, and absent Nx telemetry is not inferred as a measured zero.
+No cache was deleted.
 
-05:40UTC delta: batchedMacattempt2 job132996793757 valid2121/2121,86.517200e2e
-minutes, soMacnow2of2. SubsequentbatchedMacvalidjobsare supplementary, excluded
-frommeans. Whole-workflowattempt3 started on unchanged698a7d0e after fresh
-e0f5e5b8six-mode12e2e/18unit trace/fold. It suppliesLinuxpoint2 and the next
-eligibleWindows replacement undera84; no demoheadpush. Native/reusecurrentjobs
-continue. Actualattempt3jobs/checkout/blob/cache receipts await finished logs.
+`final-primary-name-parity.json` compares all 18 primary platform jobs by name;
+only the explicitly authorized overwritten Linux loopcost proofs are inferred.
+`all-platform-summary-failure-compile-citations.json.gz` preserves numbered
+summary/failure/timeout/rerun/compile lines from all 24 platform jobs, including
+rejected and supplementary observations. Held-adoption audit artifacts retain
+the negative calibration, corrected optimized control and replay limits.
 
-A93/a94amendment: REUSEisREJECTED; no run2/no furtherinvestigation. ItsWindows
-check_visibilityworkloadfailedmainandbothretainedreruns, despitebaselinepasses;
-stalememo versuslayoutcostunknown. Human-itemsduplicateisfourthafterobservation
-versus0baseline. COMBINATIONisNOTMEASURED/rejectedbecauseitincludesunsafeReuse;
-runno combinationCI. Originalreuse/combinationtwo-valid-pointquotasareintentionally
-unmetunderthisruling. Finishafterreadinginflightbatched3/native2andclosingdemos.
-
-Reuse PR1653 closed; remote/local branch and worktree removed after all data was
-read. Native macOS point1 passed2121/2121,80.238450e2e minutes. Native attempt2
-started unchanged after fresh35657b66six-mode12e2e/18unit proof. Read batched3
-and native2, close remaining demos, then finish undera94; no reuse/combination CI.
-
-
-### Final reader lint receipts (2026-11-16 07:00 UTC)
-
-Batched run 43753064453 attempt 3 lint job 133114993842 reports 25 judged rules passed, one failed, eight skipped and six not relevant (review 20261116T060721Z-187da). The finding is comments_earn_their_place at demonstration-only src/lib.rs:191: the no-behaviour source edit required to select the full Nx tier. Native run 43753067613 attempt 2 lint job 133127607591 reports 26 passed, zero failed, eight skipped and six not relevant. Both lint jobs still fail their required Conventional Commit title check because their authorized titles begin DO NOT MERGE, and their advisory engines-current check also fails. These are hosted results on the unchanged demonstration heads, not a green final local judged-lint claim. Ruling a47 caps further local judged refinement; in-flight heads remain untouched. Both logs and parsed restore receipts are checked in as evidence/{batched-attempt3,native-attempt2}-lint*. Their cache-save arrays are empty and Nx reports zero stored entries, zero stored bytes and zero replayed entries.
-
-Handoff: batched attempt 3 and native attempt 2 are the only in-flight runs. Reuse PR 1653 is closed and the combination is not measured under a94. Finish by reading those two runs and closing PRs 1633 and 1634.
-
-### Batched Linux second point, 2026-11-16 08:13 UTC
-
-Run 43753064453 attempt 3, job 133114993964, uses unchanged head 698a7d0e855c5bb04a362c385bab2508e3e4651e, checkout 3a841969676267c2e6cac47a0a0de12f7f77dbbc and workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. CPU is Intel Xeon 6975P-C, four logical CPUs. Job time is 136.683333 minutes; pre-e2e work is 97.258667 minutes, including compilation and other selected tasks, not a pure compile measurement. The main e2e summary at job.log:9849 is 2155/2155 passed in 2247.075 seconds, or 37.451250 minutes. No main failure or diagnostic recovery is needed. Strict named proof retains 2154 names; complete baseline named catalog coverage and the all-passed summary infer the overwritten loopcost name under a70. The later budget rerun passes separately at log:9859 and is not substituted into the main strict count. The separate version journey also passes 1/1.
-
-The trace records 338745 Git launch attempts, 2510.589256 seconds of recorded durations and 308 unknown durations. Batch-child residency includes idle time; these seconds are not wall-time savings. The 37-task Nx selection ran; all Actions-cache save receipts are empty and Nx stored zero entries/bytes. The unchanged patch audit still fails at log:10027/10059/10091 and prevents coverage merge. Other selected tier counts, including the partial root audit tier, remain in the archived summary excerpt.
-
-Sources: `evidence/batched-43753064453-3-linux{.json.gz,-summaries.txt.gz,-provenance.json,-parity.json}` and hosted job https://github.com/nickderobertis/onepipeline/actions/runs/43753064453/job/133114993964. Reader source 33edc69c; observation processed on 3430d1dd. This is Linux's second valid chronological point. Remaining jobs: batched macOS (supplementary only) and Windows, plus all three native attempt-2 platforms. No head was pushed, and no new workflow was started.
-
-Canonical reader-only fold executed on 3430d1dd, exit 0, empty stderr:
-`| linux | 2/2 | 39.487 | 39.283 | 0.205 | undecided (inside a side's spread) | 0.18 | 377822 | 340039 | 1372.8 (+81.0 unknown) | 2982.6 (+304.5 unknown) |`
-This is the batched comparison, not a decided saving. Full output is
-`evidence/readers-after-batched-linux2.md.gz`; reuse is excluded under a94.
-
-### Native macOS second point, 2026-11-16 08:27 UTC
-
-Run 43753067613 attempt 2, job 133127607304, retains head 016c5adf2a8760d1a77134c1b1ef655aebd4c70e, checkout 761544439b93836fcb54049d446defb730eb385e and workflow db2bbe081a7b9319eb38bd014e72350b389e8b01. It ran on Apple M2 Pro (Virtual), five logical/physical cores, rather than the baseline and native first point's M1 Virtual three cores. Job time is 88.950000 minutes, pre-e2e work 33.347550 minutes and main e2e 55.231783 minutes. The full main tier passes 2121/2121 at job.log:5320; the retained names match the entire baseline set, with no missing/extra names or main recovery. This hardware change is a major confounder: do not attribute the shorter time solely to native reads.
-
-The trace has 188970 Git attempts, 1564.422403 seconds of recorded durations and 24 unknown durations. The complete 39-task selection ran. Actions-cache save receipts are empty and Nx stored zero entries/bytes. Separate version passes 1/1 (log:2880). Root tier is 1412/1414 with the two inherited patch-audit failures (log:2750). The selected note tier is 74/75: `a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict` first sees no presentations instead of worker then supervisor (tests/note/main.rs:496, log:3079–3100), then passes all three job-owned reruns (log:6059/6111/6163). This failure is preserved separately under a62; no main-e2e pass is fabricated and no journey/test body changed. Follow-up: `drafts:verify-live-note-presentation-ordering-after-recovered-macos-failure`.
-
-Sources: `evidence/native-43753067613-2-macos{.json.gz,-summaries.txt.gz,-provenance.json,-parity.json}`, hosted job https://github.com/nickderobertis/onepipeline/actions/runs/43753067613/job/133127607304. Reader 33edc69c processed this observation on 386b0f98. This is macOS's second valid chronological native point. Remaining jobs: native Linux/Windows, batched Windows and supplementary macOS. No new runs or head pushes; reuse and combination remain stopped under a94.
-
-### Second batched Windows and native Linux points, 2026-11-16 08:44 UTC
-
-Batched run 43753064453 attempt 3 Windows job 133114994131: AMD EPYC 9V74 80-Core Processor/four logical CPUs, 173.766667 job minutes, 71.693833 pre-e2e minutes, 101.078317 e2e minutes. Full main1832 ran:1831 pass and `human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold` fails at tests/e2e/human_items.rs:564 with a,a,b instead of a,b (job.log:3883–3887); all three job-owned reruns pass (5397/5449/5501). Under a75 it is an eligible second point: saved main pids5500/10604/8712 show driver, fake-oneagentgraph a,a,b and taskkill starts, no Git/batch child. Nonreuse batched mode plus initially empty process-local OPEN means no prototype answer could serve the failure. The strict count stays1831; recovery is separate. This is the FIFTH Windows duplicate observation across FOUR distinct journey names, versus none found on either baseline. It remains a prominent shipping risk; follow-up `drafts:investigate-five-windows-duplicate-dispatch-observations-across-four-journeys-before-adoption` supersedes the earlier drafts. The trace records358385Git attempts/22441.353273recorded seconds/376unknown durations. Batch residency is not wall cost. Separate version1/1 at2879; root1350/1352 with two inherited audits at2773; other selected tier counts are archived. All39Nx tasks ran, cache saves none/Nxstored0.
-
-Native run43753067613 attempt2 Linux job133127607507: Intel Xeon6975P-C/four logical CPUs,132.850000job minutes,94.657383pre-e2e minutes,36.262433e2e minutes. Main2155/2155pass at9869 with all2155strict baseline names, no missing/extra names or recovery/inference. Trace188005Git attempts/924.893681recorded seconds/25unknown durations. Version1/1 at9098 and later budget1/1 at9879 remain separate. Root1373/1444partial with inherited audit at2536; audit retries10066/10098/10130 fail and coverage merge is not reached. All37Nx tasks ran, no cache saves/Nxstored0.
-
-Both use the unchanged previously recorded heads, checkout SHAs and workflowdb2bbe081a7b9319eb38bd014e72350b389e8b01. Sources are hosted job logs/test-profile artifacts and checked-in `evidence/{batched-43753064453-3-windows,native-43753067613-2-linux}{.json.gz,-summaries.txt.gz,-provenance.json,-parity.json}`; the batched main failure trace is also archived. Reader33edc69c processed these observations on423cd04d. Handoff:11of12priced reader cells are filled. Only native Windows point2 and supplementary batched macOS are still running. No head pushes, new run, reuse second run or combination run. The active held-adoption Windows attempt2 remains quarantined undera84 despite this next eligible point.
-
-### Batched final supplementary job and closure, 2026-11-16 09:44 UTC
-
-Batched43753064453attempt3 macOS job133114993991: Apple M1 Virtual/three logical and physical cores,200.083333job minutes,89.913000pre-e2e minutes,91.488600e2e minutes. Full2121/2121passes, strictallnames,no mainfailures/missing/extra names. Trace348212Git attempts/8518.965946recorded seconds/263unknown;39task selection; noActions-cache saves/Nxstored0. This THIRD valid chronological macOS observation is supplementary and excluded undera69; attempts1/2remain the primary points regardless of this timing. Version1/1passes atjob.log2930. Root1412/1414has two audits at2760. Separate codex-server tier4/7passes/3timeouts at2876: version probe, incomplete/duplicate/unsupported listeners, and wire unused-server/unmet-concurrency doubles each time out360seconds and fail all three own reruns alongside audits (summaries5979/6074/6169). No test/timeout/config changed.
-
-Completed workflow metadata for all batched attempts and earlier native/reuse attempts is archived as *-host-metadata.json.gz. Budgets jobs132992157708(B1),133109740273(B2),133123674936(N1),133123982114(R1),133205900515(B3) all succeed; full logs and parsed cache facts are archived. They have no cache-bearing steps or save receipts; Nx telemetry is absent, not inferred as zero. Cache-bearing platform/lint jobs separately show zeroNx writes. Batched overall workflow remains failure; eligible e2e points never imply green required CI.
-
-PR1633 is CLOSED after all three attempts were read; its remote/local branch and owned demonstration worktree are removed. Comments/reviews/checks and close receipt are archived. Runtime/config content patches compare each reader head with validated runtime07444653; they show only24readonly workflow lines,4opt-level manifest lines,the identical1line source no-op and the selector. This is a scoped content comparison, not a complete head diff: those demonstration comparer/test revisions predate final reader33edc69c, while the production adapters and runtime prototype are identical apart from selector. Handoff: only PR1634/native43753067613attempt2 Windows133127607621 remains in flight; no more runs or pushes to its head. Reuse PR1653 is already closed; combination remains unmeasured/rejected undera94.
-
-### Final native Windows point and closure, 2026-11-16 09:58 UTC
-
-Native run43753067613attempt2 Windows job133127607621 is point2: AMD EPYC7763 64-Core Processor/four logical CPUs,214.050000job minutes,94.915550pre-e2e minutes,93.675717e2e minutes. Full1832main runs, strict1831passes; human_items::host_and_plan_holds_compose_and_each_releases_only_its_own_hold fails a,a,b versus a,b at tests/e2e/human_items.rs:564 (job.log3911–3914). Both retained own reruns pass (5440/5528); no third positive rerun is claimed. Under a75 this is eligible: main tracepids5528start/11004drive/4568test contains only driver,fake-oneagentgraph a,a,b and taskkill. Native no-answer proof additionally checks this exact World::new/World::at plain scratch project and no repository/lifecycle/worktree plan; native admission requires Layout, engine head requires Some(worktree), hook reads require checkout. No prototype answer can serve it. The SIXTH Windows duplicate-dispatch observation across FOUR names remains a shipping risk, not causally cleared; final follow-up `drafts:investigate-six-windows-duplicate-dispatch-observations-across-four-journeys-before-adoption` supersedes the earlier counts. Timing/admission overhead effects are not excluded by a no-answer proof.
-
-Trace194981Git attempts/13288.688693recorded seconds/44unknown durations;39task selection,noActions-cache save receipts/Nxstored0. Main summary5074; separate version1/1at2904; selected root1350/1352with inherited audits. Two codex-server doubles (version probe and incomplete/duplicate/unsupported listeners) time out540seconds in their own tier and both retained diagnostic groups; full summary/failure excerpts are retained. Head016c5adf2a8760d1a77134c1b1ef655aebd4c70e, GITHUB_SHA761544439b93836fcb54049d446defb730eb385e, workflowdb2bbe081a7b9319eb38bd014e72350b389e8b01 remain unchanged. Observation processed on73a2ae96 by reader33edc69c; facts/summaries/provenance/parity/maintrace are checked in.
-
-Native budgets job133218447164 succeeds; no cache-bearing steps/save receipts, absent Nx telemetry not inferred as zero. PR1634 comments/reviews/checks and close receipt are archived. PR1634 is CLOSED and its remote/local branch and owned worktree removed. All six started workflow attempts are complete; no runs or demonstrations remain in flight. Both readers now have two valid chronological points/platform. Reuse remains rejected with original quota intentionally unmet; combination not measured undera94. Remaining work is the single final comparison, consolidated report and clean session draft handoff. No further CI or source changes.
+All runs are complete. Demonstration PRs 1633, 1634 and 1653 are CLOSED; their
+remote/local branches and owned worktrees are removed. No runs are in flight
+and no further CI remains. Session draft PR 1620 stays for lifecycle review.
+Follow-ups cover six duplicate-dispatch observations, rejected reuse correctness,
+recovered live-note presentation ordering and the frozen shared harness limits.
+Nominal adoption costs/releases and remaining production proof obligations are
+in the report; no shipping recommendation is made for these prototypes.

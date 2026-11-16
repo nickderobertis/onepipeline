@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "command": [
+    "node",
+    "scripts/git-reads-compare.mjs",
+    "compare",
+    "baseline=/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-2/sides/baseline",
+    "batched=/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/sides/batched",
+    "native=/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/sides/native"
+  ],
+  "original_execution_commit": "c7977aa636d9717f0f2cb02e20c7a0ad2c6103df",
+  "reader_source_commit": "33edc69c73a4b3cc617307b312449873f9b50ee9",
+  "runtime_validation_commit": "074446536a2001ac3323596fbf6f235a83202396",
+  "stdout_sha256": "b5b18636e63c90b5c4930053c6c51ddc1103c24a0e6a20d264328239947db712",
+  "stdout_file": "final-readers-comparison.md.gz",
+  "exit_status": 0,
+  "stderr_bytes": 0,
+  "scope": "Baseline two accepted points; first two eligible chronological batched/native jobs per platform. Rejected reuse and unmeasured combination never priced. Finished-commit re-execution is recorded in the authoring report, with exact stdout compared to this archive.",
+  "selected_points": {
+    "baseline": "43684231509/1,2 all platforms",
+    "batched": "43753064453 Linux2,3;macOS1,2;Windows1,3",
+    "native": "43753067613/1,2 all platforms"
+  }
+}
