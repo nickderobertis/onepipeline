@@ -32,6 +32,17 @@ Linux’s positive estimate and Windows’ negative estimate are both inside obs
 
 Each row links the committed facts capsule. The run/job log and listed test-profile artifact are the source of every figure in that row. Pre-e2e time includes checkout, quiet archive compilation and earlier tiers; it is not compile-only time. Quiet builds do not expose a separate compile duration. Pricing uses e2e minutes rather than cold-compile job minutes. The complete final comparison output below prints every start/adopt mean, completed/observed sample count, excluded-record counter and name-set digest. Means are conditional on completed processes; cancelled/truncated processes are excluded rather than assigned zero. The inherited inventory records one Linux aggregate per point overwritten by a later budget target: time scoping removes late trace starts but does not reconstruct that aggregate. This report prices nextest tier time and scoped trace lifetimes, not aggregate program-time savings from that profile.
 
+**Nx selection per side and OS (manager ruling c20.2).** This was read from the first `ci-job:` line of each OS job's log (the test-linux log line is cited first):
+
+| Side | Linux (log line) | macOS (log line) | Windows (log line) |
+| --- | --- | --- | --- |
+| before/1, 43684231509/1 | 37 (132721606859 L1206) | 39 (132721606835 L852) | 39 (132721606851 L956) |
+| before/2, 43684231509/2 | 37 (132799383400 L1192) | 39 (132799383592 L855) | 39 (132799383582 L951) |
+| contributors/1, 43751624389/1 | 37 (132926636190 L1224) | 39 (132926636261 L882) | 39 (132926635983 L975) |
+| contributors/2, 43756326338/1 | 37 (132941104723 L1218) | 39 (132941104978 L873) | 39 (132941105006 L983) |
+
+On each OS the four task lists are byte-identical, not just the same length (sha256/16 of the line after its timestamp: Linux 4fc2abf2c03d8f8e, macOS f8bfcad303ae4f49, Windows a44771aaf07d8528). The selections do not differ between sides. The Linux selection is wider than the 29 tasks a source-only change selects: it includes `github-workflows:test`, `github-workflows:test-ci-shape` and `github-workflows:budgets`, because both sides carry the measurement workflow edit. Every Linux comparison here is therefore an **expanded-workload comparison**: both sides run that same widened selection. The priced figure is the `onepipeline-e2e` tier's nextest minutes, which the extra tasks do not add to, but they share the job and its runner with it. Job minutes in the table above include those extra tasks on both sides.
+
 All these test jobs execute workflow blob db2bbe081a7b9319eb38bd014e72350b389e8b01. Before points use head 36237191db78133b709b3d893ccc11d91d2a5272 / GITHUB_SHA 37341b0a57e77d18f6db6c11c1b32d7b30fb8dac. After1 uses head dd64b7d141e0326cfeb4991b420bdb25387e0b53 / GITHUB_SHA 9852d29ba162d2c7810b4abe217fc9b1a8d7ed1d. After2 uses head ecf2eb593848478fbb97423e49c6f2ad5cfb42a5 / GITHUB_SHA 591dd36224fb3402f9f48130175a8c690b4eb524. Each after capsule independently confirms its job’s checkout from the final log. Actual workflow-blob API receipts are preserved with the hosted metadata.
 
 | Side/point | OS | Run/attempt | Job | Processor; logical cores | Job min | Pre-e2e min | E2e min | Main e2e passed/run |
