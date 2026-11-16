@@ -959,7 +959,13 @@ oneagentgraph = "0.13.0"
 # library, so below it a repository the host carries no rule for is routed to the
 # reviewed default whatever it declares. `tests/onevcs_seam.rs` holds it.
 # onevcs-testing 0.21.5 pins it exactly.
-onevcs = "0.67.0"
+# 0.67.2 is the floor: its warm host-wide recovery read reuses unchanged
+# repository state, which the unpublished read delegates to, and its
+# `git::status_unwritten` keeps an operator's own `GIT_OPTIONAL_LOCKS`, which
+# `manager_landings::an_operators_own_optional_locks_setting_is_kept` holds.
+# onevcs-testing 0.21.7 pins it exactly, so both requirements and the lock move
+# together.
+onevcs = "0.67.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1248,7 +1254,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.21.5"
+onevcs-testing = "0.21.7"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
