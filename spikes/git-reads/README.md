@@ -125,3 +125,8 @@ stalememo versuslayoutcostunknown. Human-itemsduplicateisfourthafterobservation
 versus0baseline. COMBINATIONisNOTMEASURED/rejectedbecauseitincludesunsafeReuse;
 runno combinationCI. Originalreuse/combinationtwo-valid-pointquotasareintentionally
 unmetunderthisruling. Finishafterreadinginflightbatched3/native2andclosingdemos.
+
+Reuse PR1653 closed; remote/local branch and worktree removed after all data was
+read. Native macOS point1 passed2121/2121,80.238450e2e minutes. Native attempt2
+started unchanged after fresh35657b66six-mode12e2e/18unit proof. Read batched3
+and native2, close remaining demos, then finish undera94; no reuse/combination CI.
