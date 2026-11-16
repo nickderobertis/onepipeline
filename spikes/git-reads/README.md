@@ -111,3 +111,10 @@ for its two-point measurement: report adverse/undecided result, do not retune/pr
 a new cohort. Snapshot/layout admission overhead is suspected; cheaper admission
 for nonmemoizable queries is an untested design step. Original nativeMac is now
 running; a90 withdraws cancellation, none performed.
+
+05:40UTC delta: batchedMacattempt2 job132996793757 valid2121/2121,86.517200e2e
+minutes, soMacnow2of2. SubsequentbatchedMacvalidjobsare supplementary, excluded
+frommeans. Whole-workflowattempt3 started on unchanged698a7d0e after fresh
+e0f5e5b8six-mode12e2e/18unit trace/fold. It suppliesLinuxpoint2 and the next
+eligibleWindows replacement undera84; no demoheadpush. Native/reusecurrentjobs
+continue. Actualattempt3jobs/checkout/blob/cache receipts await finished logs.

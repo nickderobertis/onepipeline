@@ -1,0 +1,14 @@
+{
+  "reader_commit": "33edc69c",
+  "source_commit": "e0f5e5b8",
+  "run": 43753064453,
+  "attempt": 2,
+  "job": 132996793757,
+  "head": "698a7d0e855c5bb04a362c385bab2508e3e4651e",
+  "github_sha": "3a841969676267c2e6cac47a0a0de12f7f77dbbc",
+  "workflow_blob": "db2bbe081a7b9319eb38bd014e72350b389e8b01",
+  "pricing_eligible": true,
+  "point": 2,
+  "proof": "full2121/2121,all2121retained,no mainfailure; firsttwochronologicalvalidMacjobscomplete, futurebatchedMacsupplementary",
+  "source": "/home/whoop/ai-orchestrator/runs/brief-process-launch-speed-2026-11-14-spikes/scratch/3469976-3/quarantine/batched/43753064453-2/test-macos"
+}
