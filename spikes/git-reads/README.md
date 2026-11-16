@@ -94,3 +94,11 @@ duplicate dispatch has no prototype answer; shipping signal now3after versus0bas
 Batched attempt2Macstarted; original nativeMacstillqueued. ReuseLinux/Windowsrunning,
 Macqueued. Completed reuse lint reports inherited vendor/onejudge workspace/lock
 finding and required-title failure; cache receipts/log preserved, no cache writes.
+
+A84: Windowsattempt2 stays quarantined after10of10stock/10of10batched passes and
+297of297same-ref Git comparisons,0mismatch. Exact hosted historical replay is
+unavailable; this does not clear the failure. Audit negative/positive calibration
+and receipts are preserved under evidence/held-adoption*. Continue unchanged
+prototype; the needed Linuxpoint2whole-workflow replacement can supply its next
+validWindows point once currentMacfinishes. Both active-path failure and3duplicate
+dispatches versus0baseline are shipping risks; investigation effort is unpriced.
