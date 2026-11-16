@@ -1,0 +1,24 @@
+{
+  "source_commit": "3430d1dd773819523986c8d0593aa70d02805192",
+  "job": 133114993964,
+  "main_summary": "Summary [2247.075s] 2155 tests run: 2155 passed (23 slow), 1 skipped",
+  "strict_passed_count": 2154,
+  "inferred": [
+    "loopcost::the_settlement_readability_latency_is_reported_from_its_journal_stamps"
+  ],
+  "missing_catalog_names": [],
+  "extra_catalog_names": [
+    "surface::version_reports_the_crate_version"
+  ],
+  "main_failed": [],
+  "version_summary": "1/1 PASS; independent surface::version_reports_the_crate_version profile",
+  "summary_citations": [
+    9849,
+    9859
+  ],
+  "coverage_audit_citations": [
+    10027,
+    10059,
+    10091
+  ]
+}
