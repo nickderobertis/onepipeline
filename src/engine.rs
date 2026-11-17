@@ -583,8 +583,14 @@ pub(crate) enum Message {
     /// what `command-exited` records.
     CommandExited(Box<(crate::graph::NodeRef, crate::payload::CommandExited)>),
     /// A guarded node's guard ended: the node, what `guard-evaluated` records, and whether
-    /// the node proceeds — where it does not, its settlement follows this.
-    GuardEvaluated(Box<(crate::graph::NodeRef, crate::payload::GuardEvaluated, bool)>),
+    /// the node proceeds or its settlement follows this.
+    GuardEvaluated(
+        Box<(
+            crate::graph::NodeRef,
+            crate::payload::GuardEvaluated,
+            crate::guard::Then,
+        )>,
+    ),
     /// The pool-maintenance sweep this driver started has maintained every
     /// identity, and this is what it did.
     Maintained(Box<crate::maintenance::PoolsMaintained>),
@@ -2820,13 +2826,13 @@ fn converge(
                 // out of flight to be started as an unguarded node would on the next pass, and
                 // one the verdict settles is settled by the `Settled` that follows this.
                 Message::GuardEvaluated(evaluated) => {
-                    let (node, evaluated, proceeds) = *evaluated;
+                    let (node, evaluated, then) = *evaluated;
                     journal.emit(
                         journal::PipelineKind::GuardEvaluated,
                         journal::labels(&paths.run, Some(node.as_str())),
                         payload_of(&evaluated)?,
                     )?;
-                    if proceeds {
+                    if then == crate::guard::Then::Proceeds {
                         in_flight.remove(node.as_str());
                         state.refresh(paths);
                         derived = None;

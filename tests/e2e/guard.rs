@@ -51,6 +51,30 @@ fn exit(name: &str) -> i64 {
         .unwrap_or_else(|| panic!("the contract states no exit for {name}"))
 }
 
+/// Whether the contract lists `item` under `key`.
+fn listed(key: &str, item: &str) -> bool {
+    stated(key)
+        .as_array()
+        .unwrap_or_else(|| panic!("the contract states no list {key}"))
+        .iter()
+        .any(|listed| listed == item)
+}
+
+/// How the contract says `results` and `status` print a `not-needed` node, with `detail`
+/// where it has one.
+fn rendered(detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => stated("rendered")["with_detail"]
+            .as_str()
+            .expect("the contract states the rendering")
+            .replace("<detail>", detail),
+        None => stated("rendered")["without_detail"]
+            .as_str()
+            .expect("the contract states the rendering")
+            .to_owned(),
+    }
+}
+
 /// Where the contract says a guard's output is kept, for this run and node.
 fn log_of(world: &World, run: &str, node: &str) -> PathBuf {
     let template = stated("log");
@@ -290,10 +314,22 @@ fn the_loader_refuses_every_invalid_guard_naming_the_node_and_the_field() {
             },
             "guard_timeout_seconds",
         ),
+        // The id names the guard's log, so it is one file name on every host.
+        (
+            "logname",
+            {
+                let mut node = agent("g", &[]);
+                node["id"] = json!("g:elsewhere");
+                node["guard"] = json!(["true"]);
+                node
+            },
+            "id",
+        ),
     ];
     for (name, node, field) in &cases {
         let project = world.plan(name, &plan_of(name, vec![node.clone()]));
-        let named = |said: &str| said.contains("node 'g'") && said.contains(field);
+        let id = node["id"].as_str().expect("an id");
+        let named = |said: &str| said.contains(&format!("node '{id}'")) && said.contains(field);
         let checked = world.run(&["plan", "check", &project]);
         checked.exited(1);
         assert!(named(&checked.stdout), "{name}: {}", checked.stdout);
@@ -314,7 +350,13 @@ fn the_loader_refuses_every_invalid_guard_naming_the_node_and_the_field() {
     });
     for (name, node, field) in &cases {
         let mut node = node.clone();
-        let id = format!("added-{name}");
+        // A fresh id the run does not hold, refused for the same reason as at launch: the
+        // id case keeps the separator its refusal is about.
+        let id = if *field == "id" {
+            format!("added:{name}")
+        } else {
+            format!("added-{name}")
+        };
         node["id"] = json!(id);
         let replied = world.run_with_stdin(
             &["reply", "live"],
@@ -335,7 +377,7 @@ fn the_loader_refuses_every_invalid_guard_naming_the_node_and_the_field() {
     assert!(
         !added.iter().any(|event| event["labels"]["node"]
             .as_str()
-            .is_some_and(|node| node.starts_with("added-"))),
+            .is_some_and(|node| node.starts_with("added"))),
         "a refused node reached the run's journal"
     );
 }
@@ -353,6 +395,16 @@ fn a_guard_exiting_3_settles_each_kind_not_needed_and_nothing_is_started_for_it(
     let said = "nothing for this node to do";
     let not_needed = counting_guard(&world, "not-needed", exit("not_needed"), said);
     let silent = counting_guard(&world, "silent", exit("not_needed"), "");
+    let chatty = script(
+        &world,
+        "chatty",
+        &format!(
+            "echo 'EARLY-MARKER' >&2\n\
+             i=0; while [ $i -lt 100 ]; do echo 'padding padding padding padding padding' >&2; \
+             i=$((i+1)); done\necho 'LATE-MARKER' >&2\necho '   ' >&2\nexit {}",
+            exit("not_needed")
+        ),
+    );
     let ran = at(&world, "command.ran");
     let work = script(&world, "work", &format!("touch '{ran}'"));
     let fired = at(&world, "success.fired");
@@ -372,7 +424,11 @@ fn a_guard_exiting_3_settles_each_kind_not_needed_and_nothing_is_started_for_it(
                 ),
                 guarded(human("approve", &[]), &not_needed),
                 guarded(agent("quiet", &[]), &silent),
-                agent("after", &["direct", "shipped", "cmd", "approve", "quiet"]),
+                guarded(agent("chatty", &[]), &chatty),
+                agent(
+                    "after",
+                    &["direct", "shipped", "cmd", "approve", "quiet", "chatty"],
+                ),
             ],
         ),
     );
@@ -395,8 +451,7 @@ fn a_guard_exiting_3_settles_each_kind_not_needed_and_nothing_is_started_for_it(
         assert_eq!(settled["detail"], json!(said), "{node}: {settled}");
         let line = results_line(&world, run, node);
         assert!(
-            line.trim_end()
-                .ends_with(&format!("done ({outcome}): {said}")),
+            line.trim_end().ends_with(&rendered(Some(said))),
             "{node}: {line}"
         );
         let evaluated: Vec<Value> = world
@@ -406,6 +461,7 @@ fn a_guard_exiting_3_settles_each_kind_not_needed_and_nothing_is_started_for_it(
             .collect();
         assert_eq!(evaluated.len(), 1, "{node}: {evaluated:?}");
         assert_eq!(evaluated[0]["payload"]["verdict"], "not-needed");
+        assert!(listed("verdicts", "not-needed"));
         assert_eq!(evaluated[0]["payload"]["ending"], "exited");
         assert_eq!(evaluated[0]["payload"]["exit_code"], exit("not_needed"));
         assert!(
@@ -458,19 +514,35 @@ fn a_guard_exiting_3_settles_each_kind_not_needed_and_nothing_is_started_for_it(
 
     let status = world.run(&["status", run]);
     for node in guarded_kinds {
-        status.out_has(&format!("  {node}: done ({outcome}): {said}\n"));
+        status.out_has(&format!("  {node}: {}\n", rendered(Some(said))));
     }
-    status.out_has(&format!("  quiet: done ({outcome})\n"));
+    status.out_has(&format!("  quiet: {}\n", rendered(None)));
+    let document: Value = serde_json::from_str(&world.run(&["results", run, "--json"]).stdout)
+        .expect("results --json is JSON");
+    assert_eq!(document["schema_version"], stated("results_schema_version"));
     let quiet = result(&world, run, "quiet");
     assert_eq!(quiet["outcome"], json!(outcome), "{quiet}");
     assert!(quiet.get("detail").is_none(), "{quiet}");
     assert!(
         results_line(&world, run, "quiet")
             .trim_end()
-            .ends_with(&format!("done ({outcome})")),
+            .ends_with(&rendered(None)),
         "{}",
         results_line(&world, run, "quiet")
     );
+    // A guard saying more than the detail keeps leaves only the end of it there, trimmed;
+    // its log keeps the whole.
+    let chatty = result(&world, run, "chatty");
+    let detail = chatty["detail"].as_str().expect("a detail");
+    assert!(detail.ends_with("LATE-MARKER"), "{detail}");
+    assert!(!detail.contains("EARLY-MARKER"), "{detail}");
+    assert!(
+        detail.len() as u64 <= stated("detail_tail_bytes").as_u64().expect("a bound"),
+        "{} bytes",
+        detail.len()
+    );
+    let log = std::fs::read_to_string(log_of(&world, run, "chatty")).expect("its log");
+    assert!(log.contains("EARLY-MARKER") && log.contains("LATE-MARKER"));
 
     assert!(dispatched(&world, run, "after"));
     assert_eq!(result(&world, run, "after")["status"], "done");
@@ -564,6 +636,7 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
             .find(|event| event["labels"]["node"] == node)
             .unwrap_or_else(|| panic!("{node} has no verdict: {}", world.dump()));
         assert_eq!(evaluated["payload"]["verdict"], "needed", "{node}");
+        assert!(listed("verdicts", "needed"));
         assert_eq!(evaluated["payload"]["exit_code"], exit("needed"), "{node}");
         assert!(
             position(&world, run, "guard-evaluated", node) < position(&world, run, started, node),
@@ -590,6 +663,13 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
         world.root.join("command.ran").is_file(),
         "the command never ran"
     );
+    // Raised by the driver's own pass once the wait is recorded, so waited for on the
+    // store's index rather than read once.
+    let key = format!("run:{run}#approve");
+    world.until("the human node's item to be raised", |world| {
+        std::fs::read_to_string(world.runs.join("human-items/index.json"))
+            .is_ok_and(|index| index.contains(&key))
+    });
     let items = open_items(&world);
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["item"]["dedup_key"], format!("run:{run}#approve"));
@@ -625,8 +705,9 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
     world.run(&["stop", run]);
 }
 
-/// A guard exiting 1, a guard naming a program that does not exist and a guard outliving a
-/// `guard_timeout_seconds` of two seconds each settle their node `failed` with outcome
+/// A guard exiting 1, a guard naming a program that does not exist, a guard outliving a
+/// `guard_timeout_seconds` of two seconds and — on Unix — a guard a signal ends each settle
+/// their node `failed` with outcome
 /// `guard-failed`, the detail naming the cause — never `not-needed` — and the node behind
 /// each is not run. The timed-out guard's whole process tree is stopped.
 #[test]
@@ -636,28 +717,15 @@ fn a_guard_that_fails_cannot_start_or_times_out_settles_guard_failed_and_holds_i
     let mut slow = guarded(agent("slow", &[]), &holding_guard(&world, "slow"));
     slow["guard_timeout_seconds"] = json!(2);
     let run = "guardfailed";
-    let project = world.plan(
-        run,
-        &plan_of(
-            run,
-            vec![
-                guarded(agent("broken", &[]), &broken),
-                agent("after-broken", &["broken"]),
-                guarded(agent("missing", &[]), &world.root.join("no-such-guard")),
-                agent("after-missing", &["missing"]),
-                slow,
-                agent("after-slow", &["slow"]),
-            ],
-        ),
-    );
-    let started = std::time::Instant::now();
-    world.run(&["start", &project, "--attach"]).settled();
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(50),
-        "the run waited out the guard rather than its deadline"
-    );
-    let failed = word("outcomes", "failed");
-    for (node, ending, says) in [
+    let mut nodes = vec![
+        guarded(agent("broken", &[]), &broken),
+        agent("after-broken", &["broken"]),
+        guarded(agent("missing", &[]), &world.root.join("no-such-guard")),
+        agent("after-missing", &["missing"]),
+        slow,
+        agent("after-slow", &["slow"]),
+    ];
+    let mut cases = vec![
         (
             "broken",
             "exited",
@@ -669,7 +737,28 @@ fn a_guard_that_fails_cannot_start_or_times_out_settles_guard_failed_and_holds_i
             vec!["the guard could not be started"],
         ),
         ("slow", "timed-out", vec!["the guard timed out after 2 s"]),
-    ] {
+    ];
+    if cfg!(unix) {
+        nodes.push(guarded(
+            agent("signalled", &[]),
+            &script(&world, "signalled", "kill -9 $$"),
+        ));
+        nodes.push(agent("after-signalled", &["signalled"]));
+        cases.push((
+            "signalled",
+            "exited",
+            vec!["the guard was ended by a signal"],
+        ));
+    }
+    let project = world.plan(run, &plan_of(run, nodes));
+    let started = std::time::Instant::now();
+    world.run(&["start", &project, "--attach"]).settled();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(50),
+        "the run waited out the guard rather than its deadline"
+    );
+    let failed = word("outcomes", "failed");
+    for (node, ending, says) in cases {
         let settled = result(&world, run, node);
         assert_eq!(settled["status"], "failed", "{node}: {settled}");
         assert_eq!(settled["outcome"], json!(failed), "{node}: {settled}");
@@ -683,6 +772,7 @@ fn a_guard_that_fails_cannot_start_or_times_out_settles_guard_failed_and_holds_i
             .find(|event| event["labels"]["node"] == node)
             .expect("a verdict");
         assert_eq!(evaluated["payload"]["verdict"], "failed", "{node}");
+        assert!(listed("verdicts", "failed"));
         assert_eq!(evaluated["payload"]["ending"], ending, "{node}");
         assert!(stated("endings")
             .as_array()

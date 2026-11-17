@@ -1148,7 +1148,7 @@ impl RunState {
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
         let settled = self.settled();
         if let Some(mut derived) = derived_already(&self.graph, &settled, &self.cross_dag) {
-            self.guards_unanswered(&mut derived);
+            self.ready_until_guard_answers(&mut derived);
             return derived;
         }
         let mut derived = crate::graph::derive(&self.graph, &settled, &|dependency| {
@@ -1156,7 +1156,7 @@ impl RunState {
         });
         crate::loopstats::statuses_derived();
         remember_derived(&self.graph, &settled, &self.cross_dag, &derived);
-        self.guards_unanswered(&mut derived);
+        self.ready_until_guard_answers(&mut derived);
         derived
     }
 
@@ -1167,7 +1167,7 @@ impl RunState {
     ) -> BTreeMap<String, NodeStatus> {
         crate::loopstats::statuses_derived();
         let mut derived = crate::graph::derive(&self.graph, &self.settled(), upstream);
-        self.guards_unanswered(&mut derived);
+        self.ready_until_guard_answers(&mut derived);
         derived
     }
 
@@ -1176,7 +1176,7 @@ impl RunState {
     /// holds its dependents and no item is raised until the guard has answered. Applied
     /// over the derivation rather than inside it, since what a guard said is this run's
     /// record and not the graph's.
-    fn guards_unanswered(&self, derived: &mut BTreeMap<String, NodeStatus>) {
+    fn ready_until_guard_answers(&self, derived: &mut BTreeMap<String, NodeStatus>) {
         for node in self.graph.iter() {
             if node.kind == crate::plan::NodeKind::Human
                 && node.guard.is_some()

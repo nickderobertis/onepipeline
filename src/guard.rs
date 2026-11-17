@@ -77,6 +77,16 @@ pub(crate) fn started(paths: &RunPaths, node: &Node, argv: &Argv) -> GuardStarte
     }
 }
 
+/// What follows a guard's `guard-evaluated` for its node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Then {
+    /// The node proceeds, as an unguarded node would: it comes out of flight and is
+    /// started on the loop's next pass.
+    Proceeds,
+    /// The node's settlement follows, as its own message.
+    SettlementFollows,
+}
+
 /// What a guard's ending comes to: what `guard-evaluated` records, and the settlement the
 /// node takes — none where the node is needed and proceeds.
 pub(crate) struct Evaluated {
@@ -124,11 +134,12 @@ pub(crate) fn spawn(
             // A node the loop started has an identity; one without is a node the loader
             // refused, and nothing is sent for it but its settlement.
             if let Some(named) = crate::graph::NodeRef::of(&node) {
-                let _ = tx.send(Message::GuardEvaluated(Box::new((
-                    named,
-                    record,
-                    settlement.is_none(),
-                ))));
+                let then = if settlement.is_some() {
+                    Then::SettlementFollows
+                } else {
+                    Then::Proceeds
+                };
+                let _ = tx.send(Message::GuardEvaluated(Box::new((named, record, then))));
             }
             if let Some(settlement) = settlement {
                 let (recorded, _) = std::sync::mpsc::channel();
@@ -183,7 +194,9 @@ fn evaluate(
         Ended::Exited { exit_code, .. } if exit_code == Some(0) => {
             let ending = CommandEnding::Exited { exit_code };
             // A cancellation that reached the node as its guard said *needed* is still a
-            // cancellation: nothing is started for a node a manager has stopped.
+            // cancellation: nothing is started for a node a manager has stopped. A race no
+            // journey can stage on purpose — the cancel and the exit within one poll — so it
+            // is held by this module's `each_ending_is_the_verdict_and_settlement_the_contract_names`.
             if cancel.is_cancelled() {
                 return cancelled(GuardVerdict::Needed, ending);
             }
@@ -225,6 +238,7 @@ fn evaluate(
             CommandEnding::NotStarted,
             format!("the guard could not be started: {why}"),
         ),
+        // llmlint: ignore[changed_behavior_has_e2e] reached only where the host refuses to say whether a child it started has exited (`try_wait` erring), which no plan or verb produces; a command reaches the same runner arm the same way and no journey stages it either. What it must do — fail rather than read as not needed — is the shared `failed` above, which the failure journey in `tests/e2e/guard.rs` drives.
         Ended::Unwaitable(why) => failed(
             CommandEnding::Exited { exit_code: None },
             with_tail(format!("the guard could not be waited for: {why}"), tail),
