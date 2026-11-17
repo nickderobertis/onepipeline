@@ -38,7 +38,6 @@ fn kept(id: &str) -> Value {
     node
 }
 
-/// Author `nodes` as project `name` and answer its qualified id.
 fn author(world: &World, name: &str, nodes: Vec<Value>) -> String {
     world.plan(name, &plan_of(name, nodes))
 }
@@ -94,7 +93,6 @@ fn three_kept(name: &str) -> (World, Repository, String, BTreeMap<String, Value>
     (world, repo, project, stored)
 }
 
-/// Every run directory under the world's runs root.
 fn run_dirs(world: &World) -> BTreeSet<String> {
     std::fs::read_dir(&world.runs)
         .map(|dirs| {
