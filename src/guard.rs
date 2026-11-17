@@ -37,7 +37,7 @@ use crate::executor::CancellationToken;
 use crate::filter::Argv;
 use crate::graph::NodeStatus;
 use crate::ledger::{LaunchRecord, RunPaths};
-use crate::payload::{CommandEnding, GuardEvaluated, GuardStarted, GuardVerdict};
+use crate::payload::{CommandEnding, Exited, GuardEvaluated, GuardStarted, GuardVerdict};
 use crate::plan::Node;
 
 /// The outcome a node its guard found not needed settles `done` under.
@@ -165,95 +165,136 @@ fn evaluate(
     duration_ms: u64,
     cancel: &CancellationToken,
 ) -> Evaluated {
-    let failed = |ending: CommandEnding, detail: String| Evaluated {
-        record: GuardEvaluated {
-            verdict: GuardVerdict::Failed,
-            ending,
-            duration_ms,
-        },
-        settlement: Some(Settlement {
-            detail: Some(detail),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
-        }),
-    };
-    let cancelled = |verdict: GuardVerdict, ending: CommandEnding| Evaluated {
+    let evaluated = |verdict: GuardVerdict, settlement: Option<Settlement>| Evaluated {
         record: GuardEvaluated {
             verdict,
-            ending,
             duration_ms,
         },
-        settlement: Some(Settlement {
-            detail: Some(
-                "the node was cancelled while its guard ran, so its process tree was stopped"
-                    .to_owned(),
-            ),
-            ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
-        }),
+        settlement,
+    };
+    let failed = |ending: CommandEnding, detail: String| {
+        evaluated(
+            GuardVerdict::Failed { ending },
+            Some(Settlement {
+                detail: Some(detail),
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
+            }),
+        )
+    };
+    let cancelled = |verdict: GuardVerdict| {
+        evaluated(
+            verdict,
+            Some(Settlement {
+                detail: Some(
+                    "the node was cancelled while its guard ran, so its process tree was \
+                     stopped"
+                        .to_owned(),
+                ),
+                ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
+            }),
+        )
     };
     match ended {
-        Ended::Exited { exit_code, .. } if exit_code == Some(0) => {
-            let ending = CommandEnding::Exited { exit_code };
+        Ended::Exited { exit_code: Some(0) } => {
+            let verdict = GuardVerdict::Needed {
+                ending: Exited::Exited,
+                exit_code: 0,
+            };
             // A cancellation that reached the node as its guard said *needed* is still a
             // cancellation: nothing is started for a node a manager has stopped. A race no
             // journey can stage on purpose — the cancel and the exit within one poll — so it
             // is held by this module's `each_ending_is_the_verdict_and_settlement_the_contract_names`.
             if cancel.is_cancelled() {
-                return cancelled(GuardVerdict::Needed, ending);
+                return cancelled(verdict);
             }
-            Evaluated {
-                record: GuardEvaluated {
-                    verdict: GuardVerdict::Needed,
-                    ending,
-                    duration_ms,
-                },
-                settlement: None,
-            }
+            evaluated(verdict, None)
         }
-        Ended::Exited { exit_code, .. } if exit_code == Some(NOT_NEEDED_EXIT) => {
+        Ended::Exited {
+            exit_code: Some(NOT_NEEDED_EXIT),
+        } => {
             let said = String::from_utf8_lossy(tail);
             let said = said.trim();
-            Evaluated {
-                record: GuardEvaluated {
-                    verdict: GuardVerdict::NotNeeded,
-                    ending: CommandEnding::Exited { exit_code },
-                    duration_ms,
+            evaluated(
+                GuardVerdict::NotNeeded {
+                    ending: Exited::Exited,
+                    exit_code: NOT_NEEDED_EXIT,
                 },
-                settlement: Some(Settlement {
+                Some(Settlement {
                     detail: (!said.is_empty()).then(|| said.to_owned()),
                     ..Settlement::plain(&node.id, NodeStatus::Done, Some(NOT_NEEDED))
                 }),
-            }
+            )
         }
-        Ended::Exited { exit_code, .. } => failed(
-            CommandEnding::Exited { exit_code },
-            with_tail(
-                match exit_code {
-                    Some(code) => format!("the guard exited with status {code}"),
-                    None => "the guard was ended by a signal".to_owned(),
-                },
-                tail,
-            ),
-        ),
-        Ended::NotStarted(why) => failed(
-            CommandEnding::NotStarted,
-            format!("the guard could not be started: {why}"),
-        ),
+        Ended::Cancelled => cancelled(GuardVerdict::Failed {
+            ending: CommandEnding::Cancelled,
+        }),
         // llmlint: ignore[changed_behavior_has_e2e] reached only where the host refuses to say whether a child it started has exited (`try_wait` erring), which no plan or verb produces; a command reaches the same runner arm the same way and no journey stages it either. What it must do — fail rather than read as not needed — is the shared `failed` above, which the failure journey in `tests/e2e/guard.rs` drives.
         Ended::Unwaitable(why) => failed(
             CommandEnding::Exited { exit_code: None },
             with_tail(format!("the guard could not be waited for: {why}"), tail),
         ),
+        Ended::Exited { exit_code } => {
+            let ending = CommandEnding::Exited { exit_code };
+            failed(ending, with_tail(failure(node, ending), tail))
+        }
+        Ended::NotStarted(why) => failed(
+            CommandEnding::NotStarted,
+            format!("the guard could not be started: {why}"),
+        ),
         Ended::TimedOut => failed(
             CommandEnding::TimedOut,
-            with_tail(
-                format!(
-                    "the guard timed out after {} s, so its process tree was stopped",
-                    timeout_of(node)
-                ),
-                tail,
-            ),
+            with_tail(failure(node, CommandEnding::TimedOut), tail),
         ),
-        Ended::Cancelled => cancelled(GuardVerdict::Failed, CommandEnding::Cancelled),
+    }
+}
+
+/// What a failed guard's detail opens with, before its stderr: its exit status, the signal
+/// that ended it, or the deadline it outlived.
+fn failure(node: &Node, ending: CommandEnding) -> String {
+    match ending {
+        CommandEnding::Exited {
+            exit_code: Some(code),
+        } => format!("the guard exited with status {code}"),
+        CommandEnding::Exited { exit_code: None } => "the guard was ended by a signal".to_owned(),
+        CommandEnding::TimedOut => format!(
+            "the guard timed out after {} s, so its process tree was stopped",
+            timeout_of(node)
+        ),
+        CommandEnding::NotStarted => "the guard could not be started".to_owned(),
+        CommandEnding::Cancelled => "the guard was stopped by a cancellation".to_owned(),
+    }
+}
+
+/// The settlement a verdict journalled for `node`'s current attempt leads to, for a node
+/// whose driver stopped between journalling that verdict and settling it: the adopting
+/// driver settles it from the record rather than running its guard again. `None` for a
+/// verdict that settles nothing an adopter owes — *needed*, which proceeds, and a
+/// cancellation, whose park the adopter keeps.
+///
+/// What the guard said on stderr went with the driver that read it, so the detail names
+/// the log that kept it.
+pub(crate) fn recovered(
+    paths: &RunPaths,
+    node: &Node,
+    verdict: GuardVerdict,
+) -> Option<Settlement> {
+    let kept = format!(
+        "its verdict was journalled before its driver stopped, and what it said is kept in {}",
+        log_of(paths, &node.id).display()
+    );
+    match verdict {
+        GuardVerdict::Needed { .. }
+        | GuardVerdict::Failed {
+            ending: CommandEnding::Cancelled,
+        } => None,
+        GuardVerdict::NotNeeded { .. } => Some(Settlement {
+            detail: Some(format!("the guard found the node not needed; {kept}")),
+            ..Settlement::plain(&node.id, NodeStatus::Done, Some(NOT_NEEDED))
+        }),
+        GuardVerdict::Failed { ending } => Some(Settlement {
+            detail: Some(format!("{}; {kept}", failure(node, ending))),
+            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
+        }),
     }
 }
 
@@ -275,15 +316,17 @@ mod tests {
     fn each_ending_is_the_verdict_and_settlement_the_contract_names() {
         let live = CancellationToken::new();
         let exited = |code: i32| Ended::Exited {
-            success: code == 0,
             exit_code: Some(code),
         };
         let needed = evaluate(&node(), exited(0), b"ignored", 5, &live);
-        assert_eq!(needed.record.verdict, GuardVerdict::Needed);
+        assert!(matches!(needed.record.verdict, GuardVerdict::Needed { .. }));
         assert!(needed.settlement.is_none());
 
         let not_needed = evaluate(&node(), exited(3), b"\n  nothing to do  \n", 5, &live);
-        assert_eq!(not_needed.record.verdict, GuardVerdict::NotNeeded);
+        assert!(matches!(
+            not_needed.record.verdict,
+            GuardVerdict::NotNeeded { .. }
+        ));
         let settled = not_needed.settlement.expect("it settles");
         assert_eq!(settled.status, NodeStatus::Done);
         assert_eq!(settled.outcome.as_deref(), Some(NOT_NEEDED));
@@ -293,13 +336,7 @@ mod tests {
 
         for (ended, says) in [
             (exited(1), "exited with status 1"),
-            (
-                Ended::Exited {
-                    success: false,
-                    exit_code: None,
-                },
-                "ended by a signal",
-            ),
+            (Ended::Exited { exit_code: None }, "ended by a signal"),
             (
                 Ended::NotStarted("no such file".to_owned()),
                 "the guard could not be started: no such file",
@@ -307,7 +344,7 @@ mod tests {
             (Ended::TimedOut, "the guard timed out after 300 s"),
         ] {
             let failed = evaluate(&node(), ended, b"why", 5, &live);
-            assert_eq!(failed.record.verdict, GuardVerdict::Failed);
+            assert!(matches!(failed.record.verdict, GuardVerdict::Failed { .. }));
             let settled = failed.settlement.expect("it settles");
             assert_eq!(settled.status, NodeStatus::Failed);
             assert_eq!(settled.outcome.as_deref(), Some(GUARD_FAILED));
@@ -315,10 +352,33 @@ mod tests {
             assert!(detail.contains(says), "{detail}");
         }
 
+        // The typed verdict is written as the flat record the contract names, and read back.
+        for (evaluated, wire) in [
+            (
+                not_needed.record,
+                serde_json::json!({"verdict": "not-needed", "ending": "exited", "exit_code": 3,
+                                   "duration_ms": 5}),
+            ),
+            (
+                evaluate(&node(), Ended::TimedOut, b"", 5, &live).record,
+                serde_json::json!({"verdict": "failed", "ending": "timed-out", "duration_ms": 5}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&evaluated).expect("it writes"), wire);
+            assert_eq!(
+                serde_json::from_value::<GuardEvaluated>(wire).expect("it reads"),
+                evaluated
+            );
+        }
+        assert!(serde_json::from_value::<GuardEvaluated>(serde_json::json!(
+            {"verdict": "needed", "ending": "timed-out", "duration_ms": 5}
+        ))
+        .is_err());
+
         let stopped = CancellationToken::new();
         stopped.cancel();
         let raced = evaluate(&node(), exited(0), b"", 5, &stopped);
-        assert_eq!(raced.record.verdict, GuardVerdict::Needed);
+        assert!(matches!(raced.record.verdict, GuardVerdict::Needed { .. }));
         assert_eq!(
             raced.settlement.expect("a cancelled node settles").status,
             NodeStatus::Cancelled

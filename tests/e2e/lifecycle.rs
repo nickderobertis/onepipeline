@@ -8940,10 +8940,19 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
     std::fs::create_dir_all(&record).expect("the hook's record directory");
     let hook = opens_the_last_slot_on(&world, &record, 1);
     world.script("service.work", "the worker wrote this\n");
-    let path = world.plan(
-        "poolexhausted",
-        &plan_of("poolexhausted", vec![lifecycle("service", &[])]),
+    // Guarded, so the refusal's re-queue is also held to its attempt: a guard that said the
+    // node is needed is not asked again when the identity sends the node back to the queue.
+    let guarded = crate::harness::posix_script(
+        &world.root,
+        "needed",
+        &format!(
+            "echo ran >> '{}'\nexit 0",
+            crate::harness::shell_path(&world.root.join("guard.ran"))
+        ),
     );
+    let mut service = lifecycle("service", &[]);
+    service["guard"] = serde_json::json!([guarded.display().to_string()]);
+    let path = world.plan("poolexhausted", &plan_of("poolexhausted", vec![service]));
     let mut launcher = world.cmd(&["start", &path, "--attach", "--dispatch-env-hook", &hook]);
     let mut launcher = launcher
         .stdout(std::process::Stdio::piped())
@@ -9054,6 +9063,17 @@ fn a_session_open_refused_as_exhausted_returns_the_node_to_queued_and_it_dispatc
     let settled = world.events_of(&run, "node-settled");
     assert_eq!(settled.len(), 1, "{settled:#?}");
     assert_eq!(settled[0]["payload"]["outcome"], "merged", "{settled:#?}");
+    // Its guard answered once, before the first dispatch, and the re-queue asked it nothing.
+    assert_eq!(
+        std::fs::read_to_string(world.root.join("guard.ran"))
+            .expect("the guard ran")
+            .lines()
+            .count(),
+        1,
+        "the re-queued node's guard was asked again\n{}",
+        why(&world, &run)
+    );
+    assert_eq!(world.events_of(&run, "guard-evaluated").len(), 1);
     // The hold began before the second dispatch and cleared on the record —
     // written after that pass's dispatches, as every hold transition is.
     assert!(

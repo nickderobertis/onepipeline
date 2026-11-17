@@ -1175,3 +1175,81 @@ fn adopt_reuses_a_journalled_verdict_and_runs_again_a_guard_its_driver_died_in()
     let log = std::fs::read_to_string(log_of(&world, run, "asked")).expect("its log");
     assert_eq!(log.matches("still nothing to do").count(), 1, "{log}");
 }
+
+/// A driver stopped after journalling a guard's verdict and before the settlement that
+/// verdict leads to: the adopting driver settles the node from the journalled verdict —
+/// `not-needed` or `guard-failed` as it said — without running the guard again, its detail
+/// naming the log that kept what the guard said.
+///
+/// Unix only, as the other teardown journeys here are. The driver is held at that moment by
+/// the engine's own debug failpoint, `after-guard-evaluated`, so the stop lands there every
+/// time rather than by luck.
+#[cfg(unix)]
+#[test]
+fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled() {
+    let world = World::new("guard-answered");
+    let seam = world.root.join("failpoints");
+    std::fs::create_dir_all(&seam).expect("the failpoint directory");
+    let world = world.with_env("ONEPIPELINE_REVIEW_FAILPOINT", &seam.to_string_lossy());
+    for (code, status, outcome) in [
+        (exit("not_needed"), "done", word("outcomes", "not_needed")),
+        (1, "failed", word("outcomes", "failed")),
+    ] {
+        let run = format!("answered{code}");
+        // Its own id per run: the guards of every run here write to one record.
+        let asked = format!("asked-{code}");
+        let guard = counting_guard(&world, &format!("answers{code}"), code, "said once");
+        let project = world.plan(
+            &run,
+            &plan_of(
+                &run,
+                vec![
+                    guarded(agent(&asked, &[]), &guard),
+                    agent("after", &[asked.as_str()]),
+                ],
+            ),
+        );
+        let stage = seam.join("after-guard-evaluated");
+        let reached = seam.join("after-guard-evaluated.reached");
+        let _ = std::fs::remove_file(&reached);
+        std::fs::write(&stage, "").expect("the failpoint is armed");
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the driver to stop after the verdict", |_| {
+            reached.is_file()
+        });
+        kill_driver(&world, &run);
+        std::fs::remove_file(&stage).expect("the failpoint is disarmed");
+        assert_eq!(count(&world, &run, "guard-evaluated", &asked), 1);
+        assert!(
+            !settled_as(&world, &run, &asked, status),
+            "{run}: settled before the driver stopped"
+        );
+
+        let adopted = world.run(&["adopt", &run]);
+        assert!(
+            adopted.code == 0 || code != exit("not_needed"),
+            "{}",
+            adopted.stderr
+        );
+        assert_eq!(
+            guard_runs(&world, &asked),
+            1,
+            "{run}: the guard was run again"
+        );
+        assert_eq!(count(&world, &run, "guard-started", &asked), 1);
+        assert_eq!(count(&world, &run, "guard-evaluated", &asked), 1);
+        let settled = result(&world, &run, &asked);
+        assert_eq!(settled["status"], status, "{run}: {settled}");
+        assert_eq!(settled["outcome"], json!(outcome), "{run}: {settled}");
+        let detail = settled["detail"].as_str().expect("a detail");
+        assert!(
+            detail.contains(&log_of(&world, &run, &asked).display().to_string()),
+            "{run}: {detail}"
+        );
+        assert_eq!(
+            dispatched(&world, &run, "after"),
+            status == "done",
+            "{run}: the dependent's dispatch does not follow the verdict"
+        );
+    }
+}

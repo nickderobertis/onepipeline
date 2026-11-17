@@ -2832,6 +2832,8 @@ fn converge(
                         journal::labels(&paths.run, Some(node.as_str())),
                         payload_of(&evaluated)?,
                     )?;
+                    // Where a journey stops the driver between a verdict and what it leads to.
+                    crate::review::failpoint("after-guard-evaluated")?;
                     if then == crate::guard::Then::Proceeds {
                         in_flight.remove(node.as_str());
                         state.refresh(paths);
@@ -8880,6 +8882,18 @@ fn start_ready(
         // needed proceeds below exactly as an unguarded node would. In flight while it runs,
         // as a command is, so it holds a `concurrency` slot — a human node's included — and
         // is stopped by what stops a dispatch.
+        // A verdict journalled on this attempt and never settled — its driver stopped
+        // between the two — is settled from the record: a guard that answered is not asked
+        // again.
+        if let Some(settlement) = state
+            .guards_answered
+            .get(&node.id)
+            .and_then(|verdict| crate::guard::recovered(paths, &node, *verdict))
+        {
+            settle(paths, journal, &settlement)?;
+            settled_here = true;
+            continue;
+        }
         if let Some(guard) = node
             .guard
             .clone()

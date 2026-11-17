@@ -13648,6 +13648,13 @@ that design; these are the decisions it left to the build:
   cancellation that lands as the guard exits 0 is journalled `verdict: needed`, `ending:
   exited`, and the node still settles `cancelled`: nothing is started for a node a manager
   stopped.
+- **A verdict journalled and never settled is settled from the record.** The amendment says
+  `adopt` never runs again a guard whose `guard-evaluated` is journalled; where the driver
+  stopped between that record and the settlement it leads to, the adopting driver settles the
+  node from the verdict — `not-needed`, or `guard-failed` with the exit status, signal or
+  deadline the record names — rather than asking the guard again. What the guard said on
+  stderr went with the driver that read it, so that detail names `<run>/guards/<node>.log`,
+  which kept it, in place of the stderr tail.
 - **`guard-started`'s `timeout_seconds` is always written**, as the deadline the guard is
   actually held to — the node's `guard_timeout_seconds`, or 300 where it states none.
 - **A guarded human node derives `ready`, not `waiting`, until its guard says *needed*.** Its

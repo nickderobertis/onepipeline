@@ -162,14 +162,11 @@ fn run(
                 &ran.tail,
             )),
         ),
-        Ended::Exited {
-            success: true,
-            exit_code,
-        } => (
-            CommandEnding::Exited { exit_code },
+        Ended::Exited { exit_code: Some(0) } => (
+            CommandEnding::Exited { exit_code: Some(0) },
             Settlement::plain(&node.id, NodeStatus::Done, None),
         ),
-        Ended::Exited { exit_code, .. } => (
+        Ended::Exited { exit_code } => (
             CommandEnding::Exited { exit_code },
             failed(with_tail(
                 match exit_code {
@@ -209,11 +206,9 @@ fn run(
 
 /// How a program the engine ran for a node — a command node's command, or a guard — ended.
 pub(crate) enum Ended {
-    /// It exited: `success` where its status was zero, and its status where the host
-    /// reported one (none where a signal ended it).
+    /// It exited, with its status where the host reported one: zero is success, and none
+    /// is a signal ending it.
     Exited {
-        /// Whether it exited zero.
-        success: bool,
         /// Its exit status; absent where a signal ended it.
         exit_code: Option<i32>,
     },
@@ -373,7 +368,6 @@ pub(crate) fn run_program(
         match child.try_wait() {
             Ok(Some(status)) => {
                 break Ended::Exited {
-                    success: status.success(),
                     exit_code: status.code(),
                 }
             }

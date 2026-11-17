@@ -208,6 +208,13 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
     pub(crate) guards_passed: BTreeSet<String>,
+    /// The verdict each node's guard journalled on its current attempt where that verdict
+    /// settles the node, until it does: a driver that stopped between the two leaves the
+    /// adopting one to settle the node from this rather than run its guard again. Omitted
+    /// when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
+    pub(crate) guards_answered: BTreeMap<String, crate::payload::GuardVerdict>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacks: BTreeMap<String, RestackRecord>,
@@ -1453,8 +1460,15 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
         // node derives from the graph again and is started as an unguarded node would be —
         // and marks the attempt's guard answered, so it is not asked again.
         Some(journal::PipelineKind::GuardEvaluated) => {
-            let needed = payload.get("verdict").and_then(Value::as_str) == Some("needed");
-            if let (Some(node), true) = (&event.labels.node, needed) {
+            let (Some(node), Ok(evaluated)) = (
+                &event.labels.node,
+                serde_json::from_value::<crate::payload::GuardEvaluated>(Value::Object(
+                    payload.clone(),
+                )),
+            ) else {
+                return;
+            };
+            if let crate::payload::GuardVerdict::Needed { .. } = evaluated.verdict {
                 if state
                     .recorded
                     .get(node)
@@ -1463,6 +1477,10 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
                     state.recorded.remove(node);
                 }
                 state.guards_passed.insert(node.clone());
+            } else {
+                state
+                    .guards_answered
+                    .insert(node.clone(), evaluated.verdict);
             }
         }
         Some(journal::PipelineKind::NodeDispatched) => {
@@ -1499,6 +1517,8 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
             let Some(node) = &event.labels.node else {
                 return;
             };
+            // The settlement a journalled verdict owed is on the record now.
+            state.guards_answered.remove(node);
             if let Some(rework) = payload
                 .get("continued")
                 .and_then(|continued| continued.get("rework"))
@@ -2811,6 +2831,7 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
                 state.recorded.remove(node);
                 // A new attempt, whose guard is asked again.
                 state.guards_passed.remove(node);
+                state.guards_answered.remove(node);
                 // The park is over, so nothing is held by whoever made
                 // it: a later park of the same node is judged on its own
                 // author rather than on this one's.

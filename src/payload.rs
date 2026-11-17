@@ -750,17 +750,41 @@ pub(crate) struct GuardStarted {
     pub(crate) timeout_seconds: std::num::NonZeroU64,
 }
 
-/// What a guard's ending said about its node.
+/// What a guard decided, with how it ended — each verdict carrying only the endings it can
+/// have, written as the record's `verdict` beside the `ending` and `exit_code` a command's
+/// ending is written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "verdict", rename_all = "kebab-case")]
 pub(crate) enum GuardVerdict {
     /// It exited 0: the node proceeds exactly as an unguarded node would.
-    Needed,
+    Needed {
+        /// Always `exited`.
+        ending: Exited,
+        /// Its exit status, 0.
+        exit_code: i32,
+    },
     /// It exited 3: the node settles `done` with outcome `not-needed`.
-    NotNeeded,
-    /// Anything else — another exit, a guard that could not start, one past its deadline
-    /// or one stopped by a cancellation: never read as not needed.
-    Failed,
+    NotNeeded {
+        /// Always `exited`.
+        ending: Exited,
+        /// Its exit status, 3.
+        exit_code: i32,
+    },
+    /// Anything else — another exit, a signal, a guard that could not start, one past its
+    /// deadline or one stopped by a cancellation: never read as not needed.
+    Failed {
+        /// How it ended, and its exit status where it exited with one.
+        #[serde(flatten)]
+        ending: CommandEnding,
+    },
+}
+
+/// The one ending a guard that answered *needed* or *not needed* can have: it exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Exited {
+    /// It exited.
+    Exited,
 }
 
 /// `guard-evaluated`: how a guarded node's guard ended and what it decided, journalled
@@ -768,11 +792,9 @@ pub(crate) enum GuardVerdict {
 // llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct GuardEvaluated {
-    /// What the guard decided.
-    pub(crate) verdict: GuardVerdict,
-    /// How it ended, and its exit status where it exited: a command's endings.
+    /// What the guard decided, and how it ended.
     #[serde(flatten)]
-    pub(crate) ending: CommandEnding,
+    pub(crate) verdict: GuardVerdict,
     /// How long it ran, in milliseconds.
     pub(crate) duration_ms: u64,
 }
