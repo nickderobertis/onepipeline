@@ -1242,7 +1242,7 @@ impl Writeback {
     pub(crate) fn wait_until_landed(&self, within: Duration) {
         let deadline = Instant::now() + within;
         while self.still_landing() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), Duration::from_millis(50));
         }
     }
 
@@ -1803,7 +1803,7 @@ pub(crate) fn hold_landing(paths: &RunPaths, launch: &LaunchRecord) -> Option<st
                     );
                     waiting = Some((bound, Instant::now() + bound));
                 }
-                std::thread::sleep(LANDING_POLL);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), LANDING_POLL);
             }
             // llmlint: ignore-block[changed_behavior_has_e2e] an attempt holds the lock no longer
             // than its own store deadlines, each of which cancels the call it bounds, so a
@@ -1885,7 +1885,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
             );
             return;
         }
-        std::thread::sleep(left);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), left);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // Read once the wait is served, because reading it can ask the store for the home's members.

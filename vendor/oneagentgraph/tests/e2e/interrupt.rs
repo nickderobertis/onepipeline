@@ -1,0 +1,1262 @@
+//! `interrupt`: redirecting a member's in-flight turn instead of ending it.
+//!
+//! `cancel` is the only other way to change what a running member is doing, and
+//! it discards the turn — the worker's whole accumulated context goes with it and
+//! the replacement re-derives from scratch. These journeys are the difference:
+//! the turn keeps its session and does something else.
+//!
+//! Nothing about the mechanism is faked. The binary under test writes the address
+//! down, real `oneharness` opens the control socket and serves the interrupt over
+//! claude-code's own stdin control protocol, and the double at the far end is the
+//! paid harness — the one seam this suite is allowed. What the double does is
+//! answer that protocol: it parks, it is aborted, and the redirection arrives as
+//! the next turn.
+
+// llmlint: ignore-file[e2e_not_mocked] the same declaration its eight sibling
+// journey files carry, and for the same reason — see tests/e2e/support.rs: the
+// paid harness process is the one sanctioned double, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam. Here it is doubly load-bearing: what these journeys
+// drive is claude-code's stdin control protocol, and the double is the far end
+// that answers it.
+
+// The parked-turn fixture below serves the journeys that drive a *live* control
+// socket, and those are `cfg(unix)` because that is what a unix domain socket is.
+// On Windows the fixture is still compiled — so it is still type-checked and
+// still linted — with nothing calling it, which is what this allows.
+#![allow(dead_code)]
+
+use std::path::PathBuf;
+
+#[cfg(unix)]
+use crate::support::assert_session_labels;
+use oneagentgraph::control::{Turn, CONTROL_FILE};
+
+use crate::support::{
+    graph_with, partials, until, while_rewritten, Hermetic, Workspace, CONCURRENT_READS,
+};
+
+/// One run whose member is parked on a controllable turn, and the run id an
+/// operator addresses it by.
+struct Parked {
+    /// The run process, still going.
+    run: std::thread::JoinHandle<std::process::Output>,
+    /// The run an `interrupt` names.
+    id: String,
+}
+
+impl Parked {
+    /// What the run exited with, once it is over.
+    fn settled(self) -> std::process::Output {
+        self.run.join().expect("the run thread")
+    }
+}
+
+/// Start the default graph on a task that parks its agent turn, and wait until
+/// that turn is really in flight.
+///
+/// The wait is on a marker only a *controlled* turn writes, so what follows is
+/// addressed at a turn oneharness has already opened a socket for — waiting for
+/// the process instead would race the bind.
+fn parked(workspace: &Workspace, task: &str) -> Parked {
+    parked_in(workspace, task, workspace.session_store())
+}
+
+/// [`parked`], with oneharness's per-user state at `xdg` instead of the
+/// workspace's own store.
+fn parked_in(workspace: &Workspace, task: &str, xdg: &std::path::Path) -> Parked {
+    let run = {
+        let workspace_dir = workspace.path().to_path_buf();
+        let state = workspace.state();
+        let dir = workspace.dir();
+        let xdg = xdg.to_path_buf();
+        let task = task.to_string();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    &task,
+                    "--dir",
+                    &dir.display().to_string(),
+                ])
+                .current_dir(&workspace_dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env("XDG_STATE_HOME", &xdg)
+                .hermetic()
+                .output()
+                .expect("the run finishes")
+        })
+    };
+    let started = workspace.at("turn-started");
+    // Only a *controlled* turn writes this, which makes the wait a check on the
+    // control ask as well as on the turn: an oneharness that could not bind the
+    // socket refuses `--control`, onejudge retries without it, and the member
+    // runs on uncontrolled — so a timeout here is that, and the message says so.
+    until(
+        "the member's turn to be in flight — only a controlled turn writes this, so a timeout \
+         means oneharness refused `--control` and the turn ran without a lever",
+        || started.exists(),
+    );
+    Parked {
+        run,
+        id: workspace.record()["run_id"]
+            .as_str()
+            .expect("the run recorded its id")
+            .to_string(),
+    }
+}
+
+/// The build that pulls the lever in [`an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work`]:
+/// the one under test, unless `ONEAGENTGRAPH_E2E_INTERRUPTER` names another.
+///
+/// The run is always this build's, so naming a *previous release* here holds the
+/// `control.json` this build records to the reader that release ships — the
+/// record's shape is a promise to a build that is already installed. Run that
+/// way with a wrapper that execs `uv tool run --from 'oneagentgraph-cli==<x.y.z>'
+/// oneagentgraph "$@"`; unset, the journey is the ordinary one `just check` runs.
+fn interrupter() -> String {
+    std::env::var("ONEAGENTGRAPH_E2E_INTERRUPTER")
+        .ok()
+        .filter(|program| !program.is_empty())
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_oneagentgraph").to_string())
+}
+
+/// The task that parks a member's agent turn, writing the marker [`parked`]
+/// waits for.
+fn parking_task(workspace: &Workspace, did_work: Option<&PathBuf>) -> String {
+    let mut task = format!(
+        "fake:park fake:started={}",
+        workspace.at("turn-started").display()
+    );
+    if let Some(path) = did_work {
+        task.push_str(&format!(" fake:did-work={}", path.display()));
+    }
+    task
+}
+
+/// The one journey the verb exists for: an in-flight turn stops what it was
+/// doing and does the new work instead.
+///
+/// The two files are the whole assertion. `did-work` is appended by a controlled
+/// turn *after* it is past its park and past any abort, so the first turn's copy
+/// proves it never got there and the redirected turn's proves it did — and the
+/// second is the operator's own prose, delivered with the stop as one operation.
+/// A member that had merely been cancelled and restarted would have written
+/// neither: there would be no second turn on that session at all.
+///
+/// Unix-only because oneharness's turn-control socket is a unix domain socket,
+/// which is also why a Windows member reports no controllable turn — the journey
+/// below drives that answer.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
+    let workspace = Workspace::new();
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+
+    let member = parked(&workspace, &parking_task(&workspace, Some(&original_work)));
+    let run_id = member.id.clone();
+
+    // The address the run wrote down while the turn is live. It is this crate's
+    // own answer — the report that carries oneharness's cannot arrive until the
+    // member settles — so the same file is read again at the end and the two are
+    // held to each other below.
+    let control = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("worker")
+        .join("control.json");
+    until("the run to record where its turn is addressed", || {
+        control.exists()
+    });
+    let live: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&control).expect("the control record"))
+            .expect("the control record is JSON");
+    assert_eq!(live["turn"]["state"], "open", "{live}");
+
+    // A redirection oneharness will not take is refused *before* the lever is
+    // pulled: exit 2 like every other bad argument, nothing on stdout, and the
+    // turn still there for the interrupt below. Driven through the real refusal
+    // rather than a restatement of it — a control character is not message text,
+    // because it reaches a harness inside a protocol frame.
+    let unusable = workspace.run_as(
+        &interrupter(),
+        &[
+            "interrupt",
+            &run_id,
+            "worker",
+            "--input",
+            "do this\u{1b}[2Kinstead",
+        ],
+    );
+    unusable.expect_code(2);
+    assert!(
+        unusable.stderr.contains("not message text"),
+        "{}",
+        unusable.stderr
+    );
+    assert!(
+        unusable.stdout.is_empty(),
+        "a redirection that was never delivered published an event: {}",
+        unusable.stdout
+    );
+
+    let redirection = format!(
+        "fake:complete-now fake:did-work={} stop and write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted = workspace.run_as(
+        &interrupter(),
+        &["interrupt", &run_id, "worker", "--input", &redirection],
+    );
+    interrupted.expect_code(0);
+
+    // The verb answers on the stream every other producer in this stack answers
+    // on, so a supervisor watching a run sees the lever being pulled.
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["member"], "worker");
+    assert_eq!(events[0]["payload"]["delivered"], true);
+    assert_eq!(
+        events[0]["payload"]["input_bytes"],
+        redirection.len() as u64
+    );
+    assert!(
+        events[0]["payload"].get("reason").is_none(),
+        "a delivered interrupt carried a reason: {}",
+        interrupted.stdout
+    );
+    assert_eq!(events[0]["labels"]["run_id"], run_id.as_str());
+    // The redirection is part of the member's conversation, so it carries the
+    // label a consumer renders that conversation from — and the verb publishes on
+    // a stream of its own, which is what the value names. This is the one journey
+    // that produces a real `turn-interrupted`, so it is where that half of the
+    // rule is held.
+    assert_eq!(
+        assert_session_labels(&interrupted),
+        ["turn-interrupted".to_string()].into_iter().collect(),
+        "{}",
+        interrupted.stdout
+    );
+
+    let output = member.settled();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before — the turn was not \
+         stopped, only added to"
+    );
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(
+        did.contains("stop and write the summary instead"),
+        "the turn that ran after the interrupt did not do what the operator asked: {did:?}"
+    );
+
+    // The drift gate under the live address: once the member settles, the record
+    // is rewritten from onejudge's report — the handle oneharness *actually*
+    // bound, and the store it bound it in. If the two ever disagreed, an
+    // interrupt sent while the turn was live would be addressing nothing, and
+    // this is the assertion that would say so.
+    let settled: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&control).expect("the control record"))
+            .expect("the control record is JSON");
+    assert_eq!(
+        settled["turn"]["address"]["session"], live["turn"]["address"]["session"],
+        "the session a live interrupt addresses is not the one the report says was bound"
+    );
+    assert!(
+        settled["turn"]["address"]["session_dir"].is_string(),
+        "the report's own store directory did not replace the default: {settled}"
+    );
+    // The same gate for the judge side, which asks for a controllable turn of its
+    // own: the handle written down while the member ran is the one the report
+    // says its supervisor turns were bound under.
+    assert_eq!(live["supervisor"]["state"], "open", "{live}");
+    assert_eq!(
+        settled["supervisor"]["address"]["session"], live["supervisor"]["address"]["session"],
+        "the supervisor session a live note addresses is not the one the report says was bound"
+    );
+
+    // And the same lever on the same member, now that it is over: the run's own
+    // record says it settled, so the answer is that fact rather than a socket
+    // asked about a turn nobody is running.
+    let late = workspace.run_as(
+        &interrupter(),
+        &["interrupt", &run_id, "worker", "--input", "one more thing"],
+    );
+    late.expect_code(3);
+    assert!(
+        late.of_kind("turn-interrupted")[0]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("already settled")),
+        "{}",
+        late.stdout
+    );
+}
+
+/// A member on a harness with no out-of-band turn control is a **fact**, not a
+/// failure: exit 3, naming which of the exit-3 causes applies.
+///
+/// `qwen` declares no control mechanism, so `oneharness run --control` refuses
+/// the ask before it spawns anything, onejudge retries the same call without it,
+/// and the member runs exactly as it always did — the refusal reaches the report
+/// as `control: null` with the reason, which is what this verb reports. Nothing
+/// about which harnesses have a lever is decided here.
+#[test]
+fn a_member_with_no_control_mechanism_is_reported_as_a_fact_rather_than_a_failure() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.write("oneharness.judge.toml", QWEN_CHAIN);
+    workspace.graph(&uncontrollable_graph(&crate::support::fake_harness()));
+
+    let ran = workspace.run_task("fake:complete-now: a member with no lever");
+    ran.expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+
+    let interrupted =
+        workspace.run(&["interrupt", &run_id, "worker", "--input", "do this instead"]);
+    interrupted.expect_code(3);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], false);
+    let reason = events[0]["payload"]["reason"]
+        .as_str()
+        .expect("a delivery that did not land names why");
+    // Which refusal reaches the report depends on which one comes first, and
+    // that is oneharness's ordering rather than this crate's: where there are no
+    // unix domain sockets at all, no harness has a lever and the platform is the
+    // honest answer — a member on `qwen` would be told the same thing on a
+    // platform that does. Either way the answer names the fact, which is the
+    // property under test.
+    let expected = if cfg!(unix) {
+        "no out-of-band turn control"
+    } else {
+        "unix domain socket"
+    };
+    assert!(
+        reason.contains(expected),
+        "exit 3 did not say which of its causes applied: {reason}"
+    );
+    assert!(
+        interrupted.stderr.is_empty(),
+        "a fact was reported as a failure on stderr: {}",
+        interrupted.stderr
+    );
+}
+
+/// A single-sided member whose chain oneharness cannot interrupt in place opens
+/// no controllable turn, and says so — naming the candidate — rather than
+/// reaching for a socket nothing ever bound.
+///
+/// `qwen` declares no control mechanism at all, so the member's turn runs exactly
+/// as it did before single-sided members could be redirected, and the exit-3 fact
+/// is what `interrupt` reports for it: a member still settles its record with the
+/// reason, so this answer beats the run's own "already settled".
+#[test]
+fn a_single_sided_member_it_cannot_interrupt_in_place_opens_no_controllable_turn() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert!(
+        events[0]["payload"]["reason"]
+            .as_str()
+            .is_some_and(
+                |reason| reason.contains("opened no controllable turn") && reason.contains("qwen")
+            ),
+        "{}",
+        interrupted.stdout
+    );
+}
+
+/// `interrupt` reads a member's turn-control record while the run is rewriting
+/// it, and every read sees a whole record: the reason the run wrote down, never
+/// a record "this build can read" none of.
+///
+/// The writer is the run's own, [`oneagentgraph::control::write`], driven
+/// without pause, because a member rewrites its record only as its turns open.
+#[test]
+fn interrupt_reads_a_whole_control_record_while_it_is_being_rewritten() {
+    const REASON: &str = "the rewritten member opened no controllable turn";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let scratch = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter");
+    assert!(
+        scratch.join(CONTROL_FILE).is_file(),
+        "the run wrote no control record at {}",
+        scratch.display()
+    );
+
+    let failed = {
+        let scratch = scratch.clone();
+        let turn = Turn::Unavailable {
+            reason: REASON.to_string(),
+        };
+        while_rewritten(
+            move || oneagentgraph::control::write(&scratch, &turn),
+            || {
+                let interrupted = workspace.run(&["interrupt", &run_id, "reporter"]);
+                let events = interrupted.of_kind("turn-interrupted");
+                let reason = events
+                    .first()
+                    .and_then(|event| event["payload"]["reason"].as_str());
+                match (interrupted.code, reason) {
+                    (3, Some(REASON)) => Ok(()),
+                    (code, reason) => Err(format!("exit {code}, reason {reason:?}\n")),
+                }
+            },
+        )
+    };
+    assert!(
+        failed.is_empty(),
+        "{} of {CONCURRENT_READS} reads of a control record being rewritten failed:\n{}",
+        failed.len(),
+        failed.join("")
+    );
+    assert!(
+        partials(&scratch).is_empty(),
+        "rewrites left partial records: {:?}",
+        partials(&scratch)
+    );
+}
+
+/// `interrupt` reads a member's turn-control record that the run replaces
+/// while the read is in progress, and answers from the whole record it opened
+/// — never from the replacement half-read, and never as a member that recorded
+/// no turn control.
+///
+/// The replacement lands at the one instant between the reader's open and its
+/// read, by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ` lever: deterministic where the
+/// concurrent journey above catches that instant only some of the time, and on
+/// Windows the very POSIX-semantics rename over a reader's shared handle that
+/// the replace-and-read contract in `src/run.rs` rests on. The replacement is
+/// the record's own first half — the partial no reader may ever see — so the
+/// answer can only have come from the record as it stood before.
+#[test]
+fn interrupt_answers_from_the_record_it_opened_when_a_replacement_lands_under_the_read() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let file = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter")
+        .join(CONTROL_FILE);
+    let whole = std::fs::read_to_string(&file).expect("the run wrote a control record");
+    let half = workspace.write("half-control.json", &whole[..whole.len() / 2]);
+    let interrupt = |env: &[(&str, &str)]| {
+        let interrupted = workspace.run_with(&["interrupt", &run_id, "reporter"], env);
+        interrupted.expect_code(3);
+        interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+            .as_str()
+            .expect("a reason")
+            .to_string()
+    };
+
+    let lever = format!("{CONTROL_FILE}={}", half.display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a replacement landing between a reader's open and its read — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires that instant forced deterministically with no clock. The lever adds nothing of its own: the replacement is written by the store's production writer (`replace_whole`, the POSIX-semantics rename on Windows) over the production reader's held shared handle, and the verb, the binary, the record and the answer asserted on are all real; the concurrent journey above still drives the same race through the public interface alone.
+    let read = interrupt(&[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)]);
+    assert!(
+        read.contains("opened no controllable turn") && read.contains("qwen"),
+        "{read}"
+    );
+    assert!(!read.contains("recorded no turn control"), "{read}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the record reads"),
+        whole[..whole.len() / 2],
+        "the replacement did not land under the read"
+    );
+
+    // The replacement is what the name holds now, and the next read meets it:
+    // a record that does not read, reported by its file — not an absent one.
+    let after = interrupt(&[]);
+    assert!(
+        after.contains("not one this build can read")
+            && after.contains(&file.display().to_string()),
+        "{after}"
+    );
+    assert!(!after.contains("recorded no turn control"), "{after}");
+
+    // A refusal made by the filesystem itself: a directory where the record
+    // belongs reads as nothing, and is reported by its file rather than as a
+    // turn control never recorded.
+    std::fs::remove_file(&file).expect("the record removes");
+    std::fs::create_dir(&file).expect("a directory in its place");
+    let unreadable = interrupt(&[]);
+    assert!(
+        unreadable.contains("does not read") && unreadable.contains(&file.display().to_string()),
+        "{unreadable}"
+    );
+    assert!(
+        !unreadable.contains("recorded no turn control"),
+        "{unreadable}"
+    );
+}
+
+/// `interrupt` arriving while the run is replacing a member's turn-control
+/// record — at the instant a Windows rename left the name missing to an open —
+/// waits for the replacement and answers from the whole record it leaves,
+/// never as a member that recorded no turn control.
+///
+/// The replacement is made by the run's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE` lever, which holds that writer
+/// inside the record's lock with the name removed until the reader has reached
+/// the lock — see the same journey in `tests/e2e/verbs.rs`. The replacement
+/// carries a reason the run never wrote, so the answer can only have come from
+/// the replacement, read whole.
+#[test]
+fn interrupt_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
+    const REASON: &str = "the replacement's member opened no controllable turn";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let scratch = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter");
+    assert!(
+        scratch.join(CONTROL_FILE).is_file(),
+        "the run wrote no control record at {}",
+        scratch.display()
+    );
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::control::write(
+        &staged,
+        &Turn::Unavailable {
+            reason: REASON.to_string(),
+        },
+    );
+
+    let lever = format!("{CONTROL_FILE}={}", staged.join(CONTROL_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a read arriving while a replacement has the name missing — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires it forced deterministically with no clock; the replacement is the run's production writer, under its production lock, and the verb, the binary, the record and the answer asserted on are all real.
+    let interrupted = workspace.run_with(
+        &["interrupt", &run_id, "reporter"],
+        &[("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &lever)],
+    );
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .expect("a reason")
+        .to_string();
+    assert_eq!(reason, REASON);
+    assert_eq!(
+        std::fs::read(scratch.join(CONTROL_FILE)).expect("the record reads"),
+        std::fs::read(staged.join(CONTROL_FILE)).expect("the replacement reads"),
+        "the replacement did not land"
+    );
+    assert!(partials(&scratch).is_empty(), "{:?}", partials(&scratch));
+}
+
+/// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as
+/// it always ran: oneharness would interrupt Codex only by moving the turn onto
+/// its app-server, so the member opens no controllable turn, and `interrupt`
+/// answers exit 3 naming the candidate — never a lever it does not have.
+///
+/// The `codex` is found on `PATH` the way an operator's is and records every
+/// launch's argv before handing it to the harness double, which is how the
+/// transport the turn really took is read.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv a `codex` on `PATH`
+// recorded is the one witness of which transport the turn took: an `exec` turn
+// and an app-server turn settle identically on the stream. The exit code and the
+// `interrupt` answer are still read through the CLI.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_codex_chain_stays_on_exec_and_opens_no_controllable_turn() {
+    const END: &str = "--end-of-launch--";
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let record = workspace.at("codex-argv.txt");
+    let codex = workspace.write(
+        "bin/codex",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" {END} >> '{}'\nexec '{}' \"$@\"\n",
+            record.display(),
+            crate::support::fake_harness()
+        ),
+    );
+    crate::support::make_executable(&codex);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        crate::support::NO_ENV,
+    ));
+    let path = format!(
+        "{}:{}",
+        workspace.at("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    workspace
+        .run_task_with("fake:complete-now: start codex", &[("PATH", &path)])
+        .expect_code(0);
+    let recorded = std::fs::read_to_string(&record).expect("the codex on PATH recorded its argv");
+    let turns: Vec<&str> = recorded
+        .split_terminator(&format!("{END}\n"))
+        .filter(|launch| launch.trim() != "--version")
+        .collect();
+    assert!(!turns.is_empty(), "codex never started a turn: {recorded}");
+    for launch in &turns {
+        assert!(
+            launch.lines().next() == Some("exec"),
+            "a single-sided Codex turn left `codex exec`: {launch}"
+        );
+    }
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn") && reason.contains("codex"),
+        "{reason}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A single-sided member whose chain holds one candidate oneharness interrupts
+/// in place and one it does not opens **no** controllable turn: one `--control`
+/// covers the whole chain, so asking would move the Codex candidate onto its
+/// app-server should it serve. The member still runs — on the candidate that
+/// serves it — and `interrupt` answers exit 3 naming the candidate that kept it
+/// uncontrolled.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_mixed_chain_runs_uncontrolled_and_says_which_candidate() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n",
+    );
+    workspace
+        .run_task("fake:complete-now: report in")
+        .expect_code(0);
+    let report: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "report.json"))
+            .expect("the report is JSON");
+    assert_eq!(report["fallback"]["ran"], "claude-code", "{report}");
+    let record: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "control.json"))
+            .expect("the control record is JSON");
+    assert_eq!(record["turn"]["state"], "unavailable", "{record}");
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn")
+            && reason.contains("codex")
+            && !reason.contains("claude-code"),
+        "{reason}"
+    );
+}
+
+/// A single-sided member on a harness oneharness interrupts in place opens its
+/// turn with control, and an `interrupt` redirects it exactly as it redirects a
+/// two-party member's agent side: the parked turn stops, and the redirection is
+/// the turn that does the work.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_it_can_interrupt_in_place_is_redirected() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked(&workspace, &parking_task(&workspace, Some(&original_work)));
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted =
+        workspace.run(&["interrupt", &member.id, "reporter", "--input", &redirection]);
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = member.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before"
+    );
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(did.contains("write the summary instead"), "{did:?}");
+}
+
+/// A graph name of the length a real workstream gives its nodes, so the run id
+/// every session handle and socket name is built from is too.
+#[cfg(unix)]
+const LONG_GRAPH_NAME: &str = "manager-notes-reach-live-turns-oag-note-offers-attempt-2";
+
+/// `graph` renamed to [`LONG_GRAPH_NAME`].
+#[cfg(unix)]
+fn long_named(graph: &str) -> String {
+    graph.replacen("name: node-scope", &format!("name: {LONG_GRAPH_NAME}"), 1)
+}
+
+/// Park `member` of `graph` on a long run id with oneharness's state reached
+/// through a short link to a longer directory, redirect its turn, and answer
+/// the directory the link resolves to and the member's settled control record.
+///
+/// oneharness fits a socket's file name to the `sun_path` budget against the
+/// store it is handed and binds through the resolved one. On macOS every
+/// temporary store is reached that way — `/tmp` and `/var` are links into
+/// `/private` — so an address fitted to the link came out past the budget at
+/// bind: a single-sided member died unstartable and a two-party member's sides
+/// lost their lever, for control they merely asked for. The target here is a
+/// score of bytes longer than the link — enough to carry an address fitted to
+/// the link past the budget, not so much that none fits the target — which is
+/// that host's shape on any unix, so the Linux legs drive what the macOS leg
+/// does. Both sit in the journey's short session store rather than the
+/// workspace: macOS puts a workspace under `/var/folders/…/T/`, which resolves
+/// so long that no socket name fits under it, so a target there leaves the turn
+/// without a lever however the link is resolved.
+#[cfg(unix)]
+fn redirected_through_a_link(graph: &str, member: &str) -> (PathBuf, serde_json::Value) {
+    let workspace = Workspace::new();
+    workspace.graph(&long_named(graph));
+    let target = workspace.session_store().join("store-behind-a-link");
+    std::fs::create_dir_all(&target).expect("the store the link resolves to");
+    let link = workspace.session_store().join("l");
+    std::os::unix::fs::symlink(&target, &link).expect("the link the run is handed");
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+    let parked = parked_in(
+        &workspace,
+        &parking_task(&workspace, Some(&original_work)),
+        &link,
+    );
+    assert!(
+        parked.id.starts_with(LONG_GRAPH_NAME),
+        "the run id is not the long one: {}",
+        parked.id
+    );
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted = workspace.run_with(
+        &["interrupt", &parked.id, member, "--input", &redirection],
+        &[("XDG_STATE_HOME", &link.display().to_string())],
+    );
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = parked.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before"
+    );
+    assert!(
+        redirected_work.exists(),
+        "the redirected turn never did the new work"
+    );
+    let record = workspace.member_file(member, "control.json");
+    let record = serde_json::from_str(&record).expect("the control record is JSON");
+    (
+        std::fs::canonicalize(&target).expect("the target resolves"),
+        record,
+    )
+}
+
+/// A single-sided member on a long run id whose session store is reached
+/// through a link is still controlled, and still redirected — at the store as
+/// it resolves.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_whose_store_is_reached_through_a_link_is_still_redirected() {
+    let (resolved, record) = redirected_through_a_link(
+        &crate::support::single_sided_graph(&crate::support::fake_harness()),
+        "reporter",
+    );
+    assert_eq!(record["turn"]["state"], "open", "{record}");
+    assert_eq!(
+        record["turn"]["address"]["session_dir"],
+        resolved
+            .join("oneharness")
+            .join("sessions")
+            .display()
+            .to_string(),
+        "{record}"
+    );
+}
+
+/// A two-party member on a long run id whose session store is reached through a
+/// link keeps a lever on **both** sides: its worker turn is redirected, and the
+/// supervisor's turn was controllable too, each at the store as it resolves.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_whose_store_is_reached_through_a_link_keeps_both_levers() {
+    let (resolved, record) = redirected_through_a_link(
+        &crate::support::two_party_graph(&crate::support::fake_harness(), crate::support::NO_ENV),
+        "worker",
+    );
+    let store = resolved
+        .join("oneharness")
+        .join("sessions")
+        .display()
+        .to_string();
+    for side in ["turn", "supervisor"] {
+        assert_eq!(record[side]["state"], "open", "{side}: {record}");
+        assert_eq!(
+            record[side]["address"]["session_dir"], store,
+            "{side}: {record}"
+        );
+    }
+}
+
+/// A member whose store is too deep to host any control socket is never made
+/// unstartable by the control it asked for: it runs uncontrolled and settles,
+/// and its record says why it had no lever.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_whose_store_cannot_host_a_socket_still_runs() {
+    let workspace = Workspace::new();
+    workspace.graph(&long_named(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    )));
+    let deep = workspace
+        .path()
+        .join("a-state-root-nested-so-deep-that-no-unix-socket-address-under-it-fits")
+        .join("the-platform-limit-on-any-host-this-suite-runs-on");
+    let ran = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: report in",
+        ],
+        &[("XDG_STATE_HOME", &deep.display().to_string())],
+    );
+    ran.expect_code(0);
+    assert!(ran.of_kind("member-died").is_empty(), "{}", ran.stdout);
+    let record: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "control.json"))
+            .expect("the control record is JSON");
+    assert_eq!(record["turn"]["state"], "unavailable", "{record}");
+    assert!(
+        record["turn"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("unix-socket address limit")),
+        "{record}"
+    );
+}
+
+/// Everything a caller can type that cannot work, refused with the contract's
+/// exit 2 and nothing on stdout — a caller reads a line there as an event, so a
+/// refusal must not produce one.
+#[test]
+fn every_unusable_interrupt_is_refused_by_name() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: something to address")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let input_file = workspace.write("redirect.md", "do this instead\n");
+
+    let cases: Vec<(Vec<String>, &str)> = vec![
+        (
+            vec![
+                "interrupt".into(),
+                "no-such-run".into(),
+                "worker".into(),
+                "--input".into(),
+                "x".into(),
+            ],
+            "no-such-run",
+        ),
+        (
+            vec![
+                "interrupt".into(),
+                run_id.clone(),
+                "ghost".into(),
+                "--input".into(),
+                "x".into(),
+            ],
+            "has no member",
+        ),
+        (
+            vec![
+                "interrupt".into(),
+                run_id.clone(),
+                "../escape".into(),
+                "--input".into(),
+                "x".into(),
+            ],
+            "outside the run's own directory",
+        ),
+        (
+            vec![
+                "interrupt".into(),
+                run_id.clone(),
+                "worker".into(),
+                "--input".into(),
+                "x".into(),
+                "--input-file".into(),
+                input_file.display().to_string(),
+            ],
+            "give at most one",
+        ),
+        (
+            vec![
+                "interrupt".into(),
+                run_id.clone(),
+                "worker".into(),
+                "--input".into(),
+                "   ".into(),
+            ],
+            "redirect the turn at nothing",
+        ),
+        (
+            vec![
+                "interrupt".into(),
+                run_id.clone(),
+                "worker".into(),
+                "--input-file".into(),
+                "nowhere.md".into(),
+            ],
+            "cannot read --input-file",
+        ),
+    ];
+    for (args, expected) in cases {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let refused = workspace.run(&borrowed);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(expected),
+            "{args:?} did not say {expected:?}: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stdout.is_empty(),
+            "{args:?} wrote an event while refusing: {}",
+            refused.stdout
+        );
+    }
+}
+
+/// A delivery that was attempted and failed is exit 1 — the lever broke, which is
+/// not the same answer as a turn that was simply not there. The turn survives it,
+/// and a **stop-only** interrupt then ends it without redirecting it at anything.
+///
+/// The failure is driven at the one seam a journey can reach it through: the
+/// `oneharness` the verb shells out to is named by the environment, and one that
+/// is not there is the same failure a host with a broken install has.
+#[cfg(unix)]
+#[test]
+fn a_delivery_that_could_not_be_attempted_is_a_failure_rather_than_an_absent_turn() {
+    let workspace = Workspace::new();
+    let member = parked(&workspace, &parking_task(&workspace, None));
+    let run_id = member.id.clone();
+
+    let missing = [(
+        "ONEAGENTGRAPH_ONEHARNESS_BIN",
+        "oneagentgraph-no-such-oneharness".to_string(),
+    )];
+    let broken = crate::support::as_env(&missing);
+    let failed = workspace.run_with(
+        &["interrupt", &run_id, "worker", "--input", "do this instead"],
+        &broken,
+    );
+    failed.expect_code(1);
+    assert!(
+        failed.stderr.contains("oneagentgraph-no-such-oneharness"),
+        "{}",
+        failed.stderr
+    );
+    let events = failed.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["delivered"], false);
+
+    // And the turn is still there for an install that works, which is the point
+    // of telling the two answers apart. With no `--input`, which the contract
+    // allows: the turn stops and nothing takes its place.
+    let stopped = workspace.run(&["interrupt", &run_id, "worker"]);
+    stopped.expect_code(0);
+    let events = stopped.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["delivered"], true);
+    assert_eq!(
+        events[0]["payload"]["input_bytes"], 0,
+        "an interrupt that only stops the turn carried a redirection: {}",
+        stopped.stdout
+    );
+    assert_eq!(member.settled().status.code(), Some(0));
+}
+
+/// The redirection may come from a file, which is how an operator sends one too
+/// long or too shell-hostile to type on an argv.
+#[cfg(unix)]
+#[test]
+fn a_redirection_read_from_a_file_reaches_the_turn_the_same_way() {
+    let workspace = Workspace::new();
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked(&workspace, &parking_task(&workspace, None));
+
+    let redirection = format!(
+        "fake:complete-now fake:did-work={}\nwrite the summary instead\n",
+        redirected_work.display()
+    );
+    let file = workspace.write("redirect.md", &redirection);
+    let interrupted = workspace.run(&[
+        "interrupt",
+        &member.id,
+        "worker",
+        "--input-file",
+        &file.display().to_string(),
+    ]);
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["delivered"], true);
+    assert_eq!(
+        events[0]["payload"]["input_bytes"],
+        redirection.len() as u64,
+        "the file's own bytes are what was delivered: {}",
+        interrupted.stdout
+    );
+
+    assert_eq!(member.settled().status.code(), Some(0));
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(
+        did.contains("write the summary instead"),
+        "the turn that ran after the interrupt did not do what the file asked: {did:?}"
+    );
+}
+
+/// An interrupt aimed at a run whose state this build cannot act on reports which
+/// fact applies rather than failing: a turn that has gone, a record torn in half,
+/// and one a later build wrote.
+///
+/// The records are planted, because that is the only way to reach the subject —
+/// exactly as `tests/record.rs` plants a run record for the same reason. What
+/// this verb does with a run that recorded an open turn and then went away is the
+/// state an operator meets *after* the incident they reach for `interrupt`
+/// during: a killed launcher, a host that rebooted, a torn write, or a run
+/// started by the version they are about to upgrade past. No sequence of commands
+/// produces those, and a journey that only drove healthy runs would leave the
+/// answers an operator meets in anger unproven. Real `oneharness` is what answers
+/// the first of them, and its own refusal is what this asserts on.
+///
+/// llmlint: ignore-block[tests_mirror_real_usage] see the paragraph above: the
+/// planted files are the *subject*, not a shortcut around one — every command
+/// under test is still the compiled binary reached the way a user reaches it.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_aimed_at_a_run_this_build_cannot_act_on_says_so_rather_than_failing() {
+    let workspace = Workspace::new();
+    let run_id = "node-scope-1786171301679-1447994";
+    let member = workspace
+        .state()
+        .join(run_id)
+        .join("members")
+        .join("worker");
+    std::fs::create_dir_all(&member).expect("the member's scratch");
+    std::fs::write(
+        workspace.state().join(run_id).join("record.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "run_id": run_id,
+            "graph": "./graph.yaml",
+            "name": "node-scope",
+            "started_ms": 1_786_171_301_679_u64,
+            "declared_members": ["worker"],
+            "refs": [],
+            "events_path": format!("/state/{run_id}/events.jsonl"),
+        })
+        .to_string(),
+    )
+    .expect("a run record with no outcome yet");
+
+    let gone = serde_json::json!({
+        "schema_version": 1,
+        "turn": {"state": "open", "address": {
+            "session": format!("{run_id}-worker-skill"),
+            "cwd": member.display().to_string(),
+        }},
+    })
+    .to_string();
+    let from_a_later_build = serde_json::json!({
+        "schema_version": 99,
+        "turn": {"state": "open", "address": {
+            "session": format!("{run_id}-worker-skill"),
+            "cwd": member.display().to_string(),
+        }},
+    })
+    .to_string();
+    for (record, expected) in [
+        (gone.as_str(), "already ended"),
+        ("{ torn in half", "not one this build can read"),
+        (from_a_later_build.as_str(), "schema version 99"),
+    ] {
+        std::fs::write(member.join("control.json"), record).expect("a control record");
+        // With no `--input` at all, which the contract allows: an interrupt that
+        // only asks the turn to stop. It carries no redirection, and says so.
+        let interrupted = workspace.run(&["interrupt", run_id, "worker"]);
+        interrupted.expect_code(3);
+        let events = interrupted.of_kind("turn-interrupted");
+        assert_eq!(events[0]["payload"]["input_bytes"], 0);
+        assert!(
+            events[0]["payload"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(expected)),
+            "{record}: did not say {expected:?}: {}",
+            interrupted.stdout
+        );
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A one-identity `qwen` chain: the harness with no out-of-band turn control that
+/// takes the same wire shape the double already speaks, so a member on it runs
+/// for real and only the lever is missing.
+const QWEN_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"qwen\"]\n";
+
+/// The default two-party graph, on a chain whose harness has no control
+/// mechanism.
+fn uncontrollable_graph(fake: &str) -> String {
+    graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", fake)],
+    )
+}

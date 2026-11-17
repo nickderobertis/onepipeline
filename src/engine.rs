@@ -3262,7 +3262,7 @@ impl InPass {
         let mut seen = channel.fingerprint();
         let mut held: Option<(Journal, Projected)> = None;
         loop {
-            std::thread::sleep(CHANNEL_POLL);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), CHANNEL_POLL);
             {
                 let state = self.state();
                 match state.mode {
@@ -10503,7 +10503,7 @@ pub(crate) fn attempt(
             }
             break;
         }
-        std::thread::sleep(backoff);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), backoff);
         backoff = (backoff * 2).min(BOUNDARY_BACKOFF_CEILING);
         // Announced only once the wait is over, so the record marks the moment
         // the node was actually asked again rather than the moment the last

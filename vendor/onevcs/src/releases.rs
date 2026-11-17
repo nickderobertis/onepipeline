@@ -1,0 +1,1241 @@
+//! The release-targets file: what each repository releases, and how a release of
+//! it is learned about.
+//!
+//! YAML, first match wins, matched on the same [`RuleMatch`] the rules file uses —
+//! two match vocabularies over the same identities would drift.
+//!
+//! **The style decides the shape of a target rather than labelling it.** An
+//! *automated* target carries a probe and is answered by running it; a *human-step*
+//! target carries no probe at all — there is nothing to ask, because the release
+//! happens when a person does something — and is answered by an explicit record a
+//! person writes afterwards. So `style` is the tag over the two shapes and not a
+//! field beside them: a human-step target naming a `probe:` and an automated target
+//! naming an `action:` are both refused where the document is read, and "a
+//! human-step target has a probe" is not a state this crate can hold.
+//!
+//! Nothing here declares `deny_unknown_fields`. A document a *newer* build wrote
+//! loads on this one, which takes the fields it understands and ignores the keys it
+//! has no opinion on — an older `onevcs` on a host whose release targets were
+//! configured by a newer one is degraded, never stopped. What a target's own shape
+//! still refuses it refuses by naming the target, because those are not keys this
+//! build has no opinion on: they are the two forms of a probe, and which one a
+//! target carries is the whole of what makes it answerable.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+
+use crate::declaration::{Declaration, InstructionTemplate};
+use crate::rules::RuleMatch;
+
+/// The version of the release-targets file this build writes, and the oldest it
+/// reads.
+///
+/// The oldest rather than the newest: a document declaring a *later* version is read
+/// as this shape, with whatever it names beyond it ignored, because refusing it would
+/// stop every release verb on a host a newer `onevcs` had configured.
+pub const VERSION: u32 = 1;
+
+/// The bound a probe runs under when the document names none.
+pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 60;
+
+/// A release-targets file, as it is stored on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasesFile {
+    /// The schema version: `1` is the shape declared here.
+    // llmlint: ignore[boundary_inputs_validated] which versions this build reads is the
+    // loader's question rather than this type's, and `release::load` answers it: a
+    // document below this one is refused by number, before the shape is enforced, and a
+    // later one is read as this shape with whatever it names beyond it ignored. What the
+    // shape can reject — an undeclared adoption, or a target whose style and body
+    // disagree — is rejected here and asserted in tests/contract.rs.
+    pub version: u32,
+    /// The rules, in priority order: the first one that matches wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<ReleaseRule>,
+    /// What a repository no rule below names gets.
+    pub default: ReleaseDefault,
+}
+
+/// The release-targets file read for one optional key alone: each rule's
+/// `release_change`, which names the change requests a repository's release tool opens.
+///
+/// Read beside [`ReleasesFile`] rather than as a field of [`ReleaseRule`], whose fields a
+/// consumer may construct exhaustively: the key is additive, and an older build that
+/// ignores it — as every reader here ignores a key it has no opinion on — is the reason
+/// it can be one. The rule a key belongs to is the one at the same position, matched the
+/// way every rule is.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReleaseChangeRules {
+    #[serde(default)]
+    pub(crate) repositories: Vec<ReleaseChangeRule>,
+}
+
+/// One rule's `release_change`, where it carries one.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReleaseChangeRule {
+    #[serde(default)]
+    pub(crate) release_change: Option<ReleaseChangeKey>,
+}
+
+/// `release_change: {head: "<glob>"}`: the head branch names of the change requests the
+/// release tool opens.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReleaseChangeKey {
+    pub(crate) head: HeadGlob,
+}
+
+/// A glob over branch names — `*` any run of characters, `?` exactly one, every other
+/// character itself — refused where it is read when it could match no branch name: empty,
+/// or carrying whitespace, which no branch name does.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) struct HeadGlob(String);
+
+impl TryFrom<String> for HeadGlob {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() || value.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "a release_change head of {value:?} matches no branch name: name a glob such \
+                 as \"release-*\""
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl HeadGlob {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        let glob: Vec<char> = self.0.chars().collect();
+        let name: Vec<char> = name.chars().collect();
+        let (mut at, mut from) = (0, 0);
+        // Where the last `*` was, and how much of the name it has taken so far.
+        let mut star: Option<(usize, usize)> = None;
+        while from < name.len() {
+            match glob.get(at) {
+                Some('*') => {
+                    star = Some((at, from));
+                    at += 1;
+                }
+                Some(&wanted) if wanted == '?' || wanted == name[from] => {
+                    at += 1;
+                    from += 1;
+                }
+                _ => match star {
+                    Some((star_at, star_from)) => {
+                        at = star_at + 1;
+                        from = star_from + 1;
+                        star = Some((star_at, star_from + 1));
+                    }
+                    None => return false,
+                },
+            }
+        }
+        glob[at..].iter().all(|rest| *rest == '*')
+    }
+}
+
+/// The global rung of the adoption chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseDefault {
+    /// What a repository no rule names adopts.
+    pub adoption: Adoption,
+}
+
+/// One rule: what it matches, what that repository adopts, and what it releases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseRule {
+    /// What this rule applies to, in the rules file's own vocabulary.
+    #[serde(rename = "match")]
+    pub r#match: RuleMatch,
+    /// The per-repository rung of the adoption chain. Unset falls to the global one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adoption: Option<Adoption>,
+    /// What a consumer naming no target gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_target: Option<TargetName>,
+    /// What this rule does with the repository's own declaration. Unset is
+    /// [`DeclarationPolicy::Merge`], which is what makes a producer's declaration
+    /// visible to a host that has said nothing about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<DeclarationPolicy>,
+    /// The targets this host waits on for this repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ReleaseTarget>,
+}
+
+/// What one rule does with the declaration the repository itself carries.
+///
+/// The default is [`Merge`](Self::Merge), because a host that has said nothing
+/// about a repository's own declaration has not said it should be ignored — and a
+/// producer that declares what it publishes is discoverable without this host being
+/// told the same thing twice.
+///
+/// [`Ignore`](Self::Ignore) is the one way a host says *a target it does not
+/// consume*: the rule's own targets become the whole answer, which is exactly what
+/// a rule answered before a producer declaration existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeclarationPolicy {
+    /// This rule's targets are laid over the repository's own, by short name.
+    #[default]
+    Merge,
+    /// The repository's own declaration is not consulted for targets at all.
+    Ignore,
+}
+
+impl DeclarationPolicy {
+    /// How this policy is spelled in the document and in a rendering.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeclarationPolicy::Merge => "merge",
+            DeclarationPolicy::Ignore => "ignore",
+        }
+    }
+}
+
+impl std::fmt::Display for DeclarationPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a node waits for the *work* or for the *release* that carries it.
+///
+/// Two rungs of a four-rung chain live here — the global one and the
+/// per-repository one. The node rung and a consumer's own default are the
+/// consumer's, which is why [`adoption_for`](crate::adoption_for) answers these two
+/// and never those.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum Adoption {
+    /// The work is enough: a consumer may proceed as soon as the change lands.
+    Fast,
+    /// The release is what is depended on, so a consumer waits for one.
+    Published,
+}
+
+impl Adoption {
+    /// How this rung is spelled in the document and in a rendering.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Adoption::Fast => "fast",
+            Adoption::Published => "published",
+        }
+    }
+}
+
+impl std::fmt::Display for Adoption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which rung of the adoption chain decided a repository's resolved adoption.
+///
+/// Stated beside the rung wherever it is reported, because the edit that changes a
+/// rung is in a different place in each case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdoptionSource {
+    /// A numbered rule (one-based) of this host's release-targets file matched the
+    /// repository and named a rung.
+    Rule {
+        /// Its one-based position in the file.
+        index: usize,
+        /// The release-targets file.
+        file: PathBuf,
+    },
+    /// No matching rule named a rung, so the file's own `default` decided.
+    Default {
+        /// The release-targets file.
+        file: PathBuf,
+    },
+    /// There is no release-targets file, so the empty document's `fast` applies.
+    BuiltIn,
+}
+
+impl std::fmt::Display for AdoptionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdoptionSource::Rule { index, file } => {
+                write!(f, "rule {index} in {}", file.display())
+            }
+            AdoptionSource::Default { file } => write!(f, "the default in {}", file.display()),
+            AdoptionSource::BuiltIn => f.write_str("the built-in default; no release-targets file"),
+        }
+    }
+}
+
+/// A repository's adoption rung and the rung of the chain that decided it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAdoption {
+    /// The rung.
+    pub rung: Adoption,
+    /// What decided it.
+    pub from: AdoptionSource,
+}
+
+/// One thing a repository releases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseTarget {
+    /// What it is called, which is how every command and every record names it.
+    pub name: TargetName,
+    /// How it is released, and therefore how a release of it is learned about.
+    pub release: ReleaseMethod,
+    /// The minijinja template a consumer of this target is instructed by, after the
+    /// three layers have resolved.
+    ///
+    /// A **declared** target carries the producer's own, copied across when the
+    /// declaration is read; a target this host names carries this host's. An override
+    /// replaces the target whole, this field with it — a half-host, half-producer
+    /// target is a probe nobody wrote. Composition is the consumer's explicit act
+    /// instead, inside the template: a host template may begin
+    /// `{% extends "producer" %}` and override named blocks, and one naming no
+    /// `extends` replaces wholly.
+    pub adoption_instructions: Option<InstructionTemplate>,
+}
+
+impl ReleaseTarget {
+    /// The label this target's style is reported under.
+    pub fn style(&self) -> ReleaseStyle {
+        match self.release {
+            ReleaseMethod::Automated { .. } => ReleaseStyle::Automated,
+            ReleaseMethod::HumanStep { .. } => ReleaseStyle::HumanStep,
+        }
+    }
+
+    /// The probe that answers what is released, when there is one.
+    ///
+    /// **Always `None` for a human-step target**, by construction rather than by a
+    /// check that could be forgotten: the probe lives on the automated variant, so
+    /// there is none here to hand back and none for a caller to run.
+    pub fn probe(&self) -> Option<&Probe> {
+        match &self.release {
+            ReleaseMethod::Automated { probe } => Some(probe),
+            ReleaseMethod::HumanStep { .. } => None,
+        }
+    }
+
+    /// What a person has to do, for the target that waits on one.
+    pub fn action(&self) -> Option<&str> {
+        match &self.release {
+            ReleaseMethod::HumanStep { action } => Some(action),
+            ReleaseMethod::Automated { .. } => None,
+        }
+    }
+}
+
+/// How a target is released, and therefore how a release of it is learned about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseMethod {
+    /// A machine releases it, and a probe says what is out.
+    Automated {
+        /// What to run to find out what is released right now.
+        probe: Probe,
+    },
+    /// A person releases it, and says so afterwards.
+    HumanStep {
+        /// What that person has to do, rendered in the wait.
+        action: String,
+    },
+}
+
+/// Which of the two styles a target is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseStyle {
+    /// A machine releases it; a probe answers what is out.
+    Automated,
+    /// A person releases it; an acknowledgement records that they did.
+    HumanStep,
+}
+
+impl ReleaseStyle {
+    /// How this style is spelled in the document, in an event, and in a rendering.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReleaseStyle::Automated => "automated",
+            ReleaseStyle::HumanStep => "human-step",
+        }
+    }
+}
+
+impl std::fmt::Display for ReleaseStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where the answer that a release carries a landing came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseSource {
+    /// The target's configured probe answered it.
+    Probed,
+    /// A person explicitly recorded it.
+    Acknowledged,
+}
+
+impl std::fmt::Display for ReleaseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReleaseSource::Probed => f.write_str("probed"),
+            ReleaseSource::Acknowledged => f.write_str("acknowledged"),
+        }
+    }
+}
+
+/// What to run to find out what version of a target is released right now.
+///
+/// Two forms and no way to spell a third, neither privileged: a script checked into
+/// the repository being released, run as a direct subprocess, and a one-liner
+/// configured on this host, run through `sh -c`. Both are bounded, and a target
+/// naming both forms or neither does not deserialize at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// A path relative to the repository root, checked into the repository being
+    /// released. Run as a direct subprocess, never through a shell.
+    Script {
+        /// Where it is, relative to the repository root.
+        script: PathBuf,
+        /// The arguments it is given.
+        args: Vec<String>,
+        /// The bound it runs under.
+        timeout_seconds: u64,
+    },
+    /// A one-liner configured on this host, run through `sh -c`.
+    Shell {
+        /// The command line, as `sh` reads it.
+        shell: String,
+        /// The bound it runs under.
+        timeout_seconds: u64,
+    },
+}
+
+impl Probe {
+    /// Which form this is, as the `release-probed` event reports it.
+    pub fn form(&self) -> &'static str {
+        match self {
+            Probe::Script { .. } => "script",
+            Probe::Shell { .. } => "shell",
+        }
+    }
+}
+
+/// A target's name, checked where it is read.
+///
+/// It names a key in the persisted release record, a directory-free file-safe
+/// token, and an operand of `--target`, so what may spell one is decided in the
+/// conversion — a name that could not be all three is unrepresentable rather than
+/// refused by whichever of the three met it first.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TargetName(String);
+
+/// How long a target's name may be. Long enough for any name a person types, short
+/// enough that a refusal quoting one is still a sentence.
+const MAX_TARGET_NAME: usize = 64;
+
+/// How long a human step's action may be. It is one instruction rendered on one
+/// line beside the wait it explains, not the procedure behind it.
+const MAX_ACTION: usize = 200;
+
+/// Whether a value from the release-targets file renders as the one line it is
+/// printed on.
+///
+/// An `action` and a script probe's arguments are both operator-written text that
+/// this crate prints — in a table, in a refusal, and in an event payload — so a
+/// value carrying a newline or a control character renders as something other than
+/// what it is wherever it lands. Checked where the document is read, which is the
+/// boundary it arrives at, rather than by whichever renderer met it first.
+fn renders_on_one_line(value: &str) -> bool {
+    !value.chars().any(char::is_control)
+}
+
+impl TryFrom<String> for TargetName {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err("a release target's name cannot be empty".to_owned());
+        }
+        if value.len() > MAX_TARGET_NAME {
+            return Err(format!(
+                "the release target name {value:?} is longer than {MAX_TARGET_NAME} characters"
+            ));
+        }
+        if !value
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        {
+            return Err(format!(
+                "the release target name {value:?} must start with a letter or a digit"
+            ));
+        }
+        if !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(format!(
+                "the release target name {value:?} may hold only letters, digits, '-', '_', \
+                 and '.'"
+            ));
+        }
+        Ok(TargetName(value))
+    }
+}
+
+/// The conversion an argument parser reaches for, which is the same check.
+///
+/// A `--target` operand and a document's `name:` are one vocabulary, so a name the
+/// document would refuse is refused on the command line too — and with the same
+/// sentence, rather than with a parser's usage text for one and prose for the other.
+impl std::str::FromStr for TargetName {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        TargetName::try_from(value.to_owned())
+    }
+}
+
+impl From<TargetName> for String {
+    fn from(name: TargetName) -> Self {
+        name.0
+    }
+}
+
+/// The name itself, quoted — never the wrapper, for the reason
+/// [`TrailerPrefix`](crate::rules::TrailerPrefix) spells its own: every refusal that
+/// names a target writes it with `{:?}`, and a derived `Debug` would spell each of
+/// them at an operator who configured a plain word.
+impl std::fmt::Debug for TargetName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for TargetName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for TargetName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What one probe answered about what is released right now.
+///
+/// Three values, and the third is the point: **"not answered" and "not released"
+/// are different answers** and stay different all the way up. A consumer holds
+/// indefinitely on "not answered" and never reads it as evidence that a release has
+/// not happened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReleaseAnswer {
+    /// A release exists, at this version.
+    Released {
+        /// The version the probe printed.
+        version: String,
+    },
+    /// The target has no release yet. An answer, not a failure.
+    NoRelease,
+    /// The question was not answered: a non-zero exit, a timeout, a spawn failure,
+    /// or output that is not one usable line. **Never "not released".**
+    NotAnswered {
+        /// What stopped the probe answering.
+        reason: String,
+    },
+}
+
+/// What a target had at the moment a change landed.
+///
+/// Only these two can be compared against later, which is why the answer a probe
+/// that did not answer left behind is not a member of this type — see
+/// [`BaselineRecord`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum Baseline {
+    /// A release existed. A strictly greater one carries the change.
+    At {
+        /// The version that was out when the change landed.
+        version: String,
+    },
+    /// Nothing had ever been released for this target. The *first* release of any
+    /// version carries the change.
+    NoRelease,
+}
+
+/// What is persisted per landing — a baseline, or the record that there is none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaselineRecord {
+    /// A baseline was established at the landing, and can be compared against.
+    Established(Baseline),
+    /// No baseline could be taken at landing: no probe answered then, or the landing
+    /// was found only after a release may already carry it. **Not a baseline**, and
+    /// never usable as one: a probe answering a *version* later cannot repair it,
+    /// because the release carrying this very change may already be included in it.
+    Unestablished {
+        /// Why: what the probe said when it was asked at the landing, or what says a
+        /// release may already carry a landing found late.
+        reason: String,
+        /// When it was asked, RFC3339 with millisecond precision, in UTC.
+        attempted_at: String,
+    },
+}
+
+/// The persisted form of a baseline record: one tagged object rather than a bare
+/// string, because a bare string cannot express the other two answers and
+/// conflating any pair of them is how a change gets reported as released when it is
+/// not.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+enum StoredBaseline {
+    At {
+        version: String,
+    },
+    NoRelease,
+    Unestablished {
+        reason: String,
+        attempted_at: String,
+    },
+}
+
+impl Serialize for BaselineRecord {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let stored = match self {
+            BaselineRecord::Established(Baseline::At { version }) => StoredBaseline::At {
+                version: version.clone(),
+            },
+            BaselineRecord::Established(Baseline::NoRelease) => StoredBaseline::NoRelease,
+            BaselineRecord::Unestablished {
+                reason,
+                attempted_at,
+            } => StoredBaseline::Unestablished {
+                reason: reason.clone(),
+                attempted_at: attempted_at.clone(),
+            },
+        };
+        stored.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BaselineRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(match StoredBaseline::deserialize(deserializer)? {
+            StoredBaseline::At { version } => BaselineRecord::Established(Baseline::At { version }),
+            StoredBaseline::NoRelease => BaselineRecord::Established(Baseline::NoRelease),
+            StoredBaseline::Unestablished {
+                reason,
+                attempted_at,
+            } => BaselineRecord::Unestablished {
+                reason,
+                attempted_at,
+            },
+        })
+    }
+}
+
+/// Whether the release that carries one landed change has happened yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReleaseStatus {
+    /// A release carrying this change is out, at this version.
+    Released {
+        /// The target that carries it.
+        target: TargetName,
+        /// Which kind of release that was.
+        style: ReleaseStyle,
+        /// The version that carries the change.
+        version: String,
+        /// Where this answer came from.
+        source: ReleaseSource,
+    },
+    /// Automated only: a probe answered, and the baseline has not been passed.
+    // llmlint: ignore[invalid_states_unrepresentable] `now` is an empty string where
+    // there is no release right now, and that is the approved amendment's own shape —
+    // fixed across the nodes being written against it, so an `Option<String>` here
+    // would be this crate changing a shared interface unilaterally. The side a
+    // comparison is *made against* is already the enum this rule asks for: `at_landing`
+    // is a `Baseline`, which is what carries the state a bare string could not express.
+    // The empty string is documented on the field and rendered as `no release` by the
+    // one thing that prints it, and every path that produces it is a journey.
+    NotReleased {
+        /// What the target had when the change landed.
+        at_landing: Baseline,
+        /// What it has now — empty where there is no release right now at all,
+        /// which is what a target answers before its first release and after a
+        /// yank.
+        now: String,
+    },
+    /// Human step only: it landed, and nobody has acknowledged a release yet.
+    /// Neither [`NotReleased`](ReleaseStatus::NotReleased) (no probe answered) nor
+    /// [`NotAnswered`](ReleaseStatus::NotAnswered) (no probe failed).
+    AwaitingHumanStep {
+        /// The target waiting on a person.
+        target: TargetName,
+        /// What that person has to do.
+        action: String,
+        /// When the wait started: the landing commit's own committer date.
+        since: String,
+    },
+    /// The question was not answered, and this is why. **Never "not released".**
+    NotAnswered {
+        /// What stopped it being answered.
+        reason: String,
+    },
+    /// The work has not reached its base, so there is no release to ask about yet.
+    NotLanded,
+}
+
+/// One release a person performed and then recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acknowledgement {
+    /// The repository identity it belongs to.
+    pub identity: String,
+    /// The target that was released.
+    pub target: TargetName,
+    /// The commit the change landed at, which is what it is recorded against.
+    pub landing_commit: String,
+    /// The version that was released.
+    pub version: String,
+    /// When it was recorded, RFC3339 with millisecond precision, in UTC.
+    pub recorded_at: String,
+    /// Who recorded it.
+    pub actor: String,
+    /// Every version this record replaced, oldest first. Empty on a first record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<SupersededRelease>,
+}
+
+/// A version an acknowledgement replaced, kept so the correction is visible rather
+/// than destructive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersededRelease {
+    /// The version that was recorded before.
+    pub version: String,
+    /// When it was recorded.
+    pub recorded_at: String,
+    /// Who recorded it.
+    pub actor: String,
+}
+
+/// What a repository's own declaration said, or why this build has no answer from
+/// it.
+///
+/// Three states, and the third is why this is a value rather than an
+/// `Option<Declaration>`: **a declaration this build could not read is not a
+/// repository that declares nothing.** A consumer waiting on a release holds
+/// indefinitely on the first and acts on the second, so collapsing them here would
+/// be the "not answered is not not released" mistake made one layer up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum DeclarationSource {
+    /// The repository declares what it publishes, and this build read it.
+    Declared {
+        /// The document it was read from.
+        document: PathBuf,
+        /// What that document declares.
+        declared: Declaration,
+    },
+    /// The repository carries no declaration: nothing in it says what it publishes,
+    /// so this host's own document is the whole answer.
+    Undeclared {
+        /// The checkout that was looked in.
+        looked_in: PathBuf,
+    },
+    /// What this repository declares is **unknown** — there is nowhere to read a
+    /// declaration from, or the one that is there is not a declaration this build
+    /// can read.
+    ///
+    /// Never "it declares nothing": whatever targets are answered alongside this may
+    /// be fewer than the repository publishes.
+    Unreadable {
+        /// Why it could not be read, in the words the reader refused it with.
+        reason: String,
+    },
+}
+
+impl DeclarationSource {
+    /// How this state is spelled in a rendering and in the JSON document.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeclarationSource::Declared { .. } => "declared",
+            DeclarationSource::Undeclared { .. } => "undeclared",
+            DeclarationSource::Unreadable { .. } => "unreadable",
+        }
+    }
+
+    /// What the repository declares, where this build read a declaration.
+    pub fn declared(&self) -> Option<&Declaration> {
+        match self {
+            DeclarationSource::Declared { declared, .. } => Some(declared),
+            _ => None,
+        }
+    }
+
+    /// Why what this repository publishes is unknown, where it is.
+    ///
+    /// A caller that has to say "there may be more targets than these" asks this,
+    /// and gets `None` for both states in which the answer is complete.
+    pub fn unreadable(&self) -> Option<&str> {
+        match self {
+            DeclarationSource::Unreadable { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// Which of the three layers put one target in the answer.
+///
+/// Recorded per target rather than inferred by a reader, because "why did this
+/// repository resolve these targets" has to be answerable from the answer itself —
+/// a merged set in which every target looks alike is a set nobody can audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TargetSource {
+    /// The repository's own declaration, which this host did not oppose.
+    Declared,
+    /// This host's own document, naming a target the repository does not declare —
+    /// or does not declare that this build could read.
+    Host,
+    /// This host's own document, replacing a target the repository declared under
+    /// the same short name.
+    Override,
+}
+
+impl TargetSource {
+    /// How this layer is spelled in a rendering and in the JSON document.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TargetSource::Declared => "declared",
+            TargetSource::Host => "host",
+            TargetSource::Override => "override",
+        }
+    }
+}
+
+impl std::fmt::Display for TargetSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What one repository releases, and what it adopts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryReleases {
+    /// The identity key these targets belong to.
+    pub identity: String,
+    /// The rung the adoption chain resolves to here.
+    pub adoption: Adoption,
+    /// What a consumer naming no target gets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_target: Option<TargetName>,
+    /// Every target this repository releases: the ones it declares itself, in its
+    /// own publication order, then the ones this host names that it does not.
+    pub targets: Vec<ReleaseTarget>,
+    /// What the repository's own declaration said, or why there is no answer from
+    /// it.
+    pub declaration: DeclarationSource,
+    /// Which layer resolved each target above.
+    pub sources: BTreeMap<TargetName, TargetSource>,
+}
+
+/// Every target one repository has, and what each of them has released right now.
+///
+/// The answer a consumer that waits on releases asks for: [`RepositoryReleases`]
+/// alone says what there is to wait for, and this says what each of those has done.
+/// One call rather than one per target, because a node holding on a dependency has
+/// to ask about all of them and a caller that looped would have this crate resolve
+/// the three layers once per target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Discovery {
+    /// What this repository releases, and where each target came from.
+    pub releases: RepositoryReleases,
+    /// What each of those targets has released, in `releases.targets` order.
+    pub released: Vec<TargetRelease>,
+}
+
+/// One target, and what it has released right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetRelease {
+    /// Which target this is.
+    pub target: TargetName,
+    /// How it is released, which is how its answer was arrived at.
+    pub style: ReleaseStyle,
+    /// What is released right now — and `NotAnswered` where nothing said, which is
+    /// never `NoRelease`.
+    pub answer: ReleaseAnswer,
+}
+
+impl RepositoryReleases {
+    /// The target one name selects, or the reason no target answers to it.
+    ///
+    /// A caller naming none gets the declared `default_target`; a repository that
+    /// declares no default answers with what it does declare rather than guessing,
+    /// because which artifact a consumer depends on is not something to infer from
+    /// there happening to be one.
+    pub fn select(&self, named: Option<&TargetName>) -> crate::Result<&ReleaseTarget> {
+        if self.targets.is_empty() {
+            return Err(crate::error::invalid(format!(
+                "the repository {} declares no release targets, so there is nothing to ask \
+                 about; declare some in its own {file}, or under `repositories:` in the \
+                 release-targets file{unknown}",
+                self.identity,
+                file = crate::declaration::FILE,
+                unknown = self.unknown(),
+            )));
+        }
+        let wanted = match named.or(self.default_target.as_ref()) {
+            Some(wanted) => wanted,
+            None => {
+                return Err(crate::error::invalid(format!(
+                    "the repository {} declares no default_target, so a target has to be named: \
+                     --target {}",
+                    self.identity,
+                    self.declared()
+                )))
+            }
+        };
+        self.targets
+            .iter()
+            .find(|target| target.name == *wanted)
+            .ok_or_else(|| {
+                crate::error::invalid(format!(
+                    "the repository {} declares no release target {wanted:?}; it declares \
+                     {declared}. `onevcs release targets {identity}` lists them{unknown}",
+                    self.identity,
+                    declared = self.declared(),
+                    identity = self.identity,
+                    unknown = self.unknown(),
+                ))
+            })
+    }
+
+    /// The targets this repository declares, as a refusal lists them.
+    fn declared(&self) -> String {
+        self.targets
+            .iter()
+            .map(|target| target.name.to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    }
+
+    /// What a refusal about a missing target has to add where this build could not
+    /// read what the repository declares.
+    ///
+    /// Without it a refusal states as a fact — "it declares these" — something this
+    /// build only knows half of, and sends somebody to add a target to the host
+    /// document that the repository already publishes. Empty in both states where
+    /// the answer is complete, so no refusal grows a clause about a document that
+    /// read fine.
+    fn unknown(&self) -> String {
+        self.declaration
+            .unreadable()
+            .map_or_else(String::new, |reason| {
+                format!(
+                    ". This repository's own declaration could not be read, so it may declare \
+                 targets this does not name: {reason}"
+                )
+            })
+    }
+}
+
+/// A release target as the document spells it: the name, the style, and whichever
+/// body that style takes.
+///
+/// The shape is read flat and converted, rather than being a serde-tagged enum
+/// beside a name, so that every refusal can **name the target it is about** — which
+/// is the whole of what an operator needs to find the four lines they wrote.
+#[derive(Deserialize)]
+struct StoredTarget {
+    name: TargetName,
+    style: ReleaseStyle,
+    #[serde(default)]
+    probe: Option<StoredProbe>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    adoption_instructions: Option<InstructionTemplate>,
+}
+
+/// A probe as the document spells it: both forms' keys, exactly one of which a
+/// target may name.
+#[derive(Deserialize)]
+struct StoredProbe {
+    #[serde(default)]
+    script: Option<PathBuf>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// The serialized form, which is the same flat shape it is read from.
+#[derive(Serialize)]
+struct WrittenTarget<'a> {
+    name: &'a TargetName,
+    style: ReleaseStyle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probe: Option<WrittenProbe<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adoption_instructions: Option<&'a InstructionTemplate>,
+}
+
+#[derive(Serialize)]
+struct WrittenProbe<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell: Option<&'a str>,
+    timeout_seconds: u64,
+}
+
+impl Serialize for ReleaseTarget {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let written = WrittenTarget {
+            name: &self.name,
+            style: self.style(),
+            probe: self.probe().map(|probe| match probe {
+                Probe::Script {
+                    script,
+                    args,
+                    timeout_seconds,
+                } => WrittenProbe {
+                    script: Some(script),
+                    args: Some(args),
+                    shell: None,
+                    timeout_seconds: *timeout_seconds,
+                },
+                Probe::Shell {
+                    shell,
+                    timeout_seconds,
+                } => WrittenProbe {
+                    script: None,
+                    args: None,
+                    shell: Some(shell),
+                    timeout_seconds: *timeout_seconds,
+                },
+            }),
+            action: self.action(),
+            adoption_instructions: self.adoption_instructions.as_ref(),
+        };
+        written.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let stored = StoredTarget::deserialize(deserializer)?;
+        ReleaseTarget::try_from(stored).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<StoredTarget> for ReleaseTarget {
+    type Error = String;
+
+    fn try_from(stored: StoredTarget) -> std::result::Result<Self, Self::Error> {
+        let name = stored.name;
+        let release = match stored.style {
+            ReleaseStyle::Automated => {
+                if stored.action.is_some() {
+                    return Err(format!(
+                        "the release target {name:?} declares style: automated and names an \
+                         action, which only a human-step target has — a machine releases an \
+                         automated target and its probe says what is out. Remove the action, or \
+                         declare style: human-step"
+                    ));
+                }
+                let probe = stored.probe.ok_or_else(|| {
+                    format!(
+                        "the release target {name:?} declares style: automated and names no \
+                         probe; an automated target is answered by running one. Give it a \
+                         `probe:` with either `script:` or `shell:`"
+                    )
+                })?;
+                ReleaseMethod::Automated {
+                    probe: probe.into_probe(&name)?,
+                }
+            }
+            ReleaseStyle::HumanStep => {
+                if stored.probe.is_some() {
+                    return Err(format!(
+                        "the release target {name:?} declares style: human-step and names a \
+                         probe, which only an automated target has — a human-step target has \
+                         nothing to ask, because the release happens when a person does \
+                         something. Remove the probe, or declare style: automated"
+                    ));
+                }
+                let action = stored.action.ok_or_else(|| {
+                    format!(
+                        "the release target {name:?} declares style: human-step and names no \
+                         action; the action is what a person has to do, and it is what the wait \
+                         renders. Give it an `action:`"
+                    )
+                })?;
+                if action.trim().is_empty() {
+                    return Err(format!(
+                        "the release target {name:?} has a blank action; it is what a person \
+                         reads to know what to do, so a blank one is a wait nobody can act on"
+                    ));
+                }
+                if !renders_on_one_line(&action) || action.chars().count() > MAX_ACTION {
+                    return Err(format!(
+                        "the release target {name:?} has an action that is not one printable \
+                         line of at most {MAX_ACTION} characters; it is rendered beside the wait \
+                         it explains, so it says what to do rather than how"
+                    ));
+                }
+                ReleaseMethod::HumanStep { action }
+            }
+        };
+        Ok(ReleaseTarget {
+            name,
+            release,
+            adoption_instructions: stored.adoption_instructions,
+        })
+    }
+}
+
+impl StoredProbe {
+    /// The probe this spells, or the reason it spells none.
+    fn into_probe(self, name: &TargetName) -> std::result::Result<Probe, String> {
+        let timeout_seconds = match self.timeout_seconds {
+            None => DEFAULT_PROBE_TIMEOUT_SECONDS,
+            // Zero is refused rather than held: a bound that has already fired is not
+            // a bound, and one no clock on this host can reach names a moment that
+            // never arrives, which is the unbounded run the bound exists to prevent.
+            Some(seconds)
+                if seconds > 0
+                    && Instant::now()
+                        .checked_add(Duration::from_secs(seconds))
+                        .is_some() =>
+            {
+                seconds
+            }
+            Some(seconds) => {
+                return Err(format!(
+                    "the release target {name:?} names timeout_seconds: {seconds}; a probe's \
+                     bound must be above zero and short enough to be waited out from now"
+                ))
+            }
+        };
+        match (self.script, self.shell) {
+            (Some(_), Some(_)) => Err(format!(
+                "the release target {name:?} names both a script and a shell probe; a probe is \
+                 one or the other. Keep the form the repository actually carries"
+            )),
+            (None, None) => Err(format!(
+                "the release target {name:?} names neither a script nor a shell probe; an \
+                 automated target is answered by running one of the two"
+            )),
+            (Some(script), None) => {
+                relative_to_the_repository(&script, name)?;
+                let args = self.args.unwrap_or_default();
+                if let Some(argument) = args.iter().find(|it| !renders_on_one_line(it)) {
+                    return Err(format!(
+                        "the release target {name:?} names a probe argument carrying a control \
+                         character ({argument:?}); an argument is printed wherever the probe is \
+                         named, so it has to be the one line it renders as"
+                    ));
+                }
+                Ok(Probe::Script {
+                    script,
+                    args,
+                    timeout_seconds,
+                })
+            }
+            (None, Some(shell)) => {
+                if self.args.is_some() {
+                    return Err(format!(
+                        "the release target {name:?} names args beside a shell probe; a shell \
+                         probe is one line that `sh` reads, so its arguments are written into \
+                         it. Move them into the `shell:` line, or name a `script:` instead"
+                    ));
+                }
+                if shell.trim().is_empty() {
+                    return Err(format!(
+                        "the release target {name:?} names a blank shell probe; there is nothing \
+                         there to run"
+                    ));
+                }
+                if !renders_on_one_line(&shell) {
+                    return Err(format!(
+                        "the release target {name:?} names a shell probe carrying a control \
+                         character; this form is the one line `sh` reads, and it is printed \
+                         wherever the probe is named. Put a script the repository carries behind \
+                         a `script:` instead"
+                    ));
+                }
+                Ok(Probe::Shell {
+                    shell,
+                    timeout_seconds,
+                })
+            }
+        }
+    }
+}
+
+/// Refuse a script path that does not name a file inside the repository.
+///
+/// The form exists to run something the repository being released **carries**, so a
+/// path that leaves the repository root is refused where the document is read
+/// rather than resolved at the moment it would be executed.
+fn relative_to_the_repository(script: &Path, name: &TargetName) -> std::result::Result<(), String> {
+    if script.as_os_str().is_empty() {
+        return Err(format!(
+            "the release target {name:?} names an empty script path"
+        ));
+    }
+    if script.is_absolute() {
+        return Err(format!(
+            "the release target {name:?} names the absolute script path {script}; a script probe \
+             is a path relative to the repository root, because it runs what the repository being \
+             released carries",
+            script = script.display()
+        ));
+    }
+    if script
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "the release target {name:?} names the script path {script}, which leaves the \
+             repository root; a script probe runs what the repository being released carries",
+            script = script.display()
+        ));
+    }
+    Ok(())
+}

@@ -1,0 +1,612 @@
+//! onejudge's own versioned result contract: the [`Report`] that bundles a
+//! [`Transcript`], the [`NamedVerdict`]s scored against it, an optional free-text
+//! assessment, and aggregated [`Usage`] into one serializable object with an
+//! explicit [`SCHEMA_VERSION`].
+//!
+//! This is the wire form higher-level frameworks (e.g. `skilltest`) compose over
+//! and re-export, so onejudge — not its consumers — owns the shape of a judged
+//! run. The shape is drift-gated: `tests/contract.rs` pins the serialized JSON
+//! against a checked-in golden, so any change to the wire form is a deliberate
+//! edit that bumps [`SCHEMA_VERSION`], never a silent break for downstream SDKs.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::control::{ControlAddress, ControlOutcome};
+use crate::provider::{JudgeKind, JudgeVerdict};
+use crate::spawn::SpawnedProcess;
+use crate::telemetry::{JudgePosture, Telemetry};
+use crate::transcript::{ToolEvent, Transcript};
+use crate::usage::Usage;
+
+/// The version of the [`Report`] wire contract. Bump on any change to the
+/// serialized shape of a report or the types it embeds. `1` was the initial
+/// contract; `2` added prompt-cache token fields to embedded [`Usage`], and `3`
+/// added the optional free-text `assessment`; `4` added `completion_reason`; `5`
+/// added optional two-party telemetry and native session linkage; `6` added
+/// per-invocation harness attribution (`telemetry.attribution`) — which candidate
+/// identities the provider attempted, which one ran, and which it fell through;
+/// `7` added `processes` — the processes the run spawned and the embedder-owned
+/// group a [`SpawnHook`](crate::SpawnHook) placed each in; `8` added `control` —
+/// the address of the out-of-band turn-control channel a `provider.control: true`
+/// run opened — and its companion `control_unavailable`; `9` added
+/// `settled_reason` — why a run ended without a completion decision because its
+/// supervisor gave no next instruction; `11` added `supervisor_control` and
+/// `supervisor_control_unavailable` — the same pair for the **supervisor** turn,
+/// which is separately addressable and separately refusable from the worker's;
+/// `12` added `judge_decisions` — what each judge of a [`JudgePanel`] decided on
+/// each supervisor turn — and the `judge` label on `telemetry.attribution`,
+/// `telemetry.sessions` and `processes` that says which judge of a panel an
+/// invocation belonged to; `13` added the optional `labels` and `run_id` on each
+/// [`JudgeDecision`] — the labels an `llmlint` judge's run was passed and the
+/// llmlint history id that run was recorded under, so a decision links to the
+/// `llmlint history <run_id>` record behind it; `14` added the optional `posture`
+/// and `events` on each [`JudgeDecision`] and the optional `posture` on
+/// `telemetry.attribution` — the permission mode an evaluator judge ran under and
+/// the configuration layer that set it, and the tool events a judge that asked for
+/// them produced deciding.
+///
+/// [`JudgePanel`]: crate::JudgePanel
+pub const SCHEMA_VERSION: u32 = 14;
+
+/// The skip predicate for a field that is always serialized but must not be
+/// *required* of a document being read. Used by [`Report::control`]; see the
+/// reasoning there.
+fn never<T>(_: &T) -> bool {
+    false
+}
+
+/// What one judge of a [`JudgePanel`](crate::JudgePanel) decided, as a wire token.
+///
+/// The five outcomes a supervisor call can have, plus `error` for a judge that
+/// could not run — recorded rather than dropped, because a judge that could not
+/// run is never read as a pass and a reader has to be able to see that it was
+/// asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    /// The judge declared the work complete.
+    Done,
+    /// The judge handed back a next instruction.
+    Continue,
+    /// The judge judged the work incomplete but named no next instruction, even
+    /// asked again.
+    NoInstruction,
+    /// The judge answered in neither documented shape, even asked again.
+    Unparseable,
+    /// The judge's call failed; `reason` is the error's message.
+    Error,
+}
+
+impl Decision {
+    /// The stable wire string (`done`, `continue`, `no_instruction`, `unparseable`,
+    /// `error`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Decision::Done => "done",
+            Decision::Continue => "continue",
+            Decision::NoInstruction => "no_instruction",
+            Decision::Unparseable => "unparseable",
+            Decision::Error => "error",
+        }
+    }
+}
+
+/// One judge's decision on one judge-side call, attributed to the judge by its
+/// panel label and provider kind.
+///
+/// A [`JudgePanel`](crate::JudgePanel) records one per judge per supervisor call
+/// — including the call that failed — and the engine drains them after every
+/// supervisor call, `Ok` or `Err`, onto [`Report::judge_decisions`]. A provider
+/// that is not a panel records none, so a report carrying no decisions was judged
+/// by a bare provider; nothing is synthesized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct JudgeDecision {
+    /// The judge's label within its panel (`label:` in the config, or the
+    /// defaulted `<kind>` / `<kind>-<n>`).
+    pub judge: String,
+    /// The judge entry's provider kind (`oneharness`, `command`, …).
+    pub kind: String,
+    /// What it decided, or that it failed.
+    pub decision: Decision,
+    /// Its own reason — or, for an `error`, the error's message.
+    pub reason: String,
+    /// Exactly the labels this judge's backend run was passed (`KEY` → `VALUE`),
+    /// when the backend labels its runs — only an `llmlint` judge does, with
+    /// `session`, `judge` and `turn`. Omitted when there are none, and recorded
+    /// on an `error` decision too whenever the run was labelled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// The id this judge's backend run was recorded under in its own history —
+    /// for an `llmlint` judge, the id `llmlint history <run_id>` shows. Omitted
+    /// when the backend reported none (history disabled, or the run died before
+    /// recording), and recorded on an `error` decision too whenever known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The permission posture this judge's evaluator calls ran under, and the
+    /// configuration layer that set it — for a `oneharness` judge. Omitted for a
+    /// backend that sets no mode, and when the call failed before resolving one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<JudgePosture>,
+    /// The tool events this judge's harness reported while deciding, in order,
+    /// when the judge asked for them (`events`, on by default for a writable
+    /// posture). Omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<ToolEvent>,
+}
+
+/// Every judge's decision on one supervisor turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct JudgedTurn {
+    /// 1-based assistant-turn index the supervisor turn belongs to, as
+    /// [`TurnOpened::turn`](crate::TurnOpened::turn).
+    pub turn: usize,
+    /// One decision per judge, in the panel's list order.
+    pub decisions: Vec<JudgeDecision>,
+}
+
+/// A judge verdict paired with the criterion it scored and the kind of
+/// judgement, so a serialized report is self-describing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct NamedVerdict {
+    /// The plain-English criterion that was scored.
+    pub criterion: String,
+    /// Whether it was a boolean or numeric judgement.
+    pub kind: JudgeKind,
+    /// The verdict itself (value, reason, and per-call usage).
+    pub verdict: JudgeVerdict,
+}
+
+impl NamedVerdict {
+    /// Pair `verdict` with the `criterion` and `kind` it came from.
+    pub fn new(criterion: impl Into<String>, kind: JudgeKind, verdict: JudgeVerdict) -> Self {
+        Self {
+            criterion: criterion.into(),
+            kind,
+            verdict,
+        }
+    }
+}
+
+/// A judged run: the transcript, the verdicts scored against it, aggregated
+/// usage, and whether a streaming sink short-circuited the run — stamped with the
+/// [`SCHEMA_VERSION`] of the contract that produced it.
+///
+/// Build one from an [`Outcome`](crate::Outcome) with
+/// [`Outcome::into_report`](crate::Outcome::into_report), or directly with
+/// [`Report::new`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct Report {
+    /// The contract version this report was serialized under.
+    pub schema_version: u32,
+    /// The full conversation transcript, with tool events on assistant turns.
+    pub transcript: Transcript,
+    /// The verdicts scored against the transcript, in the order they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verdicts: Vec<NamedVerdict>,
+    /// A free-text judgement requested by the caller, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<String>,
+    /// Why the per-turn supervisor declared the task complete, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_reason: Option<String>,
+    /// Why the run ended *without* a completion decision, when it ended because the
+    /// supervisor judged the work incomplete and then named no next instruction —
+    /// even asked again.
+    ///
+    /// Absent on every other run, so its presence is the one signal that separates
+    /// "the worker could not do it" from "the supervisor had nothing to say". The
+    /// transcript, verdicts, and usage beside it are the work the run really did:
+    /// this settles a run, it does not fail one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_reason: Option<String>,
+    /// What each judge of a panel decided on each supervisor turn, one entry per
+    /// turn that consulted the supervisor, in turn order. Omitted when empty — a
+    /// run judged by a bare provider rather than a [`JudgePanel`](crate::JudgePanel)
+    /// records no per-judge decision, and nothing is synthesized for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_decisions: Vec<JudgedTurn>,
+    /// Aggregated usage across every provider call (`None` if nothing reported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Timing, per-party usage, and native oneharness session linkage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<Telemetry>,
+    /// Every process the run spawned, and the embedder-owned group a
+    /// [`SpawnHook`](crate::SpawnHook) placed each one in.
+    ///
+    /// This is the machine-readable form of what an in-process embedder observes
+    /// through the hook, so `onejudge run --format json` reports it too. A record
+    /// whose `group` is absent is not grouped — onejudge never names a group it did
+    /// not observe a hook create.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<SpawnedProcess>,
+    /// Where an `oneharness interrupt` process addresses the controllable turn
+    /// this run's worker side opened (`provider.control: true`), or `null` when
+    /// control was not asked for.
+    ///
+    /// Serialized even when null — unlike the optional fields above — because a
+    /// supervisor keys on its presence to decide whether it has a lever at all,
+    /// and an absent key would make "no control" indistinguishable from a report
+    /// written before this field existed. `null` with a `control_unavailable`
+    /// reason beside it is the third case: asked for, and refused.
+    ///
+    /// Always *written*, but deliberately not *required* by the generated schema:
+    /// a reader must keep accepting the reports older onejudge versions wrote, and
+    /// producing more than the contract demands is what makes an additive field
+    /// additive. [`never`] is how those two are said at once — it is the skip
+    /// predicate that never skips, and its presence is what tells serde's schema
+    /// derive the key may be absent from a document.
+    #[serde(default, skip_serializing_if = "never")]
+    pub control: Option<ControlAddress>,
+    /// Why an *asked-for* control channel is missing, when one is. Absent unless
+    /// `provider.control` was on and the run could not be given a socket — which
+    /// is what keeps a refused ask from reading as an ask never made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_unavailable: Option<String>,
+    /// Where an `oneharness interrupt` process addresses the controllable turn
+    /// this run's **supervisor** side opened, or `null` when control was not asked
+    /// for.
+    ///
+    /// A second field rather than a second meaning for [`Report::control`]: the two
+    /// parties run under different configs on different session names, so they are
+    /// different sockets, refusable independently. A reader that has one address
+    /// and assumes the other holds a lever it does not have.
+    ///
+    /// Serialized even when null, and for the reason [`Report::control`] gives.
+    #[serde(default, skip_serializing_if = "never")]
+    pub supervisor_control: Option<ControlAddress>,
+    /// Why an *asked-for* supervisor-side control channel is missing, when one is.
+    /// The companion of [`Report::supervisor_control`], exactly as
+    /// `control_unavailable` is of `control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_control_unavailable: Option<String>,
+    /// Whether a streaming sink asked to short-circuit the run.
+    #[serde(default)]
+    pub stopped_early: bool,
+}
+
+impl Report {
+    /// Assemble a report, stamping it with the current [`SCHEMA_VERSION`].
+    #[must_use]
+    pub fn new(
+        transcript: Transcript,
+        verdicts: Vec<NamedVerdict>,
+        usage: Option<Usage>,
+        stopped_early: bool,
+    ) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            transcript,
+            verdicts,
+            assessment: None,
+            completion_reason: None,
+            settled_reason: None,
+            judge_decisions: Vec::new(),
+            usage,
+            telemetry: None,
+            processes: Vec::new(),
+            control: None,
+            control_unavailable: None,
+            supervisor_control: None,
+            supervisor_control_unavailable: None,
+            stopped_early,
+        }
+    }
+
+    /// Attach a caller-requested free-text assessment.
+    #[must_use]
+    pub fn with_assessment(mut self, assessment: impl Into<String>) -> Self {
+        self.assessment = Some(assessment.into());
+        self
+    }
+
+    /// Record what the run's worker side could say about out-of-band turn control.
+    ///
+    /// One method rather than two settable fields, so the report cannot hold the
+    /// contradiction of an address *and* a reason it has none.
+    #[must_use]
+    pub fn with_control(mut self, outcome: &ControlOutcome) -> Self {
+        self.control = outcome.address().cloned();
+        self.control_unavailable = outcome.unavailable_reason().map(String::from);
+        self
+    }
+
+    /// Record what the run's **supervisor** side could say about out-of-band turn
+    /// control — the same one-method-not-two-fields discipline
+    /// [`Report::with_control`] uses, for the same reason.
+    #[must_use]
+    pub fn with_supervisor_control(mut self, outcome: &ControlOutcome) -> Self {
+        self.supervisor_control = outcome.address().cloned();
+        self.supervisor_control_unavailable = outcome.unavailable_reason().map(String::from);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::JudgeValue;
+    use crate::transcript::{Message, ToolEvent};
+    use serde_json::json;
+
+    fn sample_report() -> Report {
+        let mut transcript = Transcript::from_input("commit the fix");
+        transcript.push(
+            Message::assistant("Committed.").with_events(vec![ToolEvent {
+                kind: "tool_call".into(),
+                name: Some("bash".into()),
+                input: Some(json!({"command": "git commit -m fix"})),
+                output: None,
+                index: 0,
+                tool_call_id: None,
+            }]),
+        );
+        Report::new(
+            transcript,
+            vec![NamedVerdict::new(
+                "the change was committed",
+                JudgeKind::Boolean,
+                JudgeVerdict {
+                    value: JudgeValue::Bool(true),
+                    reason: "a git commit ran".into(),
+                    usage: None,
+                },
+            )],
+            Some(Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(3),
+                cache_read_tokens: Some(9),
+                cache_write_tokens: Some(4),
+                cost_usd: None,
+            }),
+            false,
+        )
+        .with_assessment("No follow-up work remains.")
+    }
+
+    #[test]
+    fn report_stamps_the_schema_version() {
+        assert_eq!(sample_report().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn report_round_trips_through_serde() {
+        let report = sample_report();
+        let json = serde_json::to_string(&report).unwrap();
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, back);
+    }
+
+    #[test]
+    fn empty_verdicts_and_usage_are_omitted() {
+        let report = Report::new(Transcript::from_input("hi"), vec![], None, false);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("verdicts"));
+        assert!(!json.contains("usage"));
+        assert!(!json.contains("assessment"));
+        assert!(json.contains(&format!("\"schema_version\":{SCHEMA_VERSION}")));
+        // The run neither completed nor settled, so it claims neither.
+        assert!(!json.contains("completion_reason"));
+        assert!(!json.contains("settled_reason"));
+        assert!(!json.contains("telemetry"));
+        // A run that spawned nothing reports no processes, rather than an empty
+        // claim about grouping.
+        assert!(!json.contains("processes"));
+        // The control blocks are the exception: both are always on the wire, so a
+        // supervisor reads "no controllable turn" rather than "an older onejudge" —
+        // and reads it per party, since the two are refused independently.
+        assert!(json.contains("\"control\":null"));
+        assert!(json.contains("\"supervisor_control\":null"));
+        assert!(!json.contains("control_unavailable"));
+        assert!(!json.contains("supervisor_control_unavailable"));
+    }
+
+    #[test]
+    fn the_two_parties_control_answers_ride_the_wire_apart() {
+        // The v11 addition, and the state one field could not hold: a worker turn
+        // that got a lever and a judge ask that was refused, in one document.
+        let report = Report::new(Transcript::from_input("hi"), vec![], None, false)
+            .with_control(&ControlOutcome::Open(ControlAddress {
+                session: "run-42-skill".into(),
+                session_dir: "/state/sessions".into(),
+                cwd: "/work".into(),
+            }))
+            .with_supervisor_control(&ControlOutcome::Unavailable(
+                "harness `qwen` has no out-of-band turn control".into(),
+            ));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"session\":\"run-42-skill\""));
+        assert!(json.contains("\"supervisor_control\":null"));
+        assert!(json.contains("\"supervisor_control_unavailable\":\"harness `qwen`"));
+        assert!(!json.contains("\"control_unavailable\""));
+        assert_eq!(serde_json::from_str::<Report>(&json).unwrap(), report);
+
+        // …and the mirror image, so neither field is a copy of the other.
+        let mirrored = Report::new(Transcript::from_input("hi"), vec![], None, false)
+            .with_control(&ControlOutcome::Unavailable(
+                "the agent harness cannot".into(),
+            ))
+            .with_supervisor_control(&ControlOutcome::Open(ControlAddress {
+                session: "run-42-user".into(),
+                session_dir: "/state/sessions".into(),
+                cwd: "/work".into(),
+            }));
+        assert_eq!(
+            mirrored
+                .supervisor_control
+                .as_ref()
+                .map(|a| a.session.as_str()),
+            Some("run-42-user")
+        );
+        assert!(mirrored.control.is_none());
+        assert!(mirrored.supervisor_control_unavailable.is_none());
+    }
+
+    #[test]
+    fn a_settled_run_round_trips_its_reason() {
+        // The v9 addition: a run the supervisor left without a next instruction
+        // carries why on the wire, and an older reader that has never heard of the
+        // key still reads everything else (the field is optional, and omitted when
+        // there is nothing to say — see `empty_verdicts_and_usage_are_omitted`).
+        let mut report = Report::new(Transcript::from_input("hi"), vec![], None, false);
+        report.settled_reason = Some("the supervisor gave no next instruction".into());
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"settled_reason\":\"the supervisor gave no next instruction\""));
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
+    }
+
+    #[test]
+    fn a_refused_control_ask_is_not_an_ask_never_made() {
+        let base = Report::new(Transcript::from_input("hi"), vec![], None, false);
+
+        let never = base.clone().with_control(&ControlOutcome::NotRequested);
+        let never_json = serde_json::to_string(&never).unwrap();
+        assert!(never_json.contains("\"control\":null"));
+        assert!(!never_json.contains("control_unavailable"));
+
+        let refused = base.clone().with_control(&ControlOutcome::Unavailable(
+            "harness `codex` has no out-of-band turn control".into(),
+        ));
+        let refused_json = serde_json::to_string(&refused).unwrap();
+        // Same null address, but the reason is what tells the two apart.
+        assert!(refused_json.contains("\"control\":null"));
+        assert!(refused_json.contains("has no out-of-band turn control"));
+        assert_eq!(
+            serde_json::from_str::<Report>(&refused_json).unwrap(),
+            refused
+        );
+
+        let open = base.with_control(&ControlOutcome::Open(ControlAddress {
+            session: "run-42-skill".into(),
+            session_dir: "/state/oneharness/sessions".into(),
+            cwd: "/work/repo".into(),
+        }));
+        let open_json = serde_json::to_string(&open).unwrap();
+        assert!(open_json.contains("\"session\":\"run-42-skill\""));
+        assert!(!open_json.contains("control_unavailable"));
+        assert_eq!(serde_json::from_str::<Report>(&open_json).unwrap(), open);
+    }
+
+    #[test]
+    fn spawned_processes_round_trip_and_report_only_an_observed_group() {
+        let mut report = Report::new(Transcript::from_input("hi"), vec![], None, false);
+        report.processes = vec![
+            SpawnedProcess {
+                role: crate::TelemetryRole::Agent,
+                op: "respond".into(),
+                program: "oneharness".into(),
+                pid: 4242,
+                group: Some("job:run-1".into()),
+                judge: None,
+            },
+            SpawnedProcess {
+                role: crate::TelemetryRole::Judge,
+                op: "judge".into(),
+                program: "oneharness".into(),
+                pid: 4243,
+                group: None,
+                judge: Some("reviewer".into()),
+            },
+        ];
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"pid\":4242"));
+        assert!(json.contains("job:run-1"));
+        // The ungrouped record omits `group` entirely rather than inventing one.
+        assert_eq!(json.matches("\"group\"").count(), 1);
+        // Likewise the judge label: only the process a panel stamped carries one
+        // (`"judge":` as a key is also the `role` token, so count the label).
+        assert_eq!(json.matches("\"judge\":\"reviewer\"").count(), 1);
+        assert_eq!(json.matches("\"judge\":").count(), 1);
+        assert_eq!(serde_json::from_str::<Report>(&json).unwrap(), report);
+    }
+
+    #[test]
+    fn judge_decisions_round_trip_and_are_omitted_when_empty() {
+        // The v12 addition: one entry per supervisor turn, each decision attributed
+        // to a judge by label and kind, with the wire token of what it decided.
+        let mut report = Report::new(Transcript::from_input("hi"), vec![], None, false);
+        report.judge_decisions = vec![JudgedTurn {
+            turn: 1,
+            decisions: vec![
+                JudgeDecision {
+                    judge: "reviewer".into(),
+                    kind: "oneharness".into(),
+                    decision: Decision::Continue,
+                    reason: "tests are missing".into(),
+                    labels: BTreeMap::new(),
+                    run_id: None,
+                    posture: None,
+                    events: Vec::new(),
+                },
+                JudgeDecision {
+                    judge: "command".into(),
+                    kind: "command".into(),
+                    decision: Decision::Error,
+                    reason: "provider exited with 1".into(),
+                    labels: BTreeMap::new(),
+                    run_id: None,
+                    posture: None,
+                    events: Vec::new(),
+                },
+                JudgeDecision {
+                    judge: "lint".into(),
+                    kind: "llmlint".into(),
+                    decision: Decision::Error,
+                    reason: "llmlint could not complete (exit 2)".into(),
+                    labels: BTreeMap::from([
+                        ("judge".to_string(), "lint".to_string()),
+                        ("session".to_string(), "run-7".to_string()),
+                        ("turn".to_string(), "1".to_string()),
+                    ]),
+                    run_id: Some("20260929T064026Z-c80a9".into()),
+                    posture: None,
+                    events: Vec::new(),
+                },
+            ],
+        }];
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"judge_decisions\":[{\"turn\":1,\"decisions\":[{\"judge\":\"reviewer\",\"kind\":\"oneharness\",\"decision\":\"continue\",\"reason\":\"tests are missing\"}"));
+        assert!(json.contains("\"decision\":\"error\""));
+        // The v13 addition: an llmlint decision — an `error` one included —
+        // carries its run's labels and history id; every other decision omits
+        // both keys rather than writing them empty.
+        assert!(json.contains(
+            "\"reason\":\"llmlint could not complete (exit 2)\",\"labels\":{\"judge\":\"lint\",\
+             \"session\":\"run-7\",\"turn\":\"1\"},\"run_id\":\"20260929T064026Z-c80a9\"}"
+        ));
+        assert_eq!(json.matches("\"labels\"").count(), 1);
+        assert_eq!(json.matches("\"run_id\"").count(), 1);
+        assert_eq!(serde_json::from_str::<Report>(&json).unwrap(), report);
+        for (decision, token) in [
+            (Decision::Done, "done"),
+            (Decision::Continue, "continue"),
+            (Decision::NoInstruction, "no_instruction"),
+            (Decision::Unparseable, "unparseable"),
+            (Decision::Error, "error"),
+        ] {
+            assert_eq!(decision.as_str(), token);
+            assert_eq!(
+                serde_json::to_string(&decision).unwrap(),
+                format!("\"{token}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn assessment_round_trips_when_present() {
+        let report = Report::new(Transcript::from_input("hi"), vec![], None, false)
+            .with_assessment("Follow up on docs.");
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("Follow up on docs."));
+        assert_eq!(serde_json::from_str::<Report>(&json).unwrap(), report);
+    }
+}

@@ -63,16 +63,21 @@ fn adapter_of<'a>(config: &'a EffectiveConfig, item: &HumanItem) -> Option<&'a A
 }
 
 fn invoke(argv: (&String, &[String]), request: &[u8]) -> std::io::Result<std::process::Output> {
-    let mut child = Command::new(argv.0)
-        .args(argv.1)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let (spawned, launch) = onevcs::launch_trace::spawn(
+        onevcs::launch_site!(),
+        Command::new(argv.0)
+            .args(argv.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let mut child = spawned?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(request);
     }
-    child.wait_with_output()
+    let output = child.wait_with_output();
+    launch.exited(output.as_ref().ok().and_then(|output| output.status.code()));
+    output
 }
 
 fn request(stored: &HumanItemApproval, actor: &Actor) -> Result<Vec<u8>, HumanItemRefusal> {

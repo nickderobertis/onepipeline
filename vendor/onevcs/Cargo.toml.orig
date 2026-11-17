@@ -1,0 +1,209 @@
+[package]
+name = "onevcs"
+# The one version source in this repository. release-plz maintains it; maturin
+# reads it through `dynamic = ["version"]` and crates/onevcs/release/npm-build.mjs parses it out
+# of this file. Never write a version anywhere else.
+version = "0.67.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Version control and remote-host abstraction for agent workflows: host-neutral change requests, sessions, and a rules system."
+readme = "README.md"
+keywords = ["cli", "git", "github", "vcs", "agent"]
+categories = ["command-line-utilities", "development-tools"]
+# What a consumer receives: the sources, the manifest, the crate's readme, and
+# the release tooling under release/ that release.yml runs to build, package and
+# verify everything published from this crate (the archives, wheels and npm
+# packages, and the crate itself).
+#
+# release-plz decides this package changed by diffing its **packaged files**
+# against the last release, and it only ever walks commits that touch this
+# directory — so a script outside it can never cut a release, which is why the
+# release tooling lives here rather than in the root scripts/. A change to the
+# suite, to CI-only scripts or workflows, or to the workspace docs deliberately
+# does not cut a release on its own — which holds only while Cargo.lock beside
+# this file is a symlink to the workspace lock (release-plz.toml says why).
+include = [
+    "src/**/*.rs",
+    "src/boundary/generic-words.txt",
+    "release/*.sh",
+    "release/*.py",
+    "release/*.mjs",
+    "Cargo.toml",
+    "README.md",
+]
+
+[lib]
+name = "onevcs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "onevcs"
+path = "src/main.rs"
+
+[features]
+# Persistence writers used only by the sibling test-support crate.
+testing = []
+
+[dependencies]
+flate2 = { workspace = true }
+zip = { workspace = true }
+globset = { workspace = true }
+clap = { workspace = true }
+filetime = { workspace = true }
+fs4 = { workspace = true }
+git2 = { version = "0.21.0", default-features = false, features = ["vendored-libgit2"] }
+icu_normalizer = { workspace = true }
+icu_properties = { workspace = true }
+minijinja = { workspace = true }
+onemessagebus = { workspace = true }
+privateterms = { workspace = true }
+schemars = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+toml = { workspace = true }
+url = { workspace = true }
+
+# The bound on a git command terminates its whole process group, so a wedged hook
+# cannot outlive the push it was gating. There is no portable spelling for that.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+libz-sys = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+dunce = { workspace = true }
+# `Win32_System_JobObjects` (and the `Win32_Security` its constructor names) is how a
+# stopped publishing push takes its hook's descendants down with it: Windows has no
+# process group to signal, and a job is the tree it offers instead. git is launched
+# suspended into it, and `Win32_System_Diagnostics_ToolHelp` finds the thread to resume.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+# A journey that supplies implementations runs in-process, because the binary
+# deliberately has no way to select a backend — so there is no subprocess whose
+# stderr could be captured, and asserting what a user is told means redirecting
+# this process's own descriptor.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
+# One journey takes a duplicate of another process's pipe, which is how a handle
+# comes to outlive the command that wrote through it. `DuplicateHandle` is the only
+# spelling of that on Windows; `tests/e2e/inherited_pipes.rs` says why the journey
+# needs one.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+# The mounted filesystems a sweep journey and a landing journey need, which only Linux
+# here can mount without a package outside the distribution's own:
+# `tests/e2e/refusing_fs.rs` and `tests/e2e/lookups.rs` say what each is for and
+# `crates/onevcs/AGENTS.md` says what a host needs to run them.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+fuser = { workspace = true }
+
+[dev-dependencies]
+syn = { version = "2.0.119", features = ["full"] }
+quote = "1.0.47"
+jsonschema = { version = "0.56.0", default-features = false }
+assert_cmd = { workspace = true }
+# The parser the honesty journey drives `run_with` with, which is the same one the
+# binary uses.
+clap = { workspace = true }
+# One discovery journey composes the two templates the three layers resolved, the way
+# the consumer that renders them does. The engine is the real one rather than a
+# stand-in, because what the journey holds is that what this crate hands back is enough
+# to compose — and a substitute for the engine could not answer that.
+minijinja = { workspace = true }
+# The occupancy journeys take a session's advisory lease the way a second process
+# does — the same lock, from outside the binary, rather than a stand-in for one.
+fs4 = { workspace = true }
+predicates = { workspace = true }
+# The journeys read the binary's own NDJSON stream back, which is the surface a
+# consumer meets rather than an internal the suite could reach around.
+serde_json = { workspace = true }
+# The review journeys name a read marker by the digest its event carries, computed the
+# way the event's own contract states it.
+sha2 = { workspace = true }
+# The test implementations of this crate's own two interfaces, so one publication
+# journey can run against them and against Git + GitHub and the two streams be held
+# to each other. A dev-dependency cycle, which Cargo allows and `cargo publish`
+# strips: nothing in the packaged crate depends on it.
+onevcs-testing = { path = "../onevcs-testing" }
+# The release workflow, parsed as the YAML Actions reads rather than grepped, so
+# the paths a release archive names are the ones the suite checks exist.
+serde-saphyr = { workspace = true }
+
+# The in-process timing program the recovery workload journeys drive. Its tests,
+# over how it reads each kernel's resident memory and thread count, run in the unit
+# tier with the crate's own, so a figure a host reports differently fails there.
+[[example]]
+name = "recoverable_latency"
+test = true
+
+# The end-to-end journeys: they spawn the compiled binary as a subprocess, so they
+# are their own target (`just test-e2e` runs it alone) while `just check` still
+# runs them with everything else.
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
+# The real-backend tier: real git against a real remote and the real GitHub API.
+# Its own binary so `just test` and `just gate` can exclude it by name — an
+# ordinary gate stays offline and credential-free — while `just smoke-real` runs
+# it. Excluded by name rather than by `#[ignore]`, so no journey here is ever a
+# skipped test.
+[[test]]
+name = "smoke"
+path = "tests/smoke/main.rs"
+
+# `just release-pr-check` against the real `release-plz` at the version
+# `release-plz.yml` pins. Its own binary for the reason `smoke` is: the gate does not
+# install that tool, so `just test` and `just gate` exclude it by name and CI's
+# `release-pr` job runs it (`just release-pr-journeys`) after installing it.
+[[test]]
+name = "release_pr"
+path = "tests/release_pr/main.rs"
+
+# `just lint-llm-diff` driven through the real Nx and the real installed llmlint.
+# Its own binary for the reason `release_pr` is: the offline tiers do not install
+# llmlint, so they exclude it by name and CI's `llmlint` job runs it
+# (`just lint-llm-diff-journeys`) after `just setup-llmlint`.
+[[test]]
+name = "lint_llm_diff"
+path = "tests/lint_llm_diff/main.rs"
+
+# Host-sized recovery measurement has its own affected project and producer edge.
+[[test]]
+name = "recovery-workload"
+path = "tests/recovery-workload/main.rs"
+
+# Isolated pool measurement, excluded from every per-change tier.
+[[test]]
+name = "pool-workload"
+path = "tests/pool-workload/main.rs"
+
+# Optimized in-process export telemetry; owned by its isolated workload project.
+[[test]]
+name = "export-workload"
+path = "tests/recovery-workload/export/main.rs"
+
+[[test]]
+name = "sessionless"
+path = "tests/sessionless/main.rs"

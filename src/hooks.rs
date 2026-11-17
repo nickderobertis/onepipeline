@@ -904,9 +904,11 @@ fn run(
             spawning
                 .stdout(output.try_clone()?)
                 .stderr(output.try_clone()?);
-            Ok((spawning.spawn()?, document))
+            let (spawned, launch) =
+                onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut spawning);
+            Ok((spawned?, document, launch))
         });
-    let (mut child, document) = match spawned {
+    let (mut child, document, launch) = match spawned {
         Ok(spawned) => spawned,
         Err(error) => {
             // The log is what a reader opens to find out why, so it says.
@@ -927,7 +929,10 @@ fn run(
 
     let deadline = deadline_after(record.hook_timeout());
     let mut relayed = 0;
+    let mut watch =
+        onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), Some(POLL));
     let ran = loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => {
                 break if status.success() {
@@ -955,6 +960,8 @@ fn run(
         }
         std::thread::sleep(POLL);
     };
+    drop(watch);
+    launch.exited(None);
     if relay == Relay::Stderr {
         relay_from(log, relayed);
     }

@@ -1,0 +1,335 @@
+//! Process-shared advisory locks, and the leases built out of them.
+//!
+//! Contended identities **queue** in the kernel's own lock line rather than racing
+//! a non-blocking retry: every waiter in a busy-poll races on each attempt, so an
+//! unlucky one can be passed over indefinitely and then fail while the resource was
+//! never actually scarce. The OS releases these on process death, so a crashed
+//! holder hands the queue to the next waiter instead of wedging it.
+//!
+//! A **shared** lock marks occupancy rather than ownership: any number of holders
+//! may share it and an exclusive taker fails while even one does. That is what
+//! answers "is anyone still working in here?" for a run root several processes
+//! legitimately occupy at once.
+
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use fs4::fs_std::FileExt;
+
+use crate::error::{self, Error, Result};
+use crate::{home, ids};
+
+/// How long a queued wait may last before the turn is abandoned.
+pub const TIMEOUT_ENV: &str = "ONEVCS_LOCK_TIMEOUT_SECONDS";
+/// Minutes, not seconds: a legitimate turn can hold a whole publication, and failing
+/// a session that would simply have been served next is the outcome this bound
+/// exists to avoid.
+pub const DEFAULT_TIMEOUT_SECONDS: f64 = 900.0;
+
+/// A held advisory lock. Released when it is dropped, and by the OS if this
+/// process dies first.
+#[derive(Debug)]
+pub struct Guard {
+    file: File,
+}
+
+impl Guard {
+    /// Turn an exclusive hold into a shared one in place, never letting it go.
+    ///
+    /// Only where the platform converts a held lock without a gap another taker could
+    /// enter: Unix `flock`, where nothing can conflict with a shared lock while this
+    /// file description holds the exclusive one. Elsewhere the hold stays exclusive.
+    pub(crate) fn share(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(FileExt::try_lock_shared(&self.file), Ok(true))
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// The bound on a queued wait, refused at the boundary when it is unusable.
+pub fn timeout_seconds() -> Result<f64> {
+    let Some(raw) = std::env::var_os(TIMEOUT_ENV) else {
+        return Ok(DEFAULT_TIMEOUT_SECONDS);
+    };
+    let raw = raw.to_string_lossy().into_owned();
+    let value: f64 = raw.trim().parse().map_err(|_| Error::Invalid {
+        reason: format!("{TIMEOUT_ENV} must be a number of seconds, not {raw:?}"),
+    })?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(Error::Invalid {
+            reason: format!(
+                "{TIMEOUT_ENV} must be a finite number of seconds above zero, not {raw:?}"
+            ),
+        });
+    }
+    Ok(value)
+}
+
+/// The lock file one identity is guarded by.
+pub fn path_for(identity: &str) -> Result<PathBuf> {
+    Ok(home::locks_dir()?.join(format!("{}.lock", ids::digest(identity))))
+}
+
+/// The advisory-lock identity for a repository's git common directory — the one
+/// thing every worktree and every alias of a checkout shares.
+pub fn git_identity(common_dir: &Path) -> String {
+    format!("git:{}", common_dir.display())
+}
+
+/// Take an identity exclusively, queueing for it under the configured bound.
+pub fn exclusive(identity: &str) -> Result<Guard> {
+    acquire(identity, timeout_seconds()?)
+}
+
+/// Take the lock file at `path` exclusively, queueing for it under the configured
+/// bound.
+///
+/// For a lock that belongs to the resource it guards rather than to this state root:
+/// every process reaching that resource takes turns on the one file, whichever
+/// `ONEVCS_HOME` it runs under. The file's directory must already exist.
+pub fn exclusive_at(path: &Path) -> Result<Guard> {
+    let file = open_at(path)?;
+    wait_for(
+        path,
+        file,
+        &path.display().to_string(),
+        timeout_seconds()?,
+        Mode::Exclusive,
+    )
+}
+
+/// How a lock file is held: beside other shared holders, or alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Shared,
+    Exclusive,
+}
+
+/// Wait for a shared read turn at a resource-owned lock file.
+pub(crate) fn shared_at(path: &Path) -> Result<Guard> {
+    wait_for(
+        path,
+        open_at(path)?,
+        &path.display().to_string(),
+        timeout_seconds()?,
+        Mode::Shared,
+    )
+}
+
+/// Probe a resource-owned shared lease without waiting for its exclusive holder.
+pub(crate) fn try_shared_at(path: &Path) -> Result<Option<Guard>> {
+    try_at(path, Mode::Shared)
+}
+
+/// Probe a resource-owned exclusive lease without waiting for its holder.
+pub(crate) fn try_exclusive_at(path: &Path) -> Result<Option<Guard>> {
+    try_at(path, Mode::Exclusive)
+}
+
+fn try_at(path: &Path, mode: Mode) -> Result<Option<Guard>> {
+    let file = open_at(path)?;
+    let taken = match mode {
+        Mode::Shared => FileExt::try_lock_shared(&file),
+        Mode::Exclusive => FileExt::try_lock_exclusive(&file),
+    };
+    match taken {
+        Ok(true) => Ok(Some(Guard { file })),
+        Ok(false) => Ok(None),
+        Err(failure) => Err(error::at("read the lock at", path)(failure)),
+    }
+}
+
+/// Take an identity's shared occupancy lease, queueing behind an exclusive holder
+/// under the configured bound.
+///
+/// For a reader that has to be inside a run root rather than told it is busy: every
+/// exclusive take of an occupancy lease is a reclamation deciding about the run root
+/// and removing it, so waiting it out is short, and what is left afterwards is either
+/// the run root or nothing.
+pub fn shared(identity: &str) -> Result<Guard> {
+    let (path, file) = open(identity)?;
+    wait_for(&path, file, identity, timeout_seconds()?, Mode::Shared)
+}
+
+/// Take an identity's shared occupancy lease if it is free *right now*.
+///
+/// The lease mode: "somebody else is in here" is the answer, not something to wait
+/// out. Returns `None` when an exclusive holder has it.
+pub fn try_shared(identity: &str) -> Result<Option<Guard>> {
+    try_acquire(identity, Mode::Shared)
+}
+
+/// Whether anybody holds an identity's occupancy lease right now.
+///
+/// A probe rather than a lease: the exclusive take that answers it is released before
+/// this returns, and nothing is written into the lock file — an exclusive *holder*
+/// stamps its pid there for a timed-out waiter to read, and a reader that stamped one
+/// would overwrite the owner that waiter is sent after. [`try_exclusive`] is the same
+/// question asked by something that then keeps the lease.
+///
+/// Definite in both directions, and it has to be: what it decides is whether to hand
+/// somebody a command that publishes a branch, so "abandoned" would offer work a live
+/// session is still writing to and "occupied" would withhold work nobody is doing.
+/// A lease it could not ask about is therefore neither answer but an `Err`, exactly as
+/// a lock this module cannot open is everywhere else in it.
+///
+/// The window it opens is the exclusive take's own: a shared taker meeting it is told
+/// the identity is busy, which is what any occupancy answer means, and it is the same
+/// window `reclaim` has opened on every session opening since it existed.
+pub fn is_occupied(identity: &str) -> Result<bool> {
+    let path = path_for(identity)?;
+    // llmlint: ignore-block[changed_behavior_has_e2e] uncovered: a lock file that is
+    // there and will not open, and a `flock` the kernel refuses for a reason of its own.
+    // No interface this crate exposes can produce either — every holder creates the file
+    // and locks it through this module — so building one means changing a file's
+    // permissions under the state root by hand, which is a fixture standing in for the
+    // filesystem rather than a journey. Both answer the same way the rest of this module
+    // answers a lock it cannot read: they say so.
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        // A lock file that is not there is one nothing holds: every holder creates it
+        // before it locks it, so its absence is an answer rather than a failure.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error::at("read the lock at", &path)(error)),
+    };
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(true) => {
+            let _ = FileExt::unlock(&file);
+            Ok(false)
+        }
+        Ok(false) => Ok(true),
+        Err(error) => Err(error::at("ask who holds the lock at", &path)(error)),
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// Take an identity exclusively if it is free right now.
+///
+/// This is how occupancy is *probed*: an exclusive lock succeeds only while no
+/// shared holder remains, so taking one proves the run root is abandoned.
+pub fn try_exclusive(identity: &str) -> Result<Option<Guard>> {
+    try_acquire(identity, Mode::Exclusive)
+}
+
+fn open(identity: &str) -> Result<(PathBuf, File)> {
+    let path = path_for(identity)?;
+    home::ensure_dir(path.parent().unwrap_or(Path::new(".")))?;
+    let file = open_at(&path)?;
+    Ok((path, file))
+}
+
+fn open_at(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(error::at("open the lock at", path))
+}
+
+fn try_acquire(identity: &str, mode: Mode) -> Result<Option<Guard>> {
+    let (_, file) = open(identity)?;
+    let taken = match mode {
+        Mode::Shared => FileExt::try_lock_shared(&file),
+        Mode::Exclusive => FileExt::try_lock_exclusive(&file),
+    };
+    match taken {
+        Ok(true) => {
+            if mode == Mode::Exclusive {
+                record_owner(&file);
+            }
+            Ok(Some(Guard { file }))
+        }
+        Ok(false) | Err(_) => Ok(None),
+    }
+}
+
+/// Wait in the kernel's own lock line, abandoning the turn after `bound` seconds.
+///
+/// A blocking lock has no timeout of its own, so the wait happens on a helper
+/// thread and this one watches the clock. When the watchdog fires first the
+/// abandoned turn is handed back the instant the kernel grants it: the receiver is
+/// gone, so the file is dropped and the lock released, and the next waiter is
+/// served rather than deadlocked behind a caller that already gave up.
+fn acquire(identity: &str, bound: f64) -> Result<Guard> {
+    let (path, file) = open(identity)?;
+    wait_for(&path, file, identity, bound, Mode::Exclusive)
+}
+
+/// [`acquire`]'s wait, for a lock file already open; `what` names it in a refusal.
+fn wait_for(path: &Path, file: File, what: &str, bound: f64, mode: Mode) -> Result<Guard> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let locked = match mode {
+            Mode::Shared => FileExt::lock_shared(&file),
+            Mode::Exclusive => FileExt::lock_exclusive(&file),
+        };
+        if locked.is_ok() {
+            let _ = sender.send(file);
+        }
+    });
+    match receiver.recv_timeout(Duration::from_secs_f64(bound)) {
+        Ok(file) => {
+            if mode == Mode::Exclusive {
+                record_owner(&file);
+            }
+            Ok(Guard { file })
+        }
+        Err(_) => Err(Error::Invalid {
+            reason: format!(
+                "timed out after {bound}s waiting for {what}; owner: {} \
+                 (raise {TIMEOUT_ENV} if this wait is legitimate)",
+                recorded_owner(path)
+            ),
+        }),
+    }
+}
+
+/// Stamp who holds an exclusive lock, so a timed-out waiter can name them.
+///
+/// Only an exclusive holder can honestly do this: a shared holder is one of
+/// several, and stamping its pid would send a waiter after an arbitrary one.
+fn record_owner(file: &File) {
+    let mut handle = file;
+    let _ = handle.set_len(0);
+    let _ = write!(handle, "pid={}", std::process::id());
+    let _ = handle.flush();
+}
+
+fn recorded_owner(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown owner".to_owned())
+}
+
+/// The pid the exclusive holder of `identity` stamped, where one has.
+///
+/// For a caller whose own exclusive take was refused and who reports who holds the
+/// identity rather than waiting for it — the pool's maintenance verb, which answers
+/// `Claimed` naming the other run. `None` where nothing is stamped: the holder
+/// writes its pid the instant after the kernel grants the lock, so a reader can
+/// arrive inside that instant, and the file is truncated by the next holder rather
+/// than cleared by the last.
+pub(crate) fn stamped_owner(identity: &str) -> Result<Option<u32>> {
+    let path = path_for(identity)?;
+    Ok(std::fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().strip_prefix("pid=")?.parse().ok()))
+}

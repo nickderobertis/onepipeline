@@ -1,0 +1,402 @@
+//! [`SplitProvider`]: compose two [`Provider`]s into one — a *skill* provider
+//! that runs the assistant/skill turns, and a *judge* provider that scores
+//! criteria and role-plays the simulated user.
+//!
+//! The two responsibilities are genuinely separable: you might drive the skill on
+//! one harness ([`OneharnessProvider`](crate::OneharnessProvider) on a capable
+//! platform) while judging and simulating the user on a cheaper harness or model —
+//! or vice versa. `SplitProvider` routes each [`Provider`] operation to whichever
+//! backend owns it, so the engine sees one provider and neither backend needs to
+//! know the other exists.
+//!
+//! The judge half may itself be a [`JudgePanel`](crate::JudgePanel) — a list of
+//! judges run concurrently and combined — which is how the CLI builds a `judges:`
+//! list; an embedder composing by hand gets the same semantics through this one
+//! path, since the split only forwards.
+
+use std::ops::ControlFlow;
+
+use oneharness_core::domain::events::ActionEvent;
+
+use crate::error::Result;
+use crate::provider::{
+    Assessment, AssistantTurn, EvidenceContext, JudgeQuery, JudgeVerdict, Provider, SkillRef,
+    SupervisorQuery, SupervisorTurn, UserTurn,
+};
+use crate::transcript::{Message, ToolEvent};
+
+/// A [`Provider`] that dispatches each operation to one of two backends.
+///
+/// - [`Provider::respond`] / [`Provider::respond_streaming`] and session
+///   continuation go to the **skill** provider (the one running the worker under
+///   test).
+/// - [`Provider::judge`] and [`Provider::simulate_user`] go to the **judge**
+///   provider (the one scoring the transcript and playing the user).
+///
+/// Build one with [`SplitProvider::new`].
+pub struct SplitProvider<S, J> {
+    skill: S,
+    judge: J,
+}
+
+impl<S: Provider, J: Provider> SplitProvider<S, J> {
+    /// Compose `skill` (runs the assistant turns) with `judge` (scores criteria
+    /// and role-plays the simulated user).
+    pub fn new(skill: S, judge: J) -> Self {
+        Self { skill, judge }
+    }
+
+    /// The backend that runs the skill's assistant turns.
+    pub fn skill_provider(&self) -> &S {
+        &self.skill
+    }
+
+    /// The backend that judges the transcript and role-plays the simulated user.
+    pub fn judge_provider(&self) -> &J {
+        &self.judge
+    }
+}
+
+impl<S: Provider, J: Provider> Provider for SplitProvider<S, J> {
+    fn supervises_lost_turns(&self) -> bool {
+        self.judge.supervises_lost_turns()
+    }
+
+    fn reset_telemetry(&self) {
+        self.skill.reset_telemetry();
+        self.judge.reset_telemetry();
+    }
+
+    // Only the judge side's calls are named after the run's scope; the skill side
+    // names its own turns `<base>-skill`. Both sides are handed it, because both
+    // label their runs `session=<base>` — the skill side makes no judge-side call
+    // for the scope to name.
+    fn set_history_scope(&self, scope: Option<&crate::HistoryScope>) {
+        self.skill.set_history_scope(scope);
+        self.judge.set_history_scope(scope);
+    }
+
+    // The judge side is the one judging under a label and keeping a per-run
+    // record, so both halves of the link belong to it.
+    fn set_judge_label(&self, label: &str) {
+        self.judge.set_judge_label(label);
+    }
+
+    // Only the judge side judges a judge-only run's material.
+    fn set_judged_file(&self, file: Option<&crate::JudgedFile>) {
+        self.judge.set_judged_file(file);
+    }
+
+    fn take_judge_link(&self) -> Option<crate::JudgeLink> {
+        self.judge.take_judge_link()
+    }
+
+    fn take_judge_tools(&self) -> Vec<crate::JudgeTools> {
+        self.judge.take_judge_tools()
+    }
+
+    fn invocation_telemetry(&self) -> Vec<crate::telemetry::InvocationTelemetry> {
+        let mut records = self.skill.invocation_telemetry();
+        records.extend(self.judge.invocation_telemetry());
+        records
+    }
+
+    // Both halves of the split spawn, so both halves' processes are reported —
+    // otherwise an embedder grouping a two-party run would see only one side of
+    // the tree it owns.
+    fn spawned_processes(&self) -> Vec<crate::SpawnedProcess> {
+        let mut records = self.skill.spawned_processes();
+        records.extend(self.judge.spawned_processes());
+        records
+    }
+
+    // Each side reports its own, and only its own: the two backends are separate
+    // runs on separate addresses, so forwarding either one for the other would
+    // hand a supervisor a lever over the wrong party.
+    fn control(&self) -> crate::ControlOutcome {
+        self.skill.control()
+    }
+
+    fn supervisor_control(&self) -> crate::ControlOutcome {
+        self.judge.supervisor_control()
+    }
+
+    fn turn_control(
+        &self,
+        party: crate::Party,
+        session: &str,
+        cwd: &str,
+    ) -> Option<crate::ControlAddress> {
+        match party {
+            crate::Party::Worker => self.skill.turn_control(party, session, cwd),
+            crate::Party::Supervisor => self.judge.turn_control(party, session, cwd),
+        }
+    }
+
+    // Only the judge side decides, so only it can have recorded a decision.
+    fn take_judge_decisions(&self) -> Vec<crate::JudgeDecision> {
+        self.judge.take_judge_decisions()
+    }
+
+    fn respond(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<AssistantTurn> {
+        self.skill.respond(skill, messages, session)
+    }
+
+    fn respond_streaming(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(&ToolEvent) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        self.skill
+            .respond_streaming(skill, messages, session, on_event)
+    }
+
+    fn respond_observing(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(&ActionEvent) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        self.skill
+            .respond_observing(skill, messages, session, on_event)
+    }
+
+    fn respond_with_history(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(crate::HarnessEvent<'_>) -> ControlFlow<()>,
+    ) -> crate::Result<AssistantTurn> {
+        self.skill
+            .respond_with_history(skill, messages, session, on_event)
+    }
+
+    fn supervise_observing(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        evidence: EvidenceContext<'_>,
+        on_history: &mut dyn FnMut(&oneharness_core::io::run::RunBegun) -> ControlFlow<()>,
+    ) -> crate::Result<SupervisorTurn> {
+        self.judge
+            .supervise_observing(query, messages, session, evidence, on_history)
+    }
+
+    fn simulate_user(
+        &self,
+        persona: &str,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<UserTurn> {
+        self.judge.simulate_user(persona, messages, session)
+    }
+    fn supervise(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<SupervisorTurn> {
+        self.judge.supervise(query, messages, session)
+    }
+
+    fn judge(&self, query: &JudgeQuery<'_>, messages: &[Message]) -> Result<JudgeVerdict> {
+        self.judge.judge(query, messages)
+    }
+
+    fn judge_with_evidence(
+        &self,
+        query: &JudgeQuery<'_>,
+        messages: &[Message],
+        evidence: EvidenceContext<'_>,
+    ) -> Result<JudgeVerdict> {
+        self.judge.judge_with_evidence(query, messages, evidence)
+    }
+
+    fn assess(&self, prompt: &str, messages: &[Message]) -> Result<Assessment> {
+        self.judge.assess(prompt, messages)
+    }
+
+    fn assess_with_evidence(
+        &self,
+        prompt: &str,
+        messages: &[Message],
+        evidence: EvidenceContext<'_>,
+    ) -> Result<Assessment> {
+        self.judge.assess_with_evidence(prompt, messages, evidence)
+    }
+
+    fn supervise_with_evidence(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        evidence: EvidenceContext<'_>,
+    ) -> Result<SupervisorTurn> {
+        self.judge
+            .supervise_with_evidence(query, messages, session, evidence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{JudgeKind, JudgeValue};
+    use crate::usage::Usage;
+    use std::cell::Cell;
+
+    /// A provider that records which of its operations were called and returns a
+    /// canned turn tagged with `tag`, so a test can prove which backend handled
+    /// each op.
+    #[derive(Default)]
+    struct Tagged {
+        tag: &'static str,
+        responded: Cell<u32>,
+        streamed: Cell<u32>,
+        simulated: Cell<u32>,
+        judged: Cell<u32>,
+        assessed: Cell<u32>,
+    }
+
+    impl Tagged {
+        fn new(tag: &'static str) -> Self {
+            Self {
+                tag,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Provider for Tagged {
+        fn respond(
+            &self,
+            _skill: &SkillRef<'_>,
+            _messages: &[Message],
+            _session: Option<&str>,
+        ) -> Result<AssistantTurn> {
+            self.responded.set(self.responded.get() + 1);
+            Ok(AssistantTurn {
+                message: self.tag.into(),
+                ..AssistantTurn::default()
+            })
+        }
+
+        fn respond_streaming(
+            &self,
+            _skill: &SkillRef<'_>,
+            _messages: &[Message],
+            _session: Option<&str>,
+            on_event: &mut dyn FnMut(&ToolEvent) -> ControlFlow<()>,
+        ) -> Result<AssistantTurn> {
+            self.streamed.set(self.streamed.get() + 1);
+            let event = ToolEvent {
+                kind: "tool_call".into(),
+                name: Some("bash".into()),
+                input: None,
+                output: None,
+                index: 0,
+                tool_call_id: None,
+            };
+            let _ = on_event(&event);
+            Ok(AssistantTurn {
+                message: self.tag.into(),
+                events: vec![event],
+                ..AssistantTurn::default()
+            })
+        }
+
+        fn simulate_user(
+            &self,
+            _persona: &str,
+            _messages: &[Message],
+            _session: Option<&str>,
+        ) -> Result<UserTurn> {
+            self.simulated.set(self.simulated.get() + 1);
+            Ok(UserTurn {
+                message: self.tag.into(),
+                ..UserTurn::default()
+            })
+        }
+
+        fn judge(&self, _query: &JudgeQuery<'_>, _messages: &[Message]) -> Result<JudgeVerdict> {
+            self.judged.set(self.judged.get() + 1);
+            Ok(JudgeVerdict {
+                value: JudgeValue::Bool(true),
+                reason: self.tag.into(),
+                usage: Some(Usage::default()),
+            })
+        }
+
+        fn assess(&self, _prompt: &str, _messages: &[Message]) -> Result<Assessment> {
+            self.assessed.set(self.assessed.get() + 1);
+            Ok(Assessment {
+                text: self.tag.into(),
+                usage: None,
+            })
+        }
+    }
+
+    fn skill_ref() -> SkillRef<'static> {
+        SkillRef {
+            name: "s",
+            dir: "/s",
+            instructions: "do x",
+        }
+    }
+
+    fn boolean_query() -> JudgeQuery<'static> {
+        JudgeQuery {
+            kind: JudgeKind::Boolean,
+            criterion: "ok",
+            scale: None,
+        }
+    }
+
+    #[test]
+    fn respond_routes_to_the_skill_backend() {
+        let split = SplitProvider::new(Tagged::new("skill"), Tagged::new("judge"));
+        let turn = split.respond(&skill_ref(), &[], None).unwrap();
+        assert_eq!(turn.message, "skill");
+        assert_eq!(split.skill_provider().responded.get(), 1);
+        assert_eq!(split.judge_provider().responded.get(), 0);
+    }
+
+    #[test]
+    fn streaming_routes_to_the_skill_backend() {
+        let split = SplitProvider::new(Tagged::new("skill"), Tagged::new("judge"));
+        let mut seen = 0;
+        let turn = split
+            .respond_streaming(&skill_ref(), &[], None, &mut |_e| {
+                seen += 1;
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(turn.message, "skill");
+        assert_eq!(seen, 1);
+        assert_eq!(split.skill_provider().streamed.get(), 1);
+        assert_eq!(split.judge_provider().streamed.get(), 0);
+    }
+
+    #[test]
+    fn user_and_judge_route_to_the_judge_backend() {
+        let split = SplitProvider::new(Tagged::new("skill"), Tagged::new("judge"));
+        let user = split.simulate_user("persona", &[], None).unwrap();
+        assert_eq!(user.message, "judge");
+        let verdict = split.judge(&boolean_query(), &[]).unwrap();
+        assert_eq!(verdict.reason, "judge");
+        assert_eq!(split.judge_provider().simulated.get(), 1);
+        assert_eq!(split.judge_provider().judged.get(), 1);
+        // The skill backend was never asked to judge or simulate.
+        assert_eq!(split.skill_provider().simulated.get(), 0);
+        assert_eq!(split.skill_provider().judged.get(), 0);
+    }
+}

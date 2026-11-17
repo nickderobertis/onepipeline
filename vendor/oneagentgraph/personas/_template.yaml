@@ -1,0 +1,18 @@
+# Persona template. `oneagentgraph persona new <name>` copies this to <name>.yaml.
+#
+# Fill in what makes this role different and delete the rest: everything a
+# persona may say, which keys are refused, and how each one merges over the
+# member's `base_config` is in `docs/persona-format.md`.
+
+name: role-name
+system_prompt: |
+  What this worker specializes in and how it should approach its task. Be
+  specific about the role; the shared quality bar belongs in the base config.
+
+user:
+  persona: |
+    The supervisor's stance for reviewing this role's work — what to push on, and
+    what "not done yet" looks like for this kind of task.
+  # done_when: "a bar this role adds to the base's; both are enforced"
+  # done_when_replaces_base: true   # only when the base's bar must NOT apply here
+  # max_turns: 12
