@@ -4033,3 +4033,191 @@ fn a_schema_version_1_event_claiming_the_users_words_is_refused_by_name() {
         .err_has("cannot be read")
         .err_has("schema version 1 event is the manager's");
 }
+
+/// A question node of a plan offering `choices`, as its `human_item` writes them.
+fn question_node(id: &str, choices: Value) -> Value {
+    let mut node = human(id, &[]);
+    node["human_item"] = json!({
+        "kind": "question",
+        "priority": "medium",
+        "title": format!("How should {id} go?"),
+        "body": "Pick one, or say it in your own words.",
+        "choices": choices,
+    });
+    node
+}
+
+/// Two choices, as a plan offers them.
+fn two_choices() -> Value {
+    json!([
+        {"id": "gradual", "title": "Roll out gradually", "description": "A tenth a day."},
+        {"id": "at-once", "title": "All at once", "description": "Everyone on **Monday**."}
+    ])
+}
+
+/// The `human-attested` record of `node`.
+fn attested(world: &World, run: &str, node: &str) -> Value {
+    let records: Vec<Value> = world
+        .events_of(run, "human-attested")
+        .into_iter()
+        .filter(|e| e["labels"]["node"] == node)
+        .collect();
+    assert_eq!(records.len(), 1, "{node}: {records:?}");
+    records[0]["payload"].clone()
+}
+
+/// A question node offering two choices raises an item carrying them, and the step each
+/// item stands for is attested with what the person did: answered by a choice and words,
+/// answered by words alone, or completed — each `human-attested` naming the item, the
+/// action and the resolution exactly as `human-items show` reads it. A step attested by
+/// `onepipeline attest` while its item was open records no item.
+#[test]
+fn an_attested_steps_record_says_who_resolved_its_item_and_what_they_said() {
+    let world = World::new("human-item-attested");
+    enabled(&world);
+    let name = "attested";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                question_node("rollout", two_choices()),
+                question_node("region", two_choices()),
+                human("sign", &[]),
+                human("plain", &[]),
+                agent("after", &["rollout", "region", "sign", "plain"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let open = items(&world, &[]);
+    let id = |node: &str| {
+        open.iter()
+            .find(|v| v["item"]["dedup_key"] == format!("run:{name}#{node}"))
+            .map(id_of)
+            .unwrap_or_else(|| panic!("no item for {node}: {open:?}"))
+    };
+    let shown = human_item(&world, &id("rollout"));
+    assert_eq!(shown["item"]["kind"], "question");
+    assert_eq!(shown["item"]["choices"], two_choices(), "{shown}");
+
+    let as_person = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command
+            .env("ONEPIPELINE_LAUNCHER_SESSION", "desk")
+            .env("USER", "ada");
+        world.run_on(command, &args.join(" ")).exited(0);
+    };
+    let rollout = id("rollout");
+    as_person(&[
+        "human-items",
+        "answer",
+        &rollout,
+        "--choice",
+        "gradual",
+        "--text",
+        "Start on Monday.",
+        "--as",
+        "user",
+    ]);
+    let region = id("region");
+    as_person(&[
+        "human-items",
+        "answer",
+        &region,
+        "--text",
+        "eu-west, not a listed one",
+    ]);
+    let sign = id("sign");
+    as_person(&["human-items", "complete", &sign]);
+    world.run(&["attest", name, "plain"]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
+
+    let answered = attested(&world, name, "rollout");
+    assert_eq!(answered["ref"], "rollout");
+    assert_eq!(answered["item"]["id"], rollout.as_str());
+    assert_eq!(answered["item"]["action"], "answered");
+    assert_eq!(
+        answered["item"]["resolution"],
+        json!({"actor": "session:desk", "on_behalf_of": "user:ada", "provenance": "user",
+               "choice": "gradual", "text": "Start on Monday.", "reason": null})
+    );
+    assert_eq!(
+        answered["item"]["resolution"],
+        human_item(&world, &rollout)["item"]["resolution"]
+    );
+
+    // Free text alone answers a question that offers choices, and attests its step.
+    let worded = attested(&world, name, "region");
+    assert_eq!(worded["item"]["action"], "answered");
+    assert_eq!(
+        worded["item"]["resolution"]["text"],
+        "eu-west, not a listed one"
+    );
+    assert!(
+        worded["item"]["resolution"].get("choice").is_none(),
+        "{worded}"
+    );
+    assert!(
+        worded["item"]["resolution"].get("provenance").is_none(),
+        "{worded}"
+    );
+
+    let completed = attested(&world, name, "sign");
+    assert_eq!(completed["item"]["id"], sign.as_str());
+    assert_eq!(completed["item"]["action"], "completed");
+    assert_eq!(
+        completed["item"]["resolution"],
+        human_item(&world, &sign)["item"]["resolution"]
+    );
+    assert_eq!(completed["item"]["resolution"]["actor"], "session:desk");
+
+    assert_eq!(attested(&world, name, "plain"), json!({"ref": "plain"}));
+}
+
+/// A plan's `choices` are held to a raised item's rules at load, and the refusal names the
+/// node: choices on a task, more than six, and a malformed id are each refused by `start`
+/// and `plan check`, and nothing is launched.
+#[test]
+fn a_plan_offering_choices_a_raised_item_could_not_carry_is_refused_naming_the_node() {
+    let world = World::new("human-item-choices-refused");
+    enabled(&world);
+    let choice = |id: &str| json!({"id": id, "title": format!("Option {id}"), "description": "d"});
+    let mut on_task = question_node("tasked", json!([choice("one")]));
+    on_task["human_item"]["kind"] = json!("task");
+    let cases = [
+        ("ontask", on_task, "choices are only valid on questions"),
+        (
+            "toomany",
+            question_node(
+                "crowded",
+                json!(["a", "b", "c", "d", "e", "f", "g"].map(choice)),
+            ),
+            "at most 6 choices",
+        ),
+        (
+            "badid",
+            question_node("malformed", json!([choice("Not_An_Id")])),
+            "choice id \"Not_An_Id\"",
+        ),
+    ];
+    for (name, node, refusal) in cases {
+        let id = node["id"].as_str().unwrap().to_owned();
+        let project = world.plan(name, &plan_of(name, vec![node]));
+        world
+            .run(&["plan", "check", &project])
+            .exited(1)
+            .out_has(&format!("node '{id}'"))
+            .out_has(refusal);
+        world
+            .run(&["start", &project, "--attach"])
+            .exited(2)
+            .err_has(&format!("node '{id}'"))
+            .err_has(refusal);
+        assert!(
+            !world.run_file(name, "events.jsonl").exists(),
+            "{name} launched"
+        );
+    }
+}
