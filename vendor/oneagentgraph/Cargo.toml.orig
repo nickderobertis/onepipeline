@@ -1,0 +1,827 @@
+[workspace]
+# One member today — the crate at the root. Declared explicitly so a second
+# crate (a future runtime, a test-support crate) joins the graph by being listed
+# here rather than by changing what `--workspace` means.
+members = ["."]
+resolver = "2"
+
+[workspace.dependencies]
+# The one YAML crate, declared here and inherited by every member that reads or
+# writes YAML. serde-saphyr is safe Rust: the libyaml translation the
+# `serde_yaml` family carries is banned in `deny.toml` (RUSTSEC-2024-0449).
+serde-saphyr = "1.3"
+
+[package]
+name = "oneagentgraph"
+version = "0.13.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream."
+license = "MIT"
+repository = "https://github.com/nickderobertis/oneagentgraph"
+homepage = "https://github.com/nickderobertis/oneagentgraph"
+readme = "README.md"
+keywords = ["agents", "orchestration", "cli", "ndjson", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+# What a crates.io consumer receives: the sources, the manifest, the readme, the
+# licence, and the contract the API is written against — `tests/contract.rs`
+# reads `docs/contract.md`, so shipping the code without it would ship a crate
+# whose own test cannot run. Excludes the CLAUDE.md/AGENTS.md symlink (registries
+# reject symlinks), CI config, and the packaging scaffolding.
+include = [
+  "src/**/*.rs",
+  "tests/**/*.rs",
+  # The `record.json` goldens `tests/record.rs` reads. Shipping the test
+  # without them would ship a crate whose own test cannot run, exactly as for
+  # `docs/contract.md` below.
+  "tests/golden/*.json",
+  # And the recorded stream `tests/recorded.rs` reads, for the same reason: a
+  # package without it is a crate whose own test cannot run. Its `README.md` is
+  # the fixture's provenance, which is what makes the bytes evidence rather than
+  # a file somebody typed.
+  "tests/recorded/*.ndjson",
+  "tests/recorded/README.md",
+  # And the YAML `tests/yaml_corpus.rs` reads, for the same reason: the graph
+  # goldens (which `tests/record.rs` also reads), the screenshot fixtures, and
+  # the host's real files with what this crate read from them before.
+  "/tests/golden/*.yaml",
+  "/screenshots/fixture/*.yaml",
+  "/tests/yaml-corpus/**",
+  "personas/**/*.yaml",
+  # Anchored with a leading `/`, every one of them. These are gitignore-style
+  # patterns: one with no separator in it matches at *any* depth, so a bare
+  # `README.md` and `LICENSE` matched every vendored copy under `node_modules`
+  # and shipped 154 files of somebody else's package — and their licences — to
+  # crates.io. `/docs/contract.md` already carried the slash for this reason;
+  # the rest did not.
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE",
+  "/docs/contract.md",
+  # Read the same way, by `tests/persona_format.rs`: the published persona
+  # format drives the types it documents.
+  "/docs/persona-format.md",
+  # And the same way again, by `tests/release_declaration.rs`: the release
+  # declaration is handed to onevcs's own reader, so a package without it is a
+  # crate whose own test cannot run.
+  "/release-targets.toml",
+  # And once more, by `tests/e2e/support.rs`: the `oneharness` release the e2e
+  # suite drives is the one this file pins, read from it rather than copied.
+  "/justfile",
+  # And by `src/judge_only.rs`'s own unit tests and the llmlint double: the
+  # subset of `llmlint fingerprint --help` both are written against, which
+  # `tests/judged-lint/lint_llm_diff.rs` holds to the installed llmlint.
+  "/src/bin/llmlint-fingerprint-help.txt",
+]
+
+[[bin]]
+name = "oneagentgraph"
+path = "src/main.rs"
+
+# The deterministic programs the e2e suite drives as real subprocesses: one stands
+# in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, one
+# speaks onejudge's `CommandProvider` JSON-lines protocol, one is the `llmlint`
+# CLI a graph's `kind: llmlint` judge names as its `bin`, and one is a program a
+# journey's graph points a `pre_turn` view at. All are behind `test-doubles` so a
+# published `cargo install oneagentgraph` never builds them.
+[[bin]]
+name = "oneagentgraph-fake-harness"
+path = "src/bin/fake_harness.rs"
+required-features = ["test-doubles"]
+
+[[bin]]
+name = "oneagentgraph-fake-provider"
+path = "src/bin/fake_provider.rs"
+required-features = ["test-doubles"]
+
+# The `llmlint` an llmlint judge runs, on the view double's terms: a `bin` is an
+# argv the graph supplies, so this is the *input* to that judge rather than a
+# stand-in for any part of the engine that runs it — see the binary's own
+# documentation.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] not a command the
+# tool exposes and not a client of anything: a test double the e2e suite spawns,
+# built only under `test-doubles` (a `cargo install oneagentgraph` never has it),
+# declared the way the three doubles above it already are. Its own project would
+# split one suite's fixtures across two graph nodes for no `nx affected` gain —
+# every change that touches it is a change to the journeys that drive it.
+[[bin]]
+name = "oneagentgraph-fake-llmlint"
+path = "src/bin/fake_llmlint.rs"
+required-features = ["test-doubles"]
+
+# The program a journey's graph declares as a `pre_turn` view. Not a seam: a view
+# is an argv the operator supplies, so this is the *input* to that capability
+# rather than a stand-in for any part of it — see the binary's own documentation.
+[[bin]]
+name = "oneagentgraph-fake-view"
+path = "src/bin/fake_view.rs"
+required-features = ["test-doubles"]
+
+# The reader a consumer of a member's history pointers is, as a process of its
+# own so `tests/e2e/history_store.rs` can trace the file-system calls its read
+# makes — not a stand-in for anything; see the binary's own documentation.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] not a command the
+# tool exposes: a test fixture the e2e suite spawns, built only under
+# `test-doubles` (a `cargo install oneagentgraph` never has it), declared the way
+# the fake `llmlint` above is. Its own project would split one journey's fixture
+# from that journey for no `nx affected` gain — every change to it is a change
+# to `tests/e2e/history_store.rs`.
+[[bin]]
+name = "oneagentgraph-history-reader"
+path = "src/bin/history_reader.rs"
+required-features = ["test-doubles"]
+
+[lib]
+name = "oneagentgraph"
+path = "src/lib.rs"
+
+[features]
+# What only the suite needs: the deterministic programs it spawns — a
+# paid-harness stand-in, a onejudge `CommandProvider` backend, an `llmlint` for a
+# graph's llmlint judge to name, and a program a journey points a `pre_turn`
+# view at — and `judge`'s `hold_between_turns`, the
+# one fixture that pauses real code rather than standing in for a process,
+# because the conversation boundary it holds is reachable from nowhere else.
+# Non-default, so none of it is ever in a consumer's build; `just check` and the
+# coverage run enable them.
+test-doubles = []
+
+[dependencies]
+# The two-party conversation, driven **in this process** rather than by spawning
+# `onejudge run`. `cli` is what carries the YAML config surface a graph member
+# generates (`Config`/`Plan`) and the run driver over it
+# (`run_plan_streaming`), so this crate composes onejudge's own loop instead of
+# re-implementing it around `Engine`.
+#
+# 0.3.5 is the floor, and not for taste: it is the first release carrying the
+# three things this crate's supervision is built on, each absent from 0.3.4.
+# Lowering this requirement below 0.3.5 does not merely lose a nicety — it stops
+# compiling, and the one that would still compile is the worst of the three:
+#
+#   1. `run_plan_streaming*` — a typed live event sink over the same driver a
+#      `Format::Json` run uses. 0.3.4 streamed only under `Format::Human`, and
+#      the JSON run — the one whose report this crate needs — was buffered, so
+#      its events arrived when the run ended and the activity watchdog had
+#      nothing to watch for the whole of the turn it was watching.
+#   2. A *typed* event. 0.3.4's callback was `&mut dyn FnMut(&str)` and received
+#      an already-rendered line ("· turn 3 — …"), so `turn-started` and
+#      `turn-activity` could only have been rebuilt by parsing prose back apart —
+#      the exact string-scraping this conversion exists to delete.
+#   3. `RunFailure`, which did not exist in 0.3.4 at all. It carries `telemetry`
+#      off a run that produced **no** report, and is the only route to
+#      `fallback-advanced` for a failed two-party member — precisely when an
+#      operator needs to know which subscription refused.
+#
+# 0.3.7 raises that floor for a fourth, and the reason is the same shape: driving
+# onejudge in-process silently took away the OS grouping a subprocess hop gave
+# for free, because the harnesses are now spawned by *this* process. 0.3.7 is the
+# first release where `Plan::with_spawn_hook` reaches that seam from the plan this
+# crate actually drives — 0.3.6 exposed it only on a provider built by hand — so
+# it is what lets `crate::judge` put both sides of a two-party member into the
+# group `cancel --kill` terminates. Below 0.3.7 that call does not exist, and a
+# Windows two-party member has no job object for a cancel to find.
+#
+# 0.3.8 raises it a fifth time, for `interrupt`: it is the first release that can
+# *ask* for a controllable agent turn (`provider.control`) and the first whose
+# report carries `control: {session, session_dir, cwd}` — the address an
+# `oneharness interrupt` process redirects that turn through, and the `null` that
+# tells a supervisor there is no lever. Below 0.3.8 the config key is rejected and
+# `Report::control` does not exist, so `crate::control` does not compile.
+#
+# 0.4.0 is the sixth raise and the only one of them that is not a compile floor:
+# every call above still resolves against 0.3.8. It is taken because the loop it
+# fixes is one *this* process now runs — a supervisor turn that produced no work
+# did not settle, and in-process that is a member sitting until this crate's own
+# activity watchdog condemns it rather than a subprocess reporting a finished
+# turn. The behaviour is onejudge's and so is its coverage; what is decided here
+# is only that a graph links the release carrying it.
+# llmlint: ignore-block[changed_behavior_has_e2e] these releases change
+# dependency-owned behavior rather than this crate's logic: onejudge's settling
+# loop and oneharness-core's event parser are driven and covered by their own
+# suites. Recreating either here would assert an upstream implementation through
+# a timing race or parser fixture; this crate's existing real journeys and gate
+# instead prove that the linked libraries still satisfy its public boundary.
+#
+# 0.5.0 is the seventh raise and a compile floor again: it is the first release
+# with `run_plan_observing_reporting_failure` and the `Observation` seam behind
+# it, which is the *whole* of a turn rather than its tool half — the instruction
+# the turn is answering, each party's own reply, and that one turn's usage and
+# bounds. Below it none of `Observation`, `TurnOpened`, `TurnMessage` or
+# `TurnClosed` exists and `ToolEvent` carries neither `output` nor
+# `tool_call_id`, so `src/judge.rs` does not compile. What it buys an operator is
+# what `docs/contract.md` now describes: a live dispatch that shows what the agent
+# did, what it said, and what each turn cost — none of which a journal could carry
+# while this crate received only the tool half and discarded even the events in it
+# that named no tool.
+#
+# 0.5.3 is the eighth raise, and it buys two things at once — which is the whole
+# reason it moves in lockstep with the `oneharness-core` requirement below.
+#
+#   1. **0.5.2's reply fix, which is inert below it.** onejudge's oneharness
+#      provider used to substitute the harness process's raw stdout for a reply
+#      whose reported text was empty, so a completed turn that said nothing
+#      published its own wire framing as the agent's words — and a user turn's
+#      instruction *is* the transcript's last message, so the exhaust was
+#      re-inlined into the next prompt as well as published. Measured on this
+#      host before the bump: a 699 MB single event line whose model-authored
+#      content was 0 characters, a 3.6 GB run journal behind it, and a read-only
+#      listing verb needing 5.7 GB of RSS. This crate relays that reply verbatim
+#      (`Observation::Message` -> `turn-message`, `Observation::TurnOpened` ->
+#      `turn-started`), so it is this crate's stream the fix lands on and this
+#      crate's journey that proves it:
+#      `tests/e2e/dispatch.rs::a_turn_that_reported_no_text_relays_nothing_rather_than_the_harnesss_output`,
+#      which fails against 0.5.0 with the whole stream-json transcript in the
+#      `turn-message` payload.
+#   2. **One `oneharness-core` in the graph.** 0.5.3 is the first release that links
+#      0.12.0. Every release from
+#      0.3.9 to 0.5.2 asked for 0.8, so this crate's own lockfile resolved
+#      `oneharness-core` twice and every fix landed in 0.9-0.12 reached only half
+#      of the tree — the half onejudge does not drive.
+#
+# 0.5.4 is the ninth raise: its published requirement moves onejudge to
+# `oneharness-core` 0.12.1, whose Codex app-server parser now normalizes the
+# controlled turn's tool events. Without both releases, a judged Codex turn can
+# do work while this crate's `Observation::Tool` path and run journal see none
+# of it. Re-read on 2026-08-26 in the published sources: onejudge's `TurnEvents`
+# still forwards each `ActionEvent` through the live callback, and its manifest
+# takes 0.12.1, so the parser fix reaches the two-party side this crate drives.
+#
+# 0.6.0 is the tenth raise, and like 0.4.0 it is not a compile floor — every call
+# above still resolves against 0.5.4. It is taken because onejudge's own settling
+# rule was ending the one member shape a graph runs to *keep* something alive.
+# Two consecutive quiet exchanges — no tool events, both messages short, the same
+# reply again — settle the conversation, which is a stalled loop everywhere except
+# an observer whose *contract* is to report nothing, and there it is a healthy
+# watch: a measured run lost its monitor five minutes in and ran roughly two hours
+# unwatched while every indicator stayed green, because a member that settled is a
+# member that finished and its loss announces itself nowhere. 0.6.0 adds
+# `user.settle_on_noop`, defaulting to `true`, so no existing config changes
+# behaviour; a base config that writes `false` keeps the streak measured and stops
+# it ending the run, with `max_turns` still the bound. What is decided here is not
+# the loop — that is onejudge's, with onejudge's coverage — but that the setting is
+# *reachable*: an operator writes it in the base config their `kind: onejudge`
+# member names, and this crate is what reads that file, merges a persona over it,
+# and builds the plan, so a key dropped on the way through would read as configured
+# and change nothing. `tests/e2e/dispatch.rs`'s
+# `a_base_configs_settle_on_noop_reaches_the_loop_the_member_runs` drives one quiet
+# conversation twice through the real member and reads the difference off the turns
+# it was allowed to take.
+#
+# 0.6.1 carried nothing this crate compiled against; it was taken for being the
+# newest 0.6.
+#
+# 0.7.0 is the twelfth raise and a **compile floor**: it publishes
+# `onejudge::note` — the conversation half of the approved delivery-seam contract
+# — and nothing above resolves below it. `Notes::channel` opens the two ends,
+# `Plan::with_notes` hands the engine's end to the run driver `crate::judge`
+# already uses, and `Notes::send` answers one note. The routing has to be the
+# engine's because only it knows which side is live, and no 0.6 seam lets an
+# embedder put a word in the transcript the judge is shown. `crate::note` records
+# what each disposition means.
+#
+# 0.8.1 was the thirteenth raise, taken for what it links: its published
+# requirement is `oneharness-core` `^0.13.0`, the release that runs a controlled
+# codex turn under its candidate's model and refuses one the server would run
+# elsewhere (see the `oneharness-core` block below). The core release is a
+# pre-1.0 minor, so the `^0.12.1` that used to sit here excluded it and a lock
+# refresh alone could not take it: the two requirements are edited together
+# because a graph asking for 0.12 on one side and 0.13 on the other resolves
+# both — the two-copies state `tests/inventory.rs` exists to refuse.
+#
+# **0.10.0 is the compile floor.** It is the release whose judge side is a *list
+# of judges* — a panel — rather than one provider, and everything a
+# `kind: onejudge` member's `judge:` list composes onto lives in it and in
+# nothing before it:
+#
+#   1. `provider.judges: [...]` on a `kind: split` provider, with `judge:` as the
+#      one-element shorthand, each entry an ordinary provider config plus an
+#      optional `label` (`[A-Za-z0-9_-]+`, unique in the list, defaulted from the
+#      kind). Every judge runs against each worker turn concurrently, and the
+#      worker is handed one attributed message. A panel of one is byte-identical
+#      to the bare provider it replaces, which is what keeps every single-judge
+#      graph here running as it did.
+#   2. `kind: llmlint`, a judge that is one `llmlint` run over the worker's tree
+#      rather than a model's opinion — `bin`, `config`, `diff_base`, `args` —
+#      valid only as a judge entry, probed at plan build so an absent executable
+#      is a config error before any turn and never a silent pass.
+#   3. `Observation::JudgeDecided { turn, judge, kind, decision, reason }`, one
+#      per judge per supervisor turn, which `src/judge.rs` relays as this crate's
+#      `judge-decided` event. The seam is exhaustive, so below 0.10.0 that arm
+#      does not compile.
+#   4. Report schema 12: `judge_decisions` on the report and on `RunFailure`,
+#      and a `judge` label on every per-judge attribution, session link and
+#      spawned process — the shape `member-settled`'s artifact now carries.
+#
+# Its `oneharness-core` requirement is still `^0.13.0`, so the one-copy rule
+# below holds unchanged. 0.9.0, carried along, is the panel without the llmlint
+# kind. What is decided here is not how a panel decides — that is onejudge's,
+# with onejudge's coverage, stated in its `docs/judges.md` — but that a graph on
+# this host can reach it: `src/config.rs` reads the list, `src/invoke.rs`
+# composes it onto `judges:`, and `tests/e2e/panel.rs` drives a real stacked
+# panel through the doubles and reads the config it was launched with.
+#
+# 0.11.0 is the fifteenth raise, and it is what is linked; every call above
+# still resolves against 0.10.0, so the compile floor stays there. It is taken
+# for `user.artifacts`: a list of files or directories every judge-side prompt
+# names to read directly, relative ones against the evidence worktree, replaced
+# by `ONEJUDGE_ARTIFACTS`. A judge left to find a design document through git
+# never sees one that is gitignored, and loops on a question it cannot answer;
+# below 0.11.0 the key is a `deny_unknown_fields` refusal instead. This crate adds
+# no schema for it — the persona merge copies `user.*` over the base and the plan
+# is onejudge's own — so what is decided here is that it arrives:
+# `tests/e2e/dispatch.rs`'s
+# `named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment`
+# reads it off the supervisor's prompt from a persona, a base, and the
+# environment. Its `oneharness-core` requirement is still `^0.13.0`.
+#
+# 0.12.0 is the sixteenth raise, carried along. It is the release that stopped
+# declaring the note contract and its channel, re-exporting them from
+# `onemessagebus-agent` instead; 0.14.0 below is where the declaration came back
+# to onejudge for good, which is why the floor is there rather than here.
+#
+# 0.13.0 is the seventeenth raise. It speaks protocol v8 to command judges: each
+# supervisor request carries the agent turn's typed outcome, and a lost turn is
+# offered to that command before onejudge classifies the run or opens the next
+# agent turn. This crate does not derive that outcome; its command-judge e2e
+# drives the composed member and records onejudge's own frame.
+#
+# 0.13.1 is the eighteenth raise, and moved in lockstep with oneharness-core
+# 0.14.0. It reads that core's `server_overloaded` failure kind and
+# `server-overloaded` fall-through reason, so a temporarily overloaded Codex
+# identity retries and then advances through a two-party member's chain instead
+# of ending the member.
+#
+# 0.13.3 is the nineteenth raise, and moves in lockstep with oneharness-core
+# 0.17.0 below for the reason 0.5.3 and 0.8.1 did: its published requirement is
+# `^0.17.0`, so the two are edited together or the graph carries two cores —
+# the state `tests/inventory.rs` refuses. Nothing this crate calls changed
+# between 0.13.1 and 0.13.3 (`engine.rs` is byte-identical); what moved is what
+# each release links and asks of the CLI it spawns:
+#
+#   1. 0.13.2 asks the `oneharness run` it spawns for its JSON report by name
+#      (`--format json`), the way `src/smoke.rs` and `src/control.rs` already
+#      do, which is why the CLI pin in the `justfile` is the first release that
+#      accepts the flag.
+#   2. 0.13.3 links the core that writes a per-run history pointer line, so a
+#      two-party member's sides run on the same core a single-sided member's
+#      in-process turn does — one engine, one pointer contract.
+#
+# 0.13.4 is the twentieth raise, and moves in lockstep with the two
+# `onemessagebus` requirements below: its published requirement is `^0.8.0` of
+# both, so the three are edited together or the graph carries two buses. Nothing
+# this crate calls changed — the verdict vocabulary and the note contract are
+# as 0.13.3 had them; what moved is the bus it links.
+#
+# 0.13.5 is the twenty-first raise, and moves in lockstep with oneharness-core
+# 0.18.0 below for the reason 0.13.3 did: its published requirement is
+# `^0.18.0`, a pre-1.0 minor the `^0.17.0` that 0.13.4 asked for excludes, so
+# the two are edited together or the graph carries two cores. Its `src/` is
+# byte-identical to 0.13.4's; what moved is only the core it links.
+#
+# **0.14.0 is the compile floor again, and it is what is linked.** It is the
+# release where the note contract became onejudge's own: `onejudge::note`
+# *declares* `Note`, `Addressee`, `Party`, `Criterion`, `NoteText`, the
+# refusals, `Accepted`, `Undelivered`, `Notes` and `NoteInbox` — the same names,
+# the same serde shapes, the same refusal words, and `agent.note@1` still — where
+# 0.12.0 through 0.13.5 re-exported them from `onemessagebus-agent`, which no
+# longer exists. `src/note.rs` and `src/judge.rs` take them from here, so below
+# this release they resolve to a crate the graph no longer carries. It moves in
+# lockstep with the `onemessagebus` requirement below: its published requirement
+# is `^0.9.0`, so the two are edited together or the graph carries two buses —
+# the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
+# still `^0.18.0`.
+#
+# **0.20.0 is what is linked, and it is a compile floor.** It is the release in
+# which a note *interrupts* the live turn it is addressed to: `Note` gained
+# `delivery` (`Delivery::Interrupt` or `Delivery::TurnEnd`) and `Accepted` gained
+# `AtTurnEnd`, both of which `src/note.rs` re-exports and `src/event.rs` names on
+# the stream; `Interrupted` is now answered only for a turn oneharness confirmed
+# it redirected; and the engine takes a note out of its inbox only when it is
+# about to present it, which is what lets `control::offer_note`'s withdrawal and
+# deadline hold until then. Its `kind: oneharness` provider asks for a
+# controllable turn on **both** parties under one `control: true`, which
+# `src/invoke.rs` sets; a `split` panel is never redirected, so its judge
+# entries do not ask. It moves in lockstep
+# with oneharness-core 0.28.4 and onemessagebus 0.9.2 below: its published
+# requirements are `^0.28.4` and `^0.9.2`, so the three are edited together or
+# the graph carries two copies — the state `tests/inventory.rs` refuses.
+#
+# 0.19.1 moved in lockstep with oneharness-core
+# 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
+# `^0.24.0` 0.19.0 asked for excludes, so the two are edited together or the
+# graph carries two cores — the state `tests/inventory.rs` refuses. Its `src/` is
+# byte-identical to 0.19.0's; what moved is only the core it links. That core's
+# plugins-off launch does not reach a two-party member's sides through this
+# requirement: `src/judge.rs` installs a spawn hook, which selects onejudge's
+# process seam, so each side's Codex is started by the `oneharness` CLI the host
+# installs rather than by the linked engine.
+#
+# 0.19.0 gives every judge one
+# evidence contract whatever its mode, so a read-only judge is no longer told
+# never to use its shell and left to judge blind — and a two-party member is judged in-process, so that prompt reaches its judges only
+# through this requirement. Its `oneharness-core` requirement is still
+# `^0.24.0`, so the one-copy rule below holds unchanged. The release it crosses,
+# 0.18.0, was breaking only for onejudge's own build: it moved its gate to Nx,
+# split its tests into crates, and dropped the `fake-provider` feature and the
+# echo provider behind it — which this crate never linked, because
+# `src/bin/fake_provider.rs` is its own double. The `allow_writable_judges` a
+# graph's `judge_settings` passes through (`docs/contract.md`) is onejudge's
+# from 0.16.0 and refused by it on a non-split provider.
+#
+# 0.17.1 moved in lockstep with oneharness-core
+# 0.24.0 below: its published requirement is `^0.24.0`, a pre-1.0 minor every
+# earlier core requirement here excludes, so the two are edited together or the
+# graph carries two cores — and with two, the engine that takes this crate as a
+# library would keep the old history writer beside the new one. It changes
+# nothing but the core it links, which is the one whose history recording never
+# scans: a two-party member's sides record through the `oneharness` CLI the
+# `justfile` pins, which links that same core.
+#
+# 0.17.0 moved in lockstep with oneharness-core 0.21.0 and is a compile floor:
+# `Observation` gained `Action` — every normalized event the worker's harness
+# reports, delivered live, the agent's own `message` and `reasoning` items among
+# them — and
+# `JudgeTool`, and `TurnClosed` gained `harness` and `model`, so `src/judge.rs`
+# matches the enum it is handed only from this release. `src/judge.rs` relays
+# an `Action` that is not tool activity as `turn-activity` under its own kind,
+# as `src/harness.rs` does for a single-sided member, and relays no
+# `JudgeTool`, whose judge `turn-activity` has no field to name. The releases
+# it crosses:
+#
+#   1. 0.15.0 labels every llmlint judge run and names judge-side history after
+#      the run's session — onejudge's own records, nothing this crate reads.
+#   2. 0.16.0 makes the judge-side posture a *default* a judge's config can
+#      override: onejudge layers a read-only config beneath the judge's own,
+#      where it used to pass read-only on the request and so beat any `mode` the
+#      judge's config named, and it refuses a panel of more than one writable
+#      judge. The member `mode` `src/invoke.rs` used to stamp into every judge
+#      config was inert below this release and would grant every judge `bypass`
+#      at it, so the judge side no longer carries it (`docs/contract.md`); the
+#      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
+#   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
+#      the engine and reads no CLI output.
+#   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
+#      translation reaches this graph through onejudge.
+# 0.21.0 exposes HistoryBegun before candidate activity, so journal references
+# are resolvable at emission rather than reconstructed after settlement.
+# 0.22.0 brings worker_config: the worker layers its stamped config without
+# discovering project routing from the member worktree.
+# 0.22.3 is the release built on onemessagebus 0.10, the one bus this graph links.
+# 0.22.5 hands a note for the supervisor that the last worker turn took to one
+# closing supervisor's turn; below it the note is reported delivered and no judge
+# reads it. `tests/e2e/scheduled_notes.rs`'s
+# `a_note_for_the_supervisor_taken_by_the_last_worker_turn_reaches_one_closing_decision`
+# fails against 0.22.3.
+# **0.23.0 is a compile floor**: `JudgeInput` and `Plan::with_judge_input`,
+# onejudge's judge-only mode — the judge side alone, once, over material in
+# place of a worker's turn — which `run --judge-only` drives through the same
+# plan a two-party member runs (`src/judge_only.rs`, `src/judge.rs`). Its
+# `oneharness-core` requirement is unchanged, so the one-copy rule holds.
+# `tests/e2e/judge_only.rs` drives it end to end.
+# **0.23.1 is the release built on onemessagebus 0.11**, moved in lockstep with
+# the `onemessagebus` requirement below so the graph links one bus.
+onejudge = { version = "0.23.1", features = ["cli"] }
+# llmlint: ignore-end[changed_behavior_has_e2e]
+# The typed message bus, linked rather than restated — the *generic* core alone.
+# The envelope's shape, the filter grammar, the payload bounds and redaction, the
+# emitter that numbers a stream, and the schema registry are `onemessagebus`'s;
+# the *words* that go in them are this crate's, declared in `src/event.rs` as its
+# own `Vocabulary` over the core's open `Source`. The note spool a two-party
+# member binds is the bus inbox's `Spool` backend. `docs/contract.md` names the
+# core's own contract as the source of the envelope's generic shape and this
+# crate as the source of its words.
+#
+# **0.9.0 is what is linked, and it is linked exactly once.** It is the release
+# that deleted `onemessagebus-agent`, the agent profile this crate re-exported
+# its envelope, labels, sources, filter and emitter from through 0.8.0. Nothing
+# generic changed with it: `Vocabulary`, `Envelope`, `Filter`, `Emitter`, `Spool`
+# and `Registry` are as 0.8.0 had them, and this crate's own vocabulary
+# serializes to the bytes the profile did — `tests/recorded.rs` re-serializes a
+# stream recorded against the profile with no byte changed. It is exactly the
+# version `onejudge` 0.14.0 asks for, so one bus serves this crate and the
+# conversation it drives; the two requirements are edited together or the graph
+# carries two buses, which `tests/inventory.rs` refuses against the lockfile.
+#
+# 0.9.1 reads a filter file's YAML through serde-saphyr rather than
+# `serde_yaml_ng`, so no libyaml translation reaches this graph through the bus.
+#
+# **0.9.2 is a compile floor**, moved in lockstep with onejudge 0.20.0 above. It
+# is the release whose `Sender::offer` answers an `Offer` once the receiver has
+# admitted the message — `wait`, `wait_until(deadline)` and `withdraw`, with
+# taking and withdrawing atomic in process and across the spool — which a
+# two-party member's relay holds for the caller of `control::offer_note`.
+#
+# **0.9.3 is a compile floor too**: `Offer::try_answer`, the non-consuming look a
+# turn being announced takes at every held offer, so a note is attributed to the
+# turn that carried it when the engine answers it rather than when its caller
+# next waits — with withdrawal and expiry still atomic while it is untaken.
+#
+# 0.10.0 moves with `onejudge` and `onevcs`, which link it too: cargo treats 0.9
+# and 0.10 as incompatible, and two buses' types do not unify across the seams.
+#
+# 0.11 removes validators in favour of a message hook. This crate never
+# installed a validator, so nothing here changes with it; it moves with
+# `onejudge` 0.23.1 and `onevcs` 0.65.0, the releases built on 0.11.
+onemessagebus = "0.11.1"
+# The payload structs are registered with the bus's schema registry as
+# `Message` types, which is a `schemars` derivation. The same major and feature
+# the bus itself takes, so the one `JsonSchema` trait is the bus's.
+schemars = { version = "1", features = ["preserve_order"] }
+# The engine a `kind: oneharness` member's turn runs on, and its typed report.
+#
+# **0.10.1 is the compile floor.** It is the first release with
+# `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
+# put each harness child into the member's process group / job object — so below
+# it `src/harness.rs` deliberately does not build. Both names are unchanged at
+# 0.28.1; that was re-measured for this bump rather than assumed, and
+# `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
+#
+# **0.28.4 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.20.0 above, which asks for `^0.28.4`. 0.28.4 answers a redirect as
+# served only once its replacement turn opens with it — the guarantee a
+# single-sided member's note rests on, because `control::offer_note` reports
+# such a note interrupted only when `oneharness interrupt` says it was delivered.
+# Its controlled Codex turns share one pooled app-server, yet no turn this crate
+# runs reaches it: a `kind: oneharness` member's `RunRequest` (`src/harness.rs`)
+# asks for `control` only when every candidate of its chain is interrupted in
+# place by oneharness's registry — a mechanism that does not drive the turn, so
+# never Codex's — and otherwise leaves it unset, so a Codex turn is an
+# uncontrolled `codex exec`; and a two-party member's
+# sides run in the `oneharness` CLI through `src/judge.rs`'s spawn hook, which
+# pools and sweeps its own servers. So the `oneagentgraph` binary hosts no
+# sweeper (`io::app_server::serve_sweeper_if_requested`): it never pools.
+#
+# 0.27.0, carried along, shares one Codex model catalog per Codex home — a
+# launch first probes `codex --version` to key it — and starts Codex with
+# `-c analytics.enabled=false` unless the config opts in. Both are breaking for
+# config keys and `BuildCtx` fields this crate neither builds nor restates; the
+# probe is a launch of the configured `codex` that starts no turn, which is why
+# `tests/e2e/selection.rs` judges the launches it records without it.
+#
+# 0.26.0 moved in lockstep with onejudge 0.19.1 above. It is the release that
+# starts Codex with plugins off — `-c features.plugins=false` on every `exec` and
+# `app-server` launch — unless the config opts in with `plugins = true` under
+# `[harness.codex]` (or a codex variant), where every earlier core let Codex
+# download its whole remote plugin catalog on each process start. A
+# `kind: oneharness` member's turn is this core called in-process, so such a
+# turn reaches Codex without that download only through this requirement;
+# `tests/e2e/selection.rs` drives such a member against a recording `codex` on
+# `PATH`, with the key absent and with it set. It is breaking for the new
+# `BuildCtx` field and the new config key, neither of which this crate builds or
+# restates: a member's config is handed to the core as the operator wrote it.
+# The two releases it crosses forced nothing here: 0.25.0's break is the usage
+# report's banked Codex reset credits, which `src/health.rs`'s sweep passes
+# through untouched, and 0.25.1 finds and stops a dispatch's marked processes
+# beside `io::runner`, which is byte-identical to 0.24.0's. 0.24.1 and 0.24.2
+# (a failed Claude tool call marked in the text stream, OpenCode text and
+# reasoning parts as `message` and `reasoning` events) are carried along.
+#
+# 0.24.0 moved in lockstep with onejudge 0.17.1 above, which asks for
+# `^0.24.0`. It is the release whose
+# history recording reads no index and lists no directory (oneharness's
+# `docs/history-index.md`), where every earlier core re-read the whole index and
+# walked the store on each run. A `kind: oneharness` member's turn records
+# through this writer in-process, so the fix reaches such a turn only through
+# this requirement; `tests/e2e/history_store.rs` traces that turn and the read
+# back through the pointer the graph published. The two releases before it are
+# carried along: 0.22.0's break is the CLI's stream view (readable text unless
+# `--format json`, which `src/smoke.rs` and `src/control.rs` pass), and 0.23.0's
+# is that `read_session_display` returns the typed `HistoryShowEntry` rather
+# than JSON values — `tests/e2e/session.rs` reads it through that type's
+# serialization.
+#
+# 0.21.0 moved in lockstep with onejudge 0.17.0. The two releases it crossed
+# that this crate calls into change two things, and both are adopted here:
+#
+#   1. 0.20.0 layers configuration: `RunRequest::config` (and every sibling
+#      request's) is a list of files, each later one overriding the earlier, and
+#      an empty list is discovery. A `kind: oneharness` member must name its
+#      `oneharness_config`, so `src/harness.rs` always hands the one resolved
+#      config in the member's scratch as a list of one and never asks for
+#      discovery; `src/health.rs`'s usage sweep, which always discovered, passes
+#      the empty list `UsageRequest::default()` already holds.
+#   2. 0.21.0 streams the agent's own words: the `EventSink` and the report's
+#      `events` carry `message` and `reasoning` items beside tool calls and
+#      results, one finished item each, never a token delta, and
+#      `ActionEvent::index` numbers every kind. `src/harness.rs` relays each as
+#      `turn-activity` under its own kind, never as a tool call, and
+#      `src/member.rs`'s `Stall` states that such an item now resets the idle
+#      clock — `tests/e2e/dispatch.rs` and `tests/e2e/liveness.rs` drive both.
+#      A codex tool call now reaches the sink once, when it completes, rather
+#      than once per lifecycle record.
+#
+# 0.19.0 (Codex execpolicy sync) and 0.19.1 (a resumed Codex exec turn keeps
+# its sandbox mode) are carried along; neither is a path this crate calls.
+#
+# 0.18.0, carried along, was taken for `extends`: a config may name a parent
+# config it inherits from, resolved against the declaring file's own directory,
+# and the parent's values sit under the child's. Below it the key is a `deny_unknown_fields` refusal, so a member
+# whose config declares a parent dies at start. Because this crate hands the
+# core a stamped copy in the member's scratch rather than the file the operator
+# wrote, a relative parent would resolve against that scratch; `extends` is
+# therefore one of the keys `src/invoke.rs`'s `ANCHORED_PATHS` anchors to the
+# source config's directory, and `tests/e2e/selection.rs` drives a member whose
+# config names nothing but a relative parent through the real graph. A config
+# fetched over https has no directory to anchor to, and the core refuses its
+# relative parent by name. Nothing else this crate calls changed from 0.17.0:
+# `events.rs`, `signals.rs` and `runner.rs` are byte-identical, and 0.17.1
+# fixed the CLI's exit code for a one-candidate chain that could not run and
+# let a `--bin` flag for a base harness cover its variants — neither a path a
+# member's in-process turn takes, since it passes no `--bin` and runs no CLI.
+# onejudge 0.13.5 asks for the same core release.
+#
+# 0.17.0, carried along, is the history pointer: with history on, every harness
+# run the core begins appends one `domain::history::HistoryPointer` line to the file
+# `ONEHARNESS_HISTORY_POINTER_FILE` names — `history_id`, and the
+# `history_dir` / `history_project` / `history_session` this crate's own
+# `oneharness-session` event already spells — and `io::history::read_pointers`
+# reads it back typed. A `kind: oneharness` member's turn is this core called
+# in-process, with no `oneharness` binary between it and the environment, so
+# the line reaches a consumer of that turn only through the core linked here;
+# `src/harness.rs` deliberately sets no `history_pointer_file` of its own, so
+# the environment stays the one way a consumer names the file.
+# `tests/inventory.rs` holds the two names as a floor, and
+# `tests/e2e/session.rs` drives a single-sided member through the real graph
+# and reads the line back. 0.17.0 is a breaking minor for the new `RunRequest`
+# field; the literal in `src/harness.rs` spreads `..RunRequest::default()`, so
+# it compiles unchanged.
+#
+# The three minors between 0.14.0 and 0.17.0 forced nothing here, each re-read
+# against its CHANGELOG entry: 0.14.1 reads a null Claude rate-limit snapshot
+# as a transient; 0.15.0's break is the CLI's `--format`, which `src/smoke.rs`
+# and `src/control.rs` already pass; 0.16.0's break moves `run_mode`'s default
+# to `fallback` and the CLI's stdout to text — the request here leaves
+# `run_mode` to the config, every config this suite writes says `fallback`
+# outright, and no stdout is read from the library; 0.16.1 falls through a
+# clean-exit rate limit and honours a base `ONEHARNESS_BIN_<ID>` for a variant.
+#
+# 0.14.0, carried along, classifies Codex's transient overload as
+# `server_overloaded` and advances the identity chain with `server-overloaded`
+# after retrying that identity (oh-1295).
+#
+# 0.13.0 is the release
+# that runs a controlled codex turn under its candidate's model: the app-server
+# names the model a thread will run under on its `thread/start` / `thread/resume`
+# response, before any token is spent, and 0.13.0 reads it — `RunResult` and
+# `HistoryRunRecord` carry it as `observed_model`, `null` on every path that
+# reports none — and refuses the turn when it differs from the one requested.
+# That refusal is the ninth `FailureKind`, `model_mismatch`, and the chain steps
+# past it as `model-mismatch`, a precondition fall-through like
+# `untrusted_directory` and `input_too_large`. Below it a config that names one
+# model spends another, and the chain never notices; this crate's
+# `fallback-advanced` already publishes every stepped-past reason off
+# `FallbackReport` as the type it is, so the new reason reaches the stream
+# without an edit — `tests/e2e/selection.rs` drives a chain through it.
+#
+# This crate used to ask for 0.10 while onejudge asked for 0.8, so the graph
+# carried two copies and every oneharness fix released into 0.9-0.12 reached only
+# the half onejudge does not drive — a fix nobody had, on the side that needed
+# it. onejudge 0.11.0 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
+# that one copy, which is why the two requirements move together and why neither
+# may be bumped past what the other admits: split them again and the second copy
+# comes back — which `tests/inventory.rs` asserts against the committed lockfile,
+# since nothing else here can see a copy that is not this crate's own
+# requirement. The rule that went with the split is retired with it, because
+# there is no longer a second set of types to confuse this one with; what remains
+# true is the ordinary one — a value onejudge hands back is onejudge's own type.
+# 0.29.0 adds EventSink::run_began after flushing the opening prompt. Keep
+# this floor aligned with onejudge: both member kinds reference live history.
+# 0.29.1 is the floor because 0.29.0 dropped the sink of a run that does not
+# stream, so a `stream = false` single-sided member never learned its history
+# and journalled cut copies; 0.29.1 calls `run_began` per candidate there too.
+oneharness-core = "0.29.1"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
+# envelope carries its payload's fields in the order they arrived — what the
+# contract's "deterministic rendering" promise needs from the JSON mode.
+serde_json = { version = "1", features = ["preserve_order"] }
+# The graph config, personas, base configs and the effective onejudge config are
+# YAML, read and written through `src/yaml.rs` alone.
+serde-saphyr = { workspace = true }
+thiserror = "2"
+# A remote ref is recorded content-addressed, so replay never depends on the URL
+# staying stable — that record is a SHA-256 of the exact bytes fetched.
+sha2 = "0.10"
+# Fetching those remote refs, over `rustls` so the TLS stack itself is the same on
+# every CI leg the matrix runs.
+#
+# `platform-verifier` makes the *trust anchors* the host's own rather than the
+# Mozilla set compiled into `webpki-roots`. That is a deliberate trade, and it cuts
+# both ways: a graph served from an internal host under a private CA — or through a
+# TLS-inspecting proxy — resolves without this crate having to grow a trust knob of
+# its own, which is the environment a config-by-URL feature actually lands in; and
+# `SSL_CERT_FILE` / `SSL_CERT_DIR` become the documented way to name a bundle,
+# which is what `tests/e2e/remote.rs` uses to serve a real HTTPS graph to the real
+# fetch path. The cost is that trust now depends on the host: a machine whose store
+# is empty or misconfigured fails where the compiled-in set would have worked, and
+# a CA an operator installed for interception is one this crate honours. That is
+# how `curl` and `git` behave, and it is the behaviour an operator can inspect and
+# change; a private set nothing on the host can see is not.
+ureq = { version = "3", default-features = false, features = [
+  "rustls",
+  "platform-verifier",
+] }
+# A side's `model` override is stamped into that side's resolved oneharness
+# config; `toml_edit` keeps the rest of the operator's file — comments included —
+# byte-identical, so the copy in the run record still reads as what they wrote.
+toml_edit = "0.23"
+# Scratch ownership is an `owner.lock` flock plus a pid-with-start-token, and
+# reaping a member's descendants is a signal to a proven process group. All four
+# are kernel facilities with no safe-Rust equivalent in std.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The same four facilities on Windows, which has none of the POSIX ones: the
+# ownership lock is `LockFileEx`, the start token is `GetProcessTimes`, and both
+# the grouping and the teardown of a member's process tree are a job object —
+# the only thing on this platform that holds a descendant whose parent has
+# already exited. `src/scratch.rs` documents the mapping and what differs. A
+# fifth, `SetFileInformationByHandle` with POSIX rename semantics, is how a run's
+# state is replaced whole under a reader; `src/run.rs` documents it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+# A real HTTPS origin for the remote-ref journeys: `rcgen` mints a throwaway CA and
+# a `localhost` leaf, and `rustls` serves them to the compiled binary's own fetch
+# path. Dev-only, so nothing here reaches a consumer's build; the point is that the
+# transport under test is the production one, reached over a real socket.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Recomputing the digest the run record claims, so the assertion is against what an
+# auditor would compute rather than against the code under test. Already a normal
+# dependency, so this adds nothing to the graph.
+sha2 = "0.10"
+# The canonical release-target schema, as the one implementation that defines it.
+# `release-targets.toml` at this root is written against a schema six repositories
+# share, and `tests/release_declaration.rs` holds this repository's document to it
+# by calling `onevcs::validate_release_declaration` — the reader `onevcs`'s own
+# `docs/contract.md` documents beside the schema. A copy of those rules kept here
+# would be the defect the shared format exists to remove: a mirror drifts, and a
+# document that passes the mirror is still refused by the tool that reads it.
+#
+# 0.16.0 is the floor because it is the release that first exposes that reader;
+# below it neither `validate_release_declaration` nor `Declaration` exists. The
+# **library** rather than the `onevcs` binary, for the reason this crate drives
+# onejudge in-process: the reader answers a value a test can assert on, it is
+# pinned by `Cargo.lock` rather than by whatever is on a machine's `PATH`, and it
+# needs nothing installed for the gate to run offline on every platform leg.
+# Dev-only — nothing here reaches a consumer's build. 0.51.0 reads its own YAML
+# through serde-saphyr, so the libyaml translation no longer reaches the dev graph.
+# 0.65.0 is the release built on onemessagebus 0.11, so the lockfile keeps one bus.
+onevcs = "0.65.0"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
+# The repo-tooling tier (`tests/repo-tooling/project.json`): journeys whose
+# subject is the justfile, `scripts/`, Nx, and the workflows rather than the
+# crate. Declared by path because Cargo discovers only `tests/*.rs` and
+# `tests/*/main.rs`, and the tier lives in a directory of its own so that Nx can
+# tell its files from the contract tier's (`tests/project.json`) by ownership.
+[[test]]
+name = "affected_selection"
+path = "tests/repo-tooling/affected_selection.rs"
+
+[[test]]
+name = "tier_partition"
+path = "tests/repo-tooling/tier_partition.rs"
+
+[[test]]
+name = "workflow_contract"
+path = "tests/repo-tooling/workflow_contract.rs"
+
+[[test]]
+name = "recipe_arguments"
+path = "tests/repo-tooling/recipe_arguments.rs"
+
+[[test]]
+name = "prune_superseded_install"
+path = "tests/repo-tooling/prune_superseded_install.rs"
+
+# The judged-lint tier (`tests/judged-lint/project.json`): `just lint-llm-diff`
+# driven through real Nx and the installed llmlint. A project of its own so that
+# only a change to what that tier reads runs it.
+[[test]]
+name = "lint_llm_diff"
+path = "tests/judged-lint/lint_llm_diff.rs"
+
+# A CLI binary: optimize for a small, fast-starting artifact.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

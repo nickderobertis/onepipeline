@@ -188,3 +188,7 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
 }
 
 mod scratch;
+
+// Demonstration only (onepipeline-adopt-onevcs-reads, never lands): a no-behaviour
+// edit under src/, the same on the baseline and after sides, so each side runs the
+// Nx selection a src/ change induces.

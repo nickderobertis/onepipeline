@@ -1,0 +1,160 @@
+//! `onejudge` drives a **simulated interaction and evaluation loop** on top of
+//! [`oneharness`](https://github.com/nickderobertis/oneharness): take a skill or
+//! agent, drive it through a multi-turn conversation with a simulated user, and
+//! score the resulting transcript with natural-language (judge) verdicts and
+//! tool-event queries.
+//!
+//! The layering: `oneharness` (one invocation → one JSON report) → **`onejudge`**
+//! (interaction + judging loop) → higher-level test frameworks (e.g.
+//! [`skilltest`](https://github.com/nickderobertis/skilltest), which adds cases,
+//! evals-as-assertions, and SDKs).
+//!
+//! # The pieces
+//!
+//! - [`Provider`] is the boundary — `onejudge` never talks to a model directly.
+//!   Every model call goes through `oneharness`. [`OneharnessProvider`] shells out
+//!   to the `oneharness` CLI; [`CommandProvider`] speaks a small JSON-lines
+//!   protocol (see `docs/protocol.md`) for the deterministic test doubles and any
+//!   custom backend; [`LlmlintProvider`] is a judge-side backend whose whole
+//!   verdict is one `llmlint` run over the worker's tree, met at the process
+//!   boundary only; and [`SplitProvider`] composes a skill-running provider with a
+//!   separate judge / simulated-user provider (e.g. run the skill on one harness
+//!   and judge on another). The judge side is a **list**: a [`JudgePanel`] runs
+//!   every judge concurrently against the same worker turn, waits for all of
+//!   them, and hands the worker one combined, attributed message, recording each
+//!   judge's [`JudgeDecision`] on the report (see `docs/judges.md`).
+//! - [`Engine`] runs a [`Conversation`] (a [`Skill`] plus an initial input and an
+//!   optional [`SimulatedUser`]) into a [`Transcript`], bounded by `max_turns` /
+//!   `done_when` / the skill declaring itself done, threading one caller-owned
+//!   session name across turns (the provider degrades gracefully where a harness
+//!   cannot continue a session).
+//! - [`Engine::judge_only`] is the **judge-only** mode of a run: no agent side,
+//!   the judge side handed a [`JudgeInput`] — a document's text — as the reply to
+//!   judge once against the run's bar, returning the same [`Outcome`] and so the
+//!   same [`Report`] a run reaches on that decision.
+//! - [`Transcript`] carries each turn plus the normalized [`ToolEvent`]s the skill
+//!   took, so the judge — and a [`ToolQuery`] — can reason over *what the skill
+//!   did*, not just what it said.
+//! - [`Report`] is onejudge's own versioned contract ([`SCHEMA_VERSION`]): a
+//!   serializable bundle of the transcript, verdicts, and usage that downstream
+//!   SDKs compose over and re-export (see `docs/contract.md`).
+//! - [`SpawnHook`] is the seam for an **in-process embedder**: onejudge offers
+//!   every process it is about to create, so the embedder can place it in a group
+//!   it owns (a POSIX process group, a Windows job object) and still terminate the
+//!   whole harness tree on cancellation. The embedder owns the group; onejudge only
+//!   reports what a hook said it did, on [`Report::processes`] (see
+//!   `docs/spawn-hook.md`). Install it on each provider, or — driving the run
+//!   through the CLI's plan — on the plan itself (`Plan::with_spawn_hook`, under
+//!   the `cli` feature), which reaches both sides of a two-party run.
+//! - [`Notes`] is the **note delivery seam**: a role-addressed correction sent into
+//!   a running conversation reaches whichever party is live, and the other party
+//!   receives it with that party's response. A delivered note enters the acceptance
+//!   [`Criteria`] the judge evaluates against, and one that arrives after the
+//!   conversation completed raises [`Undelivered`] rather than being silently
+//!   accepted. See the [`note`] module.
+//! - [`ControlOutcome`] is the answer to "can something *outside* this run redirect
+//!   the turn in flight?". Asked for with `OneharnessProvider::with_control` (or
+//!   `provider.control: true`) and off by default, it reports the
+//!   [`ControlAddress`] an `oneharness interrupt` process would use — or why the
+//!   ask could not be honored. One per party: [`Provider::control`] for the
+//!   worker's turn and [`Provider::supervisor_control`] for the supervisor's
+//!   decision, on separate sockets and separately refusable. onejudge redirects
+//!   a live turn itself only for a note sent into its own conversation; see
+//!   `docs/control.md`.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use onejudge::{Conversation, Engine, OneharnessProvider, Settings, Skill, SimulatedUser};
+//!
+//! let provider = OneharnessProvider::new();
+//! // Harness/model selection lives in oneharness's config files, not here.
+//! let settings = Settings::new();
+//! let engine = Engine::new(&provider, settings);
+//!
+//! let skill = Skill::new("greeter", "./skills/greeter", "Greet the user warmly.");
+//! let user = SimulatedUser::new("A curious first-time visitor.")
+//!     .done_when("the assistant has answered the visitor's question");
+//! let outcome = engine.run(&Conversation::multi_turn(skill, "hi", user))?;
+//!
+//! let verdict = engine.judge_boolean("the reply was welcoming", &outcome.transcript)?;
+//! println!("{:?}: {}", verdict.value, verdict.reason);
+//! # Ok::<(), onejudge::Error>(())
+//! ```
+
+#[cfg(feature = "cli")]
+pub mod cli;
+mod command;
+mod control;
+mod engine;
+mod error;
+mod history_name;
+mod interrupt;
+mod judge_input;
+// llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+#[doc(hidden)]
+pub mod launch_trace;
+// llmlint: ignore-end[changed_behavior_has_e2e]
+mod llmlint;
+pub mod note;
+mod oneharness;
+mod panel;
+mod provider;
+mod report;
+#[cfg(feature = "skill")]
+mod skill;
+mod spawn;
+mod split;
+mod stream;
+mod telemetry;
+mod transcript;
+mod usage;
+#[cfg(feature = "skill")]
+mod yaml;
+
+pub use command::CommandProvider;
+pub use control::{ControlAddress, ControlOutcome};
+pub use engine::{
+    Conversation, Engine, HistoryBegun, JudgeDecided, JudgeTool, Observation, Outcome, Settings,
+    SimulatedUser, Skill, StreamEvent, TurnAction, TurnClosed, TurnMessage, TurnOpened,
+    NOOP_SETTLE_LIMIT,
+};
+pub use error::{Error, ProviderErrorKind, Result};
+pub use history_name::{HistoryScope, JudgeSideCall};
+pub use judge_input::{JudgeInput, JudgedFile, DEFAULT_JUDGE_INPUT_NAME};
+pub use llmlint::{LlmlintProvider, DEFAULT_LLMLINT_BIN, LLMLINT_MIN_VERSION};
+pub use note::{
+    supervisor_block, Accepted, Addressee, Criteria, Criterion, CriterionRefused, DeliveredNote,
+    Delivery, Note, NoteInbox, NoteRefused, NoteText, Notes, Party, Undelivered,
+};
+pub use oneharness::OneharnessProvider;
+/// oneharness's normalized event, re-exported because it is the payload of
+/// [`Observation::Action`] and of [`Provider::respond_observing`].
+pub use oneharness_core::domain::events::ActionEvent;
+pub use panel::{is_valid_label, JudgeAbilities, JudgeEntry, JudgePanel};
+pub use provider::{
+    build_assessment_prompt, build_assessment_prompt_with_evidence, build_judge_prompt,
+    build_judge_prompt_with_evidence, build_respond_prompt, build_supervisor_prompt,
+    build_supervisor_prompt_with_evidence, build_user_prompt, latest_or_inline,
+    latest_user_message, parse_supervisor, parse_verdict, render_transcript, supervise_with_reask,
+    Ask, Assessment, AssistantTurn, EvidenceContext, HarnessEvent, JudgeKind, JudgeLink,
+    JudgeQuery, JudgeTools, JudgeValue, JudgeVerdict, Provider, Reask, SkillRef, SupervisorOutcome,
+    SupervisorQuery, SupervisorTurn, TurnOutcome, UserTurn, ARTIFACT_LISTING_LIMIT,
+    EVIDENCE_PROMPT_MARKER, EVIDENCE_TOOL_RETRY_LIMIT, SUPERVISOR_REASK_LIMIT,
+    SUPERVISOR_REASK_NOTE, SUPERVISOR_REDIRECT_NOTE, SUPERVISOR_UNPARSED_NOTE,
+};
+pub use report::{Decision, JudgeDecision, JudgedTurn, NamedVerdict, Report, SCHEMA_VERSION};
+#[cfg(feature = "sdk-schema")]
+pub mod sdk_schema;
+#[cfg(feature = "skill")]
+pub use skill::{load_skill, Frontmatter, SkillDefinition};
+pub use spawn::{SharedSpawnHook, SpawnContext, SpawnHook, SpawnedProcess};
+pub use split::SplitProvider;
+#[doc(hidden)]
+pub use telemetry::InvocationTelemetry;
+pub use telemetry::{
+    CandidateAttempt, FellThrough, HarnessAttribution, JudgePosture, PartyTelemetry, SessionLink,
+    Telemetry, TelemetryRole,
+};
+pub use transcript::{Message, Role, ToolEvent, ToolQuery, Transcript};
+pub use usage::Usage;

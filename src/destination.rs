@@ -197,16 +197,16 @@ pub(crate) fn binary() -> std::ffi::OsString {
 fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
     let binary = binary();
     let named = || format!("`{} {} {repo}`", binary.to_string_lossy(), verb.join(" "));
-    let output = Command::new(&binary)
-        .args(verb)
-        .arg(repo)
-        .output()
-        .map_err(|error| {
-            format!(
-                "{} could not be run: {error} (set {BINARY_ENV} to an executable one)",
-                named()
-            )
-        })?;
+    let output = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        Command::new(&binary).args(verb).arg(repo),
+    )
+    .map_err(|error| {
+        format!(
+            "{} could not be run: {error} (set {BINARY_ENV} to an executable one)",
+            named()
+        )
+    })?;
     if !output.status.success() {
         return Err(format!(
             "{} refused: {}",
@@ -438,16 +438,16 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
         return Ok(None);
     }
     let message = write_message_file(title)?;
-    let ran = Command::new(&hook)
-        .arg(&message)
-        .current_dir(checkout)
-        .output()
-        .map_err(|error| {
-            format!(
-                "the {COMMIT_MSG_HOOK} hook at {} could not be run: {error}",
-                hook.display()
-            )
-        });
+    let ran = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        Command::new(&hook).arg(&message).current_dir(checkout),
+    )
+    .map_err(|error| {
+        format!(
+            "the {COMMIT_MSG_HOOK} hook at {} could not be run: {error}",
+            hook.display()
+        )
+    });
     // Best effort, and deliberately: a temporary file that outlives its use is
     // untidy, and turning that into a refusal would throw away a verdict the
     // repository has already given.
@@ -481,16 +481,18 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
 /// asking it is the only way to get the answer a repository configured for
 /// itself.
 fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-path", name])
-        .current_dir(checkout)
-        .output()
-        .map_err(|error| {
-            format!(
-                "git could not be run in the publication checkout {}: {error}",
-                checkout.display()
-            )
-        })?;
+    let output = onevcs::launch_trace::output(
+        onevcs::launch_site!(),
+        Command::new("git")
+            .args(["rev-parse", "--git-path", name])
+            .current_dir(checkout),
+    )
+    .map_err(|error| {
+        format!(
+            "git could not be run in the publication checkout {}: {error}",
+            checkout.display()
+        )
+    })?;
     if !output.status.success() {
         return Err(format!(
             "git does not answer for the publication checkout {}: {}",

@@ -1,0 +1,76 @@
+[package]
+name = "oneharness-core"
+version = "0.29.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Reusable engine behind the oneharness CLI: the run driver, harness registry, hook rendering/installation, and harness config sync."
+license.workspace = true
+repository.workspace = true
+
+[features]
+sdk-schema = []
+# Compiles the usage sweep's fault injectors, so the containment that keeps one
+# misbehaving probe from taking a whole report down is drivable from a test.
+# Enabled by the binary crate's feature of the same name; never in a release.
+mock-harness = []
+
+# Emits the core-only bundle, for a library consumer that wants it without the
+# CLI's roots. Named apart from the binary crate's `generate_sdk_schema` example
+# (which emits this bundle plus `list_report`/`detect_report`, and is the one the
+# SDK generators run): two examples sharing a name across the workspace share one
+# `target/debug/examples/` filename, so cargo silently runs whichever built last
+# and the SDK drift gate compares against the wrong bundle. The file keeps its
+# name so the path stays greppable next to the binary crate's example.
+[[example]]
+name = "generate_core_sdk_schema"
+path = "examples/generate_sdk_schema.rs"
+required-features = ["sdk-schema"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1"
+thiserror = "2"
+which = "7"
+wait-timeout = "0.2"
+toml = { workspace = true }
+# JSON Schema validation for structured-output runs. `default-features = false`
+# drops the optional `resolve-http`/`resolve-file` reference resolvers (and the
+# `reqwest` they pull), keeping the engine offline and portable — in-document
+# `$ref`s still resolve. Pinned to a 0.33.x line whose MSRV (1.71) stays at or
+# below the crate's declared `rust-version`.
+jsonschema = { version = "0.33", default-features = false }
+# Regex matching for mock rulesets (`domain::mock` MatchSpec `*_regex` / input
+# predicates). The `regex` crate is the linear-time RE2-style engine — no
+# catastrophic backtracking, so a caller-supplied (untrusted) pattern can never
+# hang the responder — and is already in the tree via `jsonschema`, so this adds
+# no new download.
+regex = "1"
+# History records use time-ordered UUIDv7 identifiers for resumable cursors and
+# UUIDv5 identifiers when deterministically migrating legacy v0.1 records.
+uuid = { workspace = true, features = ["serde", "v5", "v7"] }
+# The history index is shared by independent oneharness processes. `fs2` keeps
+# the locking primitive portable across Unix and Windows without leaking I/O
+# into the pure domain layer.
+fs2 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_System_Threading",
+] }
+
+# The marked-process tests' Windows fixture rewrites its own process DACL.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization"] }

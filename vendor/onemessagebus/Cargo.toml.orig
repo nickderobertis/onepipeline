@@ -1,0 +1,49 @@
+[package]
+name = "onemessagebus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A typed NDJSON message bus: one envelope, one filter grammar, payload bounds and redaction, a schema registry, and an emitter and reader over streams — generic over the vocabulary a consumer declares."
+readme = "README.md"
+keywords = ["ndjson", "events", "message-bus", "schema", "streams"]
+categories = ["development-tools", "encoding"]
+# What a consumer receives: the sources, the manifest, and the crate's readme.
+# release-plz decides this package changed by diffing its packaged files against
+# the last release, so a change to the suite deliberately does not cut a release
+# on its own.
+include = ["src/**/*.rs", "Cargo.toml", "README.md"]
+
+[lib]
+name = "onemessagebus"
+path = "src/lib.rs"
+
+# The core is a leaf: nothing here names a sibling of the stack or the agent
+# profile. deny.toml's `bans` refuse the edge, and `cargo metadata` shows the
+# profile depending on this crate and never the reverse.
+[dependencies]
+getrandom = { workspace = true }
+jsonschema = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-saphyr = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+# llmlint: ignore[new_command_or_client_gets_its_own_project] the HTTP client is how `LinkResolver` fetches a schema link, and Contract L makes resolution a library call beside `Config` in this crate: `Config::resolve_links` calls it, and the capability manifest names `onemessagebus::LinkResolver::{cached, clear, resolve}` as the library entries of the `schemas` verbs, which `tests/library_surface.rs` requires to be paths in this crate. A crate of its own would either depend on the core and leave `Config::resolve_links` unable to call it, or be depended on by the core and publish a second crate for one private function.
+ureq = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

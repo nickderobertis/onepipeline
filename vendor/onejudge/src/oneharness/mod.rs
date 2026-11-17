@@ -1,0 +1,3009 @@
+//! [`OneharnessProvider`]: the default [`Provider`], which runs each prompt on a
+//! real harness through the [`oneharness`](https://github.com/nickderobertis/oneharness)
+//! **engine, in process** — `oneharness_core::io::run::run`, the linked
+//! `oneharness-core` this crate already compiles its report contract against.
+//! Nothing is spawned and nothing needs to be on `PATH`; see [`library`] for the
+//! call and [`Execution`] for the one seam that still spawns.
+//!
+//! **Harness/model selection lives in oneharness's config, not onejudge.** The
+//! worker side passes no `--harness`/`--model`. Without a worker config it uses
+//! oneharness's discovered config — the user file, then the project
+//! `oneharness.toml` found from the worktree; with one
+//! ([`OneharnessProvider::with_worker_config`]) it passes `--config
+//! <worker_config>` and that file alone, so nothing in the worktree reaches its
+//! routing. The judge / simulated-user side passes `--config <judge_config>`
+//! (default `oneharness.judge.toml`) so it can run on a separately-configured
+//! harness/model — again without `--harness`/`--model`. Either side's list has
+//! onejudge's history default layered beneath it. Scaffold both with `onejudge
+//! init` (which shells out to `oneharness init`).
+//!
+//! It targets **oneharness v0.26.0+**, whose `run-started` stream line announces
+//! each candidate's history before its events. Older streams remain readable,
+//! but emit no history opening. The CLI also accepts the repeated `run --config`
+//! that layers onejudge's defaults beneath each side's own configuration.
+//!
+//! It can also drive a **streamed** provider (`with_streaming`): the turn asks
+//! `run` to publish incrementally and hands it an `EventSink`, so each tool event
+//! reaches the caller the instant oneharness observes it instead of only when the
+//! turn ends. The finished report is read exactly as a buffered one is, so a
+//! streamed run and a buffered one produce the same turn. On the spawning seam the
+//! same contract arrives as the NDJSON protocol in `stream.rs`
+//! (`docs/streaming.md`).
+//!
+//! The **report** it reads back is oneharness's own typed contract
+//! (`oneharness_core::domain::report`), not a shadow struct declared here — see
+//! [`report`] for what that buys, including reading the candidate a fallback chain
+//! actually ran instead of the first one it routed around. The per-candidate
+//! history record oneharness writes for every attempt is read back through
+//! oneharness's own reader; see [`history`].
+//!
+//! The pure pieces — turn description, report parsing, error classification — are
+//! separated from the thin execution shells so they are deterministically
+//! unit-tested. Both seams are proven end-to-end in the e2e suite: the in-process
+//! one against `onejudge-fake-harness` (a *harness* stand-in, so the whole of
+//! oneharness is real), the spawning one against `onejudge-fake-oneharness`. The
+//! live tier drives a real oneharness and a real harness (`docs/live-tier.md`).
+//!
+//! **What the one remaining subprocess is for.** [`Execution::Process`] spawns an
+//! `oneharness` executable, and exists for a single upstream gap: `RunControls`
+//! cannot offer a spawned harness to the caller, and each harness is its own
+//! process-group leader inside `run`, so an in-process turn leaves
+//! [`SpawnHook`](crate::SpawnHook) nothing to place and `Report::processes` empty —
+//! removing the very seam an embedder uses to reap an orphaned paid harness. It is
+//! reached only by naming a binary or installing such a hook. The gap is written
+//! up, with a proposal against oneharness, in `docs/oneharness-library.md`.
+//!
+//! It can also ask for a **controllable** worker turn (`with_control`): the
+//! worker-side call adds `--control`, oneharness opens an out-of-band socket for the
+//! turn, and the address an `oneharness interrupt` process would use is reported on
+//! [`Provider::control`]. onejudge redirects that turn itself only for a note sent
+//! into its own conversation ([`Provider::turn_control`] names where). A oneharness
+//! that refuses the ask does so before
+//! spawning a harness, so the call is retried once without the flag and the refusal
+//! becomes a stated reason rather than a failed run. See `docs/control.md`.
+//!
+//! **Cancelling a turn always terminates the harness tree, never just the party
+//! onejudge is talking to.** A harness is its own process-group leader, so onejudge
+//! can never signal one; only oneharness owns the tree. In process that is
+//! `RunControls::cancel` plus the sink's `SinkStep::Stop` (see [`library`]). On the
+//! spawning seam it is the three-rung escalation in [`terminate`] — closed stdout,
+//! SIGTERM, kill — because a spawned producer has to be reached through the OS.
+
+#[cfg(test)]
+pub(crate) mod fixture;
+mod history;
+mod library;
+mod posture;
+mod report;
+mod turn;
+
+use crate::HarnessEvent;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::io::{Read as _, Write};
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use oneharness_core::domain::events::ActionEvent;
+
+use crate::control::{ControlAddress, ControlOutcome};
+use crate::error::{Error, ProviderErrorKind, Result};
+use crate::history_name::{history_name, HistoryScope, JudgeSideCall};
+use crate::provider::{
+    assessment_prompt, build_assessment_prompt, build_judge_prompt, build_user_prompt,
+    judge_prompt, latest_or_inline, parse_supervisor, parse_verdict, resolve_evidence_request,
+    supervise_with_reask, supervisor_prompt, Ask, Assessment, AssistantTurn, EvidenceContext,
+    JudgeFraming, JudgeLink, JudgeQuery, JudgeTools, JudgeVerdict, Provider, Reask, SkillRef,
+    SupervisorOutcome, SupervisorQuery, SupervisorTurn, UserTurn, SUPERVISOR_REASK_LIMIT,
+    SUPERVISOR_REDIRECT_NOTE,
+};
+use crate::spawn::{role_of, SharedSpawnHook, SpawnContext, SpawnedProcess, Spawner};
+use crate::stream::{read_stream, StreamOutcome};
+use crate::telemetry::{
+    CandidateAttempt, FellThrough, InvocationTelemetry, JudgePosture, TelemetryRole,
+};
+use crate::transcript::{Message, ToolEvent};
+use crate::usage::Usage;
+
+pub(crate) use report::{action_event, tool_event};
+use report::{parse_report, parse_report_value, ControlSocket, Invocation};
+use turn::TurnSpec;
+
+/// The default judge/simulated-user oneharness config filename.
+const DEFAULT_JUDGE_CONFIG: &str = "oneharness.judge.toml";
+
+/// The judge config the CLI runs a `oneharness` provider under: the one its
+/// config names, else `oneharness.judge.toml` when that file is in the working
+/// directory, else `None` — oneharness's own discovery, behind onejudge's
+/// judge-side defaults. (0.15.0 passed the default file whether or not it
+/// existed, which oneharness refused.)
+#[cfg(feature = "cli")]
+pub(crate) fn cli_judge_config(configured: Option<&Path>) -> Option<PathBuf> {
+    match configured {
+        Some(config) => Some(config.to_path_buf()),
+        None => {
+            let default = Path::new(DEFAULT_JUDGE_CONFIG);
+            default.is_file().then(|| default.to_path_buf())
+        }
+    }
+}
+
+/// The posture an evaluator call under `judge_config` (`None`: discovery) over
+/// `worktree` runs in — what the CLI refuses a writable panel by.
+#[cfg(feature = "cli")]
+pub(crate) fn evaluator_posture(
+    judge_config: Option<&Path>,
+    worktree: &Path,
+) -> Result<JudgePosture> {
+    let configs = posture::evaluator_configs(judge_config, worktree)?;
+    posture::resolve(&configs, worktree)
+}
+
+/// A borrowed live-history callback shared by the two invocation paths.
+type HistorySink<'a> =
+    &'a mut (dyn FnMut(&oneharness_core::io::run::RunBegun) -> ControlFlow<()> + 'a);
+
+/// The stable substring in oneharness's error when a harness cannot bind a
+/// `--session` name (its `OneharnessError::SessionUnsupported`). Matching it lets
+/// onejudge retry the call without `--session` instead of failing the run.
+///
+/// It is a substring because oneharness reports this one *before* it can emit a
+/// report — a usage error on stderr, not a `failure_kind` — so there is nothing
+/// typed on the wire to match. `session_unsupported_marker_tracks_oneharness` in
+/// this module's tests pins it against `OneharnessError::SessionUnsupported`'s own
+/// rendering, so an upstream rewording fails the gate here instead of silently
+/// turning the graceful retry into a failed run.
+const SESSION_UNSUPPORTED_MARKER: &str = "does not support --session";
+
+/// Whether `err` is oneharness rejecting `--session` because the harness exposes no
+/// session id headlessly — the one failure the provider recovers from (by retrying
+/// without `--session`).
+fn is_session_unsupported(err: &Error) -> bool {
+    err.to_string().contains(SESSION_UNSUPPORTED_MARKER)
+}
+
+/// The stable substrings in every refusal `oneharness run --control` can answer
+/// with: a harness with no control mechanism, a run shape that has no single turn
+/// to address, an incompatible output format or stream, a platform with no unix
+/// sockets, or a socket that could not be opened.
+///
+/// Substrings for the same reason [`SESSION_UNSUPPORTED_MARKER`] is one: every one
+/// of these is a *usage* error oneharness reports before it can produce a report,
+/// so there is nothing typed on the wire to match. Every variant either quotes the
+/// flag or names the socket, and
+/// `control_refusal_markers_track_oneharness` in this module's tests pins the
+/// whole set against `OneharnessError`'s own rendering, so an upstream rewording
+/// fails the gate here instead of silently turning a degraded run into a failed one.
+const CONTROL_REFUSED_MARKERS: [&str; 3] = ["--control", "control socket", "controlled turn"];
+
+/// Whether `err` is oneharness refusing the *control ask* — as opposed to failing
+/// the turn. Only consulted on a call that actually passed `--control`.
+fn is_control_refused(err: &Error) -> bool {
+    let text = err.to_string();
+    CONTROL_REFUSED_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// Why this platform cannot carry a control channel, or `None` when it can.
+///
+/// A parameter rather than a `cfg!` at the call site so the Windows answer is
+/// asserted on every host: the degradation this returns is the whole of what a
+/// Windows caller gets, and a CI matrix that only *runs* it there would leave it
+/// unproven wherever the gate actually runs.
+fn control_platform_reason(unix: bool) -> Option<&'static str> {
+    (!unix).then_some(
+        "oneharness's turn-control socket is a unix domain socket, which this platform does not \
+         provide",
+    )
+}
+
+/// oneharness's own words for a refusal, as the reason a report carries.
+///
+/// Quoted rather than re-described: the refusal names the harness, the run shape,
+/// or the control-capable alternatives, and a supervisor deciding how to route
+/// around it needs that, not onejudge's paraphrase.
+fn refusal(err: &Error) -> String {
+    match err {
+        Error::Provider { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// How long a cancelled `oneharness run` is given to notice its closed stdout
+/// before onejudge escalates to a signal.
+///
+/// A producer that is still writing observes the broken pipe on its very next
+/// write, so this only has to cover the gap to that write. It is deliberately short:
+/// a *silent* producer will never use it, and waits it out before being signalled.
+const PIPE_CLOSE_GRACE: Duration = Duration::from_millis(250);
+
+/// How long a signalled `oneharness run` is then given to tear down the harness
+/// tree it owns before onejudge kills it outright.
+///
+/// oneharness's runner polls for cancellation on a short slice of its own, so this
+/// only has to cover that slice plus the reaping of the tree — while staying short
+/// enough that cancelling a turn is still responsive.
+const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// How often the grace period above re-checks the child.
+const TEARDOWN_POLL: Duration = Duration::from_millis(10);
+
+/// Tear down a `oneharness run` whose turn was abandoned, and through it the
+/// harness tree it owns.
+///
+/// onejudge can never signal the *harness*: oneharness makes every harness its own
+/// process-group leader precisely so a signal aimed at the runner does not race it.
+/// Everything here is therefore addressed to **oneharness**, which owns the tree
+/// and is the only party that can reap it.
+///
+/// Teardown escalates, cheapest and most cooperative first, because each rung
+/// reaches a case the one before it cannot:
+///
+/// 1. **The closed stdout** (already dropped by the caller). A producer that is
+///    still writing sees the broken pipe on its next write and short-circuits into
+///    its own teardown. This rung alone is what onejudge used to rely on.
+/// 2. **SIGTERM.** A producer whose *harness* has gone silent never writes again,
+///    so it never observes rung 1 — it would sit there until the backstop killed
+///    it, and an uncatchable kill denies it the teardown, orphaning a live harness
+///    that keeps burning tokens. Since v0.6.9 `oneharness run` installs
+///    SIGINT/SIGTERM handlers, and its runner polls for the resulting cancellation
+///    on its own time slice rather than only when the harness writes, so this
+///    reaches the silent case and still ends in `Finish::Terminate`.
+/// 3. **SIGKILL**, for a child that answers neither.
+///
+/// Rung 1 is kept, and kept first, precisely because rung 2 is not free: SIGTERM's
+/// *default* disposition is to terminate, so signalling a producer that would have
+/// torn down on the broken pipe — an older oneharness, or the window before it
+/// installs its handlers — would cut it off mid-teardown. Waiting out
+/// [`PIPE_CLOSE_GRACE`] first costs a silent harness a quarter second against a
+/// turn measured in hundreds of seconds.
+///
+/// On Windows there is no rung 2 and none is needed: oneharness puts each harness
+/// tree in a Job Object with `KILL_ON_JOB_CLOSE`, so rung 3 already ends the
+/// descendants.
+fn terminate(child: &mut std::process::Child) {
+    if exited_within(child, PIPE_CLOSE_GRACE) {
+        return;
+    }
+    request_stop(child);
+    if !exited_within(child, TEARDOWN_GRACE) {
+        let _ = child.kill();
+    }
+}
+
+/// Ask `child` to cancel, the way an operator's Ctrl-C would.
+///
+/// Best-effort by nature: a child that has already exited is an `ESRCH` this
+/// deliberately ignores, because the next thing the caller does is wait for it.
+#[cfg(unix)]
+fn request_stop(child: &std::process::Child) {
+    // The child has been spawned and not yet reaped, so its id still names it (a
+    // zombie at worst) and can never have been recycled onto an unrelated process.
+    let Some(pid) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return;
+    };
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+}
+
+/// Windows has no SIGTERM, and needs none: the Job Object teardown described on
+/// [`terminate`] makes the backstop kill sufficient there.
+#[cfg(not(unix))]
+fn request_stop(_child: &std::process::Child) {}
+
+/// Wait up to `grace` for `child` to exit on its own, returning whether it did.
+///
+/// A `try_wait` error is reported as "did not exit", so an unwaitable child still
+/// reaches the backstop kill.
+fn exited_within(child: &mut std::process::Child, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Err(_) => return false,
+            Ok(None) if Instant::now() >= deadline => return false,
+            // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+            Ok(None) => crate::launch_trace::sleep(crate::launch_site!(), TEARDOWN_POLL),
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+}
+
+/// How a turn is executed — the one seam, and the only place a harness turn can
+/// become a subprocess.
+///
+/// [`Execution::Library`] is the default and what every ordinary run uses.
+/// [`Execution::Process`] exists for exactly one thing the library cannot do:
+/// offer a spawned process to an embedder's [`SpawnHook`](crate::SpawnHook).
+/// `RunControls`' whole surface is `events`, `cancel`, `signal_cancel` and
+/// `version`, and every harness is spawned *inside* `run` through a `pub(crate)`
+/// `Process::spawn` — so an in-process turn has no process to offer, leaving
+/// [`Report::processes`](crate::Report::processes) empty and an embedder's group
+/// with nothing in it. That is a documented contract on a versioned wire, so the
+/// seam stays until oneharness can offer the process (the proposal is written up
+/// in `docs/oneharness-library.md`) rather than being silently dropped.
+///
+/// It is never reached by accident: it is selected only by naming an `oneharness`
+/// binary ([`OneharnessProvider::with_bin`]) or by installing a hook that needs
+/// one ([`OneharnessProvider::with_spawn_hook`]).
+enum Execution {
+    /// In process, through `oneharness_core::io::run::run`. See [`library`].
+    Library,
+    /// Spawn this `oneharness` executable and parse its stdout.
+    Process(String),
+}
+
+/// What **one party** of a run can say about out-of-band turn control.
+///
+/// Two of these, one per party, because the two sides are separately addressable
+/// and separately refusable: the worker and the supervisor run under different
+/// configs, on different session names — `<base>-skill` and `<base>-user`, so
+/// different sockets — and a harness that can be interrupted on one side is not
+/// thereby interruptible on the other. Collapsing them into one field would make
+/// a judge-side refusal read as a worker-side one.
+struct PartyControl {
+    /// Which party this is, for the warning a degraded ask prints.
+    party: &'static str,
+    /// What this party could say about turn control on the last run: the address
+    /// of the socket it opened, or why it has none. Reset with telemetry, because
+    /// it describes one run and not the provider.
+    outcome: RefCell<ControlOutcome>,
+    /// The socket this party's last report named, before the working directory is
+    /// folded in to make it an address. Written where the report is parsed (which
+    /// is the only place that sees it) and consumed by whichever ladder knows the
+    /// `--cwd` the turn ran under.
+    socket: RefCell<Option<ControlSocket>>,
+    /// Whether the last turn this party ran was actually **redirected** — read off
+    /// oneharness's own `ControlReport::interrupts`, never inferred from having
+    /// opened a socket, because opening one and being interrupted through it are
+    /// different facts.
+    redirected: Cell<bool>,
+}
+
+impl PartyControl {
+    fn new(party: &'static str) -> Self {
+        Self {
+            party,
+            outcome: RefCell::new(ControlOutcome::NotRequested),
+            socket: RefCell::new(None),
+            redirected: Cell::new(false),
+        }
+    }
+
+    /// Forget the last run: an address describes one run's turn, and a second run
+    /// must never inherit a socket that is already gone.
+    fn reset(&self) {
+        *self.outcome.borrow_mut() = ControlOutcome::NotRequested;
+        *self.socket.borrow_mut() = None;
+        self.redirected.set(false);
+    }
+}
+
+/// What an evaluator judge-side call runs under: the config list it layers,
+/// the posture that list resolves to, and whether it asks for tool events.
+struct Evaluator {
+    configs: Vec<PathBuf>,
+    /// `None` when the linked core could not read the list — see
+    /// [`OneharnessProvider::evaluator`].
+    posture: Option<JudgePosture>,
+    events: bool,
+}
+
+/// What this provider's judge side has recorded for the supervisor decision in
+/// flight, taken by [`Provider::take_judge_link`] or
+/// [`Provider::take_judge_tools`].
+#[derive(Default)]
+struct JudgeRecord {
+    posture: Option<JudgePosture>,
+    events: Vec<ToolEvent>,
+}
+
+/// Which party a oneharness run is made for, as its `role=` history label says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelledRole {
+    /// The worker's own turn.
+    Worker,
+    /// A supervisor decision or a simulated-user turn.
+    Supervisor,
+    /// A stateless verdict or an assessment.
+    Judge,
+}
+
+impl LabelledRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Supervisor => "supervisor",
+            Self::Judge => "judge",
+        }
+    }
+}
+
+/// The number of assistant turns in `messages` — the turn a judge-side call over
+/// them is labelled with.
+fn assistant_turns(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| m.role == crate::Role::Assistant)
+        .count()
+}
+
+/// The default [`Provider`]: runs each turn through the `oneharness` engine.
+pub struct OneharnessProvider {
+    execution: Execution,
+    /// The worker side's own oneharness config; `None` is discovery.
+    worker_config: Option<PathBuf>,
+    /// The judge side's own oneharness config; `None` is discovery.
+    judge_config: Option<PathBuf>,
+    /// Appended to every evaluator prompt this provider's judge side is handed.
+    judge_instructions: Option<String>,
+    /// Whether an evaluator call asks for tool events; `None` asks exactly when
+    /// its posture is writable.
+    judge_events: Option<bool>,
+    /// The label this provider judges under ([`Provider::set_judge_label`]).
+    judge_label: RefCell<Option<String>>,
+    /// The posture of the evaluator call in flight, stamped on its telemetry.
+    evaluating: RefCell<Option<JudgePosture>>,
+    /// What the supervisor decisions since the last take recorded.
+    judge_record: RefCell<JudgeRecord>,
+    /// Harness ids run against oneharness's deterministic responder instead of a
+    /// paid model. Empty for an ordinary run.
+    mock_harness: Vec<String>,
+    stream: bool,
+    control: bool,
+    /// The worker side's control state, reported on [`Provider::control`].
+    agent: PartyControl,
+    /// The supervisor side's, reported on [`Provider::supervisor_control`].
+    supervisor: PartyControl,
+    telemetry: RefCell<Vec<InvocationTelemetry>>,
+    /// The run the judge-side history records are named after, set by the engine.
+    history_scope: RefCell<Option<HistoryScope>>,
+    /// The assistant turn the judge-side call in flight belongs to, for its
+    /// `turn=` history label; set on entry to each judge-side call.
+    labelled_turn: Cell<usize>,
+    spawner: Spawner,
+}
+
+impl Default for OneharnessProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OneharnessProvider {
+    /// A provider that runs each turn through the **`oneharness` engine in
+    /// process**, running the judge and simulated user under
+    /// `oneharness.judge.toml` (its default config file).
+    ///
+    /// Nothing is spawned and nothing needs to be on `PATH`: the engine is the
+    /// linked `oneharness-core`, so the version onejudge compiles its report
+    /// contract against is the version that runs the turn.
+    ///
+    /// [`with_bin`](Self::with_bin) and [`with_spawn_hook`](Self::with_spawn_hook)
+    /// are the only two ways to opt back into spawning one.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            execution: Execution::Library,
+            worker_config: None,
+            judge_config: Some(PathBuf::from(DEFAULT_JUDGE_CONFIG)),
+            judge_instructions: None,
+            judge_events: None,
+            judge_label: RefCell::new(None),
+            evaluating: RefCell::new(None),
+            judge_record: RefCell::new(JudgeRecord::default()),
+            mock_harness: Vec::new(),
+            stream: false,
+            control: false,
+            // `agent` is the worker side's label, kept for what already reads it.
+            agent: PartyControl::new("agent"),
+            supervisor: PartyControl::new("judge"),
+            telemetry: RefCell::new(Vec::new()),
+            history_scope: RefCell::new(None),
+            labelled_turn: Cell::new(0),
+            spawner: Spawner::default(),
+        }
+    }
+
+    /// Offer every `oneharness` process this provider spawns to `hook` before it
+    /// starts work, so an in-process embedder can place it — and, through it, the
+    /// harness tree oneharness goes on to own — in a group the embedder can later
+    /// terminate. See [`SpawnHook`](crate::SpawnHook).
+    ///
+    /// **This selects the spawning seam** (`oneharness` from `PATH` unless
+    /// [`with_bin`](Self::with_bin) named one): a hook offers a *process*, and an
+    /// in-process turn has none to offer. Installing one and
+    /// silently having it never fire would be the failure the hook exists to
+    /// prevent — an embedder believing it owns a group that is empty.
+    ///
+    /// Install the *same* hook on both backends of a
+    /// [`SplitProvider`](crate::SplitProvider) to cover the whole two-party tree.
+    #[must_use]
+    pub fn with_spawn_hook(mut self, hook: SharedSpawnHook) -> Self {
+        if matches!(self.execution, Execution::Library) {
+            self.execution = Execution::Process("oneharness".into());
+        }
+        self.spawner.install(hook);
+        self
+    }
+
+    /// Run each turn by **spawning** this `oneharness` executable instead of the
+    /// linked engine (e.g. a pinned install, or the fake binary the e2e suite
+    /// drives).
+    ///
+    /// Naming a binary is the explicit opt-in to spawning, which exists for one
+    /// contract: `RunControls` cannot offer a spawned harness to an embedder, so
+    /// an in-process turn leaves [`SpawnHook`](crate::SpawnHook) nothing to place
+    /// and [`Report::processes`](crate::Report::processes) empty. An ordinary
+    /// caller wants [`new`](Self::new), whose engine is the `oneharness-core` this
+    /// crate compiles its report contract against, so the two can never be
+    /// different versions. See `docs/oneharness-library.md`.
+    #[must_use]
+    pub fn with_bin(mut self, bin: impl Into<String>) -> Self {
+        self.execution = Execution::Process(bin.into());
+        self
+    }
+
+    /// Run this harness id against **oneharness's own deterministic responder**
+    /// instead of a paid model, by passing `oneharness run --mock-harness <id>`.
+    /// Repeatable; every id must be one the config for that side selects.
+    ///
+    /// This is what makes an acceptance proof that needs a real multi-turn,
+    /// multi-identity chain free: oneharness swaps the selected harness's provider
+    /// process for its own `MOCK_*`-scripted responder, so the whole chain — config
+    /// discovery, fallback routing, session threading, events, the report — is the
+    /// real code, and only the model is scripted. The `MOCK_*` variables that script
+    /// it are read from the environment the run inherits, so a caller exports them
+    /// exactly as it would for a bare `oneharness run`; onejudge passes them through
+    /// by not touching the environment.
+    ///
+    /// **This selects the spawning seam**, for the same reason
+    /// [`with_spawn_hook`](Self::with_spawn_hook) does: oneharness delivers the
+    /// responder by re-executing *its own binary* as the harness, and in process
+    /// that binary is the embedder, which knows nothing about the contract. Naming
+    /// a mock harness therefore runs `oneharness` from `PATH` unless
+    /// [`with_bin`](Self::with_bin) named one.
+    ///
+    /// It applies to **both sides** of the conversation — the worker turn and the
+    /// judge / simulated-user turn — since either one otherwise bills a model. The
+    /// two sides run under different oneharness configs, so an id one config selects
+    /// and the other does not is oneharness's own loud `--mock-harness` error rather
+    /// than a silent paid turn; compose a [`SplitProvider`](crate::SplitProvider) of
+    /// two providers when each side needs a different id.
+    #[must_use]
+    pub fn with_mock_harness(mut self, id: impl Into<String>) -> Self {
+        if matches!(self.execution, Execution::Library) {
+            self.execution = Execution::Process("oneharness".into());
+        }
+        self.mock_harness.push(id.into());
+        self
+    }
+
+    /// Fold this provider's mock-harness selection into a freshly-described turn.
+    /// One place, so neither side of the conversation can be left billing a model
+    /// while the other is mocked.
+    fn mocked(&self, mut spec: TurnSpec) -> TurnSpec {
+        spec.mock_harness.clone_from(&self.mock_harness);
+        spec
+    }
+
+    /// Run the **worker** side under exactly this oneharness config file, passed as
+    /// `oneharness run --config <path>` on every worker turn, instead of the user
+    /// and project files oneharness would discover from the worktree. The worker's
+    /// counterpart of [`with_judge_config`](Self::with_judge_config); the path is
+    /// taken as given.
+    ///
+    /// onejudge's history default is layered beneath it and nothing else is, so a
+    /// `history = false` here is honoured and an unrelated `oneharness.toml` sitting
+    /// in the worktree never reaches the worker's routing. The harness still runs
+    /// in the worktree. Unset — the default — the worker side layers the history
+    /// default under the discovered user file, then the discovered project file.
+    #[must_use]
+    pub fn with_worker_config(mut self, config: impl Into<PathBuf>) -> Self {
+        self.worker_config = Some(config.into());
+        self
+    }
+
+    /// The config list a worker turn names: the worker config alone, or none —
+    /// oneharness's discovery — when no worker config was given.
+    fn pinned(&self, spec: TurnSpec) -> TurnSpec {
+        TurnSpec {
+            config: self.worker_config.iter().cloned().collect(),
+            ..spec
+        }
+    }
+
+    /// Override the oneharness config file the judge and simulated user run under
+    /// (default `oneharness.judge.toml`), passed as `oneharness run --config
+    /// <path>`. This is where the judge-side harness/model selection lives — onejudge
+    /// itself passes no `--harness`/`--model`.
+    ///
+    /// An **evaluator** call — a supervisor decision, verdict or assessment made
+    /// with the worker's tree in hand — passes onejudge's judge-side defaults
+    /// (`mode = "read-only"`) *before* this file, so a `mode` set here, in an
+    /// `ONEHARNESS_*` override or in harness `args` is what the judge runs under;
+    /// with none, it stays read-only. The plain simulated-user turn passes this
+    /// file alone, as it always has.
+    #[must_use]
+    pub fn with_judge_config(mut self, config: impl Into<PathBuf>) -> Self {
+        self.judge_config = Some(config.into());
+        self
+    }
+
+    /// Run the judge and simulated user under **oneharness's own discovery**
+    /// instead of a named judge config: the user file, then the project file
+    /// found from the working directory. An evaluator call passes onejudge's
+    /// judge-side defaults followed by exactly those discovered files, so a
+    /// discovered `mode` still decides the judge's posture; the plain
+    /// simulated-user turn passes nothing and lets oneharness discover.
+    #[must_use]
+    pub fn with_judge_config_discovery(mut self) -> Self {
+        self.judge_config = None;
+        self
+    }
+
+    /// Append `instructions` to every evaluator prompt this provider's judge
+    /// side is handed — what to verify and how, for a judge whose posture lets it
+    /// act — the way a system prompt frames the worker. The answer format each
+    /// prompt ends with is unchanged: it is the protocol.
+    #[must_use]
+    pub fn with_judge_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.judge_instructions = Some(instructions.into());
+        self
+    }
+
+    /// Whether an evaluator call asks its harness for tool events, recorded on
+    /// the judge's decision and observed as
+    /// [`Observation::JudgeTool`](crate::Observation::JudgeTool). Unset, it asks
+    /// exactly when the judge's posture can change the tree — any mode but
+    /// `read-only` and `plan`.
+    #[must_use]
+    pub fn with_judge_events(mut self, events: bool) -> Self {
+        self.judge_events = Some(events);
+        self
+    }
+
+    /// What an evaluator call over `worktree` runs under: onejudge's defaults
+    /// layered under the judge's config (or the discovered files), the posture
+    /// that resolves to, and whether it asks for events.
+    ///
+    /// A list the linked core cannot read is not refused here: the call still
+    /// passes it, and oneharness refuses it with its own words, exactly as it
+    /// always has — onejudge is never stricter about a judge's config than the
+    /// oneharness that runs it. Its posture is then unknown, so it is recorded as
+    /// none and said so on stderr; its prompt is the same in every mode.
+    fn evaluator(&self, worktree: &str) -> Result<Evaluator> {
+        let worktree = Path::new(worktree);
+        let configs = posture::evaluator_configs(self.judge_config.as_deref(), worktree)?;
+        let posture = match posture::resolve(&configs, worktree) {
+            Ok(posture) => Some(posture),
+            Err(e) => {
+                eprintln!(
+                    "onejudge: warning — {e}; the judge's posture is unknown, so none is \
+                     recorded"
+                );
+                None
+            }
+        };
+        let events = self
+            .judge_events
+            .unwrap_or_else(|| posture.as_ref().is_some_and(JudgePosture::is_writable));
+        Ok(Evaluator {
+            configs,
+            posture,
+            events,
+        })
+    }
+
+    /// How an evaluator's prompts are framed: this judge's instructions. Its
+    /// posture frames nothing — oneharness enforces it, the prompt never states it.
+    fn framing(&self) -> JudgeFraming<'_> {
+        JudgeFraming {
+            instructions: self.judge_instructions.as_deref(),
+        }
+    }
+
+    /// Declare that the worker side **streams**: the turn asks oneharness to
+    /// publish incrementally, so a tool event reaches the caller's sink the
+    /// instant it is observed and the finished report is read exactly as a
+    /// buffered one is. On the spawning seam the same contract arrives as the
+    /// NDJSON provider protocol (`docs/streaming.md`) — an `{"type":"event",…}`
+    /// line per tool event, then a terminal `{"type":"result","report":{…}}`.
+    ///
+    /// Off by default. Turn it on only for a binary that really streams: a
+    /// declared-streaming provider that writes a line the protocol does not model
+    /// is a loud [`ProviderErrorKind::Protocol`] error, not a silent empty turn.
+    /// (A provider that streams *sometimes* is still safe — a bare report document
+    /// remains accepted, so a degraded run is not a failed one.)
+    #[must_use]
+    pub fn with_streaming(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Ask for a **controllable** worker turn: the worker-side call adds
+    /// `oneharness run --control`, which opens an out-of-band unix socket for the
+    /// turn's lifetime so a separate `oneharness interrupt` process can redirect
+    /// it in flight. The address is reported on [`Provider::control`] and on
+    /// [`Report::control`](crate::Report::control); onejudge itself redirects it
+    /// only for a note sent into its own conversation.
+    ///
+    /// **Off by default**, and off changes nothing at all — no flag, no socket,
+    /// the same argv. On, the ask is best-effort in exactly one direction: a
+    /// oneharness that refuses `--control` (a harness with no control mechanism, a
+    /// run shape control cannot address, a platform with no unix sockets) does so
+    /// *before* anything spawns, so the call is retried once without it and the
+    /// refusal is reported as [`ControlOutcome::Unavailable`] rather than failing
+    /// a run the caller asked to have judged.
+    ///
+    /// **Both parties are controlled**, on separate addresses: the worker's turn
+    /// under `<base>-skill` and the supervisor's decision under `<base>-user`. The
+    /// two are reported apart, on [`Provider::control`] and
+    /// [`Provider::supervisor_control`], because a harness that can be interrupted
+    /// on one side is not thereby interruptible on the other and a caller must be
+    /// able to tell which lever it has.
+    ///
+    /// The two reasons this used to exclude the judge side are answered rather
+    /// than binding. "Two runs on one address" does not hold for this engine's own
+    /// handles: oneharness derives the socket from the session name, and the
+    /// engine mints two different ones. And "a judge turn is short" is refuted by
+    /// measurement — a judge turn on this host wedged for nearly two hours, which
+    /// is exactly the turn worth redirecting. The short scoring calls (`judge`,
+    /// `assess`) and the legacy `user` turn stay uncontrolled: they carry no
+    /// session to be addressed by, or would put a second socket on the
+    /// supervisor's own name.
+    #[must_use]
+    pub fn with_control(mut self, control: bool) -> Self {
+        self.control = control;
+        self
+    }
+
+    /// Record why an asked-for control channel is missing, and warn — a caller
+    /// that asked for a lever must not have to diff two reports to learn it has
+    /// none.
+    fn control_unavailable(&self, party: &PartyControl, reason: impl Into<String>) {
+        let reason = reason.into();
+        eprintln!(
+            "onejudge: warning — no out-of-band turn control for this run's {} side: {reason}",
+            party.party
+        );
+        *party.outcome.borrow_mut() = ControlOutcome::Unavailable(reason);
+    }
+
+    /// Fold the working directory the turn ran under into the socket the report
+    /// named, producing the address `oneharness interrupt` takes.
+    ///
+    /// A controlled attempt that returned a report with no control block is the
+    /// one case that cannot happen through oneharness (it refuses the flag rather
+    /// than honoring it silently) and must still not be reported as a lever: it
+    /// becomes an `Unavailable` naming the producer.
+    fn control_address(&self, party: &PartyControl, worktree: &str) {
+        match party.socket.borrow_mut().take() {
+            Some(socket) => {
+                *party.outcome.borrow_mut() = ControlOutcome::Open(ControlAddress {
+                    session: socket.session,
+                    session_dir: socket.session_dir,
+                    cwd: worktree.to_string(),
+                });
+            }
+            None => self.control_unavailable(
+                party,
+                "the run accepted `--control` but its report named no control socket",
+            ),
+        }
+    }
+
+    /// Run a skill turn, threading `session` and — on a `SessionUnsupported`
+    /// failure — retrying once without it, re-inlining the transcript. Tool events
+    /// reach `on_event` live when the provider streams, and are replayed from the
+    /// finished turn when it does not.
+    ///
+    /// A control ask ([`OneharnessProvider::with_control`]) rides the same ladder:
+    /// the most capable call is tried first, and each retry drops exactly the one
+    /// thing the previous attempt was refused for. Both refusals cost no model
+    /// tokens — oneharness validates the flags before it spawns a harness — which
+    /// is what makes retrying cheaper than making the caller pre-declare what its
+    /// harness can do.
+    fn run_respond(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(HarnessEvent<'_>) -> ControlFlow<()>,
+        history: bool,
+    ) -> Result<AssistantTurn> {
+        let instructions = skill.instructions;
+        let worktree = skill.dir;
+        // The turn this reply will be: one past the assistant turns already there.
+        let turn = assistant_turns(messages) + 1;
+        let labels = self.history_labels(LabelledRole::Worker, turn);
+        // Every rung of the ladder below names the same worker config.
+        let labelled = |spec: TurnSpec| TurnSpec {
+            labels: labels.clone(),
+            ..self.pinned(spec)
+        };
+        let mut session = session;
+        if let Some(name) = session {
+            // A continued session only needs the latest user turn.
+            let prompt = latest_or_inline(messages, true);
+            if self.wants_control(&self.agent) {
+                let spec = labelled(self.mocked(respond_spec(
+                    instructions,
+                    worktree,
+                    Some(name),
+                    Some(name),
+                    self.stream || history,
+                    true,
+                    &prompt,
+                )));
+                match self.respond_once(&spec, on_event) {
+                    Ok(turn) => {
+                        self.control_address(&self.agent, worktree);
+                        return Ok(turn);
+                    }
+                    // oneharness refused the control ask itself, before spawning
+                    // anything: drop the flag and run the turn as an ordinary one.
+                    Err(e) if is_control_refused(&e) => {
+                        self.control_unavailable(&self.agent, refusal(&e));
+                    }
+                    Err(e) if is_session_unsupported(&e) => {
+                        // `--control` is addressed by the session name, so a
+                        // harness with no session has no address either.
+                        self.control_unavailable(
+                            &self.agent,
+                            "the agent harness does not support --session, which --control needs \
+                             for an address",
+                        );
+                        session = None;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(name) = session {
+                let spec = labelled(self.mocked(respond_spec(
+                    instructions,
+                    worktree,
+                    Some(name),
+                    Some(name),
+                    self.stream || history,
+                    false,
+                    &prompt,
+                )));
+                match self.respond_once(&spec, on_event) {
+                    Ok(turn) => return Ok(turn),
+                    Err(e) if is_session_unsupported(&e) => {
+                        eprintln!(
+                            "onejudge: warning — the agent harness does not support --session; \
+                             retrying without it (re-inlining the transcript)"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        // Fresh or fallback call: inline the whole conversation, no `--session`.
+        let prompt = latest_or_inline(messages, false);
+        let spec = labelled(self.mocked(respond_spec(
+            instructions,
+            worktree,
+            None,
+            session,
+            self.stream || history,
+            false,
+            &prompt,
+        )));
+        self.respond_once(&spec, on_event)
+    }
+
+    /// Whether this call should ask for a controllable turn.
+    ///
+    /// Windows is answered here rather than by oneharness, so the ask degrades to
+    /// a stated reason instead of a refused run: oneharness's control socket is a
+    /// unix domain socket, and there is nothing for a retry to discover.
+    fn wants_control(&self, party: &PartyControl) -> bool {
+        if !self.control {
+            return false;
+        }
+        match control_platform_reason(cfg!(unix)) {
+            Some(reason) => {
+                self.control_unavailable(party, reason);
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// One worker-side invocation: streamed when the provider declared streaming,
+    /// otherwise the buffered call with the finished turn's events replayed.
+    fn respond_once(
+        &self,
+        spec: &TurnSpec,
+        on_event: &mut dyn FnMut(HarnessEvent<'_>) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        if spec.stream {
+            return self.run_streamed("respond", spec, on_event);
+        }
+        let invocation = self.run("respond", spec)?;
+        for action in invocation.actions() {
+            if on_event(HarnessEvent::Action(action)).is_break() {
+                break;
+            }
+        }
+        Ok(assistant_turn(&invocation))
+    }
+
+    /// Read the report a finished `oneharness run` wrote, classify it, and record
+    /// the invocation's telemetry.
+    ///
+    /// oneharness writes its JSON report on stdout **even when it exits non-zero**
+    /// (a harness failure is reported, not signalled), so a failed run is parsed
+    /// exactly like a successful one: that is what turns an exhausted fallback
+    /// chain or a timed-out harness into a classified [`ProviderErrorKind`] with
+    /// per-candidate attribution instead of a stderr blob. Only output that is not
+    /// a report at all — a usage error, a rejected `--session` — falls back to the
+    /// process's own exit status and stderr.
+    fn finish(
+        &self,
+        op: &str,
+        status: &ExitStatus,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<Invocation> {
+        match parse_report(op, stdout) {
+            Ok(invocation) => {
+                // Record BEFORE surfacing the failure: a failed invocation is
+                // exactly the one whose per-candidate attribution a caller reads.
+                self.record(op, &invocation);
+                invocation.into_ok()
+            }
+            // No readable report at all. A non-zero exit here is oneharness
+            // refusing the call before it could produce one (a usage error, a
+            // rejected `--session`), so its own stderr is the finding.
+            Err(unreadable) => {
+                if status.success() {
+                    Err(unreadable)
+                } else {
+                    Err(exit_error(op, status, stderr))
+                }
+            }
+        }
+    }
+
+    /// The history name a judge-side `call` records under: derived from the scope
+    /// the engine set, or none when it set none.
+    fn judge_side_history_name(&self, call: JudgeSideCall) -> Option<String> {
+        history_name(self.history_scope.borrow().as_ref(), call)
+    }
+
+    /// The labels a run for `role` on assistant turn `turn` records under:
+    /// `session=<base>` once the engine has scoped the run, `turn=<n>`,
+    /// `role=<role>`, and on a judge-side run `judge=<label>` — this provider's
+    /// label in a panel, else `oneharness`, the name
+    /// [`Provider::take_judge_tools`] reports it under. The same keys an llmlint
+    /// judge's runs carry, so one `--label session=<base>` selects a whole run.
+    fn history_labels(&self, role: LabelledRole, turn: usize) -> BTreeMap<String, String> {
+        let mut labels = BTreeMap::new();
+        if let Some(scope) = self.history_scope.borrow().as_ref() {
+            labels.insert("session".to_string(), scope.base().to_string());
+        }
+        labels.insert("turn".to_string(), turn.to_string());
+        labels.insert("role".to_string(), role.as_str().to_string());
+        if role != LabelledRole::Worker {
+            labels.insert(
+                "judge".to_string(),
+                self.judge_label
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "oneharness".to_string()),
+            );
+        }
+        labels
+    }
+
+    /// Run a judge/simulated-user turn under the judge config, threading `session`
+    /// and — on a `SessionUnsupported` failure — retrying once without it. The
+    /// prompt already inlines the whole transcript, so the retry needs no rebuild.
+    ///
+    /// `evaluator` is set for an **evaluator** call — one made with the worker's
+    /// tree in hand — and carries the config list it layers (onejudge's defaults
+    /// first) and whether it asks for events; the call then records its posture
+    /// on its telemetry and, for a supervisor decision, its events for
+    /// [`Provider::take_judge_link`]. A call without one passes the judge config
+    /// alone, exactly as it always has.
+    ///
+    /// `control` asks for a **controllable supervisor turn**, and rides exactly the
+    /// ladder the worker side does: the most capable call first, and each retry
+    /// drops the one thing the previous attempt was refused for. Both refusals cost
+    /// no model tokens — oneharness validates the flags before it spawns a harness
+    /// — so retrying is cheaper than making the caller pre-declare what its judge
+    /// harness can do. Only [`Provider::supervise`] passes `true`: the stateless
+    /// `judge` / `assess` calls carry no session to be addressed by, and the legacy
+    /// `user` turn shares the supervisor's session name, so controlling it would
+    /// put a second socket on one address.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is one independent axis of a judge-side call, threaded through a retry \
+                  ladder that rebuilds the spec per rung; a struct would only rename them"
+    )]
+    fn run_judge_side(
+        &self,
+        op: &str,
+        call: JudgeSideCall,
+        prompt: &str,
+        session: Option<&str>,
+        cwd: Option<&str>,
+        control: bool,
+        evaluator: Option<&Evaluator>,
+    ) -> Result<Invocation> {
+        self.run_judge_side_observing(op, call, prompt, session, cwd, control, evaluator, None)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the retry ladder rebuilds independent judge-call axes per rung, plus an optional \
+                  live history sink; a context struct would only rename those existing parameters"
+    )]
+    fn run_judge_side_observing(
+        &self,
+        op: &str,
+        call: JudgeSideCall,
+        prompt: &str,
+        session: Option<&str>,
+        cwd: Option<&str>,
+        control: bool,
+        evaluator: Option<&Evaluator>,
+        on_history: Option<HistorySink<'_>>,
+    ) -> Result<Invocation> {
+        *self.evaluating.borrow_mut() = evaluator.and_then(|e| e.posture.clone());
+        let result = self.judge_side_ladder(
+            op, call, prompt, session, cwd, control, evaluator, on_history,
+        );
+        *self.evaluating.borrow_mut() = None;
+        let invocation = result?;
+        if op == "supervisor" {
+            if let Some(evaluator) = evaluator {
+                let mut record = self.judge_record.borrow_mut();
+                record.posture.clone_from(&evaluator.posture);
+                if evaluator.events {
+                    record.events.extend(invocation.events());
+                }
+            }
+        }
+        Ok(invocation)
+    }
+
+    /// The retry ladder [`run_judge_side`](Self::run_judge_side) runs.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the same axes as `run_judge_side`, which this is the body of"
+    )]
+    fn judge_side_ladder(
+        &self,
+        op: &str,
+        call: JudgeSideCall,
+        prompt: &str,
+        session: Option<&str>,
+        cwd: Option<&str>,
+        control: bool,
+        evaluator: Option<&Evaluator>,
+        mut on_history: Option<HistorySink<'_>>,
+    ) -> Result<Invocation> {
+        // Named once, before the ladder, so every rung — including the retry that
+        // drops `--session` — records under the same name.
+        let history_name = self.judge_side_history_name(call);
+        let configs = match evaluator {
+            Some(evaluator) => evaluator.configs.clone(),
+            None => self.judge_config.iter().cloned().collect(),
+        };
+        let events = evaluator.is_some_and(|evaluator| evaluator.events);
+        let role = match call {
+            JudgeSideCall::User => LabelledRole::Supervisor,
+            JudgeSideCall::Judge | JudgeSideCall::Assess => LabelledRole::Judge,
+        };
+        let labels = self.history_labels(role, self.labelled_turn.get());
+        let spec = |session: Option<&str>, control: bool| TurnSpec {
+            labels: labels.clone(),
+            ..self.mocked(judge_side_spec(
+                configs.clone(),
+                session,
+                history_name.as_deref(),
+                cwd,
+                control,
+                events,
+                prompt,
+            ))
+        };
+        let mut session = session;
+        if let Some(name) = session {
+            if control && self.wants_control(&self.supervisor) {
+                match self.run_with_history(op, &spec(Some(name), true), &mut on_history) {
+                    Ok(result) => {
+                        // The address is keyed on the directory the turn ran under,
+                        // the same string oneharness slugged to key the store.
+                        self.control_address(&self.supervisor, cwd.unwrap_or("."));
+                        return Ok(result);
+                    }
+                    Err(e) if is_control_refused(&e) => {
+                        self.control_unavailable(&self.supervisor, refusal(&e));
+                    }
+                    Err(e) if is_session_unsupported(&e) => {
+                        self.control_unavailable(
+                            &self.supervisor,
+                            "the judge harness does not support --session, which --control needs \
+                             for an address",
+                        );
+                        session = None;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(name) = session {
+                match self.run_with_history(op, &spec(Some(name), false), &mut on_history) {
+                    Ok(result) => return Ok(result),
+                    Err(e) if is_session_unsupported(&e) => {
+                        eprintln!(
+                            "onejudge: warning — the judge harness does not support --session; \
+                             retrying without it"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        self.run_with_history(op, &spec(None, false), &mut on_history)
+    }
+
+    /// Layer history under the side's own configuration, never over it.
+    fn history_spec(&self, spec: &TurnSpec) -> Result<TurnSpec> {
+        let mut spec = spec.clone();
+        spec.config =
+            posture::history_configs(&spec.config, Path::new(spec.cwd.as_deref().unwrap_or(".")))?;
+        Ok(spec)
+    }
+
+    fn run_with_history(
+        &self,
+        op: &str,
+        spec: &TurnSpec,
+        on_history: &mut Option<HistorySink<'_>>,
+    ) -> Result<Invocation> {
+        let Some(on_history) = on_history else {
+            return self.run(op, spec);
+        };
+        let mut spec = spec.clone();
+        spec.stream = true;
+        match self.run_streamed_invocation(op, &spec, &mut |event| match event {
+            HarnessEvent::HistoryBegun(begun) => on_history(begun),
+            HarnessEvent::Action(_) => ControlFlow::Continue(()),
+        })? {
+            library::Streamed::Finished(invocation) => Ok(*invocation),
+            library::Streamed::Aborted(_) => {
+                Err(Error::provider(op, "history observer stopped the turn"))
+            }
+        }
+    }
+
+    /// Run one buffered turn and return its parsed single-result report.
+    ///
+    /// In process this is one `oneharness_core::io::run::run` call. On the
+    /// spawning seam the prompt goes over stdin (`--prompt-file -`), so an
+    /// arbitrarily long transcript never trips the OS argv limit.
+    fn run(&self, op: &str, spec: &TurnSpec) -> Result<Invocation> {
+        let spec = self.history_spec(spec)?;
+        let spec = &spec;
+        let Execution::Process(bin) = &self.execution else {
+            let invocation = library::run_buffered(op, spec)?;
+            // Recorded before the failure is surfaced, exactly as the spawning
+            // seam does: a failed invocation is the one whose per-candidate
+            // attribution a caller reads.
+            self.record(op, &invocation);
+            return invocation.into_ok();
+        };
+        let mut child = self.spawn(op, bin, &turn::argv(spec))?;
+        write_prompt(op, child.stdin.as_mut(), &spec.prompt)?;
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+        let pid = child.id();
+        let output = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(pid), None);
+            child.wait_with_output()
+        };
+        if let Ok(output) = &output {
+            crate::launch_trace::exit(crate::launch_site!(), pid, output.status.code());
+        }
+        let output = output.map_err(|e| {
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+            Error::provider(op.to_string(), format!("oneharness did not complete: {e}"))
+        })?;
+        self.finish(
+            op,
+            &output.status,
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        )
+    }
+
+    /// Run one streamed turn, delivering each tool event to `on_event` the
+    /// instant it is observed.
+    ///
+    /// In process that is an `EventSink` handed to `run`. On the spawning seam it
+    /// is `oneharness run --stream`, whose NDJSON stdout is consumed line by line.
+    ///
+    /// The child's stderr is drained on its own thread: this reader holds stdout
+    /// open for the whole turn, and a chatty child that filled the stderr pipe
+    /// meanwhile would deadlock both.
+    fn run_streamed(
+        &self,
+        op: &str,
+        spec: &TurnSpec,
+        on_event: &mut dyn FnMut(HarnessEvent<'_>) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        match self.run_streamed_invocation(op, spec, on_event)? {
+            library::Streamed::Aborted(events) => Ok(AssistantTurn {
+                events,
+                ..AssistantTurn::default()
+            }),
+            library::Streamed::Finished(invocation) => Ok(assistant_turn(&invocation)),
+        }
+    }
+
+    fn run_streamed_invocation(
+        &self,
+        op: &str,
+        spec: &TurnSpec,
+        on_event: &mut dyn FnMut(HarnessEvent<'_>) -> ControlFlow<()>,
+    ) -> Result<library::Streamed> {
+        let spec = self.history_spec(spec)?;
+        let spec = &spec;
+        let Execution::Process(bin) = &self.execution else {
+            let result = library::run_streaming(op, spec, on_event)?;
+            if let library::Streamed::Finished(invocation) = &result {
+                self.record(op, invocation);
+            }
+            return match result {
+                library::Streamed::Finished(invocation) => Ok(library::Streamed::Finished(
+                    Box::new((*invocation).into_ok()?),
+                )),
+                aborted => Ok(aborted),
+            };
+        };
+        let mut child = self.spawn(op, bin, &turn::argv(spec))?;
+        // Take stdin rather than borrow it: closing it here is what lets a child
+        // reading `--prompt-file -` see EOF and start work.
+        write_prompt(op, child.stdin.take().as_mut(), &spec.prompt)?;
+        let mut errors = child
+            .stderr
+            .take()
+            .ok_or_else(|| Error::provider(op.to_string(), "could not open oneharness stderr"))?;
+        let draining = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = errors.read_to_end(&mut buffer);
+            buffer
+        });
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::provider(op.to_string(), "could not open oneharness stdout"))?;
+
+        let mut events = Vec::new();
+        let mut reading = std::io::BufReader::new(stdout);
+        let outcome = read_stream(op, &mut reading, &mut events, on_event);
+        // Close the read end before waiting on the child, on EVERY path: nothing
+        // reads this pipe from here on, so a child still writing to it would
+        // otherwise block once it filled.
+        drop(reading);
+        if !matches!(outcome, Ok(StreamOutcome::Report(_))) {
+            // Aborted or malformed: the turn is over either way, so stop the child —
+            // and, through it, the harness tree it owns — rather than wait out its
+            // full run. See [`terminate`] for why that is a signal and not the
+            // closed pipe above.
+            terminate(&mut child);
+        }
+        // llmlint: ignore-block[changed_behavior_has_e2e] measurement-only trace calls, never landed: the hosted e2e runs and their strace/ETW check exercise them.
+        let status = {
+            let _watch = crate::launch_trace::wait(crate::launch_site!(), Some(child.id()), None);
+            child.wait()
+        };
+        if let Ok(status) = &status {
+            crate::launch_trace::exit(crate::launch_site!(), child.id(), status.code());
+        }
+        let status = status.map_err(|e| {
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+            Error::provider(op.to_string(), format!("oneharness did not complete: {e}"))
+        })?;
+        let stderr = draining.join().unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr);
+
+        match outcome {
+            // The sink asked to stop mid-turn: return what the stream produced.
+            Ok(StreamOutcome::Aborted) => Ok(library::Streamed::Aborted(events)),
+            Ok(StreamOutcome::Report(report)) => {
+                // The terminal report is read exactly as a buffered one is, so a
+                // streamed run and a buffered run classify a failure identically —
+                // including a chain that fell through to a different candidate.
+                match parse_report_value(op, report) {
+                    Ok(invocation) => {
+                        self.record(op, &invocation);
+                        let invocation = invocation.into_ok()?;
+                        // A clean report from a process that then died on teardown
+                        // is still a failed run; its stderr is the only account.
+                        if !status.success() {
+                            return Err(exit_error(op, &status, &stderr));
+                        }
+                        Ok(library::Streamed::Finished(Box::new(invocation)))
+                    }
+                    Err(unreadable) if status.success() => Err(unreadable),
+                    Err(_) => Err(exit_error(op, &status, &stderr)),
+                }
+            }
+            // The stream violation is the finding; the child's exit status is not,
+            // because the kill above may be what produced it. Its stderr still is —
+            // it carries oneharness's own diagnosis (a rejected `--session`, an
+            // unusable config), so it rides along on the one error.
+            Err(e) => Err(with_stderr(e, &stderr)),
+        }
+    }
+
+    /// Spawn the configured `oneharness` binary with `args`, all three pipes open.
+    ///
+    /// Routed through the [`Spawner`] so an embedder's [`SpawnHook`](crate::SpawnHook)
+    /// can place the process in a group it owns *before* the prompt is written —
+    /// which is what starts the turn, since `--prompt-file -` blocks on stdin.
+    fn spawn(&self, op: &str, bin: &str, args: &[String]) -> Result<std::process::Child> {
+        let mut command = Command::new(bin);
+        command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        self.spawner.spawn(
+            &mut command,
+            &SpawnContext {
+                role: role_of(op),
+                op,
+                program: bin,
+            },
+            |e| {
+                Error::provider_classified(
+                    op.to_string(),
+                    format!("could not run `{bin}`: {e}. Is oneharness installed and on PATH?"),
+                    ProviderErrorKind::Spawn,
+                )
+            },
+        )
+    }
+
+    /// Record one invocation's telemetry and per-candidate attribution against the
+    /// party that made the call — and, on the worker side, the control socket the
+    /// report named.
+    fn record(&self, op: &str, invocation: &Invocation) {
+        let role = if op == "respond" {
+            TelemetryRole::Agent
+        } else {
+            TelemetryRole::Judge
+        };
+        if self.control {
+            let party = match op {
+                "respond" => Some(&self.agent),
+                "supervisor" => Some(&self.supervisor),
+                // Every other judge-side op runs uncontrolled, so it has no socket
+                // to report and must not clear the one the supervisor opened.
+                _ => None,
+            };
+            if let Some(party) = party {
+                *party.socket.borrow_mut() = report::control_socket(&invocation.report);
+                party
+                    .redirected
+                    .set(report::was_redirected(&invocation.report));
+            }
+        }
+        let mut record = invocation_telemetry(role, invocation);
+        if role == TelemetryRole::Judge {
+            record.posture = self.evaluating.borrow().clone();
+        }
+        self.telemetry.borrow_mut().push(record);
+    }
+}
+
+/// Fold one finished invocation into the record the engine aggregates: the timing
+/// and session linkage for the candidate that ran, plus the identity of **every**
+/// candidate oneharness attempted.
+///
+/// The measurements come from the ran candidate's own
+/// [`ExecutionTelemetry`](oneharness_core::domain::report::ExecutionTelemetry) on
+/// the run report, and fall back to whatever the result object itself supplied (a
+/// producer standing in for oneharness may inline its timings instead). The
+/// history file is still read, but only for `history_id` — the one signal the
+/// report has no counterpart for.
+fn invocation_telemetry(role: TelemetryRole, invocation: &Invocation) -> InvocationTelemetry {
+    let report = &invocation.report;
+    let attempts = history::read_attempts(report);
+    let measured = invocation
+        .result()
+        .map(report::measured)
+        .unwrap_or_default();
+    let supplemental = &invocation.supplemental;
+    let candidates = report
+        .results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| CandidateAttempt {
+            harness: result.harness.clone(),
+            harness_id: result.harness_id.clone(),
+            variant: result.variant.clone(),
+            model: result.model.clone(),
+            status: report::status_token(result.status).to_string(),
+            available: result.available,
+            ran: invocation.ran == Some(index),
+            failure_kind: result
+                .failure_kind
+                .map(|kind| report::failure_token(kind).to_string()),
+            failure_kind_source: result.failure_kind_source.clone(),
+            exit_code: result.exit_code,
+            duration_ms: report::millis(result.duration_ms),
+            error: result.error.clone(),
+            session_id: result.session_id.clone(),
+            history_id: attempts
+                .get(index)
+                .map(|record| record.history_id.to_string()),
+            usage: {
+                let usage = report::usage(result);
+                (!usage.is_empty()).then_some(usage)
+            },
+        })
+        .collect();
+    InvocationTelemetry {
+        role: Some(role),
+        model_ms: measured.model_ms.or(supplemental.model_ms),
+        tool_ms: measured.tool_ms.or(supplemental.tool_ms),
+        time_to_first_token_ms: measured
+            .time_to_first_token_ms
+            .or(supplemental.time_to_first_token_ms),
+        usage: invocation.usage().unwrap_or_default(),
+        session_id: invocation
+            .result()
+            .and_then(|result| result.session_id.clone()),
+        started_at: measured
+            .started_at
+            .or_else(|| supplemental.started_at.clone()),
+        finished_at: measured
+            .finished_at
+            .or_else(|| supplemental.finished_at.clone()),
+        history_id: invocation
+            .ran
+            .and_then(|index| attempts.get(index))
+            .map(|record| record.history_id.to_string())
+            .or_else(|| supplemental.history_id.clone()),
+        ran: invocation
+            .result()
+            .map(|result| result.harness_id.clone())
+            .or_else(|| {
+                report
+                    .fallback
+                    .as_ref()
+                    .and_then(|fallback| fallback.ran.clone())
+            }),
+        fell_through: report
+            .fallback
+            .as_ref()
+            .map(|fallback| {
+                fallback
+                    .fell_through
+                    .iter()
+                    .map(|fell| FellThrough {
+                        harness: fell.harness.clone(),
+                        reason: fell.reason.as_str().to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        candidates,
+        history_file: report.history_file.clone(),
+        // A backend never knows which judge of a panel it is; the panel stamps it.
+        judge: None,
+        // Only the provider knows the posture of the call in flight; it stamps it.
+        posture: None,
+    }
+}
+
+/// Write the prompt to the child's stdin (`--prompt-file -`).
+fn write_prompt(op: &str, stdin: Option<&mut impl Write>, prompt: &str) -> Result<()> {
+    let stdin =
+        stdin.ok_or_else(|| Error::provider(op.to_string(), "could not open oneharness stdin"))?;
+    stdin
+        .write_all(prompt.as_bytes())
+        .map_err(|e| Error::provider(op.to_string(), format!("could not write prompt: {e}")))
+}
+
+/// The classified error for a `oneharness` process that exited non-zero.
+fn exit_error(op: &str, status: &ExitStatus, stderr: &str) -> Error {
+    Error::provider_classified(
+        op.to_string(),
+        format!("oneharness exited with {status}: {}", stderr.trim()),
+        ProviderErrorKind::Protocol,
+    )
+}
+
+/// Attach a streamed child's stderr to `err`, when it wrote any. The stream
+/// violation stays the headline; oneharness's own words follow it.
+fn with_stderr(err: Error, stderr: &str) -> Error {
+    let stderr = stderr.trim();
+    match err {
+        Error::Provider {
+            context,
+            message,
+            kind,
+        } if !stderr.is_empty() => Error::Provider {
+            context,
+            message: format!("{message}; oneharness stderr: {stderr}"),
+            kind,
+        },
+        other => other,
+    }
+}
+
+/// Lift one parsed oneharness invocation into the engine's assistant turn.
+fn assistant_turn(invocation: &Invocation) -> AssistantTurn {
+    AssistantTurn {
+        message: invocation.reply(),
+        done: false,
+        usage: invocation.usage(),
+        events: invocation.events(),
+    }
+}
+
+/// Describe a skill turn. Pure and total, so it is unit-tested directly.
+///
+/// No harness/model selection: the worker side relies on its oneharness config
+/// for it — the worker config, folded in by `OneharnessProvider::pinned`, or
+/// oneharness's own discovery when there is none.
+#[must_use]
+fn respond_spec(
+    instructions: &str,
+    worktree: &str,
+    session: Option<&str>,
+    history_name: Option<&str>,
+    stream: bool,
+    control: bool,
+    prompt: &str,
+) -> TurnSpec {
+    TurnSpec {
+        system: Some(instructions.to_string()),
+        cwd: Some(worktree.to_string()),
+        // Folded in by `OneharnessProvider::pinned`, which knows the worker config.
+        config: Vec::new(),
+        // Folded in by `OneharnessProvider::mocked`, which is the one place that
+        // knows whether this run is mocked at all.
+        mock_harness: Vec::new(),
+        // Always thread the caller-owned session name; the caller retries without
+        // it if oneharness reports the harness cannot bind a session.
+        session: session.map(str::to_string),
+        history_name: history_name.map(str::to_string),
+        // Set by the caller, which knows the run, turn and role this is.
+        labels: BTreeMap::new(),
+        events: true,
+        stream,
+        // Turn control is addressed by the `--session` name, which is why it only
+        // ever rides alongside one and is dropped when the session is.
+        control: control && session.is_some(),
+        mode: None,
+        prompt: prompt.to_string(),
+    }
+}
+
+/// Describe a judge or simulated-user turn (no system prompt).
+/// Harness/model selection comes from the judge config, not from a harness/model
+/// selection onejudge makes.
+///
+/// **No mode, ever.** An evaluator call's read-only default rides `configs` as
+/// its first file ([`posture`]), so it is a default the later files and the
+/// environment can override; a mode on the request would beat them all.
+#[must_use]
+fn judge_side_spec(
+    configs: Vec<PathBuf>,
+    session: Option<&str>,
+    history_name: Option<&str>,
+    cwd: Option<&str>,
+    control: bool,
+    events: bool,
+    prompt: &str,
+) -> TurnSpec {
+    TurnSpec {
+        system: None,
+        cwd: cwd.map(str::to_string),
+        config: configs,
+        // As on the worker side: `OneharnessProvider::mocked` folds it in.
+        mock_harness: Vec::new(),
+        session: session.map(str::to_string),
+        history_name: history_name.map(str::to_string),
+        // Set by the caller, which knows the run, turn and role this is.
+        labels: BTreeMap::new(),
+        events,
+        // Streaming is about the long worker turn, not the short judgement calls:
+        // a judge's events arrive on its finished report.
+        stream: false,
+        // The same expression the worker side uses, for the same reason: turn
+        // control is addressed by the `--session` name, so it only ever rides
+        // alongside one and is dropped when the session is.
+        control: control && session.is_some(),
+        mode: None,
+        prompt: prompt.to_string(),
+    }
+}
+
+impl OneharnessProvider {
+    /// The correction appended to a supervisor re-ask: the note for what was
+    /// unusable about the last answer, except that an unparseable answer from a
+    /// turn that was **redirected** gets [`SUPERVISOR_REDIRECT_NOTE`] instead. A
+    /// redirect ends the turn and reopens the next one on the same session with the
+    /// correction as its prompt, so what came back answered the correction rather
+    /// than the question — a different thing to tell the supervisor than that it
+    /// wrote the wrong shape. Read off oneharness's own report of the last turn,
+    /// never inferred from having opened a socket.
+    fn supervisor_reask_note(&self, ask: Ask) -> &'static str {
+        match ask.reask {
+            Some(Reask::Unparseable) if self.supervisor.redirected.get() => {
+                SUPERVISOR_REDIRECT_NOTE
+            }
+            _ => ask.note(),
+        }
+    }
+
+    /// Parse one supervisor reply, saying on stderr when an unparseable one is
+    /// about to be asked again: that is another judge invocation, on the run's
+    /// usage and telemetry, and an operator watching the run should see why.
+    fn supervisor_outcome(&self, ask: Ask, reply: &str) -> SupervisorOutcome {
+        let outcome = parse_supervisor(reply);
+        if let SupervisorOutcome::Unparseable { problem, .. } = &outcome {
+            if ask.attempt < SUPERVISOR_REASK_LIMIT {
+                let why = if self.supervisor.redirected.get() {
+                    "this supervisor turn was redirected and its answer"
+                } else {
+                    "the supervisor's answer"
+                };
+                eprintln!(
+                    "onejudge: warning — {why} did not parse ({problem}); asking again (re-ask {} \
+                     of {SUPERVISOR_REASK_LIMIT}). That is another judge invocation, on the run's \
+                     usage and telemetry.",
+                    ask.attempt + 1
+                );
+            }
+        }
+        outcome
+    }
+}
+
+impl OneharnessProvider {
+    fn supervise_evidence_observing(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        evidence: EvidenceContext<'_>,
+        observe_history: bool,
+        on_history: &mut dyn FnMut(&oneharness_core::io::run::RunBegun) -> ControlFlow<()>,
+    ) -> Result<SupervisorTurn> {
+        self.labelled_turn.set(query.turn_index);
+        let evaluator = evidence
+            .worktree
+            .map(|worktree| self.evaluator(worktree))
+            .transpose()?;
+        let framing = evaluator
+            .as_ref()
+            .map_or_else(JudgeFraming::default, |_| self.framing());
+        let base = supervisor_prompt(query, messages, evidence, framing);
+        supervise_with_reask(|ask| {
+            let mut prompt = format!("{base}{}", self.supervisor_reask_note(ask));
+            let mut usage = Usage::default();
+            for tool_attempt in 0..=crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                let result = self.run_judge_side_observing(
+                    "supervisor",
+                    JudgeSideCall::User,
+                    &prompt,
+                    session,
+                    evidence.worktree,
+                    true,
+                    evaluator.as_ref(),
+                    if observe_history {
+                        Some(on_history)
+                    } else {
+                        None
+                    },
+                )?;
+                if let Some(value) = result.usage() {
+                    usage.add(&value);
+                }
+                let reply = result.reply();
+                let final_line = reply
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("");
+                match resolve_evidence_request(final_line, evidence) {
+                    Err(refused) => {
+                        if tool_attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                            return Err(refused);
+                        }
+                        prompt.push_str(&format!("\n\nEvidence tool request refused: {refused}\nUse only an exact allowed request, or return the final decision."));
+                        continue;
+                    }
+                    Ok(Some(tool_result)) => {
+                        if tool_attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                            return Err(Error::provider_classified(
+                                "oneharness:supervisor",
+                                "evidence tool retry limit exhausted",
+                                crate::ProviderErrorKind::Protocol,
+                            ));
+                        }
+                        prompt.push_str(&evidence_result_follow_up(&tool_result, "a decision"));
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
+                let outcome = self.supervisor_outcome(ask, &reply);
+                return Ok(SupervisorTurn {
+                    outcome,
+                    usage: (!usage.is_empty()).then_some(usage),
+                });
+            }
+            unreachable!()
+        })
+    }
+}
+
+impl Provider for OneharnessProvider {
+    fn reset_telemetry(&self) {
+        self.telemetry.borrow_mut().clear();
+        self.spawner.reset();
+        // The control address describes one run's turn, not the provider, so a
+        // second run must never inherit the first's — least of all an address
+        // whose socket is gone. Both parties, or the judge side of run two reports
+        // the socket run one opened.
+        self.agent.reset();
+        self.supervisor.reset();
+        *self.judge_record.borrow_mut() = JudgeRecord::default();
+    }
+
+    fn invocation_telemetry(&self) -> Vec<InvocationTelemetry> {
+        self.telemetry.borrow().clone()
+    }
+
+    fn set_history_scope(&self, scope: Option<&HistoryScope>) {
+        *self.history_scope.borrow_mut() = scope.cloned();
+    }
+
+    fn set_judge_label(&self, label: &str) {
+        *self.judge_label.borrow_mut() = Some(label.to_string());
+    }
+
+    // The posture and events of the supervisor decisions since the last take —
+    // taken by a panel after each judge's call, so its decision carries them.
+    fn take_judge_link(&self) -> Option<JudgeLink> {
+        let JudgeRecord { posture, events } = std::mem::take(&mut *self.judge_record.borrow_mut());
+        (posture.is_some() || !events.is_empty()).then(|| JudgeLink {
+            posture,
+            events,
+            ..JudgeLink::default()
+        })
+    }
+
+    // A bare provider's judge events, under its label — `oneharness`, its kind,
+    // unless a caller named it.
+    fn take_judge_tools(&self) -> Vec<JudgeTools> {
+        let events = std::mem::take(&mut self.judge_record.borrow_mut().events);
+        if events.is_empty() {
+            return Vec::new();
+        }
+        vec![JudgeTools {
+            judge: self
+                .judge_label
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| "oneharness".to_string()),
+            events,
+        }]
+    }
+
+    fn spawned_processes(&self) -> Vec<SpawnedProcess> {
+        self.spawner.records()
+    }
+
+    fn control(&self) -> ControlOutcome {
+        self.agent.outcome.borrow().clone()
+    }
+
+    fn supervisor_control(&self) -> ControlOutcome {
+        self.supervisor.outcome.borrow().clone()
+    }
+
+    // Both parties ask for control under the one `with_control` switch, each on
+    // its own session name. The store is the one the run binds its socket under —
+    // onejudge passes no `--session-dir`, so it is the linked core's default,
+    // resolved from this process's environment exactly as the run resolves it.
+    fn turn_control(
+        &self,
+        _party: crate::Party,
+        session: &str,
+        cwd: &str,
+    ) -> Option<ControlAddress> {
+        if !self.control || control_platform_reason(cfg!(unix)).is_some() {
+            return None;
+        }
+        let dir = oneharness_core::io::session::resolve_dir(None)?;
+        Some(ControlAddress {
+            session: oneharness_core::domain::history::sanitize_name(session),
+            session_dir: dir.display().to_string(),
+            cwd: cwd.to_string(),
+        })
+    }
+
+    fn respond(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<AssistantTurn> {
+        self.run_respond(
+            skill,
+            messages,
+            session,
+            &mut |_| ControlFlow::Continue(()),
+            false,
+        )
+    }
+
+    fn respond_streaming(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(&ToolEvent) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        self.run_respond(
+            skill,
+            messages,
+            session,
+            &mut |event| match event {
+                HarnessEvent::Action(action) => match tool_event(action) {
+                    Some(event) => on_event(&event),
+                    None => ControlFlow::Continue(()),
+                },
+                HarnessEvent::HistoryBegun(_) => ControlFlow::Continue(()),
+            },
+            false,
+        )
+    }
+
+    fn respond_observing(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(&ActionEvent) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        self.run_respond(
+            skill,
+            messages,
+            session,
+            &mut |event| match event {
+                HarnessEvent::Action(action) => on_event(action),
+                HarnessEvent::HistoryBegun(_) => ControlFlow::Continue(()),
+            },
+            false,
+        )
+    }
+
+    fn respond_with_history(
+        &self,
+        skill: &SkillRef<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        on_event: &mut dyn FnMut(HarnessEvent<'_>) -> ControlFlow<()>,
+    ) -> Result<AssistantTurn> {
+        self.run_respond(skill, messages, session, on_event, true)
+    }
+
+    fn simulate_user(
+        &self,
+        persona: &str,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<UserTurn> {
+        self.labelled_turn.set(assistant_turns(messages));
+        let prompt = build_user_prompt(persona, messages);
+        let result = self.run_judge_side(
+            "user",
+            JudgeSideCall::User,
+            &prompt,
+            session,
+            None,
+            false,
+            None,
+        )?;
+        Ok(UserTurn {
+            message: result.reply(),
+            stop: false,
+            usage: result.usage(),
+        })
+    }
+
+    fn supervise(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+    ) -> Result<SupervisorTurn> {
+        self.labelled_turn.set(query.turn_index);
+        let evaluator = self.evaluator(query.worktree)?;
+        let base = supervisor_prompt(
+            query,
+            messages,
+            EvidenceContext {
+                worktree: Some(query.worktree),
+                history_files: &[],
+                artifacts: &[],
+            },
+            self.framing(),
+        );
+        supervise_with_reask(|ask| {
+            // The re-ask says what was unusable about the last answer; asking the
+            // identical question again mostly buys the identical answer.
+            let prompt = format!("{base}{}", self.supervisor_reask_note(ask));
+            let result = self.run_judge_side(
+                "supervisor",
+                JudgeSideCall::User,
+                &prompt,
+                session,
+                Some(query.worktree),
+                true,
+                Some(&evaluator),
+            )?;
+            let outcome = self.supervisor_outcome(ask, &result.reply());
+            Ok(SupervisorTurn {
+                outcome,
+                usage: result.usage(),
+            })
+        })
+    }
+
+    fn supervise_with_evidence(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        evidence: EvidenceContext<'_>,
+    ) -> Result<SupervisorTurn> {
+        self.supervise_evidence_observing(query, messages, session, evidence, false, &mut |_| {
+            ControlFlow::Continue(())
+        })
+    }
+
+    fn supervise_observing(
+        &self,
+        query: &SupervisorQuery<'_>,
+        messages: &[Message],
+        session: Option<&str>,
+        evidence: EvidenceContext<'_>,
+        on_history: &mut dyn FnMut(&oneharness_core::io::run::RunBegun) -> ControlFlow<()>,
+    ) -> Result<SupervisorTurn> {
+        self.supervise_evidence_observing(query, messages, session, evidence, true, on_history)
+    }
+
+    fn judge(&self, query: &JudgeQuery<'_>, messages: &[Message]) -> Result<JudgeVerdict> {
+        self.labelled_turn.set(assistant_turns(messages));
+        // Judging is stateless — no session to continue.
+        let prompt = build_judge_prompt(query, messages);
+        let result = self.run_judge_side(
+            "judge",
+            JudgeSideCall::Judge,
+            &prompt,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let mut verdict = parse_verdict(query.kind, "oneharness:judge", &result.reply())?;
+        verdict.usage = result.usage();
+        Ok(verdict)
+    }
+
+    fn judge_with_evidence(
+        &self,
+        query: &JudgeQuery<'_>,
+        messages: &[Message],
+        evidence: EvidenceContext<'_>,
+    ) -> Result<JudgeVerdict> {
+        self.labelled_turn.set(assistant_turns(messages));
+        let evaluator = evidence
+            .worktree
+            .map(|worktree| self.evaluator(worktree))
+            .transpose()?;
+        let framing = evaluator
+            .as_ref()
+            .map_or_else(JudgeFraming::default, |_| self.framing());
+        let mut prompt = judge_prompt(query, messages, evidence, framing);
+        let mut usage = Usage::default();
+        for attempt in 0..=crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+            let result = self.run_judge_side(
+                "judge",
+                JudgeSideCall::Judge,
+                &prompt,
+                None,
+                evidence.worktree,
+                false,
+                evaluator.as_ref(),
+            )?;
+            if let Some(value) = result.usage() {
+                usage.add(&value);
+            }
+            let reply = result.reply();
+            let final_line = reply
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            match resolve_evidence_request(final_line, evidence) {
+                Err(refused) => {
+                    if attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                        return Err(refused);
+                    }
+                    prompt.push_str(&format!("\n\nEvidence tool request refused: {refused}\nUse only an exact allowed request, or return the final verdict."));
+                    continue;
+                }
+                Ok(Some(tool_result)) => {
+                    if attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                        return Err(Error::provider_classified(
+                            "oneharness:judge",
+                            "evidence tool retry limit exhausted",
+                            crate::ProviderErrorKind::Protocol,
+                        ));
+                    }
+                    prompt.push_str(&evidence_result_follow_up(&tool_result, "a verdict"));
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            let mut verdict = parse_verdict(query.kind, "oneharness:judge", &reply)?;
+            verdict.usage = (!usage.is_empty()).then_some(usage);
+            return Ok(verdict);
+        }
+        unreachable!()
+    }
+
+    fn assess(&self, prompt: &str, messages: &[Message]) -> Result<Assessment> {
+        self.labelled_turn.set(assistant_turns(messages));
+        let prompt = build_assessment_prompt(prompt, messages);
+        let result = self.run_judge_side(
+            "assess",
+            JudgeSideCall::Assess,
+            &prompt,
+            None,
+            None,
+            false,
+            None,
+        )?;
+        let text = result.reply();
+        if text.trim().is_empty() {
+            return Err(Error::provider(
+                "oneharness:assess",
+                "judge returned an empty assessment",
+            ));
+        }
+        Ok(Assessment {
+            text,
+            usage: result.usage(),
+        })
+    }
+
+    fn assess_with_evidence(
+        &self,
+        prompt: &str,
+        messages: &[Message],
+        evidence: EvidenceContext<'_>,
+    ) -> Result<Assessment> {
+        self.labelled_turn.set(assistant_turns(messages));
+        let evaluator = evidence
+            .worktree
+            .map(|worktree| self.evaluator(worktree))
+            .transpose()?;
+        let framing = evaluator
+            .as_ref()
+            .map_or_else(JudgeFraming::default, |_| self.framing());
+        let mut prompt = assessment_prompt(prompt, messages, evidence, framing);
+        let mut usage = Usage::default();
+        for attempt in 0..=crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+            let result = self.run_judge_side(
+                "assess",
+                JudgeSideCall::Assess,
+                &prompt,
+                None,
+                evidence.worktree,
+                false,
+                evaluator.as_ref(),
+            )?;
+            if let Some(value) = result.usage() {
+                usage.add(&value);
+            }
+            let text = result.reply();
+            let final_line = text
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            match resolve_evidence_request(final_line, evidence) {
+                Err(refused) => {
+                    if attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                        return Err(refused);
+                    }
+                    prompt.push_str(&format!("\n\nEvidence tool request refused: {refused}\nUse only an exact allowed request, or return the final assessment."));
+                    continue;
+                }
+                Ok(Some(tool_result)) => {
+                    if attempt == crate::provider::EVIDENCE_TOOL_RETRY_LIMIT {
+                        return Err(Error::provider_classified(
+                            "oneharness:assess",
+                            "evidence tool retry limit exhausted",
+                            crate::ProviderErrorKind::Protocol,
+                        ));
+                    }
+                    prompt.push_str(&evidence_result_follow_up(&tool_result, "the assessment"));
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if text.trim().is_empty() {
+                return Err(Error::provider(
+                    "oneharness:assess",
+                    "judge returned an empty assessment",
+                ));
+            }
+            return Ok(Assessment {
+                text,
+                usage: (!usage.is_empty()).then_some(usage),
+            });
+        }
+        unreachable!()
+    }
+}
+
+/// The follow-up that hands an evaluator the result of its evidence request and
+/// asks for `answer` — the same in every mode, like the contract it answers to.
+fn evidence_result_follow_up(tool_result: &str, answer: &str) -> String {
+    format!("\n\nEvidence tool result:\n{tool_result}\nNow return {answer} or one exact allowed request.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::JudgeKind;
+    use oneharness_core::errors::OneharnessError;
+
+    /// The argv a spec renders on the spawning seam, for the assertions below that
+    /// are about flags rather than about the spec.
+    fn argv_of(spec: &TurnSpec) -> Vec<String> {
+        turn::argv(spec)
+    }
+
+    #[test]
+    fn builders_configure_bin_and_judge_config() {
+        let provider = OneharnessProvider::default()
+            .with_bin("my-oneharness")
+            .with_judge_config("custom.judge.toml");
+        // Naming a binary is the opt-in to the spawning seam.
+        assert!(matches!(&provider.execution, Execution::Process(bin) if bin == "my-oneharness"));
+        assert_eq!(
+            provider.judge_config.as_deref(),
+            Some(Path::new("custom.judge.toml"))
+        );
+        // The judge/user side passes the configured file via --config.
+        let args = argv_of(&judge_side_spec(
+            provider.judge_config.iter().cloned().collect(),
+            Some("s"),
+            None,
+            None,
+            false,
+            false,
+            "p",
+        ));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--config", "custom.judge.toml"]));
+        assert!(args.windows(2).any(|w| w == ["--session", "s"]));
+    }
+
+    #[test]
+    fn a_default_provider_runs_the_turn_in_process() {
+        assert!(matches!(
+            OneharnessProvider::new().execution,
+            Execution::Library
+        ));
+    }
+
+    #[test]
+    fn installing_a_spawn_hook_selects_the_seam_that_has_a_process_to_offer_it() {
+        // A hook offers a *process*; the in-process seam has none, so installing
+        // one must not leave the embedder believing it owns an empty group.
+        let hooked = OneharnessProvider::new().with_spawn_hook(std::sync::Arc::new(Inert));
+        assert!(matches!(&hooked.execution, Execution::Process(bin) if bin == "oneharness"));
+        // An explicitly named binary is not clobbered by installing a hook.
+        let pinned = OneharnessProvider::new()
+            .with_bin("/opt/oneharness")
+            .with_spawn_hook(std::sync::Arc::new(Inert));
+        assert!(matches!(&pinned.execution, Execution::Process(bin) if bin == "/opt/oneharness"));
+    }
+
+    #[test]
+    fn a_mock_harness_rides_both_sides_of_the_turn_and_selects_the_spawning_seam() {
+        let provider = OneharnessProvider::new().with_mock_harness("claude-code");
+        // oneharness delivers the responder by re-executing its own binary, which an
+        // in-process run does not have — so naming one selects the spawning seam
+        // rather than silently running against a paid model.
+        assert!(matches!(&provider.execution, Execution::Process(bin) if bin == "oneharness"));
+        // An explicitly named binary is kept.
+        let pinned = OneharnessProvider::new()
+            .with_bin("/opt/oneharness")
+            .with_mock_harness("codex");
+        assert!(matches!(&pinned.execution, Execution::Process(bin) if bin == "/opt/oneharness"));
+
+        // Both parties are mocked: either one alone still bills a model.
+        let agent = argv_of(&provider.mocked(respond_spec(
+            "do x",
+            "/work",
+            Some("s"),
+            Some("s"),
+            false,
+            false,
+            "p",
+        )));
+        assert!(agent
+            .windows(2)
+            .any(|w| w == ["--mock-harness", "claude-code"]));
+        let judge = argv_of(&provider.mocked(judge_side_spec(
+            provider.judge_config.iter().cloned().collect(),
+            Some("s"),
+            None,
+            None,
+            false,
+            false,
+            "p",
+        )));
+        assert!(judge
+            .windows(2)
+            .any(|w| w == ["--mock-harness", "claude-code"]));
+
+        // And an ordinary provider asks for no responder at all.
+        let plain = OneharnessProvider::new();
+        assert!(!argv_of(&plain.mocked(judge_side_spec(
+            Vec::new(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            "p"
+        )))
+        .iter()
+        .any(|arg| arg == "--mock-harness"));
+    }
+
+    /// A hook that records nothing and refuses nothing — this is about which seam
+    /// installing one selects, not about what a hook does.
+    struct Inert;
+
+    impl crate::spawn::SpawnHook for Inert {}
+
+    #[test]
+    fn default_judge_config_is_the_judge_toml() {
+        let provider = OneharnessProvider::new();
+        assert_eq!(
+            provider.judge_config.as_deref(),
+            Some(Path::new(DEFAULT_JUDGE_CONFIG))
+        );
+    }
+
+    #[test]
+    fn a_respond_spec_threads_the_session_and_selects_no_harness_or_model() {
+        let args = argv_of(&respond_spec(
+            "do x",
+            "/work",
+            Some("run-1-skill"),
+            Some("run-1-skill"),
+            false,
+            false,
+            "p",
+        ));
+        assert!(args.windows(2).any(|w| w == ["--session", "run-1-skill"]));
+        assert!(args.iter().any(|a| a == "--events"));
+        // Harness/model selection is oneharness's config's job now.
+        assert!(!args.iter().any(|a| a == "--harness"));
+        assert!(!args.iter().any(|a| a == "--model"));
+        // onejudge asks for the JSON report by name rather than relying on it
+        // being `oneharness run`'s default, which moves to text in 0.14.0.
+        assert!(args.windows(2).any(|w| w == ["--format", "json"]));
+        // A buffered provider never asks for the stream.
+        assert!(!args.iter().any(|a| a == "--stream"));
+
+        // No session supplied: no `--session`.
+        let none = argv_of(&respond_spec(
+            "do x", "/work", None, None, false, false, "p",
+        ));
+        assert!(!none.iter().any(|a| a == "--session"));
+    }
+
+    #[test]
+    fn a_worker_config_is_the_only_file_a_worker_turn_layers_over_history() {
+        let worker = std::env::temp_dir().join("onejudge-unit-worker.toml");
+        let spec = |provider: &OneharnessProvider| {
+            provider
+                .history_spec(&provider.pinned(respond_spec(
+                    "do x",
+                    "/nonexistent/worktree",
+                    Some("s"),
+                    Some("s"),
+                    false,
+                    true,
+                    "p",
+                )))
+                .unwrap()
+        };
+        let pinned = spec(&OneharnessProvider::new().with_worker_config(&worker));
+        // History beneath, the worker config above it, and nothing discovered.
+        assert_eq!(pinned.config.len(), 2);
+        assert!(pinned.config[0].ends_with("history-defaults-v1.toml"));
+        assert_eq!(pinned.config[1], worker);
+        // The same list on both seams: the in-process request and the argv.
+        assert_eq!(turn::request(&pinned).config, pinned.config);
+        let configs: Vec<String> = argv_of(&pinned)
+            .windows(2)
+            .filter(|w| w[0] == "--config")
+            .map(|w| w[1].clone())
+            .collect();
+        assert_eq!(
+            configs,
+            pinned
+                .config
+                .iter()
+                .map(|c| c.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        // The worktree is still where the harness runs.
+        assert_eq!(pinned.cwd.as_deref(), Some("/nonexistent/worktree"));
+
+        // Unset, the worker side names no config of its own.
+        let provider = OneharnessProvider::new();
+        assert!(provider
+            .pinned(respond_spec("do x", "/w", None, None, false, false, "p"))
+            .config
+            .is_empty());
+    }
+
+    #[test]
+    fn control_needs_a_session_to_be_addressed_by() {
+        // Asked for without one, the spec drops it rather than asking for a socket
+        // nothing can address.
+        let spec = respond_spec("do x", "/work", None, None, false, true, "p");
+        assert!(!spec.control);
+        let spec = respond_spec("do x", "/work", Some("s"), Some("s"), false, true, "p");
+        assert!(spec.control);
+    }
+
+    #[test]
+    fn streaming_is_asked_for_on_the_agent_side_only() {
+        let provider = OneharnessProvider::new().with_streaming(true);
+        assert!(provider.stream);
+        let agent = respond_spec(
+            "do x",
+            "/work",
+            Some("s"),
+            Some("s"),
+            provider.stream,
+            false,
+            "p",
+        );
+        assert!(agent.stream);
+        assert!(argv_of(&agent).iter().any(|a| a == "--stream"));
+        // The judge / simulated-user side stays buffered: streaming is about the
+        // long worker turn, not the short judgement calls.
+        let judge = judge_side_spec(Vec::new(), Some("s"), None, None, false, false, "p");
+        assert!(!judge.stream);
+        assert!(!argv_of(&judge).iter().any(|a| a == "--stream"));
+    }
+
+    #[test]
+    fn a_judge_side_spec_selects_by_config_not_by_harness_or_model() {
+        let args = argv_of(&judge_side_spec(
+            vec![PathBuf::from("oneharness.judge.toml")],
+            None,
+            None,
+            None,
+            false,
+            false,
+            "p",
+        ));
+        assert!(!args.iter().any(|a| a == "--system"));
+        assert!(!args.iter().any(|a| a == "--events"));
+        assert!(!args.iter().any(|a| a == "--harness"));
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--config", "oneharness.judge.toml"]));
+        // With no judge config, no `--config` is passed (oneharness discovers its
+        // own default).
+        let no_config = argv_of(&judge_side_spec(
+            Vec::new(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            "p",
+        ));
+        assert!(!no_config.iter().any(|a| a == "--config"));
+    }
+
+    #[test]
+    fn a_judge_side_spec_records_under_the_history_name_it_is_given() {
+        let named = |spec: &TurnSpec| {
+            argv_of(spec)
+                .windows(2)
+                .find(|w| w[0] == "--history-name")
+                .map(|w| w[1].clone())
+        };
+        let scope = HistoryScope::new("run-3");
+        let user = scope.name(JudgeSideCall::User);
+        let controlled =
+            judge_side_spec(Vec::new(), Some(&user), Some(&user), None, true, false, "p");
+        assert_eq!(named(&controlled).as_deref(), Some("run-3-user"));
+        // The session-unsupported retry drops `--session` and keeps the name, so a
+        // harness that cannot bind a session still records under it.
+        let retry = judge_side_spec(Vec::new(), None, Some(&user), None, false, false, "p");
+        assert!(!argv_of(&retry).iter().any(|a| a == "--session"));
+        assert_eq!(named(&retry).as_deref(), Some("run-3-user"));
+        // No base session: no name, and oneharness derives one as it always has.
+        let unscoped = judge_side_spec(Vec::new(), None, None, None, false, false, "p");
+        assert_eq!(named(&unscoped), None);
+    }
+
+    #[test]
+    fn the_provider_names_each_judge_side_call_from_the_scope_it_was_handed() {
+        let provider = OneharnessProvider::new();
+        assert_eq!(provider.judge_side_history_name(JudgeSideCall::Judge), None);
+        provider.set_history_scope(Some(&HistoryScope::new("run-3").labelled("r")));
+        assert_eq!(
+            provider
+                .judge_side_history_name(JudgeSideCall::User)
+                .as_deref(),
+            Some("run-3-user-r")
+        );
+        assert_eq!(
+            provider
+                .judge_side_history_name(JudgeSideCall::Judge)
+                .as_deref(),
+            Some("run-3-judge-r")
+        );
+        assert_eq!(
+            provider
+                .judge_side_history_name(JudgeSideCall::Assess)
+                .as_deref(),
+            Some("run-3-assess-r")
+        );
+        provider.set_history_scope(None);
+        assert_eq!(provider.judge_side_history_name(JudgeSideCall::User), None);
+    }
+
+    #[test]
+    fn an_evaluator_call_layers_the_defaults_first_and_sets_no_mode() {
+        // The one change to what onejudge asks oneharness for: the defaults file
+        // leads the config list, and no mode rides the request — so the judge's
+        // config, the environment and harness args decide the posture.
+        let dir = std::env::temp_dir().join(format!("oj-evaluator-spec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let judge = dir.join("judge.toml");
+        std::fs::write(&judge, "timeout = 30\n").unwrap();
+        let provider = OneharnessProvider::new().with_judge_config(&judge);
+        let evaluator = provider.evaluator(dir.to_str().unwrap()).unwrap();
+        assert_eq!(evaluator.posture.as_ref().unwrap().mode, "read-only");
+        assert!(
+            !evaluator.events,
+            "a read-only judge asks for no events by default"
+        );
+        let spec = judge_side_spec(
+            evaluator.configs.clone(),
+            None,
+            None,
+            dir.to_str(),
+            false,
+            evaluator.events,
+            "p",
+        );
+        let defaults = posture::defaults_file().unwrap();
+        assert_eq!(spec.config, [defaults.clone(), judge.clone()]);
+        assert_eq!(spec.mode, None);
+        assert_eq!(
+            turn::request(&spec).config,
+            [defaults.clone(), judge.clone()]
+        );
+        assert_eq!(turn::request(&spec).mode, None);
+        let argv = argv_of(&spec);
+        let configs: Vec<&String> = argv
+            .windows(2)
+            .filter(|w| w[0] == "--config")
+            .map(|w| &w[1])
+            .collect();
+        assert_eq!(
+            configs,
+            [
+                &defaults.display().to_string(),
+                &judge.display().to_string()
+            ]
+        );
+        assert!(!argv.iter().any(|arg| arg == "--mode"));
+
+        // A judge-side call with no worktree is unchanged: the judge config alone.
+        let user = judge_side_spec(
+            provider.judge_config.iter().cloned().collect(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            "p",
+        );
+        assert_eq!(user.config, [judge]);
+        assert_eq!(user.mode, None);
+        let worker = respond_spec("s", "/work", None, None, false, false, "p");
+        assert_eq!(worker.mode, None);
+    }
+
+    #[test]
+    fn a_writable_judge_asks_for_events_unless_told_not_to() {
+        let dir = std::env::temp_dir().join(format!("oj-evaluator-events-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let judge = dir.join("judge.toml");
+        std::fs::write(&judge, "mode = \"auto\"\n").unwrap();
+        let worktree = dir.to_str().unwrap();
+        let auto = OneharnessProvider::new().with_judge_config(&judge);
+        assert!(auto.evaluator(worktree).unwrap().events);
+        let quiet = OneharnessProvider::new()
+            .with_judge_config(&judge)
+            .with_judge_events(false);
+        assert!(!quiet.evaluator(worktree).unwrap().events);
+        let read_only = dir.join("read-only.toml");
+        std::fs::write(&read_only, "").unwrap();
+        let loud = OneharnessProvider::new()
+            .with_judge_config(&read_only)
+            .with_judge_events(true);
+        assert!(loud.evaluator(worktree).unwrap().events);
+        let spec = judge_side_spec(Vec::new(), None, None, Some(worktree), false, true, "p");
+        assert!(argv_of(&spec).iter().any(|arg| arg == "--events"));
+    }
+
+    #[test]
+    fn is_session_unsupported_matches_oneharness_error() {
+        let unsupported = Error::provider_classified(
+            "respond",
+            "oneharness exited with exit status: 1: harness `goose` does not support --session: \
+             it exposes no session id headlessly",
+            ProviderErrorKind::Protocol,
+        );
+        assert!(is_session_unsupported(&unsupported));
+        let other = Error::provider_classified(
+            "respond",
+            "some other failure",
+            ProviderErrorKind::Protocol,
+        );
+        assert!(!is_session_unsupported(&other));
+    }
+
+    #[test]
+    fn session_unsupported_marker_tracks_oneharness() {
+        // oneharness refuses `--session` before it can emit a report, so this one
+        // recovery is driven off stderr text. Pin the substring against the error
+        // oneharness itself renders: an upstream rewording then fails here instead
+        // of silently turning the graceful retry into a failed run.
+        let upstream = OneharnessError::SessionUnsupported {
+            id: "goose".into(),
+            supported: "claude-code".into(),
+        }
+        .to_string();
+        assert!(
+            upstream.contains(SESSION_UNSUPPORTED_MARKER),
+            "oneharness now says: {upstream}"
+        );
+    }
+
+    #[test]
+    fn control_refusal_markers_track_oneharness() {
+        // Every way `oneharness run --control` can refuse the ask, in oneharness's
+        // own rendering. Each is a usage error before a report exists, so the
+        // degradation is driven off stderr text — and an upstream rewording has to
+        // fail here rather than turn a degraded run into a failed one.
+        let refusals = [
+            OneharnessError::ControlNeedsSession,
+            OneharnessError::ControlUnsupported {
+                id: "qwen".into(),
+                supported: "claude-code, codex".into(),
+            },
+            OneharnessError::ControlSingleHarness {
+                selected: "claude-code, codex".into(),
+            },
+            OneharnessError::ControlBatch,
+            OneharnessError::ControlPlatform,
+            OneharnessError::ControlStreamUnsupported {
+                id: "opencode".into(),
+            },
+            OneharnessError::ControlSchema,
+            OneharnessError::ControlModeUnsupported {
+                id: "opencode".into(),
+                mode: "edit",
+            },
+            OneharnessError::ControlOutputFormat {
+                id: "claude-code".into(),
+                required: "stream-json".into(),
+                selected: "text".into(),
+            },
+            OneharnessError::ControlSocket {
+                path: "/state/control/x.sock".into(),
+                source: std::io::Error::other("in use"),
+            },
+            OneharnessError::MultiModelConflict {
+                with: "--control",
+                why: "control drives one live turn",
+            },
+            // A named handle whose stored conversation cannot be reopened over
+            // the mechanism that would serve this turn (oneharness 0.12). It
+            // belongs on this ladder rather than failing the run because
+            // oneharness's own remedy is onejudge's next rung: drop `--control`
+            // and the handle continues on the harness's ordinary headless run.
+            // Degrading the other way — keeping the flag and taking a fresh
+            // conversation — is the very failure the refusal exists to stop.
+            OneharnessError::SessionControlNoResume {
+                name: "run-42-skill".into(),
+                id: "opencode".into(),
+                mechanism: "opencode-http",
+                supported: "claude-code, codex".into(),
+            },
+        ];
+        for refusal in refusals {
+            let err = stderr_error(&format!("oneharness: error: {refusal}"));
+            assert!(
+                is_control_refused(&err),
+                "onejudge would fail the run instead of degrading; oneharness now says: {refusal}"
+            );
+        }
+        // And it must not swallow an ordinary turn failure as a control refusal.
+        let unrelated = stderr_error("oneharness: error: harness `codex` is not installed");
+        assert!(!is_control_refused(&unrelated));
+    }
+
+    /// The `sun_path` rung of the ladder above, which exists only where
+    /// `sun_path` does: the socket address the run would open is past this
+    /// platform's budget (oneharness 0.12), so the channel cannot exist and it is
+    /// the *ask* that is refused, not the turn.
+    ///
+    /// Split out and gated because this is the one refusal that cannot be spelled
+    /// off unix rather than merely being unlikely there. `SocketAddressTooLong`
+    /// is constructible only by *failing* to build an address, and oneharness
+    /// sets `SOCKET_ADDRESS_MAX` to `usize::MAX` where there is no `sun_path` to
+    /// overflow — so on Windows no address is ever too long and there is no value
+    /// to render. Hand-rolling the rendering instead would assert onejudge
+    /// against a string oneharness could never emit on the host running the test.
+    /// Windows' own answer is
+    /// [`a_platform_without_unix_sockets_degrades_with_a_stated_reason`]: the ask
+    /// is dropped, with a reason, before a socket is ever addressed.
+    #[cfg(unix)]
+    #[test]
+    fn an_unaddressable_control_socket_is_refused_rather_than_failing_the_turn() {
+        let refusal = OneharnessError::ControlSocketAddress {
+            source: oneharness_core::domain::control::socket_path(
+                std::path::Path::new(&"/x".repeat(200)),
+                "run-42-skill",
+            )
+            .expect_err("an address that long overruns every platform that bounds one"),
+        };
+        let err = stderr_error(&format!("oneharness: error: {refusal}"));
+        assert!(
+            is_control_refused(&err),
+            "onejudge would fail the run instead of degrading; oneharness now says: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_platform_without_unix_sockets_degrades_with_a_stated_reason() {
+        // The Windows answer, asserted wherever the gate runs: the ask is dropped
+        // with a reason rather than sent to a oneharness that would refuse the run.
+        let reason = control_platform_reason(false).expect("a non-unix host has no socket");
+        assert!(reason.contains("unix domain socket"));
+        assert!(control_platform_reason(true).is_none());
+    }
+
+    #[test]
+    fn control_rides_the_agent_argv_only_alongside_a_session() {
+        let with = argv_of(&respond_spec(
+            "do x",
+            "/work",
+            Some("s"),
+            Some("s"),
+            false,
+            true,
+            "p",
+        ));
+        assert!(with.iter().any(|a| a == "--control"));
+        // Off by default: the argv is byte-identical to a run that never asked.
+        let without = argv_of(&respond_spec(
+            "do x",
+            "/work",
+            Some("s"),
+            Some("s"),
+            false,
+            false,
+            "p",
+        ));
+        assert!(!without.iter().any(|a| a == "--control"));
+        // `--control` is addressed by the session name, so dropping the session
+        // drops it too rather than sending oneharness an unaddressable ask.
+        let sessionless = argv_of(&respond_spec(
+            "do x",
+            "/work",
+            None,
+            Some("s"),
+            false,
+            true,
+            "p",
+        ));
+        assert!(!sessionless.iter().any(|a| a == "--control"));
+    }
+
+    #[test]
+    fn the_judge_side_rides_the_same_control_expression_the_agent_side_does() {
+        // Asked for, alongside the `--session` name that addresses it.
+        assert!(argv_of(&judge_side_spec(
+            Vec::new(),
+            Some("s"),
+            None,
+            None,
+            true,
+            false,
+            "p"
+        ))
+        .iter()
+        .any(|a| a == "--control"));
+        // Not asked for.
+        assert!(!argv_of(&judge_side_spec(
+            Vec::new(),
+            Some("s"),
+            None,
+            None,
+            false,
+            false,
+            "p"
+        ))
+        .iter()
+        .any(|a| a == "--control"));
+        // Asked for, but with no session to be addressed by: dropped, exactly as it
+        // is on the worker side, because the socket is keyed on the session name.
+        assert!(!judge_side_spec(Vec::new(), None, None, None, true, false, "p").control);
+        assert!(!argv_of(&judge_side_spec(
+            Vec::new(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            "p"
+        ))
+        .iter()
+        .any(|a| a == "--control"));
+    }
+
+    #[test]
+    fn a_provider_that_never_asked_reports_no_control() {
+        let never = OneharnessProvider::new();
+        assert_eq!(never.control(), ControlOutcome::NotRequested);
+        assert_eq!(never.supervisor_control(), ControlOutcome::NotRequested);
+        // Asking does not by itself claim an address: only a turn that got one does.
+        let asked = OneharnessProvider::new().with_control(true);
+        assert_eq!(asked.control(), ControlOutcome::NotRequested);
+        assert_eq!(asked.supervisor_control(), ControlOutcome::NotRequested);
+    }
+
+    #[test]
+    fn the_two_parties_control_answers_are_kept_apart() {
+        // The hazard this separation exists for: one side opening a socket must not
+        // make the other side look like it has a lever, and one side's refusal must
+        // not read as the other's.
+        let provider = OneharnessProvider::new().with_control(true);
+        *provider.agent.socket.borrow_mut() = Some(ControlSocket {
+            session: "run-42-skill".into(),
+            session_dir: "/store".into(),
+        });
+        provider.control_address(&provider.agent, "/work");
+        assert_eq!(
+            provider.control().address().map(|a| a.session.as_str()),
+            Some("run-42-skill")
+        );
+        assert_eq!(provider.supervisor_control(), ControlOutcome::NotRequested);
+
+        provider.control_unavailable(
+            &provider.supervisor,
+            "the judge harness declares no control",
+        );
+        assert!(provider
+            .supervisor_control()
+            .unavailable_reason()
+            .is_some_and(|why| why.contains("judge harness")));
+        assert!(
+            provider.control().address().is_some(),
+            "a judge-side refusal must not take the agent's address with it"
+        );
+
+        // …and a second run inherits neither.
+        provider.reset_telemetry();
+        assert_eq!(provider.control(), ControlOutcome::NotRequested);
+        assert_eq!(provider.supervisor_control(), ControlOutcome::NotRequested);
+    }
+
+    #[test]
+    fn a_controlled_report_with_no_socket_is_unavailable_not_open() {
+        // oneharness refuses `--control` rather than honoring it silently, so this
+        // is unreachable through it — but a stand-in producer could, and reporting
+        // a lever that does not exist is the one failure this feature must not have.
+        let provider = OneharnessProvider::new().with_control(true);
+        provider.control_address(&provider.agent, "/work");
+        assert!(provider
+            .control()
+            .unavailable_reason()
+            .expect("a missing socket is a stated reason")
+            .contains("named no control socket"));
+        // …on the judge side too, which is a separate socket and a separate answer.
+        provider.control_address(&provider.supervisor, "/work");
+        assert!(provider
+            .supervisor_control()
+            .unavailable_reason()
+            .expect("a missing socket is a stated reason")
+            .contains("named no control socket"));
+    }
+
+    /// The classified error a `oneharness` process that refused the call produces,
+    /// carrying `stderr` — the shape [`is_control_refused`] reads.
+    fn stderr_error(stderr: &str) -> Error {
+        Error::provider_classified(
+            "respond".to_string(),
+            format!("oneharness exited with exit status: 2: {stderr}"),
+            ProviderErrorKind::Protocol,
+        )
+    }
+
+    #[test]
+    fn respond_prompt_switches_on_continuing() {
+        let mut messages = vec![Message::user("first")];
+        messages.push(Message::assistant("reply"));
+        messages.push(Message::user("second"));
+        assert_eq!(latest_or_inline(&messages, true), "second");
+        assert!(latest_or_inline(&messages, false).contains("first"));
+    }
+
+    #[test]
+    fn spawn_failure_is_classified() {
+        let provider = OneharnessProvider::new().with_bin("definitely-not-oneharness-xyz");
+        let err = provider
+            .judge(
+                &JudgeQuery {
+                    kind: JudgeKind::Boolean,
+                    criterion: "x",
+                    scale: None,
+                },
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(err.kind(), Some(ProviderErrorKind::Spawn));
+    }
+
+    /// What a judge may do to the tree is its oneharness mode's to enforce, so
+    /// no evaluator prompt and no evidence follow-up states one: every mode a
+    /// judge's config can resolve to — and a posture that cannot be resolved —
+    /// is handed the same bytes.
+    #[test]
+    fn every_mode_is_handed_the_byte_identical_evidence_contract() {
+        use crate::provider::{JudgeKind, TurnOutcome, EVIDENCE_PROMPT_MARKER};
+        let dir = std::env::temp_dir().join(format!("oj-one-contract-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let worktree = dir.to_str().unwrap();
+        let transcript = [Message::user("do it"), Message::assistant("done")];
+        let evidence = EvidenceContext {
+            worktree: Some(worktree),
+            history_files: &[],
+            artifacts: &[],
+        };
+        let supervisor = SupervisorQuery {
+            task: "do it",
+            persona: "reviewer",
+            done_when: None,
+            worktree,
+            history_name: "h",
+            notes: &[],
+            turn: TurnOutcome::Taken,
+            turn_index: 1,
+        };
+        let boolean = JudgeQuery {
+            kind: JudgeKind::Boolean,
+            criterion: "it is done",
+            scale: None,
+        };
+        let numeric = JudgeQuery {
+            kind: JudgeKind::Numeric,
+            criterion: "quality",
+            scale: Some((1.0, 5.0)),
+        };
+        let mut seen: Option<Vec<String>> = None;
+        for mode in [
+            "read-only",
+            "plan",
+            "default",
+            "edit",
+            "auto",
+            "bypass",
+            "not-a-mode",
+        ] {
+            let config = dir.join(format!("{mode}.toml"));
+            std::fs::write(&config, format!("mode = \"{mode}\"\n")).unwrap();
+            let provider = OneharnessProvider::new()
+                .with_judge_config(&config)
+                .with_judge_instructions("Run the tests.");
+            let evaluator = provider.evaluator(worktree).unwrap();
+            // The mode is still resolved and recorded; only the prompt ignores it.
+            match evaluator.posture.as_ref() {
+                Some(posture) => assert_eq!(posture.mode, mode),
+                None => assert_eq!(mode, "not-a-mode"),
+            }
+            let framing = provider.framing();
+            let prompts = vec![
+                supervisor_prompt(&supervisor, &transcript, evidence, framing),
+                judge_prompt(&boolean, &transcript, evidence, framing),
+                judge_prompt(&numeric, &transcript, evidence, framing),
+                assessment_prompt("left?", &transcript, evidence, framing),
+                evidence_result_follow_up("clean", "a verdict"),
+            ];
+            for prompt in &prompts[..4] {
+                assert!(
+                    prompt.contains(&format!("{EVIDENCE_PROMPT_MARKER}\n")),
+                    "{prompt}"
+                );
+            }
+            for prompt in &prompts {
+                for forbidden in [
+                    "read-only tools",
+                    "no change is permitted",
+                    "restriction is enforced",
+                    "file-reading or glob tools",
+                    "never a shell command",
+                    "permission mode",
+                    "leave it as you found it",
+                    "with the file-reading tools",
+                    "(read-only)",
+                    "(MODE:",
+                    // What `posture_of` used to say of each mode.
+                    "change nothing",
+                    "approval flow",
+                    "are approved",
+                    "gated",
+                    "the tools your harness grants",
+                ] {
+                    assert!(
+                        !prompt.contains(forbidden),
+                        "{mode}: `{forbidden}` in {prompt}"
+                    );
+                }
+            }
+            match &seen {
+                None => seen = Some(prompts),
+                Some(first) => assert_eq!(first, &prompts, "{mode} changed the prompts"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

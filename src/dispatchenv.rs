@@ -186,9 +186,8 @@ fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(stderr);
-    let mut child = spawning
-        .spawn()
-        .map_err(|error| format!("could-not-start: {error}"))?;
+    let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut spawning);
+    let mut child = spawned.map_err(|error| format!("could-not-start: {error}"))?;
 
     // Read on a thread of its own, so a hook that prints more than a pipe holds
     // cannot deadlock against a wait that only looks at its exit — and bounded,
@@ -250,7 +249,10 @@ fn run(
     };
     let timeout = record.dispatch_env_hook_timeout();
     let deadline = hooks::deadline_after(timeout);
+    let mut watch =
+        onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), Some(POLL));
     let ended = loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None)
@@ -273,6 +275,8 @@ fn run(
         }
         std::thread::sleep(POLL);
     };
+    drop(watch);
+    launch.exited(None);
     let status = ended?;
     if !status.success() {
         return Err(match status.code() {

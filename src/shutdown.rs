@@ -977,7 +977,7 @@ fn wait_for_them(
         if !standing || Instant::now() >= deadline {
             return waited;
         }
-        std::thread::sleep(POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), POLL);
     }
 }
 

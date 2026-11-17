@@ -1,0 +1,937 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Report",
+  "description": "A judged run: the transcript, the verdicts scored against it, aggregated\nusage, and whether a streaming sink short-circuited the run — stamped with the\n[`SCHEMA_VERSION`] of the contract that produced it.\n\nBuild one from an [`Outcome`](crate::Outcome) with\n[`Outcome::into_report`](crate::Outcome::into_report), or directly with\n[`Report::new`].",
+  "type": "object",
+  "properties": {
+    "assessment": {
+      "description": "A free-text judgement requested by the caller, if any.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "completion_reason": {
+      "description": "Why the per-turn supervisor declared the task complete, if it did.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "control": {
+      "description": "Where an `oneharness interrupt` process addresses the controllable turn\nthis run's worker side opened (`provider.control: true`), or `null` when\ncontrol was not asked for.\n\nSerialized even when null — unlike the optional fields above — because a\nsupervisor keys on its presence to decide whether it has a lever at all,\nand an absent key would make \"no control\" indistinguishable from a report\nwritten before this field existed. `null` with a `control_unavailable`\nreason beside it is the third case: asked for, and refused.\n\nAlways *written*, but deliberately not *required* by the generated schema:\na reader must keep accepting the reports older onejudge versions wrote, and\nproducing more than the contract demands is what makes an additive field\nadditive. [`never`] is how those two are said at once — it is the skip\npredicate that never skips, and its presence is what tells serde's schema\nderive the key may be absent from a document.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControlAddress"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "control_unavailable": {
+      "description": "Why an *asked-for* control channel is missing, when one is. Absent unless\n`provider.control` was on and the run could not be given a socket — which\nis what keeps a refused ask from reading as an ask never made.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "judge_decisions": {
+      "description": "What each judge of a panel decided on each supervisor turn, one entry per\nturn that consulted the supervisor, in turn order. Omitted when empty — a\nrun judged by a bare provider rather than a [`JudgePanel`](crate::JudgePanel)\nrecords no per-judge decision, and nothing is synthesized for it.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JudgedTurn"
+      }
+    },
+    "processes": {
+      "description": "Every process the run spawned, and the embedder-owned group a\n[`SpawnHook`](crate::SpawnHook) placed each one in.\n\nThis is the machine-readable form of what an in-process embedder observes\nthrough the hook, so `onejudge run --format json` reports it too. A record\nwhose `group` is absent is not grouped — onejudge never names a group it did\nnot observe a hook create.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SpawnedProcess"
+      }
+    },
+    "schema_version": {
+      "description": "The contract version this report was serialized under.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "settled_reason": {
+      "description": "Why the run ended *without* a completion decision, when it ended because the\nsupervisor judged the work incomplete and then named no next instruction —\neven asked again.\n\nAbsent on every other run, so its presence is the one signal that separates\n\"the worker could not do it\" from \"the supervisor had nothing to say\". The\ntranscript, verdicts, and usage beside it are the work the run really did:\nthis settles a run, it does not fail one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stopped_early": {
+      "description": "Whether a streaming sink asked to short-circuit the run.",
+      "type": "boolean",
+      "default": false
+    },
+    "supervisor_control": {
+      "description": "Where an `oneharness interrupt` process addresses the controllable turn\nthis run's **supervisor** side opened, or `null` when control was not asked\nfor.\n\nA second field rather than a second meaning for [`Report::control`]: the two\nparties run under different configs on different session names, so they are\ndifferent sockets, refusable independently. A reader that has one address\nand assumes the other holds a lever it does not have.\n\nSerialized even when null, and for the reason [`Report::control`] gives.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ControlAddress"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "supervisor_control_unavailable": {
+      "description": "Why an *asked-for* supervisor-side control channel is missing, when one is.\nThe companion of [`Report::supervisor_control`], exactly as\n`control_unavailable` is of `control`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "telemetry": {
+      "description": "Timing, per-party usage, and native oneharness session linkage.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Telemetry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transcript": {
+      "description": "The full conversation transcript, with tool events on assistant turns.",
+      "$ref": "#/$defs/Transcript"
+    },
+    "usage": {
+      "description": "Aggregated usage across every provider call (`None` if nothing reported).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verdicts": {
+      "description": "The verdicts scored against the transcript, in the order they were added.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NamedVerdict"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "transcript",
+    "stopped_early"
+  ],
+  "$defs": {
+    "CandidateAttempt": {
+      "description": "One candidate identity oneharness attempted for a single invocation — the\nharness (and variant/model) it tried, and what came of it.\n\nUnder `run_mode = \"fallback\"` oneharness attempts candidates in priority order\nand stops at the first that runs the task, so an invocation can have several of\nthese: the ones it fell through, then the one that ran. This is the typed form\nof oneharness's per-candidate record — the thing that lets a consumer attribute\na failure to a *side* (the worker, recorded as `agent`, vs the judge) and an *identity* (which harness, which\naccount) instead of grepping a message.",
+      "type": "object",
+      "properties": {
+        "available": {
+          "description": "Whether oneharness found the harness binary.",
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "description": "Wall-clock duration of this attempt.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "description": "oneharness's human-readable problem statement for a failed attempt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "description": "The harness process's exit code, when it ran to completion.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "failure_kind": {
+          "description": "oneharness's normalized failure reason (`auth`, `rate_limit`,\n`server_overloaded`, `model_not_found`, `quota`, `tool_deferred`,\n`session_not_found`, `untrusted_directory`, `input_too_large`,\n`model_mismatch`, `app_server_lost`), when it classified one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_kind_source": {
+          "description": "Where that reason was read (`stderr`, `stdout`, `config:env_from`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "harness": {
+          "description": "Canonical harness id (e.g. `claude-code`).",
+          "type": "string"
+        },
+        "harness_id": {
+          "description": "Base id, or `<base>:<variant>` when a named preset selected the identity —\nthe selector that reproduces this candidate.",
+          "type": "string"
+        },
+        "history_id": {
+          "description": "The oneharness history record written for this attempt, when history was\non — the handle `oneharness history show <id>` resolves. From oneharness\n0.21.1 that reads the dated index segment the id names, at any age; a\nrecord written before that index existed needs `--all-time`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "The model this candidate ran with, when one was requested.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ran": {
+          "description": "Whether this is the candidate that actually ran the turn.",
+          "type": "boolean"
+        },
+        "session_id": {
+          "description": "The harness's own continuation id, when it exposed one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "oneharness's status token: `ok`, `nonzero`, `timeout`, `spawn-error`,\n`skipped`, or `planned`.",
+          "type": "string"
+        },
+        "usage": {
+          "description": "This attempt's own token/cost accounting.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "variant": {
+          "description": "The named preset, when this candidate came from a composed harness id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "harness",
+        "harness_id",
+        "status",
+        "available",
+        "ran"
+      ]
+    },
+    "ControlAddress": {
+      "description": "Where an `oneharness interrupt` process addresses the controllable turn\nonejudge's worker side opened.\n\nThe three fields are the whole of `interrupt`'s addressing:\n\n```text\noneharness interrupt --session <session> --session-dir <session_dir> \\\n                     --cwd <cwd> --input \"<what to do instead>\"\n```\n\nThey are read back from the oneharness run report rather than re-derived from\nwhat onejudge asked for, so the address names the session the run actually\nbound — including in a fallback chain, where the handle is bound to the\ncandidate that *ran*, not the first one tried.",
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "description": "The working directory the turn runs in, which is how `interrupt` resolves\n*which project's* session the handle belongs to (`interrupt --cwd`). It is\nthe same string onejudge passed as `oneharness run --cwd`, because\noneharness slugs that string to key the store.",
+          "type": "string"
+        },
+        "session": {
+          "description": "The caller-owned session handle the turn is addressed by, as oneharness\nsanitized and stored it (`interrupt --session`).",
+          "type": "string"
+        },
+        "session_dir": {
+          "description": "The session store directory holding both the handle and its\n`control/<session>.sock` (`interrupt --session-dir`). Absolute: the\naddress is handed to a different process, so a relative path would name a\ndifferent directory depending on who read it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "session_dir",
+        "cwd"
+      ]
+    },
+    "Decision": {
+      "description": "What one judge of a [`JudgePanel`](crate::JudgePanel) decided, as a wire token.\n\nThe five outcomes a supervisor call can have, plus `error` for a judge that\ncould not run — recorded rather than dropped, because a judge that could not\nrun is never read as a pass and a reader has to be able to see that it was\nasked.",
+      "oneOf": [
+        {
+          "description": "The judge declared the work complete.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "The judge handed back a next instruction.",
+          "type": "string",
+          "const": "continue"
+        },
+        {
+          "description": "The judge judged the work incomplete but named no next instruction, even\nasked again.",
+          "type": "string",
+          "const": "no_instruction"
+        },
+        {
+          "description": "The judge answered in neither documented shape, even asked again.",
+          "type": "string",
+          "const": "unparseable"
+        },
+        {
+          "description": "The judge's call failed; `reason` is the error's message.",
+          "type": "string",
+          "const": "error"
+        }
+      ]
+    },
+    "FellThrough": {
+      "description": "One candidate a fallback chain fell through, with oneharness's reason token\n(`not-installed`, `spawn-error`, `auth`, `quota`, `model-not-found`,\n`rate-limit`, `session-not-found`, `untrusted-directory`, `input-too-large`,\n`model-mismatch`, `server-overloaded`, `app-server-lost`).",
+      "type": "object",
+      "properties": {
+        "harness": {
+          "description": "Canonical harness id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it could not run the task at all.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "harness",
+        "reason"
+      ]
+    },
+    "HarnessAttribution": {
+      "description": "What oneharness attempted for one provider invocation, placed on the side and\nturn that made the call.",
+      "type": "object",
+      "properties": {
+        "candidates": {
+          "description": "Every attempted candidate, in the order oneharness tried them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CandidateAttempt"
+          }
+        },
+        "fell_through": {
+          "description": "Candidates a fallback chain routed around, in priority order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FellThrough"
+          }
+        },
+        "history_file": {
+          "description": "The oneharness history session file this invocation appended to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge": {
+          "description": "Which judge of a [`JudgePanel`](crate::JudgePanel) made the invocation, by\nlabel — as [`SessionLink::judge`], and absent under the same conditions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ran": {
+          "description": "The candidate that ran the turn, by composed id; `null` when none could.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Which side of the conversation made this call.",
+          "$ref": "#/$defs/TelemetryRole"
+        },
+        "turn_index": {
+          "description": "One-based invocation index within the role.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "posture": {
+          "description": "The permission posture this invocation ran under, for an evaluator\njudge-side call; absent for the worker's turns and for a judge-side call\nwith no worktree, whose mode onejudge does not set.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgePosture"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "turn_index",
+        "candidates"
+      ]
+    },
+    "JudgeDecision": {
+      "description": "One judge's decision on one judge-side call, attributed to the judge by its\npanel label and provider kind.\n\nA [`JudgePanel`](crate::JudgePanel) records one per judge per supervisor call\n— including the call that failed — and the engine drains them after every\nsupervisor call, `Ok` or `Err`, onto [`Report::judge_decisions`]. A provider\nthat is not a panel records none, so a report carrying no decisions was judged\nby a bare provider; nothing is synthesized.",
+      "type": "object",
+      "properties": {
+        "decision": {
+          "description": "What it decided, or that it failed.",
+          "$ref": "#/$defs/Decision"
+        },
+        "judge": {
+          "description": "The judge's label within its panel (`label:` in the config, or the\ndefaulted `<kind>` / `<kind>-<n>`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The judge entry's provider kind (`oneharness`, `command`, …).",
+          "type": "string"
+        },
+        "labels": {
+          "description": "Exactly the labels this judge's backend run was passed (`KEY` → `VALUE`),\nwhen the backend labels its runs — only an `llmlint` judge does, with\n`session`, `judge` and `turn`. Omitted when there are none, and recorded\non an `error` decision too whenever the run was labelled.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "description": "Its own reason — or, for an `error`, the error's message.",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "The id this judge's backend run was recorded under in its own history —\nfor an `llmlint` judge, the id `llmlint history <run_id>` shows. Omitted\nwhen the backend reported none (history disabled, or the run died before\nrecording), and recorded on an `error` decision too whenever known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "posture": {
+          "description": "The permission posture this judge's evaluator calls ran under, and the\nconfiguration layer that set it — for a `oneharness` judge. Omitted for a\nbackend that sets no mode, and when the call failed before resolving one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgePosture"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "events": {
+          "description": "The tool events this judge's harness reported while deciding, in order,\nwhen the judge asked for them (`events`, on by default for a writable\nposture). Omitted when there are none.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolEvent"
+          }
+        }
+      },
+      "required": [
+        "judge",
+        "kind",
+        "decision",
+        "reason"
+      ]
+    },
+    "JudgeKind": {
+      "description": "The kind of judgement requested.",
+      "oneOf": [
+        {
+          "description": "A yes/no verdict.",
+          "type": "string",
+          "const": "boolean"
+        },
+        {
+          "description": "A score on a `[min, max]` scale.",
+          "type": "string",
+          "const": "numeric"
+        }
+      ]
+    },
+    "JudgeValue": {
+      "description": "The raw value a judge returns: a boolean or a number, matching the query kind.\nDeserialized untagged from the provider's `value` field.",
+      "anyOf": [
+        {
+          "description": "A boolean verdict.",
+          "type": "boolean"
+        },
+        {
+          "description": "A numeric score.",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "JudgeVerdict": {
+      "description": "A judge verdict: the raw value (bool or number) plus the stated reason. Part\nof onejudge's versioned [`Report`](crate::Report) contract, so it round-trips\nthrough serde.",
+      "type": "object",
+      "properties": {
+        "reason": {
+          "description": "The judge's one-sentence justification.",
+          "type": "string",
+          "default": ""
+        },
+        "usage": {
+          "description": "Cost/token usage for the judge call, if reported.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "description": "The parsed verdict value.",
+          "$ref": "#/$defs/JudgeValue"
+        }
+      },
+      "required": [
+        "value",
+        "reason"
+      ]
+    },
+    "JudgedTurn": {
+      "description": "Every judge's decision on one supervisor turn.",
+      "type": "object",
+      "properties": {
+        "decisions": {
+          "description": "One decision per judge, in the panel's list order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JudgeDecision"
+          }
+        },
+        "turn": {
+          "description": "1-based assistant-turn index the supervisor turn belongs to, as\n[`TurnOpened::turn`](crate::TurnOpened::turn).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "turn",
+        "decisions"
+      ]
+    },
+    "Message": {
+      "description": "A single turn in the conversation.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "description": "The turn's text.",
+          "type": "string"
+        },
+        "events": {
+          "description": "The normalized tool events the skill took producing this turn (assistant\nturns only, and only when the harness exposed a tool transcript). Empty\notherwise. Surfaced for post-hoc analysis, streamed live, and rendered\ninto the transcript the judge sees.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolEvent"
+          }
+        },
+        "role": {
+          "description": "Who produced the turn.",
+          "$ref": "#/$defs/Role"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "NamedVerdict": {
+      "description": "A judge verdict paired with the criterion it scored and the kind of\njudgement, so a serialized report is self-describing.",
+      "type": "object",
+      "properties": {
+        "criterion": {
+          "description": "The plain-English criterion that was scored.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Whether it was a boolean or numeric judgement.",
+          "$ref": "#/$defs/JudgeKind"
+        },
+        "verdict": {
+          "description": "The verdict itself (value, reason, and per-call usage).",
+          "$ref": "#/$defs/JudgeVerdict"
+        }
+      },
+      "required": [
+        "criterion",
+        "kind",
+        "verdict"
+      ]
+    },
+    "PartyTelemetry": {
+      "description": "Aggregated measurements for one side of a run.",
+      "type": "object",
+      "properties": {
+        "model_ms": {
+          "description": "Model/provider elapsed time, when every contributing invocation reported it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "session_ids": {
+          "description": "Native oneharness session IDs in first-seen order, without duplicates.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "time_to_first_token_ms": {
+          "description": "Time to first token from the first invocation that reported it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool_ms": {
+          "description": "Tool elapsed time, when every contributing invocation reported it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usage": {
+          "description": "Strictly aggregated usage; each field is present only when every invocation knew it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Role": {
+      "description": "Who produced a message.",
+      "oneOf": [
+        {
+          "description": "The (real or simulated) user driving the skill.",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "The skill / assistant under test.",
+          "type": "string",
+          "const": "assistant"
+        },
+        {
+          "description": "System-level framing, if a provider surfaces it.",
+          "type": "string",
+          "const": "system"
+        }
+      ]
+    },
+    "SessionLink": {
+      "description": "Authoritative linkage from a onejudge role/turn to a native oneharness run.",
+      "type": "object",
+      "properties": {
+        "finished_at": {
+          "description": "Upstream UTC invocation-finish timestamp, or `null` when not observed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history_id": {
+          "description": "Native oneharness history record identity, when history was available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge": {
+          "description": "Which judge of a [`JudgePanel`](crate::JudgePanel) made the invocation, by\nlabel. Set only by a panel holding more than one judge; absent for a bare\nprovider and for a panel of one, whose records are the ones it has always\nwritten.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Which side of the conversation owns the invocation.",
+          "$ref": "#/$defs/TelemetryRole"
+        },
+        "session_id": {
+          "description": "Native harness continuation identifier.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "Upstream UTC invocation-start timestamp.",
+          "type": "string"
+        },
+        "turn_index": {
+          "description": "One-based invocation index within the role.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "session_id",
+        "role",
+        "turn_index",
+        "started_at",
+        "finished_at"
+      ]
+    },
+    "SpawnedProcess": {
+      "description": "One process onejudge spawned for a run, and the group an embedder's\n[`SpawnHook`] placed it in.\n\nCarried on [`Report::processes`](crate::Report::processes) (and on the CLI's\n`--format json` failure document), so what an in-process embedder can observe\nthrough the hook is also machine-readable from the command line.\n\n`group` is present **only** when a hook named one: onejudge never reports a\ngroup that does not exist, so a `null` group is the honest statement that this\nprocess is in whatever group onejudge itself was in.",
+      "type": "object",
+      "properties": {
+        "group": {
+          "description": "The embedder-owned group a [`SpawnHook`] reported placing it in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "judge": {
+          "description": "Which judge of a [`JudgePanel`](crate::JudgePanel) spawned it, by label.\nSet only by a panel holding more than one judge; absent otherwise, so a\nsingle-judge run's records are the ones it has always written.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op": {
+          "description": "The provider operation that asked for it.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The operating-system process id it was given.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "program": {
+          "description": "The program that was run (`argv[0]`).",
+          "type": "string"
+        },
+        "role": {
+          "description": "Which side of the conversation the process served.",
+          "$ref": "#/$defs/TelemetryRole"
+        }
+      },
+      "required": [
+        "role",
+        "op",
+        "program",
+        "pid"
+      ]
+    },
+    "Telemetry": {
+      "description": "Timing, usage, and native linkage for the complete worker+judge run.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "description": "Worker-side measurements, under the `agent` key, which denotes the worker\nside.",
+          "$ref": "#/$defs/PartyTelemetry"
+        },
+        "attribution": {
+          "description": "Which harness identities each invocation attempted, in invocation order.\nEmpty when the provider reports no candidate identities.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HarnessAttribution"
+          }
+        },
+        "judge": {
+          "description": "Simulated-user, supervisor, and evaluator measurements.",
+          "$ref": "#/$defs/PartyTelemetry"
+        },
+        "orchestration_ms": {
+          "description": "Non-negative wall-time remainder after measured model and tool work.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sessions": {
+          "description": "Native session linkage records in invocation order.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SessionLink"
+          }
+        },
+        "wall_ms": {
+          "description": "Monotonic duration from task-loop entry through final result assembly.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wall_ms",
+        "agent",
+        "judge",
+        "orchestration_ms",
+        "sessions"
+      ]
+    },
+    "TelemetryRole": {
+      "description": "The side of the evaluated conversation that owns an invocation.",
+      "oneOf": [
+        {
+          "description": "The worker side: the skill under evaluation. Serialized `agent`, a name\nkept for the consumers that already read it.",
+          "type": "string",
+          "const": "agent"
+        },
+        {
+          "description": "The simulated user, supervisor, or final evaluator.",
+          "type": "string",
+          "const": "judge"
+        }
+      ]
+    },
+    "ToolEvent": {
+      "description": "One normalized tool-call / action event the skill took during a turn, lifted\nfrom `oneharness`'s `events` array (its `--events` output). Harness-agnostic,\nso a consumer can inspect shell commands, file edits, and tool uses across any\nharness, not just the final text. `input` is the structured, tool-shaped args\nso a consumer can match on the command string or file path without re-parsing.\n\n`input` is free-form JSON, so `Message`/`Transcript` are `PartialEq` but not\n`Eq`.",
+      "type": "object",
+      "properties": {
+        "index": {
+          "description": "Position within the run, so ordering (\"did X before Y\") is expressible.",
+          "type": "integer",
+          "format": "uint",
+          "default": 0,
+          "minimum": 0
+        },
+        "input": {
+          "description": "Structured tool arguments (the command, the file path); `None` when none."
+        },
+        "kind": {
+          "description": "`tool_call` (the skill invoked a tool) or `tool_result` (the observation).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Normalized tool name where knowable (e.g. `bash`, `edit_file`); `None` for\na `tool_result` or when the harness did not name it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output": {
+          "description": "The result/observation text, when the transcript exposed it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "description": "The harness's own stable identity for this call, joining a `tool_call` to\nits `tool_result`. `None` means the harness exposed no identity — never an\nempty string, which would read as an id that happens to be blank.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "index"
+      ]
+    },
+    "Transcript": {
+      "description": "An ordered list of messages.",
+      "type": "object",
+      "properties": {
+        "messages": {
+          "description": "The turns in order, oldest first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Message"
+          }
+        }
+      },
+      "required": [
+        "messages"
+      ]
+    },
+    "Usage": {
+      "description": "Token / cost usage for one provider call, or a running total.\n\nEach field is independently optional because not every harness reports every\nsignal (cost is commonly absent on subscription auth, and cache counts only\nwhen the harness surfaces prompt-cache reads/writes). `None` means \"no\nsignal\", never \"zero\" — so a total stays `None` until something reports a real\nnumber, then accumulates.",
+      "type": "object",
+      "properties": {
+        "cache_read_tokens": {
+          "description": "Prompt tokens served from the provider's prompt cache — a cheap read of a\npreviously-written prefix — when the harness reports them. `None` when the\nharness does not surface cache counts, never `0` as a guess.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "description": "Prompt tokens written to the provider's prompt cache (a.k.a. cache\ncreation), when the harness reports them. `None` when not surfaced.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "description": "Total cost in USD, when reported.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "input_tokens": {
+          "description": "Prompt/input tokens billed, when reported.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "description": "Completion/output tokens billed, when reported.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "JudgePosture": {
+      "description": "The permission posture an evaluator judge-side call ran under, and the\nconfiguration layer that decided it.\n\nAn evaluator call — a supervisor decision, a verdict or an assessment made\nwith the worker's tree in hand — layers onejudge's judge-side defaults (a\noneharness config holding `mode = \"read-only\"` and nothing else) *under* the\njudge's own configuration, so the judge's config, an `ONEHARNESS_*` override or\na discovered file can choose another mode. This records which one did, resolved\nover the same list the call passed with the linked core's own loader, so it\nnames the file `oneharness config` attributes the mode to.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "The effective oneharness permission mode: `read-only`, `plan`, `default`,\n`edit`, `auto` or `bypass`.",
+          "type": "string"
+        },
+        "source": {
+          "description": "The layer that set it: a config file's path — onejudge's defaults file,\nthe judge's config, or a discovered user or project file —\n`environment` for an `ONEHARNESS_*` override, or `default` for\noneharness's built-in default.",
+          "type": "string"
+        },
+        "config_files": {
+          "description": "Every layer the call's configuration was read from, in layering order:\neach file (its `extends` parents just before it), then `environment` when\nan override was set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "mode",
+        "source",
+        "config_files"
+      ]
+    }
+  }
+}
