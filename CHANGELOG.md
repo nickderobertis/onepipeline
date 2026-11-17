@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.4](https://github.com/nickderobertis/onepipeline/compare/v0.113.3...v0.113.4) - 2026-11-17
+
+### Fixed
+
+- *(deps)* link the oneagentgraph whose engineer persona proves one-off work once ([#1667](https://github.com/nickderobertis/onepipeline/pull/1667))
+
 ## [0.113.3](https://github.com/nickderobertis/onepipeline/compare/v0.113.2...v0.113.3) - 2026-11-16
 
 ### Fixed
