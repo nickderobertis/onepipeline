@@ -32,7 +32,8 @@ use serde_json::{json, Value};
 use crate::harness::{binary, repo_file, World};
 use crate::recorded_support::{
     aged, answered, assert_core_derived_holds, is_core_derived, journalled_here, normalized,
-    recorded, recorded_world, seeded_with, without_the_reset_report, LAYOUT, RELEASE, RUN,
+    recorded, recorded_world, seeded_with, without_the_reader_fields, without_the_reset_report,
+    LAYOUT, RELEASE, RUN,
 };
 
 /// The variable that turns these journeys from comparing into capturing.
@@ -291,6 +292,54 @@ fn normalizing_a_written_record_blanks_only_what_no_two_runs_share() {
     assert_eq!(
         normalized(r#"{"message":"queued_at is only a word here","id":1}"#),
         r#"{"message":"queued_at is only a word here","id":1}"#
+    );
+}
+
+/// The join fields come out of this world's surface and reply records only: a
+/// recorded event keeps them, another kind keeps a field of the same name, and a
+/// nested object or a message mentioning them is left as it stands.
+#[test]
+fn normalizing_an_answer_takes_the_reader_fields_out_of_only_this_worlds_records() {
+    let mine = |kind: &str, payload: &str| {
+        format!(
+            r#"{{"stream":"<this-process>","seq":0,"kind":"{kind}","labels":{{"run_id":"r"}},"payload":{payload},"artifacts":[]}}"#
+        )
+    };
+    let recorded = r#"{"stream":"recorded-stream","kind":"planner-surface-queued","payload":{"surface":4,"kind":"x"}}"#;
+    let text = format!(
+        "[{},{},{},{},{recorded}]",
+        mine(
+            "planner-surfaced",
+            r#"{"surface":1,"kind":"check-in","message":"a \"surface\":2, {not} here","correlation":null,"queued_at":5}"#
+        ),
+        mine(
+            "planner-surface-queued",
+            r#"{"surface":0,"correlation":"c-1","kind":"question","message":"m"}"#
+        ),
+        mine(
+            "planner-replied",
+            r#"{"author":"manager","edits":{"correlation":"kept"},"correlation":"c-1"}"#
+        ),
+        mine("quiet-worker", r#"{"surface":3,"node":"n"}"#),
+    );
+    assert_eq!(
+        without_the_reader_fields(&text),
+        format!(
+            "[{},{},{},{},{recorded}]",
+            mine(
+                "planner-surfaced",
+                r#"{"kind":"check-in","message":"a \"surface\":2, {not} here","queued_at":5}"#
+            ),
+            mine(
+                "planner-surface-queued",
+                r#"{"kind":"question","message":"m"}"#
+            ),
+            mine(
+                "planner-replied",
+                r#"{"author":"manager","edits":{"correlation":"kept"}}"#
+            ),
+            mine("quiet-worker", r#"{"surface":3,"node":"n"}"#),
+        )
     );
 }
 
