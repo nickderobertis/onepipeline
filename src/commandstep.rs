@@ -195,17 +195,22 @@ type Outputs = std::collections::BTreeMap<String, String>;
 /// What the file holds instead of a JSON object whose values are strings, in words that
 /// follow "the file … ".
 fn read_outputs(path: &std::path::Path) -> std::result::Result<Option<Outputs>, String> {
-    let size = match std::fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("could not be read: {error}")),
     };
-    if size > MAX_OUTPUTS_BYTES {
+    // Read through the bound rather than checked beside it, so a process the command left
+    // behind cannot grow the file between a size check and the read.
+    let mut text = Vec::new();
+    file.take(MAX_OUTPUTS_BYTES + 1)
+        .read_to_end(&mut text)
+        .map_err(|error| format!("could not be read: {error}"))?;
+    if text.len() as u64 > MAX_OUTPUTS_BYTES {
         return Err(format!(
-            "holds {size} bytes, more than the {MAX_OUTPUTS_BYTES} a step's outputs may"
+            "holds more than the {MAX_OUTPUTS_BYTES} bytes a step's outputs may"
         ));
     }
-    let text = std::fs::read(path).map_err(|error| format!("could not be read: {error}"))?;
     let value: serde_json::Value = serde_json::from_slice(&text)
         .map_err(|error| format!("is not JSON ({error}); it must hold an object of strings"))?;
     let serde_json::Value::Object(object) = value else {

@@ -79,7 +79,7 @@ fn each_surface_its_hand_out_and_its_reply_are_joined_by_its_id_and_correlation(
     assert!(finding["payload"]["surface"].is_u64(), "{finding}");
     assert_ne!(finding["payload"]["surface"], id, "two surfaces, one id");
 
-    // Before this, a question that reached the channel left nothing in the run's history.
+    // A question on the channel is in the run's history as every other surface is.
     let asked = asking(&world, RUN, &["--about", "approve", "Ship it today?"], &[]);
     let question = question_on(&world, RUN);
     let queued = record(

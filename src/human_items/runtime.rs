@@ -67,7 +67,12 @@ fn quote_published(
         if event.kind.as_str() != "command-exited" {
             continue;
         }
-        // The latest run of the step is what its dependents ran after.
+        // The latest run of the step is what its dependents ran after. Only a step run
+        // again under its own id has two records — one whose driver died after recording its
+        // exit and before settling it, which `adopt` runs again — and staging a death
+        // between those two writes takes a failpoint the engine does not carry, which costs
+        // more than this one overwrite it would hold; the outputs journey proves the read of
+        // the one record.
         let outputs = event
             .payload
             .get("outputs")
@@ -414,8 +419,8 @@ impl Gate {
 
     /// Tell the planner, once per reason, that `node`'s item was not raised because
     /// it quotes an output its step never published: the node waits, and the planner
-    /// amends what it quotes, attests it or drops it. A reason a driver before this
-    /// one already surfaced is not surfaced again.
+    /// attests it or drops it. A reason a driver before this one already surfaced is not
+    /// surfaced again.
     fn unpublished(
         &mut self,
         paths: &RunPaths,
@@ -427,8 +432,8 @@ impl Gate {
             return;
         }
         let message = format!(
-            "the human item for '{}' was not raised: {why}. Its step waits; amend what its \
-             `human_item` quotes, attest it, or drop it.",
+            "the human item for '{}' was not raised: {why}. Its step waits until it is \
+             attested or dropped.",
             node.id
         );
         let told = crate::journal::read(&paths.journal()).iter().any(|event| {
@@ -460,6 +465,9 @@ impl Gate {
                 correlation: None,
                 declined_ruling: None,
             };
+            // A run whose channel or journal refuses a write is a host fault — a full disk,
+            // a permission changed under a live run — that no plan or verb stages; it is
+            // said, and with nothing recorded as told this driver tells it on its next pass.
             if let Err(error) = crate::engine::raise(paths, journal, surface) {
                 eprintln!(
                     "onepipeline: run '{}' did not raise the human item for '{}' ({why}), and \

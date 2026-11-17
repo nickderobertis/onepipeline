@@ -13659,7 +13659,7 @@ What this build decided beyond the task's text, and the rulings that decided it:
 - **An output the step never published raises no item.** The node keeps waiting and one
   non-blocking `human-item-unraised` surface about it says which placeholder quoted what;
   a driver does not raise the same reason twice, and a later driver reads the journal for it
-  before raising it again. The planner amends, attests or drops the node.
+  before raising it again. The planner attests or drops the node.
 - **The outputs file is fresh per run of the command and removed once read**, so an earlier
   attempt's file is never read as a later one's, and it is read only on exit 0 and bounded at
   65536 bytes, since every value is copied into the journal.

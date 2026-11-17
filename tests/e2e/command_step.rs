@@ -1054,12 +1054,13 @@ fn items_enabled(world: &World) {
 /// A command node whose script publishes `outputs`, written verbatim, to the file the
 /// contract names the variable of.
 fn publishing(world: &World, id: &str, outputs: &str) -> Value {
+    writing(world, id, &format!("printf '%s' '{outputs}' > \"$OUT\""))
+}
+
+/// A command node running `body`, with `$OUT` the file the contract names the variable of.
+fn writing(world: &World, id: &str, body: &str) -> Value {
     let variable = named("step_outputs_env");
-    let script = script(
-        world,
-        id,
-        &format!("printf '%s' '{outputs}' > \"${variable}\""),
-    );
+    let script = script(world, id, &format!("OUT=\"${variable}\"\n{body}"));
     command(id, &[], &script)
 }
 
@@ -1105,11 +1106,21 @@ fn a_steps_published_output_is_quoted_by_the_item_of_the_human_node_after_it() {
             run,
             vec![
                 publishing(&world, "copy", &format!("{{\"url\": \"{url}\"}}")),
-                quoting(
-                    "approve",
-                    &["copy"],
-                    &format!("Read {placeholder} and approve it."),
-                ),
+                {
+                    let mut asked = quoting(
+                        "approve",
+                        &["copy"],
+                        &format!("Read {placeholder} and approve it."),
+                    );
+                    asked["human_item"]["kind"] = json!("question");
+                    asked["human_item"]["title"] = json!(format!("Approve {placeholder}?"));
+                    asked["human_item"]["choices"] = json!([
+                        {"id": "approve", "title": "Approve",
+                         "description": format!("Ship {placeholder} as written.")},
+                        {"id": "rework", "title": "Rework", "description": "Send it back."}
+                    ]);
+                    asked
+                },
             ],
         ),
     );
@@ -1129,6 +1140,27 @@ fn a_steps_published_output_is_quoted_by_the_item_of_the_human_node_after_it() {
         format!("Read {url} and approve it."),
         "{shown}"
     );
+    assert_eq!(shown["item"]["title"], format!("Approve {url}?"), "{shown}");
+    assert_eq!(
+        shown["item"]["choices"][0]["description"],
+        format!("Ship {url} as written."),
+        "{shown}"
+    );
+    assert_eq!(shown["item"]["choices"][1]["description"], "Send it back.");
+    // The file was the step's to write and the engine's to read once: none is left beside
+    // the step's log.
+    let commands = log_of(&world, run, "copy");
+    let left: Vec<String> = std::fs::read_dir(commands.parent().expect("the commands directory"))
+        .expect("the commands directory reads")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(left, ["copy.log"], "{left:?}");
     // A step that writes nothing publishes nothing, and its record says so by omission.
     let plain = world.plan(
         "silentstep",
@@ -1150,16 +1182,43 @@ fn a_steps_published_output_is_quoted_by_the_item_of_the_human_node_after_it() {
 fn outputs_that_are_not_an_object_of_strings_fail_and_a_quote_of_no_dependency_is_refused() {
     let world = World::new("command-step-outputs-refused");
     items_enabled(&world);
-    for (run, outputs, said) in [
+    let limit = stated("step_outputs_max_bytes")
+        .as_u64()
+        .expect("the contract states the bound");
+    // `{"url":"` and `"}` are 10 bytes, so the file is `total` bytes long.
+    let padded = |total: u64| {
+        format!(
+            "printf '{{\"url\":\"' > \"$OUT\"\n\
+             head -c {} /dev/zero | tr '\\0' a >> \"$OUT\"\n\
+             printf '\"}}' >> \"$OUT\"",
+            total - 10
+        )
+    };
+    for (run, body, said) in [
         (
             "listed",
-            "[\"https://example.invalid/doc\"]",
-            "holds a JSON list",
+            "printf '%s' '[\"https://example.invalid/doc\"]' > \"$OUT\"".to_owned(),
+            "holds a JSON list".to_owned(),
         ),
         (
             "numbered",
-            "{\"url\": 7}",
-            "value for \"url\" is a JSON number, not a string",
+            "printf '%s' '{\"url\": 7}' > \"$OUT\"".to_owned(),
+            "value for \"url\" is a JSON number, not a string".to_owned(),
+        ),
+        (
+            "garbled",
+            "printf '%s' 'url=https://example.invalid/doc' > \"$OUT\"".to_owned(),
+            "is not JSON".to_owned(),
+        ),
+        (
+            "oversized",
+            padded(limit + 1),
+            format!("holds more than the {limit} bytes"),
+        ),
+        (
+            "directory",
+            "mkdir \"$OUT\"".to_owned(),
+            "could not be read".to_owned(),
         ),
     ] {
         let project = world.plan(
@@ -1167,7 +1226,7 @@ fn outputs_that_are_not_an_object_of_strings_fail_and_a_quote_of_no_dependency_i
             &plan_of(
                 run,
                 vec![
-                    publishing(&world, &format!("{run}-copy"), outputs),
+                    writing(&world, &format!("{run}-copy"), &body),
                     quoting(
                         "approve",
                         &[&format!("{run}-copy")],
@@ -1182,11 +1241,51 @@ fn outputs_that_are_not_an_object_of_strings_fail_and_a_quote_of_no_dependency_i
         assert_eq!(settled["outcome"], word("outcomes", "failed"), "{settled}");
         let detail = settled["detail"].as_str().expect("a detail");
         assert!(detail.contains("ONEPIPELINE_STEP_OUTPUTS"), "{detail}");
-        assert!(detail.contains(said), "{said:?} is not in {detail}");
+        assert!(detail.contains(&said), "{said:?} is not in {detail}");
         let exited = world.events_of(run, "command-exited");
         assert!(exited[0]["payload"].get("outputs").is_none(), "{exited:?}");
     }
     assert!(open_items(&world).is_empty(), "an item was raised");
+
+    // At the bound exactly, the file is read; and a command that publishes and then exits
+    // non-zero has failed on its own terms, publishing nothing.
+    let project = world.plan(
+        "edges",
+        &plan_of(
+            "edges",
+            vec![
+                writing(&world, "full", &padded(limit)),
+                writing(
+                    &world,
+                    "broke",
+                    "printf '%s' '{\"url\": \"https://example.invalid/doc\"}' > \"$OUT\"\nexit 3",
+                ),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).settled();
+    let exited = |node: &str| {
+        world
+            .events_of("edges", "command-exited")
+            .into_iter()
+            .find(|event| event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("{node} never exited"))["payload"]
+            .clone()
+    };
+    assert_eq!(result(&world, "edges", "full")["status"], "done");
+    assert_eq!(
+        exited("full")["outputs"]["url"].as_str().map(str::len),
+        usize::try_from(limit - 10).ok()
+    );
+    let broke = result(&world, "edges", "broke");
+    assert_eq!(broke["status"], "failed", "{broke}");
+    assert!(
+        broke["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("the command exited with status 3")),
+        "{broke}"
+    );
+    assert!(exited("broke").get("outputs").is_none());
 
     let stray = world.plan(
         "stray",
@@ -1204,6 +1303,21 @@ fn outputs_that_are_not_an_object_of_strings_fail_and_a_quote_of_no_dependency_i
         .exited(1)
         .out_has("node 'approve'")
         .out_has("quotes step 'copy', which is not one of this node's deps");
+    let unclosed = world.plan(
+        "unclosed",
+        &plan_of(
+            "unclosed",
+            vec![
+                publishing(&world, "copy", "{}"),
+                quoting("approve", &["copy"], "Read ${steps.copy.url and approve."),
+            ],
+        ),
+    );
+    world
+        .run(&["plan", "check", &unclosed])
+        .exited(1)
+        .out_has("node 'approve'")
+        .out_has("is never closed");
 }
 
 /// A human node quoting an output its step did not publish raises no item: the step waits,

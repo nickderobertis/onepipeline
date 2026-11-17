@@ -236,9 +236,14 @@ fn unfollowed_message(node: &str, change: &str, head: &str, checks: &[(String, b
     )
 }
 
-/// A non-blocking report surface about `node`, as the release wait raises its own.
 /// A record written beside a surface, naming that surface by its channel id where the
 /// channel queued it.
+///
+/// Where a hook kept the surface off the channel, `engine::queued` answers `None` and the
+/// record names none: the branch `bus_config.rs`'s
+/// `a_quiet_worker_whose_surface_a_hook_drops_names_no_surface` drives through that same
+/// `engine::queued`. Driving it here too would put a dropping hook under the checks
+/// follow's GitHub double, a second whole world for this one `if let`.
 fn with_surface<'a>(
     surfaced: Option<&Surface>,
     mut payload: Vec<(&'a str, Value)>,
@@ -249,6 +254,7 @@ fn with_surface<'a>(
     payload
 }
 
+/// A non-blocking report surface about `node`, as the release wait raises its own.
 fn report(kind: &str, node: &str, message: String) -> Surface {
     Surface {
         id: 0,

@@ -4201,6 +4201,27 @@ fn a_plan_offering_choices_a_raised_item_could_not_carry_is_refused_naming_the_n
             question_node("malformed", json!([choice("Not_An_Id")])),
             "choice id \"Not_An_Id\"",
         ),
+        (
+            "twice",
+            question_node("repeated", json!([choice("same"), choice("same")])),
+            "choice id same is repeated",
+        ),
+        (
+            "longtitle",
+            question_node(
+                "wordy",
+                json!([{"id": "long", "title": "x".repeat(81), "description": "d"}]),
+            ),
+            "choice long's title must be one nonblank line of at most 80 characters",
+        ),
+        (
+            "blankdescription",
+            question_node(
+                "terse",
+                json!([{"id": "bare", "title": "Bare", "description": " "}]),
+            ),
+            "choice bare's description must not be blank",
+        ),
     ];
     for (name, node, refusal) in cases {
         let id = node["id"].as_str().unwrap().to_owned();
