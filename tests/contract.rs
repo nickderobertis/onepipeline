@@ -1883,9 +1883,20 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         assert!(CONTRACT.contains(&format!("`{key}`")));
     }
     assert!(CONTRACT.contains("projection-only"));
+    // What `plan writeback-keys` prints is every key the write-back owns, as the binary
+    // answers it; one of those the contract names is a store record, and a plan field only
+    // where the plan schema says so, which the loop below holds of every other key.
+    let owned: BTreeSet<String> = writeback_keys()
+        .into_iter()
+        .filter(|key| !fields.contains(key.trim_start_matches("onepipeline.")))
+        .collect();
     let named: BTreeSet<String> = backticked()
         .iter()
-        .filter(|token| !stamped.contains(*token) && !projection_keys.contains(&token.as_str()))
+        .filter(|token| {
+            !stamped.contains(*token)
+                && !projection_keys.contains(&token.as_str())
+                && !owned.contains(*token)
+        })
         .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
         .filter(|field| field != "<field>")
         .collect();
@@ -7484,6 +7495,66 @@ fn wire_word(variant: &str) -> String {
         out.extend(letter.to_lowercase());
     }
     out
+}
+
+/// Every key `plan writeback-keys --json` prints, in both scopes, as the binary answers it.
+fn writeback_keys() -> BTreeSet<String> {
+    let printed = std::process::Command::new(env!("CARGO_BIN_EXE_onepipeline"))
+        .args(["plan", "writeback-keys", "--json"])
+        .output()
+        .expect("the binary runs");
+    assert!(printed.status.success(), "{printed:?}");
+    let keys: Value = serde_json::from_slice(&printed.stdout).expect("one JSON object");
+    let scopes: BTreeSet<&str> = keys
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(scopes, BTreeSet::from(["project", "task"]), "{keys}");
+    ["task", "project"]
+        .iter()
+        .flat_map(|scope| {
+            let listed: Vec<String> = keys[*scope]
+                .as_array()
+                .unwrap_or_else(|| panic!("no {scope} array: {keys}"))
+                .iter()
+                .map(|key| key.as_str().expect("a key").to_owned())
+                .collect();
+            let mut sorted = listed.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(listed, sorted, "{scope} is not sorted and once: {keys}");
+            listed
+        })
+        .collect()
+}
+
+/// The contract's write-back paragraph names exactly the keys `plan writeback-keys` prints,
+/// so the vocabulary a host leaves out cannot drift from what the binary states.
+#[test]
+fn the_writeback_keys_paragraph_names_exactly_what_the_verb_prints() {
+    let paragraph = CONTRACT
+        .split("\n\n")
+        .find(|paragraph| paragraph.starts_with("**What the write-back owns on the store.**"))
+        .expect("the contract states what the write-back owns");
+    let printed = writeback_keys();
+    let tokens = backticked_in(paragraph);
+    // Each key it names whole is one the verb prints.
+    let whole: BTreeSet<String> = tokens
+        .iter()
+        .filter(|token| token.starts_with("onepipeline.") && *token != "onepipeline.<field>")
+        .cloned()
+        .collect();
+    assert!(whole.is_subset(&printed), "{whole:?} beyond {printed:?}");
+    // A live-edit field is named bare, as the field `onepipeline.<field>` renders.
+    let fields = tokens
+        .iter()
+        .map(|token| format!("onepipeline.{token}"))
+        .filter(|key| printed.contains(key));
+    let named: BTreeSet<String> = whole.iter().cloned().chain(fields).collect();
+    assert_eq!(named, printed);
+    assert!(paragraph.contains(r#"`{"task": [<key>...], "project": [<key>...]}`"#));
 }
 
 #[test]
