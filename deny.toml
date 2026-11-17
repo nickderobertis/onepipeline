@@ -13,8 +13,12 @@ yanked = "deny"
 # It arrives only through `yrs`, the Yjs decoder `onetaskgraph-linear` 0.13.3 requires, and
 # every `yrs` release up to the newest, 0.28.0, depends on it. onetaskgraph ignores the same
 # ID for the same reason. Retired by: a `yrs` release that drops `smallstr`.
+# RUSTSEC-2026-0543 reports `chrono` unmaintained (not vulnerable) for every version and names
+# no safe upgrade. Nothing here requires it: it arrives only through the `onetaskgraph-*` crates,
+# `onebudgetspec-core` and `schemars`. Retired by: releases of those that drop `chrono`.
 ignore = [
     { id = "RUSTSEC-2026-0215", reason = "smallstr is unmaintained, reached only through onetaskgraph-linear -> yrs, whose every release depends on it; remove when a yrs release drops smallstr" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, reached only through onetaskgraph-*, onebudgetspec-core and schemars with no safe upgrade; remove when they drop chrono" },
 ]
 
 [licenses]

@@ -1485,6 +1485,9 @@ onevcs-testing = "0.21.8"
 # (`otg-attest-copy-invariant`, onetaskgraph #4033), so a reviewed plan keeps its review across
 # a board copy. It is the store release ai-orchestrator's own store CLI pin is held to, so it
 # must be the one linked.
+# `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
+# no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
+# release of it is taken by moving `Cargo.lock` alone.
 onetaskgraph-core = "=0.14.16"
 onetaskgraph-plugin-api = "=0.14.16"
 onetaskgraph-local-md = "=0.14.16"
