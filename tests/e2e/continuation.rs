@@ -410,7 +410,7 @@ fn a_failed_draft(name: &str, run: &str) -> (World, String, BTreeMap<String, Val
 
 /// Write `value` under `key` on the task carrying node `node`, as a driver on another host
 /// would have written it.
-pub(crate) fn restate(world: &World, project: &str, node: &str, key: &str, value: Value) {
+fn restate(world: &World, project: &str, node: &str, key: &str, value: Value) {
     let task = world
         .store_tasks(project)
         .into_iter()

@@ -187,22 +187,52 @@ fn a_redo_dispatches_each_named_node_again_on_its_settled_branch_and_continues_t
 }
 
 /// Each redo the launch cannot honour is refused before any run exists, naming the node —
-/// or the flag it is given beside — and the reason.
+/// or the flag it is given beside — and the reason. Every settlement it is refused over is
+/// one a real run left: a kept node, a landed one, a direct one with no branch, a dispatch
+/// that failed and one a manager cancelled.
 #[test]
 fn a_redo_that_cannot_be_honoured_is_refused_naming_the_node_and_mints_no_run() {
     let name = "redo-refused";
-    let (world, _repo) = world_of(name, &["kept", "landed"]);
+    let (world, _repo) = world_of(name, &["kept", "landed", "broken", "stopped"]);
+    // The cancelled dispatch is ended a second after it is asked to stop.
+    let world = world.with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("broken.fail", "1");
+    let stopped = world.rendezvous("stopped");
     let project = author(
         &world,
         name,
-        vec![kept("kept"), lifecycle("landed", &[]), agent("direct", &[])],
+        vec![
+            kept("kept"),
+            lifecycle("landed", &[]),
+            agent("direct", &[]),
+            kept("broken"),
+            kept("stopped"),
+        ],
     );
-    launch(&world, name, &project, &[]).exited(0);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let held = stopped.arrived();
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "stopped"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the first run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    drop(held);
+    world.unscript("stopped.rendezvous");
     let stored = stored_settlements(&world, &project);
+    assert_eq!(stored["kept"]["status"], "done", "{stored:#?}");
     assert_eq!(stored["landed"]["landing"], "landed", "{stored:#?}");
+    assert_eq!(stored["direct"]["status"], "done", "{stored:#?}");
     assert!(stored["direct"].get("branch").is_none(), "{stored:#?}");
+    assert_eq!(stored["broken"]["status"], "failed", "{stored:#?}");
+    assert_eq!(stored["stopped"]["status"], "cancelled", "{stored:#?}");
     // A node a planner added on the board since: its lineage holds no settlement at all.
-    world.add_task(name, "003-added", &kept("added"), &[]);
+    world.add_task(name, "005-added", &kept("added"), &[]);
     let runs = run_dirs(&world);
 
     let refused = |redo: &[&str], says: &[&str]| {
@@ -227,6 +257,20 @@ fn a_redo_that_cannot_be_honoured_is_refused_naming_the_node_and_mints_no_run() 
         &["--redo refused: node 'added'", "holds no settlement"],
     );
     refused(
+        &["--redo", "broken"],
+        &[
+            "--redo refused: node 'broken'",
+            "settled `failed`, not `done`",
+        ],
+    );
+    refused(
+        &["--redo", "stopped"],
+        &[
+            "--redo refused: node 'stopped'",
+            "settled `cancelled`, not `done`",
+        ],
+    );
+    refused(
         &["--redo", "direct"],
         &[
             "--redo refused: node 'direct'",
@@ -241,23 +285,57 @@ fn a_redo_that_cannot_be_honoured_is_refused_naming_the_node_and_mints_no_run() 
         &["--redo", "kept", "--fresh"],
         &["--redo refused: --fresh already dispatches every node"],
     );
-    let branch = stored["kept"]["branch"].clone();
-    for status in ["failed", "cancelled"] {
-        crate::continuation::restate(
-            &world,
-            &project,
-            "kept",
-            "onepipeline.settlement",
-            json!({"status": status, "branch": branch}),
-        );
-        refused(
-            &["--redo", "kept"],
-            &[
-                "--redo refused: node 'kept'",
-                &format!("settled `{status}`, not `done`"),
-            ],
-        );
-    }
+}
+
+/// A dependent of a redone node is unaffected by the redo: one that settled `done` is
+/// continued, and one with no settlement waits on the redone node, as any dependent waits,
+/// and dispatches once it has settled again.
+#[test]
+fn a_redone_nodes_dependents_are_continued_or_wait_on_it_as_without_the_redo() {
+    let name = "redo-dependents";
+    let (world, _repo) = world_of(name, &["base", "child", "late"]);
+    let mut child = kept("child");
+    child["deps"] = json!(["base"]);
+    let project = author(&world, name, vec![kept("base"), child]);
+    launch(&world, name, &project, &[]).exited(0);
+    let before = stored_settlements(&world, &project);
+    assert_eq!(before["child"]["status"], "done", "{before:#?}");
+    let mut late = kept("late");
+    late["deps"] = json!(["base"]);
+    world.add_task(name, "002-late", &late, &[("base", "000-base")]);
+
+    let again = format!("{name}-2");
+    launch(&world, &again, &project, &["--redo", "base"]).exited(0);
+    assert_eq!(
+        dispatched(&world, &again),
+        vec!["base".to_owned(), "late".to_owned()]
+    );
+    let journal = world.journal(&again);
+    let at = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .position(|event| {
+                event["kind"] == kind
+                    && event["labels"]["node"] == node
+                    && event["payload"].get("continued").is_none()
+            })
+            .unwrap_or_else(|| panic!("no {kind} of {node} in {again}"))
+    };
+    assert!(
+        at("node-settled", "base") < at("node-dispatched", "late"),
+        "late was dispatched before base settled again"
+    );
+    assert_eq!(
+        settled(&world, &again, "child")["continued"]["source"],
+        "store"
+    );
+    let after = stored_settlements(&world, &project);
+    assert_eq!(
+        after["child"], before["child"],
+        "the continued dependent moved"
+    );
+    assert_eq!(after["late"]["status"], "done", "{after:#?}");
+    assert_eq!(world.run_json(&again, "result.json")["state"], "complete");
 }
 
 /// While a redo run drives the project, a launch with or without `--redo` is refused naming
@@ -460,7 +538,7 @@ fn an_adopted_redo_run_does_not_redo_a_node_that_already_settled_again() {
             ],
         )
         .exited(0);
-    // While first's redo is in flight its task carries its open dispatch and no settlement.
+    // Until first's redo settles, its task carries its open dispatch and no settlement.
     world.until("first's redo to land on the store", |world| {
         stored_settlements(world, &project)
             .get("first")
