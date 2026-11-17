@@ -98,7 +98,7 @@ fn at(world: &World, name: &str) -> String {
     shell_path(&world.root.join(name))
 }
 
-/// `node`, guarded by `guard`.
+/// `node`, guarded by `guard` with no arguments: a guard's argv is the program alone.
 fn guarded(mut node: Value, guard: &Path) -> Value {
     node["guard"] = json!([guard.display().to_string()]);
     node

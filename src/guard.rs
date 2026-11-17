@@ -90,9 +90,7 @@ pub(crate) enum Then {
 /// What a guard's ending comes to: what `guard-evaluated` records, and the settlement the
 /// node takes — none where the node is needed and proceeds.
 pub(crate) struct Evaluated {
-    /// The record.
     pub(crate) record: GuardEvaluated,
-    /// The node's settlement, where the verdict settles it.
     pub(crate) settlement: Option<Settlement>,
 }
 
