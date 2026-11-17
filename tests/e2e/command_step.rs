@@ -342,11 +342,16 @@ fn a_command_its_driver_died_in_is_run_again_by_adopt_and_settles_on_its_second_
         let world = World::new(&format!("command-step-adopt-{exit}"));
         let count = at(&world, "count");
         let go = at(&world, "go");
+        // Each run notes the outputs file it was handed; the first — the one its driver
+        // dies under — publishes to it, and the second publishes nothing.
+        let variable = named("step_outputs_env");
         let repeated = script(
             &world,
             "repeated",
             &format!(
-                "echo run >> '{count}'\necho 'attempt began'\n\
+                "echo \"${variable}\" >> '{count}'\n\
+                 [ -f '{go}' ] || printf '%s' '{{\"url\": \"first\"}}' > \"${variable}\"\n\
+                 echo 'attempt began'\n\
                  while [ ! -f '{go}' ]; do sleep 0.1; done\nexit {exit}"
             ),
         );
@@ -407,6 +412,15 @@ fn a_command_its_driver_died_in_is_run_again_by_adopt_and_settles_on_its_second_
         let exits = world.events_of(&name, "command-exited");
         assert_eq!(exits.len(), 1, "{exits:?}");
         assert_eq!(exits[0]["payload"]["exit_code"], exit);
+        // A run is handed a file no earlier run used, so what the run that died published
+        // is never read as the second's.
+        let handed = std::fs::read_to_string(world.root.join("count")).expect("the runs");
+        let handed: Vec<&str> = handed.lines().collect();
+        assert_ne!(handed[0], handed[1], "both runs were handed one file");
+        assert!(
+            exits[0]["payload"].get("outputs").is_none(),
+            "the second run read the first's outputs: {exits:?}"
+        );
         if exit == 0 {
             assert!(settled_as(&world, &name, "repeat", "done"));
             assert!(
@@ -1318,6 +1332,27 @@ fn outputs_that_are_not_an_object_of_strings_fail_and_a_quote_of_no_dependency_i
         .exited(1)
         .out_has("node 'approve'")
         .out_has("is never closed");
+    for (name, quoted) in [
+        ("nooutput", "${steps.copy}"),
+        ("badoutput", "${steps.copy.the url}"),
+    ] {
+        let malformed = world.plan(
+            name,
+            &plan_of(
+                name,
+                vec![
+                    publishing(&world, "copy", "{}"),
+                    quoting("approve", &["copy"], &format!("Read {quoted}.")),
+                ],
+            ),
+        );
+        world
+            .run(&["plan", "check", &malformed])
+            .exited(1)
+            .out_has("node 'approve'")
+            .out_has("`human_item`")
+            .out_has(&format!("`{quoted}` is not a placeholder"));
+    }
 }
 
 /// A human node quoting an output its step did not publish raises no item: the step waits,
