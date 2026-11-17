@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1985,12 +1985,18 @@
       "schema": {
         "type": "object",
         "properties": {
+          "surface": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The surface's id on the channel: what `onepipeline surface` prints and `next`\ndelivers, and what joins this record to its `planner-surfaced` and to the\nrecord written beside it. Absent from a record written before the field\nexisted."
+          },
           "correlation": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Review revision identity, where the surface names one."
+            "description": "The correlation a reply to the surface echoes — a question's, or a review\nrevision's identity — and `null` where it carries none. Absent from a record\nwritten before the field existed."
           },
           "kind": {
             "type": "string",
@@ -2130,6 +2136,19 @@
       "schema": {
         "type": "object",
         "properties": {
+          "surface": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The surface's id on the channel, as its `planner-surface-queued` records it.\nAbsent from a record written before the field existed."
+          },
+          "correlation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The correlation a reply to it echoes, `null` where it carries none. Absent\nfrom a record written before the field existed."
+          },
           "kind": {
             "type": "string",
             "description": "The surface's kind."
@@ -2195,6 +2214,13 @@
             ],
             "description": "Its reason, `null` for none.",
             "default": null
+          },
+          "correlation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The correlation of the question it answered, `null` for a reply that answered\nnone. Absent from a record written before the field existed."
           }
         },
         "required": [
@@ -2234,6 +2260,10 @@
           "ref": {
             "type": "string",
             "description": "The reference attested."
+          },
+          "item": {
+            "$ref": "#/$defs/AttestedItem",
+            "description": "The human item whose resolution attested it; absent where the node was\nattested with no item resolved, by `onepipeline attest`."
           }
         },
         "required": [
@@ -2241,7 +2271,111 @@
         ],
         "description": "`human-attested`: a human action attested.",
         "title": "HumanAttested",
-        "$schema": "https://json-schema.org/draft/2020-12/schema"
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "AttestedItem": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The item's id, as `human-items show` takes it."
+              },
+              "action": {
+                "$ref": "#/$defs/AttestedAction",
+                "description": "Whether it was answered or completed."
+              },
+              "resolution": {
+                "$ref": "#/$defs/HumanItemResolution",
+                "description": "The item's resolution, as the human-item store records it."
+              }
+            },
+            "required": [
+              "id",
+              "action",
+              "resolution"
+            ],
+            "description": "What a person did to the human item that attested a node."
+          },
+          "AttestedAction": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "answered",
+                "description": "A question answered."
+              },
+              {
+                "type": "string",
+                "const": "completed",
+                "description": "A task completed."
+              }
+            ],
+            "description": "The two resolutions that attest a node: a dismissal drops it instead."
+          },
+          "HumanItemResolution": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "type": "string",
+                "description": "Actor."
+              },
+              "on_behalf_of": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "On behalf of."
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Text."
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The picked choice's id: only an answered question carries one, and it is omitted when null."
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Reason."
+              },
+              "provenance": {
+                "$ref": "#/$defs/Provenance",
+                "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's."
+              }
+            },
+            "required": [
+              "actor",
+              "on_behalf_of",
+              "text",
+              "reason"
+            ],
+            "description": "Who resolved an item and what they said."
+          },
+          "Provenance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "manager",
+                "description": "The manager's own ruling: a strong default a dispatch may decline with its\nreason. What every record written before this field existed reads as."
+              },
+              {
+                "type": "string",
+                "const": "user",
+                "description": "The user's words, relayed by the manager: binding."
+              }
+            ],
+            "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
+          }
+        }
       }
     },
     {
@@ -2489,6 +2623,12 @@
       "schema": {
         "type": "object",
         "properties": {
+          "surface": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The channel id of the surface this record describes; absent where that\nsurface never reached the channel, because a hook dropped or rerouted it."
+          },
           "quiet_for_seconds": {
             "type": "integer",
             "format": "uint64",
@@ -5714,6 +5854,12 @@
       "schema": {
         "type": "object",
         "properties": {
+          "surface": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The channel id of the surface this record describes; absent where that\nsurface never reached the channel, because a hook dropped or rerouted it."
+          },
           "node": {
             "type": "string",
             "description": "The node whose publication carries the check."
@@ -5786,6 +5932,12 @@
       "schema": {
         "type": "object",
         "properties": {
+          "surface": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "The channel id of the surface this record describes; absent where that\nsurface never reached the channel, because a hook dropped or rerouted it."
+          },
           "node": {
             "type": "string",
             "description": "The node whose publication carries the checks."
@@ -5963,6 +6115,13 @@
             "format": "uint64",
             "minimum": 0,
             "description": "How long it ran, in milliseconds."
+          },
+          "outputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "What it published to the file `ONEPIPELINE_STEP_OUTPUTS` named: a name for\neach value. Absent where it wrote no such file."
           }
         },
         "required": [

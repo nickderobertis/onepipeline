@@ -7,6 +7,7 @@ mod live;
 pub mod phases;
 mod present;
 mod projection;
+pub(crate) mod quote;
 pub(crate) mod runtime;
 pub use approval::REREAD;
 pub use live::{item_id_for, Actor, HumanItems, ReadMode, ReadTelemetry, RUN_ENDED, TELEMETRY_ENV};
@@ -282,9 +283,68 @@ pub struct HumanItemMetadata {
     #[serde(deserialize_with = "nonempty")]
     #[schemars(length(min = 1), pattern(r"\S"))]
     pub body: String,
+    /// The answers a question offers, carried onto its raised item: a raised item's
+    /// choices, under the same rules, which the plan loader holds them to and names
+    /// the node in refusing. Default empty, omitted when empty.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "unchecked_choices"
+    )]
+    #[schemars(length(max = 6))]
+    pub choices: Vec<HumanItemChoice>,
 }
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
+
+/// A plan's choices read as written, so the loader's check — which knows the node —
+/// is what refuses a malformed one, rather than a decoder error naming a line.
+fn unchecked_choices<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Vec<HumanItemChoice>, D::Error> {
+    Ok(Vec::<HumanItemChoiceWire>::deserialize(decoder)?
+        .into_iter()
+        .map(|wire| HumanItemChoice {
+            id: wire.id,
+            title: wire.title,
+            description: wire.description,
+        })
+        .collect())
+}
+
+impl HumanItemMetadata {
+    /// Whether a plan node may carry this metadata: its choices obey a raised
+    /// item's rules, and every `${steps.<node>.<output>}` it quotes names one of
+    /// `deps`.
+    ///
+    /// # Errors
+    ///
+    /// The first rule broken, in words a refusal naming the node can carry.
+    pub(crate) fn check(&self, deps: &[String]) -> Result<(), String> {
+        validate_choices(self.kind, &self.choices)?;
+        for text in self.quoting() {
+            for quoted in quote::quoted(text)? {
+                if !deps.iter().any(|dep| *dep == quoted.step) {
+                    return Err(format!(
+                        "`{quoted}` quotes step '{}', which is not one of this node's deps",
+                        quoted.step
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every text a placeholder may sit in: the title, the body, and each choice's
+    /// description.
+    fn quoting(&self) -> impl Iterator<Item = &str> {
+        [self.title.as_str(), self.body.as_str()].into_iter().chain(
+            self.choices
+                .iter()
+                .map(|choice| choice.description.as_str()),
+        )
+    }
+}
 
 // llmlint: ignore-block[invalid_states_unrepresentable] HumanItem v1 fixes kind, state, resolution and approval as independent wire fields and imports the store Priority. Keep that declared public shape; the boundary decoder checks state/resolution/kind/approval combinations and rejects None priority.
 validated_record! {
@@ -2429,6 +2489,7 @@ pub fn derive_legacy(
             .unwrap_or(Priority::Low),
         title: title.into(),
         body: action_body.into(),
+        choices: Vec::new(),
     }
 }
 

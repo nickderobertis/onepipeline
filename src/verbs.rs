@@ -762,10 +762,12 @@ pub fn next(paths: &RunPaths, filter: &EventFilter) -> Result<Next> {
         journal::PipelineKind::PlannerSurfaced,
         journal::labels(&paths.run, surface.workstream.as_deref()),
         journal::payload(&[
+            ("surface", json!(surface.id)),
             ("kind", json!(surface.kind)),
             ("message", json!(surface.message)),
             ("source", json!(surface.source)),
             ("blocking", json!(surface.blocking)),
+            ("correlation", json!(surface.correlation)),
             // When the text was true, beside the text: a surface is written in
             // the present tense and this record's own stamp is the reading.
             // Divergence 66 is why it is the queued instant and not an age.
@@ -1470,16 +1472,7 @@ pub fn surface(paths: &RunPaths, kind: SurfaceKind, message: String) -> Result<S
     let crate::channel::SurfaceOffer::Queued(queued) = offer else {
         return Ok(surfaced);
     };
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, None),
-        journal::payload(&[
-            ("kind", json!(queued.kind)),
-            ("message", json!(queued.message)),
-            ("source", json!(queued.source)),
-            ("blocking", json!(queued.blocking)),
-        ]),
-    )?;
+    crate::engine::record_surface_queued(paths, &mut journal, &queued, &queued.message, &[])?;
     Ok(surfaced)
 }
 
@@ -1577,16 +1570,7 @@ pub fn decline_ruling(paths: &RunPaths, ruling: &str, reason: &str) -> Result<Su
     let crate::channel::SurfaceOffer::Queued(queued) = offer else {
         return Ok(surfaced);
     };
-    journal.emit(
-        journal::PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, queued.workstream.as_deref()),
-        journal::payload(&[
-            ("kind", json!(queued.kind)),
-            ("message", json!(queued.message)),
-            ("source", json!(queued.source)),
-            ("blocking", json!(queued.blocking)),
-        ]),
-    )?;
+    crate::engine::record_surface_queued(paths, &mut journal, &queued, &queued.message, &[])?;
     Ok(surfaced)
 }
 

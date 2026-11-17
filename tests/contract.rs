@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("157.")["bundle_versions"]["events"],
+        divergence_block("159.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1799,6 +1799,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
             priority: onepipeline::human_items::Priority::Low,
             title: "Review".into(),
             body: "Confirm.".into(),
+            choices: Vec::new(),
         }),
         id: "n".into(),
         kind: NodeKind::Human,
@@ -5622,8 +5623,8 @@ fn the_writeback_projection_record_is_what_the_divergence_record_names() {
 ///
 /// The contract is committed as approved and names none of it, so entry 47 is the
 /// only place it is written down — and a divergence nothing gates quietly stops
-/// being true. The kind is held against the enum that emits it and against the
-/// contract's own list, and the surface a mismatch is raised under against the
+/// being true. The kind is held against the enum that emits it — whose every kind the
+/// contract's own list names since entry 159 — and the surface a mismatch is raised under against the
 /// kinds this build parses: a check that started reporting under a kind no
 /// reader recognises would be a finding nobody is handed.
 #[test]
@@ -5637,10 +5638,6 @@ fn the_criterion_check_is_what_the_divergence_record_names() {
         assert!(
             PipelineKind::from_wire(&EventKind(kind.clone())).is_some(),
             "`{kind}` is not a kind this crate emits"
-        );
-        assert!(
-            !CONTRACT.contains(&format!("`{kind}`")),
-            "the contract names `{kind}`, so it is no divergence"
         );
     }
 
@@ -6796,32 +6793,27 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
     assert_eq!(PIPELINE_KINDS.len(), 71, "the closed set changed size");
-    let listed: BTreeSet<String> = backticked()
-        .into_iter()
-        .filter(|token| {
-            token.chars().all(|c| c.is_ascii_lowercase() || c == '-') && token.contains('-')
-        })
+    // The paragraph's closed list is the enum's, kind for kind and in its order — entry
+    // 159 brought it up to date, and this keeps it there.
+    let paragraph = CONTRACT
+        .split("This library's **own** kinds are a closed set")
+        .nth(1)
+        .and_then(|rest| rest.split("**`driver-exited`**").next())
+        .expect("the contract states this library's own kinds");
+    let listed: Vec<String> = paragraph
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| token.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+        .map(str::to_owned)
         .collect();
-    // The kinds the contract does not list are exactly the ones the divergence
-    // record proposes, and no others: a kind neither document names fails here.
-    let proposed: BTreeSet<String> = [
-        "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.", "132.", "134.", "146.",
-    ]
-    .into_iter()
-    .flat_map(|entry| {
-        serde_json::from_value::<Vec<String>>(divergence_block(entry)["event_kinds"].clone())
-            .unwrap_or_else(|e| panic!("entry {entry} names the kinds it adds: {e}"))
-    })
-    .collect();
-    let undocumented: BTreeSet<String> = PIPELINE_KINDS
+    let emitted: Vec<String> = PIPELINE_KINDS
         .iter()
         .map(|kind| kind.as_str().to_string())
-        .filter(|kind| !listed.contains(kind))
         .collect();
     assert_eq!(
-        undocumented, proposed,
-        "the kinds this crate emits that docs/contract.md does not list are not entry 40's"
+        listed, emitted,
+        "docs/contract.md's list of this library's own kinds is not `PIPELINE_KINDS`"
     );
 
     // The wire spelling is the enum's, not a string beside it.
@@ -8006,6 +7998,8 @@ const RULINGS: &[(&str, &str)] = &[
         "158.",
         "Release adoptions onevcs says can never complete are refused at load",
     ),
+    // The reader records, plan-node choices and step outputs its node's task directed.
+    ("159.", "Step outputs and the items that quote them"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

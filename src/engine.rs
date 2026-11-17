@@ -1235,7 +1235,7 @@ fn driving(
     // items holding its work.
     if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
         let statuses = state.statuses();
-        gate.pass(paths, &state, &statuses);
+        gate.pass(paths, &mut journal, &state, &statuses);
         if outcome != GraphState::Waiting {
             gate.run_ended();
         }
@@ -1900,7 +1900,7 @@ fn converge(
         sources.read_again(|| state.graph.iter().cloned().collect());
         paused.extend(sources.held().keys().cloned());
         if let Some(gate) = human.as_mut() {
-            paused.extend(gate.pass(paths, state, &statuses));
+            paused.extend(gate.pass(paths, journal, state, &statuses));
         }
 
         // The releases this pass cares about: every node ready to start, where a
@@ -12113,11 +12113,17 @@ pub(crate) fn record_operation_facts(
                 journal::labels(&paths.run, None),
                 journal::payload(&[("reason", json!(reason))]),
             )?,
-            edits::Operation::HumanAttested { node } => journal.emit(
-                journal::PipelineKind::HumanAttested,
-                journal::labels(&paths.run, Some(node)),
-                journal::payload(&[("ref", json!(node))]),
-            )?,
+            edits::Operation::HumanAttested { node } => {
+                let mut payload = vec![("ref", json!(node))];
+                if let Some(item) = crate::human_items::runtime::attested_item(paths, node) {
+                    payload.push(("item", json!(item)));
+                }
+                journal.emit(
+                    journal::PipelineKind::HumanAttested,
+                    journal::labels(&paths.run, Some(node)),
+                    journal::payload(&payload),
+                )?;
+            }
             edits::Operation::FindingRaised {
                 node,
                 message,
@@ -12604,6 +12610,16 @@ pub(crate) fn raise(paths: &RunPaths, journal: &mut Journal, surface: Surface) -
 /// record rather than the run's failure: a filter a host wrote to quieten the
 /// channel must not stop the run raising it.
 pub(crate) fn raised(paths: &RunPaths, journal: &mut Journal, surface: Surface) -> Result<Surface> {
+    Ok(queue_surface(paths, journal, surface.clone(), &[])?.unwrap_or(surface))
+}
+
+/// [`raise`], answering the surface as the channel queued it, or `None` where a hook
+/// kept it off the channel: what a record written beside a surface names it by.
+pub(crate) fn queued(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    surface: Surface,
+) -> Result<Option<Surface>> {
     queue_surface(paths, journal, surface, &[])
 }
 
@@ -12630,11 +12646,26 @@ fn queue_surface(
     journal: &mut Journal,
     surface: Surface,
     stamps: &[(&str, serde_json::Value)],
-) -> Result<Surface> {
+) -> Result<Option<Surface>> {
     let Some(queued) = offer_surface(paths, journal, &ChannelState::of_paths(paths)?, &surface)?
     else {
-        return Ok(surface);
+        return Ok(None);
     };
+    record_surface_queued(paths, journal, &queued, &queued.message, stamps)?;
+    Ok(Some(queued))
+}
+
+/// Journal `planner-surface-queued` for a surface the channel queued: its channel id
+/// and correlation, which join it to its `planner-surfaced`, its reply and the record
+/// written beside it, and the node it names as the record's `node` label. `message`
+/// is the text to record, which a writer may have bounded.
+pub(crate) fn record_surface_queued(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    queued: &Surface,
+    message: &str,
+    stamps: &[(&str, serde_json::Value)],
+) -> Result<()> {
     let mut labels = journal::labels(&paths.run, queued.workstream.as_deref());
     for (key, value) in stamps {
         labels.extra.insert((*key).to_owned(), value.clone());
@@ -12643,13 +12674,14 @@ fn queue_surface(
         journal::PipelineKind::PlannerSurfaceQueued,
         labels,
         journal::payload(&[
+            ("surface", json!(queued.id)),
             ("kind", json!(queued.kind)),
-            ("message", json!(queued.message)),
+            ("message", json!(message)),
             ("source", json!(queued.source)),
             ("blocking", json!(queued.blocking)),
+            ("correlation", json!(queued.correlation)),
         ]),
-    )?;
-    Ok(queued)
+    )
 }
 
 /// Offer `surface` to `channel`, journalling what kept it off: the surface as
@@ -12736,16 +12768,8 @@ fn watch_for_quiet(
         } else {
             format!("last activity {quiet_for}s ago")
         };
-        journal.emit(
-            journal::PipelineKind::QuietWorker,
-            journal::labels(&paths.run, Some(&node)),
-            journal::payload(&[
-                ("quiet_for_seconds", json!(quiet_for)),
-                ("threshold_seconds", json!(stall_after.as_secs())),
-                ("persona", json!(persona)),
-            ]),
-        )?;
-        raise(
+        // The surface first and the record second, so the record can name it.
+        let surfaced = queued(
             paths,
             journal,
             Surface {
@@ -12766,6 +12790,19 @@ fn watch_for_quiet(
                 correlation: None,
                 declined_ruling: None,
             },
+        )?;
+        let mut payload = vec![
+            ("quiet_for_seconds", json!(quiet_for)),
+            ("threshold_seconds", json!(stall_after.as_secs())),
+            ("persona", json!(persona)),
+        ];
+        if let Some(surfaced) = surfaced {
+            payload.push(("surface", json!(surfaced.id)));
+        }
+        journal.emit(
+            journal::PipelineKind::QuietWorker,
+            journal::labels(&paths.run, Some(&node)),
+            journal::payload(&payload),
         )?;
     }
     Ok(())

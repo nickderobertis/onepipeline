@@ -24,6 +24,67 @@ use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::NodeKind;
 use crate::projection::RunState;
 
+/// The surface kind a human node's item that could not be raised is reported under.
+pub(crate) const UNRAISED_KIND: &str = "human-item-unraised";
+
+/// Why a human node's item was not raised.
+enum Unraised {
+    /// It quotes an output its step did not publish: the planner's to act on.
+    Unpublished(String),
+    /// The item store refused it: tried again on a later pass.
+    Store(String),
+}
+
+/// `metadata` with every `${steps.<node>.<output>}` it quotes replaced by what that
+/// step's latest `command-exited` published.
+///
+/// # Errors
+///
+/// The first placeholder quoting an output its step did not publish.
+fn quote_published(
+    paths: &RunPaths,
+    metadata: &mut super::HumanItemMetadata,
+) -> Result<(), String> {
+    let quoted: BTreeSet<String> = metadata
+        .quoting()
+        .filter_map(|text| super::quote::quoted(text).ok())
+        .flatten()
+        .map(|quoted| quoted.step.to_owned())
+        .collect();
+    if quoted.is_empty() {
+        return Ok(());
+    }
+    let mut published: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for event in crate::journal::read(&paths.journal()) {
+        let Some(step) = event
+            .labels
+            .node
+            .as_ref()
+            .filter(|step| quoted.contains(*step))
+        else {
+            continue;
+        };
+        if event.kind.as_str() != "command-exited" {
+            continue;
+        }
+        // The latest run of the step is what its dependents ran after.
+        let outputs = event
+            .payload
+            .get("outputs")
+            .cloned()
+            .and_then(|outputs| serde_json::from_value(outputs).ok())
+            .unwrap_or_default();
+        published.insert(step.clone(), outputs);
+    }
+    let substitute = |text: &str| super::quote::substitute(text, &published);
+    metadata.title = substitute(&metadata.title)?;
+    metadata.body = substitute(&metadata.body)?;
+    for choice in &mut metadata.choices {
+        choice.description = substitute(&choice.description)?;
+    }
+    Ok(())
+}
+
 /// The dedup key of the item a run's human node gets: its run/node identity.
 pub(crate) fn node_key(run: &str, node: &str) -> String {
     format!("run:{run}#{node}")
@@ -204,6 +265,9 @@ pub(crate) struct Gate {
     raised: BTreeSet<String>,
     released: BTreeSet<String>,
     held: BTreeSet<String>,
+    /// The human nodes whose item quotes an output its step did not publish, and the
+    /// reason this driver surfaced: told once per reason rather than every pass.
+    unraised: BTreeMap<String, String>,
     /// Whether the store has been read at all. Until it has, nothing is known
     /// about the holds standing, so every step is held rather than none.
     read: bool,
@@ -229,6 +293,7 @@ impl Gate {
             session: launch.session.clone(),
             plan: launch.project.clone(),
             raised: BTreeSet::new(),
+            unraised: BTreeMap::new(),
             released: BTreeSet::new(),
             held: BTreeSet::new(),
             read: false,
@@ -243,6 +308,7 @@ impl Gate {
     pub(crate) fn pass(
         &mut self,
         paths: &RunPaths,
+        journal: &mut crate::journal::Journal,
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) -> BTreeSet<String> {
@@ -261,11 +327,13 @@ impl Gate {
             {
                 continue;
             }
-            match self.raise(node) {
+            match self.raise(paths, node) {
                 Ok(()) => {
                     self.raised.insert(node.id.clone());
+                    self.unraised.remove(&node.id);
                 }
-                Err(why) => eprintln!(
+                Err(Unraised::Unpublished(why)) => self.unpublished(paths, journal, node, why),
+                Err(Unraised::Store(why)) => eprintln!(
                     "onepipeline: run '{}' could not raise the human item for '{}': {why}",
                     self.run, node.id
                 ),
@@ -306,8 +374,8 @@ impl Gate {
         self.held.clone()
     }
 
-    fn raise(&self, node: &crate::plan::Node) -> Result<(), String> {
-        let metadata = node.human_item.clone().unwrap_or_else(|| {
+    fn raise(&self, paths: &RunPaths, node: &crate::plan::Node) -> Result<(), Unraised> {
+        let mut metadata = node.human_item.clone().unwrap_or_else(|| {
             let record = node.task_record.as_ref();
             derive_legacy(
                 &node.id,
@@ -316,6 +384,7 @@ impl Gate {
                 record.and_then(|r| r.priority),
             )
         });
+        quote_published(paths, &mut metadata).map_err(Unraised::Unpublished)?;
         // Explicit metadata states a nonblank body; a legacy node's is its action
         // prose, which plan loading refuses to be absent.
         let body = metadata.body;
@@ -326,7 +395,7 @@ impl Gate {
                 kind: metadata.kind,
                 title: metadata.title,
                 body,
-                choices: Vec::new(),
+                choices: metadata.choices,
                 priority: metadata.priority,
                 owner: HumanItemOwner {
                     session: self.session.clone(),
@@ -340,7 +409,67 @@ impl Gate {
                 approval: None,
             })
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| Unraised::Store(e.to_string()))
+    }
+
+    /// Tell the planner, once per reason, that `node`'s item was not raised because
+    /// it quotes an output its step never published: the node waits, and the planner
+    /// amends what it quotes, attests it or drops it. A reason a driver before this
+    /// one already surfaced is not surfaced again.
+    fn unpublished(
+        &mut self,
+        paths: &RunPaths,
+        journal: &mut crate::journal::Journal,
+        node: &crate::plan::Node,
+        why: String,
+    ) {
+        if self.unraised.get(&node.id) == Some(&why) {
+            return;
+        }
+        let message = format!(
+            "the human item for '{}' was not raised: {why}. Its step waits; amend what its \
+             `human_item` quotes, attest it, or drop it.",
+            node.id
+        );
+        let told = crate::journal::read(&paths.journal()).iter().any(|event| {
+            event.kind.as_str() == "planner-surface-queued"
+                && event.labels.node.as_deref() == Some(node.id.as_str())
+                && event
+                    .payload
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(UNRAISED_KIND)
+                && event
+                    .payload
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(message.as_str())
+        });
+        if !told {
+            let surface = crate::channel::Surface {
+                id: 0,
+                kind: UNRAISED_KIND.to_owned(),
+                message,
+                source: crate::channel::source::PROPOSAL.to_owned(),
+                // The step waits on its person either way: this holds nothing more.
+                blocking: false,
+                queued_at: crate::sys::now_millis(),
+                abandoned: false,
+                asker: None,
+                workstream: Some(node.id.clone()),
+                correlation: None,
+                declined_ruling: None,
+            };
+            if let Err(error) = crate::engine::raise(paths, journal, surface) {
+                eprintln!(
+                    "onepipeline: run '{}' did not raise the human item for '{}' ({why}), and \
+                     could not surface that: {error}",
+                    self.run, node.id
+                );
+                return;
+            }
+        }
+        self.unraised.insert(node.id.clone(), why);
     }
 
     /// Act on this run's human nodes as their items stand: a resolution whose
@@ -482,6 +611,27 @@ fn ended(store: &HumanItems, run: &str) {
              dismissed: {why}"
         );
     }
+}
+
+/// The resolution of the human item standing for a run's `node`, where one answered
+/// or completed it: what `human-attested` records of the person's act. `None` where
+/// the run enables no human items, the node has no item, or its item is not resolved
+/// that way — a node attested by `onepipeline attest` while its item was open.
+pub(crate) fn attested_item(paths: &RunPaths, node: &str) -> Option<crate::payload::AttestedItem> {
+    let launch = crate::ledger::read_json::<LaunchRecord>(&paths.launch()).ok()?;
+    let store = store_for(paths, &launch)?;
+    let id = item_id_for(&node_key(&paths.run, node));
+    let item = store.items().ok()?.remove(&id)?;
+    let action = match item.state {
+        HumanItemState::Answered => crate::payload::AttestedAction::Answered,
+        HumanItemState::Completed => crate::payload::AttestedAction::Completed,
+        HumanItemState::Open | HumanItemState::Dismissed => return None,
+    };
+    Some(crate::payload::AttestedItem {
+        id,
+        action,
+        resolution: item.resolution?,
+    })
 }
 
 /// Retire the open items holding a run's work because the run ended, where its

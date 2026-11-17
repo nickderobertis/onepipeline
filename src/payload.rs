@@ -733,6 +733,11 @@ pub(crate) struct CommandExited {
     pub(crate) ending: CommandEnding,
     /// How long it ran, in milliseconds.
     pub(crate) duration_ms: u64,
+    /// What it published to the file `ONEPIPELINE_STEP_OUTPUTS` named: a name for
+    /// each value. Absent where it wrote no such file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "std::collections::BTreeMap<String, String>")]
+    pub(crate) outputs: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
@@ -864,8 +869,17 @@ pub(crate) struct EditRejected {
 /// `planner-surface-queued`: a surface sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaceQueued {
+    /// The surface's id on the channel: what `onepipeline surface` prints and `next`
+    /// delivers, and what joins this record to its `planner-surfaced` and to the
+    /// record written beside it. Absent from a record written before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub(crate) surface: Option<u64>,
     // llmlint: ignore-block[invalid_states_unrepresentable] This optional journal DTO preserves entry 122’s wire string. Surface.correlation is the bus’s validated Correlation before record_surface serializes it; no command is executed from this journal text.
-    /// Review revision identity, where the surface names one.
+    /// The correlation a reply to the surface echoes — a question's, or a review
+    /// revision's identity — and `null` where it carries none. Absent from a record
+    /// written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) correlation: Option<String>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -929,6 +943,17 @@ pub(crate) enum SurfaceDropCause {
 /// `planner-surfaced`: a surface consumed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PlannerSurfaced {
+    /// The surface's id on the channel, as its `planner-surface-queued` records it.
+    /// Absent from a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub(crate) surface: Option<u64>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the same wire string `PlannerSurfaceQueued.correlation` above carries, for the same reason.
+    /// The correlation a reply to it echoes, `null` where it carries none. Absent
+    /// from a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The surface's kind.
     // llmlint: ignore-block[invalid_states_unrepresentable] a queued surface's kind is
     // not `channel::SurfaceKind`'s closed set: the engine queues surfaces of its own —
@@ -968,6 +993,12 @@ pub(crate) struct PlannerReplied {
     /// Its reason, `null` for none.
     #[serde(default)]
     pub(crate) reason: Option<String>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the same wire string `PlannerSurfaceQueued.correlation` carries, for the same reason.
+    /// The correlation of the question it answered, `null` for a reply that answered
+    /// none. Absent from a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) correlation: Option<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// `human-attested`: a human action attested.
@@ -976,6 +1007,32 @@ pub(crate) struct HumanAttested {
     /// The reference attested.
     #[serde(rename = "ref")]
     pub(crate) reference: String,
+    /// The human item whose resolution attested it; absent where the node was
+    /// attested with no item resolved, by `onepipeline attest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "AttestedItem")]
+    pub(crate) item: Option<AttestedItem>,
+}
+
+/// What a person did to the human item that attested a node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct AttestedItem {
+    /// The item's id, as `human-items show` takes it.
+    pub(crate) id: String,
+    /// Whether it was answered or completed.
+    pub(crate) action: AttestedAction,
+    /// The item's resolution, as the human-item store records it.
+    pub(crate) resolution: crate::human_items::HumanItemResolution,
+}
+
+/// The two resolutions that attest a node: a dismissal drops it instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum AttestedAction {
+    /// A question answered.
+    Answered,
+    /// A task completed.
+    Completed,
 }
 
 /// `driver-adopted`: a fresh driver on an intact ledger.
@@ -1285,6 +1342,11 @@ impl From<crate::shutdown::Preserved> for PreservedWord {
 /// `quiet-worker`: a dispatch silent past the threshold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct QuietWorker {
+    /// The channel id of the surface this record describes; absent where that
+    /// surface never reached the channel, because a hook dropped or rerouted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub(crate) surface: Option<u64>,
     /// How long it has been silent.
     pub(crate) quiet_for_seconds: u64,
     /// The threshold it passed.
@@ -2346,6 +2408,11 @@ pub(crate) enum ScratchEnding {
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root. What a reader acts on is still typed and required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct CheckFailed {
+    /// The channel id of the surface this record describes; absent where that
+    /// surface never reached the channel, because a hook dropped or rerouted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub(crate) surface: Option<u64>,
     /// The node whose publication carries the check.
     pub(crate) node: String,
     /// The change request, by URL.
@@ -2372,6 +2439,11 @@ pub(crate) struct CheckFailed {
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, as `CheckFailed` above records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ChecksUnfollowed {
+    /// The channel id of the surface this record describes; absent where that
+    /// surface never reached the channel, because a hook dropped or rerouted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "u64")]
+    pub(crate) surface: Option<u64>,
     /// The node whose publication carries the checks.
     pub(crate) node: String,
     /// The change request, by URL.

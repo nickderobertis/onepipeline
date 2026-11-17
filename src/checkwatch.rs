@@ -237,6 +237,18 @@ fn unfollowed_message(node: &str, change: &str, head: &str, checks: &[(String, b
 }
 
 /// A non-blocking report surface about `node`, as the release wait raises its own.
+/// A record written beside a surface, naming that surface by its channel id where the
+/// channel queued it.
+fn with_surface<'a>(
+    surfaced: Option<&Surface>,
+    mut payload: Vec<(&'a str, Value)>,
+) -> Vec<(&'a str, Value)> {
+    if let Some(surfaced) = surfaced {
+        payload.insert(0, ("surface", json!(surfaced.id)));
+    }
+    payload
+}
+
 fn report(kind: &str, node: &str, message: String) -> Surface {
     Surface {
         id: 0,
@@ -544,7 +556,7 @@ impl CheckWatch {
         }
         // The surface first and the record second, as the release wait raises its
         // own: a reader holding the record finds the surface it describes.
-        crate::engine::raised(
+        let surfaced = crate::engine::queued(
             paths,
             journal,
             report(
@@ -556,17 +568,20 @@ impl CheckWatch {
         journal.emit(
             journal::PipelineKind::CheckFailed,
             journal::labels(&paths.run, Some(&node)),
-            journal::payload(&[
-                ("node", json!(node)),
-                ("change", json!(change)),
-                ("head", json!(head)),
-                ("check", json!(reading.name)),
-                ("state", json!(reading.state)),
-                ("conclusion", json!(reading.conclusion)),
-                ("required", json!(reading.required)),
-                ("requirement", json!(requirement_label(reading.required))),
-                ("url", json!(reading.url)),
-            ]),
+            journal::payload(&with_surface(
+                surfaced.as_ref(),
+                vec![
+                    ("node", json!(node)),
+                    ("change", json!(change)),
+                    ("head", json!(head)),
+                    ("check", json!(reading.name)),
+                    ("state", json!(reading.state)),
+                    ("conclusion", json!(reading.conclusion)),
+                    ("required", json!(reading.required)),
+                    ("requirement", json!(requirement_label(reading.required))),
+                    ("url", json!(reading.url)),
+                ],
+            )),
         )?;
         Ok(())
     }
@@ -701,7 +716,7 @@ impl CheckWatch {
             {
                 continue;
             }
-            crate::engine::raised(
+            let surfaced = crate::engine::queued(
                 paths,
                 journal,
                 report(
@@ -713,27 +728,30 @@ impl CheckWatch {
             journal.emit(
                 journal::PipelineKind::ChecksUnfollowed,
                 journal::labels(&paths.run, Some(&node)),
-                journal::payload(&[
-                    ("node", json!(node)),
-                    ("change", json!(followed.change)),
-                    ("head", json!(followed.head)),
-                    ("reason", json!("timeout")),
-                    (
-                        "checks",
-                        Value::Array(
-                            running
-                                .iter()
-                                .map(|(check, required)| {
-                                    json!({
-                                        "check": check,
-                                        "required": required,
-                                        "requirement": requirement_label(*required),
+                journal::payload(&with_surface(
+                    surfaced.as_ref(),
+                    vec![
+                        ("node", json!(node)),
+                        ("change", json!(followed.change)),
+                        ("head", json!(followed.head)),
+                        ("reason", json!("timeout")),
+                        (
+                            "checks",
+                            Value::Array(
+                                running
+                                    .iter()
+                                    .map(|(check, required)| {
+                                        json!({
+                                            "check": check,
+                                            "required": required,
+                                            "requirement": requirement_label(*required),
+                                        })
                                     })
-                                })
-                                .collect(),
+                                    .collect(),
+                            ),
                         ),
-                    ),
-                ]),
+                    ],
+                )),
             )?;
         }
         Ok(())
