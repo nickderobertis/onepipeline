@@ -7,10 +7,11 @@
 //! `status` output and the doubles' own records: never off anything this crate wrote down
 //! about which way it decided.
 
-// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` and `onevcs` at
-// their subprocess boundary and nothing inside the crate under test, which is driven as a
-// real compiled binary. Each guard is a real program the binary spawns. `harness.rs`
-// carries the same suppression and the full rationale.
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
+// boundary, and the code host the linked `onevcs` publishes a lifecycle node to (`gh`),
+// and nothing inside the crate under test, which is driven as a real compiled binary. Each
+// guard is a real program the binary spawns. `harness.rs` carries the same suppression and
+// the full rationale.
 
 use std::path::{Path, PathBuf};
 

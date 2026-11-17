@@ -37,7 +37,7 @@ use crate::executor::CancellationToken;
 use crate::filter::Argv;
 use crate::graph::NodeStatus;
 use crate::ledger::{LaunchRecord, RunPaths};
-use crate::payload::{CommandEnding, Exited, GuardEvaluated, GuardStarted, GuardVerdict};
+use crate::payload::{CommandEnding, GuardEvaluated, GuardFailure, GuardStarted, GuardVerdict};
 use crate::plan::Node;
 
 /// The outcome a node its guard found not needed settles `done` under.
@@ -172,15 +172,6 @@ fn evaluate(
         },
         settlement,
     };
-    let failed = |ending: CommandEnding, detail: String| {
-        evaluated(
-            GuardVerdict::Failed { ending },
-            Some(Settlement {
-                detail: Some(detail),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
-            }),
-        )
-    };
     let cancelled = |verdict: GuardVerdict| {
         evaluated(
             verdict,
@@ -194,63 +185,67 @@ fn evaluate(
             }),
         )
     };
-    match ended {
-        Ended::Exited { exit_code: Some(0) } => {
-            let verdict = GuardVerdict::Needed {
-                ending: Exited::Exited,
-                exit_code: 0,
-            };
-            // A cancellation that reached the node as its guard said *needed* is still a
-            // cancellation: nothing is started for a node a manager has stopped. A race no
-            // journey can stage on purpose — the cancel and the exit within one poll — so it
-            // is held by this module's `each_ending_is_the_verdict_and_settlement_the_contract_names`.
-            if cancel.is_cancelled() {
-                return cancelled(verdict);
-            }
-            evaluated(verdict, None)
-        }
-        Ended::Exited {
-            exit_code: Some(NOT_NEEDED_EXIT),
-        } => {
+    // How it ended as the record writes it, and — where the host said why it never ran or
+    // could not be watched — that reason, which opens the failure's detail.
+    let (ending, why) = match ended {
+        Ended::Exited { exit_code } => (CommandEnding::Exited { exit_code }, None),
+        Ended::TimedOut => (CommandEnding::TimedOut, None),
+        Ended::Cancelled => (CommandEnding::Cancelled, None),
+        Ended::NotStarted(why) => (
+            CommandEnding::NotStarted,
+            Some(format!("the guard could not be started: {why}")),
+        ),
+        // llmlint: ignore[changed_behavior_has_e2e] reached only where the host refuses to say whether a child it started has exited (`try_wait` erring), which no plan or verb produces; a command reaches the same runner arm the same way and no journey stages it either. What it must do — fail rather than read as not needed — is the shared failure below, which the failure journey in `tests/e2e/guard.rs` drives.
+        Ended::Unwaitable(why) => (
+            CommandEnding::Exited { exit_code: None },
+            Some(with_tail(
+                format!("the guard could not be waited for: {why}"),
+                tail,
+            )),
+        ),
+    };
+    // Exit 0 and exit 3 are the guard's two answers, and no failure.
+    let Some(failure) = GuardFailure::new(ending) else {
+        if ending
+            == (CommandEnding::Exited {
+                exit_code: Some(NOT_NEEDED_EXIT),
+            })
+        {
             let said = String::from_utf8_lossy(tail);
             let said = said.trim();
-            evaluated(
-                GuardVerdict::NotNeeded {
-                    ending: Exited::Exited,
-                    exit_code: NOT_NEEDED_EXIT,
-                },
+            return evaluated(
+                GuardVerdict::NotNeeded,
                 Some(Settlement {
                     detail: (!said.is_empty()).then(|| said.to_owned()),
                     ..Settlement::plain(&node.id, NodeStatus::Done, Some(NOT_NEEDED))
                 }),
-            )
+            );
         }
-        Ended::Cancelled => cancelled(GuardVerdict::Failed {
-            ending: CommandEnding::Cancelled,
-        }),
-        // llmlint: ignore[changed_behavior_has_e2e] reached only where the host refuses to say whether a child it started has exited (`try_wait` erring), which no plan or verb produces; a command reaches the same runner arm the same way and no journey stages it either. What it must do — fail rather than read as not needed — is the shared `failed` above, which the failure journey in `tests/e2e/guard.rs` drives.
-        Ended::Unwaitable(why) => failed(
-            CommandEnding::Exited { exit_code: None },
-            with_tail(format!("the guard could not be waited for: {why}"), tail),
-        ),
-        Ended::Exited { exit_code } => {
-            let ending = CommandEnding::Exited { exit_code };
-            failed(ending, with_tail(failure(node, ending), tail))
+        // A cancellation that reached the node as its guard said *needed* is still a
+        // cancellation: nothing is started for a node a manager has stopped. A race no
+        // journey can stage on purpose — the cancel and the exit within one poll — so it is
+        // held by this module's `each_ending_is_the_verdict_and_settlement_the_contract_names`.
+        if cancel.is_cancelled() {
+            return cancelled(GuardVerdict::Needed);
         }
-        Ended::NotStarted(why) => failed(
-            CommandEnding::NotStarted,
-            format!("the guard could not be started: {why}"),
-        ),
-        Ended::TimedOut => failed(
-            CommandEnding::TimedOut,
-            with_tail(failure(node, CommandEnding::TimedOut), tail),
-        ),
+        return evaluated(GuardVerdict::Needed, None);
+    };
+    if ending == CommandEnding::Cancelled {
+        return cancelled(GuardVerdict::Failed(failure));
     }
+    let detail = why.unwrap_or_else(|| with_tail(failure_of(node, ending), tail));
+    evaluated(
+        GuardVerdict::Failed(failure),
+        Some(Settlement {
+            detail: Some(detail),
+            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
+        }),
+    )
 }
 
 /// What a failed guard's detail opens with, before its stderr: its exit status, the signal
 /// that ended it, or the deadline it outlived.
-fn failure(node: &Node, ending: CommandEnding) -> String {
+fn failure_of(node: &Node, ending: CommandEnding) -> String {
     match ending {
         CommandEnding::Exited {
             exit_code: Some(code),
@@ -283,16 +278,14 @@ pub(crate) fn recovered(
         log_of(paths, &node.id).display()
     );
     match verdict {
-        GuardVerdict::Needed { .. }
-        | GuardVerdict::Failed {
-            ending: CommandEnding::Cancelled,
-        } => None,
-        GuardVerdict::NotNeeded { .. } => Some(Settlement {
+        GuardVerdict::Needed => None,
+        GuardVerdict::Failed(failure) if failure.ending() == CommandEnding::Cancelled => None,
+        GuardVerdict::NotNeeded => Some(Settlement {
             detail: Some(format!("the guard found the node not needed; {kept}")),
             ..Settlement::plain(&node.id, NodeStatus::Done, Some(NOT_NEEDED))
         }),
-        GuardVerdict::Failed { ending } => Some(Settlement {
-            detail: Some(format!("{}; {kept}", failure(node, ending))),
+        GuardVerdict::Failed(failure) => Some(Settlement {
+            detail: Some(format!("{}; {kept}", failure_of(node, failure.ending()))),
             ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
         }),
     }
@@ -319,14 +312,11 @@ mod tests {
             exit_code: Some(code),
         };
         let needed = evaluate(&node(), exited(0), b"ignored", 5, &live);
-        assert!(matches!(needed.record.verdict, GuardVerdict::Needed { .. }));
+        assert!(matches!(needed.record.verdict, GuardVerdict::Needed));
         assert!(needed.settlement.is_none());
 
         let not_needed = evaluate(&node(), exited(3), b"\n  nothing to do  \n", 5, &live);
-        assert!(matches!(
-            not_needed.record.verdict,
-            GuardVerdict::NotNeeded { .. }
-        ));
+        assert!(matches!(not_needed.record.verdict, GuardVerdict::NotNeeded));
         let settled = not_needed.settlement.expect("it settles");
         assert_eq!(settled.status, NodeStatus::Done);
         assert_eq!(settled.outcome.as_deref(), Some(NOT_NEEDED));
@@ -344,7 +334,7 @@ mod tests {
             (Ended::TimedOut, "the guard timed out after 300 s"),
         ] {
             let failed = evaluate(&node(), ended, b"why", 5, &live);
-            assert!(matches!(failed.record.verdict, GuardVerdict::Failed { .. }));
+            assert!(matches!(failed.record.verdict, GuardVerdict::Failed(_)));
             let settled = failed.settlement.expect("it settles");
             assert_eq!(settled.status, NodeStatus::Failed);
             assert_eq!(settled.outcome.as_deref(), Some(GUARD_FAILED));
@@ -364,21 +354,32 @@ mod tests {
                 serde_json::json!({"verdict": "failed", "ending": "timed-out", "duration_ms": 5}),
             ),
         ] {
-            assert_eq!(serde_json::to_value(&evaluated).expect("it writes"), wire);
+            assert_eq!(serde_json::to_value(evaluated).expect("it writes"), wire);
             assert_eq!(
                 serde_json::from_value::<GuardEvaluated>(wire).expect("it reads"),
                 evaluated
             );
         }
-        assert!(serde_json::from_value::<GuardEvaluated>(serde_json::json!(
-            {"verdict": "needed", "ending": "timed-out", "duration_ms": 5}
-        ))
-        .is_err());
+        // A record whose verdict its ending contradicts is refused where it is read.
+        for contradicts in [
+            serde_json::json!({"verdict": "needed", "ending": "timed-out", "duration_ms": 5}),
+            serde_json::json!({"verdict": "needed", "ending": "exited", "exit_code": 3,
+                               "duration_ms": 5}),
+            serde_json::json!({"verdict": "not-needed", "ending": "exited", "exit_code": 1,
+                               "duration_ms": 5}),
+            serde_json::json!({"verdict": "failed", "ending": "exited", "exit_code": 0,
+                               "duration_ms": 5}),
+        ] {
+            assert!(
+                serde_json::from_value::<GuardEvaluated>(contradicts.clone()).is_err(),
+                "{contradicts} read"
+            );
+        }
 
         let stopped = CancellationToken::new();
         stopped.cancel();
         let raced = evaluate(&node(), exited(0), b"", 5, &stopped);
-        assert!(matches!(raced.record.verdict, GuardVerdict::Needed { .. }));
+        assert!(matches!(raced.record.verdict, GuardVerdict::Needed));
         assert_eq!(
             raced.settlement.expect("a cancelled node settles").status,
             NodeStatus::Cancelled

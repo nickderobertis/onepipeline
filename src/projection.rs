@@ -214,7 +214,7 @@ pub struct RunState {
     /// when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
-    pub(crate) guards_answered: BTreeMap<String, crate::payload::GuardVerdict>,
+    pub(crate) guards_answered: BTreeMap<String, crate::payload::GuardEvaluated>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacks: BTreeMap<String, RestackRecord>,
@@ -1468,7 +1468,7 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
             ) else {
                 return;
             };
-            if let crate::payload::GuardVerdict::Needed { .. } = evaluated.verdict {
+            if evaluated.verdict == crate::payload::GuardVerdict::Needed {
                 if state
                     .recorded
                     .get(node)
@@ -1480,7 +1480,7 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
             } else {
                 state
                     .guards_answered
-                    .insert(node.clone(), evaluated.verdict);
+                    .insert(node.clone(), evaluated);
             }
         }
         Some(journal::PipelineKind::NodeDispatched) => {

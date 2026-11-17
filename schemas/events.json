@@ -6010,133 +6010,11 @@
       "id": "agent.pipeline.guard-evaluated@2",
       "schema": {
         "type": "object",
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "ending": {
-                "$ref": "#/$defs/Exited",
-                "description": "Always `exited`."
-              },
-              "exit_code": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Its exit status, 0."
-              },
-              "verdict": {
-                "type": "string",
-                "const": "needed"
-              }
-            },
-            "required": [
-              "verdict",
-              "ending",
-              "exit_code"
-            ],
-            "description": "It exited 0: the node proceeds exactly as an unguarded node would."
-          },
-          {
-            "type": "object",
-            "properties": {
-              "ending": {
-                "$ref": "#/$defs/Exited",
-                "description": "Always `exited`."
-              },
-              "exit_code": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Its exit status, 3."
-              },
-              "verdict": {
-                "type": "string",
-                "const": "not-needed"
-              }
-            },
-            "required": [
-              "verdict",
-              "ending",
-              "exit_code"
-            ],
-            "description": "It exited 3: the node settles `done` with outcome `not-needed`."
-          },
-          {
-            "type": "object",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "exit_code": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "format": "int32",
-                    "description": "Its exit status; absent where a signal ended it."
-                  },
-                  "ending": {
-                    "type": "string",
-                    "const": "exited"
-                  }
-                },
-                "required": [
-                  "ending"
-                ],
-                "description": "It exited — with its status, where the host reported one."
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "ending": {
-                    "type": "string",
-                    "const": "timed-out"
-                  }
-                },
-                "required": [
-                  "ending"
-                ],
-                "description": "It outlived its `timeout_seconds`, and its process tree was stopped."
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "ending": {
-                    "type": "string",
-                    "const": "cancelled"
-                  }
-                },
-                "required": [
-                  "ending"
-                ],
-                "description": "Its node was cancelled while it ran, and its process tree was stopped."
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "ending": {
-                    "type": "string",
-                    "const": "not-started"
-                  }
-                },
-                "required": [
-                  "ending"
-                ],
-                "description": "It could not be started at all."
-              }
-            ],
-            "description": "Anything else — another exit, a signal, a guard that could not start, one past its\ndeadline or one stopped by a cancellation: never read as not needed.",
-            "properties": {
-              "verdict": {
-                "type": "string",
-                "const": "failed"
-              }
-            },
-            "required": [
-              "verdict"
-            ]
-          }
-        ],
-        "description": "`guard-evaluated`: how a guarded node's guard ended and what it decided, journalled\nahead of any settlement or dispatch that verdict leads to.",
         "properties": {
+          "verdict": {
+            "$ref": "#/$defs/VerdictWord",
+            "description": "What the guard decided."
+          },
           "duration_ms": {
             "type": "integer",
             "format": "uint64",
@@ -6145,20 +6023,94 @@
           }
         },
         "required": [
+          "verdict",
           "duration_ms"
         ],
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Its exit status; absent where a signal ended it."
+              },
+              "ending": {
+                "type": "string",
+                "const": "exited"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It exited — with its status, where the host reported one."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "timed-out"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It outlived its `timeout_seconds`, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "cancelled"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "Its node was cancelled while it ran, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "not-started"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It could not be started at all."
+          }
+        ],
+        "description": "`guard-evaluated`: how a guarded node's guard ended and what it decided, journalled\nahead of any settlement or dispatch that verdict leads to — as the record is written.",
         "title": "GuardEvaluated",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
-          "Exited": {
+          "VerdictWord": {
             "oneOf": [
               {
                 "type": "string",
-                "const": "exited",
-                "description": "It exited."
+                "const": "needed",
+                "description": "The guard exited 0."
+              },
+              {
+                "type": "string",
+                "const": "not-needed",
+                "description": "The guard exited 3."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "Anything else."
               }
             ],
-            "description": "The one ending a guard that answered *needed* or *not needed* can have: it exited."
+            "description": "The word a `guard-evaluated` record's `verdict` carries."
           }
         }
       }
