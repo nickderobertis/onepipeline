@@ -72,7 +72,7 @@ const STORE: &str = "onetaskgraph";
 /// `onetaskgraph` reserves it to `onepipeline` by name, which is what lets a
 /// node's persona, its turn budget, and its publication policy ride on a task
 /// without becoming vocabulary of a general task framework.
-const RESERVED: &str = "onepipeline.";
+pub(crate) const RESERVED: &str = "onepipeline.";
 
 /// The reserved key carrying a node's id.
 const ID_KEY: &str = "onepipeline.id";
@@ -139,7 +139,7 @@ pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
 /// which is what the item says. Reading them as node fields refused the relaunch of every
 /// project a run had written to, naming `node` as a field nobody authored — and, until
 /// entry 119, every project a published node had closed on, naming `landing`.
-const PROJECTION_ONLY: &[&str] = &[
+pub(crate) const PROJECTION_ONLY: &[&str] = &[
     SETTLEMENT_KEY,
     PROJECTED_STATUS_KEY,
     NODE_KEY,
@@ -153,7 +153,7 @@ const PROJECTION_ONLY: &[&str] = &[
 ];
 
 /// The reserved **project** keys the engine owns and no plan setting answers to.
-const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
+pub(crate) const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
 
 /// A reserved key this mapping fills from the task itself, and where it comes
 /// from — so a project stating it is told which end to edit rather than having

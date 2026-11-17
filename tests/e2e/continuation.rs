@@ -90,7 +90,7 @@ fn launch(world: &World, run: &str, project: &str, extra: &[&str]) -> crate::har
 }
 
 /// Each node's `onepipeline.settlement` as the store holds it, by node id.
-fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
+pub(crate) fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
     world
         .store_tasks(project)
         .into_iter()
@@ -104,7 +104,7 @@ fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
 }
 
 /// The project's `onepipeline.driver`, as the store holds it: `null` where it holds none.
-fn stored_claim(world: &World, project: &str) -> Value {
+pub(crate) fn stored_claim(world: &World, project: &str) -> Value {
     world.store_project(project)["items"][0]["item"]["metadata"]
         .get("onepipeline.driver")
         .cloned()
@@ -150,7 +150,7 @@ fn changes_from(world: &World, branch: &str) -> Vec<Value> {
 }
 
 /// The newest settlement `node` journalled in `run`.
-fn settled(world: &World, run: &str, node: &str) -> Value {
+pub(crate) fn settled(world: &World, run: &str, node: &str) -> Value {
     world
         .events_of(run, "node-settled")
         .into_iter()
@@ -170,7 +170,7 @@ fn as_stored(settlement: &Value) -> Value {
 }
 
 /// The nodes `run` dispatched, in order.
-fn dispatched(world: &World, run: &str) -> Vec<String> {
+pub(crate) fn dispatched(world: &World, run: &str) -> Vec<String> {
     world
         .events_of(run, "node-dispatched")
         .iter()
@@ -180,7 +180,7 @@ fn dispatched(world: &World, run: &str) -> Vec<String> {
 
 /// The branches `run`'s dispatches opened sessions on, each once: the sibling's own
 /// `session-opened` and the copy the engine relays beside it describe one session.
-fn sessions_opened(world: &World, run: &str) -> Vec<String> {
+pub(crate) fn sessions_opened(world: &World, run: &str) -> Vec<String> {
     world
         .journal(run)
         .iter()
@@ -410,7 +410,7 @@ fn a_failed_draft(name: &str, run: &str) -> (World, String, BTreeMap<String, Val
 
 /// Write `value` under `key` on the task carrying node `node`, as a driver on another host
 /// would have written it.
-fn restate(world: &World, project: &str, node: &str, key: &str, value: Value) {
+pub(crate) fn restate(world: &World, project: &str, node: &str, key: &str, value: Value) {
     let task = world
         .store_tasks(project)
         .into_iter()

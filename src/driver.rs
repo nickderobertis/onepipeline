@@ -227,6 +227,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(discarded.exit_code())
         }
         Verb::Plan(crate::cli::PlanCommand::Check(args)) => crate::plancheck::check(&args),
+        Verb::Plan(crate::cli::PlanCommand::WritebackKeys(args)) => {
+            print!(
+                "{}",
+                render_writeback_keys(&crate::writeback::writeback_keys(), args.json)?
+            );
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Boundary(crate::cli::BoundaryCommand::Guidance(args)) => {
             println!("{}", crate::boundary::render_guidance(args.json)?);
             Ok(EXIT_SUCCESS)
@@ -1447,6 +1454,23 @@ fn read_rendering(named: &str) -> Result<String> {
         .map_err(|error| Error::Invalid(format!("--rendering {named} cannot be read: {error}")))
 }
 
+/// What `plan writeback-keys` prints: one JSON object and a newline, or one `<scope> <key>`
+/// line per key, `task` first.
+fn render_writeback_keys(keys: &crate::writeback::WritebackKeys, json: bool) -> Result<String> {
+    if json {
+        let document = serde_json::to_string(keys)
+            .map_err(|error| Error::Invalid(format!("the write-back's keys: {error}")))?;
+        return Ok(format!("{document}\n"));
+    }
+    Ok(keys
+        .task
+        .iter()
+        .map(|key| ("task", key))
+        .chain(keys.project.iter().map(|key| ("project", key)))
+        .map(|(scope, key)| format!("{scope} {key}\n"))
+        .collect())
+}
+
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
     let labels = crate::labels::parse(&args.labels)?;
@@ -1479,12 +1503,16 @@ fn start(args: &StartArgs) -> Result<i32> {
         Err(refused) => return Err(refused),
     };
     let claim = found.claim();
+    // The nodes this launch dispatches again although they settled `done`, held before
+    // anything is minted to being nodes it can redo on the branches they settled on.
+    let redo: std::collections::BTreeSet<String> = args.redo.iter().cloned().collect();
+    crate::continuation::refuse_unredoable(project.as_str(), &read, &redo, args.fresh)?;
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
     let mut continuation = if args.fresh {
         crate::continuation::Continuation::default()
     } else {
-        crate::continuation::continuation_of(&read, claim.as_ref())?
+        crate::continuation::continuation_of(&read, claim.as_ref(), &redo)?
     };
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
@@ -1828,8 +1856,9 @@ fn start(args: &StartArgs) -> Result<i32> {
         project_origin = crate::labels::origin(&read.project_metadata)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;
+        crate::continuation::refuse_unredoable(project.as_str(), &read, &redo, args.fresh)?;
         if !args.fresh {
-            continuation = crate::continuation::continuation_of(&read, claim.as_ref())?;
+            continuation = crate::continuation::continuation_of(&read, claim.as_ref(), &redo)?;
         }
         plan = launched(&read, &continuation)?;
     }
@@ -1998,6 +2027,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
         public_id: public.id.into_string(),
         name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
+        redo: redo.into_iter().collect(),
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -5696,6 +5726,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         }
     }
 

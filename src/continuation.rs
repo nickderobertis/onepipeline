@@ -11,7 +11,12 @@
 //! - a node that left a branch — settled `failed`, `cancelled` or `parked`, or dispatched
 //!   with no settlement since — is **pinned** to that branch, as an adoption pins an
 //!   abandoned dispatch, so its next dispatch continues the branch and its publication
-//!   adopts the change request already open from it.
+//!   adopts the change request already open from it;
+//! - a node `start --redo` names is not continued although its lineage settled `done`: it
+//!   is pinned to the branch that settlement records, as a node that left one is, so it is
+//!   dispatched again continuing that branch and its new settlement replaces the stored one.
+//!   [`refuse_unredoable`] refuses a redo that names no such settlement before any run
+//!   exists, and the launch record keeps the names.
 //!
 //! The claim is **not atomic**: the store offers no conditional write, so it is a record
 //! two launches can both read empty. What it holds is narrower — a launch that finds
@@ -554,9 +559,16 @@ impl Stored {
             self.status,
             Status::Failed | Status::Cancelled | Status::Parked
         )
-        .then(|| self.fields.get("branch")?.as_str())
+        .then(|| self.branch())
         .flatten()
-        .and_then(crate::vcs::BranchName::checked)
+    }
+
+    /// The branch the settlement records, whatever it settled.
+    fn branch(&self) -> Option<crate::vcs::BranchName> {
+        self.fields
+            .get("branch")?
+            .as_str()
+            .and_then(crate::vcs::BranchName::checked)
     }
 }
 
@@ -609,6 +621,72 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
     )))
 }
 
+/// Refuse a `--redo` this launch cannot honour, naming the node and the reason, before
+/// anything is minted. Each named node must be a node of the plan whose lineage settled
+/// `done` on a branch that has not landed, and the launch must continue the project rather
+/// than run it `--fresh`, which already dispatches every node.
+pub(crate) fn refuse_unredoable(
+    project: &str,
+    read: &Read,
+    redo: &std::collections::BTreeSet<String>,
+    fresh: bool,
+) -> Result<()> {
+    let refused = |node: &str, why: &str| {
+        Err(Error::Refused(format!(
+            "--redo refused: node '{node}' of {project} {why}"
+        )))
+    };
+    if fresh && !redo.is_empty() {
+        return Err(Error::Refused(
+            "--redo refused: --fresh already dispatches every node again on a branch of its \
+             own, so --redo names nothing to continue; launch without --fresh to redo named \
+             nodes on the branches they settled on"
+                .to_owned(),
+        ));
+    }
+    for node in redo {
+        if !read.plan.tasks.iter().any(|planned| &planned.id == node) {
+            return refused(node, "is not a node of the plan");
+        }
+        let Some(settlement) = settlement_of(node, read.metadata.get(node))? else {
+            return refused(
+                node,
+                "holds no settlement, so there is nothing to redo: a launch dispatches it anyway",
+            );
+        };
+        if settlement.status != crate::payload::Status::Done {
+            return refused(
+                node,
+                &format!(
+                    "settled `{}`, not `done`: a launch without --redo already dispatches it \
+                     again, on the branch it left",
+                    settlement
+                        .fields
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                ),
+            );
+        }
+        if settlement.branch().is_none() {
+            return refused(
+                node,
+                "settled `done` on no branch, so there is no branch for its redo to continue",
+            );
+        }
+        if settlement.fields.get("landing").and_then(Value::as_str)
+            == Some(crate::graph::Landing::Landed.as_str())
+        {
+            return refused(
+                node,
+                "settled `done` and landed: redoing landed work would be a new change rather \
+                 than a continuation of its branch",
+            );
+        }
+    }
+    Ok(())
+}
+
 /// What a launch continues from its project's store.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Continuation {
@@ -643,8 +721,15 @@ impl Continued {
 /// Keyed by the plan's own node ids — a lineage root's, carrying its head's definition and,
 /// here, its head's settlement — because those are the nodes the launched plan holds.
 /// `claim` is what the read found, named on each continued settlement as the run it is
-/// continued from.
-pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Result<Continuation> {
+/// continued from. Each node `redo` names — which [`refuse_unredoable`] has already held to
+/// a lineage settled `done` on an unlanded branch — is not continued: it is pinned to the
+/// branch that settlement records, as a node that left one is, so it dispatches again
+/// continuing that branch.
+pub(crate) fn continuation_of(
+    read: &Read,
+    claim: Option<&DriverClaim>,
+    redo: &std::collections::BTreeSet<String>,
+) -> Result<Continuation> {
     let mut continued = Continuation::default();
     let from = json!({"source": "store", "run": claim.map(|claim| claim.run.clone())});
     for node in &read.plan.tasks {
@@ -656,9 +741,11 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
             Some(metadata) => dispatch_of(&node.id, metadata)?,
             None => None,
         };
+        let redone = redo.contains(&node.id);
         if let Some(done) = settlement
             .as_ref()
             .filter(|settlement| settlement.status == crate::payload::Status::Done)
+            .filter(|_| !redone)
         {
             let mut payload = done.fields.clone();
             let mut from = from.clone();
@@ -699,7 +786,13 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
         }
         // A dispatch the store still holds opened after the settlement beside it, since a
         // settlement removes the key: its branch is the one the work was last on.
-        let left = settlement.as_ref().and_then(Stored::left_on);
+        let left = settlement.as_ref().and_then(|settlement| {
+            if redone {
+                settlement.branch()
+            } else {
+                settlement.left_on()
+            }
+        });
         let dispatched =
             dispatch.and_then(|dispatch| crate::vcs::BranchName::checked(&dispatch.branch));
         if let Some(branch) = dispatched.or(left) {
@@ -2057,5 +2150,121 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// A plan of lifecycle nodes `a`, `b` and `c` and a direct node `d`, read with each
+    /// settlement `settled` names on its node's task.
+    fn read_of(settled: &[(&str, Value)]) -> Read {
+        let lifecycle = |id: &str| json!({"id": id, "repo": "service", "task": "Ship it."});
+        let plan = serde_json::from_value(json!({
+            "schema_version": crate::plan::PLAN_SCHEMA_VERSION,
+            "goal": {"text": "Deliver"},
+            "tasks": [lifecycle("a"), lifecycle("b"), lifecycle("c"),
+                      {"id": "d", "task": "Do it."}],
+        }))
+        .expect("a plan");
+        Read {
+            plan,
+            metadata: settled
+                .iter()
+                .map(|(node, settlement)| {
+                    let metadata = [(SETTLEMENT_KEY.to_owned(), settlement.clone())];
+                    ((*node).to_owned(), metadata.into_iter().collect())
+                })
+                .collect(),
+            tasks: BTreeMap::new(),
+            project_metadata: BTreeMap::new(),
+            stored: BTreeMap::new(),
+            unanswered: BTreeMap::new(),
+        }
+    }
+
+    fn named(nodes: &[&str]) -> std::collections::BTreeSet<String> {
+        nodes.iter().map(|node| (*node).to_owned()).collect()
+    }
+
+    /// A node `--redo` names is pinned to the branch its `done` settlement records rather
+    /// than continued, and every node it does not name is continued as without it.
+    #[test]
+    fn a_redone_node_is_pinned_to_its_settled_branch_and_the_rest_are_continued() {
+        let read = read_of(&[
+            (
+                "a",
+                json!({"status": "done", "branch": "me/a", "remote": "pushed"}),
+            ),
+            (
+                "b",
+                json!({"status": "done", "branch": "me/b", "remote": "pushed"}),
+            ),
+            (
+                "c",
+                json!({"status": "done", "branch": "me/c", "remote": "pushed"}),
+            ),
+        ]);
+        refuse_unredoable("p", &read, &named(&["a", "b"]), false).expect("redoable");
+        let continued = continuation_of(&read, None, &named(&["a", "b"])).expect("continued");
+        assert_eq!(
+            continued
+                .settled
+                .iter()
+                .map(|(node, _)| node.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        assert_eq!(
+            continued
+                .pinned
+                .iter()
+                .map(|(node, branch)| (node.as_str(), branch.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("a", "me/a"), ("b", "me/b")]
+        );
+        // Naming none is the continuation it always was.
+        let unnamed = continuation_of(&read, None, &named(&[])).expect("continued");
+        assert_eq!(unnamed.settled.len(), 3);
+        assert!(unnamed.pinned.is_empty());
+    }
+
+    /// Each redo this launch cannot honour is refused naming the node, or the flag it
+    /// conflicts with, and the reason.
+    #[test]
+    fn a_redo_that_cannot_be_honoured_is_refused_naming_the_node_and_why() {
+        let read = read_of(&[
+            ("a", json!({"status": "failed", "branch": "me/a"})),
+            ("b", json!({"status": "done"})),
+            (
+                "c",
+                json!({"status": "done", "branch": "me/c", "landing": "landed"}),
+            ),
+        ]);
+        for (node, says) in [
+            ("nowhere", "is not a node of the plan"),
+            ("d", "holds no settlement"),
+            ("a", "settled `failed`, not `done`"),
+            ("b", "settled `done` on no branch"),
+            ("c", "settled `done` and landed"),
+        ] {
+            let refused = refuse_unredoable("p", &read, &named(&[node]), false)
+                .expect_err("refused")
+                .to_string();
+            assert!(
+                refused.contains("--redo refused: node '")
+                    && refused.contains(&format!("'{node}' of p"))
+                    && refused.contains(says),
+                "{node}: {refused}"
+            );
+        }
+        let fresh = refuse_unredoable("p", &read, &named(&["c"]), true)
+            .expect_err("refused")
+            .to_string();
+        assert!(fresh.contains("--redo refused: --fresh"), "{fresh}");
+        // A `done`, unlanded draft redoes: its publication adopts the change request open
+        // from its branch.
+        let drafted = read_of(&[(
+            "a",
+            json!({"status": "done", "branch": "me/a", "landing": "unlanded"}),
+        )]);
+        refuse_unredoable("p", &drafted, &named(&["a"]), false).expect("redoable");
+        refuse_unredoable("p", &read, &named(&[]), true).expect("no redo, nothing refused");
     }
 }
