@@ -965,6 +965,13 @@ oneagentgraph = "0.13.0"
 # `manager_landings::an_operators_own_optional_locks_setting_is_kept` holds.
 # onevcs-testing 0.21.7 pins it exactly, so both requirements and the lock move
 # together.
+# 0.67.3 is the floor because it answers the one-name repository reads it repeats
+# most — `show-ref --verify`, `cat-file -e`, `rev-parse`, `symbolic-ref` and
+# `merge-base --is-ancestor` — in process, from a repository opened for that one
+# read, rather than starting `git` for each (onevcs-fewer-git-starts). Every
+# session, publication and landing this engine makes reads through it, so below
+# this floor each of those reads is a process start, which Windows prices
+# highest. onevcs-testing 0.21.8 pins it exactly.
 onevcs = "0.67.2"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
