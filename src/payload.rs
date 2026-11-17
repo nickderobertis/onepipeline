@@ -735,6 +735,48 @@ pub(crate) struct CommandExited {
     pub(crate) duration_ms: u64,
 }
 
+/// `guard-started`: a guarded node's guard, as it was started — the record that makes the
+/// node `running` while its guard decides whether it is needed.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct GuardStarted {
+    /// The argv, as the plan states it: never empty, its program never blank.
+    #[schemars(with = "Vec<String>", length(min = 1))]
+    pub(crate) guard: crate::filter::Argv,
+    /// Where its stdout and stderr are kept: `<run>/guards/<node>.log`, absolute.
+    pub(crate) log: String,
+    /// Its deadline in seconds: the node's `guard_timeout_seconds`, or the default where it
+    /// states none.
+    pub(crate) timeout_seconds: std::num::NonZeroU64,
+}
+
+/// What a guard's ending said about its node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GuardVerdict {
+    /// It exited 0: the node proceeds exactly as an unguarded node would.
+    Needed,
+    /// It exited 3: the node settles `done` with outcome `not-needed`.
+    NotNeeded,
+    /// Anything else — another exit, a guard that could not start, one past its deadline
+    /// or one stopped by a cancellation: never read as not needed.
+    Failed,
+}
+
+/// `guard-evaluated`: how a guarded node's guard ended and what it decided, journalled
+/// ahead of any settlement or dispatch that verdict leads to.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct GuardEvaluated {
+    /// What the guard decided.
+    pub(crate) verdict: GuardVerdict,
+    /// How it ended, and its exit status where it exited: a command's endings.
+    #[serde(flatten)]
+    pub(crate) ending: CommandEnding,
+    /// How long it ran, in milliseconds.
+    pub(crate) duration_ms: u64,
+}
+
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
 /// placed on, and the stack base merging them when there were several.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2619,6 +2661,8 @@ payload_messages! {
     ChecksUnfollowed => "checks-unfollowed";
     CommandStarted => "command-started";
     CommandExited => "command-exited";
+    GuardStarted => "guard-started";
+    GuardEvaluated => "guard-evaluated";
 }
 
 /// Whether a retained numeric field is the zero a new record leaves it at.

@@ -582,6 +582,9 @@ pub(crate) enum Message {
     /// A `kind: command` node's command ended, ahead of its settlement: the node, and
     /// what `command-exited` records.
     CommandExited(Box<(crate::graph::NodeRef, crate::payload::CommandExited)>),
+    /// A guarded node's guard ended: the node, what `guard-evaluated` records, and whether
+    /// the node proceeds — where it does not, its settlement follows this.
+    GuardEvaluated(Box<(crate::graph::NodeRef, crate::payload::GuardEvaluated, bool)>),
     /// The pool-maintenance sweep this driver started has maintained every
     /// identity, and this is what it did.
     Maintained(Box<crate::maintenance::PoolsMaintained>),
@@ -2812,6 +2815,23 @@ fn converge(
                         journal::labels(&paths.run, Some(node.as_str())),
                         payload_of(&exited)?,
                     )?;
+                }
+                // Journalled before whatever the verdict leads to: a node that proceeds comes
+                // out of flight to be started as an unguarded node would on the next pass, and
+                // one the verdict settles is settled by the `Settled` that follows this.
+                Message::GuardEvaluated(evaluated) => {
+                    let (node, evaluated, proceeds) = *evaluated;
+                    journal.emit(
+                        journal::PipelineKind::GuardEvaluated,
+                        journal::labels(&paths.run, Some(node.as_str())),
+                        payload_of(&evaluated)?,
+                    )?;
+                    if proceeds {
+                        in_flight.remove(node.as_str());
+                        state.refresh(paths);
+                        derived = None;
+                        unpublished = true;
+                    }
                 }
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
@@ -8849,6 +8869,62 @@ fn start_ready(
         if node.kind != NodeKind::Human && in_flight.len() >= concurrency {
             break;
         }
+        // A guarded node's guard runs before anything else is started for it — a dispatch,
+        // a command, a person's wait — and once an attempt: a node whose guard said it is
+        // needed proceeds below exactly as an unguarded node would. In flight while it runs,
+        // as a command is, so it holds a `concurrency` slot — a human node's included — and
+        // is stopped by what stops a dispatch.
+        if let Some(guard) = node
+            .guard
+            .clone()
+            .filter(|_| !state.guards_passed.contains(&node.id))
+        {
+            if in_flight.len() >= concurrency {
+                continue;
+            }
+            let argv = match crate::filter::Argv::new(guard) {
+                Ok(argv) => argv,
+                // llmlint: ignore-block[changed_behavior_has_e2e] `graph::check_node` refuses an
+                // empty guard or a blank program at load and at every live edit, which
+                // `guard.rs`'s refusal journeys drive; reaching this arm means a journal edited
+                // by hand, which would prove the fixture rather than the code.
+                Err(why) => {
+                    settle(
+                        paths,
+                        journal,
+                        &Settlement {
+                            detail: Some(format!("the guard could not be started: {why}")),
+                            ..failed(&node.id, crate::guard::GUARD_FAILED)
+                        },
+                    )?;
+                    settled_here = true;
+                    continue;
+                } // llmlint: ignore-end[changed_behavior_has_e2e]
+            };
+            journal.emit(
+                journal::PipelineKind::GuardStarted,
+                journal::labels(&paths.run, Some(&node.id)),
+                payload_of(&crate::guard::started(paths, &node, &argv))?,
+            )?;
+            let cancel = CancellationToken::new();
+            crate::guard::spawn(paths, launch, &node, &argv, cancel.clone(), tx.clone())?;
+            let now = Instant::now();
+            in_flight.insert(
+                node.id.clone(),
+                Dispatch {
+                    node,
+                    cancel,
+                    started: now,
+                    last_progress: now,
+                    // A guard records nothing while it runs, so it is never reported quiet.
+                    reported_quiet: true,
+                    control: None,
+                    presentations: crate::note::Presentations::default(),
+                },
+            );
+            settled_here = true;
+            continue;
+        }
         // An `expects_no_diff` node settles deterministically, without
         // dispatching: the executor never infers this from task prose.
         if node.expects_no_diff {
@@ -13995,7 +14071,7 @@ mod tests {
     /// this carries is the other half: a word *added* is a deliberate edit here,
     /// and the gate below is what stops it colliding with a vocabulary an
     /// operator reads through the same views.
-    const SETTLEMENT_OUTCOMES: [&str; 10] = [
+    const SETTLEMENT_OUTCOMES: [&str; 12] = [
         INVALID_NODE,
         NO_CHANGES,
         EMPTY_BRANCH,
@@ -14006,6 +14082,8 @@ mod tests {
         TASK_FAILED_CHANGE_OPEN,
         DISPATCH_DIED,
         PROVIDER_FAILED,
+        crate::guard::NOT_NEEDED,
+        crate::guard::GUARD_FAILED,
     ];
 
     /// Every `FailureKind` the sibling distinguishes, for the vocabulary gate.

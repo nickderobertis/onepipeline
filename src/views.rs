@@ -3762,6 +3762,17 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             if let Some(restacked) = restack_phrase(&view.state, id) {
                 out.push_str(&format!("  {id}: {restacked}\n"));
             }
+            // Work its guard found nothing to do for reads `done` like the rest, so the
+            // node, and why, is said: it is the one done node nothing ran for.
+            if let Some(detail) = not_needed_detail(view, id, *node_status) {
+                let said = detail.map(|detail| format!(": {}", one_line(&detail)));
+                out.push_str(&format!(
+                    "  {id}: {} ({}){}\n",
+                    NodeStatus::Done.as_str(),
+                    crate::guard::NOT_NEEDED,
+                    said.unwrap_or_default()
+                ));
+            }
         }
         for id in view.state.titles_unverified.keys() {
             if let Some(title) = unverified_title_phrase(&view.state, id) {
@@ -4478,6 +4489,14 @@ fn awaiting_release_nodes(view: &RunView) -> Vec<(String, NodeStatus, Option<Str
             (node, status, awaiting)
         })
         .collect()
+}
+
+/// For a node standing `done` with outcome `not-needed`, the detail its guard's settlement
+/// carried, where it carried one; `None` for every other node.
+fn not_needed_detail(view: &RunView, node: &str, status: NodeStatus) -> Option<Option<String>> {
+    (status == NodeStatus::Done
+        && view.state.outcomes.get(node).map(String::as_str) == Some(crate::guard::NOT_NEEDED))
+    .then(|| settled_detail(view, node))
 }
 
 /// The `detail` the newest `node-settled` for one node carried.
@@ -5795,6 +5814,12 @@ pub fn results(view: &RunView) -> String {
         if let Some(outcome) = view.state.outcomes.get(&node.id) {
             out.push_str(&format!(" ({outcome})"));
         }
+        // A node its guard found not needed says why on its own line, as the guard
+        // amendment prints it: the reason is the whole of what that settlement carries.
+        let not_needed = not_needed_detail(view, &node.id, status);
+        if let Some(Some(detail)) = &not_needed {
+            out.push_str(&format!(": {}", one_line(detail)));
+        }
         // Beside the status word for the same reason `status` gives it a line:
         // `parked` on its own says the planner idled the node, and says nothing
         // about the dispatch still running for it.
@@ -5910,7 +5935,7 @@ pub fn results(view: &RunView) -> String {
         if let Some(died) = death_phrase(&view.state, &node.id, branch.as_deref()) {
             out.push_str(&format!("      died: {died}\n"));
         }
-        if let Some(detail) = settled_detail(view, &node.id) {
+        if let Some(detail) = settled_detail(view, &node.id).filter(|_| not_needed.is_none()) {
             out.push_str(&format!("      detail: {}\n", one_line(&detail)));
         }
         // What this node is judged against beyond its own task prose. Under the

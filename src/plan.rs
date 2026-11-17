@@ -477,6 +477,31 @@ pub(crate) fn retired_field_refusal(document: &serde_json::Value) -> Option<Stri
     }
 }
 
+/// Why a node an edit envelope carries — an `add`'s or a `retry`'s `node` — does not read
+/// as a [`Node`], naming that node and the path to the field that refused, as the store
+/// loader names a task's: `node '<id>': steps[0].guard: unknown field ...`. `None` where
+/// every node the envelope carries reads, so whatever else is malformed is answered as it
+/// was.
+///
+/// The second, lenient read of an envelope its schema refused, beside
+/// [`retired_field_refusal`]: a serde refusal of the whole envelope says only where in the
+/// text it stopped, and a planner fixing one node of a long reply needs its name.
+pub(crate) fn unreadable_node_refusal(document: &serde_json::Value) -> Option<String> {
+    document
+        .get("commands")?
+        .as_array()?
+        .iter()
+        .filter_map(|command| command.get("node"))
+        .filter(|node| node.is_object())
+        .find_map(|node| {
+            let refused = crate::taskgraph::read::<Node>(node.clone()).err()?;
+            Some(match node.get("id").and_then(serde_json::Value::as_str) {
+                Some(id) => format!("node '{id}': {refused}"),
+                None => refused,
+            })
+        })
+}
+
 impl Node {
     /// The task prose this node's dispatch receives.
     ///
@@ -1383,6 +1408,21 @@ pub struct Node {
     /// Absent is no deadline at all. Refused on every other kind, and refused zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<std::num::NonZeroU64>,
+    /// A guard: a program and its arguments, run with no shell from the launch directory
+    /// when the node first becomes actionable, whose exit status says whether the node is
+    /// needed at all. Exit 0 is needed, and the node proceeds as an unguarded one would;
+    /// exit 3 settles it `done` with outcome `not-needed`, with nothing dispatched, run or
+    /// raised for it; anything else settles it `failed` with outcome `guard-failed`.
+    /// Allowed on an agent node, direct or lifecycle, a `kind: command` node and a
+    /// `kind: human` node; refused empty, with a blank program, and beside
+    /// `expects_no_diff: true`. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<Vec<String>>,
+    /// How long a node's [`guard`](Self::guard) may run, in whole seconds, before its
+    /// process tree is stopped and the node settles `guard-failed`. Absent is 300
+    /// seconds. Refused without a `guard`, and refused zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_timeout_seconds: Option<std::num::NonZeroU64>,
     /// The task prose: `## What`, `## Why`, `## Acceptance criteria`, then
     /// `## Additional info` only when it is nonempty. A `kind: human` node
     /// carries the action prose alone.

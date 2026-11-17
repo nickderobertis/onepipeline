@@ -202,6 +202,12 @@ pub struct RunState {
     /// Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacking: BTreeMap<String, crate::payload::Onto>,
+    /// The nodes whose guard said they are needed on their current attempt, so the guard
+    /// is not run again for it: an adopting driver dispatches such a node rather than asking
+    /// again. A `requeue` starts a new attempt, which takes the node out. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
+    pub(crate) guards_passed: BTreeSet<String>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacks: BTreeMap<String, RestackRecord>,
@@ -1141,11 +1147,16 @@ impl RunState {
     /// its references some other way asks.
     pub fn statuses(&self) -> BTreeMap<String, NodeStatus> {
         let settled = self.settled();
-        if let Some(derived) = derived_already(&self.graph, &settled, &self.cross_dag) {
+        if let Some(mut derived) = derived_already(&self.graph, &settled, &self.cross_dag) {
+            self.guards_unanswered(&mut derived);
             return derived;
         }
-        let derived = self.statuses_with(&|dependency| self.cross_dag.get(dependency).copied());
+        let mut derived = crate::graph::derive(&self.graph, &settled, &|dependency| {
+            self.cross_dag.get(dependency).copied()
+        });
+        crate::loopstats::statuses_derived();
         remember_derived(&self.graph, &settled, &self.cross_dag, &derived);
+        self.guards_unanswered(&mut derived);
         derived
     }
 
@@ -1155,7 +1166,30 @@ impl RunState {
         upstream: &dyn Fn(&str) -> Option<NodeStatus>,
     ) -> BTreeMap<String, NodeStatus> {
         crate::loopstats::statuses_derived();
-        crate::graph::derive(&self.graph, &self.settled(), upstream)
+        let mut derived = crate::graph::derive(&self.graph, &self.settled(), upstream);
+        self.guards_unanswered(&mut derived);
+        derived
+    }
+
+    /// A guarded human node whose guard has not yet said it is needed is `ready` — its
+    /// guard is what it is ready for — rather than `waiting`: nobody is asked, no decision
+    /// holds its dependents and no item is raised until the guard has answered. Applied
+    /// over the derivation rather than inside it, since what a guard said is this run's
+    /// record and not the graph's.
+    fn guards_unanswered(&self, derived: &mut BTreeMap<String, NodeStatus>) {
+        for node in self.graph.iter() {
+            if node.kind == crate::plan::NodeKind::Human
+                && node.guard.is_some()
+                && !self.guards_passed.contains(&node.id)
+                && !self.recorded.contains_key(&node.id)
+            {
+                if let Some(status) = derived.get_mut(&node.id) {
+                    if *status == NodeStatus::Waiting {
+                        *status = NodeStatus::Ready;
+                    }
+                }
+            }
+        }
     }
 
     /// What each node's settlement said, as the derivation reads it.
@@ -1402,6 +1436,35 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
             }
         }
         Some(journal::PipelineKind::CommandExited) => {}
+        // A guarded node is running from the moment its guard starts, as a command node is
+        // from its command's: nothing else is started for it until its verdict.
+        Some(journal::PipelineKind::GuardStarted) => {
+            if let Some(node) = &event.labels.node {
+                state
+                    .recorded
+                    .insert(node.clone(), Recorded::At(NodeStatus::Running));
+                if let Some(ts) = millis_of(&event.ts) {
+                    state.dispatched_at.insert(node.clone(), ts);
+                }
+            }
+        }
+        // A verdict that settles the node is followed by its `node-settled`, which the fold
+        // reads; one that says *needed* takes the guard's `running` off the record, so the
+        // node derives from the graph again and is started as an unguarded node would be —
+        // and marks the attempt's guard answered, so it is not asked again.
+        Some(journal::PipelineKind::GuardEvaluated) => {
+            let needed = payload.get("verdict").and_then(Value::as_str) == Some("needed");
+            if let (Some(node), true) = (&event.labels.node, needed) {
+                if state
+                    .recorded
+                    .get(node)
+                    .is_some_and(|recorded| *recorded == Recorded::At(NodeStatus::Running))
+                {
+                    state.recorded.remove(node);
+                }
+                state.guards_passed.insert(node.clone());
+            }
+        }
         Some(journal::PipelineKind::NodeDispatched) => {
             if let Some(node) = &event.labels.node {
                 state
@@ -2746,6 +2809,8 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             }
             Operation::NodeRequeued { node, .. } => {
                 state.recorded.remove(node);
+                // A new attempt, whose guard is asked again.
+                state.guards_passed.remove(node);
                 // The park is over, so nothing is held by whoever made
                 // it: a later park of the same node is judged on its own
                 // author rather than on this one's.

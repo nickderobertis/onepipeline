@@ -55,7 +55,7 @@ pub(crate) const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
 pub(crate) const LAUNCHER_SESSION_ENV: &str = "ONEPIPELINE_LAUNCHER_SESSION";
 
 /// How much of a command's stderr its failure's detail carries, from the end.
-const STDERR_TAIL_BYTES: usize = 2048;
+pub(crate) const STDERR_TAIL_BYTES: usize = 2048;
 
 /// How often a running command is asked whether it has ended.
 const POLL: Duration = Duration::from_millis(50);
@@ -137,16 +137,125 @@ fn run(
     argv: &Argv,
     cancel: &CancellationToken,
 ) -> (CommandEnding, Settlement) {
-    let not_started = |why: String| {
-        (
-            CommandEnding::NotStarted,
-            Settlement {
-                detail: Some(format!("the command could not be started: {why}")),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
-            },
-        )
+    let ran = run_program(
+        paths,
+        launch,
+        &node.id,
+        argv,
+        &log_of(paths, &node.id),
+        node.timeout_seconds,
+        cancel,
+    );
+    let failed = |detail: String| Settlement {
+        detail: Some(detail),
+        ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
     };
-    let log_path = log_of(paths, &node.id);
+    match ran.ended {
+        Ended::NotStarted(why) => (
+            CommandEnding::NotStarted,
+            failed(format!("the command could not be started: {why}")),
+        ),
+        Ended::Unwaitable(why) => (
+            CommandEnding::Exited { exit_code: None },
+            failed(with_tail(
+                format!("the command could not be waited for: {why}"),
+                &ran.tail,
+            )),
+        ),
+        Ended::Exited {
+            success: true,
+            exit_code,
+        } => (
+            CommandEnding::Exited { exit_code },
+            Settlement::plain(&node.id, NodeStatus::Done, None),
+        ),
+        Ended::Exited { exit_code, .. } => (
+            CommandEnding::Exited { exit_code },
+            failed(with_tail(
+                match exit_code {
+                    Some(code) => format!("the command exited with status {code}"),
+                    None => "the command was ended by a signal".to_owned(),
+                },
+                &ran.tail,
+            )),
+        ),
+        Ended::TimedOut => (
+            CommandEnding::TimedOut,
+            Settlement {
+                detail: Some(with_tail(
+                    format!(
+                        "the command was still running after its {}-second timeout, so its \
+                         process tree was stopped",
+                        node.timeout_seconds.map_or(0, std::num::NonZeroU64::get)
+                    ),
+                    &ran.tail,
+                )),
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_TIMED_OUT))
+            },
+        ),
+        Ended::Cancelled => (
+            CommandEnding::Cancelled,
+            Settlement {
+                detail: Some(
+                    "the node was cancelled while its command ran, so its process tree was \
+                     stopped"
+                        .to_owned(),
+                ),
+                ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
+            },
+        ),
+    }
+}
+
+/// How a program the engine ran for a node — a command node's command, or a guard — ended.
+pub(crate) enum Ended {
+    /// It exited: `success` where its status was zero, and its status where the host
+    /// reported one (none where a signal ended it).
+    Exited {
+        /// Whether it exited zero.
+        success: bool,
+        /// Its exit status; absent where a signal ended it.
+        exit_code: Option<i32>,
+    },
+    /// It outlived its deadline, and its process tree was stopped.
+    TimedOut,
+    /// Its node was cancelled while it ran, and its process tree was stopped.
+    Cancelled,
+    /// It could not be started at all, and why.
+    NotStarted(String),
+    /// It started and could not be waited for, and why; its process tree was stopped.
+    Unwaitable(String),
+}
+
+/// What [`run_program`] answers: how the program ended, and the end of what it said on
+/// stderr, at most [`STDERR_TAIL_BYTES`].
+pub(crate) struct Ran {
+    /// How it ended.
+    pub(crate) ended: Ended,
+    /// The last of its stderr, as far as it was read.
+    pub(crate) tail: Vec<u8>,
+}
+
+/// Run `argv` for node `node` to its end — no shell, from the launch directory, with the
+/// driver's environment and the run's coordinates on top — appending its stdout and stderr
+/// to `log_path`, stopping its process tree at `timeout_seconds` or when `cancel` is
+/// cancelled, and answer how it ended with the end of its stderr.
+///
+/// The one runner a command node's command and a guard share, so the two are started,
+/// told the run's coordinates, logged, bounded and stopped alike.
+pub(crate) fn run_program(
+    paths: &RunPaths,
+    launch: &LaunchRecord,
+    node: &str,
+    argv: &Argv,
+    log_path: &std::path::Path,
+    timeout_seconds: Option<std::num::NonZeroU64>,
+    cancel: &CancellationToken,
+) -> Ran {
+    let not_started = |why: String| Ran {
+        ended: Ended::NotStarted(why),
+        tail: Vec::new(),
+    };
     let log = log_path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -156,12 +265,12 @@ fn run(
             // Windows grants an append-only handle no `FILE_WRITE_DATA`, and a program of the
             // Cygwin family — git for Windows' `bash` among them — refuses every write to such
             // a stdout as a bad descriptor. So there it is opened for writing and placed at its
-            // end, which keeps what an earlier run of the command wrote, as appending does.
+            // end, which keeps what an earlier run of the program wrote, as appending does.
             #[cfg(windows)]
             options.write(true);
             #[cfg(not(windows))]
             options.append(true);
-            let mut log = options.open(&log_path)?;
+            let mut log = options.open(log_path)?;
             std::io::Seek::seek(&mut log, std::io::SeekFrom::End(0))?;
             Ok(log)
         });
@@ -171,8 +280,8 @@ fn run(
         // its journal into and not a log beside it is a host condition — a full disk, a
         // permission changed under a live run — that no verb or plan produces; staging it means
         // editing the run's own layout, which proves the fixture. What it must do is settle the
-        // node `command-failed` `not-started` as an unstartable program does, which
-        // `command_step.rs`'s endings journey drives.
+        // node `not-started` as an unstartable program does, which `command_step.rs`'s endings
+        // journey and `guard.rs`'s failures journey drive.
         Err(error) => {
             return not_started(format!(
                 "its log {} could not be opened: {error}",
@@ -188,13 +297,13 @@ fn run(
     spawning
         .args(argv.arguments())
         .env(RUN_ID_ENV, &paths.run)
-        .env(NODE_ID_ENV, &node.id)
+        .env(NODE_ID_ENV, node)
         .env(RUN_ROOT_ENV, crate::hooks::run_root(paths))
         .env(PLAN_ENV, &launch.project)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(Stdio::piped());
-    // The flow and the session as the launch recorded them: a run this command starts
+    // The flow and the session as the launch recorded them: a run this program starts
     // reads both to join the flow and be owned by the session that launched this one.
     if !launch.flow.is_empty() {
         spawning.env(FLOW_ENV, &launch.flow);
@@ -202,12 +311,12 @@ fn run(
             spawning.env(LAUNCHER_SESSION_ENV, &launch.session);
         }
     }
-    // A record from before the launch directory was recorded names none, and the command
+    // A record from before the launch directory was recorded names none, and the program
     // starts where the driver is.
     if !launch.dir.as_os_str().is_empty() {
         spawning.current_dir(&launch.dir);
     }
-    // A process the command leaves behind must not hold this one's own streams open behind
+    // A process the program leaves behind must not hold this one's own streams open behind
     // it: an attached launch's caller reads them to their end. The engine's own spawns name
     // every stream they hand on, so nothing here is meant to inherit them.
     crate::sys::disown_standard_handles();
@@ -216,9 +325,9 @@ fn run(
         Err(error) => return not_started(error.to_string()),
     };
 
-    // Read on a thread of its own, so a command that fills the pipe cannot block on a reader
+    // Read on a thread of its own, so a program that fills the pipe cannot block on a reader
     // that is waiting for it to exit — and into a buffer this thread shares, so what it has
-    // read is still there when a process the command left behind holds the pipe open past
+    // read is still there when a process the program left behind holds the pipe open past
     // the grace this side waits.
     let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let (drained_tx, drained) = std::sync::mpsc::channel::<()>();
@@ -226,7 +335,7 @@ fn run(
     let mut log_for_stderr = log;
     let kept = std::sync::Arc::clone(&tail);
     let _ = std::thread::Builder::new()
-        .name(format!("command-{}-stderr", node.id))
+        .name(format!("program-{node}-stderr"))
         .spawn(move || {
             let mut buffer = [0_u8; 8192];
             if let Some(stderr) = stderr.as_mut() {
@@ -254,93 +363,43 @@ fn run(
             .clone()
     };
 
-    let deadline = node.timeout_seconds.and_then(crate::hooks::deadline_after);
+    let deadline = timeout_seconds.and_then(crate::hooks::deadline_after);
     let stopped = |child: &mut std::process::Child| {
         let _ = crate::sys::stop(child.id(), crate::sys::Stop::Now);
         let _ = child.kill();
         let _ = child.wait();
     };
-    let status = loop {
+    let ended = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
+            Ok(Some(status)) => {
+                break Ended::Exited {
+                    success: status.success(),
+                    exit_code: status.code(),
+                }
+            }
             Ok(None) if cancel.is_cancelled() => {
                 stopped(&mut child);
-                break Err(CommandEnding::Cancelled);
+                break Ended::Cancelled;
             }
             Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
                 stopped(&mut child);
-                break Err(CommandEnding::TimedOut);
+                break Ended::TimedOut;
             }
             Ok(None) => std::thread::sleep(POLL),
             Err(error) => {
                 stopped(&mut child);
-                let tail = said();
-                return (
-                    CommandEnding::Exited { exit_code: None },
-                    Settlement {
-                        detail: Some(with_tail(
-                            format!("the command could not be waited for: {error}"),
-                            &tail,
-                        )),
-                        ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
-                    },
-                );
+                break Ended::Unwaitable(error.to_string());
             }
         }
     };
-    let tail = said();
-    match status {
-        Ok(status) if status.success() => (
-            CommandEnding::Exited {
-                exit_code: status.code(),
-            },
-            Settlement::plain(&node.id, NodeStatus::Done, None),
-        ),
-        Ok(status) => (
-            CommandEnding::Exited {
-                exit_code: status.code(),
-            },
-            Settlement {
-                detail: Some(with_tail(
-                    match status.code() {
-                        Some(code) => format!("the command exited with status {code}"),
-                        None => "the command was ended by a signal".to_owned(),
-                    },
-                    &tail,
-                )),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
-            },
-        ),
-        Err(CommandEnding::TimedOut) => (
-            CommandEnding::TimedOut,
-            Settlement {
-                detail: Some(with_tail(
-                    format!(
-                        "the command was still running after its {}-second timeout, so its \
-                         process tree was stopped",
-                        node.timeout_seconds.map_or(0, std::num::NonZeroU64::get)
-                    ),
-                    &tail,
-                )),
-                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_TIMED_OUT))
-            },
-        ),
-        Err(ending) => (
-            ending,
-            Settlement {
-                detail: Some(
-                    "the node was cancelled while its command ran, so its process tree was \
-                     stopped"
-                        .to_owned(),
-                ),
-                ..Settlement::plain(&node.id, NodeStatus::Cancelled, None)
-            },
-        ),
+    Ran {
+        ended,
+        tail: said(),
     }
 }
 
-/// A detail with the command's stderr tail after it, where it said anything.
-fn with_tail(detail: String, tail: &[u8]) -> String {
+/// A detail with the program's stderr tail after it, where it said anything.
+pub(crate) fn with_tail(detail: String, tail: &[u8]) -> String {
     let said = String::from_utf8_lossy(tail);
     let said = said.trim();
     if said.is_empty() {

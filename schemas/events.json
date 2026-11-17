@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -5970,6 +5970,149 @@
         ],
         "title": "CommandExited",
         "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.guard-started@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "guard": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The argv, as the plan states it: never empty, its program never blank.",
+            "minItems": 1
+          },
+          "log": {
+            "type": "string",
+            "description": "Where its stdout and stderr are kept: `<run>/guards/<node>.log`, absolute."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 1,
+            "description": "Its deadline in seconds: the node's `guard_timeout_seconds`, or the default where it\nstates none."
+          }
+        },
+        "required": [
+          "guard",
+          "log",
+          "timeout_seconds"
+        ],
+        "description": "`guard-started`: a guarded node's guard, as it was started — the record that makes the\nnode `running` while its guard decides whether it is needed.",
+        "title": "GuardStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.guard-evaluated@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "$ref": "#/$defs/GuardVerdict",
+            "description": "What the guard decided."
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "How long it ran, in milliseconds."
+          }
+        },
+        "required": [
+          "verdict",
+          "duration_ms"
+        ],
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Its exit status; absent where a signal ended it."
+              },
+              "ending": {
+                "type": "string",
+                "const": "exited"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It exited — with its status, where the host reported one."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "timed-out"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It outlived its `timeout_seconds`, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "cancelled"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "Its node was cancelled while it ran, and its process tree was stopped."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ending": {
+                "type": "string",
+                "const": "not-started"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "description": "It could not be started at all."
+          }
+        ],
+        "description": "`guard-evaluated`: how a guarded node's guard ended and what it decided, journalled\nahead of any settlement or dispatch that verdict leads to.",
+        "title": "GuardEvaluated",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "GuardVerdict": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "needed",
+                "description": "It exited 0: the node proceeds exactly as an unguarded node would."
+              },
+              {
+                "type": "string",
+                "const": "not-needed",
+                "description": "It exited 3: the node settles `done` with outcome `not-needed`."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "Anything else — another exit, a guard that could not start, one past its deadline\nor one stopped by a cancellation: never read as not needed."
+              }
+            ],
+            "description": "What a guard's ending said about its node."
+          }
+        }
       }
     }
   ]

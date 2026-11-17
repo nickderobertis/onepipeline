@@ -443,6 +443,15 @@ pub enum PipelineKind {
     /// `cancelled` or `not-started`), its `exit_code` where it exited with one, and how
     /// long it ran. The node's `node-settled` follows it.
     CommandExited,
+    /// A guarded node's guard was started: its `guard` argv, the `log` its output is kept
+    /// in, and the `timeout_seconds` it is held to. Records the node running; nothing
+    /// else is started for it until its verdict.
+    GuardStarted,
+    /// A guarded node's guard ended: its `verdict` (`needed`, `not-needed` or `failed`),
+    /// its `ending` (`exited`, `timed-out`, `cancelled` or `not-started`), its `exit_code`
+    /// where it exited with one, and how long it ran. Journalled before any settlement or
+    /// dispatch the verdict leads to.
+    GuardEvaluated,
 }
 
 impl PipelineKind {
@@ -520,6 +529,8 @@ impl PipelineKind {
             Self::ChecksUnfollowed => "checks-unfollowed",
             Self::CommandStarted => "command-started",
             Self::CommandExited => "command-exited",
+            Self::GuardStarted => "guard-started",
+            Self::GuardEvaluated => "guard-evaluated",
         }
     }
 
@@ -631,6 +642,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::ChecksUnfollowed,
     PipelineKind::CommandStarted,
     PipelineKind::CommandExited,
+    PipelineKind::GuardStarted,
+    PipelineKind::GuardEvaluated,
 ];
 
 /// The id of a stored artifact.
