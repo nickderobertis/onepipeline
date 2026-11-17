@@ -1478,9 +1478,7 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
                 }
                 state.guards_passed.insert(node.clone());
             } else {
-                state
-                    .guards_answered
-                    .insert(node.clone(), evaluated);
+                state.guards_answered.insert(node.clone(), evaluated);
             }
         }
         Some(journal::PipelineKind::NodeDispatched) => {

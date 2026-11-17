@@ -1179,12 +1179,13 @@ fn adopt_reuses_a_journalled_verdict_and_runs_again_a_guard_its_driver_died_in()
 
 /// A driver stopped after journalling a guard's verdict and before the settlement that
 /// verdict leads to: the adopting driver settles the node from the journalled verdict —
-/// `not-needed` or `guard-failed` as it said — without running the guard again, its detail
-/// naming the log that kept what the guard said.
+/// `not-needed`, or `guard-failed` saying the exit status, signal, deadline or failure to
+/// start the record names — without running the guard again, its detail naming the log that
+/// kept what the guard said.
 ///
 /// Unix only, as the other teardown journeys here are. The driver is held at that moment by
 /// the engine's own debug failpoint, `after-guard-evaluated`, so the stop lands there every
-/// time rather than by luck.
+/// time rather than by luck. A guard that ran again would journal a second `guard-started`.
 #[cfg(unix)]
 #[test]
 fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled() {
@@ -1192,23 +1193,59 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
     let seam = world.root.join("failpoints");
     std::fs::create_dir_all(&seam).expect("the failpoint directory");
     let world = world.with_env("ONEPIPELINE_REVIEW_FAILPOINT", &seam.to_string_lossy());
-    for (code, status, outcome) in [
-        (exit("not_needed"), "done", word("outcomes", "not_needed")),
-        (1, "failed", word("outcomes", "failed")),
-    ] {
-        let run = format!("answered{code}");
-        // Its own id per run: the guards of every run here write to one record.
-        let asked = format!("asked-{code}");
-        let guard = counting_guard(&world, &format!("answers{code}"), code, "said once");
+    let failed = word("outcomes", "failed");
+    let cases = [
+        (
+            "notneeded",
+            counting_guard(&world, "answers", exit("not_needed"), "said once"),
+            None,
+            "done",
+            word("outcomes", "not_needed"),
+            "the guard found the node not needed",
+        ),
+        (
+            "exited",
+            counting_guard(&world, "fails", 1, "said once"),
+            None,
+            "failed",
+            failed.clone(),
+            "the guard exited with status 1",
+        ),
+        (
+            "signalled",
+            script(&world, "signalled", "kill -9 $$"),
+            None,
+            "failed",
+            failed.clone(),
+            "the guard was ended by a signal",
+        ),
+        (
+            "timedout",
+            holding_guard(&world, "outlives"),
+            Some(1),
+            "failed",
+            failed.clone(),
+            "the guard timed out after 1 s",
+        ),
+        (
+            "missing",
+            world.root.join("no-such-guard"),
+            None,
+            "failed",
+            failed,
+            "the guard could not be started",
+        ),
+    ];
+    for (case, guard, deadline, status, outcome, says) in cases {
+        let run = format!("answered{case}");
+        let asked = format!("asked-{case}");
+        let mut node = guarded(agent(&asked, &[]), &guard);
+        if let Some(deadline) = deadline {
+            node["guard_timeout_seconds"] = json!(deadline);
+        }
         let project = world.plan(
             &run,
-            &plan_of(
-                &run,
-                vec![
-                    guarded(agent(&asked, &[]), &guard),
-                    agent("after", &[asked.as_str()]),
-                ],
-            ),
+            &plan_of(&run, vec![node, agent("after", &[asked.as_str()])]),
         );
         let stage = seam.join("after-guard-evaluated");
         let reached = seam.join("after-guard-evaluated.reached");
@@ -1227,22 +1264,18 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
         );
 
         let adopted = world.run(&["adopt", &run]);
-        assert!(
-            adopted.code == 0 || code != exit("not_needed"),
-            "{}",
-            adopted.stderr
-        );
+        assert!(adopted.code == 0 || status != "done", "{}", adopted.stderr);
         assert_eq!(
-            guard_runs(&world, &asked),
+            count(&world, &run, "guard-started", &asked),
             1,
             "{run}: the guard was run again"
         );
-        assert_eq!(count(&world, &run, "guard-started", &asked), 1);
         assert_eq!(count(&world, &run, "guard-evaluated", &asked), 1);
         let settled = result(&world, &run, &asked);
         assert_eq!(settled["status"], status, "{run}: {settled}");
         assert_eq!(settled["outcome"], json!(outcome), "{run}: {settled}");
         let detail = settled["detail"].as_str().expect("a detail");
+        assert!(detail.contains(says), "{run}: {detail}");
         assert!(
             detail.contains(&log_of(&world, &run, &asked).display().to_string()),
             "{run}: {detail}"
