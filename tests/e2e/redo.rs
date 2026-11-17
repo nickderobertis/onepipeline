@@ -24,7 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
-use crate::continuation::{dispatched, sessions_opened, settled, stored_claim, stored_settlements};
+use crate::continuation::{
+    changes_from, created_from, dispatched, held_as_draft, launched_over, sessions_opened, settled,
+    stored_claim, stored_settlements, team_world, until_claimed_on, CLAIM_INTERVAL_ENV,
+    PATIENT_GRACE,
+};
 use crate::harness::{agent, git, lifecycle, plan_of, Repository, World};
 
 /// A lifecycle node that keeps its branch on the origin rather than landing it.
@@ -564,4 +568,124 @@ fn an_adopted_redo_run_does_not_redo_a_node_that_already_settled_again() {
     );
     assert_eq!(after["second"]["status"], "done", "{after:#?}");
     assert_eq!(after["second"]["branch"], before["second"]["branch"]);
+}
+
+/// A `done` node whose change request is open as a draft and unlanded is redone on its
+/// branch, and its publication adopts that change request: the host is asked to open none,
+/// and the draft is still the one change request from the branch.
+#[test]
+fn a_redone_draft_continues_its_branch_and_adopts_its_open_change_request() {
+    let world = team_world("redo-draft");
+    world.script("a.work-anew", "a's change");
+    let name = "drafted";
+    let project = author(&world, name, vec![lifecycle("a", &[])]);
+    launch(&world, name, &project, &[]).exited(0);
+    let before = stored_settlements(&world, &project)["a"].clone();
+    assert_eq!(before["status"], "done", "{before}");
+    assert_eq!(before["outcome"], "change-review-draft", "{before}");
+    assert_eq!(before["landing"], "unlanded", "{before}");
+    let branch = before["branch"].as_str().expect("a branch").to_owned();
+    let created = created_from(&world);
+    assert_eq!(created, vec![branch.clone()]);
+
+    let again = format!("{name}-2");
+    launch(&world, &again, &project, &["--redo", "a"]).exited(0);
+    assert_eq!(dispatched(&world, &again), vec!["a".to_owned()]);
+    assert_eq!(sessions_opened(&world, &again), vec![branch.clone()]);
+    assert_eq!(
+        created_from(&world),
+        created,
+        "a second change request was opened"
+    );
+    let a = settled(&world, &again, "a");
+    assert!(a.get("continued").is_none(), "{a}");
+    assert_eq!(a["outcome"], "change-review-draft", "{a}");
+    assert_eq!(a["branch"], json!(branch), "{a}");
+    assert_eq!(a["change_url"], before["change_url"], "{a}");
+    assert_ne!(a["head"], before["head"], "the redo committed nothing: {a}");
+    let held = changes_from(&world, &branch);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(held_as_draft(&world, &held[0]["number"]), "{held:?}");
+    assert_eq!(stored_settlements(&world, &project)["a"], a);
+    assert_eq!(world.run_json(&again, "result.json")["state"], "complete");
+}
+
+/// A `--redo` that takes the project over from a live driver on another host is checked and
+/// continued again from the store as it stands once that driver has let go: a node the
+/// displaced run settled during the handover is continued rather than dispatched, and the
+/// named node is still redone on the branch it settled on.
+#[test]
+fn a_redo_taking_a_live_project_over_redoes_what_the_store_holds_once_it_is_handed_over() {
+    let name = "redo-takeover";
+    let (base, _repo) = world_of(name, &["first", "second"]);
+    let world = base
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, &PATIENT_GRACE.to_string());
+    let project = author(&world, name, vec![kept("first"), kept("second")]);
+    launch(&world, name, &project, &[]).exited(0);
+    let before = stored_settlements(&world, &project);
+
+    // A planner adds a node, and a continuing run on this host dispatches it and is held.
+    let hold = world.rendezvous("hold");
+    world.add_task(name, "002-hold", &agent("hold", &[]), &[]);
+    let displaced = format!("{name}-2");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let holding = hold.arrived();
+    assert!(
+        !stored_settlements(&world, &project).contains_key("hold"),
+        "the held node settled before the takeover read the store"
+    );
+
+    let successor = world.on_host("host-b");
+    let taking = take_over_in_background_redoing(&successor, &project, "first");
+    let claim = until_claimed_on(&world, &project, "host-b");
+    assert_eq!(claim["host"], "host-b", "{claim}");
+    // The displaced run settles its held node and closes out, acknowledging the takeover.
+    holding.release();
+    let said = launched_over(taking);
+    assert!(said.contains("acknowledged the takeover"), "{said}");
+    world.until("the displaced run to settle", |world| {
+        world.run_file(&displaced, "result.json").is_file()
+    });
+    assert_eq!(dispatched(&world, &displaced), vec!["hold".to_owned()]);
+
+    successor.until("the adopter to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(successor.run_json(name, "result.json")["state"], "complete");
+    assert_eq!(dispatched(&successor, name), vec!["first".to_owned()]);
+    assert_eq!(
+        settled(&successor, name, "hold")["continued"]["source"],
+        "store",
+        "the adopter did not continue what the displaced run settled during the handover"
+    );
+    assert_eq!(
+        settled(&successor, name, "second")["continued"]["source"],
+        "store"
+    );
+    let first = settled(&successor, name, "first");
+    assert!(first.get("continued").is_none(), "{first}");
+    assert_eq!(first["branch"], before["first"]["branch"], "{first}");
+    assert_ne!(first["head"], before["first"]["head"], "{first}");
+    assert_eq!(
+        successor.run_json(name, "launch.json")["redo"],
+        json!(["first"])
+    );
+    drop(successor);
+}
+
+/// `continuation`'s `take_over_in_background`, naming `node` to `--redo`.
+fn take_over_in_background_redoing(
+    host: &World,
+    project: &str,
+    node: &str,
+) -> onepipeline_testfakes::profile::process::Child {
+    let mut command = host.cmd(&["start", project, "--detach", "--take-over", "--redo", node]);
+    command
+        .current_dir(&host.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.spawn().expect("the takeover starts")
 }
