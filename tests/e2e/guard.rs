@@ -707,8 +707,10 @@ fn a_guard_that_fails_cannot_start_or_times_out_settles_guard_failed_and_holds_i
 }
 
 /// A running guard holds one of the plan's `concurrency` slots while the driver goes on
-/// reconciling the rest: at two, a guard and an agent fill the slots, the third node waits
-/// for the agent to settle and is then dispatched while the guard is still running.
+/// reconciling the rest, and a guard waits for a slot as a dispatch does — a human node's
+/// included, which takes no slot of its own once it waits. At two, a guard and an agent fill
+/// the slots: neither the guarded human node's guard nor the last agent starts until the
+/// agent settles, and then both run while the first guard is still running.
 #[test]
 fn a_running_guard_counts_against_concurrency_while_the_driver_reconciles_the_rest() {
     let world = World::new("guard-concurrency");
@@ -718,12 +720,14 @@ fn a_running_guard_counts_against_concurrency_while_the_driver_reconciles_the_re
         "waits",
         &format!("while [ ! -f '{go}' ]; do sleep 0.1; done\nexit 3"),
     );
+    let quick = counting_guard(&world, "quick", exit("not_needed"), "");
     world.script("first.wait", "hold");
     let mut plan = plan_of(
         "guardslot",
         vec![
             guarded(agent("guarded", &[]), &guard),
             agent("first", &[]),
+            guarded(human("approve", &[]), &quick),
             agent("second", &[]),
         ],
     );
@@ -738,7 +742,11 @@ fn a_running_guard_counts_against_concurrency_while_the_driver_reconciles_the_re
     std::thread::sleep(std::time::Duration::from_secs(2));
     assert!(
         !dispatched(&world, run, "second"),
-        "a third node started while a guard and an agent held both slots"
+        "a node started while a guard and an agent held both slots"
+    );
+    assert!(
+        position(&world, run, "guard-started", "approve").is_none(),
+        "a human node's guard started while a guard and an agent held both slots"
     );
     world.release("first.go");
     world.until("the second node to be dispatched", |world| {
@@ -746,22 +754,26 @@ fn a_running_guard_counts_against_concurrency_while_the_driver_reconciles_the_re
     });
     assert!(
         position(&world, run, "guard-evaluated", "guarded").is_none(),
-        "the guard ended before the second node started"
+        "the first guard ended before the rest started"
     );
+    let freed = position(&world, run, "node-settled", "first");
     assert!(
-        position(&world, run, "node-settled", "first")
-            < position(&world, run, "node-dispatched", "second"),
-        "the second node started before the first freed its slot"
+        freed < position(&world, run, "guard-started", "approve")
+            && freed < position(&world, run, "node-dispatched", "second"),
+        "a node started before the first freed its slot"
     );
     std::fs::write(world.root.join("guard.go"), "").expect("the guard is released");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
-    assert_eq!(
-        result(&world, run, "guarded")["outcome"],
-        json!(word("outcomes", "not_needed"))
-    );
+    for node in ["guarded", "approve"] {
+        assert_eq!(
+            result(&world, run, node)["outcome"],
+            json!(word("outcomes", "not_needed")),
+            "{node}"
+        );
+    }
 }
 
 /// A `cancel`, a `drop` or a `retry` that reaches a node whose guard is running stops the
