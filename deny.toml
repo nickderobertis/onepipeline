@@ -89,4 +89,4 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # other side. `tests/patch_pin.rs` holds this list equal to `Cargo.toml`'s
 # `[patch.crates-io]`, including when both are empty, so the exemption is deleted
 # in the same change that deletes the block.
-allow-git = []
+allow-git = ["https://github.com/nickderobertis/onepipeline?rev=e5ce2ce1e28830120ce0913b2ecd2cc5ef8a1f78"]
