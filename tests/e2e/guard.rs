@@ -593,10 +593,15 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
         &format!(
             "echo \"$ONEPIPELINE_NODE_ID\" >> '{ran}'\n\
              printf '%s\\n' {printed} \"$(pwd)\" > '{told}.'\"$ONEPIPELINE_NODE_ID\"\n\
+             printf '%s\\n' \"$@\" > '{told}.args.'\"$ONEPIPELINE_NODE_ID\"\n\
              echo 'the guard looked and found work'\nexit {}",
             exit("needed")
         ),
     );
+    // Arguments a shell would split, expand and pipe, which the guard is handed as written.
+    let arguments = ["two words", "$HOME; echo injected | cat *"];
+    let mut argued = guarded(agent("direct", &[]), &guard);
+    argued["guard"] = json!([guard.display().to_string(), arguments[0], arguments[1]]);
     let marker = at(&world, "command.ran");
     let work = script(&world, "work", &format!("touch '{marker}'"));
     let run = "needed";
@@ -605,7 +610,7 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
         &plan_of(
             run,
             vec![
-                guarded(agent("direct", &[]), &guard),
+                argued,
                 guarded(lifecycle("shipped", &[]), &guard),
                 guarded(
                     json!({"id": "cmd", "kind": "command", "command": [work.display().to_string()]}),
@@ -655,11 +660,20 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
             stated("default_timeout_seconds"),
             "{node}: {started}"
         );
-        assert_eq!(
-            started["payload"]["guard"],
+        let argv = if node == "direct" {
+            json!([guard.display().to_string(), arguments[0], arguments[1]])
+        } else {
             json!([guard.display().to_string()])
-        );
+        };
+        assert_eq!(started["payload"]["guard"], argv, "{node}");
     }
+    let handed =
+        std::fs::read_to_string(world.root.join("told.args.direct")).expect("it wrote its argv");
+    assert_eq!(
+        handed.lines().collect::<Vec<_>>(),
+        arguments,
+        "the guard was not handed its arguments as written, without a shell"
+    );
     assert!(
         world.root.join("command.ran").is_file(),
         "the command never ran"
