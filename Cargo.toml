@@ -1841,7 +1841,7 @@ path = "tests/status_read/main.rs"
 # `onevcs-testing` requires exactly this `onevcs`, which the path copy is.
 # llmlint: ignore-block[crates_stay_in_one_cargo_workspace] the vendored crates are byte-identical copies of released crates.io packages apart from the launch-trace calls, so the option spikes' diffs against them are exactly their prototypes; folding their manifests into this workspace would change what they compile to, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 [patch.crates-io]
-onevcs = { path = "vendor/onevcs" }
+onevcs = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
 # The linked libraries the inventory showed starting processes inside the engine,
 # vendored the same way: the harness runs, the judges, the bus's hooks, the agent
 # graph's pre-turn scripts, and the task graph's source plugins and boundary checks. Two departures besides the trace calls: oneharness-core
@@ -1852,11 +1852,11 @@ onevcs = { path = "vendor/onevcs" }
 # repository's structure tests would read as its own), and onetaskgraph-core's test-only
 # tests/fixtures/template-front-matter/ (the e2e tier refuses any template in the tree
 # but the plan-task base).
-oneharness-core = { path = "vendor/oneharness-core" }
-onejudge = { path = "vendor/onejudge" }
-onemessagebus = { path = "vendor/onemessagebus" }
-oneagentgraph = { path = "vendor/oneagentgraph" }
-onetaskgraph-core = { path = "vendor/onetaskgraph-core" }
+oneharness-core = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
+onejudge = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
+onemessagebus = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
+oneagentgraph = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
+onetaskgraph-core = { git = "https://github.com/nickderobertis/onepipeline", rev = "b5b370b971e41ebe9316ac350d8bb068d496073d" }
 # llmlint: ignore-end[crates_stay_in_one_cargo_workspace]
 
 [profile.release]
