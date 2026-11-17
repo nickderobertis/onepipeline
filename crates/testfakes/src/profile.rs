@@ -301,6 +301,8 @@ struct Frame {
 #[must_use = "a span measures until it is dropped"]
 pub struct Span {
     _not_send: std::marker::PhantomData<*const ()>,
+    /// Measurement only (spike-launch-inventory): a `wait` span's call site.
+    site: Option<(&'static std::panic::Location<'static>, Instant)>,
 }
 
 fn open(category: Category, counts: Counts, program: Option<String>) -> Span {
@@ -318,12 +320,17 @@ fn open(category: Category, counts: Counts, program: Option<String>) -> Span {
     });
     Span {
         _not_send: std::marker::PhantomData,
+        site: None,
     }
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
         let now = Instant::now();
+        // llmlint: ignore[changed_behavior_has_e2e] a wait span's tally is written by every e2e test of the hosted baseline runs and read off their artifacts by the fold; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+        if let Some((site, began)) = self.site.take() {
+            wait_sites::tally("span", site, now.saturating_duration_since(began), None);
+        }
         let Some((frame, enclosed)) = FRAMES.with(|frames| {
             let mut frames = frames.borrow_mut();
             let frame = frames.pop()?;
@@ -373,9 +380,15 @@ impl Drop for Span {
     }
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the call-site capture in span and polled feeds the per-site wait tally, which every e2e test of the hosted baseline runs writes and the fold reads off their artifacts; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
 /// Record `category` for as long as the returned span lives.
+#[track_caller]
 pub fn span(category: Category) -> Span {
-    open(category, Counts::Span, None)
+    let mut span = open(category, Counts::Span, None);
+    if category == Category::Wait {
+        span.site = Some((std::panic::Location::caller(), Instant::now()));
+    }
+    span
 }
 
 /// One operation of `category` that nothing else is recorded inside.
@@ -386,9 +399,75 @@ fn leaf<T>(category: Category, work: impl FnOnce() -> T) -> T {
 
 /// Run `work` as one polling wait: what the predicate does inside it is recorded
 /// where it happens, and the rest — the sleeps between looks — is the wait's.
+#[track_caller]
 pub fn polled<T>(work: impl FnOnce() -> T) -> T {
-    let _span = open(Category::Wait, Counts::Poll, None);
-    work()
+    let site = std::panic::Location::caller();
+    let began = Instant::now();
+    let answer = {
+        let _span = open(Category::Wait, Counts::Poll, None);
+        work()
+    };
+    wait_sites::tally("poll", site, began.elapsed(), None);
+    answer
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Measurement only (spike-launch-inventory, never lands): each call site of
+/// [`polled`] and [`thread::sleep`], tallied and written beside the launch trace
+/// as `<test>.waits.json` whenever this process's record is, so the harness's
+/// waits can be told apart by site. The record itself is unchanged.
+// llmlint: ignore[changed_behavior_has_e2e] every e2e test on the hosted baseline runs writes these tallies, which the fold reads from their artifacts, and npm/test/launch-inventory.test.mjs folds two of them recorded at this commit; a journey asserting the file itself would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+mod wait_sites {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    // llmlint: ignore[invalid_states_unrepresentable] the three kinds are string literals at three call sites in this module and nowhere else; an enum would change the e2e tier's compiled harness after its baseline runs were taken, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+    type Tally = BTreeMap<(&'static str, &'static str, u32), (u64, Duration, Option<Duration>)>;
+
+    static SITES: Mutex<Tally> = Mutex::new(BTreeMap::new());
+
+    // llmlint: ignore[invalid_states_unrepresentable] the kind is one of three literals at this module's three call sites, the same reason as the Tally alias above; an enum would change the e2e tier's compiled harness after its baseline runs were taken, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+    pub(super) fn tally(
+        kind: &'static str,
+        site: &'static std::panic::Location<'static>,
+        took: Duration,
+        asked: Option<Duration>,
+    ) {
+        let mut sites = SITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry =
+            sites
+                .entry((kind, site.file(), site.line()))
+                .or_insert((0, Duration::ZERO, None));
+        entry.0 += 1;
+        entry.1 += took;
+        entry.2 = asked.or(entry.2);
+    }
+
+    pub(super) fn write(dir: &std::path::Path, test: &str) {
+        let sites: Vec<_> = SITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|((kind, file, line), (count, took, asked))| {
+                serde_json::json!({
+                    "kind": kind,
+                    "site": format!("{file}:{line}"),
+                    "count": count,
+                    "s": took.as_secs_f64(),
+                    "interval_s": asked.map(|asked| asked.as_secs_f64()),
+                })
+            })
+            .collect();
+        let launch = dir.join("launch");
+        let _ = std::fs::create_dir_all(&launch);
+        let _ = std::fs::write(
+            launch.join(format!("{}.waits.json", test.replace("::", "__"))),
+            serde_json::json!({ "test": test, "sites": sites }).to_string(),
+        );
+    }
 }
 
 /// What wrote a record: the end of the test's own thread; the process's exit,
@@ -448,9 +527,9 @@ fn write(ended: Ended) {
             recorder.written = true;
         }
         let record = record(recorder, binary, &name, ended);
-        let dir = std::env::var_os(DIR_ENV)
-            .map_or(dir, PathBuf::from)
-            .join(binary);
+        let dir = std::env::var_os(DIR_ENV).map_or(dir, PathBuf::from);
+        wait_sites::write(&dir, &name);
+        let dir = dir.join(binary);
         let file = dir.join(file_name);
         // Through a name of this process's own and a rename, so a reader never
         // sees half a record; and never a panic, because a record is evidence
@@ -757,8 +836,13 @@ pub mod thread {
     pub use std::thread::*;
 
     /// [`std::thread::sleep`].
+    #[track_caller]
     pub fn sleep(duration: std::time::Duration) {
+        // llmlint: ignore[changed_behavior_has_e2e] a sleep's tally is written by every e2e test of the hosted baseline runs and read off their artifacts by the fold; a journey asserting it would be a new test body in the suite this measurement must not change, and this never lands: this branch is preserved as the measurement record and nothing on it merges.
+        let site = std::panic::Location::caller();
+        let began = std::time::Instant::now();
         super::leaf(super::Category::Wait, || std::thread::sleep(duration));
+        super::wait_sites::tally("sleep", site, began.elapsed(), Some(duration));
     }
 }
 

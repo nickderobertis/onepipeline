@@ -1,0 +1,966 @@
+//! The workspace every journey drives, and the assertions they share.
+//!
+//! A journey builds a real graph on disk, runs the real `oneagentgraph` binary
+//! against it, and reads back the NDJSON it produced. The only thing standing in
+//! for something real is the paid harness process, replaced at oneharness's own
+//! `ONEHARNESS_BIN_<ID>` seam by the crate's own `test-doubles` stand-in — real
+//! `onejudge` drives the conversation, now as a library inside the binary under
+//! test, and real `oneharness` selects the identity in between.
+
+// llmlint: ignore-file[e2e_not_mocked] the paid model turn is the one genuinely
+// external thing a gate cannot run for free, and this is the seam it is replaced
+// at: oneharness's own documented `ONEHARNESS_BIN_<ID>` binary override. Real
+// `oneagentgraph` prepares the launch, the real `onejudge` engine it links
+// against runs the loop, and real `oneharness` selects the identity, spawns the
+// double, classifies its refusal, and falls through. Nothing between them is
+// stubbed, and no journey may widen this to a second seam.
+
+#![allow(
+    dead_code,
+    reason = "journeys are modules, and each reaches for a different part of this support surface; \
+              an unused-here helper is used two files over, so `dead_code` would fire on the \
+              shared vocabulary rather than on anything unused"
+)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read as _, Seek as _};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::Value;
+
+/// One journey's directories and the graph inside them.
+pub struct Workspace {
+    root: tempfile::TempDir,
+    /// oneharness's own per-user state for this journey — see
+    /// [`Workspace::session_store`] for why it is not simply a directory inside
+    /// [`root`](Self::root).
+    session_store: tempfile::TempDir,
+}
+
+/// What one `oneagentgraph` invocation produced.
+pub struct Run {
+    /// The process exit code.
+    pub code: i32,
+    /// Everything it wrote to stdout.
+    pub stdout: String,
+    /// Everything it wrote to stderr.
+    pub stderr: String,
+}
+
+impl Run {
+    /// Every envelope on stdout, in the order it was written.
+    ///
+    /// Panics with the whole stream when a line is not an envelope, because a
+    /// stream a consumer cannot parse is the failure — not something to skip
+    /// past on the way to an assertion.
+    pub fn events(&self) -> Vec<Value> {
+        self.stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|err| panic!("stdout line is not an envelope ({err}): {line}"))
+            })
+            .collect()
+    }
+
+    /// Every envelope of one kind.
+    pub fn of_kind(&self, kind: &str) -> Vec<Value> {
+        self.events()
+            .into_iter()
+            .filter(|event| event["kind"] == kind)
+            .collect()
+    }
+
+    /// Every kind the stream carried, in the order it was written.
+    pub fn kinds(&self) -> Vec<String> {
+        self.events()
+            .iter()
+            .filter_map(|event| event["kind"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Assert an exit code, showing the whole run when it is not the one meant.
+    pub fn expect_code(&self, code: i32) -> &Self {
+        assert_eq!(
+            self.code, code,
+            "expected exit {code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout, self.stderr
+        );
+        self
+    }
+}
+
+impl Workspace {
+    /// A workspace whose graph has one two-party member called `worker`.
+    ///
+    /// Both sides run a one-identity `claude-code` chain, which is what makes the
+    /// fake reachable: `ONEHARNESS_BIN_*` keys on a harness id, and there is no
+    /// spelling of it that reaches a *variant* — a chain naming variants here
+    /// would spawn the real paid provider with the double sitting unused beside
+    /// it, which is a money hazard rather than a style point.
+    pub fn new() -> Self {
+        let workspace = Self {
+            root: tempfile::tempdir().expect("a workspace"),
+            session_store: session_store(),
+        };
+        std::fs::create_dir_all(workspace.dir()).expect("work dir");
+        std::fs::create_dir_all(workspace.state()).expect("state dir");
+        workspace.write("oneharness.toml", CHAIN);
+        workspace.write("oneharness.judge.toml", CHAIN);
+        workspace.write("base.yaml", BASE);
+        workspace.write("graph.yaml", &two_party_graph(&fake_harness(), NO_ENV));
+        workspace
+    }
+
+    /// The directory the graph and its configs live in.
+    pub fn path(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// oneharness's session store for this journey, which is where the control
+    /// socket a turn is interrupted through is bound.
+    pub fn session_store(&self) -> &Path {
+        self.session_store.path()
+    }
+
+    /// The directory members work in.
+    pub fn dir(&self) -> PathBuf {
+        self.root.path().join("work")
+    }
+
+    /// Where run state lives.
+    pub fn state(&self) -> PathBuf {
+        self.root.path().join("state")
+    }
+
+    /// One path inside the workspace.
+    pub fn at(&self, name: &str) -> PathBuf {
+        self.root.path().join(name)
+    }
+
+    /// The binary an unreachable harness points at: a path inside this
+    /// workspace that nothing ever creates.
+    ///
+    /// Absolute, so `which` reads it as a path rather than searching `PATH` for
+    /// it, and inside a freshly-made temporary directory, so it is absent on
+    /// every host rather than absent on the hosts that happen to lack a harness.
+    pub fn unreachable_harness(&self) -> String {
+        self.at("no-such-harness-binary").display().to_string()
+    }
+
+    /// Write one file into the workspace, creating what holds it.
+    pub fn write(&self, name: &str, content: &str) -> PathBuf {
+        let path = self.at(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent");
+        }
+        std::fs::write(&path, content).expect("write");
+        path
+    }
+
+    /// Read one file back.
+    pub fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.at(name)).unwrap_or_default()
+    }
+
+    /// Replace the graph with `document`.
+    pub fn graph(&self, document: &str) -> &Self {
+        self.write("graph.yaml", document);
+        self
+    }
+
+    /// Run the binary with these arguments, and this extra environment.
+    pub fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Run {
+        let output = self.command(args, env).output().expect("the binary runs");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// Run the binary as [`run`](Workspace::run) does, with a bound on the wait,
+    /// for a journey whose run could outlive the command that started it.
+    ///
+    /// Output goes to files rather than pipes because a pipe is only finished
+    /// when *every* holder closes it. Windows hands a child every inheritable
+    /// handle its parent holds, so a process `--detach` leaves behind keeps the
+    /// launcher's pipes open however its own output is redirected, and reading
+    /// them to their end waits for the whole detached run.
+    ///
+    /// # Panics
+    ///
+    /// When the process has not exited inside [`BOUNDED_RUN`], naming `args`,
+    /// having killed it.
+    pub fn run_bounded(&self, args: &[&str]) -> Run {
+        let capture = || tempfile::tempfile().expect("a capture file");
+        let (mut stdout, mut stderr) = (capture(), capture());
+        let mut child = self
+            .command(args, &[])
+            .stdout(stdout.try_clone().expect("a capture handle"))
+            .stderr(stderr.try_clone().expect("a capture handle"))
+            .spawn()
+            .expect("the binary starts");
+        let deadline = std::time::Instant::now() + BOUNDED_RUN;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("waitable") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`oneagentgraph {args:?}` did not exit within {BOUNDED_RUN:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let read = |file: &mut std::fs::File| {
+            file.seek(std::io::SeekFrom::Start(0)).expect("rewound");
+            let mut text = Vec::new();
+            file.read_to_end(&mut text).expect("the capture reads");
+            String::from_utf8_lossy(&text).into_owned()
+        };
+        Run {
+            code: status.code().unwrap_or(-1),
+            stdout: read(&mut stdout),
+            stderr: read(&mut stderr),
+        }
+    }
+
+    /// Start the binary and leave it running, for a journey that needs to
+    /// observe a run *while* something else happens.
+    pub fn spawn_with(&self, args: &[&str], env: &[(&str, &str)]) -> std::process::Child {
+        self.command(args, env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts")
+    }
+
+    /// Start the binary with an input pipe deliberately held open by the test.
+    pub fn spawn_with_open_stdin(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> std::process::Child {
+        self.command(args, env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts")
+    }
+
+    /// `program` — a build of this CLI other than the one under test — with these
+    /// arguments, armed exactly as [`run`](Workspace::run) arms the binary, so a
+    /// journey can hold what this build writes to what another build reads.
+    pub fn run_as(&self, program: &str, args: &[&str]) -> Run {
+        let output = self
+            .command_for(program, args, &[])
+            .output()
+            .expect("the program runs");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// `program` with these arguments, armed exactly as [`run`](Workspace::run)
+    /// arms the binary, under `strace` following every process it starts: each
+    /// process's file-system, descriptor and directory-listing calls land in
+    /// `<trace>.<pid>`, with every descriptor annotated by the path it names.
+    /// A host without `strace` fails the journey rather than skipping it.
+    #[cfg(target_os = "linux")]
+    pub fn run_traced(&self, trace: &Path, program: &str, args: &[&str]) -> Run {
+        assert!(
+            Command::new("strace")
+                .arg("-V")
+                .output()
+                .is_ok_and(|it| it.status.success()),
+            "no `strace` on PATH: this journey records the file-system calls a run makes \
+             with it — install it (`apt-get install strace`)"
+        );
+        let trace = trace.display().to_string();
+        let mut argv = vec![
+            "-ff",
+            "-y",
+            "-qq",
+            "-e",
+            "trace=%file,%desc,getdents64",
+            "-o",
+            &trace,
+            "--",
+            program,
+        ];
+        argv.extend_from_slice(args);
+        self.run_as("strace", &argv)
+    }
+
+    /// The binary, armed with this workspace's directories and environment.
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
+        self.command_for(env!("CARGO_BIN_EXE_oneagentgraph"), args, env)
+    }
+
+    /// `program`, armed with this workspace's directories and environment.
+    fn command_for(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(self.path())
+            .env("ONEAGENTGRAPH_STATE_DIR", self.state())
+            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
+            // oneharness's own per-user state — its session store, and the
+            // `control/<session>.sock` an `interrupt` addresses inside it. Its
+            // own directory so a journey drives its own store rather than the
+            // host's, and named here so the run and the `interrupt` that reaches
+            // it resolve the same one: `run --session-dir` has no config or
+            // environment layer, so this variable is what moves both.
+            .env("XDG_STATE_HOME", self.session_store.path())
+            .hermetic();
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+    }
+
+    /// Run the binary with these arguments.
+    pub fn run(&self, args: &[&str]) -> Run {
+        self.run_with(args, &[])
+    }
+
+    /// Run the default graph against one task, in this workspace's own work
+    /// directory.
+    ///
+    /// Under the contract's production liveness bounds: a journey that needs
+    /// shorter ones is testing a watchdog, and passes them itself through
+    /// [`run_with`](Workspace::run_with) and [`bounds`].
+    pub fn run_task(&self, task: &str) -> Run {
+        self.run_task_with(task, &[])
+    }
+
+    /// Run the default graph against one task with extra process environment.
+    pub fn run_task_with(&self, task: &str, env: &[(&str, &str)]) -> Run {
+        self.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                task,
+                "--dir",
+                &self.dir().display().to_string(),
+            ],
+            env,
+        )
+    }
+
+    /// The one run this workspace recorded.
+    pub fn record(&self) -> Value {
+        let mut runs: Vec<PathBuf> = std::fs::read_dir(self.state())
+            .expect("state")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        runs.sort();
+        let run = runs.last().expect("a recorded run");
+        let raw = std::fs::read_to_string(run.join("record.json")).expect("a record");
+        serde_json::from_str(&raw).expect("the record is JSON")
+    }
+
+    /// One file the run generated for a member — the effective config a dispatch
+    /// was actually handed, read back from where the run wrote it.
+    pub fn member_file(&self, member: &str, name: &str) -> String {
+        let run_id = self.record()["run_id"]
+            .as_str()
+            .expect("the record names its run")
+            .to_string();
+        let path = self
+            .state()
+            .join(run_id)
+            .join("members")
+            .join(member)
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {} ({err})", path.display()))
+    }
+}
+
+/// A journey's own oneharness session store, kept **short** and outside the
+/// workspace on purpose.
+///
+/// A controlled turn is addressed through a unix domain socket at
+/// `<store>/oneharness/sessions/control/<session>.sock`, and a unix socket path
+/// has a hard kernel bound near 104 bytes. The session handle at the end of it is
+/// `<run id>-<member>-skill`, which is around fifty of those on its own, and a
+/// workspace tempdir on macOS lives under `/var/folders/…/T/` — so a store inside
+/// the workspace put the socket past the bound, oneharness refused `--control`
+/// for a run it could not bind one for, and every parked-turn journey timed out
+/// waiting for a turn that was never controllable. `/tmp` keeps the prefix to a
+/// dozen bytes on both unix platforms; nothing else needs it, so the fallback is
+/// the platform's own temp directory.
+fn session_store() -> tempfile::TempDir {
+    let root = Path::new("/tmp");
+    let mut builder = tempfile::Builder::new();
+    let builder = builder.prefix("oag");
+    if root.is_dir() {
+        builder.tempdir_in(root)
+    } else {
+        builder.tempdir()
+    }
+    .expect("a session store")
+}
+
+/// The oneharness variables a journey never inherits from whatever runs the
+/// suite, which is often a dispatch that exports every one of them.
+///
+/// The selection five, because a leaked value would put the run on an identity —
+/// and a bill — nobody in this test chose. The history four, because with
+/// history on every turn records into the caller's store and appends a pointer
+/// line to the caller's pointer file: an inherited pair once wrote a journey's
+/// throwaway sessions into a live dispatch's own record, and — where the journey
+/// had not moved `XDG_STATE_HOME` — into the host's whole store, slowly enough
+/// that four scheduled-member journeys missed their deadline. A journey that
+/// means history on says so in its own graph's `env:` block, as
+/// `tests/e2e/session.rs` does.
+pub const NEVER_INHERITED: [&str; 9] = [
+    "ONEHARNESS_HARNESSES",
+    "ONEHARNESS_MODEL",
+    "ONEHARNESS_MODELS",
+    "ONEHARNESS_MODE",
+    "ONEHARNESS_TIMEOUT",
+    "ONEHARNESS_HISTORY",
+    "ONEHARNESS_HISTORY_DIR",
+    "ONEHARNESS_HISTORY_LABELS",
+    "ONEHARNESS_HISTORY_POINTER_FILE",
+];
+
+/// Every spawn of the binary under test sheds [`NEVER_INHERITED`].
+pub trait Hermetic {
+    /// Drop every [`NEVER_INHERITED`] variable from the child's environment.
+    fn hermetic(&mut self) -> &mut Self;
+}
+
+impl Hermetic for Command {
+    fn hermetic(&mut self) -> &mut Self {
+        for key in NEVER_INHERITED {
+            self.env_remove(key);
+        }
+        self
+    }
+}
+
+/// The same for a journey that drives the library in this process, where the
+/// in-process turn reads this process's own environment: called while holding
+/// the lock that keeps such journeys from running side by side.
+pub fn shed_inherited_environment() {
+    for key in NEVER_INHERITED {
+        std::env::remove_var(key);
+    }
+}
+
+/// A one-identity `claude-code` fallback chain — the only shape that keeps the
+/// `ONEHARNESS_BIN_CLAUDE_CODE` double reachable.
+pub const CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n";
+
+/// A two-identity chain whose first candidate is the one a journey makes refuse.
+pub const FALLBACK_CHAIN: &str =
+    "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n";
+
+/// A chain spanning two harness families, which the model pairing rule forbids.
+pub const MIXED_CHAIN: &str =
+    "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\", \"codex\"]\n";
+
+/// The onejudge base every member merges its persona onto.
+pub const BASE: &str = concat!(
+    "provider:\n  kind: oneharness\n",
+    "system_prompt: |\n  Standing bar: verify before you claim done.\n",
+    "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
+);
+
+/// The graph document `skeleton` describes, carrying each value in `values` at
+/// the dotted key path beside it — parsed, assigned, and **serialized back**.
+///
+/// This is how a journey gets a value it did not type itself — a path, a task,
+/// a URL — into a graph document. Formatting one in is what broke two journeys
+/// on Windows: `\U` in `C:\Users\…` opens a unicode escape inside a
+/// double-quoted scalar, and the parser refused the document. The correct
+/// quoting differs per value and per context — single quotes fail on an
+/// apostrophe, plain scalars on `: ` — so every journey's author would have to
+/// re-derive it. The serializer does not: quoting what needs quoting is the one
+/// thing a serializer cannot get wrong.
+///
+/// A `skeleton` is `concat!` rather than `format!` on purpose: literal text has
+/// nowhere to interpolate into, so the next value has nowhere to go but
+/// `values`.
+pub fn graph_with<K: AsRef<str>, V: AsRef<str>>(skeleton: &str, values: &[(K, V)]) -> String {
+    let mut document: serde_json::Value = oneagentgraph::yaml::from_str(skeleton)
+        .unwrap_or_else(|err| panic!("the skeleton is not a YAML document ({err}):\n{skeleton}"));
+    for (path, value) in values {
+        let (path, value) = (path.as_ref(), value.as_ref());
+        let mut at = &mut document;
+        for key in path.split('.') {
+            at = match at {
+                // A sequence is addressed by index — `…judge.command.0` for a
+                // provider spelled as a command line, `…deps.1` for a second
+                // dependency. One past the end appends, which is how a journey
+                // adds to a list the skeleton already has.
+                serde_json::Value::Array(items) => {
+                    let index: usize = key.parse().unwrap_or_else(|_| {
+                        panic!("{path}: `{key}` is not an index into the sequence there")
+                    });
+                    let held = items.len();
+                    if index == held {
+                        items.push(serde_json::Value::Null);
+                    }
+                    items.get_mut(index).unwrap_or_else(|| {
+                        panic!("{path}: the sequence there has {held} elements, so {index} is past its end")
+                    })
+                }
+                holder => holder
+                    .as_object_mut()
+                    .unwrap_or_else(|| {
+                        panic!("{path}: the skeleton has neither a mapping nor a sequence there")
+                    })
+                    .entry(key)
+                    .or_insert(serde_json::Value::Null),
+            };
+        }
+        *at = serde_json::Value::String(value.to_string());
+    }
+    oneagentgraph::yaml::to_string(&document).expect("a document built from strings serializes")
+}
+
+/// The default graph: one two-party member, both sides on the doubled chain,
+/// plus whatever else the journey needs in the graph's `env:` block.
+pub fn two_party_graph<K: AsRef<str>, V: AsRef<str>>(fake: &str, extra_env: &[(K, V)]) -> String {
+    let mut values = vec![(FAKE_HARNESS_KEY.to_string(), fake.to_string())];
+    values.extend(
+        extra_env
+            .iter()
+            .map(|(key, value)| (format!("env.{}", key.as_ref()), value.as_ref().to_string())),
+    );
+    graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &values,
+    )
+}
+
+/// A graph with one single-sided member — the kind that is still a child process
+/// of its own, and so the only one a spawn failure is reachable through.
+pub fn single_sided_graph(fake: &str) -> String {
+    graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake)],
+    )
+}
+
+/// Where the doubled paid harness's path goes in a graph document: oneharness's
+/// own `ONEHARNESS_BIN_<ID>` override, in the graph's `env:` block.
+pub const FAKE_HARNESS_KEY: &str = "env.ONEHARNESS_BIN_CLAUDE_CODE";
+
+/// Where an *unreachable* harness's path goes: the same `ONEHARNESS_BIN_<ID>`
+/// override, on a second identity, so a member that has to die for want of a
+/// harness dies on every host.
+///
+/// A chain naming a bare `codex` is not that. It reads as "an identity this
+/// journey gives no binary for", which is only true on a host without Codex
+/// installed: where Codex *is* installed and authenticated, the member takes a
+/// real, paid turn instead of dying and the journey asserting the death fails.
+/// Pointing the override at a path that does not exist puts `which` in the same
+/// `available: false` state a missing Codex gives, so the journeys keep
+/// asserting the provider failure they are about rather than the host's
+/// installation. Pair it with [`UNREACHABLE_CHAIN`].
+pub const UNREACHABLE_HARNESS_KEY: &str = "env.ONEHARNESS_BIN_CODEX";
+
+/// The one-identity chain [`UNREACHABLE_HARNESS_KEY`] makes unreachable.
+///
+/// A second identity rather than `claude-code`, because the override keys on the
+/// harness id: aiming `claude-code` at nothing would take the working members'
+/// double down with it.
+pub const UNREACHABLE_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n";
+
+/// A graph whose `env:` block needs nothing beyond the doubled harness.
+pub const NO_ENV: &[(&str, &str)] = &[];
+
+/// The compiled paid-harness double.
+pub fn fake_harness() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-harness").to_string()
+}
+
+/// Every line a `fake:record-*` sentinel appended, each parsed as the one JSON
+/// document a single launch of the double wrote.
+///
+/// Several launches append to the same file at once — a panel's judges run
+/// concurrently — so a line that is not one whole document is two launches'
+/// records spliced together, and the panic names it.
+pub fn recorded_documents(records: &str) -> Vec<Value> {
+    records
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("recorded line {line:?} is not one document: {error}")
+            })
+        })
+        .collect()
+}
+
+/// The compiled onejudge `CommandProvider` double.
+pub fn fake_provider() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()
+}
+
+/// The compiled `llmlint` a journey's graph names as an llmlint judge's `bin`.
+///
+/// On the view double's terms below: a `bin` is a program the graph supplies,
+/// so this is the input to that judge rather than a seam standing in for part
+/// of it — real oneagentgraph composes the judge list, and the real onejudge
+/// engine probes, spawns, bounds, and reads this exactly as it would `llmlint`.
+pub fn fake_llmlint() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-llmlint").to_string()
+}
+
+/// The compiled program a journey's graph declares as a `pre_turn` view.
+///
+/// Not a fake of anything this crate owns: a view *is* an argv the operator
+/// supplies, so this is the input to that capability rather than a seam standing
+/// in for part of it. Everything around it in those journeys is real — the
+/// validation, the member's own process group, the bound, the pipes, and the
+/// prompt the real harness is handed.
+pub fn fake_view() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-view").to_string()
+}
+
+/// The real `oneharness` this suite drives.
+///
+/// Resolved from the environment so a host or CI can pin an install, and
+/// asserted present rather than skipped: a journey that quietly did not run the
+/// real CLI proves nothing, and a suite that reports itself green on that basis
+/// is worse than one that fails.
+///
+/// There is no companion for `onejudge`: the binary under test links the real
+/// onejudge engine, so there is nothing on `PATH` for that half of the chain to
+/// be shadowed by — the version it runs is the one `Cargo.lock` pins.
+///
+/// Probed for the release `just bootstrap` installs, because that is the
+/// contract these journeys depend on and it is no longer one a `--help` can
+/// show. A two-party member's turns run through this CLI, so the
+/// `oneharness-core` *it* links is the one those journeys prove — and the
+/// model-mismatch journeys in `selection.rs` exist only where that core refuses
+/// a controlled codex turn the server would run under another model. A CLI
+/// short of the pin runs every flag they pass and answers `--version` perfectly
+/// well before failing one layer down: the refused candidate simply runs, and
+/// the journey reads a stream with no step past on it. The number is read out of
+/// the justfile rather than copied here, so there is one pin and `_ensure-oneharness`
+/// and this probe hold a candidate to the same one.
+pub fn oneharness_bin() -> String {
+    required(
+        "ONEAGENTGRAPH_TEST_ONEHARNESS",
+        "oneharness",
+        "the release the justfile pins — the one whose linked oneharness-core these journeys prove",
+        |program| {
+            Command::new(program)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).trim()
+                            == format!("oneharness {}", pinned_oneharness_version())
+                })
+        },
+    )
+}
+
+/// The justfile, whose `oneharness-version` is the one pin provisioning installs.
+const JUSTFILE: &str = include_str!("../../justfile");
+
+/// The `oneharness` release the justfile pins, as `_ensure-oneharness` spells it.
+fn pinned_oneharness_version() -> &'static str {
+    let (_, rest) = JUSTFILE
+        .split_once("\noneharness-version := \"")
+        .expect("the justfile still pins `oneharness-version`");
+    let (pinned, _) = rest.split_once('"').expect("the pin is quoted");
+    pinned
+}
+
+/// One required external CLI: the install the environment names, else the first
+/// candidate — `PATH`, then the cargo bin directory — that is the release this
+/// suite drives.
+///
+/// Resolution selects on *release*, not on the name alone, because the name
+/// alone is what the failure this guards against already satisfies: a CLI of
+/// another version earlier on `PATH` than the one `just bootstrap` installs runs
+/// every flag the journeys pass and answers `--version` perfectly well, and then
+/// behaves as *its* linked `oneharness-core` does — so a journey written against
+/// the pinned core fails one layer down, as a bare `expected exit 0` or a stream
+/// missing the event it was written to read. Older and newer are refused alike:
+/// the older one lacks what the pinned core does, and the newer one would have
+/// the suite proving a CLI CI never runs, so a green here could sit against a
+/// red gate. `docs/onejudge-integration.md` in ai-orchestrator records the older
+/// case as a live-dispatch outage; here both are a diagnosis the suite makes for
+/// you, naming the release it wants and how to get it. `carries` is the release
+/// check itself, and the same one holds an install named through `variable`.
+fn required(variable: &str, program: &str, contract: &str, carries: fn(&str) -> bool) -> String {
+    if let Ok(pinned) = std::env::var(variable) {
+        assert!(
+            carries(&pinned),
+            "{variable} points at `{pinned}`, which is not {contract}. The e2e suite drives the \
+             real CLI as a subprocess and holds a named install to the same release — point it \
+             at one, or unset it and run `just bootstrap`."
+        );
+        return pinned;
+    }
+    for candidate in [program.to_string(), cargo_bin(program)] {
+        if carries(&candidate) {
+            return candidate;
+        }
+    }
+    panic!(
+        "no `{program}` that is {contract} was found on PATH or in the cargo bin directory. The \
+         e2e suite drives the real CLI as a subprocess — run `just bootstrap`, or set {variable} \
+         to an install at that release. A `{program}` that merely runs is not enough, whether \
+         older or newer: one of another version earlier on PATH shadows the pinned install \
+         `just bootstrap` writes, and the journeys would prove its core rather than the pinned one."
+    );
+}
+
+/// Where `just bootstrap` installs a pinned CLI, which `PATH` need not reach
+/// first.
+fn cargo_bin(program: &str) -> String {
+    let home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo")
+        });
+    home.join("bin").join(program).display().to_string()
+}
+
+/// The environment a journey uses to shorten the liveness bounds it is testing.
+pub fn bounds(heartbeat: &str, stall: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("ONEAGENTGRAPH_HEARTBEAT_TIMEOUT", heartbeat.to_string()),
+        ("ONEAGENTGRAPH_STALL_TIMEOUT", stall.to_string()),
+    ]
+}
+
+/// Turn owned pairs into the borrowed ones [`Workspace::run_with`] takes.
+pub fn as_env<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect()
+}
+
+/// Every reserved label an envelope carries, for an assertion that names them.
+pub fn labels(event: &Value) -> BTreeMap<String, String> {
+    event["labels"]
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_string),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub const SESSION_LABELLED_KINDS: [&str; 5] = [
+    "turn-started",
+    "turn-activity",
+    "turn-message",
+    "turn-completed",
+    "turn-interrupted",
+];
+
+/// Assert both halves of the session rule over a whole real stream, and answer
+/// with the kinds that carried one.
+///
+/// One helper rather than an assertion per journey, because the rule is about the
+/// *whole* stream: five kinds carry the label and every other kind a member or
+/// the graph emits carries none. A check that looked only at the events one
+/// journey cares about could not see the half that matters — the consumer reads
+/// any labelled envelope that is not a turn's activity, message or interruption
+/// as one transcript turn, so a label on a heartbeat is a heartbeat rendered as a
+/// turn.
+///
+/// The value is rebuilt here from the envelope's own `stream` and `member`
+/// rather than taken from the crate, so a build that changed how it derives one
+/// fails this instead of agreeing with itself.
+pub fn assert_session_labels(run: &Run) -> BTreeSet<String> {
+    let mut labelled = BTreeSet::new();
+    for event in run.events() {
+        let kind = event["kind"].as_str().expect("every envelope names a kind");
+        let Some(session) = event["labels"].get("session") else {
+            assert!(
+                !SESSION_LABELLED_KINDS.contains(&kind),
+                "{kind} carries no session label, so its turn cannot be rendered: {event}"
+            );
+            continue;
+        };
+        assert!(
+            SESSION_LABELLED_KINDS.contains(&kind),
+            "{kind} carries a session label, which a consumer renders as a transcript turn: \
+             {event}"
+        );
+        let session = session.as_str().expect("a session label is a string");
+        // The documented value, derived here rather than taken from the crate:
+        // the stream and the member joined, under the consumer's own rule.
+        let sanitized = |id: &str| -> String {
+            id.chars()
+                .map(|it| {
+                    if it.is_ascii_alphanumeric() || matches!(it, '-' | '_' | '.') {
+                        it
+                    } else {
+                        '-'
+                    }
+                })
+                .collect()
+        };
+        let stream = sanitized(event["stream"].as_str().expect("a stream"));
+        let member = sanitized(event["labels"]["member"].as_str().expect("a member"));
+        let joined = format!("{stream}.{member}");
+        if joined.chars().count() <= 128 {
+            assert_eq!(
+                session,
+                joined.trim_start_matches('.'),
+                "a session label naming something other than its stream and member: {event}"
+            );
+        } else {
+            // A pair the bound cannot hold keeps a share of each id instead, so
+            // what is asserted here is that both are still in there. That two
+            // such labels stay two conversations is the journey named for it in
+            // `tests/e2e/session.rs`.
+            let (kept, _digest) = session.rsplit_once('-').expect("a digest");
+            let (from_stream, from_member) = kept.rsplit_once('.').expect("a stream and a member");
+            assert!(
+                !from_stream.is_empty() && stream.ends_with(from_stream),
+                "a shortened session no longer names its stream: {event}"
+            );
+            assert!(
+                !from_member.is_empty() && member.starts_with(from_member),
+                "a shortened session no longer names its member: {event}"
+            );
+        }
+        assert!(
+            !session.is_empty()
+                && session.chars().count() <= 128
+                && !session.starts_with('.')
+                && session
+                    .chars()
+                    .all(|it| it.is_ascii_alphanumeric() || matches!(it, '-' | '_' | '.')),
+            "{session:?} is not an identifier the consumer accepts"
+        );
+        labelled.insert(kind.to_string());
+    }
+    labelled
+}
+
+/// Mark a generated helper script executable, so oneharness can spawn it.
+///
+/// A POSIX shell stands in for a provider in the journeys that need one identity
+/// to answer differently from another; on a platform without one, those journeys
+/// do not compile in and this does nothing.
+pub fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Wait for `condition`, or fail saying what never happened.
+///
+/// The deadline is generous on purpose. Every journey here spawns three real
+/// CLIs, and the suite runs many of them at once, so a threshold near one run's
+/// unloaded wall clock fails healthy journeys under exactly the load the suite
+/// creates — the same mistake a heartbeat near its write cadence makes.
+pub fn until(what: &str, condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// How long [`Workspace::run_bounded`] waits, matching [`until`]'s patience.
+pub const BOUNDED_RUN: std::time::Duration = std::time::Duration::from_secs(240);
+
+/// How many times a journey reads a store `while_rewritten` is rewriting.
+///
+/// Enough that a writer replacing the store in place is caught every time: with
+/// the run record written in place, 184 of 200 reads saw it empty.
+pub const CONCURRENT_READS: usize = 200;
+
+/// Run `rewrite` without pause on a thread of its own while `read` runs
+/// [`CONCURRENT_READS`] times, and return what each read that failed said.
+///
+/// The verdict rests on no clock: each read waits for at least one more rewrite
+/// before it starts, so every read lands on a store a writer is still
+/// replacing. A rewrite that panics fails the journey rather than leaving the
+/// reads to pass against a store nothing is writing any more.
+pub fn while_rewritten(
+    mut rewrite: impl FnMut() + Send + 'static,
+    mut read: impl FnMut() -> Result<(), String>,
+) -> Vec<String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let (stop, writes) = (Arc::clone(&stop), Arc::clone(&writes));
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                rewrite();
+                writes.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let mut failed = Vec::new();
+    for attempt in 0..CONCURRENT_READS {
+        let before = writes.load(Ordering::SeqCst);
+        while writes.load(Ordering::SeqCst) == before && !writer.is_finished() {
+            std::thread::yield_now();
+        }
+        if let Err(why) = read() {
+            failed.push(format!("read {attempt}: {why}"));
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().expect("the writer kept writing");
+    failed
+}
+
+/// The names in `dir` a whole-file replacement left behind as its partial.
+pub fn partials(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("the directory lists")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".partial"))
+        .collect()
+}

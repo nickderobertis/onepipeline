@@ -412,7 +412,7 @@ _crate-coverage-clean dir=llvm-cov-target-dir:
 # the run did not select; counting them would hold the floor to code no tier measures.
 _tier-test unit filter:
     @bash scripts/ensure-test-archive.sh coverage
-    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
+    @RUSTFLAGS="-D warnings" COVERAGE_UNIT_IGNORE_REGEX="${COVERAGE_UNIT_IGNORE_REGEX:-/crates/testfakes/|/vendor/}" bash scripts/coverage-unit.sh "$1" -- nextest --locked -E "$2" --final-status-level fail
 
 # Explicit archive verb for warm builds and diagnostics. Executing test tiers
 # build it lazily through ensure-test-archive.sh, so cache hits build nothing.
@@ -459,7 +459,15 @@ _tier-lint bin:
 # Each tier's instrumented run, counted by `_crate-coverage` in the one floor.
 # The e2e journeys are the ones that run the binary under `strace` and drive the
 # released `onetaskgraph`, so that tier asks for both up front.
-_e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "onepipeline-e2e" e2e-tier)
+#
+# Measurement only (spike-launch-inventory, never lands): `_launch-host` first records the
+# runner's processor and each CLI's minimal start beside the tier's launch trace, in the
+# uploaded artifact, so a run whose tier fails still names its runner.
+_e2e-test: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test "onepipeline-e2e" e2e-tier)
+
+# Measurement only (spike-launch-inventory, never lands): see `_e2e-test` and `_e2e-test-quick`.
+_launch-host:
+    @mkdir -p target/test-profile && node scripts/launch-inventory.mjs host > target/test-profile/launch-host.json || echo "launch-host: not measured" >&2
 
 _contract-test: (_tier-test "onepipeline-contract" contract-tier)
 
@@ -504,7 +512,9 @@ _tier-test-quick filter:
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
-_e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e-tier)
+# Measurement only (spike-launch-inventory, never lands): the Windows and macOS jobs run the
+# tier through this recipe, so it records the runner first too (see `_e2e-test`).
+_e2e-test-quick: _strace-preflight _onetaskgraph-preflight _launch-host (_tier-test-quick e2e-tier)
 
 _contract-test-quick: (_tier-test-quick contract-tier)
 

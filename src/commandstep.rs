@@ -211,7 +211,8 @@ fn run(
     // it: an attached launch's caller reads them to their end. The engine's own spawns name
     // every stream they hand on, so nothing here is meant to inherit them.
     crate::sys::disown_standard_handles();
-    let mut child = match spawning.spawn() {
+    let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut spawning);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return not_started(error.to_string()),
     };
@@ -260,7 +261,10 @@ fn run(
         let _ = child.kill();
         let _ = child.wait();
     };
+    let mut watch =
+        onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), Some(POLL));
     let status = loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) if cancel.is_cancelled() => {
@@ -288,6 +292,8 @@ fn run(
             }
         }
     };
+    drop(watch);
+    launch.exited(None);
     let tail = said();
     match status {
         Ok(status) if status.success() => (

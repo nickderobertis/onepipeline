@@ -1,0 +1,1923 @@
+//! The `onejudge` command line: drive a harness through a simulated-user loop to
+//! complete one task, configured by YAML. This is the standalone-tool surface on
+//! top of the engine (issue #8) — a different framing from a test framework: run
+//! *one task* to completion, not a matrix of cases-as-assertions.
+//!
+//! The binary entrypoint (`src/bin/onejudge.rs`) stays thin; the logic lives here
+//! and in the `config` / `provider` submodules so it is covered by the gate.
+//! [`run`] loads and validates the config, builds the provider, drives the loop,
+//! scores the evals, and renders the result — readably and live by default
+//! (`--format text`, the `text` module), or the versioned [`Report`] contract
+//! under `--format json`. Every run is also published for `onejudge watch` to
+//! follow from another process (the `watch` module).
+
+mod config;
+mod provider;
+mod text;
+mod watch;
+
+use std::io::{Read as _, Write};
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+
+use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::{Engine, JudgeKind, JudgeValue, NamedVerdict, Observation, Report, StreamEvent, Usage};
+
+pub use config::{Config, Eval, EvalKind, JudgeSpec, Overrides, Plan, ProviderKind, ProviderSpec};
+pub use provider::AnyProvider;
+
+/// The default config filename, looked up in the working directory when `run` is
+/// given no explicit config path.
+const DEFAULT_CONFIG: &str = "onejudge.yaml";
+
+/// A starter config, written by `onejudge init` and printed by `onejudge schema`.
+/// It doubles as the documentation of the config surface.
+pub const STARTER_CONFIG: &str = include_str!("starter.yaml");
+
+/// The oldest `oneharness` **CLI** this build works against, as told to an
+/// operator: the first release that carries the `run-started` history opening,
+/// accepts repeated `run --config`, and writes the report schema this crate's
+/// linked `oneharness-core` parses. An older stream remains readable, but without
+/// `run-started` it cannot supply a [`crate::Observation::HistoryBegun`].
+///
+/// One source for every message the CLI prints, and drift-gated in this module's
+/// tests against the linked core's own report schema and against the prose that
+/// repeats it — so relinking a core whose report moved without moving what an
+/// operator is told to install fails the gate instead of shipping a wrong number.
+///
+/// It is the CLI's own version, which is **not** the linked core's, and the two
+/// are deliberately **not** ordered against each other. The crates version
+/// independently — there is no `oneharness` 0.6.13, the 0.6.14 CLI carried
+/// `oneharness-core` 0.6.13, and the 0.25.1 CLI carries `oneharness-core` 0.28.1
+/// — so naming the core version here would tell an operator to install a CLI
+/// that was never published, and holding the CLI to embed a core at least as new
+/// as the linked one would move the floor on every relink whether or not the
+/// report changed. The linked core may be newer than the one this floor embeds
+/// so long as both write the same report schema: what ties the two is
+/// [`MIN_ONEHARNESS_REPORT_SCHEMA`], and the gate below is written against that.
+const MIN_ONEHARNESS: &str = "0.26.0";
+
+/// The oneharness **report schema** the [`MIN_ONEHARNESS`] CLI writes, read off
+/// the `oneharness-core` that release embeds (`oneharness` 0.26.0 depends on
+/// `^0.29.0`, whose `domain::report::SCHEMA_VERSION` is `0.12`). The gate holds
+/// the linked core's declared schema equal to it (see [`MIN_ONEHARNESS`] for why
+/// the schema, not a version, is what ties the two), so a relink that moves the
+/// report fails until the floor and this constant follow.
+///
+/// Test-only because the gate is the only thing that reads it: nothing an
+/// operator sees names a schema, and a second number in a CLI message would be
+/// one more copy to drift.
+#[cfg(test)]
+const MIN_ONEHARNESS_REPORT_SCHEMA: &str = "0.12";
+
+/// The oldest `oneharness-core` this crate can be built against: the release
+/// carrying `EventSink::run_began` and `RunBegun`, so an embedder learns a
+/// candidate's history address before its events. It also carries the public
+/// event renderer, layered config list and per-run history pointer reader.
+/// The manifest
+/// requirement is held to it by the gate below. The production bridge names
+/// the history-opening symbols, so a lock resolved below it fails to compile.
+#[cfg(test)]
+const MIN_ONEHARNESS_CORE: &str = "0.29.0";
+
+/// Errors surfaced by the CLI. Config/validation problems are separated from IO
+/// and engine failures so the entrypoint can exit with a fitting code.
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    /// A malformed or inconsistent config (bad YAML, unknown key, missing task,
+    /// misplaced provider field, …).
+    #[error("config error: {0}")]
+    Config(String),
+    /// An IO failure reading the config / task / writing the output.
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+    /// A failure from the engine / provider while driving the run.
+    #[error("run failed: {0}")]
+    Engine(#[from] crate::Error),
+}
+
+/// `onejudge` — drive a harness through a simulated-user loop to complete a task.
+#[derive(Debug, Parser)]
+#[command(name = "onejudge", version, about, long_about = None)]
+pub struct Cli {
+    /// The subcommand to run.
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// The `onejudge` subcommands.
+#[derive(Debug, Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process, so `Run`'s size costs nothing; boxing it would change \
+              the public `Command::Run(RunArgs)` shape an embedder matches on"
+)]
+pub enum Command {
+    /// Drive one task to completion via a simulated-user loop.
+    Run(RunArgs),
+    /// Follow a running (or finished) `onejudge run` from another process: replay
+    /// its session from the start, then follow it to the result.
+    Watch(WatchArgs),
+    /// Write a starter `onejudge.yaml`.
+    Init(InitArgs),
+    /// Print the annotated config schema.
+    Schema,
+}
+
+/// Arguments for `onejudge run`. Each flag also has a matching `ONEJUDGE_*`
+/// environment override; precedence is flags > env > config file > defaults.
+#[derive(Debug, Parser)]
+pub struct RunArgs {
+    /// The config file (defaults to `./onejudge.yaml` when present).
+    pub config: Option<PathBuf>,
+
+    /// The judge / simulated-user oneharness config file (`oneharness run --config
+    /// <path>`); default `oneharness.judge.toml`.
+    #[arg(long)]
+    pub judge_config: Option<String>,
+    /// The worker-side oneharness config file (`oneharness run --config <path>`),
+    /// run under exactly as given instead of the files oneharness discovers from
+    /// the worktree. Lands on the provider that runs the worker side.
+    #[arg(long)]
+    pub worker_config: Option<String>,
+    /// A skill directory (containing `SKILL.md`) whose body seeds the system
+    /// prompt. Resolved relative to the working directory.
+    #[arg(long)]
+    pub skill: Option<PathBuf>,
+    /// Extra system-prompt text for the harness (prepended to the skill body).
+    #[arg(long)]
+    pub system_prompt: Option<String>,
+    /// The task to drive to completion (`-` reads stdin).
+    #[arg(long)]
+    pub task: Option<String>,
+    /// The simulated user's persona.
+    #[arg(long)]
+    pub persona: Option<String>,
+    /// The completion condition the simulated user drives toward.
+    #[arg(long)]
+    pub done_when: Option<String>,
+    /// The assistant-turn cap.
+    #[arg(long)]
+    pub max_turns: Option<u32>,
+    /// A file or directory the judge side should read directly (repeatable;
+    /// replaces `user.artifacts`). Relative paths resolve against the skill's
+    /// working directory.
+    #[arg(long = "artifact", value_name = "PATH")]
+    pub artifacts: Vec<String>,
+    /// The caller-owned session name threaded across turns (default
+    /// `onejudge`). Every party's oneharness history is named after it: the
+    /// worker's `<session>-skill`, the supervisor's `<session>-user`, eval verdicts
+    /// `<session>-judge` and the assessment `<session>-assess`, each suffixed
+    /// `-<label>` in a panel of more than one judge — so `oneharness history show
+    /// <session>-user-<label> --project <worktree> --all` finds one judge's turns
+    /// (from oneharness 0.21.1, within the last 7 UTC days unless `--since
+    /// <date>` or `--all-time` widens the window).
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Override just the provider backend kind.
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderKind>,
+
+    /// The output format: `text` (the default) prints the run readably as it
+    /// happens; `json` prints the versioned report. `human` is accepted as an
+    /// alias of `text`.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+    /// Stream the run as it happens. Under `--format json` that is the streamed
+    /// protocol on stdout (`docs/streaming.md`): one `{"type":"event",…}` line per
+    /// tool event, then a terminal `{"type":"result","report":{…}}` line — which is
+    /// incompatible with `--output`, because the stream *is* stdout. Under `--format
+    /// text`, which is already live, it changes nothing.
+    #[arg(long)]
+    pub stream: bool,
+    /// Write the final result here instead of stdout: the report under `--format
+    /// json`, and the whole text of the run under `--format text` (whose live
+    /// lines then go to stderr).
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+
+    /// Judge-only mode: start no agent side. The judge side the config declares
+    /// (its `judge:` / `judges:` panel, `llmlint` judges included) judges the
+    /// `--judge-input` once, as the reply to the task, against the same bar
+    /// (persona, done-when, criteria) with any `--artifact`s, and the run prints
+    /// the same result and exits with the same codes a normal run does.
+    #[arg(long, requires = "judge_input")]
+    pub judge_only: bool,
+    /// The material a `--judge-only` run judges: a file's path, or `-` to read it
+    /// from stdin.
+    #[arg(long, value_name = "PATH|-", requires = "judge_only")]
+    pub judge_input: Option<String>,
+}
+
+/// The task a judge-only run's material answers when the config and flags name
+/// none: the judge side is told the material is the work it judges.
+pub const JUDGE_ONLY_TASK: &str = "Produce the material under review.";
+
+/// The criterion a judge-only run's verdict is recorded under when no
+/// `done_when` states one — the bar the judge side then applies.
+const JUDGE_ONLY_BAR: &str = "the original task is complete";
+
+/// Arguments for `onejudge watch`.
+#[derive(Debug, Parser)]
+pub struct WatchArgs {
+    /// The session to follow — the `--session` its run was given (default
+    /// `onejudge`).
+    #[arg(default_value = "onejudge")]
+    pub session: String,
+    /// `text` prints the run exactly as `onejudge run` prints it; `json` prints
+    /// each observation, then the result, as one JSON line.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+}
+
+/// Arguments for `onejudge init`.
+#[derive(Debug, Parser)]
+pub struct InitArgs {
+    /// Where to write the starter config (default `./onejudge.yaml`).
+    #[arg(default_value = DEFAULT_CONFIG)]
+    pub path: PathBuf,
+    /// Overwrite existing files (the `onejudge.yaml` and both scaffolded
+    /// `oneharness` configs).
+    #[arg(long)]
+    pub force: bool,
+    /// The `oneharness` binary used to scaffold `oneharness.toml` /
+    /// `oneharness.judge.toml` (default `oneharness`).
+    #[arg(long, default_value = "oneharness")]
+    pub oneharness_bin: String,
+}
+
+/// The `--format` choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// The run drawn for a person as it happens — turns, the worker's events and
+    /// words, each judge's decision, the feedback handed back — then a closing
+    /// summary. `human` is its alias on the command line.
+    #[value(alias = "human")]
+    Text,
+    /// The versioned [`Report`] JSON contract.
+    Json,
+    /// The name [`Format::Text`] had before it matched oneharness's `text`; means
+    /// exactly what `Text` means. Kept so code naming it still builds.
+    #[value(skip)]
+    #[deprecated(note = "use `Format::Text`")]
+    Human,
+}
+
+impl Format {
+    /// Whether this is the text view, under either of its names.
+    #[must_use]
+    #[allow(
+        deprecated,
+        reason = "`Human` is the deprecated spelling of `Text`, and this is the one place both \
+                  are read as the same thing"
+    )]
+    pub fn is_text(self) -> bool {
+        matches!(self, Format::Text | Format::Human)
+    }
+}
+
+/// Run the CLI to completion, returning the process exit code.
+///
+/// # Errors
+/// [`CliError`] for a bad config, an IO failure, or an engine/provider error.
+pub fn run(cli: Cli) -> Result<i32, CliError> {
+    match cli.command {
+        Command::Run(args) => run_task(args),
+        Command::Watch(args) => watch_session(&args),
+        Command::Init(args) => init(args),
+        Command::Schema => {
+            print!("{STARTER_CONFIG}");
+            Ok(0)
+        }
+    }
+}
+
+/// Load + resolve the config, drive the run, render it, and return the exit code.
+fn run_task(args: RunArgs) -> Result<i32, CliError> {
+    let RunArgs {
+        config,
+        judge_config,
+        worker_config,
+        skill,
+        system_prompt,
+        task,
+        persona,
+        done_when,
+        max_turns,
+        artifacts,
+        session,
+        provider,
+        format,
+        stream,
+        output,
+        judge_only,
+        judge_input,
+    } = args;
+
+    // Validate the output surface before doing any work: `--format json --stream`
+    // publishes the NDJSON protocol on stdout, so a file destination would silently
+    // discard the very thing that was asked for. Text is live whether streamed or
+    // not, so `--stream` asks it for nothing it does not already do.
+    let json = !format.is_text();
+    if stream && json && output.is_some() {
+        return Err(CliError::Config(
+            "--stream writes the event stream to stdout; drop --output".into(),
+        ));
+    }
+
+    let cfg_path = resolve_config_path(config.as_ref());
+    let mut cfg = load_config(cfg_path.as_ref())?;
+    // A `skill:` in the config file is relative to that file's directory; a
+    // `--skill` flag (applied below) stays relative to the working directory.
+    if let Some(base) = cfg_path.as_ref().and_then(|p| p.parent()) {
+        rebase_skill(&mut cfg, base);
+    }
+    if judge_only && task.as_deref() == Some("-") && judge_input.as_deref() == Some("-") {
+        return Err(CliError::Config(
+            "--task - and --judge-input - both read stdin; give one of them a value".into(),
+        ));
+    }
+    let task = task.map(resolve_task).transpose()?;
+    let judge_input = judge_input.map(resolve_judge_input).transpose()?;
+
+    // Precedence: flags > `ONEJUDGE_*` env > config file > defaults. Apply the env
+    // layer first so a flag (applied next) wins over it, and both win over the file.
+    cfg.apply(Overrides::from_env(|key| std::env::var(key).ok())?);
+    cfg.apply(Overrides {
+        judge_config,
+        worker_config,
+        skill,
+        system_prompt,
+        task,
+        persona,
+        done_when,
+        max_turns,
+        artifacts: (!artifacts.is_empty()).then_some(artifacts),
+        session,
+        provider_kind: provider,
+    });
+
+    // A judge-only run judges material against a bar; a task is what the
+    // material answers, and is not required to name one.
+    if judge_input.is_some() && cfg.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
+        cfg.task = Some(JUDGE_ONLY_TASK.into());
+    }
+    let mut plan = cfg.into_plan()?;
+    if let Some(input) = judge_input {
+        plan = plan.with_judge_input(input);
+    }
+
+    // Every run is published for `onejudge watch <session>`, whatever it prints.
+    // A stream that cannot be opened is a side channel lost, never a run refused.
+    let publisher = match watch::Publisher::start(&watch::watch_dir(), &plan.settings.session_name)
+    {
+        Ok(publisher) => Some(publisher),
+        Err(e) => {
+            eprintln!("onejudge: warning — {e}; `onejudge watch` will not see this run");
+            None
+        }
+    };
+    let mut published = Published {
+        publisher,
+        started: std::time::Instant::now(),
+    };
+
+    if !json {
+        return run_text(plan, &mut published, output.as_ref());
+    }
+    if stream {
+        return run_streamed(plan, &mut published);
+    }
+
+    let summary = match execute(
+        plan,
+        Some(&mut |observation: &Observation<'_>| {
+            published.observation(observation);
+            ControlFlow::Continue(())
+        }),
+    ) {
+        Ok(summary) => summary,
+        Err(failure) => {
+            published.failure(&failure);
+            // A failed run produces no report, but it does produce attribution —
+            // which harness identity refused, on which side. Under `--format json`
+            // that is written where the report would have gone, so a programmatic
+            // caller never has to parse it back out of a human message.
+            write_output(output.as_ref(), &render_failure_json(&failure)?)?;
+            return Err(failure.error);
+        }
+    };
+
+    let code = exit_code(&summary);
+    published.result(&summary, code);
+    write_output(output.as_ref(), &render_json(&summary.report)?)?;
+    Ok(code)
+}
+
+/// A run's publication for `onejudge watch`: each observation as the JSON line it
+/// serializes to, then one terminal line — `{"type":"result",…}` carrying the
+/// report and what the closing summary is drawn from, or `{"type":"failure",…}`
+/// carrying the [`FailureReport`].
+struct Published {
+    publisher: Option<watch::Publisher>,
+    started: std::time::Instant,
+}
+
+impl Published {
+    /// Publish `observation`, returning the line it was published as.
+    fn observation(&mut self, observation: &Observation<'_>) -> Option<String> {
+        let line = serde_json::to_string(observation).ok()?;
+        if let Some(publisher) = &mut self.publisher {
+            publisher.publish(&line);
+        }
+        Some(line)
+    }
+
+    /// Publish the terminal record for a run that finished, returning it.
+    fn result(&mut self, summary: &RunSummary, code: i32) -> text::Finished {
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let finished = text::Finished::new(summary, code, elapsed);
+        self.terminal("result", &finished);
+        finished
+    }
+
+    /// Publish the terminal record for a run that produced no report.
+    fn failure(&mut self, failure: &RunFailure) {
+        self.terminal("failure", &FailureReport::new(failure));
+    }
+
+    fn terminal(&mut self, kind: &'static str, body: &impl serde::Serialize) {
+        #[derive(serde::Serialize)]
+        struct Tagged<'a, T> {
+            r#type: &'static str,
+            #[serde(flatten)]
+            body: &'a T,
+        }
+        if let (Some(publisher), Ok(line)) = (
+            &mut self.publisher,
+            serde_json::to_string(&Tagged { r#type: kind, body }),
+        ) {
+            publisher.publish(&line);
+        }
+    }
+}
+
+/// Drive `plan` under `--format text`: each observation drawn as it happens —
+/// on stdout, or on stderr when `--output` takes the result — then the closing
+/// summary. `--output` receives the whole text of the run.
+fn run_text(
+    plan: Plan,
+    published: &mut Published,
+    output: Option<&PathBuf>,
+) -> Result<i32, CliError> {
+    let mut view = text::TextView::default();
+    let mut printed = String::new();
+    let mut broken = None;
+    let emit = |block: &str, printed: &mut String| -> Result<(), CliError> {
+        printed.push_str(block);
+        printed.push('\n');
+        if output.is_some() {
+            let mut err = std::io::stderr();
+            writeln!(err, "{block}")?;
+            err.flush()?;
+        } else {
+            let mut out = std::io::stdout();
+            writeln!(out, "{block}")?;
+            out.flush()?;
+        }
+        Ok(())
+    };
+    let run = execute(
+        plan,
+        Some(&mut |observation: &Observation<'_>| {
+            let Some(line) = published.observation(observation) else {
+                return ControlFlow::Continue(());
+            };
+            let Some(block) = serde_json::from_str::<text::Seen>(&line)
+                .ok()
+                .and_then(|seen| view.render(&seen))
+            else {
+                return ControlFlow::Continue(());
+            };
+            if let Err(e) = emit(&block, &mut printed) {
+                // Stop the run rather than keep burning harness calls into a pipe
+                // that no longer accepts them.
+                broken = Some(e);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }),
+    );
+    let outcome = match run {
+        Ok(summary) => {
+            let code = exit_code(&summary);
+            let finished = published.result(&summary, code);
+            emit(text::closing(&finished).trim_end(), &mut printed).map(|()| code)
+        }
+        Err(failure) => {
+            published.failure(&failure);
+            let _ = emit(&text::failed(&failure.error.to_string()), &mut printed);
+            Err(failure.error)
+        }
+    };
+    if let Some(path) = output {
+        std::fs::write(path, &printed)?;
+    }
+    if let Some(e) = broken {
+        return Err(e);
+    }
+    outcome
+}
+
+/// `onejudge watch <session>`: replay the session's stream from its start, then
+/// follow it to the run's result, drawn as `run` draws it — or, under `--format
+/// json`, each record as the JSON line it was published as. Exits with the run's
+/// own exit code.
+fn watch_session(args: &WatchArgs) -> Result<i32, CliError> {
+    let mut view = text::TextView::default();
+    let mut out = std::io::stdout();
+    let json = !args.format.is_text();
+    watch::follow(&watch::watch_dir(), &args.session, &mut |line| {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| CliError::Config(format!("the watch stream is unreadable: {e}")))?;
+        let (block, code) = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("result") => {
+                let finished: text::Finished = serde_json::from_value(value).map_err(|e| {
+                    CliError::Config(format!("the watch stream's result is unreadable: {e}"))
+                })?;
+                let code = finished.exit_code;
+                (
+                    Some(text::closing(&finished).trim_end().to_string()),
+                    Some(code),
+                )
+            }
+            Some("failure") => {
+                let failure: FailureReport = serde_json::from_value(value).map_err(|e| {
+                    CliError::Config(format!("the watch stream's failure is unreadable: {e}"))
+                })?;
+                // A run that produced no report exits 2; its watcher does too.
+                (Some(text::failed(&failure.error.message)), Some(2))
+            }
+            _ => (
+                serde_json::from_value::<text::Seen>(value)
+                    .ok()
+                    .and_then(|seen| view.render(&seen)),
+                None,
+            ),
+        };
+        if json {
+            writeln!(out, "{line}")?;
+        } else if let Some(block) = block {
+            writeln!(out, "{block}")?;
+        }
+        out.flush()?;
+        Ok(code)
+    })
+}
+
+/// Drive `plan` while republishing it on stdout as the streamed protocol: one
+/// NDJSON `event` line per tool event the instant it is observed, a `judge_tool`
+/// line per tool event a judge that asked for them reported deciding, then the
+/// terminal `result` line carrying the versioned [`Report`].
+///
+/// Each line is flushed as it is written — a consumer reading this pipe to watch a
+/// long turn learns nothing from a line still sitting in our buffer.
+fn run_streamed(plan: Plan, published: &mut Published) -> Result<i32, CliError> {
+    let mut stdout = std::io::stdout();
+    let mut failure = None;
+    let summary = match execute(
+        plan,
+        Some(&mut |observation: &Observation<'_>| {
+            published.observation(observation);
+            let line = match observation {
+                Observation::Tool(event) => StreamLine::Event(event),
+                Observation::JudgeTool(tool) => StreamLine::JudgeTool(tool),
+                _ => return ControlFlow::Continue(()),
+            };
+            if let Err(e) = write_line(&mut stdout, &line) {
+                // Stop the run rather than keep burning harness calls into a pipe that
+                // no longer accepts them (a consumer that hung up mid-turn).
+                failure = Some(e);
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }),
+    ) {
+        Ok(summary) => summary,
+        Err(run_failure) => {
+            published.failure(&run_failure);
+            // stdout is the `event* result EOF` protocol, so a failure cannot be
+            // published there without inventing a third envelope every consumer
+            // would have to learn. It goes to stderr as ONE compact JSON line
+            // instead — still machine-readable, still line-oriented, and the
+            // protocol on stdout stays exactly as documented.
+            if let Ok(json) = serde_json::to_string(&FailureReport::new(&run_failure)) {
+                eprintln!("{json}");
+            }
+            return Err(run_failure.error);
+        }
+    };
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let code = exit_code(&summary);
+    published.result(&summary, code);
+    write_line(
+        &mut stdout,
+        &StreamLine::Result {
+            report: &summary.report,
+        },
+    )?;
+    Ok(code)
+}
+
+/// One line of the outbound stream — the same two `type`-tagged envelopes onejudge
+/// accepts *from* a streamed provider, so a consumer speaks one protocol in both
+/// directions, plus the judge's own tool events. An `Event` line is the `"type"`
+/// tag wrapped around exactly [`StreamEvent`]'s fields, a `judge_tool` line around
+/// exactly [`JudgeTool`](crate::JudgeTool)'s (the same `event` payload, with the
+/// judge's label); the terminal `Result` line's `report` is byte-for-byte the
+/// versioned [`Report`] a buffered `--format json` run prints.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum StreamLine<'a> {
+    Event(&'a StreamEvent<'a>),
+    #[serde(rename = "judge_tool")]
+    JudgeTool(&'a crate::JudgeTool<'a>),
+    Result {
+        report: &'a Report,
+    },
+}
+
+/// Serialize one NDJSON line and flush it — a consumer watching a long turn learns
+/// nothing from a line still sitting in this process's buffer.
+fn write_line(out: &mut impl Write, line: &StreamLine<'_>) -> Result<(), CliError> {
+    let json = serde_json::to_string(line)
+        .map_err(|e| CliError::Config(format!("could not serialize a stream line: {e}")))?;
+    out.write_all(json.as_bytes())?;
+    out.write_all(b"\n")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// The config file a run reads: the explicit `path`, or `./onejudge.yaml` when it
+/// exists. `None` means no file — flags alone drive the run.
+fn resolve_config_path(path: Option<&PathBuf>) -> Option<PathBuf> {
+    match path {
+        Some(p) => Some(p.clone()),
+        None => {
+            let default = PathBuf::from(DEFAULT_CONFIG);
+            default.exists().then_some(default)
+        }
+    }
+}
+
+/// Read the config from `path`, or start from an empty config (so flags alone can
+/// drive a run) when there is none.
+fn load_config(path: Option<&PathBuf>) -> Result<Config, CliError> {
+    match path {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).map_err(|e| {
+                CliError::Config(format!("could not read config `{}`: {e}", p.display()))
+            })?;
+            // The reader's message says what was wrong and where in the text;
+            // this names the file it is in.
+            Config::from_yaml(&text).map_err(|e| match e {
+                CliError::Config(why) => CliError::Config(format!("`{}`: {why}", p.display())),
+                other => other,
+            })
+        }
+        None => Ok(Config::default()),
+    }
+}
+
+/// Resolve a config-file `skill:` path relative to the config's own directory, so
+/// `onejudge run sub/onejudge.yaml` finds `sub/skills/x` from `skill: skills/x`. An
+/// absolute path is left as-is, and an empty `base` (a bare filename config) is a
+/// no-op.
+fn rebase_skill(cfg: &mut Config, base: &Path) {
+    if base.as_os_str().is_empty() {
+        return;
+    }
+    if let Some(rel) = cfg.skill.take() {
+        cfg.skill = Some(if rel.is_relative() {
+            base.join(rel)
+        } else {
+            rel
+        });
+    }
+}
+
+/// Resolve `--task`, reading stdin when it is exactly `-`.
+fn resolve_task(task: String) -> Result<String, CliError> {
+    if task == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf.trim().to_string())
+    } else {
+        Ok(task)
+    }
+}
+
+/// Read `--judge-input`: the file at the path, or stdin when it is exactly `-` —
+/// verbatim either way, because the material is judged as written.
+fn resolve_judge_input(input: String) -> Result<crate::JudgeInput, CliError> {
+    if input == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        return Ok(crate::JudgeInput::text(buf));
+    }
+    crate::JudgeInput::from_path(&input)
+        .map_err(|e| CliError::Config(format!("could not read --judge-input `{input}`: {e}")))
+}
+
+/// Write `content` to `output` (a file) or stdout.
+fn write_output(output: Option<&PathBuf>, content: &str) -> Result<(), CliError> {
+    match output {
+        Some(path) => {
+            std::fs::write(path, content)?;
+        }
+        None => {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(content.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// Scaffold a run: the two oneharness config files (via `oneharness init`, which
+/// owns harness/model selection) plus the loop-only `onejudge.yaml`.
+fn init(args: InitArgs) -> Result<i32, CliError> {
+    // Check the onejudge.yaml target first so we fail before scaffolding anything.
+    if args.path.exists() && !args.force {
+        return Err(CliError::Config(format!(
+            "{} already exists (use --force to overwrite)",
+            args.path.display()
+        )));
+    }
+
+    // Harness/model selection lives in oneharness's own config files now, so
+    // scaffold them by shelling out to `oneharness init` (see [`MIN_ONEHARNESS`]):
+    // the discovered `oneharness.toml` drives the worker side, and
+    // `oneharness.judge.toml` drives the judge / simulated-user side
+    // (`provider.judge_config`).
+    oneharness_init(&args.oneharness_bin, "oneharness.toml", args.force)?;
+    oneharness_init(&args.oneharness_bin, "oneharness.judge.toml", args.force)?;
+
+    std::fs::write(&args.path, STARTER_CONFIG)?;
+    println!("wrote {}", args.path.display());
+    Ok(0)
+}
+
+/// Shell out to `oneharness init <path>` to scaffold one oneharness config,
+/// surfacing a missing binary or a non-zero exit as an actionable error.
+fn oneharness_init(bin: &str, path: &str, force: bool) -> Result<(), CliError> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("init").arg(path);
+    if force {
+        cmd.arg("--force");
+    }
+    let output = cmd.output().map_err(|e| {
+        CliError::Config(format!(
+            "could not run `{bin} init {path}`: {e}. Is oneharness ({MIN_ONEHARNESS}+) installed \
+             and on PATH? Install it or pass --oneharness-bin <path>."
+        ))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::Config(format!(
+            "`{bin} init {path}` failed: {}",
+            stderr.trim()
+        )));
+    }
+    // Relay oneharness's own confirmation line (e.g. "wrote oneharness.toml").
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+// --- The run driver (pure of arg parsing / IO, so it is unit-testable) -----
+
+/// The structured result of one run: the versioned report plus the derived
+/// status the exit code and human rendering read.
+pub struct RunSummary {
+    /// The versioned report (transcript + verdicts + usage).
+    pub report: Report,
+    /// Whether the task completed (the `done_when` held, or — without one — the
+    /// loop ended before the turn cap).
+    pub completed: bool,
+    /// Whether the multi-turn loop stopped by hitting the turn cap.
+    pub hit_max_turns: bool,
+    /// The turn cap in effect.
+    pub max_turns: u32,
+    /// The completion condition and whether it was satisfied, if one was set.
+    pub done_when: Option<DoneWhen>,
+    /// One entry per configured eval, in order.
+    pub eval_results: Vec<EvalResult>,
+}
+
+/// A `done_when` completion check re-judged against the finished transcript.
+pub struct DoneWhen {
+    /// The completion criterion.
+    pub criterion: String,
+    /// Whether the judge decided it holds.
+    pub satisfied: bool,
+}
+
+/// An eval's verdict, carrying the kind-specific payload so an invalid
+/// combination (a boolean with a score, a mismatched kind) is unrepresentable.
+pub enum EvalOutcome {
+    /// A boolean eval and whether it passed. Gates the exit code.
+    Boolean(bool),
+    /// A numeric eval and its score on the configured scale (report-only).
+    Numeric(f64),
+}
+
+/// One eval's outcome.
+pub struct EvalResult {
+    /// The criterion scored.
+    pub criterion: String,
+    /// The verdict (boolean pass/fail or numeric score).
+    pub outcome: EvalOutcome,
+    /// The judge's stated reason.
+    pub reason: String,
+}
+
+/// A run that did not produce a report, with whatever the provider had already
+/// recorded when it failed.
+///
+/// [`run_plan_reporting_failure`] and [`run_plan_streaming_reporting_failure`]
+/// return it boxed (`Result<_, Box<RunFailure>>`) because the telemetry it carries
+/// is far larger than a summary, and every success would otherwise pay for it.
+/// [`run_plan_observing_reporting_failure`] returns it by value; the field below
+/// keeps its published unboxed shape either way.
+///
+/// A failure is exactly the case a caller most needs attribution for — *which*
+/// harness identity refused, on *which* side of the conversation — and a failed
+/// run produces no [`Report`] to carry it. So the telemetry is returned alongside
+/// the error, and `onejudge run --format json` renders both as a
+/// [`FailureReport`] rather than leaving stdout empty.
+#[derive(Debug)]
+pub struct RunFailure {
+    /// Why the run did not complete.
+    pub error: CliError,
+    /// Timing, usage, and per-invocation harness attribution recorded before the
+    /// failure; `None` when nothing ran at all (a config or provider-build error).
+    pub telemetry: Option<crate::Telemetry>,
+    /// The processes the failed run had already spawned, and the embedder-owned
+    /// group each was placed in — what a caller cleaning up after the failure needs
+    /// to name. Empty when nothing was spawned.
+    pub processes: Vec<crate::SpawnedProcess>,
+    /// What each judge of a panel decided on each supervisor turn before the
+    /// failure — including the turn that failed, with the judge that failed
+    /// recorded as `error` beside the ones that decided. Empty for a bare
+    /// provider.
+    pub judge_decisions: Vec<crate::JudgedTurn>,
+}
+
+impl From<CliError> for Box<RunFailure> {
+    fn from(error: CliError) -> Self {
+        Box::new(RunFailure {
+            error,
+            telemetry: None,
+            processes: Vec::new(),
+            judge_decisions: Vec::new(),
+        })
+    }
+}
+
+/// Drive `plan` to completion, re-judge its `done_when`, score its evals, and
+/// bundle everything into a [`RunSummary`]. Under [`Format::Text`] `progress`
+/// receives the run as `onejudge run` draws it, one block of lines per
+/// observation as it happens (the closing summary is the caller's to draw); a
+/// `Json` run is buffered.
+///
+/// Every process this spawns is offered to the plan's
+/// [`spawn_hook`](Plan::with_spawn_hook), if an embedder installed one.
+///
+/// # Errors
+/// [`CliError::Engine`] on a provider/engine failure; [`CliError::Config`] if the
+/// provider cannot be built.
+pub fn run_plan(
+    plan: Plan,
+    format: Format,
+    progress: &mut dyn FnMut(&str),
+) -> Result<RunSummary, CliError> {
+    run_plan_reporting_failure(plan, format, progress).map_err(|failure| failure.error)
+}
+
+/// [`run_plan`], additionally returning the telemetry a *failed* run had recorded
+/// — the only place harness attribution for a failed invocation is reachable.
+///
+/// # Errors
+/// As [`run_plan`], wrapped in a [`RunFailure`].
+pub fn run_plan_reporting_failure(
+    plan: Plan,
+    format: Format,
+    progress: &mut dyn FnMut(&str),
+) -> Result<RunSummary, Box<RunFailure>> {
+    if !format.is_text() {
+        return execute(plan, None);
+    }
+    let mut view = text::TextView::default();
+    let mut lines = |observation: &Observation<'_>| {
+        if let Some(block) = serde_json::to_string(observation)
+            .ok()
+            .and_then(|line| serde_json::from_str::<text::Seen>(&line).ok())
+            .and_then(|seen| view.render(&seen))
+        {
+            progress(&block);
+        }
+        ControlFlow::Continue(())
+    };
+    execute(plan, Some(&mut lines))
+}
+
+/// The sink a streaming run delivers each live [`StreamEvent`] to. Returning
+/// [`ControlFlow::Break`] short-circuits the run.
+pub type EventSink<'a> = dyn FnMut(&StreamEvent<'_>) -> ControlFlow<()> + 'a;
+
+/// The sink an observing run delivers each live [`Observation`] to. Returning
+/// [`ControlFlow::Break`] short-circuits the run.
+pub type ObservationSink<'a> = dyn FnMut(&Observation<'_>) -> ControlFlow<()> + 'a;
+
+/// Drive `plan` exactly as [`run_plan`] does, delivering each live tool event to
+/// `on_event` as a typed [`StreamEvent`] instead of a rendered line. Returning
+/// [`ControlFlow::Break`] short-circuits the run (the summary then reflects a
+/// stopped-early outcome). This is what `onejudge run --stream` publishes and what
+/// an SDK reads to watch a long turn while it is still running.
+///
+/// # Errors
+/// As [`run_plan`].
+pub fn run_plan_streaming(
+    plan: Plan,
+    on_event: &mut EventSink<'_>,
+) -> Result<RunSummary, CliError> {
+    run_plan_streaming_reporting_failure(plan, on_event).map_err(|failure| failure.error)
+}
+
+/// [`run_plan_streaming`], additionally returning the telemetry a *failed* run had
+/// recorded. See [`RunFailure`].
+///
+/// # Errors
+/// As [`run_plan_streaming`], wrapped in a [`RunFailure`].
+pub fn run_plan_streaming_reporting_failure(
+    plan: Plan,
+    on_event: &mut EventSink<'_>,
+) -> Result<RunSummary, Box<RunFailure>> {
+    // Narrowed to the tool half of the wider seam, so a streaming caller keeps
+    // receiving exactly the observations it always did — same kind, same shape,
+    // same order — while one run driver serves both entry points.
+    let mut tools_only = |observation: &Observation<'_>| match observation {
+        Observation::Tool(event) => on_event(event),
+        _ => ControlFlow::Continue(()),
+    };
+    execute(plan, Some(&mut tools_only))
+}
+
+/// Drive `plan` exactly as [`run_plan_streaming_reporting_failure`] does, but
+/// deliver the *whole* of each turn to `on_observation` as it happens — the turn's
+/// opening and the instruction it answers, its tool events, each party's own reply
+/// text, and the turn's usage and bounds. See [`Observation`].
+///
+/// This is the entry point for an embedder that drives a [`Plan`] rather than
+/// building providers itself, and needs to show an operator a dispatch they cannot
+/// otherwise watch. Returning [`ControlFlow::Break`] short-circuits the run.
+///
+/// The failure comes back **unboxed**, unlike
+/// [`run_plan_streaming_reporting_failure`]: see [`RunFailure`] for why the older
+/// entry point boxes it, and the suppression below for why this one does not.
+///
+/// # Errors
+/// As [`run_plan_streaming_reporting_failure`], unboxed.
+#[allow(
+    clippy::result_large_err,
+    reason = "one of these is produced at most once per run — at the end of a dispatch measured in \
+              minutes — so the bytes it costs to move are not a cost anything can notice. The two \
+              ways to satisfy the lint both change a *published* public shape to buy that: boxing \
+              `RunFailure::telemetry` breaks every existing reader of that field, and boxing the \
+              return type deviates from the signature this entry point is contracted to have."
+)]
+pub fn run_plan_observing_reporting_failure(
+    plan: Plan,
+    on_observation: &mut dyn FnMut(&Observation<'_>) -> ControlFlow<()>,
+) -> std::result::Result<RunSummary, RunFailure> {
+    execute(plan, Some(on_observation)).map_err(|failure| *failure)
+}
+
+/// The one run driver every entry point shares: `None` runs the buffered engine
+/// loop, `Some(sink)` the observing one (which a streaming caller reaches through
+/// [`tools_only`]).
+///
+/// The engine's telemetry is read once the loop has finished **either way**, so a
+/// failure carries the same per-invocation harness attribution a success does.
+fn execute(
+    plan: Plan,
+    on_observation: Option<&mut ObservationSink<'_>>,
+) -> Result<RunSummary, Box<RunFailure>> {
+    let Plan {
+        provider,
+        settings,
+        conversation,
+        evals,
+        done_when,
+        assessment,
+        spawn_hook,
+        notes,
+        judge_input,
+    } = plan;
+
+    let multi_turn = conversation.user.is_some();
+    let max_turns = conversation
+        .user
+        .as_ref()
+        .and_then(|u| u.max_turns)
+        .unwrap_or(settings.max_turns);
+
+    // An embedder that drives a plan never builds the backend itself, so the plan is
+    // where its spawn hook has to reach the processes the run creates — every one of
+    // them, including both sides of a two-party `split`. Without a hook the backend
+    // is built exactly as before.
+    let built = AnyProvider::build(&provider);
+    if let (Err(_), Some(inbox)) = (&built, &notes) {
+        // No conversation will ever read the plan's note channel.
+        crate::engine::close_unread(inbox);
+    }
+    let backend = match spawn_hook {
+        Some(hook) => built?.with_spawn_hook(hook),
+        None => built?,
+    };
+    let engine = match notes {
+        Some(inbox) => Engine::new(&backend, settings).with_notes(inbox),
+        None => Engine::new(&backend, settings),
+    };
+    // Read the engine's telemetry once the loop is done, whichever way it ended, so
+    // a failure still carries which harness identities the run attempted.
+    let drive = || -> Result<RunSummary, CliError> {
+        let outcome = match (&judge_input, on_observation) {
+            (Some(input), Some(sink)) => engine.judge_only_observing(&conversation, input, sink)?,
+            (Some(input), None) => engine.judge_only(&conversation, input)?,
+            (None, Some(sink)) => engine.run_observing(&conversation, sink)?,
+            (None, None) => engine.run(&conversation)?,
+        };
+
+        let mut verdicts: Vec<NamedVerdict> = Vec::new();
+
+        // A judge-only run's one decision IS its verdict on the bar: re-judging
+        // the material would be a second judgement of the same thing. It is
+        // recorded as the boolean verdict a normal run's re-judge records, so a
+        // reader of either report finds the outcome and its reason in one place.
+        if judge_input.is_some() {
+            let criterion = engine.criteria(done_when.as_deref()).rendered();
+            let satisfied = outcome.completion_reason.is_some() && !outcome.stopped_early;
+            verdicts.push(NamedVerdict::new(
+                criterion.clone().unwrap_or_else(|| JUDGE_ONLY_BAR.into()),
+                JudgeKind::Boolean,
+                crate::JudgeVerdict {
+                    value: JudgeValue::Bool(satisfied),
+                    reason: judge_only_reason(&outcome),
+                    usage: outcome.usage.clone(),
+                },
+            ));
+            let done = criterion.map(|criterion| DoneWhen {
+                criterion,
+                satisfied,
+            });
+            return finish_summary(
+                &engine,
+                outcome,
+                verdicts,
+                &evals,
+                assessment,
+                RunStatus {
+                    completed: satisfied,
+                    hit_max_turns: false,
+                    max_turns,
+                    done,
+                },
+            );
+        }
+
+        // Re-judge the completion condition against the FINAL transcript: this is the
+        // authoritative "did the task actually complete?" signal that drives the exit
+        // code (the loop's own mid-run check can be preempted by the turn cap).
+        //
+        // The criterion re-judged here is the one actually in force: the configured
+        // one plus every criterion a delivered binding note added. A note that moved
+        // the bar mid-run would otherwise be invisible to the verdict that decides
+        // `done` versus `task-failed` — and this is the site that decides it.
+        let done = match engine.criteria(done_when.as_deref()).rendered() {
+            Some(criterion) => {
+                let verdict = engine.judge_boolean(&criterion, &outcome.transcript)?;
+                let satisfied = matches!(verdict.value, JudgeValue::Bool(true));
+                verdicts.push(NamedVerdict::new(
+                    criterion.clone(),
+                    JudgeKind::Boolean,
+                    verdict,
+                ));
+                Some(DoneWhen {
+                    criterion,
+                    satisfied,
+                })
+            }
+            None => None,
+        };
+
+        let hit_max_turns =
+            multi_turn && outcome.transcript.assistant_turns() >= max_turns as usize;
+        let completed = match &done {
+            // A configured criterion is the authority on completion, whatever ended
+            // the loop — a satisfied one is satisfied however the run got there.
+            Some(d) => d.satisfied,
+            // Without one, "the loop ended before the cap" is the completion signal.
+            // A run that *settled* is the exception: it ended because the supervisor
+            // judged the work incomplete and then named no next instruction, which
+            // is the opposite of the task being done, and reporting it as completed
+            // would hide exactly the case `settled_reason` exists to surface. A
+            // run at the cap completed only if its final supervisor turn said so.
+            None => {
+                (!hit_max_turns || outcome.completion_reason.is_some())
+                    && outcome.settled_reason.is_none()
+            }
+        };
+
+        finish_summary(
+            &engine,
+            outcome,
+            verdicts,
+            &evals,
+            assessment,
+            RunStatus {
+                completed,
+                hit_max_turns,
+                max_turns,
+                done,
+            },
+        )
+    };
+    drive().map_err(|error| {
+        Box::new(RunFailure {
+            error,
+            telemetry: engine.telemetry(),
+            processes: engine.spawned_processes(),
+            judge_decisions: engine.judge_decisions(),
+        })
+    })
+}
+
+/// What decides a run's exit code and closing summary, beside its report.
+struct RunStatus {
+    completed: bool,
+    hit_max_turns: bool,
+    max_turns: u32,
+    done: Option<DoneWhen>,
+}
+
+/// Score `evals` and the `assessment` against the finished `outcome` and bundle
+/// everything into the [`RunSummary`] — the same tail for a normal run and a
+/// judge-only one.
+fn finish_summary(
+    engine: &Engine<'_>,
+    mut outcome: crate::Outcome,
+    mut verdicts: Vec<NamedVerdict>,
+    evals: &[Eval],
+    assessment: Option<String>,
+    status: RunStatus,
+) -> Result<RunSummary, CliError> {
+    let mut eval_results = Vec::with_capacity(evals.len());
+    for eval in evals {
+        let result = match eval.kind {
+            EvalKind::Boolean => {
+                let verdict = engine.judge_boolean(&eval.criterion, &outcome.transcript)?;
+                let passed = matches!(verdict.value, JudgeValue::Bool(true));
+                let reason = verdict.reason.clone();
+                verdicts.push(NamedVerdict::new(
+                    eval.criterion.clone(),
+                    JudgeKind::Boolean,
+                    verdict,
+                ));
+                EvalResult {
+                    criterion: eval.criterion.clone(),
+                    outcome: EvalOutcome::Boolean(passed),
+                    reason,
+                }
+            }
+            EvalKind::Numeric { scale: (min, max) } => {
+                let verdict =
+                    engine.judge_numeric(&eval.criterion, min, max, &outcome.transcript)?;
+                // A numeric query yields a number; treat a contract-violating bool
+                // as the scale floor rather than inventing a separate empty state.
+                let score = match verdict.value {
+                    JudgeValue::Number(n) => n,
+                    JudgeValue::Bool(_) => min,
+                };
+                let reason = verdict.reason.clone();
+                verdicts.push(NamedVerdict::new(
+                    eval.criterion.clone(),
+                    JudgeKind::Numeric,
+                    verdict,
+                ));
+                EvalResult {
+                    criterion: eval.criterion.clone(),
+                    outcome: EvalOutcome::Numeric(score),
+                    reason,
+                }
+            }
+        };
+        eval_results.push(result);
+    }
+
+    let assessment = match assessment {
+        Some(prompt) => {
+            let result = engine.assess(&prompt, &outcome.transcript)?;
+            if let Some(usage) = result.usage {
+                outcome.usage.get_or_insert_with(Usage::default).add(&usage);
+            }
+            Some(result.text)
+        }
+        None => None,
+    };
+    outcome.telemetry = engine.telemetry();
+    outcome.processes = engine.spawned_processes();
+    let report = outcome.into_report_with_assessment(verdicts, assessment);
+
+    Ok(RunSummary {
+        report,
+        completed: status.completed,
+        hit_max_turns: status.hit_max_turns,
+        max_turns: status.max_turns,
+        done_when: status.done,
+        eval_results,
+    })
+}
+
+/// The reason a judge-only run's verdict carries: the judges' completion reason,
+/// else the finding they handed back (the user turn after the material), else why
+/// the decision settled without one.
+fn judge_only_reason(outcome: &crate::Outcome) -> String {
+    if let Some(reason) = &outcome.completion_reason {
+        return reason.clone();
+    }
+    let finding = outcome
+        .transcript
+        .messages
+        .get(2)
+        .filter(|message| message.role == crate::Role::User)
+        .map(|message| message.content.clone());
+    finding
+        .or_else(|| outcome.settled_reason.clone())
+        .unwrap_or_else(|| "the run stopped before the judge side decided".into())
+}
+
+/// The process exit code for a run: `0` when the task completed and every boolean
+/// eval passed, else `1`. Numeric evals are score-and-report — they never fail
+/// the run (there is no threshold to fail against).
+#[must_use]
+pub fn exit_code(summary: &RunSummary) -> i32 {
+    let evals_pass = summary
+        .eval_results
+        .iter()
+        .all(|r| !matches!(r.outcome, EvalOutcome::Boolean(false)));
+    if summary.completed && evals_pass {
+        0
+    } else {
+        1
+    }
+}
+
+/// Render the human-readable result: the conversation (with tool actions), the
+/// completion status, usage, and each eval verdict.
+#[must_use]
+pub fn render_human(summary: &RunSummary) -> String {
+    let mut out = String::new();
+    out.push_str("=== Conversation ===\n");
+    out.push_str(&render_conversation(&summary.report));
+    out.push_str("\n\n=== Result ===\n");
+
+    let status = status_line(
+        summary.completed,
+        summary.report.settled_reason.as_deref(),
+        summary.hit_max_turns,
+        summary.max_turns,
+    );
+    out.push_str(&format!("Status: {status}\n"));
+    out.push_str(&format!(
+        "Turns:  {} assistant turn(s)\n",
+        summary.report.transcript.assistant_turns()
+    ));
+    if let Some(done) = &summary.done_when {
+        out.push_str(&format!(
+            "Completion: \"{}\" — {}\n",
+            done.criterion,
+            if done.satisfied {
+                "satisfied"
+            } else {
+                "not satisfied"
+            }
+        ));
+    }
+    out.push_str(&format!(
+        "Usage:  {}\n",
+        render_usage(summary.report.usage.as_ref())
+    ));
+
+    if !summary.eval_results.is_empty() {
+        out.push_str("\n=== Evals ===\n");
+        for r in &summary.eval_results {
+            out.push_str(&render_eval(r));
+            out.push('\n');
+        }
+    }
+    if let Some(assessment) = &summary.report.assessment {
+        out.push_str("\n=== Assessment ===\n");
+        out.push_str(assessment);
+        out.push('\n');
+    }
+    out
+}
+
+/// A run's status as a person reads it: `completed`, or `incomplete` and why.
+fn status_line(
+    completed: bool,
+    settled: Option<&str>,
+    hit_max_turns: bool,
+    max_turns: u32,
+) -> String {
+    if completed {
+        "completed".to_string()
+    } else if let Some(settled) = settled {
+        // Said before the turn cap, because it is the more specific fact and the
+        // one an operator would otherwise have to guess at.
+        format!("incomplete — {settled}")
+    } else if hit_max_turns {
+        format!("incomplete — hit the turn cap ({max_turns})")
+    } else {
+        "incomplete".to_string()
+    }
+}
+
+/// The conversation as [`render_transcript`](crate::render_transcript) renders
+/// it, with each judge's decision printed beside the supervisor turn it belongs
+/// to — directly under the assistant turn that turn judged, before the next user
+/// message, so a reader sees what each judge said at the point it said it. A run
+/// judged by a bare provider records no decision and renders exactly as before.
+fn render_conversation(report: &Report) -> String {
+    let mut out = String::new();
+    let mut assistant_turn = 0;
+    for (i, message) in report.transcript.messages.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&crate::render_transcript(
+            std::slice::from_ref(message),
+            true,
+        ));
+        if message.role != crate::Role::Assistant {
+            continue;
+        }
+        assistant_turn += 1;
+        for judged in report
+            .judge_decisions
+            .iter()
+            .filter(|judged| judged.turn == assistant_turn)
+        {
+            for decision in &judged.decisions {
+                out.push_str(&format!(
+                    "\n  [judge {} ({})] {}",
+                    decision.judge,
+                    decision.kind,
+                    decision.decision.as_str()
+                ));
+                if !decision.reason.is_empty() {
+                    out.push_str(" — ");
+                    out.push_str(&decision.reason);
+                }
+                // The exact command that shows the llmlint run behind the
+                // decision, on its own line so it copies whole.
+                if let Some(run_id) = &decision.run_id {
+                    out.push_str(&format!("\n    llmlint history {run_id}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One eval line for the human report.
+fn render_eval(r: &EvalResult) -> String {
+    let mark = match r.outcome {
+        EvalOutcome::Boolean(true) => "[PASS]".to_string(),
+        EvalOutcome::Boolean(false) => "[FAIL]".to_string(),
+        EvalOutcome::Numeric(score) => format!("[{score}]"),
+    };
+    let reason = if r.reason.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", r.reason)
+    };
+    format!("{mark} {}{reason}", r.criterion)
+}
+
+/// A compact usage line.
+fn render_usage(usage: Option<&Usage>) -> String {
+    match usage {
+        None => "none reported".to_string(),
+        Some(u) => {
+            let mut parts = Vec::new();
+            if let Some(i) = u.input_tokens {
+                parts.push(format!("input={i}"));
+            }
+            if let Some(o) = u.output_tokens {
+                parts.push(format!("output={o}"));
+            }
+            if let Some(r) = u.cache_read_tokens {
+                parts.push(format!("cache_read={r}"));
+            }
+            if let Some(w) = u.cache_write_tokens {
+                parts.push(format!("cache_write={w}"));
+            }
+            if let Some(c) = u.cost_usd {
+                parts.push(format!("cost=${c:.4}"));
+            }
+            if parts.is_empty() {
+                "none reported".to_string()
+            } else {
+                parts.join(" ")
+            }
+        }
+    }
+}
+
+/// The machine-readable document a `--format json` run writes when it produced no
+/// [`Report`]: why it failed, and the telemetry — including per-invocation harness
+/// attribution — recorded before it did.
+///
+/// Stamped with the same [`SCHEMA_VERSION`](crate::SCHEMA_VERSION) as a report, so
+/// one number describes both halves of the CLI's JSON surface. Additive: before
+/// this existed a failed `--format json` run wrote nothing at all.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct FailureReport {
+    /// The contract version this document was serialized under.
+    pub schema_version: u32,
+    /// Why the run did not complete.
+    pub error: FailureDetail,
+    /// Timing, usage, and per-invocation harness attribution recorded before the
+    /// failure; absent when nothing ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<crate::Telemetry>,
+    /// The processes the failed run had already spawned, with the embedder-owned
+    /// group each was placed in. Absent when nothing was spawned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<crate::SpawnedProcess>,
+    /// What each judge of a panel decided on each supervisor turn before the
+    /// failure, the failed turn included. Absent for a bare provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_decisions: Vec<crate::JudgedTurn>,
+}
+
+/// The failure itself, with the classification a caller branches on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "sdk-schema", derive(schemars::JsonSchema))]
+pub struct FailureDetail {
+    /// The human-readable failure, exactly as it is printed on stderr.
+    pub message: String,
+    /// The provider failure category, when the failure came from a provider and
+    /// was classified (`auth`, `quota`, `timeout`, `spawn`, `protocol`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::ProviderErrorKind>,
+}
+
+impl FailureReport {
+    /// Build the document for `failure`.
+    #[must_use]
+    pub fn new(failure: &RunFailure) -> Self {
+        Self {
+            schema_version: crate::SCHEMA_VERSION,
+            error: FailureDetail {
+                message: failure.error.to_string(),
+                kind: match &failure.error {
+                    CliError::Engine(error) => error.kind(),
+                    CliError::Config(_) | CliError::Io(_) => None,
+                },
+            },
+            telemetry: failure.telemetry.clone(),
+            processes: failure.processes.clone(),
+            judge_decisions: failure.judge_decisions.clone(),
+        }
+    }
+}
+
+/// Serialize a [`FailureReport`] as pretty JSON.
+fn render_failure_json(failure: &RunFailure) -> Result<String, CliError> {
+    let mut json = serde_json::to_string_pretty(&FailureReport::new(failure))
+        .map_err(|e| CliError::Config(format!("could not serialize the failure report: {e}")))?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// Serialize the versioned report as pretty JSON.
+fn render_json(report: &Report) -> Result<String, CliError> {
+    let mut json = serde_json::to_string_pretty(report)
+        .map_err(|e| CliError::Config(format!("could not serialize report: {e}")))?;
+    json.push('\n');
+    Ok(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Transcript;
+
+    #[test]
+    fn the_linked_core_is_at_least_the_release_opening_history_before_events() {
+        // The manifest requirement is the one thing that constrains the build;
+        // this holds it at the floor by number, and the test after it by name.
+        let pinned = pinned_oneharness_core();
+        assert!(
+            version_parts(&pinned) >= version_parts(MIN_ONEHARNESS_CORE),
+            "the workspace requires oneharness-core {pinned}, below the {MIN_ONEHARNESS_CORE} \
+             floor whose history-opening callback downstream engines take through this crate"
+        );
+        // Named, not numbered: a config *list* on both the request and the loader
+        // arrived in 0.20.0, so a lock resolved below it fails to compile this.
+        // Named, not numbered: the public renderer arrived in 0.21.0.
+        let render: fn(&crate::ActionEvent) -> Option<String> =
+            oneharness_core::domain::render::render_event;
+        let said = crate::ActionEvent {
+            kind: "message".into(),
+            name: None,
+            input: None,
+            output: Some("hi".into()),
+            index: 0,
+            tool_call_id: None,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+            status: None,
+            timing_source: None,
+        };
+        assert_eq!(render(&said).as_deref(), Some("› hi"));
+        let request = oneharness_core::io::run::RunRequest {
+            config: vec![std::path::PathBuf::from("defaults.toml")],
+            ..Default::default()
+        };
+        assert_eq!(request.config.len(), 1);
+        type Layers = Vec<(String, oneharness_core::domain::config::FileConfig)>;
+        type LoadLayers = fn(
+            &[std::path::PathBuf],
+            bool,
+            &std::path::Path,
+        ) -> Result<Layers, oneharness_core::errors::OneharnessError>;
+        let layers: LoadLayers = oneharness_core::io::config::load_layers;
+        assert!(layers(&[], true, std::path::Path::new("."))
+            .unwrap()
+            .is_empty());
+        // Named, not numbered: `read_pointers` and `HistoryPointer` arrived in
+        // 0.17.0, so a lock resolved below that release fails to compile this
+        // test rather than linking a core that writes no pointer line. The
+        // journey that drives them through the engine is in `tests/e2e.rs`.
+        let reader: fn(
+            &std::path::Path,
+        ) -> Result<
+            oneharness_core::io::history::HistoryPointers,
+            oneharness_core::errors::OneharnessError,
+        > = oneharness_core::io::history::read_pointers;
+        let record = std::any::type_name::<oneharness_core::domain::history::HistoryPointer>();
+        assert!(record.ends_with("HistoryPointer"), "{record}");
+        let read = reader(std::path::Path::new("")).expect("a missing file reads as empty");
+        assert!(read.pointers.is_empty() && read.skipped == 0, "{read:?}");
+    }
+
+    #[test]
+    fn the_advertised_oneharness_minimum_tracks_the_report_schema_and_the_prose() {
+        // The version an operator is told to install is restated in CLI messages
+        // and in prose, and what makes it right is the report contract: the
+        // floor CLI has to write the schema the linked core parses. That schema
+        // is the source; this is the gate that keeps the floor and its copies
+        // from drifting off it — which they had.
+        //
+        // Schema equality, never an ordering of the two crates' versions — see
+        // `MIN_ONEHARNESS`.
+        assert_eq!(
+            oneharness_core::domain::report::SCHEMA_VERSION,
+            MIN_ONEHARNESS_REPORT_SCHEMA,
+            "the linked oneharness-core parses report schema {}, but the advertised \
+             oneharness minimum {MIN_ONEHARNESS} writes {MIN_ONEHARNESS_REPORT_SCHEMA}, so an \
+             operator following it installs a CLI whose report this build cannot read; move \
+             the floor to the first CLI writing the new schema and record it here",
+            oneharness_core::domain::report::SCHEMA_VERSION
+        );
+
+        // Everything else that repeats it — prose and rustdoc alike — so a bump
+        // cannot land in the code alone. A file that states the minimum and is not
+        // on this list is a copy nothing reconciles, which is the drift this gate
+        // exists to make impossible.
+        for (name, text) in [
+            ("README.md", include_str!("../../../../README.md")),
+            ("AGENTS.md", include_str!("../../../../AGENTS.md")),
+            ("docs/cli.md", include_str!("../../../../docs/cli.md")),
+            (
+                "docs/control.md",
+                include_str!("../../../../docs/control.md"),
+            ),
+            (
+                "docs/live-tier.md",
+                include_str!("../../../../docs/live-tier.md"),
+            ),
+            (
+                "docs/oneharness-library.md",
+                include_str!("../../../../docs/oneharness-library.md"),
+            ),
+            ("oneharness/mod.rs", include_str!("../oneharness/mod.rs")),
+        ] {
+            assert!(
+                text.contains(MIN_ONEHARNESS),
+                "{name} does not mention the advertised oneharness minimum {MIN_ONEHARNESS}"
+            );
+        }
+    }
+
+    /// The `oneharness-core` requirement as the workspace manifest states it.
+    fn pinned_oneharness_core() -> String {
+        include_str!("../../../../Cargo.toml")
+            .lines()
+            .find_map(|line| line.strip_prefix("oneharness-core = "))
+            .expect("the workspace pins oneharness-core")
+            .trim()
+            .trim_matches('"')
+            .to_string()
+    }
+
+    /// A `major.minor.patch` string as comparable numbers. Only used by the drift
+    /// gate above, where both inputs are release versions this repo writes.
+    fn version_parts(version: &str) -> (u32, u32, u32) {
+        let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    }
+
+    fn summary(completed: bool, hit_max: bool, evals: Vec<EvalResult>) -> RunSummary {
+        RunSummary {
+            report: Report::new(Transcript::from_input("hi"), vec![], None, false),
+            completed,
+            hit_max_turns: hit_max,
+            max_turns: 8,
+            done_when: None,
+            eval_results: evals,
+        }
+    }
+
+    fn bool_eval(passed: bool) -> EvalResult {
+        EvalResult {
+            criterion: "it works".into(),
+            outcome: EvalOutcome::Boolean(passed),
+            reason: "because".into(),
+        }
+    }
+
+    #[test]
+    fn exit_zero_only_when_completed_and_evals_pass() {
+        assert_eq!(exit_code(&summary(true, false, vec![])), 0);
+        assert_eq!(exit_code(&summary(false, true, vec![])), 1);
+        assert_eq!(exit_code(&summary(true, false, vec![bool_eval(true)])), 0);
+        assert_eq!(exit_code(&summary(true, false, vec![bool_eval(false)])), 1);
+    }
+
+    #[test]
+    fn numeric_eval_never_fails_the_run() {
+        let numeric = EvalResult {
+            criterion: "quality".into(),
+            outcome: EvalOutcome::Numeric(2.0),
+            reason: String::new(),
+        };
+        assert_eq!(exit_code(&summary(true, false, vec![numeric])), 0);
+    }
+
+    #[test]
+    fn human_render_shows_status_and_evals() {
+        let s = summary(false, true, vec![bool_eval(false)]);
+        let out = render_human(&s);
+        assert!(out.contains("=== Conversation ==="));
+        assert!(out.contains("hit the turn cap (8)"));
+        assert!(out.contains("[FAIL] it works"));
+    }
+
+    #[test]
+    fn human_render_says_why_a_settled_run_is_incomplete() {
+        // "incomplete" alone reads as "the worker could not do it". A run the
+        // supervisor left without a next instruction has to say so.
+        let mut s = summary(false, true, vec![]);
+        s.report.settled_reason = Some("the supervisor gave no next instruction".into());
+        let out = render_human(&s);
+        assert!(
+            out.contains("Status: incomplete — the supervisor gave no next instruction"),
+            "{out}"
+        );
+        assert!(!out.contains("hit the turn cap"));
+    }
+
+    #[test]
+    fn human_render_prints_each_judges_decision_beside_its_supervisor_turn() {
+        let mut s = summary(true, false, vec![]);
+        let mut transcript = Transcript::from_input("fix it");
+        transcript.push(crate::Message::assistant("did half"));
+        transcript.push(crate::Message::user(
+            "## Judge `lint` (command)\n\nFix the lint.",
+        ));
+        transcript.push(crate::Message::assistant("done"));
+        s.report.transcript = transcript;
+        s.report.judge_decisions = vec![
+            crate::JudgedTurn {
+                turn: 1,
+                decisions: vec![
+                    crate::JudgeDecision {
+                        judge: "reviewer".into(),
+                        kind: "oneharness".into(),
+                        decision: crate::Decision::Done,
+                        reason: "looks right".into(),
+                        labels: std::collections::BTreeMap::new(),
+                        run_id: None,
+                        posture: None,
+                        events: Vec::new(),
+                    },
+                    crate::JudgeDecision {
+                        judge: "lint".into(),
+                        kind: "command".into(),
+                        decision: crate::Decision::Continue,
+                        reason: String::new(),
+                        labels: std::collections::BTreeMap::new(),
+                        run_id: None,
+                        posture: None,
+                        events: Vec::new(),
+                    },
+                ],
+            },
+            crate::JudgedTurn {
+                turn: 2,
+                decisions: vec![crate::JudgeDecision {
+                    judge: "lint".into(),
+                    kind: "command".into(),
+                    decision: crate::Decision::Done,
+                    reason: "clean".into(),
+                    labels: std::collections::BTreeMap::new(),
+                    run_id: None,
+                    posture: None,
+                    events: Vec::new(),
+                }],
+            },
+        ];
+        let out = render_human(&s);
+        assert_eq!(
+            out.split("\n\n=== Result ===").next().unwrap(),
+            "=== Conversation ===\n\
+             User: fix it\n\
+             Assistant: did half\n\
+             \x20 [judge reviewer (oneharness)] done — looks right\n\
+             \x20 [judge lint (command)] continue\n\
+             User: ## Judge `lint` (command)\n\nFix the lint.\n\
+             Assistant: done\n\
+             \x20 [judge lint (command)] done — clean",
+            "{out}"
+        );
+        // A decision linked to an llmlint run prints the command that shows it.
+        s.report.judge_decisions[1].decisions[0].kind = "llmlint".into();
+        s.report.judge_decisions[1].decisions[0].run_id = Some("20260929T064026Z-c80a9".into());
+        assert!(
+            render_human(&s).contains(
+                "Assistant: done\n\x20 [judge lint (llmlint)] done — clean\n\
+                 \x20   llmlint history 20260929T064026Z-c80a9\n"
+            ),
+            "{}",
+            render_human(&s)
+        );
+        // Without decisions the conversation renders exactly as it always has.
+        s.report.judge_decisions.clear();
+        assert!(render_human(&s).contains(&format!(
+            "=== Conversation ===\n{}\n\n=== Result ===",
+            crate::render_transcript(&s.report.transcript.messages, true)
+        )));
+    }
+
+    #[test]
+    fn human_render_shows_completion_line() {
+        let mut s = summary(true, false, vec![]);
+        s.done_when = Some(DoneWhen {
+            criterion: "tests pass".into(),
+            satisfied: true,
+        });
+        let out = render_human(&s);
+        assert!(out.contains("Completion: \"tests pass\" — satisfied"));
+        assert!(out.contains("Status: completed"));
+    }
+
+    #[test]
+    fn render_eval_marks_each_kind() {
+        assert!(render_eval(&bool_eval(true)).starts_with("[PASS]"));
+        assert!(render_eval(&bool_eval(false)).starts_with("[FAIL]"));
+        let numeric = EvalResult {
+            criterion: "q".into(),
+            outcome: EvalOutcome::Numeric(4.5),
+            reason: String::new(),
+        };
+        assert!(render_eval(&numeric).starts_with("[4.5]"));
+    }
+
+    #[test]
+    fn usage_render_summarizes_or_reports_none() {
+        assert_eq!(render_usage(None), "none reported");
+        let u = Usage {
+            input_tokens: Some(10),
+            output_tokens: Some(3),
+            cache_read_tokens: Some(21),
+            cache_write_tokens: Some(4),
+            cost_usd: Some(0.0123),
+        };
+        let rendered = render_usage(Some(&u));
+        assert!(rendered.contains("input=10"));
+        assert!(rendered.contains("output=3"));
+        assert!(rendered.contains("cache_read=21"));
+        assert!(rendered.contains("cache_write=4"));
+        assert!(rendered.contains("cost=$0.0123"));
+    }
+
+    #[test]
+    fn json_render_is_the_versioned_report() {
+        let report = Report::new(Transcript::from_input("hi"), vec![], None, false);
+        let json = render_json(&report).unwrap();
+        // Against the constant, not a literal: this asserts that `--format json`
+        // renders *the versioned report*, and a hand-copied number turns every
+        // schema bump into an unrelated failure here. `tests/contract.rs` is what
+        // holds the number itself.
+        assert!(json.contains(&format!("\"schema_version\": {}", crate::SCHEMA_VERSION)));
+    }
+
+    #[test]
+    fn rebase_skill_resolves_relative_against_the_config_dir() {
+        let mut cfg = Config::from_yaml("task: x\nskill: skills/greeter\n").unwrap();
+        rebase_skill(&mut cfg, Path::new("/proj/cases"));
+        assert_eq!(cfg.skill.unwrap(), Path::new("/proj/cases/skills/greeter"));
+    }
+
+    #[test]
+    fn rebase_skill_leaves_absolute_paths_and_no_skill_alone() {
+        // Use a real absolute path so the assertion holds on Windows too (a
+        // leading-slash path is not absolute there).
+        let abs = std::env::temp_dir().join("greeter-abs");
+        let yaml = format!(
+            "task: x\nskill: {}\n",
+            serde_json::to_string(&abs.to_string_lossy()).unwrap()
+        );
+        let mut cfg = Config::from_yaml(&yaml).unwrap();
+        rebase_skill(&mut cfg, Path::new("/proj"));
+        assert_eq!(cfg.skill.unwrap(), abs);
+
+        let mut none = Config::from_yaml("task: x\n").unwrap();
+        rebase_skill(&mut none, Path::new("/proj"));
+        assert!(none.skill.is_none());
+    }
+
+    #[test]
+    fn starter_config_parses_and_documents_the_surface() {
+        // The starter doubles as `schema` output and must itself be valid.
+        let cfg = Config::from_yaml(STARTER_CONFIG).unwrap();
+        assert!(cfg.task.is_some());
+        assert!(cfg.user.is_some());
+    }
+
+    #[test]
+    fn docs_cli_md_names_every_run_flag_env_override_and_the_artifact_bound() {
+        use clap::CommandFactory as _;
+        let docs = include_str!("../../../../docs/cli.md");
+        for arg in RunArgs::command().get_arguments() {
+            if let Some(long) = arg.get_long().filter(|l| !matches!(*l, "help" | "version")) {
+                assert!(
+                    docs.contains(&format!("`--{long}")),
+                    "docs/cli.md does not document `--{long}`"
+                );
+            }
+        }
+        // Every variable the env layer actually reads, not a transcribed list.
+        let asked = std::cell::RefCell::new(Vec::new());
+        crate::cli::config::Overrides::from_env(|key| {
+            asked.borrow_mut().push(key.to_string());
+            None
+        })
+        .unwrap();
+        let asked = asked.into_inner();
+        assert!(asked.iter().any(|key| key == "ONEJUDGE_ARTIFACTS"));
+        for key in asked {
+            assert!(
+                docs.contains(&format!("`{key}`")),
+                "docs/cli.md does not document `{key}`"
+            );
+        }
+        assert!(
+            docs.contains(&format!("at most {}", crate::ARTIFACT_LISTING_LIMIT)),
+            "docs/cli.md restates the artifact listing bound; keep it equal to ARTIFACT_LISTING_LIMIT"
+        );
+    }
+}

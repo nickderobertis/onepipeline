@@ -153,7 +153,7 @@ fn hold_observer_restarts(paths: &RunPaths) -> Result<std::fs::File> {
                         bound.as_secs()
                     ))));
                 }
-                std::thread::sleep(RESTART_LOCK_POLL);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), RESTART_LOCK_POLL);
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(refused(error)),
         }
@@ -2315,7 +2315,7 @@ fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result
             }
             break;
         }
-        std::thread::sleep(ATTACH_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
     }
     Err(Error::Refused(format!(
         "the driver retained for run '{}' did not claim it: {}",
@@ -2432,12 +2432,14 @@ pub(crate) fn retain_driver(
     let mut command = std::process::Command::new(&retain.program);
     command.args(&retain.args);
     sys::in_own_process_group(&mut command);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(log)
-        .stderr(errors)
-        .spawn()
-        .map_err(|e| Error::Invalid(format!("cannot retain a driver for '{}': {e}", paths.run)))
+    onevcs::launch_trace::spawn_detached(
+        onevcs::launch_site!(),
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(log)
+            .stderr(errors),
+    )
+    .map_err(|e| Error::Invalid(format!("cannot retain a driver for '{}': {e}", paths.run)))
 }
 
 /// `onepipeline drive-run` — the retained driver of a detached launch.
@@ -2583,7 +2585,7 @@ fn keep_the_run_watched(
         if observer.has_exited() && matches!(watch.stopped(observer), Stopped::Over) {
             return;
         }
-        std::thread::sleep(ATTACH_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
     }
 }
 
@@ -3292,7 +3294,7 @@ fn attach(
         // that has concluded is read regardless: its settlement is read off it.
         let length = std::fs::metadata(paths.journal()).map_or(0, |about| about.len());
         if !concluded && read_at == Some(length) {
-            std::thread::sleep(ATTACH_POLL);
+            onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
             continue;
         }
         read_at = Some(length);
@@ -3362,7 +3364,7 @@ fn attach(
             }
             return Ok(settlement);
         }
-        std::thread::sleep(ATTACH_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
     }
 }
 
@@ -3724,7 +3726,7 @@ fn displace_the_undriven_driver(record: &LaunchRecord) {
     sys::stop(record.pid, sys::Stop::Politely);
     let deadline = Instant::now() + DRIVER_HANDOVER;
     while Instant::now() < deadline && sys::process_may_be_live(record.pid) {
-        std::thread::sleep(ATTACH_POLL);
+        onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
     }
 }
 
@@ -4348,7 +4350,10 @@ pub(crate) fn deliver_note_envelope(
                     // read from the calling process's environment, as the `Queued` arm below
                     // says, and this call is a library call a journey cannot bound from outside.
                     None if Instant::now() >= deadline => break Ok(crate::note::Delivered::Queued),
-                    None => std::thread::sleep(Duration::from_millis(50)),
+                    None => onevcs::launch_trace::sleep(
+                        onevcs::launch_site!(),
+                        Duration::from_millis(50),
+                    ),
                 }
             }
         }
@@ -5068,7 +5073,7 @@ pub(crate) fn submit_offered(
                     answered = Some(outcome);
                     break;
                 }
-                std::thread::sleep(ATTACH_POLL);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
             }
             // The wait ran out with nothing answering, so the question this fork
             // was taken on is asked again: is anything still driving this run?
@@ -5166,7 +5171,7 @@ fn take_the_run_over_and_answer(
                 if let Some(outcome) = channel.outcome_of(id) {
                     return Ok(Some(outcome));
                 }
-                std::thread::sleep(ATTACH_POLL);
+                onevcs::launch_trace::sleep(onevcs::launch_site!(), ATTACH_POLL);
             }
             // Something is driving the run, which is the honest queued answer:
             // there is a reconciler and it has not got to this envelope.

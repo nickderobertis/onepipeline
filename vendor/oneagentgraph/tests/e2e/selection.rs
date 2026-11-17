@@ -1,0 +1,1039 @@
+//! Per-side selection journeys, ported from ai-orchestrator's
+//! `test_harness_side_selection_e2e.py` and `test_quota_fallthrough_e2e.py`.
+//!
+//! This crate owns **no** harness or model selection: the graph names an
+//! oneharness config per side, and oneharness decides everything past that. What
+//! these journeys hold is the seam — that each side really runs under the config
+//! it was given, that a model override reaches only the side it was written on,
+//! and that the pairing rule refuses a graph that could not degrade.
+//!
+//! Both halves are money hazards rather than style points. A side that quietly
+//! inherited the other's selection runs on a subscription nobody chose; an
+//! unpaired model reaches whichever candidate the chain settles on and kills the
+//! member on a provider rejection instead of falling through.
+
+// llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
+// process is the single sanctioned double. The wrapper scripts here are that same
+// double under a second `ONEHARNESS_BIN_*` key, because a fall-through needs two
+// candidates and neither may be a real subscription.
+
+#[cfg(unix)]
+use crate::support::make_executable;
+use crate::support::{
+    fake_harness, graph_with, single_sided_graph, two_party_graph, Workspace, CHAIN,
+    FAKE_HARNESS_KEY, FALLBACK_CHAIN, MIXED_CHAIN, NO_ENV, UNREACHABLE_HARNESS_KEY,
+};
+
+// llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
+// file the doubled harness wrote recording the prompt, environment, or argv it was
+// given, and that is the observation point *because* it is the subject: what
+// arrived at the far end of the invocation this crate builds. Nothing a user reads
+// carries it — the stream reports that a member settled, not what the harness was
+// asked, and a run that delivered a mangled task or spent the wrong subscription
+// exits 0 with a stream identical to a correct one. Asserting only on the stream
+// would leave the whole delivery path unproven, which is the path these journeys
+// were ported to cover; ai-orchestrator's originals record at the same point for
+// the same reason. The recorder is the single sanctioned double, and every
+// assertion about behaviour — exit codes, event kinds, the run record — is still
+// made through the CLI.
+/// A model named on one side is stamped into that side's own config, and reaches
+/// the harness — while the other side keeps the model its own config pins.
+///
+/// Ported from `test_each_side_runs_the_model_it_was_given_on_one_shared_identity`
+/// and `test_a_model_given_to_one_side_never_reaches_the_other`.
+#[test]
+fn a_model_reaches_only_the_side_it_was_written_on() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        &format!("{CHAIN}\n[harness.claude-code]\nmodel = \"agent-side-default\"\n"),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{CHAIN}\n[harness.claude-code]\nmodel = \"judge-side-default\"\n"),
+    );
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
+        "    agent:\n      oneharness_config: ./oneharness.toml\n",
+        "    agent:\n      oneharness_config: ./oneharness.toml\n      model: agent-only-model\n",
+    ));
+    // Asserted at the provider boundary rather than in the generated config: the
+    // argv is where a model actually reaches a harness, so this is what proves
+    // the side it was written on is the side that got it.
+    let argv = workspace.at("argv.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: per-side model fake:record-argv={}",
+            argv.display()
+        ))
+        .expect_code(0);
+
+    let spawned = std::fs::read_to_string(&argv).expect("the harness recorded its argv");
+    let lines: Vec<&str> = spawned.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "not every side reached the double: {spawned}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("--model agent-only-model")),
+        "the agent side never got its override: {spawned}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("--model judge-side-default")),
+        "the judge side did not keep the model its own config pins: {spawned}"
+    );
+    assert!(
+        !spawned.contains("agent-side-default"),
+        "the override did not replace the pinned model: {spawned}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("agent-only-model"))
+            .count(),
+        1,
+        "the agent's model reached the judge: {spawned}"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The pairing rule: a model paired with a chain spanning two harness families
+/// refuses the run before it starts, naming both families.
+///
+/// Ported from `test_a_model_the_pairing_rule_forbids_refuses_the_dispatch_before_it_starts`.
+#[test]
+fn a_model_on_a_chain_of_two_families_refuses_before_anything_starts() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", MIXED_CHAIN);
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
+        "    agent:\n      oneharness_config: ./oneharness.toml\n",
+        "    agent:\n      oneharness_config: ./oneharness.toml\n      model: claude-opus-5\n",
+    ));
+    let run = workspace.run_task("fake:complete-now: never gets here");
+    run.expect_code(2);
+    assert!(run.stderr.contains("claude-code, codex"), "{}", run.stderr);
+    assert!(run.stderr.contains("one harness family"), "{}", run.stderr);
+    assert!(
+        run.stdout.is_empty(),
+        "a refusal must not read as an event stream"
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
+// file the doubled harness wrote recording the prompt, environment, or argv it was
+// given, and that is the observation point *because* it is the subject: what
+// arrived at the far end of the invocation this crate builds. Nothing a user reads
+// carries it — the stream reports that a member settled, not what the harness was
+// asked, and a run that delivered a mangled task or spent the wrong subscription
+// exits 0 with a stream identical to a correct one. Asserting only on the stream
+// would leave the whole delivery path unproven, which is the path these journeys
+// were ported to cover; ai-orchestrator's originals record at the same point for
+// the same reason. The recorder is the single sanctioned double, and every
+// assertion about behaviour — exit codes, event kinds, the run record — is still
+// made through the CLI.
+/// The model *value* is forwarded unchecked — the contract's deliberate
+/// asymmetry with the identity, which only the config selects.
+#[test]
+fn the_model_value_itself_is_forwarded_unchecked() {
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
+        "    agent:\n      oneharness_config: ./oneharness.toml\n",
+        "    agent:\n      oneharness_config: ./oneharness.toml\n      model: no-such-model-anywhere\n",
+    ));
+    let argv = workspace.at("argv.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: unchecked model fake:record-argv={}",
+            argv.display()
+        ))
+        .expect_code(0);
+    assert!(
+        std::fs::read_to_string(&argv)
+            .expect("argv")
+            .contains("--model no-such-model-anywhere"),
+        "a model this crate never checked did not reach the harness"
+    );
+}
+
+/// The chain the member's own config declares is what selects the identity — a
+/// process-wide `ONEHARNESS_HARNESSES` in the launching environment does not
+/// move a side that was given its own config.
+///
+/// Ported from `test_each_side_runs_the_provider_it_was_given_over_a_process_wide_selection`.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
+#[test]
+fn each_side_runs_the_config_it_was_given() {
+    let workspace = Workspace::new();
+    let record = workspace.at("env.txt");
+
+    // If the ambient selection *did* win, the run would resolve `codex` — so
+    // that identity is bound to a script that refuses rather than left to reach
+    // a real paid provider. The refusal is the safety net; the assertion is that
+    // it never runs.
+    let never = workspace.write(
+        "never.sh",
+        "#!/bin/sh\necho 'the ambient selection reached a side that had its own config' >&2\nexit 1\n",
+    );
+    make_executable(&never);
+
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "fake:complete-now: selection fake:record-env={}",
+                record.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        // oneharness's own process-wide selection, exported by whatever launched
+        // this run. Both sides still resolve their own config's chain, because
+        // that is what the graph named.
+        &[
+            ("ONEHARNESS_HARNESSES", "codex"),
+            ("ONEHARNESS_BIN_CODEX", &never.display().to_string()),
+        ],
+    );
+    run.expect_code(0);
+    // Every side reached the doubled `claude-code` candidate — if either had
+    // resolved something else, the double would never have been spawned and the
+    // record would be missing that side's line.
+    let recorded = std::fs::read_to_string(&record).expect("env");
+    assert!(
+        recorded.lines().count() >= 2,
+        "not every side reached the double: {recorded}"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A chain whose candidates all refuse on `auth` reports *every* step past as a
+/// `fallback-advanced`, and then fails rather than settling.
+///
+/// The chain that reaches a working identity is the next journey down; this is
+/// the other end of the same rule, and the end that once reported a member as
+/// settled having run no turn at all.
+///
+/// Ported from `test_a_zero_work_subscription_429_hands_the_turn_to_the_next_identity`
+/// and `test_agent_config_falls_back_to_codex_after_claude_auth_rejection`.
+#[test]
+fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", FALLBACK_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  FAKE_HARNESS_REFUSAL: auth\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        // Both candidates are replaced, so the chain can reach no paid
+        // provider by any path — including the fall-through under test.
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+        ],
+    ));
+    // Both candidates refuse, because one `FAKE_HARNESS_REFUSAL` reaches both —
+    // which is the chain that reached nothing, and it must fail rather than
+    // report a settled member.
+    let run = workspace.run_task("fake:complete-now: everything refuses");
+    run.expect_code(1);
+
+    // oneharness records *every* candidate it stepped past, including on a chain
+    // that then reached nothing, so both are reported with their classification.
+    // What must not happen is a settle: a chain that ran no turn has not done the
+    // work, however many candidates it named on the way.
+    let advanced = run.of_kind("fallback-advanced");
+    let identities: Vec<&str> = advanced
+        .iter()
+        .filter_map(|event| event["payload"]["identity"].as_str())
+        .collect();
+    assert_eq!(identities, vec!["claude-code", "codex"], "{advanced:?}");
+    for event in &advanced {
+        assert_eq!(event["payload"]["reason"], serde_json::json!("auth"));
+    }
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "a chain that ran no turn reported the member as settled: {:?}",
+        run.kinds()
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+}
+
+/// A chain that reaches nothing dies as **the chain's** death, carrying every
+/// candidate it attempted — so an operator reads which subscription refused,
+/// with what, off the one event that says the member is gone rather than off
+/// free text.
+///
+/// Three candidates, three different answers: a refusal oneharness classifies,
+/// the same refusal from a *variant* of that harness, and a candidate with no
+/// binary at all, which oneharness steps past with no classification of its
+/// own. The variant is the point of the second: the death has to name a
+/// candidate as the chain did, `<base>:<variant>`, because that is the spelling
+/// that selects the same subscription again. The variant names its binary in
+/// its own config, where a variant can — the route `tests/e2e/dispatch.rs`'s
+/// env-file journey already takes — so nothing paid is reachable from this
+/// config on any machine, whichever layer resolves it: the base
+/// `ONEHARNESS_BIN_CLAUDE_CODE` override covers a variant at the linked core,
+/// and the config's `bin` is what an older core falls to.
+#[test]
+fn an_exhausted_chain_dies_naming_every_candidate_it_attempted() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        &format!(
+            concat!(
+                "run_mode = \"fallback\"\n",
+                "harnesses = [\"claude-code\", \"claude-code:alternate\", \"codex\"]\n",
+                "\n[harness.claude-code.variant.alternate]\nbin = {bin}\n",
+            ),
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            bin = toml_edit::Value::from(fake_harness()),
+        ),
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  FAKE_HARNESS_REFUSAL: auth\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (UNREACHABLE_HARNESS_KEY, workspace.unreachable_harness()),
+        ],
+    ));
+    let run = workspace.run_task("fake:complete-now: nothing answers");
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    assert_eq!(
+        payload["cause"],
+        serde_json::json!("fallback_chain_exhausted"),
+        "{payload}"
+    );
+    let candidates = payload["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an exhausted chain died naming no candidates: {payload}"));
+    let identities: Vec<&str> = candidates
+        .iter()
+        .filter_map(|candidate| candidate["identity"].as_str())
+        .collect();
+    assert_eq!(
+        identities,
+        vec!["claude-code", "claude-code:alternate", "codex"],
+        "{candidates:?}"
+    );
+    // oneharness's own classification for each, in its own spelling — and
+    // `null`, serialized, for the candidate it could not classify.
+    let kinds: Vec<&serde_json::Value> = candidates
+        .iter()
+        .map(|candidate| &candidate["failure_kind"])
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            &serde_json::json!("auth"),
+            &serde_json::json!("auth"),
+            &serde_json::Value::Null
+        ],
+        "{candidates:?}"
+    );
+    assert!(
+        candidates[2].get("failure_kind").is_some(),
+        "an unclassified candidate omitted its kind rather than writing null: {candidates:?}"
+    );
+    for candidate in candidates {
+        let detail = candidate["detail"].as_str().unwrap_or_default();
+        assert!(
+            !detail.is_empty(),
+            "a candidate with no evidence: {candidate}"
+        );
+        assert!(
+            detail.len() <= 4096,
+            "a candidate's detail outgrew its bound"
+        );
+    }
+    assert!(
+        candidates[2]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("not found")),
+        "the missing binary's own words did not reach the death: {:?}",
+        candidates[2]
+    );
+    // The run's own summary is still the detail, and the chain's death is still
+    // an in-process one: none of a child process's facts.
+    assert!(
+        payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("claude-code")),
+        "{payload}"
+    );
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(payload.get(absent).is_none(), "{absent}: {payload}");
+    }
+    // Every step past is still published ahead of the death, one per candidate
+    // in the same order, so a consumer that folds those is unchanged.
+    let advanced = run.of_kind("fallback-advanced");
+    let stepped_past: Vec<&str> = advanced
+        .iter()
+        .filter_map(|event| event["payload"]["reason"].as_str())
+        .collect();
+    assert_eq!(stepped_past, vec!["auth", "auth", "not-installed"]);
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+    assert_eq!(
+        workspace.record()["members"]["reporter"],
+        serde_json::json!("died (provider-failure)")
+    );
+}
+
+/// The other half of the same chain: when a later candidate *can* run, the step
+/// past is reported with the identity and oneharness's own classification.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
+#[test]
+fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", FALLBACK_CHAIN);
+    let refusing = workspace.write(
+        "refusing.sh",
+        // The zero-work 429 a subscription out of quota really answers with: a
+        // terminal record that reads as a success and declares the rejection
+        // only through `terminal_reason` and an embedded `api_error_status`,
+        // having spent nothing. The accounting is what oneharness classifies on,
+        // which is why every counter in it is zero.
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=quota exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&refusing);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, refusing.display().to_string()),
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+        ],
+    ));
+    let run = workspace.run_task("fake:complete-now: fall through to the next identity");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("claude-code")
+    );
+    assert_eq!(advanced[0]["payload"]["reason"], serde_json::json!("quota"));
+    assert!(!run.of_kind("member-settled").is_empty());
+}
+
+/// Codex capacity exhaustion is carried through with the producer's two wire
+/// spellings while the chain advances to its backup.
+#[cfg(unix)]
+#[test]
+fn a_server_overloaded_codex_candidate_falls_through_with_its_failure_kind_unchanged() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "server_overloaded_max_retries = 0\n",
+        ),
+    );
+    let overloaded = workspace.write(
+        "overloaded.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=server_overloaded exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&overloaded);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", overloaded.display().to_string()),
+            (FAKE_HARNESS_KEY, fake_harness()),
+        ],
+    ));
+
+    let run = workspace.run_task("fake:complete-now: use the backup after overload");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("server-overloaded")
+    );
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    let report_path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .expect("the settle names its oneharness report");
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(report_path).expect("read the oneharness report"),
+    )
+    .expect("the report is JSON");
+    assert_eq!(
+        report["fallback"]["fell_through"][0]["reason"],
+        serde_json::json!("server-overloaded"),
+        "{report}"
+    );
+    assert_eq!(
+        report["results"][0]["failure_kind"],
+        serde_json::json!("server_overloaded"),
+        "{report}"
+    );
+}
+
+/// The same core release is linked into onejudge: its agent side advances past
+/// the overload and the conversation settles on the backup identity.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_advances_past_a_server_overloaded_codex_candidate() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "server_overloaded_max_retries = 0\n",
+            "[harness.codex]\napp_server = \"per-dispatch\"\n",
+        ),
+    );
+    let overloaded = workspace.write(
+        "overloaded.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=server_overloaded exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&overloaded);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[("ONEHARNESS_BIN_CODEX", overloaded.display().to_string())],
+    ));
+
+    let run = workspace.run_task("fake:complete-now: use the backup after overload");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("server-overloaded")
+    );
+    assert_eq!(advanced[0]["payload"]["role"], serde_json::json!("agent"));
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
+}
+
+/// A **two-party** member reports the candidates each side stepped past, with
+/// the side and the turn it happened on.
+///
+/// This is what the library conversion made reportable at all. onejudge's report
+/// carries no fallback chain of its own, so while that hop was a subprocess a
+/// two-party member published no `fallback-advanced` whatever its chains did —
+/// an operator had to go and read a harness's history to learn which
+/// subscription had refused. In-process, the per-invocation telemetry answers,
+/// and it answers per side, which is the distinction that matters when only one
+/// of the two is out of quota.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
+    let workspace = Workspace::new();
+    // Both sides run the same two-identity chain, so both have somewhere to fall
+    // to — and the identity they land on is `claude-code`, because that is the
+    // shape the doubled harness speaks. A conversation is parsed on both sides,
+    // so a journey that landed either of them on a harness whose output the
+    // double does not produce would be testing the double, not the chain.
+    const REFUSING_FIRST: &str = concat!(
+        "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+        "[harness.codex]\napp_server = \"per-dispatch\"\n",
+    );
+    workspace.write("oneharness.toml", REFUSING_FIRST);
+    workspace.write("oneharness.judge.toml", REFUSING_FIRST);
+    let refusing = workspace.write(
+        "refusing.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=quota exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&refusing);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", refusing.display().to_string()),
+            (FAKE_HARNESS_KEY, fake_harness()),
+        ],
+    ));
+    let run = workspace.run_task("fake:complete-now: both sides fall through");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert!(
+        !advanced.is_empty(),
+        "a two-party member reported no step past: {:?}",
+        run.kinds()
+    );
+    for event in &advanced {
+        assert_eq!(event["payload"]["identity"], serde_json::json!("codex"));
+        assert_eq!(event["payload"]["reason"], serde_json::json!("quota"));
+        let role = event["payload"]["role"].as_str().unwrap_or_default();
+        assert!(["agent", "judge"].contains(&role), "{event}");
+        assert!(
+            event["payload"]["turn"].as_u64().unwrap_or(0) >= 1,
+            "a step past that names no turn: {event}"
+        );
+    }
+    // Both sides of the conversation ran the refusing identity first, so both
+    // are attributed — the whole point of carrying the side.
+    let roles: std::collections::BTreeSet<&str> = advanced
+        .iter()
+        .filter_map(|event| event["payload"]["role"].as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        ["agent", "judge"].into_iter().collect(),
+        "only one side's chain was attributed: {advanced:?}"
+    );
+
+    // And the member still settled on the identity that could run, with its full
+    // report stored where the settle says it is — the artifact the contract
+    // promises, now with something behind the id to fetch.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!path.is_empty(), "the settle named no stored report");
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the stored report"))
+            .expect("the stored report is JSON");
+    assert_eq!(
+        stored["verdicts"], settled[0]["payload"]["verdict"],
+        "the inline verdict and the stored report disagree"
+    );
+    assert_eq!(
+        settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0),
+        std::fs::metadata(&path).expect("the stored report").len(),
+        "the artifact's size is not the size of what was stored"
+    );
+}
+
+/// A candidate the chain stepped past because the harness would have run it
+/// under the wrong model reaches the stream as `fallback-advanced` with reason
+/// `model-mismatch` — the reason as oneharness classified it, not one this
+/// crate re-derived.
+///
+/// This is the user's own words made into a journey: a config that says Sol
+/// silently spends Astra, and the chain never notices. oneharness-core 0.13.0
+/// reads the model codex's app-server names on its `thread/start` response and
+/// refuses the turn before a token is spent; onejudge 0.8.1 links that core; and
+/// this crate publishes every stepped-past candidate's reason off
+/// `FallbackReport` as the type it already is. So nothing here was edited for
+/// the new reason, and that is precisely the claim: the payload is proven to
+/// carry it rather than assumed to.
+///
+/// Every controlled codex chain in this file says `app_server = "per-dispatch"`:
+/// oneharness-core 0.29 pools a controlled turn onto one shared
+/// `codex app-server --listen unix://…` by default, and the double speaks only
+/// the dispatch's own stdio app-server, the shape these journeys are about.
+///
+/// A controlled codex turn is driven over `codex app-server`, which is why the
+/// chain has to be a two-party member's — a single-sided member asks for no
+/// control and would reach codex over `exec`, where no model is ever observed.
+/// Only the **agent** side carries the mispinned codex: the judge side's
+/// evaluator turn runs with no session and so no control, which would reach
+/// codex over `exec` — a shape the double does not speak — and fail the member
+/// for a reason that is not the one under test. The wrapper stands in for a
+/// codex whose default moved from under the pin, on the same terms every other
+/// refusing wrapper here does.
+#[cfg(unix)]
+#[test]
+fn a_candidate_that_would_run_under_the_wrong_model_is_stepped_past_as_model_mismatch() {
+    let workspace = Workspace::new();
+    // Codex first with a model pinned, claude-code to fall to. The pin is the
+    // config's own, `[harness.codex].model`, which is the shape the defect was
+    // reported against: a per-harness pin that never reached the wire.
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\napp_server = \"per-dispatch\"\n",
+        ),
+    );
+    let serving_another = workspace.write(
+        "astra.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_SERVED_MODEL=gpt-6-astra exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&serving_another);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[(
+            "ONEHARNESS_BIN_CODEX",
+            serving_another.display().to_string(),
+        )],
+    ));
+    let run = workspace.run_task("fake:complete-now: fall through to the model that was asked for");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    let payload = &advanced[0]["payload"];
+    assert_eq!(payload["identity"], serde_json::json!("codex"));
+    assert_eq!(
+        payload["reason"],
+        serde_json::json!("model-mismatch"),
+        "{payload}"
+    );
+    assert_eq!(payload["role"], serde_json::json!("agent"));
+    assert_eq!(payload["turn"], serde_json::json!(1));
+    // And the member still settled, on the candidate that honours the model.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
+}
+
+/// The same refusal on a chain with nowhere to fall to ends the member, and both
+/// the step past and the death carry the reason oneharness classified.
+///
+/// The recovery path above is what the fix is for; this is the failure path it
+/// leaves behind when there is no second candidate, and it is what an operator
+/// reads when the config pins a model no identity honours. The refused
+/// candidate is still published as `fallback-advanced` — a chain names every
+/// candidate it stepped past whether or not a later one ran, because which
+/// subscription to restore is what a member that reached nothing owes its
+/// operator. The cause is `other` rather than a kind of its own: onejudge maps
+/// every precondition refusal to its `ProviderErrorKind::Other`, and widening
+/// `cause` is the contract proposal `docs/oneharness-library.md` records.
+#[cfg(unix)]
+#[test]
+fn a_chain_of_one_candidate_serving_the_wrong_model_dies_naming_the_refusal() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\napp_server = \"per-dispatch\"\n",
+        ),
+    );
+    let serving_another = workspace.write(
+        "astra.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_SERVED_MODEL=gpt-6-astra exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&serving_another);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[(
+            "ONEHARNESS_BIN_CODEX",
+            serving_another.display().to_string(),
+        )],
+    ));
+    let run = workspace.run_task("fake:complete-now: nowhere to fall to");
+    run.expect_code(1);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("model-mismatch"),
+        "{advanced:?}"
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    assert_eq!(payload["cause"], serde_json::json!("other"), "{payload}");
+    let detail = payload["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("codex [model-mismatch]"),
+        "the death does not name the refusal: {detail}"
+    );
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the first journey below reads the
+// argv the doubled harness recorded, for the reason the blocks above give: which
+// model a harness was handed is not on the stream, and it is the one thing that
+// says the parent's `[harness.claude-code]` table is the one the turn ran under.
+// The exit code, the event kinds, and the refusal are all read through the CLI.
+/// A single-sided member whose `oneharness_config` names nothing but a parent
+/// runs under the chain and the model only that parent names.
+///
+/// The parent sits in a directory of its own and is named relatively, as a
+/// config on disk names one: the core resolves `extends` against the declaring
+/// file's directory, so this is what proves the member's turn reads the chain
+/// the operator wrote rather than a copy that has lost where it came from.
+#[test]
+fn a_member_whose_config_extends_a_parent_runs_under_the_harness_the_parent_names() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "shared/parent.toml",
+        &format!("{CHAIN}\n[harness.claude-code]\nmodel = \"parent-pinned-model\"\n"),
+    );
+    workspace.write("oneharness.toml", "extends = \"shared/parent.toml\"\n");
+    workspace.graph(&single_sided_graph(&fake_harness()));
+
+    let argv = workspace.at("argv.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: inherited chain fake:record-argv={}",
+        argv.display()
+    ));
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled").len(),
+        1,
+        "the member did not settle: {:?}",
+        run.kinds()
+    );
+    assert!(run.of_kind("member-failed").is_empty(), "{:?}", run.kinds());
+
+    let spawned = std::fs::read_to_string(&argv).expect("the harness recorded its argv");
+    assert_eq!(spawned.lines().count(), 1, "one turn, one spawn: {spawned}");
+    assert!(
+        spawned.contains("--model parent-pinned-model"),
+        "the turn did not run under the model only the parent names: {spawned}"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A parent that is not there refuses the member rather than running it under
+/// whatever the child alone would select.
+#[test]
+fn a_member_whose_parent_config_is_missing_is_refused_by_name() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", "extends = \"shared/gone.toml\"\n");
+    workspace.graph(&single_sided_graph(&fake_harness()));
+
+    let run = workspace.run_task("fake:complete-now: never runs");
+    assert_ne!(run.code, 0, "a missing parent ran: {:?}", run.kinds());
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    // The core reports the parent as the absolute path it resolved and failed to
+    // read, so the refusal spells it with the separator the platform uses and
+    // the missing-file error in that platform's words. The parent it names is
+    // the same file either way, which is what this reads.
+    assert!(
+        detail.replace('\\', "/").contains("shared/gone.toml"),
+        "the refusal does not name the parent it could not read: {detail}"
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] these journeys read the argv a
+// `codex` on `PATH` recorded, because which plugins flag Codex was started with is
+// on no stream: the member settles identically either way, and the only effect of
+// a missing flag is a catalog download nothing here observes. The exit code and
+// the settle are still read through the CLI.
+/// A one-identity `codex` chain, so the member's turn is a Codex launch.
+#[cfg(unix)]
+const CODEX_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n";
+
+/// The argv every Codex launch of one `kind: oneharness` member's turn was
+/// started with, under `config`, as a `codex` on `PATH` recorded it.
+///
+/// The double is found the way an operator's Codex is — by name on `PATH`, with
+/// no `ONEHARNESS_BIN_CODEX` — and is placed first on it, so a host with Codex
+/// installed still runs the double. It writes one argument per line and ends each
+/// launch with a line of its own, then hands the same argv to the compiled
+/// harness double, which plays the turn.
+#[cfg(unix)]
+fn codex_launches_under(config: &str) -> Vec<Vec<String>> {
+    const END: &str = "--end-of-launch--";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", config);
+    let record = workspace.at("codex-argv.txt");
+    let codex = workspace.write(
+        "bin/codex",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" {END} >> '{}'\nexec '{}' \"$@\"\n",
+            record.display(),
+            fake_harness()
+        ),
+    );
+    make_executable(&codex);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        NO_ENV,
+    ));
+    let path = format!(
+        "{}:{}",
+        workspace.at("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let run = workspace.run_task_with("fake:complete-now: start codex", &[("PATH", &path)]);
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled").len(),
+        1,
+        "the member did not settle: {:?}",
+        run.kinds()
+    );
+
+    let recorded = std::fs::read_to_string(&record)
+        .expect("the codex on PATH recorded its argv, so it is what the turn started");
+    // The core probes `codex --version` before a turn to key its shared model
+    // catalog (oneharness-core 0.27.0). That probe starts no session and takes no
+    // feature flags, so it is not one of the launches these journeys judge.
+    let launches: Vec<Vec<String>> = recorded
+        .split_terminator(&format!("{END}\n"))
+        .map(|launch| launch.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|argv| argv != &["--version"])
+        .collect();
+    assert!(
+        !launches.is_empty(),
+        "codex never started a turn: {recorded}"
+    );
+    launches
+}
+
+/// A member whose config has no `app_server` key runs its turn as one
+/// uncontrolled `codex exec` and never starts `codex app-server`: the request
+/// this crate builds leaves `control` unset, so the linked core's shared
+/// app-server pool is never reached and this binary has no idle server to sweep.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_names_no_app_server_runs_its_turn_as_codex_exec() {
+    let launches = codex_launches_under(CODEX_CHAIN);
+    assert!(
+        launches
+            .iter()
+            .all(|argv| argv.first().map(String::as_str) == Some("exec")),
+        "a turn was not started as `codex exec`: {launches:?}"
+    );
+    assert!(
+        !launches.iter().flatten().any(|arg| arg == "app-server"),
+        "the turn started a Codex app-server: {launches:?}"
+    );
+}
+
+/// Where in `argv` a plugins override sits, and whether it turns plugins on.
+#[cfg(unix)]
+fn plugins_flags(argv: &[String]) -> Vec<(usize, bool)> {
+    argv.windows(2)
+        .enumerate()
+        .filter_map(|(at, pair)| match (pair[0].as_str(), pair[1].as_str()) {
+            ("-c", "features.plugins=false") | ("--disable", "plugins") => Some((at, false)),
+            ("-c", "features.plugins=true") | ("--enable", "plugins") => Some((at, true)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A member whose config says nothing about plugins starts Codex with them off,
+/// so a monitor or drafting member's turn never downloads the plugin catalog —
+/// and nothing later on the argv turns them back on.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_names_no_plugins_starts_codex_with_plugins_off() {
+    for argv in codex_launches_under(CODEX_CHAIN) {
+        let flags = plugins_flags(&argv);
+        // `-c features.plugins=false` is the spelling oneharness releases, so a
+        // caller's own later `-c features.plugins=true` can still win.
+        let off = flags
+            .iter()
+            .position(|&(at, on)| !on && argv[at] == "-c")
+            .unwrap_or_else(|| {
+                panic!("codex was started without -c features.plugins=false: {argv:?}")
+            });
+        assert!(
+            flags[off..].iter().all(|(_, on)| !on),
+            "a later flag turns plugins back on: {argv:?}"
+        );
+    }
+}
+
+/// A config that opts into plugins starts Codex with no plugins flag at all, so
+/// Codex's own default — and the operator's choice — stands.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_opts_into_plugins_starts_codex_with_no_plugins_flag() {
+    let config = format!("{CODEX_CHAIN}\n[harness.codex]\nplugins = true\n");
+    for argv in codex_launches_under(&config) {
+        assert_eq!(plugins_flags(&argv), [], "{argv:?}");
+        assert!(
+            !argv.iter().any(|arg| arg.contains("plugins")),
+            "codex was started with a plugins flag: {argv:?}"
+        );
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]

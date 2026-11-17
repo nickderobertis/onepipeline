@@ -232,7 +232,8 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
     // A process the hook leaves behind must not hold this one's own streams open behind it:
     // the sender of a reply reads them to their end. See [`crate::sys::disown_standard_handles`].
     crate::sys::disown_standard_handles();
-    let mut child = match spawning.spawn() {
+    let (spawned, launch) = onevcs::launch_trace::spawn(onevcs::launch_site!(), &mut spawning);
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return Verdict::Unjudged(format!("it could not be started: {error}")),
     };
@@ -275,7 +276,10 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
         });
     let timeout: NonZeroU64 = hook.timeout_seconds();
     let deadline = crate::hooks::deadline_after(timeout);
+    let mut watch =
+        onevcs::launch_trace::wait(onevcs::launch_site!(), Some(child.id()), Some(POLL));
     let status = loop {
+        watch.poll();
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if deadline.is_none_or(|deadline| Instant::now() < deadline) => {
@@ -295,6 +299,8 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
             }
         }
     };
+    drop(watch);
+    launch.exited(None);
     let _ = drained.recv_timeout(STDERR_GRACE);
     let said = String::from_utf8_lossy(
         &said
