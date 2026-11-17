@@ -676,6 +676,63 @@ fn a_redo_taking_a_live_project_over_redoes_what_the_store_holds_once_it_is_hand
     drop(successor);
 }
 
+/// A `--redo` the first read admits is held to the store as it stands once the displaced
+/// driver has let go: a planner removes the named node from the board during the handover,
+/// so the takeover is refused naming it, and dispatches nothing.
+#[test]
+fn a_redo_the_handover_leaves_unredoable_is_refused_and_dispatches_nothing() {
+    let name = "redo-takeover-refused";
+    let (base, _repo) = world_of(name, &["first", "second"]);
+    let world = base
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, &PATIENT_GRACE.to_string());
+    let project = author(&world, name, vec![kept("first"), kept("second")]);
+    launch(&world, name, &project, &[]).exited(0);
+
+    // A planner adds a node, and a continuing run on this host dispatches it and is held.
+    let hold = world.rendezvous("hold");
+    world.add_task(name, "002-hold", &agent("hold", &[]), &[]);
+    let displaced = format!("{name}-2");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let holding = hold.arrived();
+    assert_eq!(
+        stored_settlements(&world, &project)["first"]["status"],
+        "done"
+    );
+
+    let successor = world.on_host("host-b");
+    let runs = run_dirs(&successor);
+    let taking = take_over_in_background_redoing(&successor, &project, "first");
+    // The takeover has read the store and admitted the redo; the planner then removes it.
+    until_claimed_on(&world, &project, "host-b");
+    let task = world
+        .store()
+        .join("tasks")
+        .join(crate::harness::project_id(name))
+        .join("000-first.md");
+    std::fs::remove_file(&task).expect("the planner removes first's task");
+    holding.release();
+    let answered = taking.wait_with_output().expect("the takeover answers");
+    let said = String::from_utf8_lossy(&answered.stderr);
+    assert_eq!(answered.status.code(), Some(2), "{said}");
+    assert!(
+        said.contains("--redo refused: node 'first'") && said.contains("is not a node of the plan"),
+        "{said}"
+    );
+    world.until("the displaced run to settle", |world| {
+        world.run_file(&displaced, "result.json").is_file()
+    });
+    assert_eq!(dispatched(&world, &displaced), vec!["hold".to_owned()]);
+    assert_eq!(
+        run_dirs(&successor),
+        runs,
+        "the refused takeover minted a run"
+    );
+    drop(successor);
+}
+
 /// `continuation`'s `take_over_in_background`, naming `node` to `--redo`.
 fn take_over_in_background_redoing(
     host: &World,

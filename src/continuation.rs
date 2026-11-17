@@ -622,8 +622,7 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
 }
 
 /// Refuse a `--redo` given beside `--fresh`, which already dispatches every node again on a
-/// branch of its own, so a redo would name nothing to continue. Read from the flags alone,
-/// before the project is.
+/// branch of its own, so a redo would name nothing to continue. Read from the flags alone.
 pub(crate) fn refuse_redo_beside_fresh(
     redo: &std::collections::BTreeSet<String>,
     fresh: bool,
