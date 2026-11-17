@@ -1506,13 +1506,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     // The nodes this launch dispatches again although they settled `done`, held before
     // anything is minted to being nodes it can redo on the branches they settled on.
     let redo: std::collections::BTreeSet<String> = args.redo.iter().cloned().collect();
-    crate::continuation::refuse_unredoable(project.as_str(), &read, &redo, args.fresh)?;
+    crate::continuation::refuse_redo_beside_fresh(&redo, args.fresh)?;
     // What the project's last driver left on it, which a launch continues rather than runs
     // again — unless it is told `--fresh`.
     let mut continuation = if args.fresh {
         crate::continuation::Continuation::default()
     } else {
-        crate::continuation::continuation_of(&read, claim.as_ref(), &redo)?
+        crate::continuation::continuation_of(project.as_str(), &read, claim.as_ref(), &redo)?
     };
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
@@ -1856,9 +1856,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         project_origin = crate::labels::origin(&read.project_metadata)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;
-        crate::continuation::refuse_unredoable(project.as_str(), &read, &redo, args.fresh)?;
         if !args.fresh {
-            continuation = crate::continuation::continuation_of(&read, claim.as_ref(), &redo)?;
+            continuation = crate::continuation::continuation_of(
+                project.as_str(),
+                &read,
+                claim.as_ref(),
+                &redo,
+            )?;
         }
         plan = launched(&read, &continuation)?;
     }

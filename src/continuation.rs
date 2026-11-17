@@ -15,8 +15,8 @@
 //! - a node `start --redo` names is not continued although its lineage settled `done`: it
 //!   is pinned to the branch that settlement records, as a node that left one is, so it is
 //!   dispatched again continuing that branch and its new settlement replaces the stored one.
-//!   [`refuse_unredoable`] refuses a redo that names no such settlement before any run
-//!   exists, and the launch record keeps the names.
+//!   A redo naming no such settlement is refused before any run exists, and the launch
+//!   record keeps the names.
 //!
 //! The claim is **not atomic**: the store offers no conditional write, so it is a record
 //! two launches can both read empty. What it holds is narrower — a launch that finds
@@ -621,21 +621,13 @@ pub(crate) fn refuse_fresh_over_unlanded(project: &str, read: &Read) -> Result<(
     )))
 }
 
-/// Refuse a `--redo` this launch cannot honour, naming the node and the reason, before
-/// anything is minted. Each named node must be a node of the plan whose lineage settled
-/// `done` on a branch that has not landed, and the launch must continue the project rather
-/// than run it `--fresh`, which already dispatches every node.
-pub(crate) fn refuse_unredoable(
-    project: &str,
-    read: &Read,
+/// Refuse a `--redo` given beside `--fresh`, which already dispatches every node again on a
+/// branch of its own, so a redo would name nothing to continue. Read from the flags alone,
+/// before the project is.
+pub(crate) fn refuse_redo_beside_fresh(
     redo: &std::collections::BTreeSet<String>,
     fresh: bool,
 ) -> Result<()> {
-    let refused = |node: &str, why: &str| {
-        Err(Error::Refused(format!(
-            "--redo refused: node '{node}' of {project} {why}"
-        )))
-    };
     if fresh && !redo.is_empty() {
         return Err(Error::Refused(
             "--redo refused: --fresh already dispatches every node again on a branch of its \
@@ -644,6 +636,24 @@ pub(crate) fn refuse_unredoable(
                 .to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Refuse a `--redo` the store's project cannot honour, naming the node and the reason: each
+/// named node must be a node of the plan whose lineage settled `done` on a branch that has
+/// not landed. [`continuation_of`] asks it of every read it continues from, so a takeover's
+/// read of the project once the driver it displaced has let go is held to it as the first
+/// read is.
+fn refuse_unredoable(
+    project: &str,
+    read: &Read,
+    redo: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let refused = |node: &str, why: &str| {
+        Err(Error::Refused(format!(
+            "--redo refused: node '{node}' of {project} {why}"
+        )))
+    };
     for node in redo {
         if !read.plan.tasks.iter().any(|planned| &planned.id == node) {
             return refused(node, "is not a node of the plan");
@@ -721,15 +731,17 @@ impl Continued {
 /// Keyed by the plan's own node ids — a lineage root's, carrying its head's definition and,
 /// here, its head's settlement — because those are the nodes the launched plan holds.
 /// `claim` is what the read found, named on each continued settlement as the run it is
-/// continued from. Each node `redo` names — which [`refuse_unredoable`] has already held to
-/// a lineage settled `done` on an unlanded branch — is not continued: it is pinned to the
-/// branch that settlement records, as a node that left one is, so it dispatches again
-/// continuing that branch.
+/// continued from. Each node `redo` names is held by [`refuse_unredoable`] to a lineage
+/// settled `done` on an unlanded branch — a launch of `project` naming any other is refused —
+/// and is not continued: it is pinned to the branch that settlement records, as a node that
+/// left one is, so it dispatches again continuing that branch.
 pub(crate) fn continuation_of(
+    project: &str,
     read: &Read,
     claim: Option<&DriverClaim>,
     redo: &std::collections::BTreeSet<String>,
 ) -> Result<Continuation> {
+    refuse_unredoable(project, read, redo)?;
     let mut continued = Continuation::default();
     let from = json!({"source": "store", "run": claim.map(|claim| claim.run.clone())});
     for node in &read.plan.tasks {
@@ -2201,8 +2213,7 @@ mod tests {
                 json!({"status": "done", "branch": "me/c", "remote": "pushed"}),
             ),
         ]);
-        refuse_unredoable("p", &read, &named(&["a", "b"]), false).expect("redoable");
-        let continued = continuation_of(&read, None, &named(&["a", "b"])).expect("continued");
+        let continued = continuation_of("p", &read, None, &named(&["a", "b"])).expect("continued");
         assert_eq!(
             continued
                 .settled
@@ -2220,7 +2231,7 @@ mod tests {
             vec![("a", "me/a"), ("b", "me/b")]
         );
         // Naming none is the continuation it always was.
-        let unnamed = continuation_of(&read, None, &named(&[])).expect("continued");
+        let unnamed = continuation_of("p", &read, None, &named(&[])).expect("continued");
         assert_eq!(unnamed.settled.len(), 3);
         assert!(unnamed.pinned.is_empty());
     }
@@ -2244,7 +2255,7 @@ mod tests {
             ("b", "settled `done` on no branch"),
             ("c", "settled `done` and landed"),
         ] {
-            let refused = refuse_unredoable("p", &read, &named(&[node]), false)
+            let refused = continuation_of("p", &read, None, &named(&[node]))
                 .expect_err("refused")
                 .to_string();
             assert!(
@@ -2254,7 +2265,7 @@ mod tests {
                 "{node}: {refused}"
             );
         }
-        let fresh = refuse_unredoable("p", &read, &named(&["c"]), true)
+        let fresh = refuse_redo_beside_fresh(&named(&["c"]), true)
             .expect_err("refused")
             .to_string();
         assert!(fresh.contains("--redo refused: --fresh"), "{fresh}");
@@ -2264,7 +2275,8 @@ mod tests {
             "a",
             json!({"status": "done", "branch": "me/a", "landing": "unlanded"}),
         )]);
-        refuse_unredoable("p", &drafted, &named(&["a"]), false).expect("redoable");
-        refuse_unredoable("p", &read, &named(&[]), true).expect("no redo, nothing refused");
+        continuation_of("p", &drafted, None, &named(&["a"])).expect("redoable");
+        refuse_redo_beside_fresh(&named(&[]), true).expect("no redo, nothing refused");
+        refuse_redo_beside_fresh(&named(&["c"]), false).expect("continuing, nothing refused");
     }
 }
