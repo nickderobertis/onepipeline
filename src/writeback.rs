@@ -8547,6 +8547,102 @@ mod tests {
         );
     }
 
+    /// Every field of a plan node is a live-edit field or one of the rest, each once. The
+    /// destructuring names every field and fails to compile on one it does not, so a field
+    /// added to the node is classified here before `plan writeback-keys` can omit it.
+    #[test]
+    fn every_node_field_is_classified_as_live_edit_or_not() {
+        macro_rules! every_field {
+            ($($field:ident),* $(,)?) => {{
+                let crate::plan::Node { $($field: _),* } = crate::plan::Node::default();
+                [$(stringify!($field)),*]
+            }};
+        }
+        let every: std::collections::BTreeSet<&str> = every_field!(
+            human_item,
+            id,
+            kind,
+            command,
+            timeout_seconds,
+            task,
+            persona,
+            deps,
+            max_turns,
+            sets,
+            expects_no_diff,
+            context,
+            amendment,
+            parked,
+            executor,
+            agent_graph,
+            repo,
+            repo_type,
+            workflow,
+            merge_policy,
+            base_branch,
+            branch,
+            title,
+            body,
+            draft,
+            publish,
+            execution_checkout,
+            pool,
+            overflow,
+            steps,
+            resume,
+            adoption,
+            consumes,
+            delivers,
+            task_record,
+            assets_from,
+            classification,
+        )
+        .into_iter()
+        .collect();
+        // A plan authors these, or `task_document` writes them under no reserved key.
+        let rest = [
+            "human_item",
+            "id",
+            "kind",
+            "command",
+            "timeout_seconds",
+            "task",
+            "persona",
+            "deps",
+            "max_turns",
+            "sets",
+            "expects_no_diff",
+            "executor",
+            "agent_graph",
+            "repo",
+            "repo_type",
+            "workflow",
+            "merge_policy",
+            "base_branch",
+            "title",
+            "body",
+            "draft",
+            "publish",
+            "execution_checkout",
+            "pool",
+            "overflow",
+            "steps",
+            "adoption",
+            "consumes",
+            "delivers",
+            "task_record",
+            "assets_from",
+            "classification",
+        ];
+        let mut classified: Vec<&str> = super::LIVE_EDIT_FIELDS.into_iter().chain(rest).collect();
+        classified.sort_unstable();
+        assert_eq!(
+            classified,
+            every.into_iter().collect::<Vec<_>>(),
+            "a node field is unclassified, or classified twice"
+        );
+    }
+
     /// A write-back pass publishes each shadow document by its rename alone: the
     /// journal rebuilds the shadow store, and a sync per document is what pushed the
     /// loopcost scale journey past its bound.
