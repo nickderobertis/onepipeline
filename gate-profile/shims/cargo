@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# `cargo` while `just gate-profile` runs: gate-profile/run.mjs puts this directory first on PATH.
+# A cargo build under the profiled repository's root gains `--timings`, and its wall clock, the
+# CPU of its whole process tree and the Nx task it ran in are recorded to cargo.jsonl. Anything
+# else — no profiled run, a directory outside the root, a command that compiles nothing, or a
+# cargo started by a profiled cargo's own build or tests — is the real cargo, untouched.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$here/lib.sh"
+real="$(gate_profile_real_tool cargo)" || exit 127
+
+passthrough() { exec "$real" "$@"; }
+[ -n "${ONEPIPELINE_GATE_PROFILE_DIR-}" ] || passthrough "$@"
+[ "${ONEPIPELINE_GATE_PROFILE_CARGO-}" != "${ONEPIPELINE_GATE_PROFILE_RUN-}" ] || passthrough "$@"
+root=${ONEPIPELINE_GATE_PROFILE_ROOT-}
+[ -n "$root" ] || passthrough "$@"
+case "$(pwd -P)/" in "$root"/*) ;; *) passthrough "$@" ;; esac
+
+# Where `--timings` goes: straight after the subcommand that builds, skipping cargo's own leading
+# options (and the values of those that take one). `llvm-cov` and `nextest` build through their
+# own subcommand, which is where they accept it.
+at=-1 i=0 args=("$@")
+while [ "$i" -lt "${#args[@]}" ]; do
+  case "${args[$i]}" in
+    +* | -v | -vv | -q | --quiet | --verbose | --frozen | --locked | --offline) ;;
+    --color | --config | -Z | -C) i=$((i + 1)) ;;
+    -*) ;;
+    build | b | check | c | clippy | doc | d | test | t | bench | rustc | rustdoc) at=$i; break ;;
+    nextest)
+      case "${args[$((i + 1))]-}" in run | r | archive) at=$((i + 1)) ;; esac
+      break
+      ;;
+    llvm-cov)
+      j=$((i + 1))
+      while [ "$j" -lt "${#args[@]}" ] && [[ ${args[$j]} == -* ]]; do j=$((j + 1)); done
+      case "${args[$j]-}" in nextest | nextest-archive | test) at=$j ;; esac
+      break
+      ;;
+    *) break ;;
+  esac
+  i=$((i + 1))
+done
+[ "$at" -ge 0 ] || passthrough "$@"
+gate_profile_check_dir || exit
+
+scratch="$ONEPIPELINE_GATE_PROFILE_DIR/.times.$$"
+# An interrupted build is still recorded: bash would otherwise die with a cargo the signal killed.
+# A handler, unlike an ignored signal, leaves cargo's own disposition at its default.
+trap : INT
+started="$ONEPIPELINE_GATE_PROFILE_DIR/.started.$$"
+: >"$started"
+start=$EPOCHREALTIME
+gate_profile_children_cpu "$scratch"
+before=$gate_profile_cpu
+ONEPIPELINE_GATE_PROFILE_CARGO="$ONEPIPELINE_GATE_PROFILE_RUN" \
+  "$real" "${args[@]:0:at+1}" --timings "${args[@]:at+1}"
+status=$?
+finished="$ONEPIPELINE_GATE_PROFILE_DIR/.finished.$$"
+: >"$finished"
+gate_profile_children_cpu "$scratch"
+after=$gate_profile_cpu
+end=$EPOCHREALTIME
+rm -f "$scratch"
+
+# This build's timings page, copied out now: cargo names a page by the millisecond its build
+# started, so a build that started with another in one target directory has its page overwritten
+# when the other finishes. The page is the newest written while this cargo ran, in any target
+# directory it could have used: the configured ones, the root's, and its manifest's. A page written
+# after it exited is a concurrent build's, which finished last.
+manifest_dir=.
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --manifest-path) manifest_dir=$(dirname "${args[$((i + 1))]-.}") ;;
+    --manifest-path=*) manifest_dir=$(dirname "${args[$i]#--manifest-path=}") ;;
+  esac
+done
+page=""
+for target in "${CARGO_TARGET_DIR-}" "${CARGO_LLVM_COV_TARGET_DIR-}" "$root/target" \
+  "$root/target/llvm-cov-target" "$manifest_dir/target" "$manifest_dir/target/llvm-cov-target"; do
+  [ -n "$target" ] || continue
+  for candidate in "$target"/cargo-timings/cargo-timing-*.html; do
+    [ -f "$candidate" ] && [ "$candidate" -nt "$started" ] && ! [ "$candidate" -nt "$finished" ] ||
+      continue
+    if [ -z "$page" ] || [ "$candidate" -nt "$page" ]; then page=$candidate; fi
+  done
+done
+rm -f "$started" "$finished"
+copies=()
+if [ -n "$page" ]; then
+  copy="$ONEPIPELINE_GATE_PROFILE_DIR/cargo-timings/$$-${start/./}.html"
+  if mkdir -p "$(dirname "$copy")" && cp -p "$page" "$copy"; then
+    copies=("$copy")
+  else
+    # The build is still recorded; its report row then says it left no timings page.
+    echo "gate-profile: could not keep $page for \`cargo $*\` (see above); its compile units will be missing from the report" >&2
+  fi
+fi
+# A build the report would silently leave out fails instead: the profile is not a true one.
+if ! printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"timings":%s,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
+  "$start" "$end" "$before" "$after" "$status" "$(gate_profile_json_array "${copies[@]}")" \
+  "$(gate_profile_json_array "$@")" \
+  "$(gate_profile_json_string "$(pwd -P)")" "$(gate_profile_json_string "${CARGO_TARGET_DIR-}")" \
+  "$(gate_profile_json_string "${CARGO_LLVM_COV_TARGET_DIR-}")" \
+  "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_INVOCATION-}")" \
+  "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
+  "$(gate_profile_json_string "${NX_TASK_TARGET_PROJECT:+$NX_TASK_TARGET_PROJECT:${NX_TASK_TARGET_TARGET-}}")" \
+  >>"$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"; then
+  gate_profile_unrecorded "could not record \`cargo $*\` in $ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl (see above); make the run directory writable and profile again"
+fi
+exit "$status"

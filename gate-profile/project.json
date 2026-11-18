@@ -1,0 +1,62 @@
+{
+  "name": "onepipeline-gate-profile",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "gate-profile",
+  "tags": ["scope:tooling", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write --config-path gate-profile/biome-standalone.jsonc gate-profile"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --config-path gate-profile/biome-standalone.jsonc gate-profile"
+    },
+    "lint": {
+      "command": "just _gate-profile-lint",
+      "inputs": [
+        "default",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _gate-profile-lint"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "test": {
+      "command": "node --test gate-profile/*.test.mjs",
+      "//": "`just gate-profile` driven over a small generated workspace by real just, Nx and cargo, plus the fold over hand-made records. Keyed on what those journeys read: this project, the Nx wrapper its hook rides in, the recipe, and the Nx and Rust toolchains the fixture runs. Linux only, as /proc is.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/scripts/nx.sh",
+        "{workspaceRoot}/rust-toolchain.toml",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs gate-profile"
+        },
+        {
+          "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem npm"
+        },
+        "sharedGlobals",
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    },
+    "input-selection": {
+      "executor": "nx:noop",
+      "cache": false,
+      "//": "Selection-only manifest edges: Nx affected ignores runtime inputs. Hashing stays in the version-free runtime inputs of the tasks that run.",
+      "inputs": ["justfileSelection", "npmSelection"]
+    }
+  }
+}

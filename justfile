@@ -253,6 +253,21 @@ _gate-body base="origin/main": check
     @just lint-llm-diff "{{base}}"
     @echo "gate: ok"
 
+# On demand only, in no gate and under no budget: runs `recipe` with this run's own fresh Nx
+# cache, so every task does its work, and writes where its time went to
+# target/gate-profile/<UTC timestamp>/report.{md,json} — each phase, Nx task and cargo build with
+# its wall, CPU and the host's load, the critical path, and cargo's compile time per unit.
+# gate-profile/run.mjs says how; unprofiled, every switch it sets is unset and inert.
+# Profile one run of a gate recipe (default `gate`): where its time went.
+gate-profile recipe="gate":
+    @node gate-profile/run.mjs "$1"
+
+# onepipeline-gate-profile:lint, here so it runs under bash on every platform: Nx runs a
+# target's command through cmd.exe on Windows. Biome, then each shell file's syntax.
+_gate-profile-lint:
+    @node node_modules/@biomejs/biome/bin/biome lint --error-on-warnings --config-path gate-profile/biome-standalone.jsonc gate-profile
+    @for script in gate-profile/lib.sh gate-profile/nx-hook.sh gate-profile/shims/just gate-profile/shims/cargo; do bash -n "$script"; done
+
 # Escape hatch for Nx itself, e.g. `just nx show projects` or `just nx graph`.
 # Run an arbitrary Nx command against this workspace.
 nx *ARGS:
