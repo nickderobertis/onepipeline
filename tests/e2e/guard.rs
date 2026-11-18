@@ -1301,3 +1301,125 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
         );
     }
 }
+
+/// A guarded node of a run launched in a flow: its guard is told the flow and the session
+/// that launched the run, exactly as a command node is, so a run the guard starts would
+/// join the same flow and be owned by the same session.
+///
+/// Unix only, as every flow journey is: the flow's program is a shell script.
+#[cfg(unix)]
+#[test]
+fn a_guard_in_a_flow_is_told_the_flow_and_the_launching_session() {
+    let world = World::new("guard-flow");
+    let told = at(&world, "flow.told");
+    let guard = script(
+        &world,
+        "flowing",
+        &format!(
+            "printf '%s\\n' \"${{ONEPIPELINE_FLOW:-unset}}\" \
+             \"${{ONEPIPELINE_LAUNCHER_SESSION:-unset}}\" > '{told}'\nexit {}",
+            exit("not_needed")
+        ),
+    );
+    let run = "flowguarded";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![guarded(agent("asked", &[]), &guard)]),
+    );
+    let program = world.root.join("program.sh");
+    std::fs::write(
+        &program,
+        format!("\"$ONEPIPELINE_FAKE_CLI_BIN\" start '{project}' --attach >/dev/null\n"),
+    )
+    .expect("the flow's program is written");
+    let flow = "guarded-flow";
+    let ran = world
+        .cmd(&[
+            "flow",
+            "run",
+            "--name",
+            flow,
+            "--",
+            "sh",
+            program.to_str().expect("a path"),
+        ])
+        .env_remove("ONEPIPELINE_RUN_ID")
+        .output()
+        .expect("flow run runs");
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(world.run_json(run, "launch.json")["flow"], json!(flow));
+    let told = std::fs::read_to_string(world.root.join("flow.told")).expect("the guard ran");
+    let told: Vec<&str> = told.lines().collect();
+    assert_eq!(told, [flow, world.session.as_str()], "{told:?}");
+    assert_eq!(
+        result(&world, run, "asked")["outcome"],
+        json!(word("outcomes", "not_needed"))
+    );
+}
+
+/// A guard stopped by a `cancel` whose driver stopped after journalling that cancelled
+/// verdict and before settling it: the adopting driver keeps the cancellation — the node
+/// stays out of the run, nothing is started for it — and never starts its guard again.
+#[cfg(unix)]
+#[test]
+fn adopt_keeps_a_cancellation_its_driver_journalled_and_never_settled() {
+    let world = World::new("guard-cancel-answered");
+    let seam = world.root.join("failpoints");
+    std::fs::create_dir_all(&seam).expect("the failpoint directory");
+    let world = world.with_env("ONEPIPELINE_REVIEW_FAILPOINT", &seam.to_string_lossy());
+    let run = "cancelanswered";
+    let project = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![guarded(agent("held", &[]), &holding_guard(&world, "held"))],
+        ),
+    );
+    let stage = seam.join("after-guard-evaluated");
+    std::fs::write(&stage, "").expect("the failpoint is armed");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the guard to be running", |world| {
+        world.root.join("held.child").is_file()
+    });
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "held"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the driver to stop after the cancelled verdict", |_| {
+        seam.join("after-guard-evaluated.reached").is_file()
+    });
+    kill_driver(&world, run);
+    std::fs::remove_file(&stage).expect("the failpoint is disarmed");
+    let evaluated = world
+        .events_of(run, "guard-evaluated")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "held")
+        .expect("the verdict was journalled");
+    assert_eq!(evaluated["payload"]["ending"], "cancelled", "{evaluated}");
+
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    // Long enough for the adopting driver's passes to have started anything it was going to.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert_eq!(
+        count(&world, run, "guard-started", "held"),
+        1,
+        "the adopting driver started a cancelled node's guard again"
+    );
+    assert!(
+        !dispatched(&world, run, "held"),
+        "a cancelled node was dispatched"
+    );
+    let held = result(&world, run, "held");
+    assert!(
+        held["status"] == "parked" || held["status"] == "cancelled",
+        "{held}"
+    );
+    assert_ne!(held["outcome"], json!(word("outcomes", "failed")), "{held}");
+    world.run(&["stop", run]);
+}
