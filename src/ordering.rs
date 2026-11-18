@@ -226,6 +226,8 @@ impl WatchClock {
         let connected = || -> std::io::Result<Self> {
             let backstop = Duration::from_secs(120);
             let asks = TcpStream::connect_timeout(&address, backstop)?;
+            // Each question is a turn the watch waits on: sent as it is written.
+            asks.set_nodelay(true)?;
             asks.set_read_timeout(Some(backstop))?;
             asks.set_write_timeout(Some(backstop))?;
             let answers = std::io::BufReader::new(asks.try_clone()?);
@@ -330,7 +332,9 @@ fn ask(
     let failed = |error: std::io::Error| {
         Error::Invalid(format!("the flow watch's clock peer failed: {error}"))
     };
-    writeln!(asks, "{question}").map_err(failed)?;
+    // One write per question, so it leaves whole.
+    asks.write_all(format!("{question}\n").as_bytes())
+        .map_err(failed)?;
     let mut answer = String::new();
     std::io::BufRead::read_line(answers, &mut answer).map_err(failed)?;
     Ok(answer.trim_end().to_owned())
