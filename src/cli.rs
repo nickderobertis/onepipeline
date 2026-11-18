@@ -300,6 +300,25 @@ pub enum PlanCommand {
     /// Run the engine's own plan loader, and every registered check, over one
     /// project.
     Check(PlanCheckArgs),
+    /// Print every plan-store metadata key the engine's write-back writes and no
+    /// plan authors, so a host digesting or copying plan records can leave them out.
+    ///
+    /// One `<scope> <key>` line per key, `task` keys first, each scope sorted. With
+    /// `--json`, one object, `{"task": [<key>...], "project": [<key>...]}`, each
+    /// array sorted and duplicate-free: `task` is every key the write-back owns on a
+    /// task — its projection-only records and each node field only a live edit sets,
+    /// as `onepipeline.<field>` — and `project` every key it owns on the project.
+    /// Reads nothing and writes nothing.
+    WritebackKeys(PlanWritebackKeysArgs),
+}
+
+/// `onepipeline plan writeback-keys`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct PlanWritebackKeysArgs {
+    /// Print one JSON object, `{"task": [...], "project": [...]}`, rather than a
+    /// line per key.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// What the repository publication boundary may be asked.
@@ -750,6 +769,21 @@ pub struct StartArgs {
     /// landed, naming each, because running it again would open a second one.
     #[arg(long)]
     pub fresh: bool,
+    /// Dispatch this node again although its lineage settled `done`, repeatable,
+    /// naming a node id of the loaded plan.
+    ///
+    /// The launch does not continue the named node's stored settlement: it pins
+    /// the node to the branch that settlement records, as continuation pins a node
+    /// that settled `failed`, `cancelled` or `parked`, so its next dispatch
+    /// continues that branch and the branch template renders nothing for it. Its
+    /// new settlement replaces the stored one. Every node it does not name is
+    /// continued as without it, a dependent of a named node included. Refused
+    /// before any run exists, naming the node, when it is not a node of the plan,
+    /// when its lineage holds no settlement or one that is not `done`, when that
+    /// settlement records no branch, when it records the work landed, and beside
+    /// --fresh. The launch record keeps the named nodes.
+    #[arg(long = "redo", value_name = "NODE")]
+    pub redo: Vec<String>,
     /// Launch even though the project's driver claim names another run, and claim it
     /// for this one.
     ///
