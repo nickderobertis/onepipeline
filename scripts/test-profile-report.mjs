@@ -398,7 +398,7 @@ function readSpanRecord(path) {
  * runs, per verb. One file is read at a time, and only the per-verb and per-span totals
  * are kept, so a module's thousands of runs cost one record's memory. A span record
  * older than its test's record was left by an earlier run of that test and is set aside.
- * CPU sums are over the records that carry the figure, and `null` where none does.
+ * CPU sums and means are over the records that carry the figure, and `null` where none does.
  */
 export function foldSpans(dir, records, { topSpans = 10 } = {}) {
   const tests = new Map(
@@ -434,12 +434,16 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
           invocations: 0,
           wall_ms: 0,
           cpu_ms: null,
+          // How many runs carried a CPU figure, which is what a mean of it is over.
+          cpu_runs: 0,
           children_cpu_ms: null,
           spans: new Map(),
         };
         verb.invocations += 1;
         verb.wall_ms += span.wall_ms;
-        verb.cpu_ms = plus(verb.cpu_ms, cpuOf(span.user_cpu_ms, span.system_cpu_ms));
+        const cpu = cpuOf(span.user_cpu_ms, span.system_cpu_ms);
+        if (cpu !== null) verb.cpu_runs += 1;
+        verb.cpu_ms = plus(verb.cpu_ms, cpu);
         verb.children_cpu_ms = plus(
           verb.children_cpu_ms,
           cpuOf(span.children_user_cpu_ms, span.children_system_cpu_ms),
@@ -457,7 +461,7 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
         .map(({ spans, ...verb }) => ({
           ...verb,
           mean_wall_ms: verb.wall_ms / verb.invocations,
-          mean_cpu_ms: verb.cpu_ms === null ? null : verb.cpu_ms / verb.invocations,
+          mean_cpu_ms: verb.cpu_ms === null ? null : verb.cpu_ms / verb.cpu_runs,
           span_names: spans.size,
           spans: [...spans.values()]
             .sort((a, b) => b.self_wall_ms - a.self_wall_ms)

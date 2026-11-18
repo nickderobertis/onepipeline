@@ -380,3 +380,21 @@ fn a_span_record_that_cannot_be_written_leaves_the_verbs_answer_alone() {
         "not a directory"
     );
 }
+
+/// A verb that refuses records the status it exits with, not a success.
+#[test]
+fn a_verb_that_refuses_records_the_status_it_exits_with() {
+    let world = World::new("span-refused");
+    let spans = world.root.join("spans");
+    let refused = run_profiled(
+        &world,
+        &world.root,
+        Some(&spans),
+        &["status", "no-such-run"],
+    );
+    assert_eq!(refused.code, 2, "{}", refused.stderr);
+    let record = the_record(&spans);
+    assert_eq!(record["verb"], "status", "{record:#}");
+    assert_eq!(record["exit_status"], 2, "{record:#}");
+    spans_fit_the_process(&record);
+}

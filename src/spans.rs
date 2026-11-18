@@ -467,3 +467,54 @@ impl Timed for std::process::Command {
         self.output()
     }
 }
+
+// The frame arithmetic is held here rather than by a journey because no verb arranges
+// either case on demand: none nests a span name inside itself, and the threads a verb
+// starts run in an order nothing outside the process controls. `tests/e2e/span_profile.rs`
+// drives the records real verbs write.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recorded() -> BTreeMap<String, (u64, Duration, Duration)> {
+        TOTALS.with_borrow(|totals| {
+            totals
+                .iter()
+                .map(|(name, totals)| {
+                    (
+                        name.to_string(),
+                        (totals.count, totals.self_wall, totals.wall),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_span_inside_one_of_its_own_name_is_counted_twice_and_timed_once() {
+        RECORDING.with(|recording| recording.set(true));
+        {
+            let _outer = span("ledger:read");
+            std::thread::sleep(Duration::from_millis(2));
+            let _inner = span("ledger:read");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (count, own, whole) = recorded()["ledger:read"];
+        assert_eq!(count, 2);
+        // The outer frame's own time and the inner's together are the outer's whole,
+        // so the inclusive figure is that whole once rather than with the inner again.
+        assert_eq!(own, whole);
+    }
+
+    #[test]
+    fn a_span_on_a_thread_that_is_not_recording_is_not_recorded() {
+        RECORDING.with(|recording| recording.set(true));
+        std::thread::spawn(|| {
+            let _elsewhere = span("onevcs:elsewhere");
+            let _child = child(std::ffi::OsStr::new("git"));
+        })
+        .join()
+        .expect("the thread ends");
+        assert!(recorded().is_empty(), "{:?}", recorded());
+    }
+}

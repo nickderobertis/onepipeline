@@ -658,3 +658,49 @@ test("a span file that is not a span record is refused by its path", () => {
     /next:/,
   );
 });
+
+test("a span record with no CPU figures, as a platform without them writes, folds to null", () => {
+  const dir = join(scratch, "cpu-less");
+  write(dir, [
+    { ...golden, test: "mixed::one", run_id: "now", started_at: 1 },
+    { ...golden, test: "bare::one", run_id: "now", started_at: 1 },
+  ]);
+  const mixed = join(dir, "e2e", `mixed.one${SPANS_SUFFIX}`);
+  profiledRuns(mixed, [["runs"], ["runs"]]);
+  const bare = join(dir, "e2e", `bare.one${SPANS_SUFFIX}`);
+  profiledRuns(bare, [["runs"]]);
+  // What the binary writes where there is no `getrusage` and no per-thread CPU clock.
+  const withoutCpu = (record) => ({
+    ...record,
+    user_cpu_ms: null,
+    system_cpu_ms: null,
+    children_user_cpu_ms: null,
+    children_system_cpu_ms: null,
+    peak_rss_kb: null,
+    spans: record.spans.map((span) => ({ ...span, self_cpu_ms: null })),
+  });
+  const strip = (at, keep) => {
+    const names = readdirSync(at).sort();
+    const records = names.map((name) => JSON.parse(readFileSync(join(at, name), "utf8")));
+    names.forEach((name, i) => {
+      if (i >= keep) writeFileSync(join(at, name), JSON.stringify(withoutCpu(records[i])));
+    });
+    return records.slice(0, keep);
+  };
+  const [kept] = strip(mixed, 1);
+  strip(bare, 0);
+
+  const folded = JSON.parse(report("--json", `linux=${dir}`)).platforms[0].spans;
+  const verbOf = (module) => folded.modules.find((m) => m.name === module).verbs[0];
+  const one = verbOf("e2e::mixed");
+  assert.equal(one.invocations, 2);
+  near(one.cpu_ms, kept.user_cpu_ms + kept.system_cpu_ms, "the one run with CPU");
+  near(one.mean_cpu_ms, kept.user_cpu_ms + kept.system_cpu_ms, "a mean over that run alone");
+  const none = verbOf("e2e::bare");
+  assert.deepEqual([none.cpu_ms, none.mean_cpu_ms, none.children_cpu_ms], [null, null, null]);
+  assert.ok(none.spans.every((span) => span.self_cpu_ms === null));
+  assert.equal(folded.modules.find((m) => m.name === "e2e::bare").cpu_ms, null);
+  const markdown = report(`linux=${dir}`);
+  assert.match(markdown, /#### e2e::bare: 1 runs, [0-9.]+ wall s, - cpu s/);
+  assert.match(markdown, /\| runs \| 1 \| [0-9.]+ \| [0-9.]+ \| - \| - \| - \|/);
+});
