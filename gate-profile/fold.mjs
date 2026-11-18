@@ -29,7 +29,8 @@ const strict = (properties, optional = []) => ({
 const list = (items) => ({ type: "array", items });
 
 /**
- * report.json, version 1. Times are ISO-8601 UTC; durations and CPU are seconds; every `load` is
+ * report.json, version 1. A task's `replayed` is true when Nx served it from this run's own,
+ * initially empty cache: an earlier invocation of the same run did that work. Times are ISO-8601 UTC; durations and CPU are seconds; every `load` is
  * the host's mean 1-minute load average over that row's own interval, to be read against
  * `host.nproc`. CPU is user plus system time of the row's whole process tree; `delegated_cpu_s` is
  * CPU outside every tree of the run that a daemon spent on a task's behalf (sccache's compilers). A unit's compile
@@ -88,6 +89,7 @@ export const REPORT_SCHEMA = strict({
       phase: nullableText,
       task: text,
       status: text,
+      replayed: { type: "boolean" },
       start: when,
       end: when,
       wall_s: num,
@@ -555,6 +557,9 @@ export function foldRun(dir) {
         phase: invocation.phase,
         task: entry.name,
         status: entry.args.status,
+        // The run's cache starts empty and the remote one is skipped, so a cache status can only
+        // be a replay of what this run already did, as the unprofiled gate replays its own.
+        replayed: /cache/.test(entry.args.status),
         start: iso(start),
         end: iso(end),
         wall_s: seconds(end - start),
@@ -844,7 +849,7 @@ export function renderMarkdown(report) {
         .map((t) => [
           t.task,
           phaseOf.get(t.phase) ?? "–",
-          t.status,
+          t.replayed ? `replayed this run's ${t.task} (${t.status})` : t.status,
           at(report, t.start),
           at(report, t.end),
           s(t.wall_s),
@@ -855,7 +860,7 @@ export function renderMarkdown(report) {
         ]),
     ),
     "",
-    "CPU basis: `reaped` is exactly what the task's process trees used; `sampled` is what samples saw, which can miss a tree's last moments; `none` means no process of it was sampled (a cache replay, or one shorter than the sampling interval). Delegated CPU is what a daemon outside the run's process tree spent on the task.",
+    "CPU basis: `reaped` is exactly what the task's process trees used; `sampled` is what samples saw, which can miss a tree's last moments; `none` means no process of it was sampled (a replay, or one shorter than the sampling interval). No task is served from a cache that existed before the run: each starts empty, and a replay is a later invocation reusing what an earlier one in this same run did, exactly as the unprofiled gate does. Delegated CPU is what a daemon outside the run's process tree spent on the task.",
     "",
     "## Cargo invocations",
     "",

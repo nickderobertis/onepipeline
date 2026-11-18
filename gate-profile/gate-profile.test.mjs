@@ -91,6 +91,7 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
     assert.equal(markerLines(dir), 2);
     const marker = report.tasks.find((task) => task.task === "work:marker");
     assert.equal(marker.status, "success");
+    assert.equal(marker.replayed, false);
     assert.ok(marker.cpu_s >= 0.15, `work:marker charged ${marker.cpu_s}s`);
   });
 
@@ -150,6 +151,16 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
       (task) => task.invocation === order[1] && task.task === "crate:build",
     );
     assert.match(replay.status, /cache/);
+    assert.equal(replay.replayed, true);
+    // Only the build the first invocation already ran is replayed; every other task did its work.
+    assert.deepEqual(
+      report.tasks.filter((task) => task.replayed).map((task) => task.task),
+      ["crate:build"],
+    );
+    assert.match(
+      readFileSync(join(dir, "target/gate-profile", run, "report.md"), "utf8"),
+      /\| crate:build \| _gate-body \| replayed this run's crate:build \(local-cache[\w-]*\) \|/,
+    );
     assert.equal(path.complete, true);
     assert.ok(path.wall_s <= path.run_wall_s, `${path.wall_s}s > ${path.run_wall_s}s`);
     assert.equal(path.run_wall_s, report.run.wall_s);
