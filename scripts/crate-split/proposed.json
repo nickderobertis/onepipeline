@@ -221,6 +221,7 @@
         "tests/e2e/github_world_support.rs",
         "tests/e2e/mixed_world_support.rs",
         "tests/e2e/command_step.rs",
+        "tests/e2e/guard.rs",
         "tests/e2e/plan_edit_hook.rs",
         "tests/e2e/configured_host.rs"
       ],
@@ -255,6 +256,7 @@
         "github_create_retry",
         "human_board_projection",
         "command_step",
+        "guard",
         "plan_edit_hook",
         "configured_host"
       ]
