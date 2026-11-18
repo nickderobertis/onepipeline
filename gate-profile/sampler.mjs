@@ -13,9 +13,10 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 
-const [out, runId, topHash = "", intervalText] = process.argv.slice(2);
+const given = process.argv.slice(2);
+const [out, runId, topHash, intervalText] = given;
 const interval = Number(intervalText);
-if (!out || !runId || !Number.isInteger(interval) || interval < 10) {
+if (given.length !== 4 || !out || !runId || !Number.isInteger(interval) || interval < 10) {
   console.error(
     "gate-profile: usage: sampler.mjs <out.json> <run id> <top task hash> <interval ms>",
   );
@@ -101,6 +102,9 @@ function sample() {
   const tick = ticks.length;
   const now = Date.now();
   ticks.push(now);
+  // The /proc refusals below are untested: staging one takes a mount namespace without /proc,
+  // which this host's unprivileged tests cannot make. Each prints and exits 3 exactly as the
+  // samples-write refusal does, which the sampler's journey in gate-profile.test.mjs holds.
   let load;
   try {
     load = Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]);

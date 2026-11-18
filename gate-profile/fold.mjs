@@ -906,8 +906,9 @@ export function writeReports(dir) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  const [dir] = process.argv.slice(2);
-  if (!dir || !existsSync(join(dir, "meta.json"))) {
+  const given = process.argv.slice(2);
+  const [dir] = given;
+  if (given.length !== 1 || !existsSync(join(dir, "meta.json"))) {
     console.error(
       "gate-profile: usage: fold.mjs <run dir>, a target/gate-profile/<timestamp> directory",
     );

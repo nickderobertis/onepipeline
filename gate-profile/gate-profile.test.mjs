@@ -361,3 +361,26 @@ test("a second run within the same second gets a directory of its own", (t) => {
     assert.deepEqual(readdirSync(join(dir, "target/gate-profile", stamp)), []);
   assert.equal(readReport(dir, fresh[0]).run.exit, 7);
 });
+
+test("the sampler refuses a malformed invocation, and a run whose samples it cannot write", async (t) => {
+  const { dir } = fixture(t);
+  const sampler = join(dir, "gate-profile", "sampler.mjs");
+  for (const args of [[], ["out.json", "run", "", "100", "extra"], ["out.json", "run", "", "5"]]) {
+    const usage = spawnSync(process.execPath, [sampler, ...args], { encoding: "utf8" });
+    assert.equal(usage.status, 2, args.join(" "));
+    assert.match(usage.stderr, /usage: sampler\.mjs/);
+  }
+  const unwritable = join(dir, "no", "such", "dir", "processes.json");
+  const child = spawn(process.execPath, [sampler, unwritable, "run", "", "100"], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  await new Promise((resolve) => child.stdout.once("data", resolve));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  child.stdin.end();
+  assert.equal(await exited, 3);
+  assert.match(stderr, /cannot write the samples to .*processes\.json/);
+});

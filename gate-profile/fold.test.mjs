@@ -299,9 +299,11 @@ test("refolding refuses a missing or malformed record with exit 3, naming it", (
   const missing = fold(dir);
   assert.equal(missing.status, 3);
   assert.match(missing.stderr, /cannot read the whole run's record/);
-  const usage = spawnSync(process.execPath, [foldScript], { encoding: "utf8" });
-  assert.equal(usage.status, 2);
-  assert.match(usage.stderr, /usage: fold\.mjs <run dir>/);
+  for (const args of [[], [dir, "extra"]]) {
+    const usage = spawnSync(process.execPath, [foldScript, ...args], { encoding: "utf8" });
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /usage: fold\.mjs <run dir>/);
+  }
 });
 
 test("refolding refuses records that are not JSON, run backwards or loop, naming each", async (t) => {
