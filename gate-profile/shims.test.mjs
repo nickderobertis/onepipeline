@@ -392,6 +392,14 @@ case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
     }).status,
     0,
   );
+  // The same manifest named in --manifest-path='s other spelling, its coverage tree under it.
+  assert.equal(
+    cargo(["llvm-cov", "nextest", "--manifest-path=sub/Cargo.toml"], {
+      STANDIN_TARGET: join(dir, "sub", "target", "llvm-cov-target"),
+      STANDIN_UNIT: "manifest's coverage",
+    }).status,
+    0,
+  );
   // The other places cargo or cargo-llvm-cov put a build's target directory.
   for (const [where, env] of [
     [join(dir, "configured"), { CARGO_TARGET_DIR: join(dir, "configured") }],
@@ -414,6 +422,7 @@ case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
       ["build", ["page of first"]],
       ["clippy", ["page of second"]],
       ["check", ["page of manifest's"]],
+      ["llvm-cov", ["page of manifest's coverage"]],
       ["test", ["page of configured"]],
       ["test", ["page of coverage"]],
       ["test", ["page of llvm-cov-target"]],
