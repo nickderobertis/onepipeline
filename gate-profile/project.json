@@ -18,7 +18,16 @@
       "command": "node node_modules/@biomejs/biome/bin/biome format --config-path gate-profile/biome-standalone.jsonc gate-profile"
     },
     "lint": {
-      "command": "node node_modules/@biomejs/biome/bin/biome lint --config-path gate-profile/biome-standalone.jsonc gate-profile && bash -n gate-profile/lib.sh && bash -n gate-profile/nx-hook.sh && bash -n gate-profile/shims/just && bash -n gate-profile/shims/cargo"
+      "command": "just _gate-profile-lint",
+      "inputs": [
+        "default",
+        {
+          "runtime": "node scripts/nx-recipe-input.mjs _gate-profile-lint"
+        },
+        {
+          "runtime": "node -p process.platform"
+        }
+      ]
     },
     "test": {
       "command": "node --test gate-profile/*.test.mjs",
