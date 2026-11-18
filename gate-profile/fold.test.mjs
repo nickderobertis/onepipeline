@@ -114,6 +114,14 @@ test("processes whose parents loop, or one named twice, are refused rather than 
       taskCpu({ processes: [proc("1:0", null, null, 0), proc("1:0", null, null, 0)], reaps: [] }),
     /names a process twice/,
   );
+  assert.throws(
+    () =>
+      taskCpu({
+        processes: [proc("1:0", null, null, 0)],
+        reaps: [{ reaper: "1:0", tick: 6, ticks: 10, children: ["9:0"] }],
+      }),
+    /reaps name 9:0, which it does not record/,
+  );
 });
 
 test("the critical path follows the longest chain, through a replay that took no time", () => {
@@ -344,6 +352,37 @@ test("refolding refuses records that are not JSON, run backwards or loop, naming
           )
           .join("\n"),
       /phases\.jsonl's parents loop through/,
+    ],
+    [
+      "phases.jsonl",
+      (base) =>
+        JSON.stringify({
+          id: "a",
+          parent: "gone",
+          recipe: "a",
+          start: base,
+          end: base,
+          cpu_ms_before: [0, 0],
+          cpu_ms_after: [0, 0],
+          exit: 0,
+        }),
+      /phase a ran inside gone, which it does not record/,
+    ],
+    [
+      "processes.json",
+      () =>
+        JSON.stringify({
+          clock_ticks_per_second: 100,
+          interval_ms: 100,
+          nproc: 4,
+          loads: [
+            [2000, 1],
+            [1000, 1],
+          ],
+          processes: [],
+          reaps: [],
+        }),
+      /load samples are out of time order/,
     ],
   ];
   for (const [file, content, pattern] of cases)

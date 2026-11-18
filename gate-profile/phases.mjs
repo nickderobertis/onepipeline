@@ -12,6 +12,8 @@
 import { execFileSync } from "node:child_process";
 
 const NOT_SPLITTABLE = 3;
+// The parameter kinds `just --dump` writes: one value, `+` one or more, `*` any number.
+const KINDS = ["singular", "plus", "star"];
 
 function fail(message) {
   console.error(`gate-profile: ${message}`);
@@ -49,7 +51,7 @@ function declared(name) {
       (d) => isObject(d) && typeof d.recipe === "string" && Array.isArray(d.arguments),
     ) &&
     Array.isArray(entry.parameters) &&
-    entry.parameters.every((p) => isObject(p) && typeof p.kind === "string") &&
+    entry.parameters.every((p) => isObject(p) && KINDS.includes(p.kind)) &&
     (entry.priors === undefined || Number.isInteger(entry.priors)) &&
     (entry.attributes === undefined || Array.isArray(entry.attributes));
   if (!valid) fail(`\`just --dump\` describes recipe ${name} in a shape this does not know`);

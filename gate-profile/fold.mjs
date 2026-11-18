@@ -269,7 +269,6 @@ export const RECORD_SCHEMAS = {
 
 function checked(value, schema, what) {
   const errors = validateReport(value, schema);
-  // A timed record's end and CPU counters cannot run backwards.
   if (!errors.length && schema.properties?.cpu_ms_before) {
     if (value.end < value.start) errors.push(`$: ends at ${value.end}, before it starts`);
     if (value.cpu_ms_after.some((after, i) => after < value.cpu_ms_before[i]))
@@ -389,7 +388,9 @@ export function taskCpu(sampled) {
   };
   const reaped = new Map();
   for (const reap of sampled.reaps) {
-    const trees = reap.children.map((key) => byKey.get(key)).filter(Boolean);
+    for (const key of [reap.reaper, ...reap.children])
+      need(byKey.has(key), `processes.json reaps name ${key}, which it does not record`);
+    const trees = reap.children.map((key) => byKey.get(key));
     const seen = trees.map(seenTotal);
     const sum = seen.reduce((a, b) => a + b, 0);
     trees.forEach((tree, i) => {
@@ -497,6 +498,10 @@ export function foldRun(dir) {
   const phaseRecords = readLines(join(dir, "phases.jsonl"), "phases.jsonl", RECORD_SCHEMAS.phase);
   const cargoRuns = readLines(join(dir, "cargo.jsonl"), "cargo.jsonl", RECORD_SCHEMAS.cargo);
   const loads = sampled.loads;
+  need(
+    loads.every(([t], i) => i === 0 || t >= loads[i - 1][0]),
+    "processes.json's load samples are out of time order",
+  );
   const notes = [];
   const ms = (epochSeconds) => Math.round(Number(epochSeconds) * 1000);
 
@@ -507,7 +512,6 @@ export function foldRun(dir) {
   const runUser = runCpu.user - runCpuBefore.user;
   const runSystem = runCpu.system - runCpuBefore.system;
 
-  // Invocations, each with its Nx task profile and, where `nx --graph` could write it, its graph.
   const nxDir = join(dir, "nx");
   const invocations = [];
   for (const name of existsSync(nxDir) ? readdirSync(nxDir).sort() : []) {
@@ -569,6 +573,10 @@ export function foldRun(dir) {
   const byId = new Map(phaseRecords.map((p) => [p.id, p]));
   need(byId.size === phaseRecords.length, "phases.jsonl names a phase twice");
   for (const p of phaseRecords) {
+    need(
+      !p.parent || byId.has(p.parent),
+      `phases.jsonl's phase ${p.id} ran inside ${p.parent}, which it does not record`,
+    );
     const lineage = new Set();
     for (let up = p; up; up = byId.get(up.parent)) {
       need(!lineage.has(up.id), `phases.jsonl's parents loop through ${up.id}`);
@@ -609,7 +617,6 @@ export function foldRun(dir) {
   // The run's critical path: its invocations run one after another, so it is each one's longest
   // dependency chain, in turn.
   const pathTasks = [];
-  // Complete only when every invocation left both its task profile and its task graph.
   let complete = invocations.length > 0;
   for (const invocation of invocations) {
     if (!invocation.profiled || !invocation.dependencies) complete = false;
@@ -629,7 +636,6 @@ export function foldRun(dir) {
     }
   }
 
-  // Cargo invocations, each with the timings pages its shim copied out.
   const cargo = cargoRuns
     .map((c) => {
       const start = ms(c.start);
@@ -658,7 +664,6 @@ export function foldRun(dir) {
       };
     })
     .sort((a, b) => a.startMs - b.startMs);
-  // Each build's own timings pages, which the cargo shim copied out as it finished.
   for (const owner of cargo) {
     for (const page of owner.records) {
       const timing = readTimings(page);

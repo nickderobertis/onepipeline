@@ -94,6 +94,27 @@ test("the planner orders prior dependencies as just does, and refuses what it ca
   assert.equal(plan(dir, "rest", "a", "b", "c").status, 0);
   for (const args of [["given"], ["then"], ["fan"], ["base", "m"], ["nosuch"]])
     assert.equal(plan(dir, ...args).status, 3, args.join(" "));
+  // A dump naming a parameter kind this does not know is refused, not read as some other kind.
+  const unknown = scratch(t, "phases-unknown");
+  write(join(unknown, "justfile"), JUSTFILE);
+  const realJust = spawnSync("bash", ["-c", "command -v just"], { encoding: "utf8" }).stdout.trim();
+  const dump = JSON.parse(
+    spawnSync(realJust, ["--dump", "--dump-format", "json"], { cwd: unknown, encoding: "utf8" })
+      .stdout,
+  );
+  dump.recipes.rest.parameters[0].kind = "someday";
+  write(
+    join(unknown, "fake-just"),
+    `#!/bin/sh\ncat <<'EOF'\n${JSON.stringify(dump)}\nEOF\n`,
+    0o755,
+  );
+  const strange = spawnSync(
+    process.execPath,
+    [join(root, "gate-profile", "phases.mjs"), join(unknown, "fake-just"), "rest", "a"],
+    { cwd: unknown, encoding: "utf8" },
+  );
+  assert.equal(strange.status, 2);
+  assert.match(strange.stderr, /describes recipe rest in a shape this does not know/);
   const broken = scratch(t, "phases-broken");
   write(join(broken, "justfile"), "this is not a justfile\n");
   const refused = plan(broken, "top");
