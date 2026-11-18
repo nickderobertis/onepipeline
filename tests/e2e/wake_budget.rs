@@ -257,7 +257,7 @@ fn unknown(world: &World, args: &[&str], run: &str, why: &str) {
 }
 
 /// An RFC 3339 instant of the shape this crate writes, as epoch milliseconds.
-pub(crate) fn millis(instant: &str) -> i64 {
+fn millis(instant: &str) -> i64 {
     let field =
         |from: usize, to: usize| -> i64 { instant[from..to].parse().expect("a digit field") };
     let (year, month, day) = (field(0, 4), field(5, 7), field(8, 10));

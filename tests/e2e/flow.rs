@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::harness::{
-    agent, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING, WATCH_ELAPSED,
+    agent, epoch_millis, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING,
+    WATCH_ELAPSED,
 };
-use crate::wake_budget::millis;
 
 use onepipeline::cli::{FLOW_ENV, WAKE_BUDGET_ENV, WAKE_RESERVE_SECONDS};
 use onepipeline::error::{EXIT_FLOW_FAILED, EXIT_RUN_JOINED, EXIT_SUCCESS};
@@ -215,7 +215,7 @@ impl Watching {
 /// deadline its terms record, each as epoch milliseconds — once the lease is
 /// published, rather than the temporary it is renamed from, which shares its
 /// name's prefix. The terms are published before the lease, so they are there.
-fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (i64, i64) {
+fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (u64, u64) {
     let flow_dir = world.runs.join(".flows").join(flow);
     let mine = format!("{}-", watch.child.id());
     let published = || {
@@ -239,8 +239,8 @@ fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (i64, i64) {
             .join("watch-terms")
             .join(lease.file_name().expect("a name")),
     );
-    let began = millis(read(&lease)["began_at"].as_str().expect("an instant"));
-    let deadline = millis(terms["deadline"].as_str().expect("a bounded watch"));
+    let began = epoch_millis(read(&lease)["began_at"].as_str().expect("an instant"));
+    let deadline = epoch_millis(terms["deadline"].as_str().expect("a bounded watch"));
     (began, deadline)
 }
 
@@ -835,10 +835,7 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .with_env(WAKE_BUDGET_ENV, "900");
     let lasting = watching(&long, "quiet", &[]);
     let (began, deadline) = armed_terms(&world, "quiet", &lasting);
-    assert_eq!(
-        deadline - began,
-        900_000 - i64::try_from(reserve_ms).expect("a few seconds")
-    );
+    assert_eq!(deadline - began, 900_000 - reserve_ms);
     lasting.end();
 
     // A watch whose timeout is the budget does not qualify, and says why.
