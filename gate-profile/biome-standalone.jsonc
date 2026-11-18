@@ -1,0 +1,11 @@
+// The root biome.jsonc's settings over this project's files. The root's own `files.includes`
+// is held to a pinned list by .github/ci-shape/shared-scripts.test.mjs, so this project is
+// formatted and linted through this file (passed by --config-path) instead of joining it.
+// Named so Biome never discovers it as a nested configuration.
+{
+  "$schema": "../node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": ["../biome.jsonc"],
+  "files": {
+    "includes": ["**/*.mjs", "**/*.cjs", "**/*.json"]
+  }
+}

@@ -12,13 +12,13 @@
       "executor": "nx:noop"
     },
     "format": {
-      "command": "node node_modules/@biomejs/biome/bin/biome format --write gate-profile"
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write --config-path gate-profile/biome-standalone.jsonc gate-profile"
     },
     "format-check": {
-      "command": "node node_modules/@biomejs/biome/bin/biome format gate-profile"
+      "command": "node node_modules/@biomejs/biome/bin/biome format --config-path gate-profile/biome-standalone.jsonc gate-profile"
     },
     "lint": {
-      "command": "node node_modules/@biomejs/biome/bin/biome lint gate-profile && for script in gate-profile/lib.sh gate-profile/nx-hook.sh gate-profile/shims/just gate-profile/shims/cargo; do bash -n \"$script\" || exit 1; done"
+      "command": "node node_modules/@biomejs/biome/bin/biome lint --config-path gate-profile/biome-standalone.jsonc gate-profile && for script in gate-profile/lib.sh gate-profile/nx-hook.sh gate-profile/shims/just gate-profile/shims/cargo; do bash -n \"$script\" || exit 1; done"
     },
     "test": {
       "command": "node --test gate-profile/*.test.mjs",
