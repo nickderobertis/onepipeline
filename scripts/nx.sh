@@ -49,6 +49,18 @@ for argument in "$@"; do
   esac
 done
 
+# `just gate-profile` (gate-profile/run.mjs) sets this to profile the Nx runs of the recipe it
+# runs; unset, as in every other run, nothing here changes. A copy of this script in a workspace
+# without the profiler is a suite's scratch workspace inside a profiled task, which the profile's
+# Nx settings must not reach.
+if [ -n "${ONEPIPELINE_GATE_PROFILE_DIR:-}" ]; then
+  if [ -f "$ROOT/gate-profile/nx-hook.sh" ]; then
+    . "$ROOT/gate-profile/nx-hook.sh"
+  else
+    unset ONEPIPELINE_GATE_PROFILE_DIR NX_PROFILE NX_CACHE_DIRECTORY NX_WORKSPACE_DATA_DIRECTORY
+  fi
+fi
+
 # The pinned `onemessagebus` CLI is the other shim the checks read — the
 # layout-document journey drives it — and the pinned `@onebudgetspec/sdk` is the
 # `report` the stage budget's command imports, so a tree installed before either

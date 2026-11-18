@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# `cargo` while `just gate-profile` runs: gate-profile/run.mjs puts this directory first on PATH.
+# A cargo build under the profiled repository's root gains `--timings`, and its wall clock, the
+# CPU of its whole process tree and the Nx task it ran in are recorded to cargo.jsonl. Anything
+# else — no profiled run, a directory outside the root, a command that compiles nothing, or a
+# cargo started by a profiled cargo's own build or tests — is the real cargo, untouched.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$here/lib.sh"
+real="$(gate_profile_real_tool cargo)" || exit 127
+
+passthrough() { exec "$real" "$@"; }
+[ -n "${ONEPIPELINE_GATE_PROFILE_DIR-}" ] || passthrough "$@"
+[ "${ONEPIPELINE_GATE_PROFILE_CARGO-}" != "${ONEPIPELINE_GATE_PROFILE_RUN-}" ] || passthrough "$@"
+root=${ONEPIPELINE_GATE_PROFILE_ROOT-}
+[ -n "$root" ] || passthrough "$@"
+case "$(pwd -P)/" in "$root"/*) ;; *) passthrough "$@" ;; esac
+
+# Where `--timings` goes: straight after the subcommand that builds, skipping cargo's own leading
+# options (and the values of those that take one). `llvm-cov` and `nextest` build through their
+# own subcommand, which is where they accept it.
+at=-1 i=0 args=("$@")
+while [ "$i" -lt "${#args[@]}" ]; do
+  case "${args[$i]}" in
+    +* | -v | -vv | -q | --quiet | --verbose | --frozen | --locked | --offline) ;;
+    --color | --config | -Z | -C) i=$((i + 1)) ;;
+    -*) ;;
+    build | b | check | c | clippy | doc | d | test | t | bench | rustc | rustdoc) at=$i; break ;;
+    nextest)
+      case "${args[$((i + 1))]-}" in run | r | archive) at=$((i + 1)) ;; esac
+      break
+      ;;
+    llvm-cov)
+      j=$((i + 1))
+      while [ "$j" -lt "${#args[@]}" ] && [[ ${args[$j]} == -* ]]; do j=$((j + 1)); done
+      case "${args[$j]-}" in nextest | nextest-archive | test) at=$j ;; esac
+      break
+      ;;
+    *) break ;;
+  esac
+  i=$((i + 1))
+done
+[ "$at" -ge 0 ] || passthrough "$@"
+gate_profile_check_dir || exit
+
+scratch="$ONEPIPELINE_GATE_PROFILE_DIR/.times.$$"
+start=$EPOCHREALTIME
+gate_profile_children_cpu "$scratch"
+before=$gate_profile_cpu
+ONEPIPELINE_GATE_PROFILE_CARGO="$ONEPIPELINE_GATE_PROFILE_RUN" \
+  "$real" "${args[@]:0:at+1}" --timings "${args[@]:at+1}"
+status=$?
+gate_profile_children_cpu "$scratch"
+after=$gate_profile_cpu
+end=$EPOCHREALTIME
+rm -f "$scratch"
+printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
+  "$start" "$end" "$before" "$after" "$status" "$(gate_profile_json_array "$@")" \
+  "$(gate_profile_json_string "$(pwd -P)")" "$(gate_profile_json_string "${CARGO_TARGET_DIR-}")" \
+  "$(gate_profile_json_string "${CARGO_LLVM_COV_TARGET_DIR-}")" \
+  "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_INVOCATION-}")" \
+  "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
+  "$(gate_profile_json_string "${NX_TASK_TARGET_PROJECT:+$NX_TASK_TARGET_PROJECT:${NX_TASK_TARGET_TARGET-}}")" \
+  >>"$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"
+exit "$status"

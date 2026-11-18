@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# `just` while `just gate-profile` runs: gate-profile/run.mjs puts this directory first on PATH.
+# Inside one of the run's Nx tasks, or for anything but a recipe, it is the real `just`. At the
+# run's own level it runs the recipe as phases: each of its prior dependencies (gate-profile/
+# phases.mjs plans them, as just itself would order them), then its own body with `--no-deps`,
+# each with the wall clock and the CPU of its whole process tree recorded to phases.jsonl.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$here/lib.sh"
+real="$(gate_profile_real_tool just)" || exit 127
+
+if [ -z "${ONEPIPELINE_GATE_PROFILE_DIR-}" ] || ! gate_profile_at_top || [ $# -eq 0 ] || [[ $1 == -* ]]; then
+  exec "$real" "$@"
+fi
+gate_profile_check_dir || exit
+dir=$ONEPIPELINE_GATE_PROFILE_DIR
+parent=${ONEPIPELINE_GATE_PROFILE_PHASE-}
+scratch="$dir/.times.$$"
+trap 'rm -f "$scratch"' EXIT
+
+run_start=$EPOCHREALTIME
+gate_profile_children_cpu "$scratch"
+run_before=$gate_profile_cpu
+
+# Exit 3 from the planner means "not expandable as just would run it" (a dependency taking
+# arguments, a subsequent, several recipes on one line): the whole invocation is then one phase.
+plan_status=0
+plan="$(node "$here/phases.mjs" "$real" "$@")" || plan_status=$?
+case "$plan_status" in
+  0) mapfile -t prior <<<"$plan"; [ -n "$plan" ] || prior=() ;;
+  3) prior=() ;;
+  *) echo "gate-profile: could not plan the phases of \`just $*\` (exit $plan_status); fix the error above and run \`just gate-profile\` again" >&2; exit 3 ;;
+esac
+
+sequence=0
+run_phase() {
+  local recipe=$1 id start before after end status
+  shift
+  sequence=$((sequence + 1))
+  id="$$-$sequence"
+  start=$EPOCHREALTIME
+  gate_profile_children_cpu "$scratch"
+  before=$gate_profile_cpu
+  ONEPIPELINE_GATE_PROFILE_PHASE="$id" "$real" "$@"
+  status=$?
+  gate_profile_children_cpu "$scratch"
+  after=$gate_profile_cpu
+  end=$EPOCHREALTIME
+  printf '{"id":"%s","parent":%s,"recipe":%s,"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d}\n' \
+    "$id" "$(gate_profile_json_string "$parent")" "$(gate_profile_json_string "$recipe")" \
+    "$start" "$end" "$before" "$after" "$status" >>"$dir/phases.jsonl"
+  return "$status"
+}
+
+status=0
+for recipe in "${prior[@]}"; do
+  run_phase "$recipe" --no-deps "$recipe" || { status=$?; break; }
+done
+if [ "$status" -eq 0 ]; then
+  if [ "$plan_status" -eq 0 ]; then
+    run_phase "$1" --no-deps "$@" || status=$?
+  else
+    run_phase "$1" "$@" || status=$?
+  fi
+fi
+
+# The run's own root (no phase above it) also records the whole run, measured the same way.
+if [ -z "$parent" ]; then
+  gate_profile_children_cpu "$scratch"
+  printf '{"recipe":%s,"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d}\n' \
+    "$(gate_profile_json_string "$1")" "$run_start" "$EPOCHREALTIME" "$run_before" \
+    "$gate_profile_cpu" "$status" >"$dir/run.json"
+fi
+exit "$status"

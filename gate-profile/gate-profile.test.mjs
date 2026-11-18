@@ -1,0 +1,204 @@
+// `just gate-profile` as a user runs it, over the fixture workspace (fixture.mjs) with real just,
+// Nx and cargo: the unprofiled gate is untouched by it, and a profiled run reports every phase,
+// task, cargo build and compile unit with its CPU and load, and its critical path.
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+import { validateReport } from "./fold.mjs";
+import {
+  cargoUnits,
+  filesUnder,
+  fixture,
+  fixtureEnvironment,
+  GRANDCHILD_CPU_US,
+  grandchildReports,
+  just,
+  markerLines,
+} from "./fixture.mjs";
+
+const runDirs = (dir) =>
+  existsSync(join(dir, "target/gate-profile")) ? readdirSync(join(dir, "target/gate-profile")) : [];
+
+const readReport = (dir, run) =>
+  JSON.parse(readFileSync(join(dir, "target/gate-profile", run, "report.json"), "utf8"));
+
+const sum = (rows) => rows.reduce((total, row) => total + row.cpu_s, 0);
+
+test("gate-profile profiles the gate run it makes, and the gate without it records nothing", async (t) => {
+  const { dir, commit } = fixture(t);
+
+  await t.test("the gate without the command writes no profile of any kind", () => {
+    const gate = just(dir, "gate");
+    assert.equal(gate.status, 0, gate.stderr);
+    assert.equal(markerLines(dir), 1);
+    assert.deepEqual(runDirs(dir), []);
+    const written = filesUnder(dir);
+    assert.deepEqual(
+      written.filter((path) =>
+        /cargo-timing|\.profile\.json$|gate-profile\/.*\.jsonl?$/.test(path),
+      ),
+      [],
+    );
+    assert.doesNotMatch(readFileSync(join(dir, ".logs/nx.log"), "utf8"), /Performance Profile/);
+    // The marker task is now in the Nx cache: running it again replays it and appends nothing.
+    const replay = spawnSync("bash", ["scripts/nx.sh", "run", "work:marker"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: fixtureEnvironment(),
+    });
+    assert.equal(replay.status, 0, replay.stderr);
+    assert.equal(markerLines(dir), 1);
+  });
+
+  // So that cargo compiles every unit again rather than finding them fresh.
+  rmSync(join(dir, "crate/target"), { recursive: true, force: true });
+
+  const profiled = just(dir, "gate-profile");
+  const [run] = runDirs(dir);
+  const report = run ? readReport(dir, run) : null;
+
+  await t.test("the command runs the gate and writes both reports where it says", () => {
+    assert.equal(profiled.status, 0, profiled.stderr);
+    assert.equal(runDirs(dir).length, 1);
+    assert.match(run, /^\d{8}T\d{6}Z$/);
+    assert.match(profiled.stdout, new RegExp(`target/gate-profile/${run}/report\\.md`));
+    assert.ok(existsSync(join(dir, "target/gate-profile", run, "report.md")));
+    assert.deepEqual(validateReport(report), []);
+    assert.equal(report.recipe, "gate");
+    assert.deepEqual(report.commit, { sha: commit, dirty: false });
+    const markdown = readFileSync(join(dir, "target/gate-profile", run, "report.md"), "utf8");
+    for (const heading of ["Whole run", "Phases", "Critical path", "Nx tasks", "Cargo invocations"])
+      assert.match(markdown, new RegExp(`## ${heading}`));
+    assert.match(markdown, new RegExp(commit));
+  });
+
+  await t.test("the cache is skipped: the cached marker task ran again and is charged CPU", () => {
+    assert.equal(markerLines(dir), 2);
+    const marker = report.tasks.find((task) => task.task === "work:marker");
+    assert.equal(marker.status, "success");
+    assert.ok(marker.cpu_s >= 0.15, `work:marker charged ${marker.cpu_s}s`);
+  });
+
+  await t.test("phases are the recipes in the order they ran, one after another", () => {
+    assert.deepEqual(
+      report.phases.map((phase) => phase.recipe),
+      ["build", "_gate-body"],
+    );
+    for (let i = 1; i < report.phases.length; i++)
+      assert.ok(
+        Date.parse(report.phases[i].start) >= Date.parse(report.phases[i - 1].end),
+        `${report.phases[i].recipe} starts before ${report.phases[i - 1].recipe} ends`,
+      );
+    for (const phase of report.phases) assert.equal(phase.invocations.length, 1);
+  });
+
+  await t.test("CPU nests: the run holds its phases, each phase its tasks", () => {
+    assert.ok(report.run.cpu_s > 0 && report.run.wall_s > 0);
+    assert.ok(report.run.cpu_s >= sum(report.phases), JSON.stringify(report.run));
+    for (const phase of report.phases) {
+      const tasks = report.tasks.filter((task) => task.phase === phase.id);
+      assert.ok(tasks.length > 0, `no tasks in ${phase.recipe}`);
+      assert.ok(phase.cpu_s >= sum(tasks), `${phase.recipe}: ${phase.cpu_s}s < its tasks'`);
+    }
+  });
+
+  await t.test("the task whose grandchild did the work is charged it, and no other task is", () => {
+    const reports = grandchildReports(dir).filter(
+      (r) => r.at >= Date.parse(report.run.start) && r.at <= Date.parse(report.run.end),
+    );
+    assert.equal(reports.length, 1);
+    const grandchild = reports[0].cpu_us / 1e6;
+    assert.ok(grandchild >= GRANDCHILD_CPU_US / 1e6);
+    const tree = report.tasks.find((task) => task.task === "work:tree");
+    assert.ok(tree.cpu_s >= grandchild, `work:tree charged ${tree.cpu_s}s of ${grandchild}s`);
+    for (const other of report.tasks.filter((task) => task.task !== "work:tree"))
+      assert.ok(other.cpu_s < grandchild, `${other.task} charged ${other.cpu_s}s`);
+  });
+
+  await t.test("the critical path is the whole run's chain, across both invocations", () => {
+    const path = report.critical_path;
+    const order = report.phases.flatMap((phase) => phase.invocations);
+    assert.deepEqual([...new Set(path.tasks.map((task) => task.invocation))], order);
+    // The second invocation's chain starts at the build the first one ran, replayed from this
+    // run's own cache rather than built twice.
+    assert.deepEqual(
+      path.tasks.map((task) => [order.indexOf(task.invocation), task.task]),
+      [
+        [0, "crate:build"],
+        [1, "crate:build"],
+        [1, "work:marker"],
+        [1, "work:tree"],
+        [1, "work:check"],
+      ],
+    );
+    const replay = report.tasks.find(
+      (task) => task.invocation === order[1] && task.task === "crate:build",
+    );
+    assert.match(replay.status, /cache/);
+    assert.equal(path.complete, true);
+    assert.ok(path.wall_s <= path.run_wall_s, `${path.wall_s}s > ${path.run_wall_s}s`);
+    assert.equal(path.run_wall_s, report.run.wall_s);
+  });
+
+  await t.test("every unit of the crate appears with its compile time and load", () => {
+    assert.equal(report.cargo.length, 1);
+    const [build] = report.cargo;
+    assert.equal(build.task, "crate:build");
+    assert.equal(build.exit, 0);
+    assert.ok(build.cpu_s > 0);
+    const expected = cargoUnits(dir);
+    assert.ok(expected.length >= 5, JSON.stringify(expected));
+    for (const unit of expected) {
+      const found = build.units.find(
+        (u) =>
+          u.name === unit.name &&
+          (unit.reason === "build-script-executed"
+            ? u.mode === "run-custom-build"
+            : u.mode !== "run-custom-build" &&
+              (unit.kind === "custom-build"
+                ? u.target === "build-script"
+                : unit.kind === "bin"
+                  ? u.target.includes("bin")
+                  : u.target === "")),
+      );
+      assert.ok(found, `no unit for ${JSON.stringify(unit)} in ${JSON.stringify(build.units)}`);
+      assert.equal(typeof found.wall_s, "number");
+      assert.equal(typeof found.load, "number");
+    }
+    const walls = build.units.map((u) => u.wall_s);
+    assert.deepEqual(
+      walls,
+      [...walls].sort((a, b) => b - a),
+    );
+  });
+
+  await t.test("every row carries the load it was taken under", () => {
+    assert.equal(typeof report.host.nproc, "number");
+    for (const row of [report.run, ...report.phases, ...report.tasks, ...report.cargo])
+      assert.equal(typeof row.load, "number", JSON.stringify(row));
+  });
+});
+
+test("gate-profile refuses an unknown recipe, and reports a failing one up to its failure", async (t) => {
+  const { dir } = fixture(t);
+
+  const unknown = just(dir, "gate-profile", "nosuch");
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /no recipe 'nosuch'/);
+  assert.deepEqual(runDirs(dir), []);
+
+  const broken = just(dir, "gate-profile", "broken");
+  assert.equal(broken.status, 1, broken.stderr);
+  assert.match(broken.stderr, /`just broken` failed \(exit 7\)/);
+  const [run] = runDirs(dir);
+  const report = readReport(dir, run);
+  assert.deepEqual(validateReport(report), []);
+  assert.equal(report.run.exit, 7);
+  assert.deepEqual(
+    report.phases.map((phase) => [phase.recipe, phase.exit]),
+    [["broken", 7]],
+  );
+  assert.deepEqual(report.tasks, []);
+});

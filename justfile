@@ -253,6 +253,15 @@ _gate-body base="origin/main": check
     @just lint-llm-diff "{{base}}"
     @echo "gate: ok"
 
+# On demand only, in no gate and under no budget: runs `recipe` with this run's own fresh Nx
+# cache, so every task does its work, and writes where its time went to
+# target/gate-profile/<UTC timestamp>/report.{md,json} — each phase, Nx task and cargo build with
+# its wall, CPU and the host's load, the critical path, and cargo's compile time per unit.
+# gate-profile/run.mjs says how; unprofiled, every switch it sets is unset and inert.
+# Profile one run of a gate recipe (default `gate`): where its time went.
+gate-profile recipe="gate":
+    @node gate-profile/run.mjs "$1"
+
 # Escape hatch for Nx itself, e.g. `just nx show projects` or `just nx graph`.
 # Run an arbitrary Nx command against this workspace.
 nx *ARGS:
