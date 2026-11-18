@@ -780,10 +780,17 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     // that, so the span from before the spawn to after the exit encloses its
     // whole wait. A slow or loaded host only lengthens that span, so it can
     // fail this for a watch that gave up early and never for a late one.
+    //
+    // How long it waited at most is counted on the watch's own clock instead:
+    // under a one-second tick it says a heartbeat only once a whole second of
+    // silence has passed since the last, so a wait that gave up at its deadline
+    // says at most one per second of the budget less the reserve. A loaded
+    // host only delays heartbeats, so it can lower that count, never raise it;
+    // a wait that ran on past its deadline raises it.
     let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
     let spawned = Instant::now();
     let output = budgeted
-        .cmd(&["watch", "--flow", "quiet"])
+        .cmd(&["watch", "--flow", "quiet", "--tick-interval", "1"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -803,6 +810,16 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
             .and_then(|line| serde_json::from_str::<Value>(line).ok())
             .is_some_and(|record| record["watch"] == "return"),
         "the watch's last record is not its return: {said}"
+    );
+    let heartbeats = said
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["watch"] == "heartbeat")
+        .count();
+    assert!(
+        heartbeats <= usize::try_from(10 - WAKE_RESERVE_SECONDS).expect("a few seconds"),
+        "the watch said {heartbeats} one-second heartbeats, so it waited past the budget \
+         less the reserve: {said}"
     );
     assert!(
         took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
