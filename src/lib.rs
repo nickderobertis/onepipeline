@@ -100,6 +100,7 @@ mod flow;
 mod flowwatch;
 mod freespace;
 mod graph;
+mod guard;
 mod heartbeat;
 mod home;
 mod hooks;

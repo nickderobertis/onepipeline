@@ -740,6 +740,164 @@ pub(crate) struct CommandExited {
     pub(crate) outputs: Option<std::collections::BTreeMap<String, String>>,
 }
 
+/// `guard-started`: a guarded node's guard, as it was started — the record that makes the
+/// node `running` while its guard decides whether it is needed.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct GuardStarted {
+    /// The argv, as the plan states it: never empty, its program never blank.
+    #[schemars(with = "Vec<String>", length(min = 1))]
+    pub(crate) guard: crate::filter::Argv,
+    /// Where its stdout and stderr are kept: `<run>/guards/<node>.log`, absolute.
+    pub(crate) log: String,
+    /// Its deadline in seconds: the node's `guard_timeout_seconds`, or the default where it
+    /// states none.
+    pub(crate) timeout_seconds: std::num::NonZeroU64,
+}
+
+/// Where one record stands in a run's journal: its writer's stream and its `seq` there,
+/// which no other record of the run shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordAt {
+    /// The writer's stream.
+    pub(crate) stream: String,
+    /// Its place in that stream.
+    pub(crate) seq: u64,
+}
+
+/// The word a `guard-evaluated` record's `verdict` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum VerdictWord {
+    /// The guard exited 0.
+    Needed,
+    /// The guard exited 3.
+    NotNeeded,
+    /// Anything else.
+    Failed,
+}
+
+/// `guard-evaluated`: how a guarded node's guard ended and what it decided, journalled
+/// ahead of any settlement or dispatch that verdict leads to — as the record is written.
+// llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields, so a newer build's record still reads. What the fields say together is validated where this is read, by `GuardEvaluated`'s `TryFrom`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct GuardRecord {
+    /// What the guard decided.
+    verdict: VerdictWord,
+    /// How it ended, and its exit status where it exited: a command's endings.
+    #[serde(flatten)]
+    ending: CommandEnding,
+    /// How long it ran, in milliseconds.
+    duration_ms: u64,
+}
+
+/// How a guard that failed ended: any ending but an exit 0 or an exit 3, which are the
+/// two answers a guard gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GuardFailure(CommandEnding);
+
+impl GuardFailure {
+    /// `ending` as a failure; `None` where it is an exit 0 or an exit 3.
+    pub(crate) fn new(ending: CommandEnding) -> Option<Self> {
+        match ending {
+            CommandEnding::Exited {
+                exit_code: Some(0 | crate::guard::NOT_NEEDED_EXIT),
+            } => None,
+            ending => Some(Self(ending)),
+        }
+    }
+
+    /// How it ended.
+    pub(crate) fn ending(self) -> CommandEnding {
+        self.0
+    }
+}
+
+/// What a guard decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuardVerdict {
+    /// It exited 0: the node proceeds exactly as an unguarded node would.
+    Needed,
+    /// It exited 3: the node settles `done` with outcome `not-needed`.
+    NotNeeded,
+    /// It ended any other way — another exit, a signal, a guard that could not start, one
+    /// past its deadline or one stopped by a cancellation: never read as not needed.
+    Failed(GuardFailure),
+}
+
+/// `guard-evaluated`, as the engine reads it: a verdict that cannot contradict how the guard
+/// ended. Written and read as [`GuardRecord`], and a record whose verdict its ending
+/// contradicts — `needed` from anything but an exit 0, `not-needed` from anything but an
+/// exit 3, `failed` from either — is refused where it is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "GuardRecord", into = "GuardRecord")]
+pub(crate) struct GuardEvaluated {
+    /// What the guard decided.
+    pub(crate) verdict: GuardVerdict,
+    /// How long it ran, in milliseconds.
+    pub(crate) duration_ms: u64,
+}
+
+impl TryFrom<GuardRecord> for GuardEvaluated {
+    type Error = String;
+
+    fn try_from(record: GuardRecord) -> Result<Self, String> {
+        let exited = |code| CommandEnding::Exited {
+            exit_code: Some(code),
+        };
+        let verdict = match record.verdict {
+            VerdictWord::Needed if record.ending == exited(0) => GuardVerdict::Needed,
+            VerdictWord::NotNeeded if record.ending == exited(crate::guard::NOT_NEEDED_EXIT) => {
+                GuardVerdict::NotNeeded
+            }
+            VerdictWord::Failed => GuardVerdict::Failed(GuardFailure::new(record.ending).ok_or(
+                "a `failed` verdict is never an exit 0 or an exit 3, which are a guard's answers",
+            )?),
+            VerdictWord::Needed => {
+                return Err("a `needed` verdict is an exit 0 and nothing else".into())
+            }
+            VerdictWord::NotNeeded => {
+                return Err("a `not-needed` verdict is an exit 3 and nothing else".into())
+            }
+        };
+        Ok(Self {
+            verdict,
+            duration_ms: record.duration_ms,
+        })
+    }
+}
+
+impl From<GuardEvaluated> for GuardRecord {
+    fn from(evaluated: GuardEvaluated) -> Self {
+        let exited = |code| CommandEnding::Exited {
+            exit_code: Some(code),
+        };
+        let (verdict, ending) = match evaluated.verdict {
+            GuardVerdict::Needed => (VerdictWord::Needed, exited(0)),
+            GuardVerdict::NotNeeded => (
+                VerdictWord::NotNeeded,
+                exited(crate::guard::NOT_NEEDED_EXIT),
+            ),
+            GuardVerdict::Failed(failure) => (VerdictWord::Failed, failure.ending()),
+        };
+        Self {
+            verdict,
+            ending,
+            duration_ms: evaluated.duration_ms,
+        }
+    }
+}
+
+impl JsonSchema for GuardEvaluated {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GuardEvaluated".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        GuardRecord::json_schema(generator)
+    }
+}
+
 /// The stack a lifecycle node was drafted on: the stack parents its branch was
 /// placed on, and the stack base merging them when there were several.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2691,6 +2849,8 @@ payload_messages! {
     ChecksUnfollowed => "checks-unfollowed";
     CommandStarted => "command-started";
     CommandExited => "command-exited";
+    GuardStarted => "guard-started";
+    GuardEvaluated => "guard-evaluated";
 }
 
 /// Whether a retained numeric field is the zero a new record leaves it at.

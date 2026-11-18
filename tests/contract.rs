@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("159.")["bundle_versions"]["events"],
+        divergence_block("160.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1805,6 +1805,8 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         kind: NodeKind::Human,
         command: Some(vec!["./scripts/step.sh".into()]),
         timeout_seconds: std::num::NonZeroU64::new(600),
+        guard: Some(vec!["./scripts/needed.sh".into()]),
+        guard_timeout_seconds: std::num::NonZeroU64::new(60),
         task: Some("t".into()),
         persona: Some("engineer".into()),
         deps: vec!["other".into()],
@@ -6803,7 +6805,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 71, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 73, "the closed set changed size");
     // The paragraph's closed list is the enum's, kind for kind and in its order — entry
     // 159 brought it up to date, and this keeps it there.
     let paragraph = CONTRACT
@@ -13021,6 +13023,104 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
         let kind = kind.as_str().expect("a kind");
         assert!(
             PipelineKind::from_wire(&EventKind(kind.to_owned())).is_some(),
+            "{kind} is not a kind this build emits"
+        );
+    }
+    // The bundle the amendment was recorded at, which carries its two kinds: a later
+    // amendment raising the bundle leaves this approved text as it was, so the version it
+    // names is at or below the one this build publishes, never above it.
+    assert!(
+        bundle_at_or_below(
+            block["events_bundle_version"].as_str().expect("a version"),
+            onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+        ),
+        "the generic primitives name a bundle newer than this build publishes"
+    );
+}
+
+/// Whether bundle version `stated` is at or below `current`, both `major.minor.patch`.
+fn bundle_at_or_below(stated: &str, current: &str) -> bool {
+    let parts = |version: &str| -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| part.parse().expect("a bundle version is numeric"))
+            .collect()
+    };
+    parts(stated) <= parts(current)
+}
+
+/// The guard amendment, as the contract's `guards` block states it, driven through the
+/// public types: a guarded node reads, round-trips and is the node it states, its fields are
+/// the reserved keys the block names, a node without them writes neither, the kinds a guard
+/// applies to are node kinds, its journal kinds are in the closed set and the bundle is the
+/// one this build publishes. What the engine does with a guard — the exits, outcomes,
+/// endings, log, environment, deadline and rendering the block names — is held to the same
+/// block by `tests/e2e/guard.rs`, which reads it as its source.
+#[test]
+fn the_guards_block_is_what_this_build_reads() {
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"guarded_node\""))
+        .expect("the block is JSON");
+    let block = &block["guards"];
+
+    let node: Node =
+        serde_json::from_value(block["guarded_node"].clone()).expect("a guarded node reads");
+    assert_eq!(node.kind, NodeKind::Agent);
+    assert_eq!(
+        node.guard.as_deref(),
+        Some(
+            [
+                "./scripts/has-spikes.sh".to_owned(),
+                "--plan".to_owned(),
+                "release-notes".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+    assert_eq!(node.guard_timeout_seconds, NonZeroU64::new(60));
+    let written = serde_json::to_value(&node).expect("a node writes");
+    assert_eq!(
+        written, block["guarded_node"],
+        "a guarded node does not round-trip"
+    );
+    for key in block["metadata_keys"].as_array().expect("the keys") {
+        let field = key
+            .as_str()
+            .and_then(|key| key.strip_prefix("onepipeline."))
+            .expect("a reserved key");
+        assert!(
+            written.get(field).is_some(),
+            "`{field}` is not a node field"
+        );
+    }
+    // Absent, both are omitted: a node without a guard writes exactly what it wrote before.
+    let unguarded = Node {
+        guard: None,
+        guard_timeout_seconds: None,
+        ..node.clone()
+    };
+    let unguarded = serde_json::to_value(&unguarded).expect("a node writes");
+    for key in ["guard", "guard_timeout_seconds"] {
+        assert!(unguarded.get(key).is_none(), "{key} written while absent");
+    }
+    // Zero, negative and fractional deadlines are no deadline the type can hold.
+    for refused in [json!(0), json!(-5), json!(1.5)] {
+        let mut stated = block["guarded_node"].clone();
+        stated["guard_timeout_seconds"] = refused.clone();
+        assert!(
+            serde_json::from_value::<Node>(stated).is_err(),
+            "a guard_timeout_seconds of {refused} read"
+        );
+    }
+
+    for kind in block["kinds"].as_array().expect("the kinds") {
+        serde_json::from_value::<NodeKind>(kind.clone())
+            .unwrap_or_else(|error| panic!("{kind} is not a node kind: {error}"));
+    }
+    for kind in block["journal_kinds"].as_array().expect("the kinds") {
+        let kind = kind.as_str().expect("a kind");
+        assert!(
+            PipelineKind::from_wire(&EventKind(kind.to_owned()))
+                .is_some_and(|known| PIPELINE_KINDS.contains(&known)),
             "{kind} is not a kind this build emits"
         );
     }

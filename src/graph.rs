@@ -1019,11 +1019,7 @@ fn check_command(node: &Node) -> std::result::Result<(), Refusal> {
     }
     // The id names the command's log, `<run>/commands/<id>.log`, so it is one file name on
     // every host: nothing a path could read as a separator, a drive or a parent.
-    let portable = node
-        .id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if !portable || node.id == "." || node.id == ".." {
+    if !names_a_log_file(&node.id) {
         return Err(named(
             "a command id names its log file, so it is ASCII letters, digits, '.', '_' and \
              '-' alone, and never '.' or '..'",
@@ -1064,6 +1060,58 @@ fn check_command(node: &Node) -> std::result::Result<(), Refusal> {
     Ok(())
 }
 
+/// Whether `id` is one file name on every host — nothing a path could read as a separator,
+/// a drive or a parent — as the id of a node whose output the run keeps in a log named after
+/// it must be.
+fn names_a_log_file(id: &str) -> bool {
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && id != "."
+        && id != ".."
+}
+
+/// A node's [`guard`](Node::guard) and its deadline: a program to run, never beside a
+/// declaration that settles the node without running anything, and a deadline only where
+/// there is a guard to bound.
+///
+/// Its kind is no rule of the guard's: an agent node, direct or lifecycle, a command node
+/// and a human node each run one before what they would otherwise start. A step has no
+/// `guard` field at all, so a guard written on one is refused where the step is read.
+fn check_guard(node: &Node) -> std::result::Result<(), Refusal> {
+    let named = |what: &str| Refusal::node(&node.id, what);
+    let Some(guard) = &node.guard else {
+        if node.guard_timeout_seconds.is_some() {
+            return Err(named(
+                "`guard_timeout_seconds` bounds a guard, and this node has no `guard`",
+            )
+            .field("guard_timeout_seconds"));
+        }
+        return Ok(());
+    };
+    if guard.is_empty() {
+        return Err(named("`guard` is empty: it needs a program to run").field("guard"));
+    }
+    if guard[0].trim().is_empty() {
+        return Err(named("`guard` names no program").field("guard"));
+    }
+    if node.expects_no_diff {
+        return Err(named(
+            "`guard` decides whether a node runs, and an `expects_no_diff` node runs nothing: \
+             it settles `done` without a dispatch",
+        )
+        .field("guard"));
+    }
+    // The id names the guard's log, `<run>/guards/<id>.log`, as a command's names its own.
+    if !names_a_log_file(&node.id) {
+        return Err(named(
+            "a guarded node's id names its guard's log file, so it is ASCII letters, digits, \
+             '.', '_' and '-' alone, and never '.' or '..'",
+        )
+        .field("id"));
+    }
+    Ok(())
+}
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     check_node(node).map_err(Error::from)
@@ -1082,6 +1130,7 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     {
         return Err(named("`sets` needs an agent dispatch; this node has none").field("sets"));
     }
+    check_guard(node)?;
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
     }

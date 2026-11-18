@@ -153,6 +153,13 @@ mod filter;
 // reserve on the wall clock, which is the behaviour under test and about ten seconds.
 mod flow;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a guard is loaded by
+// `taskgraph` and `graph`, run by `engine`, `guard` and `commandstep`, folded by `projection`,
+// written back by `writeback`, read by `views` and `crossdag` and recovered by `driver`'s
+// adoption — so the crate is the narrowest edge these journeys can honestly sit behind, and
+// any change under `src/` can move what they prove. Same grounds as `mod command_step` above.
+mod guard;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod holds;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the human-item journeys
 // drive the reconcile loop, the driver, the channel and the human-item store together — code

@@ -1132,12 +1132,18 @@ pub fn reply(
 
     // A reply this schema refuses is read a second time, leniently, to see
     // whether a retired plan field is why — an `add` carrying one is the same
-    // planner mistake as a task carrying one, and deserves the same answer.
+    // planner mistake as a task carrying one, and deserves the same answer — and
+    // otherwise which node it carries does not read, named as the loader names it.
     let envelope: Reply = serde_json::from_str(text).map_err(|e| {
-        let why = serde_json::from_str::<serde_json::Value>(text)
-            .ok()
+        let lenient = serde_json::from_str::<serde_json::Value>(text).ok();
+        let why = lenient
             .as_ref()
             .and_then(crate::plan::retired_field_refusal)
+            .or_else(|| {
+                lenient
+                    .as_ref()
+                    .and_then(crate::plan::unreadable_node_refusal)
+            })
             .unwrap_or_else(|| e.to_string());
         Error::Refused(format!("the reply is malformed: {why}"))
     })?;

@@ -13681,3 +13681,79 @@ paragraph, the closed list aside.
   "bundle_versions": {"events": "2.3.0"}
 }
 ```
+
+## 160. Guards — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the user's approval of plan `node-guard-not-needed-2026-11-17`'s design document
+(board issue `nickderobertis/ai-orchestrator#2594`).** The amendment under *Guards* restates
+that design; these are the decisions it left to the build:
+
+- **A guarded node's id names its guard's log**, `<run>/guards/<id>.log`, so it is refused,
+  on field `id`, unless it is ASCII letters, digits, `.`, `_` and `-` alone and neither `.`
+  nor `..` — the rule a command node's id is already held to for `<run>/commands/<id>.log`.
+- **A guard written on a step is refused by the step's own schema**, which carries no `guard`
+  field: the refusal is serde's *unknown field `guard`*, named under the node the step
+  belongs to. `Step` gains no public field that only exists to be refused.
+- **A cancellation stops a running guard and settles its node `cancelled`, never
+  `guard-failed`.** Its `guard-evaluated` carries `verdict: failed` and `ending: cancelled` —
+  the guard did not answer *needed*, and the amendment's three verdicts have no fourth. A
+  cancellation that lands as the guard exits 0 is journalled `verdict: needed`, `ending:
+  exited`, and the node still settles `cancelled`: nothing is started for a node a manager
+  stopped.
+- **A verdict journalled and never settled is settled from the record, with the detail it
+  would have carried.** The amendment says `adopt` never runs again a guard whose
+  `guard-evaluated` is journalled; where the driver stopped between that record and the
+  settlement it leads to, the adopting driver settles the node from the verdict — `not-needed`
+  or `guard-failed` — rather than asking the guard again, and with exactly the detail the
+  amendment gives that settlement: the stderr tail of a node not needed and none where it
+  said nothing, the cause and stderr tail of a failure. The journal carries no detail, so
+  before a verdict that settles its node is journalled, the guard's thread durably writes a
+  private `<run>/guards/<node>.answer.json` naming the attempt — by the stream and `seq` of
+  that attempt's own `guard-started` record — beside the verdict record and that detail. The
+  adopter reads it only where it names the node's latest `guard-started` and carries the
+  journalled verdict, so another attempt's answer is never taken. No journal kind, payload or
+  published document changes.
+- **A verdict whose answer cannot be kept is not journalled.** Where that file cannot be
+  written, the guard's thread hands the loop the error instead of the verdict: the driver
+  journals neither `guard-evaluated` nor a settlement, stops with the error on its log —
+  naming the node and the `adopt` that recovers it — and leaves the node started and
+  unevaluated, so `adopt` runs its guard again once the run's directory takes the answer, as
+  it does for any guard whose driver stopped before its verdict. Only an answer removed or
+  rewritten under a stopped run is lost; the adopter then says so on stderr and settles with
+  the failure's cause alone, or no detail for a node not needed.
+- **A guard is not told `ONEPIPELINE_STEP_OUTPUTS`.** The amendment gives a guard the
+  environment a command node gets and names its variables; a command step is also told where
+  it may publish outputs, but a guard's only answer is its exit status and nothing reads a
+  file it writes, so it is given the variables the amendment names and not that one.
+- **`guard-started`'s `timeout_seconds` is always written**, as the deadline the guard is
+  actually held to — the node's `guard_timeout_seconds`, or 300 where it states none.
+- **A guarded human node derives `ready`, not `waiting`, until its guard says *needed*.** Its
+  guard is what it is ready for, and `waiting` is what every reader of a run takes as *a
+  person is being asked*: the decision point `decision-pending` records, the item a human-item
+  store raises, `status`'s `PAUSED` and the frontier `attest` validates against. So none of
+  those happen for a guarded human node before its verdict, and none happen at all for one its
+  guard finds not needed. An unguarded human node derives `waiting` exactly as before.
+- **The verdict that lets a node proceed is kept in the fold's checkpoint** as
+  `guards_passed`, omitted while empty, so a checkpoint of an unguarded run is byte for byte
+  what it was. A host refusing a node's workspace re-queues it within the same attempt (its
+  journalled `node-requeued`), which does not run its guard again; only a `requeue` edit does.
+- **A `retry` replacement is guarded by what it states.** Like its `command`, `task` and
+  `persona`, a replacement's `guard` is the replacement's own document's, and is not inherited
+  from the node it supersedes: a replacement stating a guard evaluates it as a new attempt.
+- **`results` puts a `not-needed` node's detail on the node's own line**, after `: `, rather
+  than on the `detail:` line under it that every other settlement's detail takes, so the line
+  reads `done (not-needed): <detail>` as the amendment states. **`status`**, which lists no
+  `done` node of its own accord, gives each `not-needed` node a line in the shape of its other
+  node lines, `  <node>: done (not-needed): <detail>`; a run with no guard prints exactly what
+  it printed before.
+
+Two journal kinds are added, so the events bundle moves to a new minor: a stream an earlier
+build wrote still validates, and one this build writes carries kinds a validator pinned at
+the previous bundle has no document for.
+
+```json
+{
+  "bundle_versions": {"events": "2.4.0"}
+}
+```
