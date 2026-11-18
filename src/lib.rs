@@ -130,6 +130,7 @@ mod reply;
 mod review;
 mod ruling;
 mod shutdown;
+mod spans;
 mod stack;
 mod stopguard;
 mod storeops;
@@ -167,9 +168,11 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     // The registry every record this process writes or folds is declared in,
     // built before any of them: a payload document of this build's own that did
     // not register is a build fault, and it is met here rather than mid-fold.
+    let startup = spans::begin();
     hostphases::mark("run");
     {
         let _registry = hostphases::phase("event-registry");
+        let _span = spans::span("registry:events");
         event::registry();
     }
     // Reaching here *is* the proof that this process's executable answers this
@@ -185,7 +188,14 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     // inherits none of it — a node dispatch above all — and the one child that
     // must carry it, a flow's program, is handed it explicitly.
     flow::take_inherited();
-    driver::dispatch(cli)
+    drop(startup);
+    let answered = spans::within("dispatch", || driver::dispatch(cli));
+    spans::finish(
+        answered
+            .as_ref()
+            .map_or_else(Error::exit_code, |code| *code),
+    );
+    answered
 }
 
 mod scratch;

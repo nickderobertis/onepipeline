@@ -138,6 +138,7 @@ fn run(
     launching: &Launching<'_>,
     command: &str,
 ) -> std::result::Result<Vec<(String, String)>, String> {
+    let _span = crate::spans::child(std::ffi::OsStr::new(command));
     let paths = launching.paths;
     let record = launching.record;
     let log = hooks::hook_log(paths, HOOK);

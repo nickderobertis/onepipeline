@@ -8,6 +8,7 @@
 //! are this crate's rather than the consumer's, is entry 88 of
 //! `docs/contract-divergences.md`.
 
+use crate::spans::Timed as _;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -191,7 +192,10 @@ fn subjects_of(command: &onevcs::cli::Command) -> onevcs::Result<Vec<LandingSubj
         // answers that variant or refuses.
         _ => return Ok(Vec::new()),
     };
-    let identity = onevcs::resolve_repository(&providers, &repo.to_string_lossy())?.identity;
+    let identity = crate::spans::within("onevcs:resolve_repository", || {
+        onevcs::resolve_repository(&providers, &repo.to_string_lossy())
+    })?
+    .identity;
     Ok(branches
         .into_iter()
         .map(|branch| LandingSubject {
@@ -226,7 +230,11 @@ fn forward(
                         onevcs::DirectOperation::Integrate {
                             repository: identity,
                         },
-                        |handle| onevcs::integrate_in_operation(&request, handle),
+                        |handle| {
+                            crate::spans::within("onevcs:integrate_in_operation", || {
+                                onevcs::integrate_in_operation(&request, handle)
+                            })
+                        },
                     )?);
                     supervision.close_issues();
                     status
@@ -235,8 +243,14 @@ fn forward(
                     let selector = identity_of(&cli.command)
                         .map(|repository| onevcs::DirectOperation::Integrate { repository });
                     let (integrated, landings) = unsupervised(selector, |handle| match handle {
-                        Some(handle) => onevcs::integrate_in_operation(&request, handle),
-                        None => onevcs::integrate(&request),
+                        Some(handle) => {
+                            crate::spans::within("onevcs:integrate_in_operation", || {
+                                onevcs::integrate_in_operation(&request, handle)
+                            })
+                        }
+                        None => {
+                            crate::spans::within("onevcs:integrate", || onevcs::integrate(&request))
+                        }
                     });
                     let status = report_integration(integrated);
                     close_issues(&landings, |_| {});
@@ -293,7 +307,9 @@ fn forward(
             format!("forwarding `onevcs {}`", verb.onevcs()),
         )?;
     }
-    Ok(i32::from(onevcs::run(cli)))
+    Ok(i32::from(crate::spans::within("onevcs:run", || {
+        onevcs::run(cli)
+    })))
 }
 
 /// The identity a landing's subjects resolve to, where they resolve: what an unsupervised
@@ -749,8 +765,12 @@ impl Landing {
     fn land(&self) -> onevcs::Result<onevcs::PublishOutcome> {
         let providers = onevcs::Providers::real();
         match self {
-            Self::PublishBranch(request) => onevcs::publish_branch(&providers, request),
-            Self::Recover(request) => onevcs::recover(&providers, request),
+            Self::PublishBranch(request) => crate::spans::within("onevcs:publish_branch", || {
+                onevcs::publish_branch(&providers, request)
+            }),
+            Self::Recover(request) => {
+                crate::spans::within("onevcs:recover", || onevcs::recover(&providers, request))
+            }
         }
     }
 
@@ -762,9 +782,13 @@ impl Landing {
         let providers = onevcs::Providers::real();
         match self {
             Self::PublishBranch(request) => {
-                onevcs::publish_branch_in_operation(&providers, request, operation)
+                crate::spans::within("onevcs:publish_branch_in_operation", || {
+                    onevcs::publish_branch_in_operation(&providers, request, operation)
+                })
             }
-            Self::Recover(request) => onevcs::recover_in_operation(&providers, request, operation),
+            Self::Recover(request) => crate::spans::within("onevcs:recover_in_operation", || {
+                onevcs::recover_in_operation(&providers, request, operation)
+            }),
         }
     }
 
@@ -1551,7 +1575,7 @@ fn git_in<'a>(
         .args(&args)
         .current_dir(dir)
         .stdin(Stdio::null())
-        .output()
+        .timed_output()
         .map_err(|error| format!("{} could not be run: {error}", named()))?;
     if !output.status.success() {
         return Err(format!(

@@ -853,6 +853,7 @@ fn run(
     log: &Path,
     relay: Relay,
 ) -> Ran {
+    let _span = crate::spans::child(std::ffi::OsStr::new(command));
     let hook = firing.hook();
     let opened = log
         .parent()

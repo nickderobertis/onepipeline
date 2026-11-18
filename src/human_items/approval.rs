@@ -63,6 +63,7 @@ fn adapter_of<'a>(config: &'a EffectiveConfig, item: &HumanItem) -> Option<&'a A
 }
 
 fn invoke(argv: (&String, &[String]), request: &[u8]) -> std::io::Result<std::process::Output> {
+    let _span = crate::spans::child(std::ffi::OsStr::new(argv.0));
     let mut child = Command::new(argv.0)
         .args(argv.1)
         .stdin(Stdio::piped())

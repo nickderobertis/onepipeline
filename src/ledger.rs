@@ -1477,6 +1477,7 @@ fn read_published(path: &Path) -> io::Result<String> {
 
 /// Read a JSON document, refusing anything the type does not accept.
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let _span = crate::spans::reading(path);
     let text = read_published(path).map_err(|e| Error::Ledger {
         path: path.to_path_buf(),
         source: e,
@@ -1490,6 +1491,7 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 /// Used only where the contract says an unreadable input withholds a verdict
 /// rather than ending the read: a view must still render the rest of a run.
 pub fn read_json_opt<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let _span = crate::spans::reading(path);
     read_published(path)
         .ok()
         .map(|text| counted(text.len(), text))
@@ -2112,6 +2114,7 @@ fn report_torn_tail(path: &Path, torn: &TornTail) {
 /// is what lets a view render a live run rather than refuse it over one input.
 // llmlint: ignore[changed_behavior_has_e2e] the per-line decoding is three lines of one function, and `tests/e2e/journal.rs` drives them through the compiled binary against the store where a tear actually happens. Its other callers — the channel queue, the replies, the commands — differ only in the path they hand it, so a journey each would be the same three lines tested four times; the unit test below holds the decoding itself.
 pub fn read_records(path: &Path) -> Vec<Record> {
+    let _span = crate::spans::reading(path);
     // llmlint: ignore-block[no_panics_on_recoverable_errors] the leniency is the documented rule above and predates this reader; changing it changes every ledger reader in the crate — the channel queue, the replies, the commands — rather than this one.
     let Ok(bytes) = fs::read(path) else {
         return Vec::new();
@@ -2197,6 +2200,7 @@ impl EnvelopeLine {
 /// or is shorter than `from` reads as holding nothing past it, which is the rule
 /// every ledger reader here follows.
 pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
+    let _span = crate::spans::reading(path);
     // llmlint: ignore-block[no_panics_on_recoverable_errors] the same leniency every
     // ledger reader here follows, stated on `read_records` above: a file this process
     // cannot open reads as one that is not there.
@@ -2252,6 +2256,7 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
 /// the append receipt establishes continuity and the cursor supplies the boundary.
 /// Envelope validation still belongs to the vocabulary's serde implementation.
 pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> Vec<EnvelopeLine> {
+    let _span = crate::spans::reading(path);
     let Some(bytes) = read_range(path, from, len) else {
         return Vec::new();
     };
@@ -2286,6 +2291,7 @@ pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> 
 ///
 /// Counted like every other read here — see the note at the head of this file.
 pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
+    let _span = crate::spans::reading(path);
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path).ok()?;
     file.seek(SeekFrom::Start(from)).ok()?;

@@ -542,7 +542,10 @@
         "clippy.toml",
         "rustfmt.toml",
         "tests/e2e/profiling.rs",
-        "tests/golden/test-profile-record-v2.json",
+        "tests/golden/test-profile-record-v3.json",
+        "scripts/test-profile-report.mjs",
+        "tests/e2e/span_profile.rs",
+        "tests/golden/span-profile-record-v1.json",
         "tests/e2e/gh_session_bus.rs"
       ],
       "crates": [
@@ -551,6 +554,7 @@
       "modules": [
         "harness",
         "profiling",
+        "span_profile",
         "gh_session_bus"
       ]
     }

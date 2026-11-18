@@ -897,7 +897,9 @@ impl Transport for RunChanges {
         since: &Fingerprint,
         timeout: Duration,
     ) -> std::result::Result<Changed, TransportError> {
-        onemessagebus::transport::poll_for_change(self, queue, since, timeout)
+        crate::spans::within("onemessagebus:transport::poll_for_change", || {
+            onemessagebus::transport::poll_for_change(self, queue, since, timeout)
+        })
     }
 
     fn document(

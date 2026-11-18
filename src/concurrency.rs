@@ -69,11 +69,13 @@ pub fn holders(plan: &Plan) -> Result<Holdings> {
     let mut by_identity_and_token = BTreeMap::new();
     let mut identities = BTreeMap::new();
     for repo in repos {
-        let found = onevcs::session_holders(repo).map_err(|error| {
-            sibling(format!(
-                "cannot read the session holders of {repo}: {error}"
-            ))
-        })?;
+        let found =
+            crate::spans::within("onevcs:session_holders", || onevcs::session_holders(repo))
+                .map_err(|error| {
+                    sibling(format!(
+                        "cannot read the session holders of {repo}: {error}"
+                    ))
+                })?;
         let on: &mut BTreeSet<String> = identities.entry(repo.to_string()).or_default();
         for holder in found {
             on.insert(holder.identity.clone());

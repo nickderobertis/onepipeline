@@ -10,7 +10,7 @@ use onepipeline_testfakes::profile::process::Command;
 use onepipeline_testfakes::profile::{self, Category};
 use serde_json::Value;
 
-use crate::harness::{double, git, repo_file, World};
+use crate::harness::{agent, double, git, plan_of, repo_file, World};
 
 /// The test whose record [`a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not`]
 /// reads for the four categories it spends time in.
@@ -26,7 +26,12 @@ const FAILING: &str = "profiling::a_profiled_journey_that_fails";
 /// The record's shape, which `scripts/test-profile-report.mjs` reads: a record
 /// written here is held to it, and that script's tests are held to it too, so a
 /// field renamed on one side fails on that side.
-const GOLDEN: &str = "tests/golden/test-profile-record-v2.json";
+const GOLDEN: &str = "tests/golden/test-profile-record-v3.json";
+
+/// The figures `onepipeline_testfakes::profile` writes as `null` where a platform has
+/// none: each program's CPU, the host's CPU count and its load. Every other field's type
+/// is held exactly.
+const NULLABLE: [&str; 4] = ["cpu_s", "nproc", "load_1m_start", "load_1m_end"];
 
 /// What a record says, without the values: each object's keys and each leaf's
 /// JSON type, with `programs` — one entry per program a test happened to run —
@@ -42,6 +47,9 @@ fn shape(value: &Value) -> Value {
                             Value::Null,
                             |entry| serde_json::json!({ "*": shape(entry) }),
                         ),
+                        (key, Value::Number(_) | Value::Null) if NULLABLE.contains(&key) => {
+                            Value::from("number or null")
+                        }
                         _ => shape(field),
                     };
                     (key.clone(), reduced)
@@ -53,6 +61,66 @@ fn shape(value: &Value) -> Value {
         Value::Bool(_) => Value::from("bool"),
         Value::Null => Value::from("null"),
         Value::Array(_) => Value::from("array"),
+    }
+}
+
+fn golden() -> Value {
+    serde_json::from_str(
+        &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
+    )
+    .expect("the golden record is JSON")
+}
+
+fn has_the_goldens_shape(record: &Value) {
+    assert_eq!(
+        shape(record),
+        shape(&golden()),
+        "a record no longer has {GOLDEN}'s shape: bump `profile::SCHEMA` and the golden \
+         together, and the reader with them: {record:#}"
+    );
+}
+
+/// A record from a platform with no `getrusage` or load average — every Windows
+/// record — carries `null` for each program's CPU and for the load, and a host that
+/// cannot say how many CPUs it has carries `null` for `nproc`: that is the golden's
+/// shape too. A `null` anywhere else, a figure of another type, or a missing key is not.
+#[test]
+fn a_record_with_a_platforms_missing_figures_has_the_goldens_shape_and_nothing_looser_does() {
+    let world = World::new("profile-null-figures");
+    let records = world.root.join("profiles");
+    passed(BUSY, &run_alone(&["--exact", BUSY], &records));
+    let mut record = read_record(&records.join("e2e").join(file_of(BUSY)));
+    for field in ["nproc", "load_1m_start", "load_1m_end"] {
+        record[field] = Value::Null;
+    }
+    for program in record["programs"]
+        .as_object_mut()
+        .expect("programs is an object")
+        .values_mut()
+    {
+        program["cpu_s"] = Value::Null;
+    }
+    has_the_goldens_shape(&record);
+
+    let golden = shape(&golden());
+    let mut typed = record.clone();
+    typed["load_1m_end"] = Value::from("high");
+    let mut nulled = record.clone();
+    nulled["wall_s"] = Value::Null;
+    let mut program_nulled = record.clone();
+    program_nulled["programs"]["cargo"]["s"] = Value::Null;
+    let mut missing = record.clone();
+    missing
+        .as_object_mut()
+        .expect("a record is an object")
+        .remove("nproc");
+    for (what, wrong) in [
+        ("a nullable figure of another type", typed),
+        ("a null wall clock", nulled),
+        ("a null program wall clock", program_nulled),
+        ("a missing nullable key", missing),
+    ] {
+        assert_ne!(shape(&wrong), golden, "{what} read as the golden's shape");
     }
 }
 
@@ -212,16 +280,8 @@ fn a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not()
     let record = |test: &str| read_record(&records.join("e2e").join(file_of(test)));
 
     let busy = record(BUSY);
-    let golden: Value = serde_json::from_str(
-        &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
-    )
-    .expect("the golden record is JSON");
-    assert_eq!(
-        shape(&busy),
-        shape(&golden),
-        "a record no longer has {GOLDEN}'s shape: bump `profile::SCHEMA` and the golden \
-         together, and the reader with them"
-    );
+    let golden = golden();
+    has_the_goldens_shape(&busy);
     assert_eq!(busy["test"], BUSY, "{busy:#}");
     assert_eq!(busy["schema"], profile::SCHEMA, "{busy:#}");
     assert_eq!(
@@ -321,10 +381,14 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
     let programs: serde_json::Map<String, Value> = totals
         .programs
         .iter()
-        .map(|(program, (count, time))| {
+        .map(|(program, (count, time, cpu))| {
             (
                 program.clone(),
-                serde_json::json!({ "count": count, "s": time.as_secs_f64() }),
+                serde_json::json!({
+                    "count": count,
+                    "s": time.as_secs_f64(),
+                    "cpu_s": cpu.map(|cpu| cpu.as_secs_f64()),
+                }),
             )
         })
         .collect();
@@ -872,4 +936,258 @@ fn a_journey_ended_before_it_finishes_leaves_an_unfinished_record() {
     assert_eq!(record["ended"], "unfinished", "{record:#}");
     assert_eq!(record["categories"]["fixture"]["count"], 1, "{record:#}");
     assert!(record["wall_s"].as_f64() > Some(0.0), "{record:#}");
+}
+
+/// The check [`a_profiled_journey_that_runs_onepipeline_verbs`] starts spends the CPU
+/// its script asks for and says what it spent, and refuses, by name and with its
+/// double's failure code, a burn that is no count and a CPU file it cannot write.
+#[test]
+fn the_working_check_reports_its_cpu_and_refuses_what_it_cannot_do() {
+    let world = World::new("reviewer-bar-burn");
+    world.script("reviewer-bar.fingerprint", "bar");
+    let bar = || {
+        let mut command = Command::new(double("reviewer-bar"));
+        command.env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes);
+        command.output().expect("the double runs")
+    };
+    let cpu = world.fakes.join("reviewer-bar.cpu");
+
+    world.script("reviewer-bar.burn", "20");
+    let ran = bar();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(ran.stdout, b"bar\n");
+    let spent: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cpu).expect("the CPU it spent"))
+            .expect("JSON");
+    if cfg!(unix) {
+        let ms = spent
+            .as_f64()
+            .expect("a count of milliseconds on a platform with getrusage");
+        assert!(ms >= 20.0, "it spent the CPU it was asked to: {ms}");
+    } else {
+        assert!(spent.is_null(), "{spent}");
+    }
+    std::fs::remove_file(&cpu).expect("the CPU file goes");
+
+    world.script("reviewer-bar.burn", "soon");
+    let ran = bar();
+    assert_eq!(ran.status.code(), Some(78), "{ran:?}");
+    assert!(
+        String::from_utf8_lossy(&ran.stderr)
+            .contains("reviewer-bar.burn is not a count of milliseconds"),
+        "{ran:?}"
+    );
+    assert!(ran.stdout.is_empty(), "{ran:?}");
+    assert!(!cpu.exists(), "a refused burn writes no CPU");
+
+    world.script("reviewer-bar.burn", "1");
+    std::fs::create_dir(&cpu).expect("a directory where the CPU file goes");
+    let ran = bar();
+    assert_eq!(ran.status.code(), Some(78), "{ran:?}");
+    assert!(
+        String::from_utf8_lossy(&ran.stderr).contains("reviewer-bar.cpu is not written"),
+        "{ran:?}"
+    );
+    assert!(ran.stdout.is_empty(), "{ran:?}");
+}
+
+/// A test that runs `onepipeline` verbs crossing the binary's outer boundaries: a
+/// plan check reading the store and starting a registered check that does real
+/// work, twice, and a listing of runs.
+const SPANNED: &str = "profiling::a_profiled_journey_that_runs_onepipeline_verbs";
+
+/// Set in the one child process that runs [`SPANNED`]: a directory it has two more
+/// `onepipeline` runs write their own span records into, by setting the binary's
+/// variable itself — and one more run where it removes the variable.
+const OWN_SPANS: &str = "ONEPIPELINE_PROFILE_FIXTURE_OWN_SPANS";
+
+#[test]
+fn a_profiled_journey_that_runs_onepipeline_verbs() {
+    let world = World::new("profile-spanned");
+    let project = world.plan(
+        "profile-spanned",
+        &plan_of("profile-spanned", vec![agent("build", &[])]),
+    );
+    world.script("reviewer-bar.fingerprint", r#"{"refusals": []}"#);
+    world.script("reviewer-bar.burn", "50");
+    let check = double("reviewer-bar");
+    let check = check.to_str().expect("a UTF-8 path");
+    for _ in 0..2 {
+        world
+            .run(&["plan", "check", &project, "--check", check, "--json"])
+            .exited(0);
+    }
+    world.run(&["runs"]).exited(0);
+    let Some(own) = std::env::var_os(OWN_SPANS) else {
+        return;
+    };
+    for _ in 0..2 {
+        let mut command = world.cmd(&["runs"]);
+        command.env("ONEPIPELINE_PROFILE_SPANS", &own);
+        world.run_on(command, "runs").exited(0);
+    }
+    let mut command = world.cmd(&["runs"]);
+    command.env_remove("ONEPIPELINE_PROFILE_SPANS");
+    world.run_on(command, "runs").exited(0);
+}
+
+fn number(value: &Value) -> f64 {
+    value
+        .as_f64()
+        .unwrap_or_else(|| panic!("{value} is not a number"))
+}
+
+/// Under [`profile::SPANS_ENV`], every `onepipeline` a test starts writes its span
+/// record into that test's own directory beside its record — one per process — and
+/// the record is schema 3, carrying each program's CPU and the host's load. The
+/// report folds those span records into the test's module, per verb: each verb's
+/// runs, wall and CPU are the sums of its records', and the store-read and
+/// child-process spans keep their names and their summed walls.
+#[test]
+fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_folds_them() {
+    let world = World::new("profile-spans");
+    let records = world.root.join("profiles");
+    let spans_dir = records
+        .join("e2e")
+        .join(file_of(SPANNED).replace(".json", ".spans"));
+    // What an earlier attempt of the test left, which its first spawn clears.
+    profile::fs::create_dir_all(&spans_dir).expect("an earlier attempt's span directory");
+    let earlier = spans_dir.join("onepipeline-1-1.json");
+    profile::fs::write(&earlier, "an earlier attempt's").expect("an earlier attempt's record");
+    let own = world.root.join("own-spans");
+    let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
+        .args(["--exact", SPANNED, "--nocapture"])
+        .env(profile::DIR_ENV, &records)
+        .env(profile::SPANS_ENV, "1")
+        .env(OWN_SPANS, &own)
+        .env_remove("ONEPIPELINE_PROFILE_SPANS")
+        .env_remove("NEXTEST_TEST_NAME")
+        .output()
+        .expect("the suite runs");
+    passed(SPANNED, &ran);
+
+    let record = read_record(&records.join("e2e").join(file_of(SPANNED)));
+    assert_eq!(record["schema"], 3, "{record:#}");
+    let started = &record["programs"]["onepipeline"];
+    assert_eq!(started["count"], 6, "{record:#}");
+    if cfg!(unix) {
+        assert!(number(&started["cpu_s"]) > 0.0, "{record:#}");
+        assert!(number(&record["load_1m_start"]) >= 0.0, "{record:#}");
+        assert!(number(&record["load_1m_end"]) >= 0.0, "{record:#}");
+    } else {
+        assert!(started["cpu_s"].is_null(), "{record:#}");
+    }
+    assert!(number(&record["nproc"]) >= 1.0, "{record:#}");
+
+    assert!(!earlier.exists(), "the earlier attempt's record was kept");
+    let kept = profile::fs::read_dir(&own)
+        .expect("the directory the test named itself")
+        .count();
+    assert_eq!(
+        kept, 2,
+        "a run the test pointed elsewhere was not left there"
+    );
+    let spans: Vec<Value> = profile::fs::read_dir(&spans_dir)
+        .expect("the test's span directory")
+        .map(|entry| read_record(&entry.expect("a span record").path()))
+        .collect();
+    assert_eq!(
+        spans.len(),
+        3,
+        "one span record per onepipeline the test started and left the switch to, and none \
+         where it set the variable itself or removed it: {spans:#?}"
+    );
+
+    let out = world.root.join("report.json");
+    let reported = Command::new("node")
+        .arg(repo_file("scripts/test-profile-report.mjs"))
+        .args(["--json", "--top-spans", "1000", "--out"])
+        .arg(&out)
+        .arg(format!("linux={}", records.display()))
+        .output()
+        .expect("node runs the report");
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let report = read_record(&out);
+    let folded = &report["platforms"][0]["spans"];
+    assert_eq!(folded["records"], 3, "{folded:#}");
+    let module = folded["modules"]
+        .as_array()
+        .expect("modules")
+        .iter()
+        .find(|module| module["name"] == "e2e::profiling")
+        .unwrap_or_else(|| panic!("the test's module is not in the fold: {folded:#}"));
+    let close = |a: f64, b: f64, what: &str| {
+        assert!(
+            (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+            "{what}: the fold says {a} and the records {b}: {module:#}"
+        );
+    };
+    for verb in ["plan check", "runs"] {
+        let theirs: Vec<&Value> = spans.iter().filter(|span| span["verb"] == verb).collect();
+        let folded = module["verbs"]
+            .as_array()
+            .expect("verbs")
+            .iter()
+            .find(|folded| folded["verb"] == verb)
+            .unwrap_or_else(|| panic!("`{verb}` is not in the fold: {module:#}"));
+        assert_eq!(folded["invocations"], theirs.len(), "{module:#}");
+        let sum =
+            |field: &dyn Fn(&Value) -> f64| theirs.iter().map(|span| field(span)).sum::<f64>();
+        close(
+            number(&folded["wall_ms"]),
+            sum(&|span| number(&span["wall_ms"])),
+            "wall",
+        );
+        if cfg!(unix) {
+            close(
+                number(&folded["cpu_ms"]),
+                sum(&|span| number(&span["user_cpu_ms"]) + number(&span["system_cpu_ms"])),
+                "cpu",
+            );
+        }
+        let named = |name: &str| -> Vec<&Value> {
+            theirs
+                .iter()
+                .flat_map(|span| span["spans"].as_array().expect("spans"))
+                .filter(|span| span["name"] == name)
+                .collect()
+        };
+        let boundaries: Vec<String> = theirs
+            .iter()
+            .flat_map(|span| span["spans"].as_array().expect("spans"))
+            .filter_map(|span| span["name"].as_str())
+            .filter(|name| name.starts_with("child:") || name.starts_with("onetaskgraph:"))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if verb == "plan check" {
+            assert!(
+                boundaries.iter().any(|name| name == "child:reviewer-bar")
+                    && boundaries
+                        .iter()
+                        .any(|name| name.starts_with("onetaskgraph:")),
+                "`plan check` crossed no library call and no child process: {boundaries:?}"
+            );
+        }
+        for name in boundaries {
+            let held = folded["spans"]
+                .as_array()
+                .expect("a verb's spans")
+                .iter()
+                .find(|span| span["name"] == name.as_str())
+                .unwrap_or_else(|| panic!("{name} lost its name in the fold: {folded:#}"));
+            for field in ["self_wall_ms", "wall_ms"] {
+                close(
+                    number(&held[field]),
+                    named(&name).iter().map(|span| number(&span[field])).sum(),
+                    &format!("{name}.{field}"),
+                );
+            }
+        }
+    }
 }

@@ -674,8 +674,10 @@ fn visit(keys: &[String], stop: &AtomicBool, mut each: impl FnMut(&String)) -> V
 }
 
 fn identities() -> std::result::Result<Vec<String>, String> {
-    onevcs::registered_identities()
-        .map_err(|error| format!("the host's registered identities could not be read: {error}"))
+    crate::spans::within("onevcs:registered_identities", || {
+        onevcs::registered_identities()
+    })
+    .map_err(|error| format!("the host's registered identities could not be read: {error}"))
 }
 
 /// Maintain every registered identity once, on the schedule, stopping at the
@@ -753,14 +755,16 @@ fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retiremen
         });
         retirements.take(
             identity,
-            onevcs::retire_finished(
-                &providers,
-                &onevcs::RetirePass {
-                    scope: Scope::Repo(identity.clone()),
-                    exclude: excluded_in(identity, &named),
-                    dry_run: false,
-                },
-            ),
+            crate::spans::within("onevcs:retire_finished", || {
+                onevcs::retire_finished(
+                    &providers,
+                    &onevcs::RetirePass {
+                        scope: Scope::Repo(identity.clone()),
+                        exclude: excluded_in(identity, &named),
+                        dry_run: false,
+                    },
+                )
+            }),
         );
     }
     retirements
@@ -804,16 +808,18 @@ fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
             }
         }
     };
-    let outcome = onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
-        .map_err(|failure| failure.to_string())
-        .and_then(|report| {
-            report
-                .identities
-                .into_iter()
-                .next()
-                .map(|maintained| maintained.outcome)
-                .ok_or_else(|| "the sibling answered for no identity".to_owned())
-        });
+    let outcome = crate::spans::within("onevcs:pool_maintain", || {
+        onevcs::pool_maintain(Scope::Repo(identity.clone()), Some(every))
+    })
+    .map_err(|failure| failure.to_string())
+    .and_then(|report| {
+        report
+            .identities
+            .into_iter()
+            .next()
+            .map(|maintained| maintained.outcome)
+            .ok_or_else(|| "the sibling answered for no identity".to_owned())
+    });
     Maintained {
         identity,
         every,

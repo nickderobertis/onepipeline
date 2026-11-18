@@ -8,6 +8,7 @@
 //! accepted is seen by the next read and never posted again, and one it never
 //! accepted leaves the comment owed. See `docs/contract-divergences.md` entry 130.
 
+use crate::spans::Timed as _;
 use crate::{
     error::{Error, Result},
     event::Envelope,
@@ -538,11 +539,13 @@ pub(crate) fn commits(
 /// The origin a registered checkout of `repo` fetches from.
 fn origin_url(repo: &str) -> Result<String> {
     let identity = crate::vcs::repository_identity(repo)?;
-    let listed = onevcs::repositories(&onevcs::Providers::real(), onevcs::GateAudit::Skipped)
-        .map_err(|error| Error::Sibling {
-            tool: "onevcs",
-            message: error.to_string(),
-        })?;
+    let listed = crate::spans::within("onevcs:repositories", || {
+        onevcs::repositories(&onevcs::Providers::real(), onevcs::GateAudit::Skipped)
+    })
+    .map_err(|error| Error::Sibling {
+        tool: "onevcs",
+        message: error.to_string(),
+    })?;
     let checkout = listed
         .iter()
         .filter(|repository| repository.identity == identity || repository.identity == repo)
@@ -563,7 +566,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
         .arg("-C")
         .arg(dir)
         .args(args)
-        .output()
+        .timed_output()
         .map_err(|error| Error::Invalid(format!("git could not run: {error}")))?;
     if !output.status.success() {
         return Err(Error::Invalid(format!(

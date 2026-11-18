@@ -613,6 +613,7 @@ fn shell(command: &str) -> Command {
 /// carries exactly what `unwatched` would write and nothing else.
 fn consult(command: &str, asked: &Asked, timeout: Duration) -> Result<Answer, String> {
     let mut spawning = shell(command);
+    let _span = crate::spans::child(spawning.get_program());
     // Its own group, so what it leaves behind when it exits can still be ended
     // at the deadline, after descent from it is lost.
     crate::sys::in_own_process_group(&mut spawning);

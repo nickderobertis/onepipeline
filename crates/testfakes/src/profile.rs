@@ -53,8 +53,19 @@ pub const DIR_ENV: &str = "ONEPIPELINE_TEST_PROFILE_DIR";
 /// that runs the tests, which `tests/ci_workflows.rs` holds it to.
 pub const RECORD_DIR: &str = "target/test-profile";
 
+/// The switch that has every `onepipeline` process a test starts write its span
+/// record — `ONEPIPELINE_PROFILE_SPANS`, the binary's own — into that test's own
+/// record directory, `<binary>/<test>.spans/` beside its record, so each span
+/// record is the test's whose spawn produced it. Unset or empty, which is every
+/// tier of the gate, no process is asked to.
+pub const SPANS_ENV: &str = "ONEPIPELINE_TEST_PROFILE_SPANS";
+
+/// The binary's own variable, which [`SPANS_ENV`] sets on each `onepipeline` a
+/// test starts — unless the test set or removed it itself.
+const BINARY_SPANS_ENV: &str = "ONEPIPELINE_PROFILE_SPANS";
+
 /// The version of the record's shape, written into every record as `schema`.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// What a moment of a test's wall clock was spent on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,9 +144,10 @@ pub struct Snapshot {
     pub tallies: [Tally; 6],
     /// How many polling waits the test thread ran.
     pub polls: u64,
-    /// Per program a process ran, how many the test thread started and how long
-    /// it was held by them.
-    pub programs: BTreeMap<String, (u64, Duration)>,
+    /// Per program a process ran, how many the test thread started, how long it
+    /// was held by them, and the CPU (user and system) of the children reaped
+    /// while it was — `None` where the platform has no `getrusage`.
+    pub programs: BTreeMap<String, (u64, Duration, Option<Duration>)>,
 }
 
 impl Snapshot {
@@ -148,6 +160,10 @@ impl Snapshot {
 struct Recorder {
     started: Instant,
     started_at: SystemTime,
+    /// The host's 1-minute load average when the clock started.
+    load_at_start: Option<f64>,
+    /// Whether this test's span directory has been emptied of an earlier attempt's.
+    spans_cleared: bool,
     /// The test binary, and the directory its records go under, from [`start`].
     binary: Option<(&'static str, PathBuf)>,
     written: bool,
@@ -163,6 +179,8 @@ fn with_recorder<T>(f: impl FnOnce(&mut Recorder) -> T) -> T {
     let recorder = held.get_or_insert_with(|| Recorder {
         started: Instant::now(),
         started_at: SystemTime::now(),
+        load_at_start: load_1m(),
+        spans_cleared: false,
         binary: None,
         written: false,
         snapshot: Snapshot::default(),
@@ -288,6 +306,8 @@ struct Frame {
     category: Category,
     counts: Counts,
     start: Instant,
+    /// The reaped children's CPU when a frame running a program opened.
+    children_cpu: Option<Duration>,
     nested: Duration,
     /// Whether no frame of the same category encloses this one.
     outermost: bool,
@@ -307,10 +327,12 @@ fn open(category: Category, counts: Counts, program: Option<String>) -> Span {
     FRAMES.with(|frames| {
         let mut frames = frames.borrow_mut();
         let outermost = frames.iter().all(|frame| frame.category != category);
+        let children_cpu = program.as_ref().and_then(|_| children_cpu());
         frames.push(Frame {
             category,
             counts,
             start: Instant::now(),
+            children_cpu,
             nested: Duration::ZERO,
             outermost,
             program,
@@ -357,9 +379,19 @@ impl Drop for Span {
                     snapshot.polls += 1;
                 }
                 if let Some(program) = frame.program {
+                    let cpu = children_cpu()
+                        .zip(frame.children_cpu)
+                        .map(|(now, then)| now.saturating_sub(then));
+                    let first = !snapshot.programs.contains_key(&program);
                     let entry = snapshot.programs.entry(program).or_default();
                     entry.0 += u64::from(counted);
                     entry.1 += elapsed;
+                    // `None` once any of the program's frames had no CPU to read.
+                    entry.2 = if first {
+                        cpu
+                    } else {
+                        entry.2.zip(cpu).map(|(held, more)| held + more)
+                    };
                 }
             } else {
                 if counted {
@@ -497,10 +529,14 @@ fn record(recorder: &Recorder, binary: &str, name: &str, ended: Ended) -> serde_
     let programs: serde_json::Map<_, _> = snapshot
         .programs
         .iter()
-        .map(|(program, (count, time))| {
+        .map(|(program, (count, time, cpu))| {
             (
                 program.clone(),
-                serde_json::json!({ "count": count, "s": time.as_secs_f64() }),
+                serde_json::json!({
+                    "count": count,
+                    "s": time.as_secs_f64(),
+                    "cpu_s": cpu.map(|cpu| cpu.as_secs_f64()),
+                }),
             )
         })
         .collect();
@@ -522,6 +558,75 @@ fn record(recorder: &Recorder, binary: &str, name: &str, ended: Ended) -> serde_
         "categories": categories,
         "unattributed_s": wall.saturating_sub(attributed).as_secs_f64(),
         "programs": programs,
+        "nproc": std::thread::available_parallelism().ok().map(std::num::NonZeroUsize::get),
+        "load_1m_start": recorder.load_at_start,
+        "load_1m_end": load_1m(),
+    })
+}
+
+/// The CPU, user and system, of every child this process has reaped, and theirs
+/// in turn: one `getrusage` read. A frame reads it as it opens and closes, so
+/// what a program's frames add is the children reaped while they were open — on
+/// the test thread, the program's own, unless a thread the test started reaped
+/// one of its own at the same moment.
+#[cfg(unix)]
+fn children_cpu() -> Option<Duration> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: `getrusage` fills the one `rusage` the pointer names, which lives for
+    // the call; it is read only when the call says it filled it.
+    let usage = unsafe {
+        if libc::getrusage(libc::RUSAGE_CHILDREN, usage.as_mut_ptr()) != 0 {
+            return None;
+        }
+        usage.assume_init()
+    };
+    let time = |value: libc::timeval| {
+        Duration::new(
+            u64::try_from(value.tv_sec).unwrap_or(0),
+            u32::try_from(value.tv_usec).unwrap_or(0) * 1000,
+        )
+    };
+    Some(time(usage.ru_utime) + time(usage.ru_stime))
+}
+
+#[cfg(not(unix))]
+fn children_cpu() -> Option<Duration> {
+    None
+}
+
+/// The host's 1-minute load average, where the platform keeps one.
+#[cfg(unix)]
+fn load_1m() -> Option<f64> {
+    let mut load = [0.0_f64; 1];
+    // SAFETY: `getloadavg` writes at most the one sample it is asked for into the
+    // one-element array the pointer names.
+    let read = unsafe { libc::getloadavg(load.as_mut_ptr(), 1) };
+    (read == 1).then_some(load[0])
+}
+
+#[cfg(not(unix))]
+fn load_1m() -> Option<f64> {
+    None
+}
+
+/// Where the `onepipeline` processes this test starts write their span records,
+/// when [`SPANS_ENV`] asks for them: the test's own directory beside its record,
+/// emptied of an earlier attempt's at the first spawn that asks.
+fn spans_dir() -> Option<PathBuf> {
+    std::env::var_os(SPANS_ENV).filter(|value| !value.is_empty())?;
+    let name = test_name()?;
+    let file = record_file(&name)?;
+    with_recorder(|recorder| {
+        let (binary, dir) = recorder.binary.clone()?;
+        let spans = std::env::var_os(DIR_ENV)
+            .map_or(dir, PathBuf::from)
+            .join(binary)
+            .join(format!("{}.spans", file.trim_end_matches(".json")));
+        if !recorder.spans_cleared {
+            recorder.spans_cleared = true;
+            let _ = std::fs::remove_dir_all(&spans);
+        }
+        Some(spans)
     })
 }
 
@@ -652,8 +757,21 @@ pub mod process {
             self
         }
 
-        fn program(&self) -> (Category, String) {
+        /// The program's category and name — and, for an `onepipeline` under
+        /// [`SPANS_ENV`](super::SPANS_ENV), where it writes its span record, unless
+        /// the test itself set or removed that.
+        fn program(&mut self) -> (Category, String) {
             let program = program_name(self.inner.get_program());
+            if program == "onepipeline"
+                && !self
+                    .inner
+                    .get_envs()
+                    .any(|(key, _)| key == super::BINARY_SPANS_ENV)
+            {
+                if let Some(spans) = super::spans_dir() {
+                    self.inner.env(super::BINARY_SPANS_ENV, spans);
+                }
+            }
             (Category::of_program(&program), program)
         }
 

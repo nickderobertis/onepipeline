@@ -96,16 +96,18 @@ impl Landing {
             return None;
         }
         let commit = crate::vcs::usable(envelope.payload.get("sha")?.as_str()?)?;
-        let read = onevcs::landing_closes(envelope).and_then(|closes| {
-            closes
-                .iter()
-                .map(|spelled| {
-                    IssueRef::from_str(spelled).map_err(|why| onevcs::Error::Invalid {
-                        reason: format!("`{spelled}` is not an issue reference: {why}"),
-                    })
-                })
-                .collect::<onevcs::Result<Vec<IssueRef>>>()
-        });
+        let read =
+            crate::spans::within("onevcs:landing_closes", || onevcs::landing_closes(envelope))
+                .and_then(|closes| {
+                    closes
+                        .iter()
+                        .map(|spelled| {
+                            IssueRef::from_str(spelled).map_err(|why| onevcs::Error::Invalid {
+                                reason: format!("`{spelled}` is not an issue reference: {why}"),
+                            })
+                        })
+                        .collect::<onevcs::Result<Vec<IssueRef>>>()
+                });
         let issues = match read {
             Ok(issues) => issues,
             // llmlint: ignore[changed_behavior_has_e2e] `closes` is written by one function of

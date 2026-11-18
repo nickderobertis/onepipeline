@@ -105,10 +105,12 @@ impl Oracle for Onevcs {
             return known.clone();
         }
         let visibility = probed(repo).unwrap_or(onevcs::Visibility::Unknown);
-        let identity = onevcs::release_targets(repo).map_or_else(
-            |_| Identity::Unresolved(repo.to_owned()),
-            |targets| Identity::Registered(targets.identity),
-        );
+        let identity =
+            crate::spans::within("onevcs:release_targets", || onevcs::release_targets(repo))
+                .map_or_else(
+                    |_| Identity::Unresolved(repo.to_owned()),
+                    |targets| Identity::Registered(targets.identity),
+                );
         let answered = Repository {
             clearance: if visibility.effective() == onevcs::Visibility::Public {
                 Clearance::Public
@@ -143,8 +145,10 @@ static PROBED: std::sync::Mutex<BTreeMap<String, (std::time::Instant, onevcs::Vi
 /// again at the next read.
 fn probed(repo: &str) -> std::result::Result<onevcs::Visibility, String> {
     probed_with(&PROBED, repo, std::time::Instant::now(), |repo| {
-        onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
-            repository: repo.to_owned(),
+        crate::spans::within("onevcs:inspect_repository", || {
+            onevcs::inspect_repository(&onevcs::boundary::InspectRequest {
+                repository: repo.to_owned(),
+            })
         })
         .map(|answer| answer.visibility)
         .map_err(|error| error.to_string())
@@ -1043,11 +1047,13 @@ pub(crate) fn ensure_export(
     // fail without placing a different branch under a name `onevcs` minted at random a
     // moment before. What a failure answers is the neutral refusal below, the detail kept
     // in the driver's own log.
-    onevcs::import_branch(&onevcs::ImportRequest {
-        repo: std::path::PathBuf::from(&export.from),
-        branch: export.branch.clone(),
-        from: None,
-        under: None,
+    crate::spans::within("onevcs:import_branch", || {
+        onevcs::import_branch(&onevcs::ImportRequest {
+            repo: std::path::PathBuf::from(&export.from),
+            branch: export.branch.clone(),
+            from: None,
+            under: None,
+        })
     })
     .map_err(|refused| {
         // What was refused names the producer's repository and branch, so it goes to the
@@ -1063,19 +1069,21 @@ pub(crate) fn ensure_export(
         opaque(),
         export.ordinal
     );
-    let exported = onevcs::export(
-        &onevcs::Providers::real(),
-        &onevcs::ExportRequest {
-            from: export.from.clone(),
-            branch: export.branch.clone(),
-            directory: export.source_directory.clone(),
-            to: export.to.clone(),
-            target_directory: export.target_directory.clone(),
-            branch_name,
-            accepted_opaque: export.accepted_opaque.clone(),
-            term_scope: term_scope.clone(),
-        },
-    )
+    let exported = crate::spans::within("onevcs:export", || {
+        onevcs::export(
+            &onevcs::Providers::real(),
+            &onevcs::ExportRequest {
+                from: export.from.clone(),
+                branch: export.branch.clone(),
+                directory: export.source_directory.clone(),
+                to: export.to.clone(),
+                target_directory: export.target_directory.clone(),
+                branch_name,
+                accepted_opaque: export.accepted_opaque.clone(),
+                term_scope: term_scope.clone(),
+            },
+        )
+    })
     .map_err(|refused| refused.to_string())?;
     recorded.push(Recorded {
         producer: export.producer.clone(),
@@ -1513,10 +1521,14 @@ pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<Stri
     let terms: Vec<serde_json::Value> = resolved
         .scope
         .iter()
-        .map(|identity| match onevcs::repository_boundary(identity) {
-            Ok(boundary) => serde_json::json!({"identity": identity, "boundary": boundary}),
-            Err(error) => {
-                serde_json::json!({"identity": identity, "unreadable": error.to_string()})
+        .map(|identity| {
+            match crate::spans::within("onevcs:repository_boundary", || {
+                onevcs::repository_boundary(identity)
+            }) {
+                Ok(boundary) => serde_json::json!({"identity": identity, "boundary": boundary}),
+                Err(error) => {
+                    serde_json::json!({"identity": identity, "unreadable": error.to_string()})
+                }
             }
         })
         .collect();

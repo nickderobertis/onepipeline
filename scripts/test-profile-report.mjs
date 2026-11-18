@@ -4,7 +4,8 @@
 // against a baseline platform's.
 //
 //   node scripts/test-profile-report.mjs --out FILE [--json] [--top-tests N]
-//        [--top-modules N] [--baseline LABEL] [--run LABEL=RUN_ID] LABEL=DIR [LABEL=DIR ...]
+//        [--top-modules N] [--top-spans N] [--baseline LABEL] [--run LABEL=RUN_ID]
+//        LABEL=DIR [LABEL=DIR ...]
 //
 // Each LABEL=DIR is one platform's records: a directory searched recursively for the
 // records `onepipeline_testfakes::profile` writes, such as a CI leg's downloaded
@@ -14,19 +15,30 @@
 // most records, the newest of those on a tie. The rest are reported as set aside. A
 // test retried within that run is read at its last attempt.
 //
+// A test run under ONEPIPELINE_TEST_PROFILE_SPANS also leaves, beside its record, a
+// `<test>.spans/` directory of the span records each `onepipeline` it started wrote
+// (`src/spans.rs` declares their shape). Those of the tests read are folded, one file
+// at a time, into a per-module, per-verb section: how many runs, their wall and CPU,
+// and the spans that account for them, largest first.
+//
 // The report (Markdown, or JSON with --json) is written to --out; what is printed is
 // one line saying where it went. It exits 0 once the report is written, and 1 with
 // the reason and a `next:` line on stderr when anything is refused or fails.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const SCHEMA = 2;
+export const SCHEMA = 3;
 /**
- * The schemas this reads: 2, and 1 — which is 2 without the `unfinished` ending,
- * so records a leg wrote before schema 2 are read as they were written.
+ * The schemas this reads: 3; 2, which is 3 without each program's `cpu_s` and the
+ * record's `nproc` and load; and 1, which is 2 without the `unfinished` ending — so
+ * records a leg wrote before either are read as they were written.
  */
-export const READS = [1, 2];
+export const READS = [1, 2, 3];
+/** The span record's schema, `src/spans.rs`'s `SCHEMA`. */
+export const SPAN_SCHEMA = 1;
+/** The suffix of the directory a test's span records sit in, beside its record. */
+export const SPANS_SUFFIX = ".spans";
 /** How a record was written; `unfinished` is a test the runner ended before it did. */
 export const ENDINGS = ["test-thread", "process-exit", "unfinished"];
 export const CATEGORIES = ["spawn", "git", "build", "fixture", "wait", "fs"];
@@ -43,12 +55,14 @@ export class Refusal extends Error {
 const SLACK_S = 0.01;
 const isSeconds = (value) => Number.isFinite(value) && value >= 0;
 const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+/** A figure a platform may not supply, which is then `null` and never `0`. */
+const isFigureOrNull = (value) => value === null || isSeconds(value);
 
 /** Why `record` is not a record this reader can fold, or `undefined` when it is one. */
 export function recordProblem(record) {
   if (record === null || typeof record !== "object") return "it is not an object";
   if (!READS.includes(record.schema)) {
-    return `it is schema ${record.schema}, and this reads ${READS.join(" and ")}`;
+    return `it is schema ${record.schema}, and this reads ${READS.slice(0, -1).join(", ")} and ${READS.at(-1)}`;
   }
   for (const field of ["binary", "test"]) {
     if (typeof record[field] !== "string" || record[field] === "") return `${field} is not a name`;
@@ -80,6 +94,17 @@ export function recordProblem(record) {
     if (!isCount(entry?.count) || !isSeconds(entry?.s)) {
       return `programs.${program} is not a count and a number of seconds`;
     }
+    if (record.schema >= 3 && !isFigureOrNull(entry.cpu_s)) {
+      return `programs.${program}.cpu_s is not a nonnegative number or null`;
+    }
+  }
+  if (record.schema >= 3) {
+    if (record.nproc !== null && !(isCount(record.nproc) && record.nproc > 0)) {
+      return "nproc is not a positive count or null";
+    }
+    for (const field of ["load_1m_start", "load_1m_end"]) {
+      if (!isFigureOrNull(record[field])) return `${field} is not a nonnegative number or null`;
+    }
   }
   if (!isCount(record.categories.wait.polls)) return "categories.wait.polls is not a count";
   // The writer's categories are exclusive and its remainder is what they leave, so a
@@ -95,6 +120,15 @@ export function recordProblem(record) {
   return undefined;
 }
 
+/** The entries of directory `at`, or a refusal naming it and what to do, `next`. */
+function entriesOf(at, next) {
+  try {
+    return readdirSync(at, { withFileTypes: true });
+  } catch (error) {
+    throw new Refusal(`${at} cannot be read: ${error.message}`, next);
+  }
+}
+
 /**
  * Every record under `dir`, however deep. A file a writer is still staging (a name
  * starting with `.`) is passed over; any other `.json` that is not a record is refused
@@ -103,17 +137,13 @@ export function recordProblem(record) {
 export function loadRecords(dir) {
   const records = [];
   const walk = (at) => {
-    let entries;
-    try {
-      entries = readdirSync(at, { withFileTypes: true });
-    } catch (error) {
-      throw new Refusal(
-        `${at} cannot be read: ${error.message}`,
-        "name a directory of records: target/test-profile/e2e after an e2e run, or a CI leg's unpacked test-profile-* artifact",
-      );
-    }
-    for (const entry of entries) {
+    for (const entry of entriesOf(
+      at,
+      "name a directory of records: target/test-profile/e2e after an e2e run, or a CI leg's unpacked test-profile-* artifact",
+    )) {
       const path = join(at, entry.name);
+      // A test's span records are not test records; `foldSpans` reads them.
+      if (entry.isDirectory() && entry.name.endsWith(SPANS_SUFFIX)) continue;
       if (entry.isDirectory()) walk(path);
       else if (entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith(".")) {
         let record;
@@ -205,7 +235,13 @@ export function totals(records) {
     unattributed: 0,
     categories: {},
     counts: {},
+    // The children's CPU of the programs the tests ran, over the records that carry
+    // one; `null` where none does, which is not none spent.
+    cpu: null,
+    // The mean 1-minute load at the tests' start and end, over the records carrying it.
+    load: { start: null, end: null },
   };
+  const loads = { start: [], end: [] };
   for (const category of CATEGORIES) {
     total.categories[category] = 0;
     total.counts[category] = 0;
@@ -219,7 +255,15 @@ export function totals(records) {
       total.counts[category] += counts(record, category);
     }
     total.counts.polls += record.categories?.wait?.polls ?? 0;
+    for (const entry of Object.values(record.programs ?? {})) {
+      if (isSeconds(entry.cpu_s)) total.cpu = (total.cpu ?? 0) + entry.cpu_s;
+    }
+    if (isSeconds(record.load_1m_start)) loads.start.push(record.load_1m_start);
+    if (isSeconds(record.load_1m_end)) loads.end.push(record.load_1m_end);
   }
+  const mean = (values) =>
+    values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  total.load = { start: mean(loads.start), end: mean(loads.end) };
   return total;
 }
 
@@ -264,16 +308,243 @@ export function ratios(platform, baseline) {
   return out;
 }
 
+/** How far a span record's figures may disagree before they are not one writer's. */
+const SLACK_MS = 0.01;
+
+/** Why `record` is not a span record this reader can fold, or `undefined` when it is one. */
+export function spanRecordProblem(record) {
+  if (record === null || typeof record !== "object") return "it is not an object";
+  if (record.schema !== SPAN_SCHEMA) {
+    return `it is span schema ${record.schema}, and this reads ${SPAN_SCHEMA}`;
+  }
+  if (typeof record.verb !== "string") return "verb is not a string";
+  if (!isCount(record.pid)) return "pid is not a count";
+  for (const field of ["started_at", "wall_ms"]) {
+    if (!isSeconds(record[field])) return `${field} is not a nonnegative number`;
+  }
+  for (const field of [
+    "user_cpu_ms",
+    "system_cpu_ms",
+    "children_user_cpu_ms",
+    "children_system_cpu_ms",
+    "peak_rss_kb",
+  ]) {
+    if (!isFigureOrNull(record[field])) return `${field} is not a nonnegative number or null`;
+  }
+  if (!Number.isSafeInteger(record.exit_status)) return "exit_status is not an integer";
+  if (!Array.isArray(record.spans)) return "spans is not a list";
+  let selfWall = 0;
+  for (const span of record.spans) {
+    if (typeof span?.name !== "string" || span.name === "") return "a span has no name";
+    if (!isCount(span.count)) return `spans.${span.name}.count is not a count`;
+    for (const field of ["self_wall_ms", "wall_ms"]) {
+      if (!isSeconds(span[field])) return `spans.${span.name}.${field} is not a nonnegative number`;
+    }
+    if (!isFigureOrNull(span.self_cpu_ms)) {
+      return `spans.${span.name}.self_cpu_ms is not a nonnegative number or null`;
+    }
+    // A span's own time is the part of its whole that nothing nested in it took.
+    if (span.self_wall_ms > span.wall_ms + SLACK_MS) {
+      return `spans.${span.name} spent ${span.self_wall_ms}ms of its own in ${span.wall_ms}ms`;
+    }
+    selfWall += span.self_wall_ms;
+  }
+  // The writer's spans are one thread's and exclusive, so their own times fit the process.
+  if (selfWall > record.wall_ms + SLACK_MS) {
+    return `its spans hold ${selfWall}ms of a ${record.wall_ms}ms process`;
+  }
+  return undefined;
+}
+
+/** `a + b` where either may be a figure a platform did not supply. */
+const plus = (a, b) => (a === null ? b : b === null ? a : a + b);
+const cpuOf = (user, system) => (user === null || system === null ? null : user + system);
+
+function spanFold(names, span) {
+  const held = names.get(span.name) ?? {
+    name: span.name,
+    count: 0,
+    self_wall_ms: 0,
+    wall_ms: 0,
+    self_cpu_ms: null,
+  };
+  held.count += span.count;
+  held.self_wall_ms += span.self_wall_ms;
+  held.wall_ms += span.wall_ms;
+  held.self_cpu_ms = plus(held.self_cpu_ms, span.self_cpu_ms);
+  names.set(span.name, held);
+}
+
+function readSpanRecord(path) {
+  let record;
+  try {
+    record = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Refusal(
+      `${path} is not JSON: ${error.message}`,
+      `remove ${path}, or rerun the test whose directory holds it`,
+    );
+  }
+  const problem = spanRecordProblem(record);
+  if (problem) {
+    throw new Refusal(
+      `${path} is not a span record: ${problem}`,
+      `remove ${path}, or rerun the test whose directory holds it`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Fold the span records of the tests in `records` — each test's `<test>.spans/`
+ * directory beside its record, anywhere under `dir` — into each module's `onepipeline`
+ * runs, per verb. One file is read at a time, and only the per-verb and per-span totals
+ * are kept, so a module's thousands of runs cost one record's memory. A span record
+ * older than its test's record was left by an earlier run of that test and is set aside.
+ * CPU sums and means are over the records that carry the figure, and `null` where none does.
+ */
+export function foldSpans(dir, records, { topSpans = 10 } = {}) {
+  const tests = new Map(
+    records.map((record) => [`${record.binary}\u0000${record.test.replaceAll("::", ".")}`, record]),
+  );
+  const modules = new Map();
+  let read = 0;
+  let stale = 0;
+  const walk = (at) => {
+    // Read again: a directory `loadRecords` read can have gone since.
+    for (const entry of entriesOf(
+      at,
+      "rerun the report once the run writing these records has finished",
+    )) {
+      if (!entry.isDirectory()) continue;
+      const path = join(at, entry.name);
+      if (!entry.name.endsWith(SPANS_SUFFIX)) {
+        walk(path);
+        continue;
+      }
+      const test = tests.get(`${basename(at)}\u0000${entry.name.slice(0, -SPANS_SUFFIX.length)}`);
+      if (!test) continue;
+      const moduleName = `${test.binary}::${moduleOf(test.test)}`;
+      const module = modules.get(moduleName) ?? { name: moduleName, verbs: new Map() };
+      modules.set(moduleName, module);
+      for (const file of entriesOf(
+        path,
+        `make ${path} readable, or remove it and rerun the test whose span records it holds`,
+      )) {
+        if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
+        const span = readSpanRecord(join(path, file.name));
+        if (span.started_at + SLACK_S < test.started_at) {
+          stale += 1;
+          continue;
+        }
+        read += 1;
+        const verb = module.verbs.get(span.verb) ?? {
+          verb: span.verb,
+          invocations: 0,
+          wall_ms: 0,
+          cpu_ms: null,
+          // How many runs carried a CPU figure, which is what a mean of it is over.
+          cpu_runs: 0,
+          children_cpu_ms: null,
+          spans: new Map(),
+        };
+        verb.invocations += 1;
+        verb.wall_ms += span.wall_ms;
+        const cpu = cpuOf(span.user_cpu_ms, span.system_cpu_ms);
+        if (cpu !== null) verb.cpu_runs += 1;
+        verb.cpu_ms = plus(verb.cpu_ms, cpu);
+        verb.children_cpu_ms = plus(
+          verb.children_cpu_ms,
+          cpuOf(span.children_user_cpu_ms, span.children_system_cpu_ms),
+        );
+        for (const named of span.spans) spanFold(verb.spans, named);
+        module.verbs.set(span.verb, verb);
+      }
+    }
+  };
+  walk(dir);
+  const byWall = (a, b) => b.wall_ms - a.wall_ms;
+  const folded = [...modules.values()]
+    .map((module) => {
+      const verbs = [...module.verbs.values()]
+        .map(({ spans, ...verb }) => ({
+          ...verb,
+          mean_wall_ms: verb.wall_ms / verb.invocations,
+          mean_cpu_ms: verb.cpu_ms === null ? null : verb.cpu_ms / verb.cpu_runs,
+          span_names: spans.size,
+          spans: [...spans.values()]
+            .sort((a, b) => b.self_wall_ms - a.self_wall_ms)
+            .slice(0, topSpans),
+        }))
+        .sort(byWall);
+      return {
+        name: module.name,
+        invocations: verbs.reduce((sum, verb) => sum + verb.invocations, 0),
+        wall_ms: verbs.reduce((sum, verb) => sum + verb.wall_ms, 0),
+        cpu_ms: verbs.reduce((sum, verb) => plus(sum, verb.cpu_ms), null),
+        verbs,
+      };
+    })
+    .filter((module) => module.invocations > 0)
+    .sort(byWall);
+  return { records: read, stale, modules: folded };
+}
+
+function renderSpans(lines, spans) {
+  if (spans.records === 0) return;
+  const s = (ms) => (ms === null ? "-" : (ms / 1000).toFixed(2));
+  const ms = (value) => (value === null ? "-" : value.toFixed(1));
+  lines.push(
+    "### Where the `onepipeline` runs went",
+    "",
+    `${spans.records} span records of the tests read` +
+      (spans.stale ? ` (${spans.stale} of an earlier run of those tests set aside)` : "") +
+      ". Each module's runs per verb, and each verb's spans by their own time, largest first.",
+    "",
+  );
+  for (const module of spans.modules) {
+    lines.push(
+      `#### ${module.name}: ${module.invocations} runs, ${s(module.wall_ms)} wall s, ${s(module.cpu_ms)} cpu s`,
+      "",
+      "| verb | runs | wall s | mean wall ms | cpu s | mean cpu ms | child cpu s |",
+      "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    );
+    for (const verb of module.verbs) {
+      lines.push(
+        `| ${verb.verb || "(none)"} | ${verb.invocations} | ${s(verb.wall_ms)} | ${ms(verb.mean_wall_ms)} | ${s(verb.cpu_ms)} | ${ms(verb.mean_cpu_ms)} | ${s(verb.children_cpu_ms)} |`,
+      );
+    }
+    lines.push("");
+    for (const verb of module.verbs) {
+      lines.push(
+        `\`${verb.verb || "(none)"}\`, ${verb.spans.length} of its ${verb.span_names} spans:`,
+        "",
+        "| span | count | self wall s | of the verb's wall | wall s | self cpu s |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+      );
+      for (const span of verb.spans) {
+        lines.push(
+          `| ${span.name} | ${span.count} | ${s(span.self_wall_ms)} | ${pct(span.self_wall_ms, verb.wall_ms)} | ${s(span.wall_ms)} | ${s(span.self_cpu_ms)} |`,
+        );
+      }
+      lines.push("");
+    }
+  }
+}
+
 function pct(part, whole) {
   return whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "-";
 }
 
+const figure = (value, digits = 1) => (value === null ? "-" : value.toFixed(digits));
+
 function shareRow(name, total) {
   const cells = CATEGORIES.map((category) => pct(total.categories[category], total.wall));
-  return `| ${name} | ${total.tests} | ${total.wall.toFixed(1)} | ${cells.join(" | ")} | ${pct(total.unattributed, total.wall)} |`;
+  const load = `${figure(total.load.start, 2)} → ${figure(total.load.end, 2)}`;
+  return `| ${name} | ${total.tests} | ${total.wall.toFixed(1)} | ${figure(total.cpu)} | ${load} | ${cells.join(" | ")} | ${pct(total.unattributed, total.wall)} |`;
 }
 
-const HEADER = `| | tests | wall s | ${CATEGORIES.join(" | ")} | unattributed |\n| --- | ---: | ---: | ${CATEGORIES.map(() => "---:").join(" | ")} | ---: |`;
+const HEADER = `| | tests | wall s | child cpu s | load 1m | ${CATEGORIES.join(" | ")} | unattributed |\n| --- | ---: | ---: | ---: | ---: | ${CATEGORIES.map(() => "---:").join(" | ")} | ---: |`;
 
 /** The report as Markdown. */
 export function render(report) {
@@ -300,6 +571,7 @@ export function render(report) {
     lines.push("", `### The ${b.modules.length} costliest modules`, "", HEADER);
     for (const module of b.modules) lines.push(shareRow(module.name, module));
     lines.push("");
+    renderSpans(lines, platform.spans);
   }
   lines.push(`## Against ${report.baseline}`, "");
   if (report.missingBaseline) {
@@ -326,7 +598,10 @@ export function render(report) {
 }
 
 /** Read every platform's records and build the report. */
-export function buildReport(platforms, { baseline, runs = new Map(), topTests, topModules }) {
+export function buildReport(
+  platforms,
+  { baseline, runs = new Map(), topTests, topModules, topSpans },
+) {
   const read = platforms.map(({ label, dir }) => {
     const { run, records, setAside } = selectRun(loadRecords(dir), runs.get(label));
     return {
@@ -335,6 +610,7 @@ export function buildReport(platforms, { baseline, runs = new Map(), topTests, t
       setAside,
       records,
       breakdown: breakdown(records, { topTests, topModules }),
+      spans: foldSpans(dir, records, { topSpans }),
     };
   });
   const base = read.find((platform) => platform.label === baseline);
@@ -386,6 +662,7 @@ export function parseArgs(argv) {
     runs: new Map(),
     topTests: 30,
     topModules: 10,
+    topSpans: 10,
     json: false,
   };
   const platforms = [];
@@ -400,6 +677,7 @@ export function parseArgs(argv) {
     else if (arg === "--baseline") options.baseline = value();
     else if (arg === "--top-tests") options.topTests = count(arg, value());
     else if (arg === "--top-modules") options.topModules = count(arg, value());
+    else if (arg === "--top-spans") options.topSpans = count(arg, value());
     else if (arg === "--run") {
       const [label, id] = pair(value(), "a LABEL=RUN_ID");
       options.runs.set(label, id);

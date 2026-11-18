@@ -29,6 +29,7 @@
 //! misread that way: what the publication did is a case of [`PublishOutcome`],
 //! and the compiler checks every reader of it.
 
+use crate::spans::Timed as _;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -77,24 +78,36 @@ fn providers() -> Providers<'static> {
 pub(crate) fn review_standings(
     request: &onevcs::ReviewStandingsRequest,
 ) -> Result<onevcs::ReviewStandings> {
-    onevcs::review_standings(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:review_standings", || {
+        onevcs::review_standings(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// Where each named change request of one repository stands, in one batched read.
 pub(crate) fn change_standings(
     request: &onevcs::ChangeStandingsRequest,
 ) -> Result<onevcs::ChangeStandings> {
-    onevcs::change_standings(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:change_standings", || {
+        onevcs::change_standings(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// Move a change request onto `base`, writing its description in the same request.
 pub(crate) fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
-    onevcs::retarget_change(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:retarget_change", || {
+        onevcs::retarget_change(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// Restore a closed draft's deleted base and reopen it.
 pub(crate) fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
-    onevcs::reopen_change(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:reopen_change", || {
+        onevcs::reopen_change(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// Normalize a repository spelling before collecting a batched host read.
@@ -108,16 +121,21 @@ pub(crate) fn repository_identity(repo: &str) -> Result<String> {
 
 /// Answer one review comment on the host, as `onevcs`'s `reply_to_comment` does.
 pub(crate) fn reply_to_comment(request: &onevcs::ReplyRequest) -> Result<onevcs::PostedReply> {
-    onevcs::reply_to_comment(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:reply_to_comment", || {
+        onevcs::reply_to_comment(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// A full host snapshot, by URL, including on a host with no local session.
 pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
-    onevcs::review_comments(
-        &providers(),
-        &onevcs::ChangeRef::Url(change_url.to_owned()),
-        None,
-    )
+    crate::spans::within("onevcs:review_comments", || {
+        onevcs::review_comments(
+            &providers(),
+            &onevcs::ChangeRef::Url(change_url.to_owned()),
+            None,
+        )
+    })
     .map_err(refusal)
 }
 
@@ -168,7 +186,10 @@ pub fn session_open(request: &SessionRequest) -> Result<Session> {
 pub fn workspace_capacity(
     request: &SessionRequest,
 ) -> std::result::Result<onevcs::WorkspaceCapacity, String> {
-    onevcs::workspace_capacity(request).map_err(|error| error.to_string())
+    crate::spans::within("onevcs:workspace_capacity", || {
+        onevcs::workspace_capacity(request)
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// A session open `onevcs` refused, as this crate's own error — with the two
@@ -280,21 +301,23 @@ pub fn publish(
             .checked()
             .map_err(|error| PublishRefused::Refused(refusal(error)))?;
     }
-    onevcs::publish_with_cancellation(
-        &providers(),
-        token,
-        &PublishRequest {
-            policy,
-            title,
-            body: body.map(str::to_owned),
-            draft: draft.cloned(),
-            term_scope: term_scope.clone(),
-            // First publications and missing-head-record fallbacks watch their checks.
-            defer_checks: false,
-            adopt: None,
-        },
-        &NodeCancellation(cancel),
-    )
+    crate::spans::within("onevcs:publish_with_cancellation", || {
+        onevcs::publish_with_cancellation(
+            &providers(),
+            token,
+            &PublishRequest {
+                policy,
+                title,
+                body: body.map(str::to_owned),
+                draft: draft.cloned(),
+                term_scope: term_scope.clone(),
+                // First publications and missing-head-record fallbacks watch their checks.
+                defer_checks: false,
+                adopt: None,
+            },
+            &NodeCancellation(cancel),
+        )
+    })
     .map_err(publication_refusal)
 }
 
@@ -316,20 +339,22 @@ pub(crate) fn republish(
         .parse::<onevcs::Url>()
         .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
     let adopted = adopt.clone();
-    let answer = onevcs::publish_with_cancellation(
-        &providers(),
-        token,
-        &PublishRequest {
-            policy,
-            title: subject,
-            body: body.map(str::to_owned),
-            draft: None,
-            term_scope: term_scope.clone(),
-            defer_checks: true,
-            adopt: Some(adopt),
-        },
-        &NodeCancellation(cancel),
-    );
+    let answer = crate::spans::within("onevcs:publish_with_cancellation", || {
+        onevcs::publish_with_cancellation(
+            &providers(),
+            token,
+            &PublishRequest {
+                policy,
+                title: subject,
+                body: body.map(str::to_owned),
+                draft: None,
+                term_scope: term_scope.clone(),
+                defer_checks: true,
+                adopt: Some(adopt),
+            },
+            &NodeCancellation(cancel),
+        )
+    });
     match answer {
         // A record naming another branch is the one refusal that must never fall back:
         // the change request is not this session's, and the planner decides.
@@ -426,7 +451,10 @@ fn publication_refusal(error: onevcs::Error) -> PublishRefused {
 /// and the caller says so and publishes as it always has rather than reading
 /// silence as an answer.
 pub fn session_change(token: &SessionToken) -> Result<Option<onevcs::SessionChange>> {
-    onevcs::session_change(&providers(), token).map_err(refusal)
+    crate::spans::within("onevcs:session_change", || {
+        onevcs::session_change(&providers(), token)
+    })
+    .map_err(refusal)
 }
 
 /// Write a drafted description onto the session's own change request, and answer
@@ -452,15 +480,17 @@ pub fn describe_change(
     let title = title
         .map(|title| title.parse::<Subject>().map_err(sibling))
         .transpose()?;
-    onevcs::describe_change(
-        &providers(),
-        token,
-        &onevcs::ChangeDescription {
-            title,
-            body: body.to_owned(),
-            term_scope: term_scope.clone(),
-        },
-    )
+    crate::spans::within("onevcs:describe_change", || {
+        onevcs::describe_change(
+            &providers(),
+            token,
+            &onevcs::ChangeDescription {
+                title,
+                body: body.to_owned(),
+                term_scope: term_scope.clone(),
+            },
+        )
+    })
     .map_err(refusal)
 }
 
@@ -477,7 +507,10 @@ pub fn describe_change(
 /// outside the stack-base namespace, a push the origin or the public boundary
 /// turned down.
 pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs::StackBase> {
-    onevcs::assemble_stack_base(&providers(), request).map_err(refusal)
+    crate::spans::within("onevcs:assemble_stack_base", || {
+        onevcs::assemble_stack_base(&providers(), request)
+    })
+    .map_err(refusal)
 }
 
 /// The word a node whose change request is held open as a **draft** settles on.
@@ -859,7 +892,9 @@ impl LandingRead {
 // by `usable`, which is what wrote every value that reaches this.
 pub(crate) fn landing_now(branch: &str, repo: Option<&str>) -> LandingRead {
     crate::rendercost::landing_read_taken(branch, repo);
-    let answered = read_of(onevcs::landing_status(branch, repo));
+    let answered = read_of(crate::spans::within("onevcs:landing_status", || {
+        onevcs::landing_status(branch, repo)
+    }));
     // One per read, because the read takes one from scratch. Recorded after it
     // rather than inferred from it, so a build that asked about a repository
     // *without* reading a landing — or twice for one read — is counted rather
@@ -1226,7 +1261,7 @@ pub fn change_url(outcome: &PublishOutcome) -> Option<String> {
 /// reclaims the first's workspace. Both are recorded in
 /// `docs/contract-divergences.md`.
 pub fn working_session(token: &SessionToken) -> Option<Session> {
-    onevcs::session(&providers(), token)
+    crate::spans::within("onevcs:session", || onevcs::session(&providers(), token))
         .map(|record| record.session)
         .map_err(|error| {
             eprintln!(
@@ -1249,10 +1284,12 @@ pub fn preserve_branch(
     branch: &str,
     term_scope: &onevcs::TermScope,
 ) -> std::result::Result<onevcs::Preserved, String> {
-    onevcs::preserve(&onevcs::PreserveRequest {
-        repo: repo.to_owned(),
-        branch: branch.to_owned(),
-        term_scope: term_scope.clone(),
+    crate::spans::within("onevcs:preserve", || {
+        onevcs::preserve(&onevcs::PreserveRequest {
+            repo: repo.to_owned(),
+            branch: branch.to_owned(),
+            term_scope: term_scope.clone(),
+        })
     })
     .map_err(|refusal| refusal.to_string())
 }
@@ -1292,7 +1329,7 @@ pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
-        .output()
+        .timed_output()
         .ok()
         .filter(|output| output.status.success())?;
     usable(String::from_utf8_lossy(&output.stdout).trim())
@@ -1303,7 +1340,10 @@ pub fn worktree_head(worktree: &std::path::Path) -> Option<String> {
 /// Closing is best-effort on the failure path: a node that already failed must
 /// not be reported as a different failure because its cleanup also failed.
 pub fn session_close(token: &SessionToken) -> Result<Session> {
-    onevcs::close_session(&providers(), token).map_err(refusal)
+    crate::spans::within("onevcs:close_session", || {
+        onevcs::close_session(&providers(), token)
+    })
+    .map_err(refusal)
 }
 
 /// The commit one session's branch was last recorded at, when `onevcs` recorded
@@ -1475,7 +1515,7 @@ pub fn level_with_base(
             .args(args)
             .current_dir(worktree)
             .stdin(std::process::Stdio::null())
-            .output()
+            .timed_output()
             .map_err(|error| {
                 eprintln!(
                     "onepipeline: cannot run `git {}` in {}: {error}",
@@ -1512,7 +1552,7 @@ pub fn level_with_base(
         .args(["diff", "--quiet", "HEAD", "--"])
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
-        .output()
+        .timed_output()
     {
         Ok(compared) if compared.status.success() => {}
         Ok(compared) if compared.status.code() == Some(1) => return None,
@@ -1595,7 +1635,7 @@ pub fn level_with_base(
             .args(["merge-base", "--is-ancestor", sha, "HEAD"])
             .current_dir(worktree)
             .stdin(std::process::Stdio::null())
-            .output()
+            .timed_output()
         {
             Ok(answered) if answered.status.success() => {
                 wrote = Wrote::ACommitTheBaseCarries;
@@ -1874,10 +1914,12 @@ pub fn skipped_required_in(token: &SessionToken) -> Vec<String> {
 /// to stop looking for what a node is waiting on. The caller renders the
 /// refusal rather than deciding for itself what it meant.
 pub fn holders_of(repo: &str) -> std::result::Result<Vec<onevcs::SessionHolder>, String> {
-    onevcs::session_holders(repo).map_err(|error| {
-        eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
-        error.to_string()
-    })
+    crate::spans::within("onevcs:session_holders", || onevcs::session_holders(repo)).map_err(
+        |error| {
+            eprintln!("onepipeline: cannot read the session holders of {repo}: {error}");
+            error.to_string()
+        },
+    )
 }
 
 /// One session's stream, read from the start of what this reader has not seen.
@@ -2144,7 +2186,7 @@ pub fn follow(
 /// still the safe direction; ending it in silence is what leaves a reader
 /// thinking the stream ran out.
 fn settled(session: &SessionToken) -> bool {
-    match onevcs::session(&providers(), session) {
+    match crate::spans::within("onevcs:session", || onevcs::session(&providers(), session)) {
         Ok(record) => record.lifecycle == Lifecycle::Closed,
         Err(error) => {
             eprintln!(
@@ -2416,7 +2458,7 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
             .args(&conflict.paths)
             .current_dir(&session.worktree)
             .stdin(std::process::Stdio::null())
-            .output()
+            .timed_output()
             .ok()?;
         output
             .status
@@ -2485,7 +2527,7 @@ pub(crate) fn bring_base_in(
             .args(args)
             .current_dir(at)
             .stdin(std::process::Stdio::null())
-            .output()
+            .timed_output()
             .map_err(|error| format!("git {args:?}: {error}"))
     };
     let resolve = |name: &str| -> Option<String> {
@@ -2815,7 +2857,7 @@ pub(crate) fn net_diff(
             .current_dir(worktree)
             .env("GIT_INDEX_FILE", &scratch)
             .stdin(std::process::Stdio::null())
-            .output()
+            .timed_output()
             .map_err(|error| format!("cannot run `git {}`: {error}", args.join(" ")))?;
         if !output.status.success() {
             return Err(format!(
