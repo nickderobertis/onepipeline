@@ -582,6 +582,9 @@ pub(crate) enum Message {
     /// A `kind: command` node's command ended, ahead of its settlement: the node, and
     /// what `command-exited` records.
     CommandExited(Box<(crate::graph::NodeRef, crate::payload::CommandExited)>),
+    /// A guarded node's guard ended and the answer that has to be kept before its verdict
+    /// is journalled could not be: the node, and why. Nothing of the verdict follows.
+    GuardAnswerUnkept(Box<(String, Error)>),
     /// A guarded node's guard ended: the node, what `guard-evaluated` records, and whether
     /// the node proceeds or its settlement follows this.
     GuardEvaluated(
@@ -2825,6 +2828,18 @@ fn converge(
                 // Journalled before whatever the verdict leads to: a node that proceeds comes
                 // out of flight to be started as an unguarded node would on the next pass, and
                 // one the verdict settles is settled by the `Settled` that follows this.
+                // A verdict whose answer could not be kept is not journalled: the driver stops
+                // on the error, the node's guard stays started and unevaluated, and `adopt`
+                // runs it again once the run's directory takes the answer.
+                Message::GuardAnswerUnkept(unkept) => {
+                    let (node, error) = *unkept;
+                    return Err(Error::Invalid(format!(
+                        "node '{node}': its guard's answer could not be kept, so its verdict was \
+                         not journalled and this driver stops; `onepipeline adopt {}` runs the \
+                         guard again once the run's directory takes it: {error}",
+                        paths.run
+                    )));
+                }
                 Message::GuardEvaluated(evaluated) => {
                     let (node, evaluated, then) = *evaluated;
                     journal.emit(
@@ -8885,11 +8900,9 @@ fn start_ready(
         // A verdict journalled on this attempt and never settled — its driver stopped
         // between the two — is settled from the record: a guard that answered is not asked
         // again.
-        if let Some(settlement) = state
-            .guards_answered
-            .get(&node.id)
-            .and_then(|answered| crate::guard::recovered(paths, &node, answered))
-        {
+        if let Some(settlement) = state.guards_answered.get(&node.id).and_then(|answered| {
+            crate::guard::recovered(paths, &node, state.guard_attempts.get(&node.id), answered)
+        }) {
             settle(paths, journal, &settlement)?;
             settled_here = true;
             continue;
@@ -8927,7 +8940,18 @@ fn start_ready(
                 payload_of(&crate::guard::started(paths, &node, &argv))?,
             )?;
             let cancel = CancellationToken::new();
-            crate::guard::spawn(paths, launch, &node, &argv, cancel.clone(), tx.clone())?;
+            // The `guard-started` just written names this attempt: what the guard's kept
+            // answer is held to, so no other attempt's answer is ever taken for it.
+            let attempt = journal.last_written();
+            crate::guard::spawn(
+                paths,
+                launch,
+                &node,
+                &argv,
+                attempt,
+                cancel.clone(),
+                tx.clone(),
+            )?;
             let now = Instant::now();
             in_flight.insert(
                 node.id.clone(),

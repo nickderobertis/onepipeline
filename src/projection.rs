@@ -215,6 +215,11 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
     pub(crate) guards_answered: BTreeMap<String, crate::payload::GuardEvaluated>,
+    /// The `guard-started` record of each guarded node's latest guard: the attempt a kept
+    /// answer has to name to be read back for the node. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] node ids, the String keys every map of this state is keyed by and the graph validates where it is loaded.
+    pub(crate) guard_attempts: BTreeMap<String, crate::payload::RecordAt>,
     /// The last restack each node published. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) restacks: BTreeMap<String, RestackRecord>,
@@ -1447,6 +1452,13 @@ fn fold_record(state: &mut RunState, event: &Envelope, at: Option<u64>) {
         // from its command's: nothing else is started for it until its verdict.
         Some(journal::PipelineKind::GuardStarted) => {
             if let Some(node) = &event.labels.node {
+                state.guard_attempts.insert(
+                    node.clone(),
+                    crate::payload::RecordAt {
+                        stream: event.stream.clone(),
+                        seq: event.seq,
+                    },
+                );
                 state
                     .recorded
                     .insert(node.clone(), Recorded::At(NodeStatus::Running));

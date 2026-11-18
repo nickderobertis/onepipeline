@@ -750,6 +750,17 @@ pub(crate) struct GuardStarted {
     pub(crate) timeout_seconds: std::num::NonZeroU64,
 }
 
+/// Where one record stands in a run's journal: its writer's stream and its `seq` there,
+/// which no other record of the run shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordAt {
+    /// The writer's stream.
+    pub(crate) stream: String,
+    /// Its place in that stream.
+    pub(crate) seq: u64,
+}
+
 /// The word a `guard-evaluated` record's `verdict` carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]

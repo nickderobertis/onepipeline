@@ -93,6 +93,11 @@ fn script(world: &World, name: &str, body: &str) -> PathBuf {
     posix_script(&world.root, name, body)
 }
 
+/// Where a guard's answer is kept before its verdict is journalled: beside its log.
+fn answer_of(world: &World, run: &str, node: &str) -> PathBuf {
+    log_of(world, run, node).with_extension("answer.json")
+}
+
 /// A file under the world's root, as a script body names it.
 fn at(world: &World, name: &str) -> String {
     shell_path(&world.root.join(name))
@@ -1267,8 +1272,28 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             world.root.join("no-such-guard"),
             None,
             "failed",
-            failed,
+            failed.clone(),
             Detail::Opens("the guard could not be started: "),
+        ),
+        // Its answer taken out of the run's directory after the driver stopped: the
+        // failure's cause is all that is left to say, and it is said rather than invented.
+        (
+            "removed",
+            counting_guard(&world, "lost", 1, "said and lost"),
+            None,
+            "failed",
+            failed,
+            Detail::Exactly(Some("the guard exited with status 1")),
+        ),
+        // An answer carrying this very verdict and a detail, but kept for another attempt —
+        // its `guard-started` elsewhere — is no answer to this one.
+        (
+            "foreign",
+            counting_guard(&world, "stale", 1, "said for another attempt"),
+            None,
+            "failed",
+            word("outcomes", "failed"),
+            Detail::Exactly(Some("the guard exited with status 1")),
         ),
     ];
     for (case, guard, deadline, status, outcome, expected) in cases {
@@ -1297,6 +1322,21 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             !settled_as(&world, &run, &asked, status),
             "{run}: settled before the driver stopped"
         );
+        let kept = answer_of(&world, &run, &asked);
+        if case == "removed" {
+            std::fs::remove_file(&kept).expect("the kept answer is there to take away");
+        }
+        if case == "foreign" {
+            let mut answer: Value = serde_json::from_slice(
+                &std::fs::read(&kept).expect("the kept answer is there to read"),
+            )
+            .expect("the kept answer is JSON");
+            let seq = answer["attempt"]["seq"]
+                .as_u64()
+                .expect("its attempt's seq");
+            answer["attempt"]["seq"] = json!(seq + 1000);
+            std::fs::write(&kept, answer.to_string()).expect("the answer is rewritten");
+        }
 
         let adopted = world.run(&["adopt", &run]);
         assert!(adopted.code == 0 || status != "done", "{}", adopted.stderr);
@@ -1529,4 +1569,93 @@ fn a_guarded_human_node_is_no_ones_decision_until_its_guard_answers() {
             < position(&world, run, "node-dispatched", "ship")
     );
     world.run(&["stop", run]);
+}
+
+/// A guard whose answer cannot be kept — its place in the run's directory taken by a
+/// directory — has no verdict journalled: the driver stops saying why, the node is neither
+/// evaluated nor settled, and nothing behind it runs. With the obstruction gone, `adopt`
+/// runs the guard again and the node settles with exactly the detail its guard gave.
+#[test]
+fn a_guard_whose_answer_cannot_be_kept_journals_no_verdict_and_adopt_runs_it_again() {
+    let world = World::new("guard-answer-unkept");
+    let ran = at(&world, "guards.ran");
+    let go = at(&world, "guard.go");
+    let guard = script(
+        &world,
+        "held",
+        &format!(
+            "echo \"$ONEPIPELINE_NODE_ID\" >> '{ran}'\n\
+             while [ ! -f '{go}' ]; do sleep 0.1; done\n\
+             echo 'nothing to finalize' >&2\nexit {}",
+            exit("not_needed")
+        ),
+    );
+    let run = "unkept";
+    let project = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                guarded(agent("asked", &[]), &guard),
+                agent("after", &["asked"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the guard to start", |world| {
+        guard_runs(world, "asked") == 1
+    });
+    let answer = answer_of(&world, run, "asked");
+    std::fs::create_dir_all(&answer).expect("the answer's place is taken");
+    std::fs::write(world.root.join("guard.go"), "").expect("the guard is released");
+
+    let said = "its guard's answer could not be kept";
+    world.until("the driver to stop saying why", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log"))
+            .is_ok_and(|log| log.contains(said))
+    });
+    let driver = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .expect("the launch record names its driver");
+    world.until("the driver to exit", |_| {
+        !std::process::Command::new("kill")
+            .args(["-0", &driver.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("this host answers about a process it owns")
+            .success()
+    });
+    assert_eq!(count(&world, run, "guard-started", "asked"), 1);
+    assert_eq!(
+        count(&world, run, "guard-evaluated", "asked"),
+        0,
+        "a verdict was journalled without its answer"
+    );
+    assert!(
+        !world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "asked"),
+        "the node settled without its answer"
+    );
+    assert!(!dispatched(&world, run, "after"));
+
+    std::fs::remove_dir_all(&answer).expect("the obstruction is removed");
+    world.run(&["adopt", run]).exited(0);
+    assert_eq!(
+        guard_runs(&world, "asked"),
+        2,
+        "adopt did not run the guard again"
+    );
+    assert_eq!(count(&world, run, "guard-evaluated", "asked"), 1);
+    let settled = result(&world, run, "asked");
+    assert_eq!(settled["status"], "done", "{settled}");
+    assert_eq!(
+        settled["outcome"],
+        json!(word("outcomes", "not_needed")),
+        "{settled}"
+    );
+    assert_eq!(settled["detail"], "nothing to finalize", "{settled}");
+    assert!(answer.is_file(), "the answer was not kept on adoption");
+    assert!(dispatched(&world, run, "after"));
 }

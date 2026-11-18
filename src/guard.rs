@@ -39,7 +39,9 @@ use crate::executor::CancellationToken;
 use crate::filter::Argv;
 use crate::graph::NodeStatus;
 use crate::ledger::{LaunchRecord, RunPaths};
-use crate::payload::{CommandEnding, GuardEvaluated, GuardFailure, GuardStarted, GuardVerdict};
+use crate::payload::{
+    CommandEnding, GuardEvaluated, GuardFailure, GuardStarted, GuardVerdict, RecordAt,
+};
 use crate::plan::Node;
 
 /// The outcome a node its guard found not needed settles `done` under.
@@ -73,20 +75,22 @@ fn answer_of(paths: &RunPaths, node: &str) -> PathBuf {
         .join(format!("{node}.answer.json"))
 }
 
-/// A guard's answer as it is kept: the verdict record the journal is about to carry, and
-/// the detail of the settlement that verdict leads to — the one thing the journal does not
+/// A guard's answer as it is kept: the attempt it answers — named by that attempt's
+/// `guard-started` record — the verdict record the journal is about to carry, and the
+/// detail of the settlement that verdict leads to, the one thing the journal does not
 /// carry, which an adopting driver needs where the settlement was never written.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Answer {
+    attempt: RecordAt,
     evaluated: GuardEvaluated,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
-/// Keep `settlement`'s detail beside `evaluated` for `node`, where a settlement follows the
-/// verdict. Durable before it returns, so a verdict the loop journals after it is always
-/// recoverable with its detail.
+/// Keep `settlement`'s detail beside `evaluated` for `node`'s `attempt`, where a settlement
+/// follows the verdict. Durable before it returns; the verdict is journalled only after it
+/// returned `Ok`, so a journalled verdict always has its answer.
 ///
 /// # Errors
 ///
@@ -94,6 +98,7 @@ struct Answer {
 fn keep_answer(
     paths: &RunPaths,
     node: &str,
+    attempt: &RecordAt,
     evaluated: &GuardEvaluated,
     settlement: &Settlement,
 ) -> Result<()> {
@@ -105,6 +110,7 @@ fn keep_answer(
         })?;
     }
     let bytes = serde_json::to_vec(&Answer {
+        attempt: attempt.clone(),
         evaluated: *evaluated,
         detail: settlement.detail.clone(),
     })
@@ -155,6 +161,7 @@ pub(crate) fn spawn(
     launch: &LaunchRecord,
     node: &Node,
     argv: &Argv,
+    attempt: RecordAt,
     cancel: CancellationToken,
     tx: Sender<Message>,
 ) -> Result<()> {
@@ -180,15 +187,16 @@ pub(crate) fn spawn(
             let Evaluated { record, settlement } =
                 evaluate(&node, ran.ended, &ran.tail, duration_ms, &cancel);
             // Kept before the loop journals the verdict, so a driver that stops between that
-            // record and the settlement leaves the settlement's detail to its adopter.
+            // record and the settlement leaves the settlement's detail to its adopter. An
+            // answer that cannot be kept stops the verdict here: the loop is told why and
+            // journals nothing, leaving the guard started and unevaluated for `adopt`.
             if let Some(settlement) = &settlement {
-                // llmlint: ignore[changed_behavior_has_e2e] a run directory the driver journals into and cannot write a file beside is a host condition — a full disk, a permission changed under a live run — that no plan or verb produces; staging it edits the run's own layout, which proves the fixture. The live settlement is unaffected, and only a recovery that also loses its driver falls back, as `recovered` says.
-                if let Err(error) = keep_answer(&paths, &node.id, &record, settlement) {
-                    eprintln!(
-                        "onepipeline: node '{}': its guard's answer could not be kept, so a \
-                         driver adopting it before it settles cannot repeat its detail: {error}",
-                        node.id
-                    );
+                if let Err(error) = keep_answer(&paths, &node.id, &attempt, &record, settlement) {
+                    let _ = tx.send(Message::GuardAnswerUnkept(Box::new((
+                        node.id.clone(),
+                        error,
+                    ))));
+                    return;
                 }
             }
             // A node the loop started has an identity; one without is a node the loader
@@ -327,19 +335,17 @@ fn failure_of(node: &Node, ending: CommandEnding) -> String {
 /// cancellation, whose park the adopter keeps.
 ///
 /// Its detail is the one the settlement would have carried, read from the answer the guard's
-/// thread kept before the verdict was journalled — only where that answer is the journalled
-/// verdict itself, so another attempt's answer is never taken for this one's. Where no such
-/// answer could be kept, the failure's cause is all that is left to say, and a node not
-/// needed carries no detail.
+/// thread kept before the verdict could be journalled — only where that answer names this
+/// `attempt` and carries this verdict, so another attempt's answer is never taken for this
+/// one's. A run directory edited after its driver stopped can have lost it; then the
+/// failure's cause is all that is left to say, a node not needed carries no detail, and the
+/// adopter says on stderr that the detail was lost.
 pub(crate) fn recovered(
     paths: &RunPaths,
     node: &Node,
+    attempt: Option<&RecordAt>,
     answered: &GuardEvaluated,
 ) -> Option<Settlement> {
-    let kept = std::fs::read(answer_of(paths, &node.id))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
-        .filter(|answer| answer.evaluated == *answered);
     let (status, outcome, cause) = match answered.verdict {
         GuardVerdict::Needed => return None,
         GuardVerdict::Failed(failure) if failure.ending() == CommandEnding::Cancelled => {
@@ -352,10 +358,22 @@ pub(crate) fn recovered(
             Some(failure_of(node, failure.ending())),
         ),
     };
+    let path = answer_of(paths, &node.id);
+    let kept = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
+        .filter(|answer| Some(&answer.attempt) == attempt && answer.evaluated == *answered);
     let detail = match kept {
         Some(answer) => answer.detail,
-        // llmlint: ignore[changed_behavior_has_e2e] reached only where the answer the guard's thread writes before the verdict is journalled could not be written or was removed under a stopped run — the host condition `keep_answer`'s caller names; staging it edits the run's own layout. The kept-answer path is `tests/e2e/guard.rs`'s adoption journey.
-        None => cause,
+        None => {
+            eprintln!(
+                "onepipeline: node '{}': its guard's verdict is journalled and its answer {} \
+                 is not this attempt's, so it is settled without what the guard said",
+                node.id,
+                path.display()
+            );
+            cause
+        }
     };
     Some(Settlement {
         detail,

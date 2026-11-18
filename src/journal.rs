@@ -94,6 +94,16 @@ impl Journal {
         self.emit_with_artifacts(kind, labels, payload, Vec::new())
     }
 
+    /// The stream and `seq` of the record this writer appended last: what names it among
+    /// every record of the run. Asked straight after an [`emit`](Self::emit) that returned
+    /// `Ok`, it names that record.
+    pub(crate) fn last_written(&self) -> crate::payload::RecordAt {
+        crate::payload::RecordAt {
+            stream: self.stream.clone(),
+            seq: self.next_seq.saturating_sub(1),
+        }
+    }
+
     /// Retain evidence under this writer's stream and next event sequence.
     pub(crate) fn artifact<T: serde::Serialize>(
         &self,

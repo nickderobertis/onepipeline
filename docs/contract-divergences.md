@@ -13655,11 +13655,20 @@ that design; these are the decisions it left to the build:
   or `guard-failed` — rather than asking the guard again, and with exactly the detail the
   amendment gives that settlement: the stderr tail of a node not needed and none where it
   said nothing, the cause and stderr tail of a failure. The journal carries no detail, so
-  before the verdict is journalled the guard's thread durably writes a private
-  `<run>/guards/<node>.answer.json` holding the verdict record beside that detail, and the
-  adopter reads it only where its verdict is the journalled one. No journal kind, payload or
-  published document changes. Where the host could not write that file, the adopter has the
-  failure's cause and nothing more to say, and a node not needed then carries no detail.
+  before a verdict that settles its node is journalled, the guard's thread durably writes a
+  private `<run>/guards/<node>.answer.json` naming the attempt — by the stream and `seq` of
+  that attempt's own `guard-started` record — beside the verdict record and that detail. The
+  adopter reads it only where it names the node's latest `guard-started` and carries the
+  journalled verdict, so another attempt's answer is never taken. No journal kind, payload or
+  published document changes.
+- **A verdict whose answer cannot be kept is not journalled.** Where that file cannot be
+  written, the guard's thread hands the loop the error instead of the verdict: the driver
+  journals neither `guard-evaluated` nor a settlement, stops with the error on its log —
+  naming the node and the `adopt` that recovers it — and leaves the node started and
+  unevaluated, so `adopt` runs its guard again once the run's directory takes the answer, as
+  it does for any guard whose driver stopped before its verdict. Only an answer removed or
+  rewritten under a stopped run is lost; the adopter then says so on stderr and settles with
+  the failure's cause alone, or no detail for a node not needed.
 - **`guard-started`'s `timeout_seconds` is always written**, as the deadline the guard is
   actually held to — the node's `guard_timeout_seconds`, or 300 where it states none.
 - **A guarded human node derives `ready`, not `waiting`, until its guard says *needed*.** Its
