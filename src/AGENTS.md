@@ -76,6 +76,11 @@ Rules:
   `oneharness_core`'s own parser, and its refusal is an `Error` the engine's
   `attempt` settles as `infrastructure-failure`; nothing in it journals, and no
   value a hook prints may reach a log, an event or a detail.
+- `guard.rs` is a node's guard, run through `commandstep::run_program` — the one runner a
+  command node's command uses, so both are spawned, told the run's coordinates, logged,
+  bounded and stopped alike. A guarded human node derives `ready` rather than `waiting`
+  until its guard answers (`RunState::statuses`), so no decision, item or `attest` reads it
+  as waiting on a person first.
 - `projection.rs` folds the journal into the plan of record. The run's
   `plan.json` is its launch record and is never rewritten, and the store the
   plan was read from is never re-read to decide what the run is doing.
