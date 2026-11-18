@@ -812,10 +812,11 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     // and hands it every wait instead of sleeping; the peer answers each wait by
     // moving its time on by exactly that much. So every moment of the wait is
     // one the watch asked about, in order, and how promptly the host runs it or
-    // this journey changes none of them: it gives up no sooner and no later than
-    // the budget less the reserve from the moment it took its deadline if, and
-    // only if, it returns `elapsed` with the clock at exactly that, having asked
-    // nothing once it read it there.
+    // this journey changes none of them. It takes its deadline and arms before
+    // it first waits, so before the clock has moved from 0; it gives up no sooner
+    // and no later than the budget less the reserve from then if, and only if, it
+    // returns `elapsed` with the clock at exactly that, having asked nothing once
+    // it read it there.
     let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
     let peer = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     peer.set_nonblocking(true)
@@ -839,6 +840,8 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     });
     let asks = connected.expect("the watch asked its clock");
     asks.set_nonblocking(false).expect("a blocking stream");
+    asks.set_nodelay(true)
+        .expect("answers sent as they are written");
     asks.set_read_timeout(Some(Duration::from_secs(120)))
         .expect("a bounded read");
     let mut answers = asks.try_clone().expect("a second handle");
@@ -851,20 +854,33 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         match std::io::BufRead::read_line(&mut asks, &mut question) {
             Ok(0) => break,
             Ok(_) => {}
-            Err(error) => panic!("the watch's clock failed after {asked:?}: {error}"),
+            Err(error) => {
+                let _ = watch.kill();
+                panic!("the watch's clock failed after {asked:?}: {error}")
+            }
         }
         let question = question.trim_end().to_owned();
         asked.push(format!("{question} @{now}"));
-        assert!(
-            asked.len() < 10_000,
-            "the watch never stopped asking: {asked:?}"
-        );
+        // Some hundred questions bring a correct watch to its deadline; one still
+        // asking long after is waiting past it with its clock standing still.
+        if asked.len() >= 1_000 {
+            let _ = watch.kill();
+            panic!("the watch never gave up: {asked:?}");
+        }
         let answer = match question.strip_prefix("wait ") {
             None if question == "now" => now.to_string(),
             None => panic!("the watch asked its clock `{question}`"),
             Some(millis) => {
-                // Armed and waiting on this answer, its lease and terms are there.
-                armed.get_or_insert_with(|| armed_terms(&world, "quiet", pid));
+                // It takes its deadline, then publishes its lease, then waits: at its
+                // first wait the lease and terms are there, and stay while it waits on
+                // this answer. A wait before them is one before it armed.
+                if armed.is_none() {
+                    if published_lease(&world, "quiet", pid).is_none() {
+                        let _ = watch.kill();
+                        panic!("the watch waited before it armed: {asked:?}");
+                    }
+                    armed = Some(armed_terms(&world, "quiet", pid));
+                }
                 now += millis.parse::<u64>().expect("a wait in milliseconds");
                 "ok".to_owned()
             }
