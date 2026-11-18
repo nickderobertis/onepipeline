@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::commandstep::{run_program, with_tail, Ended};
+use crate::commandstep::{run_program, with_tail, Ended, Program};
 use crate::engine::{Message, Settled, Settlement};
 use crate::error::{Error, Result};
 use crate::executor::CancellationToken;
@@ -179,11 +179,13 @@ pub(crate) fn spawn(
                 &paths,
                 &launch,
                 &node.id,
-                &argv,
-                &log_of(&paths, &node.id),
-                Some(timeout_of(&node)),
+                &Program {
+                    argv: &argv,
+                    log: &log_of(&paths, &node.id),
+                    timeout_seconds: Some(timeout_of(&node)),
+                    outputs: None,
+                },
                 &cancel,
-                None,
             );
             let duration_ms = u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX);
             let Evaluated { record, settlement } =

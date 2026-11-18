@@ -257,11 +257,13 @@ fn run_to_end(
         paths,
         launch,
         &node.id,
-        argv,
-        &log_of(paths, &node.id),
-        node.timeout_seconds,
+        &Program {
+            argv,
+            log: &log_of(paths, &node.id),
+            timeout_seconds: node.timeout_seconds,
+            outputs: Some(outputs),
+        },
         cancel,
-        Some(outputs),
     );
     let failed = |detail: String| Settlement {
         detail: Some(detail),
@@ -348,11 +350,23 @@ pub(crate) struct Ran {
     pub(crate) tail: Vec<u8>,
 }
 
-/// Run `argv` for node `node` to its end — no shell, from the launch directory, with the
+/// One program to run for a node: what it is, where its output goes, how long it may take,
+/// and the file it may publish outputs to — `None` for a guard, which publishes nothing.
+pub(crate) struct Program<'a> {
+    /// The program and its arguments.
+    pub(crate) argv: &'a Argv,
+    /// The log its stdout and stderr are appended to.
+    pub(crate) log: &'a std::path::Path,
+    /// Its deadline, or none.
+    pub(crate) timeout_seconds: Option<std::num::NonZeroU64>,
+    /// The file a command step is told it may publish to.
+    pub(crate) outputs: Option<&'a std::path::Path>,
+}
+
+/// Run `program` for node `node` to its end — no shell, from the launch directory, with the
 /// driver's environment and the run's coordinates on top — appending its stdout and stderr
-/// to `log_path`, stopping its process tree at `timeout_seconds` or when `cancel` is
-/// cancelled, and answer how it ended with the end of its stderr. `outputs` is the file a
-/// command step is told it may publish to, and `None` for a guard, which publishes nothing.
+/// to its log, stopping its process tree at its deadline or when `cancel` is cancelled, and
+/// answer how it ended with the end of its stderr.
 ///
 /// The one runner a command node's command and a guard share, so the two are started,
 /// told the run's coordinates, logged, bounded and stopped alike.
@@ -360,12 +374,15 @@ pub(crate) fn run_program(
     paths: &RunPaths,
     launch: &LaunchRecord,
     node: &str,
-    argv: &Argv,
-    log_path: &std::path::Path,
-    timeout_seconds: Option<std::num::NonZeroU64>,
+    program: &Program<'_>,
     cancel: &CancellationToken,
-    outputs: Option<&std::path::Path>,
 ) -> Ran {
+    let Program {
+        argv,
+        log: log_path,
+        timeout_seconds,
+        outputs,
+    } = *program;
     let not_started = |why: String| Ran {
         ended: Ended::NotStarted(why),
         tail: Vec::new(),
