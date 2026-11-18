@@ -243,40 +243,6 @@ fn armed_terms(world: &World, flow: &str, pid: u32) -> (u64, u64) {
     (began, deadline)
 }
 
-/// A pipe whose buffer is already full. A process handed its writer as standard
-/// output is held at its first write there — at a point of its own choosing,
-/// whenever the host gets round to running it — until the reader is drained.
-fn filled_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-    let (reader, mut writer) = std::io::pipe().expect("a pipe");
-    let fd = writer.as_raw_fd();
-    // SAFETY: reads the status flags of a descriptor this function owns.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    assert!(flags >= 0, "the pipe's flags could not be read");
-    // SAFETY: the same descriptor, its own flags and `O_NONBLOCK`.
-    let set = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    assert_eq!(set, 0, "the pipe could not be made non-blocking");
-    // Large writes first, which a host that grows a pipe's buffer on demand grows
-    // to its largest for; then single bytes, until not one more fits. Newlines,
-    // so what is drained afterwards is the watch's lines between blank ones.
-    for chunk in [1 << 20, 1] {
-        let filler = vec![b'\n'; chunk];
-        loop {
-            match writer.write(&filler) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("the pipe could not be filled: {error}"),
-            }
-        }
-    }
-    // SAFETY: the same descriptor, its flags as they were, so its writer blocks.
-    let reset = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-    assert_eq!(reset, 0, "the pipe could not be made blocking again");
-    (reader, writer)
-}
-
 impl Returned {
     /// Assert the status and the condition, and that the human ending line
     /// carries the cursor its record does.
@@ -788,16 +754,16 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
     assert_eq!(flow.ended(), 0);
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the wait this journey
-// measures is the behaviour under test — a watch returning within its wake budget, which
-// only a clock can show — and it is `flow`, `flowwatch`, `watch`, `watchers` and `unwatched`
-// at once, so the narrowest edge it can honestly sit behind is the crate's, as the `mod
-// flow` declaration in `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own
-// timed journeys behind the same edge for the same reason.
-/// Under a wake budget a `watch --flow` given no `--timeout` gives up at the
-/// budget less the reserve — no sooner, on the wall clock; inside the budget,
-/// by the deadline it arms; and no later, by never reading the flow again once
-/// that deadline has passed; one whose `--timeout` equals the budget does not
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the behaviour under test
+// is a watch returning within its wake budget, and this journey is `flow`, `flowwatch`,
+// `watch`, `watchers`, `unwatched` and the watch's clock seam in `ordering` at once, so the
+// narrowest edge it can honestly sit behind is the crate's, as the `mod flow` declaration in
+// `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own timed journeys behind
+// the same edge for the same reason.
+/// Under a wake budget a `watch --flow` given no `--timeout` gives up at
+/// exactly the budget less the reserve on a clock the journey drives — no
+/// sooner, and no later, asking nothing more once it reads it there — saying a
+/// heartbeat each quiet second until then; one whose `--timeout` equals the budget does not
 /// qualify, naming the reserve; and with the budget as a flag, the line names
 /// `--timeout <budget less the reserve>`, which qualifies.
 #[test]
@@ -839,130 +805,116 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     qualifying.end();
 
     // No event, no timeout: it gives up at the budget less the reserve. Last,
-    // so the surface this puts on the flow reaches none of the guard's readings
-    // above. Two such watches, armed together, one on each of two flows: each
-    // proves one bound from what the watch itself wrote, and neither from how
-    // promptly the host runs the watch or this journey.
+    // so no reading of the flow it makes reaches the guard's readings above.
     //
-    // Inside the budget, `held`. Its standard output is a pipe this journey
-    // filled before starting it, so the first line it says holds it at that
-    // write until the pipe is drained. A watch says a heartbeat only after it
-    // has read the flow and then asked whether its deadline has come and found
-    // it has not. Held there, its lease and terms stay to be read — the deadline
-    // they record is exactly the budget less the reserve from the instant the
-    // lease records — and that deadline passes while it can do nothing: it took
-    // its deadline before publishing its lease, so the deadline has passed once
-    // the budget less the reserve has since this journey saw the lease. A
-    // surface is then put on the flow and the pipe drained. One that gives up
-    // at its deadline asks again before it reads the flow, and returns
-    // `elapsed`; one still waiting past it reads the flow, and wakes on the
-    // surface. That order is the same however late the host runs either party.
-    //
-    // No sooner, `free`: from before its spawn to the stamp the filesystem puts
-    // on its last write, its return record. It takes its deadline after it is
-    // spawned and writes that record no sooner, so a slow or loaded host only
-    // lengthens that span: it can fail this for a watch that gave up early,
-    // never for one that did not, and when this journey looks plays no part.
+    // When is read off a clock this journey drives rather than the host's. The
+    // watch asks the peer `ONEPIPELINE_TEST_FLOW_WATCH_CLOCK` names for the time
+    // and hands it every wait instead of sleeping; the peer answers each wait by
+    // moving its time on by exactly that much. So every moment of the wait is
+    // one the watch asked about, in order, and how promptly the host runs it or
+    // this journey changes none of them: it gives up no sooner and no later than
+    // the budget less the reserve from the moment it took its deadline if, and
+    // only if, it returns `elapsed` with the clock at exactly that, having asked
+    // nothing once it read it there.
     let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
-    let still = Flowing::start(&world, "still", &[gate(&world, "still-end")]);
-    let (drain, holding) = filled_pipe();
-    let held_human = world.root.join("held-watch.stderr");
-    let mut held = budgeted
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+    peer.set_nonblocking(true)
+        .expect("a listener that can be polled");
+    let address = peer.local_addr().expect("an address").to_string();
+    // llmlint: ignore-block[tests_mirror_real_usage] the planner's ruling c33.0 asks for a test-only
+    // clock seam so this journey proves the wake budget without the host's scheduling; the
+    // watch is the real binary over a real flow, and only where its time comes from is the peer's.
+    let mut watch = budgeted
         .cmd(&["watch", "--flow", "quiet", "--tick-interval", "1"])
-        .stdout(holding)
-        .stderr(std::fs::File::create(&held_human).expect("a stderr file"))
+        .env("ONEPIPELINE_TEST_FLOW_WATCH_CLOCK", &address)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .expect("the held watch starts");
-    let held_pid = held.id();
-    let records = world.root.join("free-watch.jsonl");
-    let human = world.root.join("free-watch.stderr");
-    let spawned = std::time::SystemTime::now();
-    let mut free = budgeted
-        .cmd(&["watch", "--flow", "still"])
-        .stdout(std::fs::File::create(&records).expect("a records file"))
-        .stderr(std::fs::File::create(&human).expect("a stderr file"))
-        .spawn()
-        .expect("the free watch starts");
-
-    world.until("the held watch to publish its lease", |_| {
-        published_lease(&world, "quiet", held_pid).is_some()
-            || held.try_wait().is_ok_and(|exited| exited.is_some())
+        .expect("the watch starts");
+    let pid = watch.id();
+    let mut connected = None;
+    world.until("the watch to ask its clock", |_| {
+        connected = peer.accept().ok().map(|(stream, _)| stream);
+        connected.is_some() || watch.try_wait().is_ok_and(|exited| exited.is_some())
     });
-    let past_its_deadline = Instant::now() + Duration::from_millis(10_000 - reserve_ms);
-    world.until("the held watch to say its first line", |_| {
-        std::fs::read_to_string(&held_human).is_ok_and(|said| said.contains('\n'))
-            || held.try_wait().is_ok_and(|exited| exited.is_some())
-    });
-    let first = std::fs::read_to_string(&held_human).unwrap_or_default();
-    assert!(
-        first.starts_with("-- watching flow quiet "),
-        "the held watch said no heartbeat a tick into its wait, or no longer waits: {first}"
+    let asks = connected.expect("the watch asked its clock");
+    asks.set_nonblocking(false).expect("a blocking stream");
+    asks.set_read_timeout(Some(Duration::from_secs(120)))
+        .expect("a bounded read");
+    let mut answers = asks.try_clone().expect("a second handle");
+    let mut asks = std::io::BufReader::new(asks);
+    let mut now = 0_u64;
+    let mut asked: Vec<String> = Vec::new();
+    let mut armed = None;
+    loop {
+        let mut question = String::new();
+        match std::io::BufRead::read_line(&mut asks, &mut question) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => panic!("the watch's clock failed after {asked:?}: {error}"),
+        }
+        let question = question.trim_end().to_owned();
+        asked.push(format!("{question} @{now}"));
+        assert!(
+            asked.len() < 10_000,
+            "the watch never stopped asking: {asked:?}"
+        );
+        let answer = match question.strip_prefix("wait ") {
+            None if question == "now" => now.to_string(),
+            None => panic!("the watch asked its clock `{question}`"),
+            Some(millis) => {
+                // Armed and waiting on this answer, its lease and terms are there.
+                armed.get_or_insert_with(|| armed_terms(&world, "quiet", pid));
+                now += millis.parse::<u64>().expect("a wait in milliseconds");
+                "ok".to_owned()
+            }
+        };
+        std::io::Write::write_all(&mut answers, format!("{answer}\n").as_bytes())
+            .expect("the answer reaches the watch");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let output = watch.wait_with_output().expect("the watch returns");
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    let human = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(WATCH_ELAPSED),
+        "{said}{human}\nthe clock was asked: {asked:?}"
     );
-    let (began, deadline) = armed_terms(&world, "quiet", held_pid);
+    let (began, deadline) = armed.expect("the watch waited at least once");
     assert_eq!(
         deadline - began,
         10_000 - reserve_ms,
         "a watch under a 10s wake budget armed a deadline {}ms after it began",
         deadline - began
     );
-    world.until("the held watch's deadline to pass", |_| {
-        Instant::now() >= past_its_deadline
-    });
-    world
-        .run(&[
-            "surface",
-            "--flow",
-            "quiet",
-            "--kind",
-            "finding",
-            "--message",
-            "after the deadline",
-        ])
-        .exited(EXIT_SUCCESS);
-    let drained = std::thread::spawn(move || {
-        let mut said = Vec::new();
-        let mut drain = drain;
-        std::io::Read::read_to_end(&mut drain, &mut said).expect("the held watch's records");
-        said
-    });
-    let status = held.wait().expect("the held watch returns");
-    let said = String::from_utf8_lossy(&drained.join().expect("the pipe drains")).into_owned();
-    let said: Vec<&str> = said.lines().filter(|line| !line.is_empty()).collect();
-    let human_said = std::fs::read_to_string(&held_human).unwrap_or_default();
     assert_eq!(
-        status.code(),
-        Some(WATCH_ELAPSED),
-        "the held watch did not give up at its deadline: {said:?}\n{human_said}"
+        asked.last().map(String::as_str),
+        Some(format!("now @{}", 10_000 - reserve_ms).as_str()),
+        "the watch did not give up the moment its clock read the budget less the reserve: \
+         {asked:?}"
     );
-    assert!(
-        said.last()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
-            .is_some_and(|record| record["watch"] == "return" && record["condition"] == "elapsed"),
-        "the held watch's last record is not its elapsed return: {said:?}"
+    assert_eq!(
+        now,
+        10_000 - reserve_ms,
+        "the watch waited to {now}ms on its clock under a 10s wake budget: {asked:?}"
     );
-
-    let status = free.wait().expect("the free watch returns");
-    let took = std::fs::metadata(&records)
-        .and_then(|found| found.modified())
-        .expect("when the watch last wrote its records")
-        .duration_since(spawned)
-        .unwrap_or_default();
-    let said = std::fs::read_to_string(&records).unwrap_or_default();
-    let human = std::fs::read_to_string(&human).unwrap_or_default();
-    assert_eq!(status.code(), Some(WATCH_ELAPSED), "{said}{human}");
-    assert!(
-        said.lines()
-            .last()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
-            .is_some_and(|record| record["watch"] == "return"),
-        "the watch's last record is not its return: {said}"
+    let records: Vec<Value> = said
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a record per line"))
+        .collect();
+    let beats = records
+        .iter()
+        .filter(|record| record["watch"] == "heartbeat")
+        .count();
+    assert_eq!(
+        (
+            beats,
+            records.last().map(|record| record["condition"].clone())
+        ),
+        (7, Some(json!("elapsed"))),
+        "one heartbeat a quiet second before the deadline, then the elapsed return: {said}"
     );
-    assert!(
-        took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
-        "the watch wrote its return {took:?} after its spawn, before the budget less the reserve"
-    );
-    still.open("still-end");
-    assert_eq!(still.ended(), 0);
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }

@@ -622,14 +622,25 @@ pub(crate) fn wake_within(
     tick: Duration,
     quiet_since: Instant,
 ) -> Duration {
+    wake_within_at(Instant::now, deadline, tick, quiet_since)
+}
+
+/// [`wake_within`], reading the time from `now` — which it asks once for each
+/// of the two spans it measures, as [`wake_within`] reads the host's clock.
+pub(crate) fn wake_within_at(
+    mut now: impl FnMut() -> Instant,
+    deadline: Option<Instant>,
+    tick: Duration,
+    quiet_since: Instant,
+) -> Duration {
     let until_deadline = deadline.map_or(Duration::MAX, |deadline| {
         deadline
-            .saturating_duration_since(Instant::now())
+            .saturating_duration_since(now())
             .min(DEADLINE_CHECK)
     });
     let until_heartbeat = match tick.is_zero() {
         true => Duration::MAX,
-        false => tick.saturating_sub(quiet_since.elapsed()),
+        false => tick.saturating_sub(now().saturating_duration_since(quiet_since)),
     };
     until_deadline.min(until_heartbeat)
 }
@@ -927,10 +938,19 @@ impl Transport for RunChanges {
 /// than one far away, which is what keeps `0`'s published meaning, read once and
 /// return, the value it always was.
 pub(crate) fn deadline(timeout: WatchTimeout) -> Result<Option<Instant>> {
+    deadline_from(timeout, Instant::now)
+}
+
+/// [`deadline`], counted from the instant `now` answers — asked only for a wait
+/// with a bound, as [`deadline`] reads the host's clock only then.
+pub(crate) fn deadline_from(
+    timeout: WatchTimeout,
+    now: impl FnOnce() -> Instant,
+) -> Result<Option<Instant>> {
     let WatchTimeout::Bounded(seconds) = timeout else {
         return Ok(None);
     };
-    Instant::now()
+    now()
         .checked_add(Duration::from_secs(seconds))
         .map(Some)
         .ok_or_else(|| {
