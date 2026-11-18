@@ -750,16 +750,21 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     let mut watch = watching(&budgeted, "quiet", &[]);
     let mine = format!("{}-", watch.child.id());
     let flow_dir = world.runs.join(".flows").join("quiet");
-    let lease = std::fs::read_dir(flow_dir.join("watchers"))
-        .expect("the flow's leases")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&mine))
-        })
-        .expect("the watch holds a lease until it returns");
+    // The published lease, not the temporary it is renamed from, which shares
+    // its prefix; the terms are published before it, so they are there too.
+    let published = || {
+        std::fs::read_dir(flow_dir.join("watchers"))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&mine) && name.ends_with(".json"))
+            })
+    };
+    world.until("the watch to publish its lease", |_| published().is_some());
+    let lease = published().expect("the watch holds its lease until it returns");
     let read = |path: &std::path::Path| -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).expect("the record")).expect("JSON")
     };
