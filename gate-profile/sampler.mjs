@@ -9,7 +9,7 @@
 // interval is kept with them: that jump is exactly what the children and everything beneath them
 // used, which no sample of their own can see once they have exited. gate-profile/fold.mjs turns
 // these into each Nx task's CPU. Prints `ready` once the first sample is taken; writes <out.json>
-// and exits 0 when stdin ends. Exit 2 for a usage error, 3 when /proc cannot be read.
+// and exits 0 when stdin ends. Exit 2 for a usage error, 3 when /proc cannot be read or the samples cannot be written.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 
@@ -237,4 +237,3 @@ process.stdin.on("data", () => {});
 process.stdin.on("end", finish);
 // An interrupted run still has its samples written: the gate under it is stopped by the same signal.
 process.on("SIGINT", finish);
-process.on("SIGTERM", finish);

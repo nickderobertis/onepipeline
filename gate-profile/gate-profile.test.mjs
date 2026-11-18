@@ -197,6 +197,8 @@ test("gate-profile refuses an unknown recipe, and reports a failing one up to it
   assert.match(unknown.stderr, /no recipe 'nosuch'/);
   assert.deepEqual(runDirs(dir), []);
 
+  // An uncommitted change is named with the commit it sits on.
+  writeFileSync(join(dir, "uncommitted.txt"), "a change\n");
   // Settings of a profiled run this one is started inside reach none of this run's records.
   const broken = just(dir, ["gate-profile", "broken"], {
     ONEPIPELINE_GATE_PROFILE_DIR: join(dir, "not-this-run"),
@@ -215,6 +217,8 @@ test("gate-profile refuses an unknown recipe, and reports a failing one up to it
   );
   assert.deepEqual(report.tasks, []);
   assert.deepEqual(report.phases[0].within, []);
+  assert.equal(report.commit.dirty, true);
+  rmSync(join(dir, "uncommitted.txt"));
 
   const missing = just(dir, ["gate-profile", "missing"]);
   assert.equal(missing.status, 1, missing.stderr);
@@ -314,6 +318,18 @@ test("gate-profile exits 3, saying why, when it cannot record or fold the run", 
       /fold them again with `node gate-profile\/fold\.mjs target\/gate-profile\//,
     );
   });
+});
+
+test("a workspace outside git is profiled with no commit to name", (t) => {
+  const { dir } = fixture(t);
+  rmSync(join(dir, ".git"), { recursive: true, force: true });
+  const result = just(dir, ["gate-profile", "broken"]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.deepEqual(readReport(dir, runDirs(dir)[0]).commit, { sha: null, dirty: false });
+  assert.match(
+    readFileSync(join(dir, "target/gate-profile", runDirs(dir)[0], "report.md"), "utf8"),
+    /Commit `unknown`/,
+  );
 });
 
 test("a second run within the same second gets a directory of its own", (t) => {

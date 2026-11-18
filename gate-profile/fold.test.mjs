@@ -333,6 +333,19 @@ test("refolding refuses records that are not JSON, run backwards or loop, naming
       /ends at .*, before it starts/,
     ],
     [
+      "run.json",
+      (base) =>
+        JSON.stringify({
+          recipe: "r",
+          start: base,
+          end: base + 1,
+          cpu_ms_before: [10, 0],
+          cpu_ms_after: [5, 0],
+          exit: 0,
+        }),
+      /its CPU counters fall between start and end/,
+    ],
+    [
       "phases.jsonl",
       (base) =>
         ["a", "b"]
