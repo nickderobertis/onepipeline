@@ -335,9 +335,12 @@ fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1e3
 }
 
+/// User CPU, system CPU and peak RSS in KiB, as `getrusage` reports them.
+type Usage = (Duration, Duration, u64);
+
 /// `getrusage`'s user and system CPU and peak RSS for `who`.
 #[cfg(unix)]
-fn rusage(who: libc::c_int) -> Option<(Duration, Duration, u64)> {
+fn rusage(who: libc::c_int) -> Option<Usage> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: `getrusage` fills the one `rusage` the pointer names, which lives for
     // the call; it is read only when the call says it filled it.
@@ -396,10 +399,7 @@ pub(crate) fn finish(exit_status: i32) {
     #[cfg(unix)]
     let (own, children) = (rusage(libc::RUSAGE_SELF), rusage(libc::RUSAGE_CHILDREN));
     #[cfg(not(unix))]
-    let (own, children): (
-        Option<(Duration, Duration, u64)>,
-        Option<(Duration, Duration, u64)>,
-    ) = (None, None);
+    let (own, children): (Option<Usage>, Option<Usage>) = (None, None);
     let spans = TOTALS.with_borrow(|totals| {
         totals
             .iter()
