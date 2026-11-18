@@ -49,6 +49,7 @@
 //! correctly today; passing silently would let a plan load looking like it had
 //! cleared a bar nobody applied.
 
+use crate::spans::Timed as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -200,7 +201,7 @@ fn ask(verb: &[&str], repo: &str) -> Result<String, String> {
     let output = Command::new(&binary)
         .args(verb)
         .arg(repo)
-        .output()
+        .timed_output()
         .map_err(|error| {
             format!(
                 "{} could not be run: {error} (set {BINARY_ENV} to an executable one)",
@@ -441,7 +442,7 @@ fn ask_the_hook(checkout: &Path, title: &str) -> Result<Option<Rejected>, String
     let ran = Command::new(&hook)
         .arg(&message)
         .current_dir(checkout)
-        .output()
+        .timed_output()
         .map_err(|error| {
             format!(
                 "the {COMMIT_MSG_HOOK} hook at {} could not be run: {error}",
@@ -484,7 +485,7 @@ fn git_path(checkout: &Path, name: &str) -> Result<PathBuf, String> {
     let output = Command::new("git")
         .args(["rev-parse", "--git-path", name])
         .current_dir(checkout)
-        .output()
+        .timed_output()
         .map_err(|error| {
             format!(
                 "git could not be run in the publication checkout {}: {error}",

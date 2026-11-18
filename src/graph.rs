@@ -666,7 +666,10 @@ pub(crate) fn validate_graph_sets(
                 "{context} graph '{reference}' sets {sets:?}: {why}"
             ))
         })?;
-    oneagentgraph::config::validate(&graph).map_err(|why| {
+    crate::spans::within("oneagentgraph:config::validate", || {
+        oneagentgraph::config::validate(&graph)
+    })
+    .map_err(|why| {
         Error::Invalid(format!(
             "{context} graph '{reference}' sets {sets:?}: {why}"
         ))
@@ -890,7 +893,7 @@ pub(crate) fn stacking_bases<'a>(
     {
         if let Some(repo) = &node.repo {
             identities.entry(repo.as_str()).or_insert_with(|| {
-                onevcs::release_targets(repo)
+                crate::spans::within("onevcs:release_targets", || onevcs::release_targets(repo))
                     .map(|repository| repository.identity)
                     .map_err(|failure| failure.to_string())
             });

@@ -165,9 +165,10 @@ pub(crate) fn ask(plan: &Plan, asked: impl Fn(&Node) -> bool) -> Asked {
                 consumes: node.consumes.get(dep).cloned(),
                 consumer_policy: node.merge_policy,
             };
-            let verdict = answers
-                .entry(format!("{query:?}"))
-                .or_insert_with(|| onevcs::adoption_check(&query).map_err(|e| e.to_string()));
+            let verdict = answers.entry(format!("{query:?}")).or_insert_with(|| {
+                crate::spans::within("onevcs:adoption_check", || onevcs::adoption_check(&query))
+                    .map_err(|e| e.to_string())
+            });
             let verdict = match verdict {
                 Ok(verdict) => verdict,
                 Err(failure) => {

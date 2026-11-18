@@ -281,9 +281,11 @@ impl Store {
     pub(crate) fn engine(&self, flags: &Layer) -> std::result::Result<Built, ConfigError> {
         let Loaded {
             config, secrets, ..
-        } = config::load(&self.dir, &self.environment, flags)?;
+        } = crate::spans::within("configuration:store", || {
+            config::load(&self.dir, &self.environment, flags)
+        })?;
         Ok(Built {
-            engine: Engine::build(&config, &secrets),
+            engine: crate::spans::within("onetaskgraph:build", || Engine::build(&config, &secrets)),
             page: config.page_size(),
             config,
         })
@@ -697,6 +699,7 @@ impl Reader {
     /// the store operation `operation`.
     fn call<T>(&self, operation: crate::storeops::Operation, future: impl Future<Output = T>) -> T {
         crate::storeops::record(operation);
+        let _span = crate::spans::library("onetaskgraph", operation.as_str());
         self.runtime.block_on(future)
     }
 

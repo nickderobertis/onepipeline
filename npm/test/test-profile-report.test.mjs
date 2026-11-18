@@ -2,19 +2,39 @@
 // in the shape `onepipeline_testfakes::profile` writes them.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CATEGORIES, SCHEMA, loadRecords, totals } from "../../scripts/test-profile-report.mjs";
+import {
+  CATEGORIES,
+  SCHEMA,
+  SPAN_SCHEMA,
+  SPANS_SUFFIX,
+  loadRecords,
+  spanRecordProblem,
+  totals,
+} from "../../scripts/test-profile-report.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const script = join(root, "scripts", "test-profile-report.mjs");
 // The record a real test wrote, at the shape `tests/e2e/profiling.rs` holds every
 // record the harness writes to: the one source both sides of the format answer to.
-const golden = JSON.parse(
-  readFileSync(join(root, "tests", "golden", "test-profile-record-v2.json"), "utf8"),
+const goldenAt = (name) => JSON.parse(readFileSync(join(root, "tests", "golden", name), "utf8"));
+const golden = goldenAt("test-profile-record-v3.json");
+// Schema 2's record, which a leg that ran before schema 3 left; schema 1 is the same
+// shape without the `unfinished` ending.
+const goldenV2 = goldenAt("test-profile-record-v2.json");
+// The record the `onepipeline` binary writes under ONEPIPELINE_PROFILE_SPANS, at the shape
+// `tests/e2e/span_profile.rs` holds every record the binary writes to.
+const spanGolden = goldenAt("span-profile-record-v1.json");
+// The binary the crate's debug build leaves, which this suite's Nx target builds first.
+const binary = join(
+  root,
+  "target",
+  "debug",
+  process.platform === "win32" ? "onepipeline.exe" : "onepipeline",
 );
 
 let scratch;
@@ -46,6 +66,9 @@ function record(test, { run = "now", attempt = 1, startedAt = 100, wall, spent =
     categories,
     programs: {},
     unattributed_s: wall - attributed,
+    nproc: null,
+    load_1m_start: null,
+    load_1m_end: null,
   };
 }
 
@@ -173,7 +196,10 @@ test("each platform's category cost is a ratio to the baseline's over the tests 
   const markdown = report(`linux=${join(scratch, "linux")}`, `windows=${join(scratch, "windows")}`);
   assert.match(markdown, /## Against linux/);
   assert.match(markdown, /\| windows \| 3 \| 2\.41x \| 2\.40x \| 4\.00x \| - \|/);
-  assert.match(markdown, /\| e2e::readjust::slow \| 1 \| 10\.0 \| 40\.0% \| 40\.0% \|/);
+  assert.match(
+    markdown,
+    /\| e2e::readjust::slow \| 1 \| 10\.0 \| - \| - → - \| 40\.0% \| 40\.0% \|/,
+  );
 });
 
 test("a missing baseline is named rather than compared against", () => {
@@ -219,7 +245,7 @@ test("a file that is not a record of this schema is refused by its path", () => 
   writeFileSync(join(dir, "e2e", "newer.json"), JSON.stringify({ ...golden, schema: SCHEMA + 1 }));
   refused(
     ["--out", join(scratch, "x"), `other=${dir}`],
-    /newer\.json is not a test-profile record: it is schema 3, and this reads 1 and 2/,
+    /newer\.json is not a test-profile record: it is schema 4, and this reads 1, 2 and 3/,
     /next: remove .*newer\.json, or rerun the test that wrote it/,
   );
   const broken = join(scratch, "broken");
@@ -420,4 +446,215 @@ test("a schema-1 record, written before the unfinished ending, is read as it was
   write(dir, [{ ...record("a::old", { wall: 2 }), schema: 1 }]);
   const [read] = JSON.parse(report("--json", `old=${dir}`)).platforms;
   assert.equal(read.breakdown.total.tests, 1);
+});
+
+test("the reader still reads a schema-2 and a schema-1 record, which carry no CPU or load", () => {
+  for (const schema of [1, 2]) {
+    const dir = join(scratch, `golden-v${schema}`);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "record.json"), JSON.stringify({ ...goldenV2, schema }));
+    const [read] = loadRecords(dir);
+    const total = totals([read]);
+    assert.equal(total.wall, goldenV2.wall_s);
+    assert.equal(total.cpu, null);
+    assert.deepEqual(total.load, { start: null, end: null });
+  }
+});
+
+test("a schema-3 record's CPU and load are checked, and null where a platform has none", () => {
+  const total = totals([golden]);
+  assert.equal(total.cpu, golden.programs.cargo.cpu_s);
+  assert.deepEqual(total.load, { start: golden.load_1m_start, end: golden.load_1m_end });
+  const nulls = {
+    ...golden,
+    nproc: null,
+    load_1m_start: null,
+    load_1m_end: null,
+    programs: { cargo: { ...golden.programs.cargo, cpu_s: null } },
+  };
+  assert.equal(totals([nulls]).cpu, null);
+  const cases = [
+    [{ nproc: 0 }, /nproc is not a positive count or null/],
+    [{ load_1m_end: "high" }, /load_1m_end is not a nonnegative number or null/],
+    [
+      { programs: { cargo: { ...golden.programs.cargo, cpu_s: -1 } } },
+      /programs\.cargo\.cpu_s is not a nonnegative number or null/,
+    ],
+  ];
+  for (const [i, [change, message]] of cases.entries()) {
+    const dir = join(scratch, `v3-field-${i}`);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "record.json"), JSON.stringify({ ...golden, ...change }));
+    refused(["--out", join(scratch, "x"), `field=${dir}`], message, /next: remove /);
+  }
+  const dir = join(scratch, "v3-nulls");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "record.json"), JSON.stringify(nulls));
+  assert.equal(loadRecords(dir).length, 1);
+});
+
+test("the CPU and load sit beside wall in the per-test and per-module tables", () => {
+  const dir = join(scratch, "loaded");
+  write(dir, [
+    {
+      ...record("loaded::one", { wall: 4, spent: { spawn: 2 } }),
+      programs: { onepipeline: { count: 2, s: 2, cpu_s: 1.5 } },
+      nproc: 8,
+      load_1m_start: 1,
+      load_1m_end: 3,
+    },
+    {
+      ...record("loaded::two", { wall: 2, spent: { spawn: 1 } }),
+      programs: { git: { count: 1, s: 1, cpu_s: 0.5 } },
+      nproc: 8,
+      load_1m_start: 3,
+      load_1m_end: 5,
+    },
+  ]);
+  const markdown = report(`loaded=${dir}`);
+  assert.match(markdown, /\| \| tests \| wall s \| child cpu s \| load 1m \| spawn \|/);
+  assert.match(markdown, /\| e2e::loaded::one \| 1 \| 4\.0 \| 1\.5 \| 1\.00 → 3\.00 \| 50\.0% \|/);
+  assert.match(markdown, /\| e2e::loaded \| 2 \| 6\.0 \| 2\.0 \| 2\.00 → 4\.00 \|/);
+});
+
+test("the span reader reads the record the binary writes, field for field", () => {
+  assert.equal(SPAN_SCHEMA, spanGolden.schema);
+  assert.equal(spanRecordProblem(spanGolden), undefined);
+  const cases = [
+    [{ schema: 2 }, /it is span schema 2, and this reads 1/],
+    [{ wall_ms: -1 }, /wall_ms is not a nonnegative number/],
+    [{ children_user_cpu_ms: "x" }, /children_user_cpu_ms is not a nonnegative number or null/],
+    [
+      { spans: [{ ...spanGolden.spans[0], self_wall_ms: 99, wall_ms: 1 }] },
+      /spent 99ms of its own/,
+    ],
+    [{ wall_ms: 0.001 }, /its spans hold .*ms of a 0\.001ms process/],
+  ];
+  for (const [change, message] of cases) {
+    assert.match(spanRecordProblem({ ...spanGolden, ...change }) ?? "", message);
+  }
+  assert.equal(
+    spanRecordProblem({ ...spanGolden, user_cpu_ms: null, peak_rss_kb: null }),
+    undefined,
+  );
+});
+
+/**
+ * Run the built binary under ONEPIPELINE_PROFILE_SPANS for each of `runs`, into `spans`,
+ * against a runs root of its own.
+ */
+function profiledRuns(spans, runs) {
+  const runsRoot = join(scratch, "spans-runs-root");
+  mkdirSync(runsRoot, { recursive: true });
+  for (const args of runs) {
+    const ran = spawnSync(binary, args, {
+      encoding: "utf8",
+      env: { ...process.env, ONEPIPELINE_PROFILE_SPANS: spans, ONEPIPELINE_RUNS_DIR: runsRoot },
+    });
+    assert.notEqual(ran.status, null, ran.error?.message);
+  }
+}
+
+const SPAN_WALL_SLACK = 1e-6;
+const near = (a, b, what) =>
+  assert.ok(Math.abs(a - b) <= SPAN_WALL_SLACK * Math.max(1, Math.abs(b)), `${what}: ${a} vs ${b}`);
+
+test("the binary's span records fold into each module's runs per verb, sums intact", () => {
+  const dir = join(scratch, "spanned");
+  const startedAt = Date.now() / 1000 - 60;
+  const tests = {
+    "spanned::one": [["runs"], ["runs"], ["status", "no-such-run"]],
+    "spanned::two": [["runs"]],
+    "elsewhere::three": [["status", "no-such-run"]],
+  };
+  const written = [];
+  for (const [test, runs] of Object.entries(tests)) {
+    written.push({ ...golden, test, run_id: "now", started_at: startedAt });
+    const spans = join(dir, "e2e", `${test.replace("::", ".")}${SPANS_SUFFIX}`);
+    profiledRuns(spans, runs);
+  }
+  write(dir, written);
+  // A span record an earlier run of the test left, which the fold sets aside.
+  const stale = join(dir, "e2e", `spanned.two${SPANS_SUFFIX}`, "onepipeline-1-1.json");
+  writeFileSync(stale, JSON.stringify({ ...spanGolden, started_at: 1 }));
+  // A test of another run, whose span records are not this report's.
+  const other = join(dir, "e2e", `gone.test${SPANS_SUFFIX}`);
+  profiledRuns(other, [["runs"]]);
+
+  const out = JSON.parse(report("--json", "--top-spans", "1000", `linux=${dir}`));
+  const folded = out.platforms[0].spans;
+  assert.equal(folded.records, 5);
+  assert.equal(folded.stale, 1);
+  assert.deepEqual(folded.modules.map((m) => m.name).sort(), ["e2e::elsewhere", "e2e::spanned"]);
+  const spanned = folded.modules.find((m) => m.name === "e2e::spanned");
+  const records = ["spanned.one", "spanned.two"].flatMap((stem) => {
+    const at = join(dir, "e2e", `${stem}${SPANS_SUFFIX}`);
+    return readdirSync(at)
+      .map((name) => JSON.parse(readFileSync(join(at, name), "utf8")))
+      .filter((record) => record.started_at >= startedAt);
+  });
+  for (const verb of ["runs", "status"]) {
+    const theirs = records.filter((record) => record.verb === verb);
+    const held = spanned.verbs.find((v) => v.verb === verb);
+    assert.equal(held.invocations, theirs.length);
+    near(
+      held.wall_ms,
+      theirs.reduce((sum, r) => sum + r.wall_ms, 0),
+      `${verb} wall`,
+    );
+    if (process.platform !== "win32") {
+      const cpu = theirs.reduce((sum, r) => sum + r.user_cpu_ms + r.system_cpu_ms, 0);
+      near(held.cpu_ms, cpu, `${verb} cpu`);
+    }
+    const names = new Set(theirs.flatMap((record) => record.spans.map((span) => span.name)));
+    assert.equal(held.span_names, names.size);
+    for (const name of names) {
+      const spans = theirs.flatMap((r) => r.spans).filter((span) => span.name === name);
+      const span = held.spans.find((s) => s.name === name);
+      assert.equal(
+        span.count,
+        spans.reduce((sum, s) => sum + s.count, 0),
+      );
+      near(
+        span.self_wall_ms,
+        spans.reduce((sum, s) => sum + s.self_wall_ms, 0),
+        name,
+      );
+      near(
+        span.wall_ms,
+        spans.reduce((sum, s) => sum + s.wall_ms, 0),
+        name,
+      );
+    }
+    const ranked = held.spans.map((span) => span.self_wall_ms);
+    assert.deepEqual(
+      ranked,
+      [...ranked].sort((a, b) => b - a),
+    );
+  }
+  const markdown = report("--top-spans", "2", `linux=${dir}`);
+  assert.match(markdown, /### Where the `onepipeline` runs went/);
+  assert.match(markdown, /5 span records of the tests read \(1 of an earlier run/);
+  assert.match(markdown, /#### e2e::spanned: 4 runs/);
+  assert.match(markdown, /\| runs \| 3 \|/);
+  assert.match(markdown, /`runs`, 2 of its \d+ spans:/);
+});
+
+test("a span file that is not a span record is refused by its path", () => {
+  const dir = join(scratch, "bad-spans");
+  write(dir, [{ ...golden, test: "bad::one", run_id: "now" }]);
+  const spans = join(dir, "e2e", `bad.one${SPANS_SUFFIX}`);
+  mkdirSync(spans);
+  writeFileSync(join(spans, "torn.json"), "{");
+  refused(
+    ["--out", join(scratch, "x"), `bad=${dir}`],
+    /torn\.json is not JSON/,
+    /next: remove .*torn\.json, or rerun the test whose directory holds it/,
+  );
+  writeFileSync(join(spans, "torn.json"), JSON.stringify({ ...spanGolden, pid: -1 }));
+  refused(
+    ["--out", join(scratch, "x"), `bad=${dir}`],
+    /is not a span record: pid is not a count/,
+    /next:/,
+  );
 });

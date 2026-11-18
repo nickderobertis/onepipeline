@@ -1220,28 +1220,30 @@ fn preserve_every_branch(view: &RunView, now: Option<&RunView>) -> Vec<BranchPre
             branch: branch.clone(),
             term_scope: term_scope.clone(),
         };
-        preserved.push(match onevcs::preserve(&request) {
-            Ok(done) => BranchPreserved {
-                identity: done.identity,
-                branch: done.branch,
-                outcome: match done.outcome {
-                    onevcs::Preservation::Pushed => Preserved::Pushed,
-                    onevcs::Preservation::AlreadyOnOrigin => Preserved::AlreadyOnOrigin,
-                    onevcs::Preservation::NoRemote => Preserved::NoRemote,
+        preserved.push(
+            match crate::spans::within("onevcs:preserve", || onevcs::preserve(&request)) {
+                Ok(done) => BranchPreserved {
+                    identity: done.identity,
+                    branch: done.branch,
+                    outcome: match done.outcome {
+                        onevcs::Preservation::Pushed => Preserved::Pushed,
+                        onevcs::Preservation::AlreadyOnOrigin => Preserved::AlreadyOnOrigin,
+                        onevcs::Preservation::NoRemote => Preserved::NoRemote,
+                    },
+                    remote: done.remote,
+                    commit: done.commit,
+                    detail: format!("preserved from {}", done.from.display()),
                 },
-                remote: done.remote,
-                commit: done.commit,
-                detail: format!("preserved from {}", done.from.display()),
+                Err(why) => BranchPreserved {
+                    identity: repo,
+                    branch,
+                    outcome: Preserved::Refused,
+                    remote: None,
+                    commit: None,
+                    detail: why.to_string(),
+                },
             },
-            Err(why) => BranchPreserved {
-                identity: repo,
-                branch,
-                outcome: Preserved::Refused,
-                remote: None,
-                commit: None,
-                detail: why.to_string(),
-            },
-        });
+        );
     }
     preserved
 }

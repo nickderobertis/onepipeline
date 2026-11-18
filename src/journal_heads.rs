@@ -274,6 +274,7 @@ const PIPELINED: usize = 2048;
 /// read through a second time. Each record's strings are built once, and `fold` reads
 /// them before they are moved into its head.
 pub(crate) fn read_heads(journal: &Path, mut fold: impl FnMut(&Envelope, Option<u64>)) -> Heads {
+    let _span = crate::spans::reading(journal);
     let Some(bytes) = whole_file(journal) else {
         return Heads::default();
     };
@@ -538,6 +539,7 @@ fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Res
 /// never answers a record of another `(stream, seq)`. [`Ledger`](crate::Error::Ledger)
 /// where the journal cannot be opened or read.
 pub fn fetch(journal: &Path, handles: &[RecordHandle]) -> crate::Result<Vec<Envelope>> {
+    let _span = crate::spans::reading(journal);
     if handles.is_empty() {
         return Ok(Vec::new());
     }

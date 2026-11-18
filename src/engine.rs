@@ -8699,7 +8699,10 @@ struct PlacementShape {
 /// repository this run can place anything on, so it is answered `false` and the
 /// dependency only orders the node.
 pub(crate) fn same_identity(mine: &str, other: &str) -> bool {
-    let identity = |repo: &str| onevcs::release_targets(repo).map(|repository| repository.identity);
+    let identity = |repo: &str| {
+        crate::spans::within("onevcs:release_targets", || onevcs::release_targets(repo))
+            .map(|repository| repository.identity)
+    };
     matches!((identity(mine), identity(other)), (Ok(mine), Ok(other)) if mine == other)
 }
 

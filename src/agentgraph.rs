@@ -72,6 +72,7 @@
 //! same thing on both backends under it, and says why the pairs it carries are
 //! safe to put there.
 
+use crate::spans::Timed as _;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -397,10 +398,16 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
     recorded_graph_run(recorded, run)
         .ok()
         .and_then(|graph_run| {
-            let record = oneagentgraph::history::show(&root, graph_run.as_str()).ok()?;
+            let record = crate::spans::within("oneagentgraph:history::show", || {
+                oneagentgraph::history::show(&root, graph_run.as_str())
+            })
+            .ok()?;
             Some(
                 record.finished_ms.is_some()
-                    || oneagentgraph::scratch::reclaimable(&root.join(&graph_run)).is_ok(),
+                    || crate::spans::within("oneagentgraph:scratch::reclaimable", || {
+                        oneagentgraph::scratch::reclaimable(&root.join(&graph_run))
+                    })
+                    .is_ok(),
             )
         })
         .unwrap_or(false)
@@ -417,16 +424,22 @@ pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Re
     let state = state_dir(&process_env());
     // A missing record belongs to another host or to a run already swept.
     // Never manufacture a graph directory from a stale launch record.
-    if oneagentgraph::history::show(&state, id.as_str()).is_err() || graph_run_ended(recorded, run)
+    if crate::spans::within("oneagentgraph:history::show", || {
+        oneagentgraph::history::show(&state, id.as_str())
+    })
+    .is_err()
+        || graph_run_ended(recorded, run)
     {
         return Ok(false);
     }
-    oneagentgraph::run::cancel(
-        &state.join(&id),
-        &id,
-        &oneagentgraph::run::CancelScope::run(),
-        oneagentgraph::run::CancelMode::Stop,
-    )
+    crate::spans::within("oneagentgraph:run::cancel", || {
+        oneagentgraph::run::cancel(
+            &state.join(&id),
+            &id,
+            &oneagentgraph::run::CancelScope::run(),
+            oneagentgraph::run::CancelMode::Stop,
+        )
+    })
     .map_err(|error| sibling(format!("cancel observer {id}: {error}")))?;
     let deadline = Instant::now() + patience;
     while !graph_run_ended(recorded, run) && Instant::now() < deadline {
@@ -1802,8 +1815,10 @@ impl GraphRun {
             oneharness_bin: oneharness_bin(&run_env),
             follow_events: follow_events.map(Path::to_path_buf),
         };
-        let running = oneagentgraph::run::start(&request, &run_env)
-            .map_err(|error| sibling(error.to_string()))?;
+        let running = crate::spans::within("oneagentgraph:run::start", || {
+            oneagentgraph::run::start(&request, &run_env)
+        })
+        .map_err(|error| sibling(error.to_string()))?;
         let run_id = running.started().run_id.clone();
         let root = request.state_dir.join(&run_id);
         // Where the sibling keeps the record the relay below holds for. See
@@ -1829,12 +1844,16 @@ impl GraphRun {
                             eprintln!("onepipeline: {error}");
                         }
                         let _ = match mode {
-                            oneagentgraph::run::CancelMode::Stop => oneagentgraph::run::cancel(
-                                &relay_root,
-                                &recorded_as,
-                                &oneagentgraph::run::CancelScope::run(),
-                                oneagentgraph::run::CancelMode::Stop,
-                            ),
+                            oneagentgraph::run::CancelMode::Stop => {
+                                crate::spans::within("oneagentgraph:run::cancel", || {
+                                    oneagentgraph::run::cancel(
+                                        &relay_root,
+                                        &recorded_as,
+                                        &oneagentgraph::run::CancelScope::run(),
+                                        oneagentgraph::run::CancelMode::Stop,
+                                    )
+                                })
+                            }
                             _ => running.cancel(),
                         };
                     }
@@ -2050,18 +2069,24 @@ impl GraphRun {
         }
         let root = self.root();
         let asked = match (&root, self.run_id()) {
-            (Some(root), Some(id)) => match oneagentgraph::run::cancel(
-                root,
-                id,
-                &oneagentgraph::run::CancelScope::run(),
-                oneagentgraph::run::CancelMode::Stop,
-            ) {
-                Ok(_) => true,
-                Err(error) => {
-                    eprintln!("onepipeline: cancel observer {id}: {error}; ending its processes");
-                    false
+            (Some(root), Some(id)) => {
+                match crate::spans::within("oneagentgraph:run::cancel", || {
+                    oneagentgraph::run::cancel(
+                        root,
+                        id,
+                        &oneagentgraph::run::CancelScope::run(),
+                        oneagentgraph::run::CancelMode::Stop,
+                    )
+                }) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        eprintln!(
+                            "onepipeline: cancel observer {id}: {error}; ending its processes"
+                        );
+                        false
+                    }
                 }
-            },
+            }
             _ => false,
         };
         if !asked {
@@ -2075,7 +2100,9 @@ impl GraphRun {
             self.cancel();
         }
         if let Some(root) = &root {
-            oneagentgraph::scratch::reap(root);
+            crate::spans::within("oneagentgraph:scratch::reap", || {
+                oneagentgraph::scratch::reap(root)
+            });
         }
         self.has_exited()
     }
@@ -2330,13 +2357,15 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
             }
         }
     };
-    let delivered = oneagentgraph::control::interrupt(
-        &state_dir(&env),
-        &run_id,
-        &member,
-        Some(input),
-        &oneharness_bin(&env),
-    );
+    let delivered = crate::spans::within("oneagentgraph:control::interrupt", || {
+        oneagentgraph::control::interrupt(
+            &state_dir(&env),
+            &run_id,
+            &member,
+            Some(input),
+            &oneharness_bin(&env),
+        )
+    });
     // llmlint: ignore-block[changed_behavior_has_e2e] three of these five answers cannot
     // be reached offline, and the reason is the sibling's rather than a gap in the suite.
     // `Delivered`, `Failed`, and `Invalid` are all what `control::deliver` came back with,
@@ -2444,13 +2473,15 @@ pub fn offer_note(
             })
         }
     };
-    match oneagentgraph::control::offer_note(
-        &state_dir(&env),
-        &run_id,
-        &member,
-        note,
-        &oneharness_bin(&env),
-    ) {
+    match crate::spans::within("oneagentgraph:control::offer_note", || {
+        oneagentgraph::control::offer_note(
+            &state_dir(&env),
+            &run_id,
+            &member,
+            note,
+            &oneharness_bin(&env),
+        )
+    }) {
         Ok(oneagentgraph::note::NoteOffered::Admitted(offer)) => Ok(offer),
         Ok(oneagentgraph::note::NoteOffered::Undelivered(undelivered)) => Err(undelivered),
         // A run the sibling cannot find, or a member it does not have. Not a
@@ -2583,7 +2614,7 @@ fn interrupt_by_process(address: &TurnAddress, input: &str) -> Interrupt {
         .arg("--input")
         .arg(input)
         .stdin(Stdio::null())
-        .output();
+        .timed_output();
     let output = match output {
         Ok(output) => output,
         // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
@@ -2651,7 +2682,7 @@ pub fn health() -> Option<String> {
         let output = Command::new(binary())
             .arg("health")
             .stdin(Stdio::null())
-            .output()
+            .timed_output()
             .ok()?;
         if !output.status.success() {
             return None;
@@ -2659,9 +2690,11 @@ pub fn health() -> Option<String> {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return (!text.is_empty()).then_some(text);
     }
-    oneagentgraph::health::read()
-        .ok()
-        .and_then(|report| serde_json::to_string_pretty(&report).ok())
+    crate::spans::within("oneagentgraph:health::read", || {
+        oneagentgraph::health::read()
+    })
+    .ok()
+    .and_then(|report| serde_json::to_string_pretty(&report).ok())
 }
 
 #[cfg(test)]

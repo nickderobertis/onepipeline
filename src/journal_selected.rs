@@ -830,6 +830,7 @@ pub(crate) fn whole_file(path: &Path) -> Option<Vec<u8>> {
 /// the complete read follows. The module note says what the read rests on.
 #[must_use]
 pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecords {
+    let _span = crate::spans::reading(journal);
     let Some(bytes) = whole_file(journal) else {
         return SelectedRecords::default();
     };
@@ -845,6 +846,7 @@ pub fn read_selected(journal: &Path, selection: &Selection<'_>) -> SelectedRecor
 /// appended, with no other record parsed: what a reader whose answer no relayed record
 /// decides reads, since on a long run those are nearly all of its bytes.
 pub(crate) fn pipeline_records(journal: &Path) -> Vec<Envelope> {
+    let _span = crate::spans::reading(journal);
     let Ok(bytes) = std::fs::read(journal) else {
         return Vec::new();
     };

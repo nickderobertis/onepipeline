@@ -10,7 +10,7 @@ use onepipeline_testfakes::profile::process::Command;
 use onepipeline_testfakes::profile::{self, Category};
 use serde_json::Value;
 
-use crate::harness::{double, git, repo_file, World};
+use crate::harness::{agent, double, git, plan_of, repo_file, World};
 
 /// The test whose record [`a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not`]
 /// reads for the four categories it spends time in.
@@ -26,7 +26,7 @@ const FAILING: &str = "profiling::a_profiled_journey_that_fails";
 /// The record's shape, which `scripts/test-profile-report.mjs` reads: a record
 /// written here is held to it, and that script's tests are held to it too, so a
 /// field renamed on one side fails on that side.
-const GOLDEN: &str = "tests/golden/test-profile-record-v2.json";
+const GOLDEN: &str = "tests/golden/test-profile-record-v3.json";
 
 /// What a record says, without the values: each object's keys and each leaf's
 /// JSON type, with `programs` — one entry per program a test happened to run —
@@ -321,10 +321,14 @@ fn a_profiled_journey_nests_work_and_works_on_a_thread_it_started() {
     let programs: serde_json::Map<String, Value> = totals
         .programs
         .iter()
-        .map(|(program, (count, time))| {
+        .map(|(program, (count, time, cpu))| {
             (
                 program.clone(),
-                serde_json::json!({ "count": count, "s": time.as_secs_f64() }),
+                serde_json::json!({
+                    "count": count,
+                    "s": time.as_secs_f64(),
+                    "cpu_s": cpu.map(|cpu| cpu.as_secs_f64()),
+                }),
             )
         })
         .collect();
@@ -872,4 +876,176 @@ fn a_journey_ended_before_it_finishes_leaves_an_unfinished_record() {
     assert_eq!(record["ended"], "unfinished", "{record:#}");
     assert_eq!(record["categories"]["fixture"]["count"], 1, "{record:#}");
     assert!(record["wall_s"].as_f64() > Some(0.0), "{record:#}");
+}
+
+/// A test that runs `onepipeline` verbs crossing the binary's outer boundaries: a
+/// plan check reading the store and starting a registered check that does real
+/// work, twice, and a listing of runs.
+const SPANNED: &str = "profiling::a_profiled_journey_that_runs_onepipeline_verbs";
+
+/// The test [`SPANNED`] names.
+#[test]
+fn a_profiled_journey_that_runs_onepipeline_verbs() {
+    let world = World::new("profile-spanned");
+    let project = world.plan(
+        "profile-spanned",
+        &plan_of("profile-spanned", vec![agent("build", &[])]),
+    );
+    world.script("reviewer-bar.fingerprint", r#"{"refusals": []}"#);
+    world.script("reviewer-bar.burn", "50");
+    let check = double("reviewer-bar");
+    let check = check.to_str().expect("a UTF-8 path");
+    for _ in 0..2 {
+        world
+            .run(&["plan", "check", &project, "--check", check, "--json"])
+            .exited(0);
+    }
+    world.run(&["runs"]).exited(0);
+}
+
+/// A figure of a JSON document, or the test fails naming it.
+fn number(value: &Value) -> f64 {
+    value
+        .as_f64()
+        .unwrap_or_else(|| panic!("{value} is not a number"))
+}
+
+/// Under [`profile::SPANS_ENV`], every `onepipeline` a test starts writes its span
+/// record into that test's own directory beside its record — one per process — and
+/// the record is schema 3, carrying each program's CPU and the host's load. The
+/// report folds those span records into the test's module, per verb: each verb's
+/// runs, wall and CPU are the sums of its records', and the store-read and
+/// child-process spans keep their names and their summed walls.
+#[test]
+fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_folds_them() {
+    let world = World::new("profile-spans");
+    let records = world.root.join("profiles");
+    let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
+        .args(["--exact", SPANNED, "--nocapture"])
+        .env(profile::DIR_ENV, &records)
+        .env(profile::SPANS_ENV, "1")
+        .env_remove("ONEPIPELINE_PROFILE_SPANS")
+        .env_remove("NEXTEST_TEST_NAME")
+        .output()
+        .expect("the suite runs");
+    passed(SPANNED, &ran);
+
+    let record = read_record(&records.join("e2e").join(file_of(SPANNED)));
+    assert_eq!(record["schema"], 3, "{record:#}");
+    let started = &record["programs"]["onepipeline"];
+    assert_eq!(started["count"], 3, "{record:#}");
+    if cfg!(unix) {
+        assert!(number(&started["cpu_s"]) > 0.0, "{record:#}");
+        assert!(number(&record["load_1m_start"]) >= 0.0, "{record:#}");
+        assert!(number(&record["load_1m_end"]) >= 0.0, "{record:#}");
+    } else {
+        assert!(started["cpu_s"].is_null(), "{record:#}");
+    }
+    assert!(number(&record["nproc"]) >= 1.0, "{record:#}");
+
+    let spans_dir = records
+        .join("e2e")
+        .join(file_of(SPANNED).replace(".json", ".spans"));
+    let spans: Vec<Value> = profile::fs::read_dir(&spans_dir)
+        .expect("the test's span directory")
+        .map(|entry| read_record(&entry.expect("a span record").path()))
+        .collect();
+    assert_eq!(
+        spans.len(),
+        3,
+        "one span record per onepipeline the test started: {spans:#?}"
+    );
+
+    let out = world.root.join("report.json");
+    let reported = Command::new("node")
+        .arg(repo_file("scripts/test-profile-report.mjs"))
+        .args(["--json", "--top-spans", "1000", "--out"])
+        .arg(&out)
+        .arg(format!("linux={}", records.display()))
+        .output()
+        .expect("node runs the report");
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let report = read_record(&out);
+    let folded = &report["platforms"][0]["spans"];
+    assert_eq!(folded["records"], 3, "{folded:#}");
+    let module = folded["modules"]
+        .as_array()
+        .expect("modules")
+        .iter()
+        .find(|module| module["name"] == "e2e::profiling")
+        .unwrap_or_else(|| panic!("the test's module is not in the fold: {folded:#}"));
+    let close = |a: f64, b: f64, what: &str| {
+        assert!(
+            (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+            "{what}: the fold says {a} and the records {b}: {module:#}"
+        );
+    };
+    for verb in ["plan check", "runs"] {
+        let theirs: Vec<&Value> = spans.iter().filter(|span| span["verb"] == verb).collect();
+        let folded = module["verbs"]
+            .as_array()
+            .expect("verbs")
+            .iter()
+            .find(|folded| folded["verb"] == verb)
+            .unwrap_or_else(|| panic!("`{verb}` is not in the fold: {module:#}"));
+        assert_eq!(folded["invocations"], theirs.len(), "{module:#}");
+        let sum =
+            |field: &dyn Fn(&Value) -> f64| theirs.iter().map(|span| field(span)).sum::<f64>();
+        close(
+            number(&folded["wall_ms"]),
+            sum(&|span| number(&span["wall_ms"])),
+            "wall",
+        );
+        if cfg!(unix) {
+            close(
+                number(&folded["cpu_ms"]),
+                sum(&|span| number(&span["user_cpu_ms"]) + number(&span["system_cpu_ms"])),
+                "cpu",
+            );
+        }
+        let named = |name: &str| -> Vec<&Value> {
+            theirs
+                .iter()
+                .flat_map(|span| span["spans"].as_array().expect("spans"))
+                .filter(|span| span["name"] == name)
+                .collect()
+        };
+        let boundaries: Vec<String> = theirs
+            .iter()
+            .flat_map(|span| span["spans"].as_array().expect("spans"))
+            .filter_map(|span| span["name"].as_str())
+            .filter(|name| name.starts_with("child:") || name.starts_with("onetaskgraph:"))
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if verb == "plan check" {
+            assert!(
+                boundaries.iter().any(|name| name == "child:reviewer-bar")
+                    && boundaries
+                        .iter()
+                        .any(|name| name.starts_with("onetaskgraph:")),
+                "`plan check` crossed no library call and no child process: {boundaries:?}"
+            );
+        }
+        for name in boundaries {
+            let held = folded["spans"]
+                .as_array()
+                .expect("a verb's spans")
+                .iter()
+                .find(|span| span["name"] == name.as_str())
+                .unwrap_or_else(|| panic!("{name} lost its name in the fold: {folded:#}"));
+            for field in ["self_wall_ms", "wall_ms"] {
+                close(
+                    number(&held[field]),
+                    named(&name).iter().map(|span| number(&span[field])).sum(),
+                    &format!("{name}.{field}"),
+                );
+            }
+        }
+    }
 }

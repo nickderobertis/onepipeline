@@ -329,7 +329,9 @@ pub(crate) fn adoption_of(node: &Node) -> Adoption {
         return declared;
     }
     if let Some(repo) = node.repo.as_deref() {
-        if let Ok(resolved) = onevcs::adoption_for(repo) {
+        if let Ok(resolved) =
+            crate::spans::within("onevcs:adoption_for", || onevcs::adoption_for(repo))
+        {
             return resolved;
         }
     }
@@ -587,10 +589,11 @@ impl Repositories {
         self.known
             .entry(repo.to_owned())
             .or_insert_with(|| {
-                onevcs::release_targets(repo).map_err(|failure| UnreadRepository {
-                    reason: failure.to_string(),
-                    at: Instant::now(),
-                })
+                crate::spans::within("onevcs:release_targets", || onevcs::release_targets(repo))
+                    .map_err(|failure| UnreadRepository {
+                        reason: failure.to_string(),
+                        at: Instant::now(),
+                    })
             })
             .as_ref()
             .map_err(|unread| unread.reason.clone())
@@ -1015,7 +1018,10 @@ impl Watch {
             let spawned = std::thread::Builder::new()
                 .name("release-holdup".to_owned())
                 .spawn(move || {
-                    let answer = onevcs::release_holdup(&asked).map_err(|error| error.to_string());
+                    let answer = crate::spans::within("onevcs:release_holdup", || {
+                        onevcs::release_holdup(&asked)
+                    })
+                    .map_err(|error| error.to_string());
                     let _ = send.send((asked, answer));
                 });
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
@@ -2184,16 +2190,17 @@ pub(crate) fn acknowledge_stated_releases(commands: &[crate::channel::Command]) 
         else {
             continue;
         };
-        onevcs::acknowledge_release(landing, &release.target, &release.version, false).map_err(
-            |refused| {
-                crate::Error::Refused(format!(
-                    "settle: node '{id}' states that {target} {version} carries the landing \
+        crate::spans::within("onevcs:acknowledge_release", || {
+            onevcs::acknowledge_release(landing, &release.target, &release.version, false)
+        })
+        .map_err(|refused| {
+            crate::Error::Refused(format!(
+                "settle: node '{id}' states that {target} {version} carries the landing \
                      {landing}, and `onevcs` would not record it: {refused}; nothing was queued",
-                    target = release.target,
-                    version = release.version,
-                ))
-            },
-        )?;
+                target = release.target,
+                version = release.version,
+            ))
+        })?;
     }
     Ok(())
 }
@@ -2604,9 +2611,11 @@ fn askable(row: &CrossRepoReference) -> Option<(&str, TargetName)> {
 /// answered" is never "not released" here either; what it is is a change that
 /// must not land yet, which is the safe direction and the only one.
 fn released_already(reference: &str, target: &TargetName) -> bool {
-    Answer::of(&onevcs::release_status(reference, Some(target)))
-        .version()
-        .is_some()
+    Answer::of(&crate::spans::within("onevcs:release_status", || {
+        onevcs::release_status(reference, Some(target))
+    }))
+    .version()
+    .is_some()
 }
 
 /// The note a fast-adoption node is sent when the releases it was waiting on

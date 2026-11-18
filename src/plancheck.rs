@@ -606,6 +606,7 @@ fn offer(check: &Registered, document: &[u8]) -> std::result::Result<Vec<Reporte
         stderr,
     };
     let resolved = Path::new(check.argv.program());
+    let _span = crate::spans::child(resolved.as_os_str());
     let mut child = Command::new(resolved)
         .args(check.argv.arguments())
         .env(SCHEMA_ENV, SCHEMA_VERSION)

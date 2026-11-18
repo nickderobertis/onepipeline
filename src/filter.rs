@@ -935,6 +935,7 @@ impl LaunchConfig {
     /// declared version never had, a version this build does not read, or a
     /// filter that could not be honoured.
     pub fn load(path: &Path) -> Result<Self> {
+        let _span = crate::spans::span("configuration:launch");
         let text = std::fs::read_to_string(path).map_err(|source| Error::Ledger {
             path: path.to_path_buf(),
             source,

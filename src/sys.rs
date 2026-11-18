@@ -6,6 +6,7 @@
 //! resolves them through this module, so an unanswerable question resolves
 //! toward "still working" here rather than in each caller.
 
+use crate::spans::Timed as _;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The environment variable naming the launching session, when the harness
@@ -619,7 +620,7 @@ fn all_stopped(pids: &[u32]) -> bool {
     let Some(answered) = asked
         .args(["-o", "pid=,stat=", "-p", &ids])
         .stderr(std::process::Stdio::null())
-        .output()
+        .timed_output()
         .ok()
         .filter(|answered| answered.status.success())
     else {
@@ -822,7 +823,7 @@ fn process_table() -> Option<Vec<(u32, u32)>> {
     let listed = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .stderr(std::process::Stdio::null())
-        .output()
+        .timed_output()
         .ok()?;
     if !listed.status.success() {
         return None;
@@ -1039,6 +1040,7 @@ fn taskkill(pid: u32, reach: Reach) -> std::io::Result<std::process::ExitStatus>
     if reach == Reach::Tree {
         ask.arg("/T");
     }
+    let _span = crate::spans::child(ask.get_program());
     ask.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -1408,7 +1410,7 @@ fn platform_process_terminated_awaiting_parent(pid: u32) -> bool {
         .env("TZ", "UTC")
         .env("LC_ALL", "C")
         .stderr(std::process::Stdio::null())
-        .output()
+        .timed_output()
     else {
         return false;
     };
@@ -1931,7 +1933,7 @@ fn ps_process_start_token(pid: u32) -> Option<String> {
         .env("TZ", "UTC")
         .env("LC_ALL", "C")
         .stderr(std::process::Stdio::null())
-        .output()
+        .timed_output()
         .ok()?;
     if !listed.status.success() {
         return None;

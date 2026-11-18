@@ -240,7 +240,9 @@ pub(crate) fn record(run: &str, lineage: &Lineage, attempts: &[Attempt]) -> Reco
                 (BY_LABEL.to_owned(), lineage.node.clone()),
             ]),
         };
-        match onevcs::record_supersession(&supersession) {
+        match crate::spans::within("onevcs:record_supersession", || {
+            onevcs::record_supersession(&supersession)
+        }) {
             Ok(()) => recorded.push(attempt.clone()),
             Err(error) => failed.push(Unrecorded {
                 attempt: attempt.clone(),

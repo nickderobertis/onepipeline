@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "verb": "runs",
+  "pid": 4242,
+  "started_at": 1795000000.25,
+  "wall_ms": 33.764168999999995,
+  "user_cpu_ms": 7.0089999999999995,
+  "system_cpu_ms": 33.044,
+  "children_user_cpu_ms": 0.0,
+  "children_system_cpu_ms": 0.0,
+  "peak_rss_kb": 42172,
+  "exit_status": 0,
+  "spans": [
+    {
+      "name": "dispatch",
+      "count": 1,
+      "self_wall_ms": 0.781787,
+      "wall_ms": 0.781787,
+      "self_cpu_ms": 0.780791
+    },
+    {
+      "name": "registry:events",
+      "count": 1,
+      "self_wall_ms": 21.542849,
+      "wall_ms": 21.542849,
+      "self_cpu_ms": 21.51375
+    },
+    {
+      "name": "startup",
+      "count": 1,
+      "self_wall_ms": 11.152929,
+      "wall_ms": 32.695778000000004,
+      "self_cpu_ms": 11.135541
+    }
+  ]
+}

@@ -819,8 +819,10 @@ impl CheckWatch {
             let spawned = std::thread::Builder::new()
                 .name("check-follow".to_owned())
                 .spawn(move || {
-                    let answer = onevcs::follow_checks(&onevcs::Providers::real(), &request)
-                        .map_err(|error| error.to_string());
+                    let answer = crate::spans::within("onevcs:follow_checks", || {
+                        onevcs::follow_checks(&onevcs::Providers::real(), &request)
+                    })
+                    .map_err(|error| error.to_string());
                     let _ = send.send((asked, nodes, answer));
                 });
             // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type

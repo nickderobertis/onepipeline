@@ -1331,6 +1331,7 @@ fn supervise(
     flow: Option<&std::ffi::OsStr>,
     registered: Option<&Flow>,
 ) -> Result<i32> {
+    let _span = crate::spans::child(program);
     let mut command = std::process::Command::new(program);
     command.args(arguments);
     match flow {

@@ -1163,6 +1163,7 @@ pub(crate) fn resolve_root(
     working_dir: &Path,
     launch_dir: &Path,
 ) -> Result<Option<PathBuf>> {
+    let _span = crate::spans::span("configuration:templates");
     let (named, base, whence) = match flag {
         Some(flag) => (flag.to_path_buf(), working_dir, ROOT_FLAG.to_owned()),
         None => match std::env::var(ROOT_ENVIRONMENT) {
