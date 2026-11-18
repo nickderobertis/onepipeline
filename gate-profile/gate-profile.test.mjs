@@ -207,6 +207,18 @@ test("gate-profile refuses an unknown recipe, and reports a failing one up to it
   );
   assert.deepEqual(report.tasks, []);
   assert.deepEqual(report.phases[0].within, []);
+
+  const missing = just(dir, ["gate-profile", "missing"]);
+  assert.equal(missing.status, 1, missing.stderr);
+  assert.match(missing.stderr, /could not read the task graph of `nx run crate:nosuch`/);
+  const after = readReport(
+    dir,
+    runDirs(dir).find((r) => r !== run),
+  );
+  assert.deepEqual(validateReport(after), []);
+  assert.equal(after.invocations.length, 1);
+  assert.equal(after.critical_path.complete, false);
+  assert.match(after.notes.join("\n"), /Nx wrote no task profile for invocation/);
 });
 
 test("an interrupted run still writes its profile of what ran", async (t) => {

@@ -3,7 +3,15 @@
 // line between samples, and the report shape REPORT_SCHEMA declares.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -169,6 +177,8 @@ function handMadeRun(t) {
   };
   put(join(dir, "phases.jsonl"), `${JSON.stringify(phase)}\n`);
   put(join(dir, "nx", "i1.invocation.json"), { id: "i1", phase: "1-1", args: ["run-many"] });
+  // An Nx run that failed before it wrote its task profile.
+  put(join(dir, "nx", "i2.invocation.json"), { id: "i2", phase: "1-1", args: ["run", "x:y"] });
   put(join(dir, "nx", "i1.profile.json"), [
     { ph: "M", name: "thread_name" },
     { ph: "X", name: "p:x", ts: (base + 1) * 1e6, dur: 2e6, args: { status: "success" } },
@@ -229,10 +239,31 @@ test("refolding a run writes its reports, saying what the records did not have",
     ["p:x"],
   );
   assert.equal(report.tasks[0].cpu_basis, "none");
-  assert.equal(report.notes.length, 3, report.notes.join("\n"));
+  assert.equal(report.notes.length, 4, report.notes.join("\n"));
   assert.match(report.notes.join("\n"), /No task graph for invocation i1/);
+  assert.match(report.notes.join("\n"), /Nx wrote no task profile for invocation i2 \(run x:y\)/);
+  assert.deepEqual(
+    report.invocations.map((i) => [i.id, i.task_graph]),
+    [
+      ["i1", false],
+      ["i2", false],
+    ],
+  );
   assert.match(report.notes.join("\n"), /cargo-timing-b\.html was written during the run by no/);
   assert.match(report.notes.join("\n"), /`cargo build` left no timings page/);
+});
+
+test("refolding refuses a timings page whose units are not as cargo writes them", (t) => {
+  const dir = handMadeRun(t);
+  const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
+  const page = join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html");
+  const html = readFileSync(page, "utf8");
+  const { mtime } = statSync(page);
+  writeFileSync(page, html.replace('"duration": 0.5', '"duration": -1'));
+  utimesSync(page, mtime, mtime);
+  const result = fold(dir);
+  assert.equal(result.status, 3);
+  assert.match(result.stderr, /unit data is not as recorded: \$\[0\]\.duration: -1 is below 0/);
 });
 
 test("refolding refuses a missing or malformed record with exit 3, naming it", (t) => {

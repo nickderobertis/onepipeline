@@ -224,6 +224,13 @@ export const RECORD_SCHEMAS = {
     dur: { type: "number", minimum: 0 },
     args: { type: "object" },
   }),
+  timingUnits: list(
+    open({
+      name: text,
+      start: { type: "number", minimum: 0 },
+      duration: { type: "number", minimum: 0 },
+    }),
+  ),
   graph: open({
     tasks: open({ dependencies: { type: "object", additionalProperties: list(text) } }),
   }),
@@ -438,25 +445,17 @@ export function readTimings(path) {
   need(start && units, `${path} has no build start or unit data; is it a cargo --timings page?`);
   const fraction = (start[2] ?? ".0").slice(1, 4).padEnd(3, "0");
   const built = Date.parse(`${start[1]}.${fraction}Z`);
+  need(Number.isFinite(built), `${path}'s build start ${start[1]} is not a date`);
   let data;
   try {
     data = JSON.parse(units[1]);
   } catch (error) {
     throw new RecordError(`${path}'s unit data is not JSON: ${error.message}`);
   }
-  need(Array.isArray(data), `${path}'s unit data is not a list`);
   return {
     built,
     written: statSync(path).mtimeMs,
-    units: data.map((unit) => {
-      need(
-        typeof unit.name === "string" &&
-          Number.isFinite(unit.start) &&
-          Number.isFinite(unit.duration),
-        `${path} has a unit without a name, start and duration`,
-      );
-      return unit;
-    }),
+    units: checked(data, RECORD_SCHEMAS.timingUnits, `${path}'s unit data`),
   };
 }
 
@@ -539,6 +538,7 @@ export function foldRun(dir) {
       id,
       phase: record.phase || null,
       args: record.args,
+      profiled: profile !== null,
       entries: (profile ?? [])
         .filter((e) => e.ph === "X")
         .map((e, i) => checked(e, RECORD_SCHEMAS.profileTask, `task ${i + 1} of ${id}'s profile`)),
@@ -609,12 +609,13 @@ export function foldRun(dir) {
   // The run's critical path: its invocations run one after another, so it is each one's longest
   // dependency chain, in turn.
   const pathTasks = [];
+  // Complete only when every invocation left both its task profile and its task graph.
   let complete = invocations.length > 0;
   for (const invocation of invocations) {
+    if (!invocation.profiled || !invocation.dependencies) complete = false;
     const mine = tasks.filter((t) => t.invocation === invocation.id);
     if (!mine.length) continue;
     const durations = new Map(mine.map((t) => [t.task, t.endMs - t.startMs]));
-    if (!invocation.dependencies) complete = false;
     for (const id of longestPath(durations, invocation.dependencies ?? {})) {
       const t = mine.find((m) => m.task === id);
       pathTasks.push({
@@ -810,7 +811,7 @@ export function renderMarkdown(report) {
     "## Critical path",
     "",
     `The chain of dependent Nx tasks that sets the total: ${s(report.critical_path.wall_s)} of the run's ${s(report.critical_path.run_wall_s)} wall` +
-      `${report.critical_path.complete ? "" : " (an invocation without its task graph counts only its longest task)"}.`,
+      `${report.critical_path.complete ? "" : " (incomplete: an invocation without its task graph counts only its longest task, and one without its task profile counts none; see the notes)"}.`,
     "",
     table(
       ["#", "task", "phase", "start", "wall", "load"],

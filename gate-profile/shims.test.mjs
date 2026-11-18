@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -376,6 +377,9 @@ test("nx.sh's hook profiles a run's own Nx runs and takes itself off nested ones
   });
 
   await t.test("at the run's level a task run gets its own profile and this run's cache", () => {
+    // The project graph Nx already holds is carried over; the cache's databases are not.
+    write(join(dir, ".nx/workspace-data/project-graph.json"), "{}\n");
+    write(join(dir, ".nx/workspace-data/abc-v3.db"), "a cache index\n");
     const { status, seen, stderr } = nx(dir, ["run-many", "-t", "lint"], top);
     assert.equal(status, 0, stderr);
     assert.deepEqual(seen.args, ["run-many", "-t", "lint", "--skip-remote-cache"]);
@@ -387,6 +391,7 @@ test("nx.sh's hook profiles a run's own Nx runs and takes itself off nested ones
     assert.equal(seen.env.NODE_OPTIONS, "--max-old-space-size=300");
     assert.equal(seen.child, "--max-old-space-size=300");
     assert.equal("ONEPIPELINE_GATE_PROFILE_NODE_OPTIONS" in seen.env, false);
+    assert.deepEqual(readdirSync(join(run, "nx-state", "data")), ["project-graph.json"]);
     const record = JSON.parse(readFileSync(join(run, "nx", `${id}.invocation.json`), "utf8"));
     assert.deepEqual(record.args, ["run-many", "-t", "lint"]);
   });

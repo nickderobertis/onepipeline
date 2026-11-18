@@ -137,6 +137,10 @@ broken:
 
 slow:
     @sleep 60
+
+# An Nx run that fails before it runs any task: no task profile, and no task graph to read back.
+missing:
+    @bash scripts/nx.sh run crate:nosuch
 `;
 
 /**
