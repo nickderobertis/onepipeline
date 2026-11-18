@@ -1193,9 +1193,9 @@ fn adopt_reuses_a_journalled_verdict_and_runs_again_a_guard_its_driver_died_in()
 
 /// A driver stopped after journalling a guard's verdict and before the settlement that
 /// verdict leads to: the adopting driver settles the node from the journalled verdict —
-/// `not-needed`, or `guard-failed` saying the exit status, signal, deadline or failure to
-/// start the record names — without running the guard again, its detail naming the log that
-/// kept what the guard said.
+/// `not-needed`, or `guard-failed` — without running the guard again, and with exactly the
+/// detail the contract gives that settlement had the driver lived: the guard's stderr for a
+/// node not needed, none where it said nothing, and the cause and stderr tail of a failure.
 ///
 /// Unix only, as the other teardown journeys here are. The driver is held at that moment by
 /// the engine's own debug failpoint, `after-guard-evaluated`, so the stop lands there every
@@ -1203,27 +1203,46 @@ fn adopt_reuses_a_journalled_verdict_and_runs_again_a_guard_its_driver_died_in()
 #[cfg(unix)]
 #[test]
 fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled() {
+    /// The detail the contract gives the settlement.
+    enum Detail {
+        /// Exactly this, or absent.
+        Exactly(Option<&'static str>),
+        /// Opening with this, as an operating system's own words close it.
+        Opens(&'static str),
+    }
     let world = World::new("guard-answered");
     let seam = world.root.join("failpoints");
     std::fs::create_dir_all(&seam).expect("the failpoint directory");
     let world = world.with_env("ONEPIPELINE_REVIEW_FAILPOINT", &seam.to_string_lossy());
     let failed = word("outcomes", "failed");
+    let not_needed = word("outcomes", "not_needed");
     let cases = [
         (
             "notneeded",
-            counting_guard(&world, "answers", exit("not_needed"), "said once"),
+            counting_guard(&world, "answers", exit("not_needed"), "nothing to finalize"),
             None,
             "done",
-            word("outcomes", "not_needed"),
-            "the guard found the node not needed",
+            not_needed.clone(),
+            Detail::Exactly(Some("nothing to finalize")),
+        ),
+        (
+            "silent",
+            counting_guard(&world, "silent", exit("not_needed"), ""),
+            None,
+            "done",
+            not_needed,
+            Detail::Exactly(None),
         ),
         (
             "exited",
-            counting_guard(&world, "fails", 1, "said once"),
+            counting_guard(&world, "fails", 1, "the lookup broke"),
             None,
             "failed",
             failed.clone(),
-            "the guard exited with status 1",
+            Detail::Exactly(Some(
+                "the guard exited with status 1; stderr (last 2048 bytes at most):\n\
+                 the lookup broke",
+            )),
         ),
         (
             "signalled",
@@ -1231,7 +1250,7 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             None,
             "failed",
             failed.clone(),
-            "the guard was ended by a signal",
+            Detail::Exactly(Some("the guard was ended by a signal")),
         ),
         (
             "timedout",
@@ -1239,7 +1258,9 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             Some(1),
             "failed",
             failed.clone(),
-            "the guard timed out after 1 s",
+            Detail::Exactly(Some(
+                "the guard timed out after 1 s, so its process tree was stopped",
+            )),
         ),
         (
             "missing",
@@ -1247,10 +1268,10 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             None,
             "failed",
             failed,
-            "the guard could not be started",
+            Detail::Opens("the guard could not be started: "),
         ),
     ];
-    for (case, guard, deadline, status, outcome, says) in cases {
+    for (case, guard, deadline, status, outcome, expected) in cases {
         let run = format!("answered{case}");
         let asked = format!("asked-{case}");
         let mut node = guarded(agent(&asked, &[]), &guard);
@@ -1288,12 +1309,21 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
         let settled = result(&world, &run, &asked);
         assert_eq!(settled["status"], status, "{run}: {settled}");
         assert_eq!(settled["outcome"], json!(outcome), "{run}: {settled}");
-        let detail = settled["detail"].as_str().expect("a detail");
-        assert!(detail.contains(says), "{run}: {detail}");
-        assert!(
-            detail.contains(&log_of(&world, &run, &asked).display().to_string()),
-            "{run}: {detail}"
-        );
+        match expected {
+            Detail::Exactly(Some(detail)) => {
+                assert_eq!(settled["detail"], json!(detail), "{run}: {settled}");
+            }
+            Detail::Exactly(None) => {
+                assert!(settled.get("detail").is_none(), "{run}: {settled}");
+            }
+            Detail::Opens(opening) => {
+                let detail = settled["detail"].as_str().expect("a detail");
+                assert!(
+                    detail.starts_with(opening) && !detail.contains("journalled"),
+                    "{run}: {detail}"
+                );
+            }
+        }
         assert_eq!(
             dispatched(&world, &run, "after"),
             status == "done",

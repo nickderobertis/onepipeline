@@ -8888,7 +8888,7 @@ fn start_ready(
         if let Some(settlement) = state
             .guards_answered
             .get(&node.id)
-            .and_then(|answered| crate::guard::recovered(paths, &node, answered.verdict))
+            .and_then(|answered| crate::guard::recovered(paths, &node, answered))
         {
             settle(paths, journal, &settlement)?;
             settled_here = true;

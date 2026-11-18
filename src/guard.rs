@@ -30,6 +30,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 use crate::commandstep::{run_program, with_tail, Ended};
 use crate::engine::{Message, Settled, Settlement};
 use crate::error::{Error, Result};
@@ -60,6 +62,54 @@ pub(crate) fn log_of(paths: &RunPaths, node: &str) -> PathBuf {
     crate::hooks::run_root(paths)
         .join("guards")
         .join(format!("{node}.log"))
+}
+
+/// Where a guard's answer is kept for the node's current attempt: what `guard-evaluated`
+/// records beside the detail of the settlement it leads to, written before that record is
+/// journalled.
+fn answer_of(paths: &RunPaths, node: &str) -> PathBuf {
+    crate::hooks::run_root(paths)
+        .join("guards")
+        .join(format!("{node}.answer.json"))
+}
+
+/// A guard's answer as it is kept: the verdict record the journal is about to carry, and
+/// the detail of the settlement that verdict leads to — the one thing the journal does not
+/// carry, which an adopting driver needs where the settlement was never written.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answer {
+    evaluated: GuardEvaluated,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+/// Keep `settlement`'s detail beside `evaluated` for `node`, where a settlement follows the
+/// verdict. Durable before it returns, so a verdict the loop journals after it is always
+/// recoverable with its detail.
+///
+/// # Errors
+///
+/// A run directory this host will not write the answer into.
+fn keep_answer(
+    paths: &RunPaths,
+    node: &str,
+    evaluated: &GuardEvaluated,
+    settlement: &Settlement,
+) -> Result<()> {
+    let path = answer_of(paths, node);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::Ledger {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let bytes = serde_json::to_vec(&Answer {
+        evaluated: *evaluated,
+        detail: settlement.detail.clone(),
+    })
+    .map_err(|error| Error::Invalid(format!("a guard's answer is not JSON: {error}")))?;
+    crate::ledger::write_atomic(&path, &bytes, crate::ledger::Durability::Record)
 }
 
 /// The deadline `node`'s guard is held to.
@@ -129,6 +179,18 @@ pub(crate) fn spawn(
             let duration_ms = u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX);
             let Evaluated { record, settlement } =
                 evaluate(&node, ran.ended, &ran.tail, duration_ms, &cancel);
+            // Kept before the loop journals the verdict, so a driver that stops between that
+            // record and the settlement leaves the settlement's detail to its adopter.
+            if let Some(settlement) = &settlement {
+                // llmlint: ignore[changed_behavior_has_e2e] a run directory the driver journals into and cannot write a file beside is a host condition — a full disk, a permission changed under a live run — that no plan or verb produces; staging it edits the run's own layout, which proves the fixture. The live settlement is unaffected, and only a recovery that also loses its driver falls back, as `recovered` says.
+                if let Err(error) = keep_answer(&paths, &node.id, &record, settlement) {
+                    eprintln!(
+                        "onepipeline: node '{}': its guard's answer could not be kept, so a \
+                         driver adopting it before it settles cannot repeat its detail: {error}",
+                        node.id
+                    );
+                }
+            }
             // A node the loop started has an identity; one without is a node the loader
             // refused, and nothing is sent for it but its settlement.
             if let Some(named) = crate::graph::NodeRef::of(&node) {
@@ -264,29 +326,41 @@ fn failure_of(node: &Node, ending: CommandEnding) -> String {
 /// verdict that settles nothing an adopter owes — *needed*, which proceeds, and a
 /// cancellation, whose park the adopter keeps.
 ///
-/// What the guard said on stderr went with the driver that read it, so the detail names
-/// the log that kept it.
+/// Its detail is the one the settlement would have carried, read from the answer the guard's
+/// thread kept before the verdict was journalled — only where that answer is the journalled
+/// verdict itself, so another attempt's answer is never taken for this one's. Where no such
+/// answer could be kept, the failure's cause is all that is left to say, and a node not
+/// needed carries no detail.
 pub(crate) fn recovered(
     paths: &RunPaths,
     node: &Node,
-    verdict: GuardVerdict,
+    answered: &GuardEvaluated,
 ) -> Option<Settlement> {
-    let kept = format!(
-        "its verdict was journalled before its driver stopped, and what it said is kept in {}",
-        log_of(paths, &node.id).display()
-    );
-    match verdict {
-        GuardVerdict::Needed => None,
-        GuardVerdict::Failed(failure) if failure.ending() == CommandEnding::Cancelled => None,
-        GuardVerdict::NotNeeded => Some(Settlement {
-            detail: Some(format!("the guard found the node not needed; {kept}")),
-            ..Settlement::plain(&node.id, NodeStatus::Done, Some(NOT_NEEDED))
-        }),
-        GuardVerdict::Failed(failure) => Some(Settlement {
-            detail: Some(format!("{}; {kept}", failure_of(node, failure.ending()))),
-            ..Settlement::plain(&node.id, NodeStatus::Failed, Some(GUARD_FAILED))
-        }),
-    }
+    let kept = std::fs::read(answer_of(paths, &node.id))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
+        .filter(|answer| answer.evaluated == *answered);
+    let (status, outcome, cause) = match answered.verdict {
+        GuardVerdict::Needed => return None,
+        GuardVerdict::Failed(failure) if failure.ending() == CommandEnding::Cancelled => {
+            return None
+        }
+        GuardVerdict::NotNeeded => (NodeStatus::Done, NOT_NEEDED, None),
+        GuardVerdict::Failed(failure) => (
+            NodeStatus::Failed,
+            GUARD_FAILED,
+            Some(failure_of(node, failure.ending())),
+        ),
+    };
+    let detail = match kept {
+        Some(answer) => answer.detail,
+        // llmlint: ignore[changed_behavior_has_e2e] reached only where the answer the guard's thread writes before the verdict is journalled could not be written or was removed under a stopped run — the host condition `keep_answer`'s caller names; staging it edits the run's own layout. The kept-answer path is `tests/e2e/guard.rs`'s adoption journey.
+        None => cause,
+    };
+    Some(Settlement {
+        detail,
+        ..Settlement::plain(&node.id, status, Some(outcome))
+    })
 }
 
 #[cfg(test)]
