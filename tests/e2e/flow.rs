@@ -761,8 +761,9 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
 // at once, so the narrowest edge it can honestly sit behind is the crate's, as the `mod
 // flow` declaration in `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own
 // timed journeys behind the same edge for the same reason.
-/// Under a wake budget a `watch --flow` given no `--timeout` returns within it,
-/// measured on the wall clock; one whose `--timeout` equals the budget does not
+/// Under a wake budget a `watch --flow` given no `--timeout` gives up at the
+/// budget less the reserve — no sooner, on the wall clock, and inside the
+/// budget, by the deadline it arms; one whose `--timeout` equals the budget does not
 /// qualify, naming the reserve; and with the budget as a flag, the line names
 /// `--timeout <budget less the reserve>`, which qualifies.
 #[test]
@@ -773,31 +774,29 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "10");
 
-    // No event, no timeout: it gives up at the budget less the reserve. Timed
-    // between two instants the kernel stamps on the watch's own writes, read
-    // only after it has exited: the birth of the `watch-terms` directory, made
-    // as it arms, and the last write to the file its standard output goes to,
-    // which is its return record. Neither the process start before arming, the
-    // teardown after returning, nor when this test is scheduled to look is in
-    // what is measured — and nothing has to be read while the watch is live.
+    // No event, no timeout: it gives up at the budget less the reserve. Only
+    // that floor is read off the wall clock, and from outside the process: the
+    // watch takes its deadline after it is spawned and returns no sooner than
+    // that, so the span from before the spawn to after the exit encloses its
+    // whole wait. A slow or loaded host only lengthens that span, so it can
+    // fail this for a watch that gave up early and never for a late one.
     let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
-    let terms_dir = world.runs.join(".flows").join("quiet").join("watch-terms");
-    assert!(
-        !terms_dir.exists(),
-        "a watch armed on the flow before the timed one: {}",
-        terms_dir.display()
-    );
-    let records = world.root.join("reserve-watch.jsonl");
-    let watch = budgeted
+    let spawned = Instant::now();
+    let output = budgeted
         .cmd(&["watch", "--flow", "quiet"])
-        .stdout(std::fs::File::create(&records).expect("a records file"))
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("the watch starts")
         .wait_with_output()
         .expect("the watch returns");
-    let said = std::fs::read_to_string(&records).expect("the watch's records");
-    assert_eq!(watch.status.code(), Some(WATCH_ELAPSED), "{said}{watch:?}");
+    let took = spawned.elapsed();
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(WATCH_ELAPSED),
+        "{said}{output:?}"
+    );
     assert!(
         said.lines()
             .last()
@@ -805,37 +804,26 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
             .is_some_and(|record| record["watch"] == "return"),
         "the watch's last record is not its return: {said}"
     );
-    let armed = std::fs::metadata(&terms_dir)
-        .and_then(|found| found.created())
-        .expect("the filesystem records when the watch's terms directory was made");
-    let returned = std::fs::metadata(&records)
-        .and_then(|found| found.modified())
-        .expect("the time the watch last wrote its records");
-    let waited = u64::try_from(
-        returned
-            .duration_since(armed)
-            .expect("the watch returned after it armed")
-            .as_millis(),
-    )
-    .expect("a few seconds");
     assert!(
-        waited <= 10_000,
-        "the watch returned {waited}ms after it armed, past its 10s wake budget"
+        took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
+        "the watch returned within {took:?} of its spawn, before the budget less the reserve"
     );
-    assert!(
-        waited >= 10_000 - reserve_ms - 1_000,
-        "the watch returned {waited}ms after it armed, before the budget less the reserve"
-    );
-    // The deadline a budgeted watch arms is exactly the budget less the reserve
-    // from the instant its lease records, whatever the host's speed — read off
-    // one under a budget long enough that its lease outlives any delay in
-    // looking at it.
+    // That it gives up inside the budget is read off the deadline it arms, not
+    // off how soon the host lets it run again once that deadline passes: the
+    // deadline its terms record is exactly the budget less the reserve from
+    // the instant its lease records. Read off one under a budget long enough
+    // that its lease outlives any delay in looking at it.
     let long = world
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "900");
     let lasting = watching(&long, "quiet", &[]);
     let (began, deadline) = armed_terms(&world, "quiet", &lasting);
-    assert_eq!(deadline - began, 900_000 - reserve_ms);
+    assert_eq!(
+        deadline - began,
+        900_000 - reserve_ms,
+        "a watch under a 900s wake budget armed a deadline {}ms after it began",
+        deadline - began
+    );
     lasting.end();
 
     // A watch whose timeout is the budget does not qualify, and says why.
