@@ -1340,6 +1340,15 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
 
         let adopted = world.run(&["adopt", &run]);
         assert!(adopted.code == 0 || status != "done", "{}", adopted.stderr);
+        // A lost answer is said to be lost, and only then.
+        assert_eq!(
+            adopted.stderr.contains(&format!(
+                "node '{asked}': its guard's verdict is journalled"
+            )),
+            matches!(case, "removed" | "foreign"),
+            "{run}: {}",
+            adopted.stderr
+        );
         assert_eq!(
             count(&world, &run, "guard-started", &asked),
             1,

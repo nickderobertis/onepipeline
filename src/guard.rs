@@ -155,7 +155,8 @@ pub(crate) struct Evaluated {
 ///
 /// # Errors
 ///
-/// A thread this host would not start; the node is then left for the loop to settle.
+/// A thread this host would not start. The error stops the driver, and the node's
+/// `guard-started` with no `guard-evaluated` after it has its guard run again on `adopt`.
 pub(crate) fn spawn(
     paths: &RunPaths,
     launch: &LaunchRecord,
