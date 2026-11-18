@@ -3,12 +3,13 @@
 //   node gate-profile/fold.mjs <run dir>     fold a run again (gate-profile/run.mjs folds each run)
 //
 // The run directory holds meta.json (run.mjs), run.json and phases.jsonl (the `just` shim),
-// cargo.jsonl (the `cargo` shim), nx/<invocation>.{invocation,profile,graph}.json (nx-hook.sh,
-// Nx's NX_PROFILE, `nx --graph`), processes.json (sampler.mjs) and cargo's own timings pages.
+// cargo.jsonl and cargo-timings/ (the `cargo` shim: its records and the copies of cargo's own
+// timings pages), nx/<invocation>.{invocation,profile,graph}.json (nx-hook.sh,
+// Nx's NX_PROFILE, `nx --graph`) and processes.json (sampler.mjs).
 // REPORT_SCHEMA below is the one declaration of report.json's shape; every report is checked
 // against it before it is written. Exit 0 when both reports are written, 2 for a usage error,
 // 3 when a record is missing or malformed.
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -208,6 +209,7 @@ export const RECORD_SCHEMAS = {
   cargo: open({
     ...timed,
     exit: { type: "integer" },
+    timings: list(text),
     argv: list(text),
     cwd: text,
     target_dir: text,
@@ -459,7 +461,12 @@ const UNIT_DATA = /const UNIT_DATA = (\[[\s\S]*?\n\]);/;
 
 /** One cargo timings page: when its build started and each unit it compiled. */
 export function readTimings(path) {
-  const page = readFileSync(path, "utf8");
+  let page;
+  try {
+    page = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new RecordError(`cannot read the timings page ${path}: ${error.message}`);
+  }
   const start = page.match(BUILD_START);
   const units = page.match(UNIT_DATA);
   need(start && units, `${path} has no build start or unit data; is it a cargo --timings page?`);
@@ -474,43 +481,8 @@ export function readTimings(path) {
   }
   return {
     built,
-    written: statSync(path).mtimeMs,
     units: checked(data, RECORD_SCHEMAS.timingUnits, `${path}'s unit data`),
   };
-}
-
-/** Every cargo timings page written since `since` in a `cargo-timings` directory cargo could use. */
-function timingsPages(root, cargoRuns, since) {
-  const dirs = new Set();
-  const consider = (dir) => {
-    if (dir && existsSync(join(dir, "cargo-timings"))) dirs.add(join(dir, "cargo-timings"));
-  };
-  const skip = new Set(["node_modules", ".git", ".nx"]);
-  const entries = (dir) => {
-    try {
-      return readdirSync(dir, { withFileTypes: true }).filter(
-        (e) => e.isDirectory() && !skip.has(e.name),
-      );
-    } catch {
-      return [];
-    }
-  };
-  for (const first of entries(root)) {
-    consider(join(root, first.name));
-    for (const second of entries(join(root, first.name)))
-      consider(join(root, first.name, second.name));
-  }
-  for (const run of cargoRuns) {
-    consider(run.target_dir);
-    consider(run.llvm_cov_target_dir);
-    if (run.target_dir) consider(join(run.target_dir, "llvm-cov-target"));
-  }
-  const pages = [];
-  for (const dir of dirs)
-    for (const name of readdirSync(dir))
-      if (/^cargo-timing-.+\.html$/.test(name) && statSync(join(dir, name)).mtimeMs >= since)
-        pages.push(join(dir, name));
-  return pages.sort();
 }
 
 /** Fold the run directory `dir` into its report object. */
@@ -657,7 +629,7 @@ export function foldRun(dir) {
     }
   }
 
-  // Cargo invocations, each with the timings pages written inside its interval.
+  // Cargo invocations, each with the timings pages its shim copied out.
   const cargo = cargoRuns
     .map((c) => {
       const start = ms(c.start);
@@ -679,44 +651,42 @@ export function foldRun(dir) {
         load: loadOver(loads, start, end),
         exit: c.exit,
         timings: [],
+        records: c.timings,
         units: [],
         startMs: start,
         endMs: end,
       };
     })
     .sort((a, b) => a.startMs - b.startMs);
-  const slack = 5;
-  for (const page of timingsPages(meta.root, cargoRuns, runStart - 1000)) {
-    const timing = readTimings(page);
-    const owner = cargo
-      .filter((c) => c.startMs <= timing.built + slack && c.endMs + slack >= timing.written)
-      .sort((a, b) => b.startMs - a.startMs)[0];
-    if (!owner) {
-      notes.push(
-        `${relative(meta.root, page)} was written during the run by no recorded cargo invocation.`,
-      );
-      continue;
+  // Each build's own timings pages, which the cargo shim copied out as it finished.
+  for (const owner of cargo) {
+    for (const page of owner.records) {
+      const timing = readTimings(page);
+      owner.timings.push(relative(meta.root, page));
+      for (const unit of timing.units) {
+        const from = timing.built + unit.start * 1000;
+        const to = from + unit.duration * 1000;
+        owner.units.push({
+          unit: `${unit.name} v${unit.version} ${unit.target.trim()}`.trim(),
+          name: unit.name,
+          version: unit.version,
+          target: unit.target.trim(),
+          mode: unit.mode,
+          start: iso(from),
+          end: iso(to),
+          wall_s: round2(unit.duration),
+          load: loadOver(loads, from, to),
+        });
+      }
     }
-    owner.timings.push(relative(meta.root, page));
-    for (const unit of timing.units) {
-      const from = timing.built + unit.start * 1000;
-      const to = from + unit.duration * 1000;
-      owner.units.push({
-        unit: `${unit.name} v${unit.version} ${unit.target.trim()}`.trim(),
-        name: unit.name,
-        version: unit.version,
-        target: unit.target.trim(),
-        mode: unit.mode,
-        start: iso(from),
-        end: iso(to),
-        wall_s: round2(unit.duration),
-        load: loadOver(loads, from, to),
-      });
-    }
+    delete owner.records;
   }
   for (const c of cargo) {
     c.units.sort((a, b) => b.wall_s - a.wall_s);
-    if (!c.timings.length) notes.push(`\`${c.command.join(" ")}\` left no timings page.`);
+    if (!c.timings.length)
+      notes.push(
+        `\`${c.command.join(" ")}\` left no timings page: it failed before cargo wrote one, or wrote it outside every target directory the shim looks in.`,
+      );
   }
 
   const phaseWall = phases.reduce((sum, p) => sum + p.wall_s, 0);
@@ -902,13 +872,21 @@ export function renderMarkdown(report) {
   ];
   report.cargo.forEach((c, i) => {
     if (!c.units.length) return;
+    // A unit cargo lists at no time at all clutters the page; report.json keeps every one.
+    const timed = c.units.filter((u) => u.wall_s > 0);
     out.push("", `### Compile units of cargo invocation ${i + 1}, slowest first`, "");
-    out.push(
-      table(
-        ["unit", "mode", "start", "wall", "load"],
-        c.units.map((u) => [u.unit, u.mode, at(report, u.start), s(u.wall_s), u.load]),
-      ),
-    );
+    if (timed.length)
+      out.push(
+        table(
+          ["unit", "mode", "start", "wall", "load"],
+          timed.map((u) => [u.unit, u.mode, at(report, u.start), s(u.wall_s), u.load]),
+        ),
+      );
+    if (timed.length < c.units.length)
+      out.push(
+        "",
+        `${c.units.length - timed.length}${timed.length ? " more" : ""} units took under 0.01s; report.json lists them.`,
+      );
   });
   if (report.notes.length) out.push("", "## Notes", "", ...report.notes.map((n) => `- ${n}`));
   return `${out.join("\n")}\n`;

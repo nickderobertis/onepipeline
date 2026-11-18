@@ -3,15 +3,7 @@
 // line between samples, and the report shape REPORT_SCHEMA declares.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -217,37 +209,31 @@ function handMadeRun(t) {
     { ph: "M", name: "thread_name" },
     { ph: "X", name: "p:x", ts: (base + 1) * 1e6, dur: 2e6, args: { status: "success" } },
   ]);
-  const cargo = (start, end, target_dir) => ({
+  const copy = join(dir, "cargo-timings", "1-a.html");
+  const cargo = (start, end, timings) => ({
     start,
     end,
     ...cpu,
     exit: 0,
+    timings,
     argv: ["build"],
     cwd: root,
-    target_dir,
+    target_dir: "",
     llvm_cov_target_dir: "",
     invocation: "i1",
     phase: "1-1",
     task: "p:x",
   });
-  const elsewhere = join(root, "out", "of", "the", "way");
+  // The first build's page as its shim copied it out; the second left none.
   put(
     join(dir, "cargo.jsonl"),
-    `${JSON.stringify(cargo(base + 2, base + 5, elsewhere))}\n${JSON.stringify(cargo(base + 6, base + 7, ""))}\n`,
+    `${JSON.stringify(cargo(base + 2, base + 5, [copy]))}\n${JSON.stringify(cargo(base + 6, base + 7, []))}\n`,
   );
-  const page = (path, built, written) => {
-    const start = new Date(built * 1000).toISOString().replace("Z", "123456Z");
-    put(
-      path,
-      `<td>Build start:</td><td>${start}</td>\nconst UNIT_DATA = [\n  {"name": "u", "version": "1.0.0", "mode": "todo", "target": " (check)", "start": 0.1, "duration": 0.5}\n];\n`,
-    );
-    utimesSync(path, written, written);
-  };
-  // In the first build's own target directory, which no search of the root reaches.
-  page(join(elsewhere, "cargo-timings", "cargo-timing-a.html"), base + 2.5, base + 4.9);
-  // Written during the run by no recorded build, and one from before the run.
-  page(join(root, "sub", "target", "cargo-timings", "cargo-timing-b.html"), base + 8.5, base + 8.9);
-  page(join(root, "sub", "target", "cargo-timings", "cargo-timing-c.html"), base - 50, base - 49);
+  const start = new Date((base + 2.5) * 1000).toISOString().replace("Z", "123456Z");
+  put(
+    copy,
+    `<td>Build start:</td><td>${start}</td>\nconst UNIT_DATA = [\n  {"name": "u", "version": "1.0.0", "mode": "todo", "target": " (check)", "start": 0.1, "duration": 0.5}\n];\n`,
+  );
   return dir;
 }
 
@@ -263,7 +249,7 @@ test("refolding a run writes its reports, saying what the records did not have",
   assert.deepEqual(
     report.cargo.map((c) => [c.timings, c.units.map((u) => u.unit)]),
     [
-      [["out/of/the/way/cargo-timings/cargo-timing-a.html"], ["u v1.0.0 (check)"]],
+      [["target/gate-profile/x/cargo-timings/1-a.html"], ["u v1.0.0 (check)"]],
       [[], []],
     ],
   );
@@ -273,7 +259,7 @@ test("refolding a run writes its reports, saying what the records did not have",
     ["p:x"],
   );
   assert.equal(report.tasks[0].cpu_basis, "none");
-  assert.equal(report.notes.length, 4, report.notes.join("\n"));
+  assert.equal(report.notes.length, 3, report.notes.join("\n"));
   assert.match(report.notes.join("\n"), /No task graph for invocation i1/);
   assert.match(report.notes.join("\n"), /Nx wrote no task profile for invocation i2 \(run x:y\)/);
   assert.deepEqual(
@@ -283,18 +269,13 @@ test("refolding a run writes its reports, saying what the records did not have",
       ["i2", false],
     ],
   );
-  assert.match(report.notes.join("\n"), /cargo-timing-b\.html was written during the run by no/);
   assert.match(report.notes.join("\n"), /`cargo build` left no timings page/);
 });
 
 test("refolding refuses a timings page whose units are not as cargo writes them", (t) => {
   const dir = handMadeRun(t);
-  const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
-  const page = join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html");
-  const html = readFileSync(page, "utf8");
-  const { mtime } = statSync(page);
-  writeFileSync(page, html.replace('"duration": 0.5', '"duration": -1'));
-  utimesSync(page, mtime, mtime);
+  const page = join(dir, "cargo-timings", "1-a.html");
+  writeFileSync(page, readFileSync(page, "utf8").replace('"duration": 0.5', '"duration": -1'));
   const result = fold(dir);
   assert.equal(result.status, 3);
   assert.match(result.stderr, /unit data is not as recorded: \$\[0\]\.duration: -1 is below 0/);
@@ -385,56 +366,10 @@ test("refolding refuses a timings page that is not one cargo wrote", async (t) =
   for (const [rewrite, pattern] of cases)
     await t.test(String(pattern), (t) => {
       const dir = handMadeRun(t);
-      const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
-      const page = join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html");
-      const { mtime } = statSync(page);
+      const page = join(dir, "cargo-timings", "1-a.html");
       writeFileSync(page, rewrite(readFileSync(page, "utf8")));
-      utimesSync(page, mtime, mtime);
       const result = fold(dir);
       assert.equal(result.status, 3, result.stderr);
       assert.match(result.stderr, pattern);
     });
-});
-
-test("refolding finds the timings of llvm-cov builds in the directories cargo-llvm-cov uses", (t) => {
-  const dir = handMadeRun(t);
-  const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
-  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
-  const page = readFileSync(
-    join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html"),
-    "utf8",
-  );
-  const records = readFileSync(join(dir, "cargo.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-  // One build names its llvm-cov directory, the other only the target directory it sits under.
-  const named = join(meta.root, "deep", "a", "cov");
-  const under = join(meta.root, "deep", "b", "target");
-  records[0] = { ...records[0], target_dir: "", llvm_cov_target_dir: named };
-  records[1] = { ...records[1], target_dir: under };
-  writeFileSync(join(dir, "cargo.jsonl"), `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
-  rmSync(join(meta.root, "out"), { recursive: true });
-  const place = (path, built, written) => {
-    const start = new Date(built * 1000).toISOString();
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, page.replace(/<td>[^<]*Z<\/td>/, `<td>${start}</td>`));
-    utimesSync(path, written, written);
-  };
-  place(join(named, "cargo-timings", "cargo-timing-n.html"), run.start + 2.5, run.start + 4.9);
-  place(
-    join(under, "llvm-cov-target", "cargo-timings", "cargo-timing-u.html"),
-    run.start + 6.2,
-    run.start + 6.9,
-  );
-  const result = fold(dir);
-  assert.equal(result.status, 0, result.stderr);
-  const report = JSON.parse(readFileSync(join(dir, "report.json"), "utf8"));
-  assert.deepEqual(
-    report.cargo.map((c) => c.timings),
-    [
-      ["deep/a/cov/cargo-timings/cargo-timing-n.html"],
-      ["deep/b/target/llvm-cov-target/cargo-timings/cargo-timing-u.html"],
-    ],
-  );
 });

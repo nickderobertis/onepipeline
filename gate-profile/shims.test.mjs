@@ -317,6 +317,66 @@ process.exit(Number(process.env.STANDIN_EXIT ?? 0));
   assert.deepEqual(failed.got, ["build", "--timings", "--features", awkward]);
 });
 
+test("the cargo shim keeps each build's own timings page, even one a later build overwrites", (t) => {
+  const dir = scratch(t, "cargo-pages");
+  const run = join(dir, "run");
+  mkdirSync(run);
+  // Like cargo, it writes its page under the target directory, named so two builds can collide.
+  const standin = join(dir, "bin", "cargo");
+  write(
+    standin,
+    `#!/usr/bin/env bash
+case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
+  printf 'page of %s\\n' "$STANDIN_UNIT" > "$STANDIN_TARGET/cargo-timings/cargo-timing-same.html" ;; esac
+`,
+    0o755,
+  );
+  const cargo = (args, env) =>
+    spawnSync("cargo", args, {
+      cwd: dir,
+      encoding: "utf8",
+      env: {
+        ...fixtureEnvironment(),
+        PATH: `${shims}:${dirname(standin)}:${process.env.PATH}`,
+        ONEPIPELINE_GATE_PROFILE_DIR: run,
+        ONEPIPELINE_GATE_PROFILE_ROOT: dir,
+        ONEPIPELINE_GATE_PROFILE_RUN: "run-1",
+        ...env,
+      },
+    });
+  assert.equal(
+    cargo(["build"], { STANDIN_TARGET: join(dir, "target"), STANDIN_UNIT: "first" }).status,
+    0,
+  );
+  assert.equal(
+    cargo(["clippy"], { STANDIN_TARGET: join(dir, "target"), STANDIN_UNIT: "second" }).status,
+    0,
+  );
+  mkdirSync(join(dir, "sub"));
+  assert.equal(
+    cargo(["check", "--manifest-path", "sub/Cargo.toml"], {
+      STANDIN_TARGET: join(dir, "sub", "target"),
+      STANDIN_UNIT: "manifest's",
+    }).status,
+    0,
+  );
+  // A build that wrote no page records none, rather than an older build's.
+  assert.equal(
+    cargo(["test"], { STANDIN_TARGET: join(dir, "nowhere"), STANDIN_UNIT: "x" }).status,
+    0,
+  );
+  const records = lines(join(run, "cargo.jsonl"));
+  assert.deepEqual(
+    records.map((r) => [r.argv[0], r.timings.map((page) => readFileSync(page, "utf8").trim())]),
+    [
+      ["build", ["page of first"]],
+      ["clippy", ["page of second"]],
+      ["check", ["page of manifest's"]],
+      ["test", []],
+    ],
+  );
+});
+
 test("a shim finds the real tool past every run's shims, and says so when there is none", (t) => {
   const dir = scratch(t, "nested-shims");
   // A run profiled inside another puts its shims before the other's: both are skipped.

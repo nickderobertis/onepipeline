@@ -47,6 +47,8 @@ scratch="$ONEPIPELINE_GATE_PROFILE_DIR/.times.$$"
 # An interrupted build is still recorded: bash would otherwise die with a cargo the signal killed.
 # A handler, unlike an ignored signal, leaves cargo's own disposition at its default.
 trap : INT
+started="$ONEPIPELINE_GATE_PROFILE_DIR/.started.$$"
+: >"$started"
 start=$EPOCHREALTIME
 gate_profile_children_cpu "$scratch"
 before=$gate_profile_cpu
@@ -57,8 +59,36 @@ gate_profile_children_cpu "$scratch"
 after=$gate_profile_cpu
 end=$EPOCHREALTIME
 rm -f "$scratch"
-printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
-  "$start" "$end" "$before" "$after" "$status" "$(gate_profile_json_array "$@")" \
+
+# This build's timings page, copied out now: cargo names a page by the millisecond its build
+# started, so a build that started with another in one target directory has its page overwritten
+# when the other finishes. The page is the newest written since this cargo started, in any target
+# directory it could have used: the configured ones, the root's, and its manifest's.
+manifest_dir=.
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --manifest-path) manifest_dir=$(dirname "${args[$((i + 1))]-.}") ;;
+    --manifest-path=*) manifest_dir=$(dirname "${args[$i]#--manifest-path=}") ;;
+  esac
+done
+page=""
+for target in "${CARGO_TARGET_DIR-}" "${CARGO_LLVM_COV_TARGET_DIR-}" "$root/target" \
+  "$root/target/llvm-cov-target" "$manifest_dir/target" "$manifest_dir/target/llvm-cov-target"; do
+  [ -n "$target" ] || continue
+  for candidate in "$target"/cargo-timings/cargo-timing-*.html; do
+    [ -f "$candidate" ] && [ "$candidate" -nt "$started" ] || continue
+    if [ -z "$page" ] || [ "$candidate" -nt "$page" ]; then page=$candidate; fi
+  done
+done
+rm -f "$started"
+copies=()
+if [ -n "$page" ]; then
+  copy="$ONEPIPELINE_GATE_PROFILE_DIR/cargo-timings/$$-${start/./}.html"
+  mkdir -p "$(dirname "$copy")" && cp -p "$page" "$copy" && copies=("$copy")
+fi
+printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"timings":%s,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
+  "$start" "$end" "$before" "$after" "$status" "$(gate_profile_json_array "${copies[@]}")" \
+  "$(gate_profile_json_array "$@")" \
   "$(gate_profile_json_string "$(pwd -P)")" "$(gate_profile_json_string "${CARGO_TARGET_DIR-}")" \
   "$(gate_profile_json_string "${CARGO_LLVM_COV_TARGET_DIR-}")" \
   "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_INVOCATION-}")" \
