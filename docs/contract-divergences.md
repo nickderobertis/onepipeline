@@ -13629,7 +13629,60 @@ substitution above, and ruled that a `releasing: false` verdict is set aside, as
 reads no rule of its own beyond that field. `docs/contract.md` is left unedited above the
 amendment paragraph.
 
-## 159. Guards — OPEN
+## 159. Reader records, plan-node choices and step outputs — RESOLVED
+
+**Ruled by the manager of node `engine-reader-records`**, whose task directs the four
+additions the amendment paragraphs *Reader records* and *Step outputs and the items that
+quote them*, and the human-items paragraph's amendment, state. The approved text is left
+verbatim above each amendment, except the closed list of this library's own kinds, which
+the task directed be brought up to `PipelineKind`'s and which
+`the_contract_enumerates_exactly_this_librarys_own_event_kinds` now holds to it in order.
+
+What this build decided beyond the task's text, and the rulings that decided it:
+
+- **`surface` is the channel's unsigned integer id**, not the string the task first named
+  (ruling `a1`): it is what `Surface.id`, `onepipeline surface`'s output and `next` already
+  carry, and what `review.rs` already wrote on `planner-surface-queued`, so a string would
+  have changed the type of a field journals already hold. On `quiet-worker`, `check-failed`
+  and `checks-unfollowed` it is omitted where the surface never reached the channel, since a
+  hook dropped or rerouted it and the channel gave it no id. Those records are now written
+  after their surface is offered rather than before, so `quiet-worker` follows its surface
+  as `check-failed` and `checks-unfollowed` already did.
+- **A plan choice is a `HumanItemChoice`**, so its `description` is required nonblank
+  markdown as on a raised item (ruling `a0`), one source of the rules carried verbatim onto
+  the raised item. The plan's choices are decoded unchecked and checked by the loader, so a
+  refusal names the node rather than a decoder position.
+- **`HumanItemMetadata` gains the public field `choices`** (ruling `a0`). On the wire it is
+  additive — default empty and omitted when empty — but a Rust consumer building the struct
+  with a literal adds `choices: Vec::new()`, which cargo-semver-checks reports as
+  `constructible_struct_adds_field`; pre-1.0 that is the minor bump a `feat` takes anyway.
+- **An output the step never published raises no item.** The node keeps waiting and one
+  non-blocking `human-item-unraised` surface about it says which placeholder quoted what;
+  a driver does not raise the same reason twice, and a later driver reads the journal for it
+  before raising it again. The planner attests or drops the node.
+- **The outputs file is fresh per run of the command and removed once read**, so an earlier
+  attempt's file is never read as a later one's, and it is read only on exit 0 and bounded at
+  65536 bytes, since every value is copied into the journal.
+- **`ask` journals only a question raised on a run's channel**: a flow's question has no run
+  journal, and a journal that refuses the record is said on stderr while the asker still
+  waits for its answer.
+
+The events bundle moves to a new minor for the optional fields on seven pipeline payloads.
+
+**Ruling:** the task of node `engine-reader-records` directs the four additions, their
+documentation and the closed list brought up to date; its manager ruled `a0` (plan choices
+are `HumanItemChoice`, and `HumanItemMetadata` gains `choices` with the struct-literal break
+stated) and `a1` (`surface` is the channel's integer id, omitted on a record beside a surface
+that never reached the channel). `docs/contract.md` is left unedited above each amendment
+paragraph, the closed list aside.
+
+```json
+{
+  "bundle_versions": {"events": "2.3.0"}
+}
+```
+
+## 160. Guards — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, recording what this build decided
 beyond the user's approval of plan `node-guard-not-needed-2026-11-17`'s design document
@@ -13669,6 +13722,10 @@ that design; these are the decisions it left to the build:
   it does for any guard whose driver stopped before its verdict. Only an answer removed or
   rewritten under a stopped run is lost; the adopter then says so on stderr and settles with
   the failure's cause alone, or no detail for a node not needed.
+- **A guard is not told `ONEPIPELINE_STEP_OUTPUTS`.** The amendment gives a guard the
+  environment a command node gets and names its variables; a command step is also told where
+  it may publish outputs, but a guard's only answer is its exit status and nothing reads a
+  file it writes, so it is given the variables the amendment names and not that one.
 - **`guard-started`'s `timeout_seconds` is always written**, as the deadline the guard is
   actually held to — the node's `guard_timeout_seconds`, or 300 where it states none.
 - **A guarded human node derives `ready`, not `waiting`, until its guard says *needed*.** Its
@@ -13697,6 +13754,6 @@ the previous bundle has no document for.
 
 ```json
 {
-  "bundle_versions": {"events": "2.3.0"}
+  "bundle_versions": {"events": "2.4.0"}
 }
 ```

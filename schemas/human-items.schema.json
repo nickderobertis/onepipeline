@@ -5743,6 +5743,14 @@
         "type": "string",
         "minLength": 1,
         "pattern": "\\S"
+      },
+      "choices": {
+        "description": "The answers a question offers, carried onto its raised item: a raised item's\nchoices, under the same rules, which the plan loader holds them to and names\nthe node in refusing. Default empty, omitted when empty.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HumanItemChoice"
+        },
+        "maxItems": 6
       }
     },
     "additionalProperties": false,
@@ -5766,6 +5774,36 @@
             "type": "string",
             "const": "question"
           }
+        ]
+      },
+      "HumanItemChoice": {
+        "description": "One answer a question offers.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Unique within its item, lowercase letters, digits and hyphens.",
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+          },
+          "title": {
+            "description": "One nonblank line.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[^\\r\\n]*\\S[^\\r\\n]*$"
+          },
+          "description": {
+            "description": "Nonblank markdown.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description"
         ]
       }
     }

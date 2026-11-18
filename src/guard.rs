@@ -183,6 +183,7 @@ pub(crate) fn spawn(
                 &log_of(&paths, &node.id),
                 Some(timeout_of(&node)),
                 &cancel,
+                None,
             );
             let duration_ms = u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX);
             let Evaluated { record, settlement } =

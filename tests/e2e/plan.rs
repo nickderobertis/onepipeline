@@ -997,7 +997,8 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
             .any(|event| event["labels"]["node"] == "busy")
     });
 
-    // Written before the surface was raised, so it is there once the surface is.
+    // Written in the pass that raised the surface, right after it, and naming it by its
+    // channel id: a reader joins the record to the surface the planner reads.
     let reported = world
         .events_of("quiet", "quiet-worker")
         .into_iter()
@@ -1005,6 +1006,16 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
         .expect("the slow worker was reported quiet");
     assert_eq!(reported["payload"]["threshold_seconds"], 1);
     assert_eq!(reported["payload"]["persona"], "engineer");
+    assert!(surfaced["payload"]["surface"].is_u64(), "{surfaced}");
+    assert_eq!(
+        reported["payload"]["surface"],
+        surfaced["payload"]["surface"]
+    );
+    assert_eq!(
+        surfaced["payload"]["correlation"],
+        Value::Null,
+        "{surfaced}"
+    );
 
     // A node is reported once per quiet stretch, not once per pass.
     onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));

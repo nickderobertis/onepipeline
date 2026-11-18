@@ -183,6 +183,16 @@ fn a_late_failing_check_that_blocks_nothing_is_shown_once_and_moves_nothing() {
         Some(40),
         "{payload}"
     );
+    // The record names the surface it describes by its channel id, and the surface
+    // names the node as its `node` label.
+    assert!(
+        surfaces[0]["payload"]["surface"].is_u64(),
+        "{}",
+        surfaces[0]
+    );
+    assert_eq!(payload["surface"], surfaces[0]["payload"]["surface"]);
+    assert_eq!(surfaces[0]["labels"]["node"], "service");
+    assert_eq!(surfaces[0]["payload"]["correlation"], Value::Null);
 
     // The planner profile — what `monitor` and `next` read by default — shows the
     // check's line, stamped `attention`.
@@ -891,6 +901,17 @@ fn a_check_the_timeout_stops_following_is_named_and_its_later_failure_is_not() {
     assert_eq!(records[0]["payload"]["checks"][0]["required"], false);
     let surfaces = raised(&world, run, "checks-unfollowed");
     assert_eq!(surfaces.len(), 1);
+    assert!(
+        surfaces[0]["payload"]["surface"].is_u64(),
+        "{}",
+        surfaces[0]
+    );
+    assert_eq!(
+        records[0]["payload"]["surface"],
+        surfaces[0]["payload"]["surface"]
+    );
+    assert_eq!(surfaces[0]["labels"]["node"], "service");
+    assert_eq!(surfaces[0]["payload"]["correlation"], Value::Null);
     let message = surfaces[0]["payload"]["message"]
         .as_str()
         .unwrap_or_default();

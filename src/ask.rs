@@ -282,8 +282,38 @@ impl Question {
             declined_ruling: None,
         };
         let offered = question.clone();
+        let about = request.about.clone();
         Ok(match channel.ask(question, request.about) {
-            Ok(AskOffered::Raised(pending)) => Self::Pending { pending, window },
+            Ok(AskOffered::Raised(pending)) => {
+                // A run's history holds its questions as it holds every other surface;
+                // a flow's channel has no run journal to hold one.
+                if let On::Run(paths) = on {
+                    let queued = Surface {
+                        id: pending.id(),
+                        correlation: Some(pending.correlation().clone()),
+                        workstream: about.as_ref().map(|about| about.as_str().to_owned()),
+                        ..offered
+                    };
+                    // The question is on the channel and its answer is coming: a journal
+                    // that refused the record must not cost the asker the answer, so it is
+                    // said and the wait goes on. Arranging a journal that refuses one append
+                    // and admits the run's others is a host fault no journey can stage.
+                    if let Err(error) = crate::engine::record_surface_queued(
+                        paths,
+                        &mut crate::journal::Journal::open(paths),
+                        &queued,
+                        &crate::journal::bounded_text(&queued.message),
+                        &[],
+                    ) {
+                        eprintln!(
+                            "onepipeline: the question is asked, and run '{}''s journal did not \
+                             record it: {error}",
+                            paths.run
+                        );
+                    }
+                }
+                Self::Pending { pending, window }
+            }
             Ok(AskOffered::Dropped(dropped)) => {
                 if let On::Run(paths) = on {
                     crate::engine::record_surface_dropped(

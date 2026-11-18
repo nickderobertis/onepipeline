@@ -470,17 +470,26 @@ fn a_decline_given_its_reason_as_one_argument_raises_the_surface_stdin_does() {
 
     // `World::run` closes stdin: the reason reaches the verb as the argument
     // alone.
-    world
-        .run(&[
-            "decline-ruling",
-            &by_argument,
-            "--ruling",
-            &reference,
-            "--reason",
-            reason,
-        ])
-        .exited(0)
-        .out_has("\"state\":\"queued\"");
+    let declined = world.run(&[
+        "decline-ruling",
+        &by_argument,
+        "--ruling",
+        &reference,
+        "--reason",
+        reason,
+    ]);
+    declined.exited(0).out_has("\"state\":\"queued\"");
+    // Its record in the run's history names the surface by the id the verb printed, and
+    // the node it is about by its label.
+    let queued: Vec<Value> = world
+        .events_of(&by_argument, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| event["payload"]["kind"] == "declined-ruling")
+        .collect();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0]["payload"]["surface"], declined.json()["surface"]);
+    assert_eq!(queued[0]["payload"]["correlation"], Value::Null);
+    assert_eq!(queued[0]["labels"]["node"], "managers");
     decline(&world, &by_stdin, &reference, reason)
         .exited(0)
         .out_has("\"state\":\"queued\"");
