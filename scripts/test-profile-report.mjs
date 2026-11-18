@@ -120,6 +120,15 @@ export function recordProblem(record) {
   return undefined;
 }
 
+/** The entries of directory `at`, or a refusal naming it and what to do, `next`. */
+function entriesOf(at, next) {
+  try {
+    return readdirSync(at, { withFileTypes: true });
+  } catch (error) {
+    throw new Refusal(`${at} cannot be read: ${error.message}`, next);
+  }
+}
+
 /**
  * Every record under `dir`, however deep. A file a writer is still staging (a name
  * starting with `.`) is passed over; any other `.json` that is not a record is refused
@@ -128,16 +137,10 @@ export function recordProblem(record) {
 export function loadRecords(dir) {
   const records = [];
   const walk = (at) => {
-    let entries;
-    try {
-      entries = readdirSync(at, { withFileTypes: true });
-    } catch (error) {
-      throw new Refusal(
-        `${at} cannot be read: ${error.message}`,
-        "name a directory of records: target/test-profile/e2e after an e2e run, or a CI leg's unpacked test-profile-* artifact",
-      );
-    }
-    for (const entry of entries) {
+    for (const entry of entriesOf(
+      at,
+      "name a directory of records: target/test-profile/e2e after an e2e run, or a CI leg's unpacked test-profile-* artifact",
+    )) {
       const path = join(at, entry.name);
       // A test's span records are not test records; `foldSpans` reads them.
       if (entry.isDirectory() && entry.name.endsWith(SPANS_SUFFIX)) continue;
@@ -408,8 +411,11 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
   let read = 0;
   let stale = 0;
   const walk = (at) => {
-    // `loadRecords` has already refused a directory it cannot read.
-    for (const entry of readdirSync(at, { withFileTypes: true })) {
+    // Read again: a directory `loadRecords` read can have gone since.
+    for (const entry of entriesOf(
+      at,
+      "rerun the report once the run writing these records has finished",
+    )) {
       if (!entry.isDirectory()) continue;
       const path = join(at, entry.name);
       if (!entry.name.endsWith(SPANS_SUFFIX)) {
@@ -421,7 +427,10 @@ export function foldSpans(dir, records, { topSpans = 10 } = {}) {
       const moduleName = `${test.binary}::${moduleOf(test.test)}`;
       const module = modules.get(moduleName) ?? { name: moduleName, verbs: new Map() };
       modules.set(moduleName, module);
-      for (const file of readdirSync(path, { withFileTypes: true })) {
+      for (const file of entriesOf(
+        path,
+        `make ${path} readable, or remove it and rerun the test whose span records it holds`,
+      )) {
         if (!file.isFile() || !file.name.endsWith(".json") || file.name.startsWith(".")) continue;
         const span = readSpanRecord(join(path, file.name));
         if (span.started_at + SLACK_S < test.started_at) {

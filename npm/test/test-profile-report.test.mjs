@@ -2,7 +2,15 @@
 // in the shape `onepipeline_testfakes::profile` writes them.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
@@ -12,6 +20,8 @@ import {
   SCHEMA,
   SPAN_SCHEMA,
   SPANS_SUFFIX,
+  Refusal,
+  foldSpans,
   loadRecords,
   spanRecordProblem,
   totals,
@@ -657,6 +667,43 @@ test("a span file that is not a span record is refused by its path", () => {
     /is not a span record: pid is not a count/,
     /next:/,
   );
+});
+
+test("a span directory that cannot be read is refused by its path, saying what to do", () => {
+  const dir = join(scratch, "gone-spans");
+  write(dir, [{ ...golden, test: "gone::one", run_id: "now" }]);
+  const records = loadRecords(dir);
+  rmSync(dir, { recursive: true });
+  assert.throws(
+    () => foldSpans(dir, records),
+    (error) =>
+      error instanceof Refusal &&
+      error.message.includes(`${dir} cannot be read`) &&
+      /rerun the report once the run writing these records has finished/.test(error.next),
+  );
+  // A mode the platform enforces: Windows keeps no POSIX mode bits, and a
+  // superuser reads past them, so the span directory there is read as before.
+  const locked = join(scratch, "locked-spans");
+  write(locked, [{ ...golden, test: "locked::one", run_id: "now" }]);
+  const spans = join(locked, "e2e", `locked.one${SPANS_SUFFIX}`);
+  mkdirSync(spans);
+  chmodSync(spans, 0o000);
+  try {
+    let enforced = true;
+    try {
+      readdirSync(spans);
+      enforced = false;
+    } catch {}
+    if (enforced) {
+      refused(
+        ["--out", join(scratch, "x"), `locked=${locked}`],
+        /locked\.one\.spans cannot be read/,
+        /next: make .*locked\.one\.spans readable, or remove it and rerun the test whose span records it holds/,
+      );
+    } else report(`locked=${locked}`);
+  } finally {
+    chmodSync(spans, 0o755);
+  }
 });
 
 test("a span record with no CPU figures, as a platform without them writes, folds to null", () => {
