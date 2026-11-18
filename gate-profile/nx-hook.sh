@@ -29,17 +29,19 @@ elif [ "${1-}" = run-many ] || [ "${1-}" = run ] || [ "${1-}" = affected ]; then
   if [ ! -d "$gate_profile_state/data" ]; then
     # The project graph Nx already computed is kept, so the first invocation does not pay to
     # compute it again; the databases that say which task results are cached are not.
-    mkdir -p "$gate_profile_state/data" "$gate_profile_state/cache"
-    if [ -d .nx/workspace-data ]; then
-      find .nx/workspace-data -maxdepth 1 -type f -name '*.json' -exec cp {} "$gate_profile_state/data/" \;
-    fi
+    mkdir -p "$gate_profile_state/data" "$gate_profile_state/cache" &&
+      if [ -d .nx/workspace-data ]; then
+        find .nx/workspace-data -maxdepth 1 -type f -name '*.json' -exec cp {} "$gate_profile_state/data/" \;
+      fi ||
+      gate_profile_unrecorded "could not set up this run's own Nx cache in $gate_profile_state (see above); make the run directory writable and profile again"
   fi
   ONEPIPELINE_GATE_PROFILE_INVOCATION="${EPOCHREALTIME/./}-$$"
-  mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/nx"
   gate_profile_invocation="$ONEPIPELINE_GATE_PROFILE_DIR/nx/$ONEPIPELINE_GATE_PROFILE_INVOCATION"
-  printf '{"id":"%s","phase":%s,"args":%s}\n' "$ONEPIPELINE_GATE_PROFILE_INVOCATION" \
-    "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
-    "$(gate_profile_json_array "$@")" >"$gate_profile_invocation.invocation.json"
+  { mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/nx" &&
+    printf '{"id":"%s","phase":%s,"args":%s}\n' "$ONEPIPELINE_GATE_PROFILE_INVOCATION" \
+      "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
+      "$(gate_profile_json_array "$@")" >"$gate_profile_invocation.invocation.json"; } ||
+    gate_profile_unrecorded "could not record \`nx $*\` in $gate_profile_invocation.invocation.json (see above); make the run directory writable and profile again"
   # Nx joins NX_PROFILE onto its working directory, so the path is given relative to the root.
   export NX_PROFILE="${gate_profile_invocation#"$ROOT"/}.profile.json"
   export NX_CACHE_DIRECTORY="$gate_profile_state/cache"

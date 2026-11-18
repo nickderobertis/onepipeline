@@ -690,6 +690,29 @@ test("nx.sh's hook profiles a run's own Nx runs and takes itself off nested ones
     },
   );
 
+  await t.test("a run whose Nx state or invocation it cannot write fails, saying so", () => {
+    // Where each would go is a file, so it cannot be made: the cache first, then the record.
+    for (const [blocked, pattern] of [
+      ["nx-state", /could not set up this run's own Nx cache in .*nx-state/],
+      ["nx", /could not record `nx run-many -t lint` in .*\.invocation\.json/],
+    ]) {
+      const unwritable = join(dir, "target", "gate-profile", `no-${blocked}`);
+      if (blocked === "nx") mkdirSync(join(unwritable, "nx-state", "data"), { recursive: true });
+      write(join(unwritable, blocked), "not a directory\n");
+      const faults = join(unwritable, "faults.log");
+      write(faults, "");
+      const { status, stderr } = nx(dir, ["run-many", "-t", "lint"], {
+        ...top,
+        ONEPIPELINE_GATE_PROFILE_DIR: unwritable,
+        ONEPIPELINE_GATE_PROFILE_FAULTS: faults,
+      });
+      assert.equal(status, 3, stderr);
+      assert.match(stderr, pattern);
+      assert.match(stderr, /make the run directory writable and profile again/);
+      assert.match(readFileSync(faults, "utf8"), pattern);
+    }
+  });
+
   await t.test("a copy of nx.sh without the profiler drops every setting of the run", () => {
     const bare = nxWorkspace(t, { profiler: false });
     const { status, seen, stderr } = nx(bare, ["run-many", "-t", "test"], {
