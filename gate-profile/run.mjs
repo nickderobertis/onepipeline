@@ -111,7 +111,15 @@ if (!ready)
 const inherited = { ...process.env };
 for (const name of Object.keys(inherited))
   if (name.startsWith("ONEPIPELINE_GATE_PROFILE_")) delete inherited[name];
-for (const name of ["NX_PROFILE", "NX_CACHE_DIRECTORY", "NX_WORKSPACE_DATA_DIRECTORY"])
+// Nor an enclosing Nx run's cache switches: skipping this run's own cache would make a later
+// invocation redo what an earlier one did instead of replaying it.
+for (const name of [
+  "NX_PROFILE",
+  "NX_CACHE_DIRECTORY",
+  "NX_WORKSPACE_DATA_DIRECTORY",
+  "NX_SKIP_NX_CACHE",
+  "NX_DISABLE_NX_CACHE",
+])
   delete inherited[name];
 const environment = { ...inherited };
 Object.assign(environment, {

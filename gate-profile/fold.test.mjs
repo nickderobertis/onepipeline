@@ -395,3 +395,46 @@ test("refolding refuses a timings page that is not one cargo wrote", async (t) =
       assert.match(result.stderr, pattern);
     });
 });
+
+test("refolding finds the timings of llvm-cov builds in the directories cargo-llvm-cov uses", (t) => {
+  const dir = handMadeRun(t);
+  const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
+  const run = JSON.parse(readFileSync(join(dir, "run.json"), "utf8"));
+  const page = readFileSync(
+    join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html"),
+    "utf8",
+  );
+  const records = readFileSync(join(dir, "cargo.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  // One build names its llvm-cov directory, the other only the target directory it sits under.
+  const named = join(meta.root, "deep", "a", "cov");
+  const under = join(meta.root, "deep", "b", "target");
+  records[0] = { ...records[0], target_dir: "", llvm_cov_target_dir: named };
+  records[1] = { ...records[1], target_dir: under };
+  writeFileSync(join(dir, "cargo.jsonl"), `${records.map((r) => JSON.stringify(r)).join("\n")}\n`);
+  rmSync(join(meta.root, "out"), { recursive: true });
+  const place = (path, built, written) => {
+    const start = new Date(built * 1000).toISOString();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, page.replace(/<td>[^<]*Z<\/td>/, `<td>${start}</td>`));
+    utimesSync(path, written, written);
+  };
+  place(join(named, "cargo-timings", "cargo-timing-n.html"), run.start + 2.5, run.start + 4.9);
+  place(
+    join(under, "llvm-cov-target", "cargo-timings", "cargo-timing-u.html"),
+    run.start + 6.2,
+    run.start + 6.9,
+  );
+  const result = fold(dir);
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(readFileSync(join(dir, "report.json"), "utf8"));
+  assert.deepEqual(
+    report.cargo.map((c) => c.timings),
+    [
+      ["deep/a/cov/cargo-timings/cargo-timing-n.html"],
+      ["deep/b/target/llvm-cov-target/cargo-timings/cargo-timing-u.html"],
+    ],
+  );
+});

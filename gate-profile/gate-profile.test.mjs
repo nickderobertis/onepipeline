@@ -12,7 +12,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { validateReport } from "./fold.mjs";
 import {
@@ -63,7 +63,12 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
   // So that cargo compiles every unit again rather than finding them fresh.
   rmSync(join(dir, "crate/target"), { recursive: true, force: true });
 
-  const profiled = just(dir, ["gate-profile"]);
+  // Started inside an Nx run that skips its cache, as `nx run --skip-nx-cache` hands its tasks:
+  // the profiled run still replays within itself (the replayed build below).
+  const profiled = just(dir, ["gate-profile"], {
+    NX_SKIP_NX_CACHE: "true",
+    NX_DISABLE_NX_CACHE: "true",
+  });
   const [run] = runDirs(dir);
   const report = run ? readReport(dir, run) : null;
 
@@ -323,7 +328,8 @@ test("gate-profile exits 3, saying why, when it cannot record or fold the run", 
 test("a workspace outside git is profiled with no commit to name", (t) => {
   const { dir } = fixture(t);
   rmSync(join(dir, ".git"), { recursive: true, force: true });
-  const result = just(dir, ["gate-profile", "broken"]);
+  // Nor may git find a repository around the scratch directory the fixture sits in.
+  const result = just(dir, ["gate-profile", "broken"], { GIT_CEILING_DIRECTORIES: dirname(dir) });
   assert.equal(result.status, 1, result.stderr);
   assert.deepEqual(readReport(dir, runDirs(dir)[0]).commit, { sha: null, dirty: false });
   assert.match(
