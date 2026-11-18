@@ -352,3 +352,31 @@ fn the_host_phase_line_is_unchanged_beside_a_span_record() {
         "the phase line changed with the span profile on"
     );
 }
+
+/// A record that cannot be written is said on stderr, and costs the verb nothing:
+/// it answers, and exits, exactly as it does with the profile off.
+#[test]
+fn a_span_record_that_cannot_be_written_leaves_the_verbs_answer_alone() {
+    let world = World::new("span-unwritable");
+    let in_the_way = world.root.join("spans-is-a-file");
+    profile::fs::write(&in_the_way, "not a directory").expect("a file in the way");
+    let profiled = run_profiled(&world, &world.root, Some(&in_the_way), &["runs"]);
+    let unset = run_unset(&world, &world.root, &["runs"]);
+    assert_eq!(
+        (profiled.code, &profiled.stdout),
+        (unset.code, &unset.stdout),
+        "{}",
+        profiled.stderr
+    );
+    assert!(
+        profiled
+            .stderr
+            .contains("onepipeline: the span profile was not written to"),
+        "{}",
+        profiled.stderr
+    );
+    assert_eq!(
+        profile::fs::read_to_string(&in_the_way).expect("the file in the way"),
+        "not a directory"
+    );
+}

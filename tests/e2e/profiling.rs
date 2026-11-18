@@ -883,7 +883,11 @@ fn a_journey_ended_before_it_finishes_leaves_an_unfinished_record() {
 /// work, twice, and a listing of runs.
 const SPANNED: &str = "profiling::a_profiled_journey_that_runs_onepipeline_verbs";
 
-/// The test [`SPANNED`] names.
+/// Set in the one child process that runs [`SPANNED`]: a directory it has two more
+/// `onepipeline` runs write their own span records into, by setting the binary's
+/// variable itself — and one more run where it removes the variable.
+const OWN_SPANS: &str = "ONEPIPELINE_PROFILE_FIXTURE_OWN_SPANS";
+
 #[test]
 fn a_profiled_journey_that_runs_onepipeline_verbs() {
     let world = World::new("profile-spanned");
@@ -901,9 +905,19 @@ fn a_profiled_journey_that_runs_onepipeline_verbs() {
             .exited(0);
     }
     world.run(&["runs"]).exited(0);
+    let Some(own) = std::env::var_os(OWN_SPANS) else {
+        return;
+    };
+    for _ in 0..2 {
+        let mut command = world.cmd(&["runs"]);
+        command.env("ONEPIPELINE_PROFILE_SPANS", &own);
+        world.run_on(command, "runs").exited(0);
+    }
+    let mut command = world.cmd(&["runs"]);
+    command.env_remove("ONEPIPELINE_PROFILE_SPANS");
+    world.run_on(command, "runs").exited(0);
 }
 
-/// A figure of a JSON document, or the test fails naming it.
 fn number(value: &Value) -> f64 {
     value
         .as_f64()
@@ -920,10 +934,19 @@ fn number(value: &Value) -> f64 {
 fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_folds_them() {
     let world = World::new("profile-spans");
     let records = world.root.join("profiles");
+    let spans_dir = records
+        .join("e2e")
+        .join(file_of(SPANNED).replace(".json", ".spans"));
+    // What an earlier attempt of the test left, which its first spawn clears.
+    profile::fs::create_dir_all(&spans_dir).expect("an earlier attempt's span directory");
+    let earlier = spans_dir.join("onepipeline-1-1.json");
+    profile::fs::write(&earlier, "an earlier attempt's").expect("an earlier attempt's record");
+    let own = world.root.join("own-spans");
     let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
         .args(["--exact", SPANNED, "--nocapture"])
         .env(profile::DIR_ENV, &records)
         .env(profile::SPANS_ENV, "1")
+        .env(OWN_SPANS, &own)
         .env_remove("ONEPIPELINE_PROFILE_SPANS")
         .env_remove("NEXTEST_TEST_NAME")
         .output()
@@ -933,7 +956,7 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
     let record = read_record(&records.join("e2e").join(file_of(SPANNED)));
     assert_eq!(record["schema"], 3, "{record:#}");
     let started = &record["programs"]["onepipeline"];
-    assert_eq!(started["count"], 3, "{record:#}");
+    assert_eq!(started["count"], 6, "{record:#}");
     if cfg!(unix) {
         assert!(number(&started["cpu_s"]) > 0.0, "{record:#}");
         assert!(number(&record["load_1m_start"]) >= 0.0, "{record:#}");
@@ -943,9 +966,14 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
     }
     assert!(number(&record["nproc"]) >= 1.0, "{record:#}");
 
-    let spans_dir = records
-        .join("e2e")
-        .join(file_of(SPANNED).replace(".json", ".spans"));
+    assert!(!earlier.exists(), "the earlier attempt's record was kept");
+    let kept = profile::fs::read_dir(&own)
+        .expect("the directory the test named itself")
+        .count();
+    assert_eq!(
+        kept, 2,
+        "a run the test pointed elsewhere was not left there"
+    );
     let spans: Vec<Value> = profile::fs::read_dir(&spans_dir)
         .expect("the test's span directory")
         .map(|entry| read_record(&entry.expect("a span record").path()))
@@ -953,7 +981,8 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
     assert_eq!(
         spans.len(),
         3,
-        "one span record per onepipeline the test started: {spans:#?}"
+        "one span record per onepipeline the test started and left the switch to, and none \
+         where it set the variable itself or removed it: {spans:#?}"
     );
 
     let out = world.root.join("report.json");
