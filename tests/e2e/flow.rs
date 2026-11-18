@@ -762,8 +762,9 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
 // flow` declaration in `tests/e2e/main.rs` says; `tests/e2e/wake_budget.rs` keeps its own
 // timed journeys behind the same edge for the same reason.
 /// Under a wake budget a `watch --flow` given no `--timeout` gives up at the
-/// budget less the reserve — no sooner, on the wall clock, and inside the
-/// budget, by the deadline it arms; one whose `--timeout` equals the budget does not
+/// budget less the reserve — no sooner, on the wall clock; inside the budget,
+/// by the deadline it arms; and no later, by never reading the flow again once
+/// that deadline has passed; one whose `--timeout` equals the budget does not
 /// qualify, naming the reserve; and with the budget as a flag, the line names
 /// `--timeout <budget less the reserve>`, which qualifies.
 #[test]
@@ -774,57 +775,7 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "10");
 
-    // No event, no timeout: it gives up at the budget less the reserve. Only
-    // that floor is read off the wall clock, and from outside the process: the
-    // watch takes its deadline after it is spawned and returns no sooner than
-    // that, so the span from before the spawn to after the exit encloses its
-    // whole wait. A slow or loaded host only lengthens that span, so it can
-    // fail this for a watch that gave up early and never for a late one.
-    //
-    // How long it waited at most is counted on the watch's own clock instead:
-    // under a one-second tick it says a heartbeat only once a whole second of
-    // silence has passed since the last, so a wait that gave up at its deadline
-    // says at most one per second of the budget less the reserve. A loaded
-    // host only delays heartbeats, so it can lower that count, never raise it;
-    // a wait that ran on past its deadline raises it.
     let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
-    let spawned = Instant::now();
-    let output = budgeted
-        .cmd(&["watch", "--flow", "quiet", "--tick-interval", "1"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the watch starts")
-        .wait_with_output()
-        .expect("the watch returns");
-    let took = spawned.elapsed();
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        output.status.code(),
-        Some(WATCH_ELAPSED),
-        "{said}{output:?}"
-    );
-    assert!(
-        said.lines()
-            .last()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
-            .is_some_and(|record| record["watch"] == "return"),
-        "the watch's last record is not its return: {said}"
-    );
-    let heartbeats = said
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|record| record["watch"] == "heartbeat")
-        .count();
-    assert!(
-        heartbeats <= usize::try_from(10 - WAKE_RESERVE_SECONDS).expect("a few seconds"),
-        "the watch said {heartbeats} one-second heartbeats, so it waited past the budget \
-         less the reserve: {said}"
-    );
-    assert!(
-        took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
-        "the watch returned within {took:?} of its spawn, before the budget less the reserve"
-    );
     // That it gives up inside the budget is read off the deadline it arms, not
     // off how soon the host lets it run again once that deadline passes: the
     // deadline its terms record is exactly the budget less the reserve from
@@ -872,6 +823,100 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         json!({"verdict": "none"})
     );
     qualifying.end();
+
+    // No event, no timeout: it gives up at the budget less the reserve. Last,
+    // so the surface this may leave on the flow reaches none of the guard's
+    // readings above.
+    //
+    // No sooner is read off the wall clock: from before the spawn to the time
+    // the filesystem stamps on the watch's last write, its return record. The
+    // watch takes its deadline after it is spawned and writes that record no
+    // sooner, so a slow or loaded host only lengthens that span: it can fail
+    // this for a watch that gave up early, never for a late one, and when this
+    // test gets to look at it plays no part.
+    //
+    // No later is proved by order, not by how long anything took. The watch
+    // takes its deadline before it publishes its lease, so once the budget less
+    // the reserve has passed since this saw the lease, the deadline has too. A
+    // watch says a heartbeat only after asking whether its deadline has come,
+    // and once it has come, its next step after that heartbeat is to ask again
+    // and return, never to read the flow. So a surface put on the flow after a
+    // heartbeat said past that point is never what a watch that gives up at its
+    // deadline returns on, however late the host runs it; a watch still waiting
+    // past that deadline reads the flow again, and wakes on the surface.
+    let records = world.root.join("reserve-watch.jsonl");
+    let human = world.root.join("reserve-watch.stderr");
+    let spawned = std::time::SystemTime::now();
+    let mut watch = budgeted
+        .cmd(&["watch", "--flow", "quiet", "--tick-interval", "1"])
+        .stdout(std::fs::File::create(&records).expect("a records file"))
+        .stderr(std::fs::File::create(&human).expect("a stderr file"))
+        .spawn()
+        .expect("the watch starts");
+    let pid = watch.id();
+    world.until("the timed watch to publish its lease", |_| {
+        published_lease(&world, "quiet", pid).is_some()
+            || watch.try_wait().is_ok_and(|exited| exited.is_some())
+    });
+    let past_its_deadline = Instant::now() + Duration::from_millis(10_000 - reserve_ms);
+    let said_from = |offset: usize| -> String {
+        let said = std::fs::read(&records).unwrap_or_default();
+        String::from_utf8_lossy(said.get(offset..).unwrap_or_default()).into_owned()
+    };
+    world.until("the timed watch's deadline to pass", |_| {
+        Instant::now() >= past_its_deadline || watch.try_wait().is_ok_and(|exited| exited.is_some())
+    });
+    let then = std::fs::read(&records).map_or(0, |said| said.len());
+    let mut surfaced = false;
+    world.until("the timed watch to return or say a heartbeat", |world| {
+        if watch.try_wait().is_ok_and(|exited| exited.is_some()) {
+            return true;
+        }
+        let heartbeat = said_from(then)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|record| record["watch"] == "heartbeat");
+        if heartbeat {
+            world
+                .run(&[
+                    "surface",
+                    "--flow",
+                    "quiet",
+                    "--kind",
+                    "finding",
+                    "--message",
+                    "after the deadline",
+                ])
+                .exited(EXIT_SUCCESS);
+            surfaced = true;
+        }
+        heartbeat
+    });
+    let status = watch.wait().expect("the watch returns");
+    let took = std::fs::metadata(&records)
+        .and_then(|found| found.modified())
+        .expect("when the watch last wrote its records")
+        .duration_since(spawned)
+        .unwrap_or_default();
+    let said = said_from(0);
+    let human = std::fs::read_to_string(&human).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(WATCH_ELAPSED),
+        "the watch did not give up at its deadline (a surface put on the flow after it: \
+         {surfaced}): {said}{human}"
+    );
+    assert!(
+        said.lines()
+            .last()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .is_some_and(|record| record["watch"] == "return"),
+        "the watch's last record is not its return: {said}"
+    );
+    assert!(
+        took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
+        "the watch wrote its return {took:?} after its spawn, before the budget less the reserve"
+    );
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }
