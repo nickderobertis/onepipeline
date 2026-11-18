@@ -1280,6 +1280,56 @@ fn a_missing_env_from_source_refuses_the_launch_naming_the_file_the_variant_and_
     }
 }
 
+/// A judge-side config carrying Codex's typed `skip_git_repo_check` is one the
+/// dispatch-env check reads as an oneharness config, so the judged launch
+/// dispatches. The check reads every config through the linked
+/// `oneharness-core`, which refuses a field it does not know — so below the
+/// release carrying the setting, this launch is refused `is not an oneharness
+/// config` and never reaches the `oneagentgraph` double.
+#[test]
+fn a_judge_config_skipping_codexs_git_repo_check_is_dispatched_rather_than_refused() {
+    let world = hooked_world("dispatch-env-skip-git");
+    let hook = hook(&world);
+    std::fs::write(
+        world.graphs().join("oneharness-worker.toml"),
+        hooked_worker_config(),
+    )
+    .expect("the worker config is written");
+    world.write_supervised_node_graph();
+    let judge = world.graphs().join("oneharness-judge.toml");
+    std::fs::write(
+        &judge,
+        "harnesses = [\"codex\"]\n\n[harness.codex]\nskip_git_repo_check = true\n",
+    )
+    .expect("the judge config is written");
+    let run = "skipgit";
+    prints(&world, run, &adding(SUPPLIED, "supplied"));
+    attached(
+        &world,
+        run,
+        vec![agent("build", &[])],
+        &[
+            "--dispatch-env-hook",
+            &hook,
+            "--node-set",
+            "members.worker.judge.oneharness_config=./oneharness-judge.toml",
+        ],
+    )
+    .settled();
+    let settled = settlement(&world, run, "build");
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        !detail.contains("is not an oneharness config"),
+        "the judge config was refused by the dispatch-env check: {detail}"
+    );
+    assert_eq!(settled["payload"]["status"], "done", "{}", world.dump());
+    assert!(
+        world.was_invoked("oneagentgraph", &["--label", "onepipeline.node=build"]),
+        "the judged launch was never dispatched: {:?}",
+        world.invocations()
+    );
+}
+
 /// A member config whose harness identity lives in an `extends` parent is read
 /// through the chain the sibling's loader follows: the **parent's** `env_from`
 /// source is this launch's, so a dispatch whose environment lacks it is refused

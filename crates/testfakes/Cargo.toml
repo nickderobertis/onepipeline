@@ -54,14 +54,14 @@ oneharness-core = { workspace = true }
 # turn, and `tests/e2e/dispatch.rs`'s
 # `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` drives
 # that real process — over the one `oneharness-core` above, since 0.25.2 requires
-# `^0.28.2` — with only `codex` doubled. The `oneharness-cli` bin below is that
-# same CLI's shell over this one dependency, so a journey can name the released
-# CLI from this package's own build.
+# `^0.28.2` and 0.31.0 `^0.34.0` — with only `codex` doubled. The
+# `oneharness-cli` bin below is that same CLI's shell over this one dependency,
+# so a journey can name the released CLI from this package's own build.
 #
 # A normal dependency rather than a dev-dependency, because a `[[bin]]` cannot link
 # a dev-dependency; this package is test-support and publishes nothing, so the
 # dependency reaches no artifact either way.
-oneharness = "0.26.1"
+oneharness = "0.31.0"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.
