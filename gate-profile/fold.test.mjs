@@ -438,3 +438,42 @@ test("refolding refuses a timings page that is not one cargo wrote", async (t) =
       assert.match(result.stderr, pattern);
     });
 });
+
+test("Nx runs a recipe starts at once are alternatives on the critical path, not a sum", (t) => {
+  const dir = handMadeRun(t);
+  const base = JSON.parse(readFileSync(join(dir, "run.json"), "utf8")).start;
+  rmSync(join(dir, "nx"), { recursive: true });
+  rmSync(join(dir, "cargo.jsonl"));
+  const nx = (id, from, to) => {
+    const at = (name, value) =>
+      writeFileSync(join(dir, "nx", `${id}.${name}.json`), JSON.stringify(value));
+    mkdirSync(join(dir, "nx"), { recursive: true });
+    at("invocation", { id, phase: "1-1", args: ["run", `p:${id}`] });
+    at("profile", [
+      {
+        ph: "X",
+        name: `p:${id}`,
+        ts: (base + from) * 1e6,
+        dur: (to - from) * 1e6,
+        args: { status: "success" },
+      },
+    ]);
+    at("graph", { tasks: { dependencies: { [`p:${id}`]: [] } } });
+  };
+  // i1 and i2 overlap, so only the longer of them leads into i3, which started after both ended.
+  nx("i1", 1, 5);
+  nx("i2", 2, 8);
+  nx("i3", 8.5, 9.5);
+  const result = fold(dir);
+  assert.equal(result.status, 0, result.stderr);
+  const { critical_path: path } = JSON.parse(readFileSync(join(dir, "report.json"), "utf8"));
+  assert.deepEqual(
+    path.tasks.map((task) => [task.invocation, task.task]),
+    [
+      ["i2", "p:i2"],
+      ["i3", "p:i3"],
+    ],
+  );
+  assert.equal(path.wall_s, 7);
+  assert.ok(path.wall_s <= path.run_wall_s);
+});

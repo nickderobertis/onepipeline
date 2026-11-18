@@ -79,8 +79,8 @@ function readEnvironment(pid) {
 }
 
 // Samples are stamped on the monotonic clock, set against the wall clock once: a wall clock the
-// host adjusts mid-run (this one has stepped back 14ms between two samples) would put them out of
-// order. The shims' and Nx's wall-clock stamps stay comparable to within that adjustment.
+// host adjusts mid-run would put them out of order. The shims' and Nx's wall-clock stamps stay
+// comparable to within that adjustment.
 const origin = Date.now() - performance.now();
 const clock = () => Math.round(origin + performance.now());
 const started = clock();

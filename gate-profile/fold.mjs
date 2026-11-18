@@ -459,6 +459,31 @@ export function longestPath(durations, dependencies) {
   return path;
 }
 
+/**
+ * The heaviest sequence of `chains` (each `{ms, startMs, endMs}`, in start order) in which each
+ * one started no earlier than the one before it ended. Ties go to the later chain, as above.
+ */
+export function chainThroughInvocations(chains) {
+  const best = [];
+  const via = [];
+  let end = -1;
+  chains.forEach((chain, j) => {
+    let before = 0;
+    let from = -1;
+    for (let i = 0; i < j; i++) {
+      if (chains[i].endMs <= chain.startMs && (from === -1 || best[i] >= before)) {
+        [before, from] = [best[i], i];
+      }
+    }
+    best[j] = before + chain.ms;
+    via[j] = from;
+    if (end === -1 || best[j] >= best[end]) end = j;
+  });
+  const sequence = [];
+  for (let j = end; j !== -1; j = via[j]) sequence.unshift(chains[j]);
+  return sequence;
+}
+
 const BUILD_START = /<td>Build start:<\/td><td>(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z<\/td>/;
 const UNIT_DATA = /const UNIT_DATA = (\[[\s\S]*?\n\]);/;
 
@@ -619,27 +644,37 @@ export function foldRun(dir) {
     })
     .sort((a, b) => a.startMs - b.startMs);
 
-  // The run's critical path: its invocations run one after another, so it is each one's longest
-  // dependency chain, in turn.
-  const pathTasks = [];
+  // The run's critical path: each invocation's longest dependency chain, joined through the
+  // invocations that ran one after another. An invocation that overlapped another (a recipe
+  // can start two Nx runs at once) is not after it, so the two are alternatives rather than a sum.
   let complete = invocations.length > 0;
+  const chains = [];
   for (const invocation of invocations) {
     if (!invocation.profiled || !invocation.dependencies) complete = false;
     const mine = tasks.filter((t) => t.invocation === invocation.id);
     if (!mine.length) continue;
     const durations = new Map(mine.map((t) => [t.task, t.endMs - t.startMs]));
-    for (const id of longestPath(durations, invocation.dependencies ?? {})) {
-      const t = mine.find((m) => m.task === id);
-      pathTasks.push({
-        invocation: invocation.id,
-        task: id,
-        start: t.start,
-        end: t.end,
-        wall_s: t.wall_s,
-        load: t.load,
-      });
-    }
+    const path = longestPath(durations, invocation.dependencies ?? {}).map((id) =>
+      mine.find((m) => m.task === id),
+    );
+    chains.push({
+      invocation: invocation.id,
+      path,
+      ms: path.reduce((sum, t) => sum + t.endMs - t.startMs, 0),
+      startMs: Math.min(...mine.map((t) => t.startMs)),
+      endMs: Math.max(...mine.map((t) => t.endMs)),
+    });
   }
+  const pathTasks = chainThroughInvocations(chains).flatMap((chain) =>
+    chain.path.map((t) => ({
+      invocation: chain.invocation,
+      task: t.task,
+      start: t.start,
+      end: t.end,
+      wall_s: t.wall_s,
+      load: t.load,
+    })),
+  );
 
   const cargo = cargoRuns
     .map((c) => {

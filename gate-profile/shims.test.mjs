@@ -431,6 +431,44 @@ case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
   );
 });
 
+test("the cargo shim keeps its own page, not one a concurrent build wrote after it exited", (t) => {
+  const dir = scratch(t, "cargo-concurrent");
+  const run = join(dir, "run");
+  mkdirSync(run);
+  // Its own page, then the page of a build in another target directory that finished after this
+  // one exited: dated later than any write this run can make, as the shim's scan would find it.
+  const standin = join(dir, "bin", "cargo");
+  write(
+    standin,
+    `#!/usr/bin/env bash
+mkdir -p "$STANDIN_OWN/cargo-timings" "$STANDIN_OTHER/cargo-timings"
+echo own > "$STANDIN_OWN/cargo-timings/cargo-timing-1.html"
+echo other > "$STANDIN_OTHER/cargo-timings/cargo-timing-2.html"
+touch -d '+1 hour' "$STANDIN_OTHER/cargo-timings/cargo-timing-2.html"
+`,
+    0o755,
+  );
+  const result = spawnSync("cargo", ["build"], {
+    cwd: dir,
+    encoding: "utf8",
+    env: {
+      ...fixtureEnvironment(),
+      PATH: `${shims}:${dirname(standin)}:${process.env.PATH}`,
+      ONEPIPELINE_GATE_PROFILE_DIR: run,
+      ONEPIPELINE_GATE_PROFILE_ROOT: dir,
+      ONEPIPELINE_GATE_PROFILE_RUN: "run-1",
+      STANDIN_OWN: join(dir, "target"),
+      STANDIN_OTHER: join(dir, "target", "llvm-cov-target"),
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const [record] = lines(join(run, "cargo.jsonl"));
+  assert.deepEqual(
+    record.timings.map((page) => readFileSync(page, "utf8").trim()),
+    ["own"],
+  );
+});
+
 test("the cargo shim says when it cannot keep a page, and fails when it cannot record a build", (t) => {
   const dir = scratch(t, "cargo-unrecorded");
   const standin = join(dir, "bin", "cargo");

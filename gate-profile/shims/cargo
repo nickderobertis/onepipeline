@@ -55,6 +55,8 @@ before=$gate_profile_cpu
 ONEPIPELINE_GATE_PROFILE_CARGO="$ONEPIPELINE_GATE_PROFILE_RUN" \
   "$real" "${args[@]:0:at+1}" --timings "${args[@]:at+1}"
 status=$?
+finished="$ONEPIPELINE_GATE_PROFILE_DIR/.finished.$$"
+: >"$finished"
 gate_profile_children_cpu "$scratch"
 after=$gate_profile_cpu
 end=$EPOCHREALTIME
@@ -62,8 +64,9 @@ rm -f "$scratch"
 
 # This build's timings page, copied out now: cargo names a page by the millisecond its build
 # started, so a build that started with another in one target directory has its page overwritten
-# when the other finishes. The page is the newest written since this cargo started, in any target
-# directory it could have used: the configured ones, the root's, and its manifest's.
+# when the other finishes. The page is the newest written while this cargo ran, in any target
+# directory it could have used: the configured ones, the root's, and its manifest's. A page written
+# after it exited is a concurrent build's, which finished last.
 manifest_dir=.
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[$i]}" in
@@ -76,11 +79,12 @@ for target in "${CARGO_TARGET_DIR-}" "${CARGO_LLVM_COV_TARGET_DIR-}" "$root/targ
   "$root/target/llvm-cov-target" "$manifest_dir/target" "$manifest_dir/target/llvm-cov-target"; do
   [ -n "$target" ] || continue
   for candidate in "$target"/cargo-timings/cargo-timing-*.html; do
-    [ -f "$candidate" ] && [ "$candidate" -nt "$started" ] || continue
+    [ -f "$candidate" ] && [ "$candidate" -nt "$started" ] && ! [ "$candidate" -nt "$finished" ] ||
+      continue
     if [ -z "$page" ] || [ "$candidate" -nt "$page" ]; then page=$candidate; fi
   done
 done
-rm -f "$started"
+rm -f "$started" "$finished"
 copies=()
 if [ -n "$page" ]; then
   copy="$ONEPIPELINE_GATE_PROFILE_DIR/cargo-timings/$$-${start/./}.html"
