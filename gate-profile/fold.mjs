@@ -30,7 +30,8 @@ const list = (items) => ({ type: "array", items });
 /**
  * report.json, version 1. Times are ISO-8601 UTC; durations and CPU are seconds; every `load` is
  * the host's mean 1-minute load average over that row's own interval, to be read against
- * `host.nproc`. CPU is user plus system time of the row's whole process tree. A unit's compile
+ * `host.nproc`. CPU is user plus system time of the row's whole process tree; `delegated_cpu_s` is
+ * CPU outside every tree of the run that a daemon spent on a task's behalf (sccache's compilers). A unit's compile
  * time has no CPU figure: cargo's timings give each unit's wall time only.
  */
 export const REPORT_SCHEMA = strict({
@@ -53,6 +54,7 @@ export const REPORT_SCHEMA = strict({
     load_min: load,
     load_max: load,
     exit: { type: "integer" },
+    delegated_cpu_s: num,
     outside_phases: strict({ wall_s: num, cpu_s: num }),
   }),
   phases: list(
@@ -90,6 +92,7 @@ export const REPORT_SCHEMA = strict({
       wall_s: num,
       cpu_s: num,
       cpu_basis: { type: "string", enum: ["reaped", "sampled", "none"] },
+      delegated_cpu_s: num,
       load,
     }),
   ),
@@ -233,7 +236,7 @@ export function loadOver(loads, from, to) {
  * the CPU of the process trees it is the root of. A tree whose exit its parent was sampled across
  * gets exactly what that parent reaped (split by each tree's sampled share when several exited in
  * one interval); any other tree gets what its samples saw, which can miss what it used after its
- * last sample.
+ * last sample. A tree no process of the run started is the task's delegated CPU, kept apart.
  */
 export function taskCpu(sampled) {
   const byKey = new Map(sampled.processes.map((p) => [p.key, p]));
@@ -282,9 +285,16 @@ export function taskCpu(sampled) {
     if (!task) continue;
     const parent = p.parent ? byKey.get(p.parent) : undefined;
     if (parent && ownerOf(parent) === task) continue;
-    const entry = tasks.get(task) ?? { ticks: 0, basis: "reaped" };
-    entry.ticks += best(p);
-    if (!reaped.has(p.key)) entry.basis = "sampled";
+    const entry = tasks.get(task) ?? { ticks: 0, basis: "reaped", delegated_ticks: 0 };
+    if (!parent) {
+      // Started outside the run's process tree yet carrying its environment: work a daemon did
+      // for the task (sccache's server runs the compilers cargo asks it for). Real CPU, but no
+      // phase's or the run's own figure can hold it, so it is kept apart from theirs.
+      entry.delegated_ticks += best(p);
+    } else {
+      entry.ticks += best(p);
+      if (!reaped.has(p.key)) entry.basis = "sampled";
+    }
     tasks.set(task, entry);
   }
   return tasks;
@@ -458,7 +468,8 @@ export function foldRun(dir) {
         end: iso(end),
         wall_s: seconds(end - start),
         cpu_s: cpu ? round2(cpu.ticks / ticksPerSecond) : 0,
-        cpu_basis: cpu ? cpu.basis : "none",
+        cpu_basis: cpu && cpu.ticks > 0 ? cpu.basis : "none",
+        delegated_cpu_s: cpu ? round2(cpu.delegated_ticks / ticksPerSecond) : 0,
         load: loadOver(loads, start, end),
         startMs: start,
         endMs: end,
@@ -567,7 +578,7 @@ export function foldRun(dir) {
       const from = timing.built + unit.start * 1000;
       const to = from + unit.duration * 1000;
       owner.units.push({
-        unit: `${unit.name} v${unit.version}${String(unit.target ?? "").trim() ? ` (${String(unit.target).trim()})` : ""}`,
+        unit: `${unit.name} v${unit.version} ${String(unit.target ?? "").trim()}`.trim(),
         name: unit.name,
         version: String(unit.version ?? ""),
         target: String(unit.target ?? "").trim(),
@@ -607,6 +618,7 @@ export function foldRun(dir) {
       load_min: runLoads.length ? Math.min(...runLoads) : loadOver(loads, runStart, runEnd),
       load_max: runLoads.length ? Math.max(...runLoads) : loadOver(loads, runStart, runEnd),
       exit: run.exit,
+      delegated_cpu_s: round2(tasks.reduce((sum, t) => sum + t.delegated_cpu_s, 0)),
       outside_phases: {
         wall_s: seconds(Math.max(0, runEnd - runStart - phaseWall * 1000)),
         cpu_s: seconds(Math.max(0, runUser + runSystem - phaseCpu * 1000)),
@@ -680,6 +692,8 @@ export function renderMarkdown(report) {
     "",
     `Outside every phase (the wrappers around them): ${s(run.outside_phases.wall_s)} wall, ${s(run.outside_phases.cpu_s)} CPU.`,
     "",
+    `Delegated: ${s(run.delegated_cpu_s)} more CPU was spent for the run's tasks outside its process tree, by a daemon such as sccache's server, and is in none of the CPU figures above or below; each task's share is its delegated CPU.`,
+    "",
     "## Phases",
     "",
     table(
@@ -714,7 +728,18 @@ export function renderMarkdown(report) {
     "## Nx tasks, slowest first",
     "",
     table(
-      ["task", "phase", "status", "start", "end", "wall", "CPU", "CPU basis", "load"],
+      [
+        "task",
+        "phase",
+        "status",
+        "start",
+        "end",
+        "wall",
+        "CPU",
+        "CPU basis",
+        "delegated CPU",
+        "load",
+      ],
       [...report.tasks]
         .sort((a, b) => b.wall_s - a.wall_s)
         .map((t) => [
@@ -726,11 +751,12 @@ export function renderMarkdown(report) {
           s(t.wall_s),
           s(t.cpu_s),
           t.cpu_basis,
+          s(t.delegated_cpu_s),
           t.load,
         ]),
     ),
     "",
-    "CPU basis: `reaped` is exactly what the task's process trees used; `sampled` is what samples saw, which can miss a tree's last moments; `none` means no process of it was sampled (a cache replay, or one shorter than the sampling interval).",
+    "CPU basis: `reaped` is exactly what the task's process trees used; `sampled` is what samples saw, which can miss a tree's last moments; `none` means no process of it was sampled (a cache replay, or one shorter than the sampling interval). Delegated CPU is what a daemon outside the run's process tree spent on the task.",
     "",
     "## Cargo invocations",
     "",

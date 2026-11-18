@@ -24,7 +24,7 @@ test("a task whose exit its parent saw is charged what the parent reaped, beyond
     processes: [proc("1:0", null, null, 50, { last_tick: 9 }), proc("2:0", "1:0", task("a"), 100)],
     reaps: [{ reaper: "1:0", tick: 6, ticks: 180, children: ["2:0"] }],
   });
-  assert.deepEqual(cpu.get("i1|p:a"), { ticks: 180, basis: "reaped" });
+  assert.deepEqual(cpu.get("i1|p:a"), { ticks: 180, basis: "reaped", delegated_ticks: 0 });
 });
 
 test("trees reaped in one interval split the jump by what each was seen to use", () => {
@@ -43,26 +43,41 @@ test("trees reaped in one interval split the jump by what each was seen to use",
 test("unseen exits fall back to samples, counting children still running at the last one", () => {
   const cpu = taskCpu({
     processes: [
-      proc("2:0", null, task("a"), 10, { children_ticks: 5, last_tick: 3 }),
+      proc("1:0", null, null, 0, { last_tick: 9 }),
+      proc("2:0", "1:0", task("a"), 10, { children_ticks: 5, last_tick: 3 }),
       proc("4:0", "2:0", null, 40, { last_tick: 4 }),
       proc("5:0", "2:0", null, 99, { last_tick: 2 }),
     ],
     reaps: [],
   });
   // 5:0 had exited by 2:0's last sample, so it is already in 2:0's reaped 5; 4:0 had not.
-  assert.deepEqual(cpu.get("i1|p:a"), { ticks: 55, basis: "sampled" });
+  assert.deepEqual(cpu.get("i1|p:a"), { ticks: 55, basis: "sampled", delegated_ticks: 0 });
 });
 
 test("a nested Nx run inside a task stays that task's work, whatever its own tasks are named", () => {
   const cpu = taskCpu({
     processes: [
-      proc("2:0", null, task("outer"), 10),
+      proc("1:0", null, null, 0),
+      proc("2:0", "1:0", task("outer"), 10),
       proc("3:0", "2:0", task("inner", "nested"), 20),
     ],
     reaps: [],
   });
   assert.deepEqual([...cpu.keys()], ["i1|p:outer"]);
   assert.equal(cpu.get("i1|p:outer").ticks, 30);
+});
+
+test("a daemon's work for a task is its delegated CPU, apart from its own trees'", () => {
+  const cpu = taskCpu({
+    processes: [
+      proc("1:0", null, null, 0, { last_tick: 9 }),
+      proc("2:0", "1:0", task("a"), 30),
+      // A compiler sccache's server started with the task's environment: no parent in the run.
+      proc("7:0", null, task("a"), 400),
+    ],
+    reaps: [],
+  });
+  assert.deepEqual(cpu.get("i1|p:a"), { ticks: 30, basis: "sampled", delegated_ticks: 400 });
 });
 
 test("the critical path follows the longest chain, through a replay that took no time", () => {
