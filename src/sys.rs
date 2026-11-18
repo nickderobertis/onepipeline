@@ -6,6 +6,7 @@
 //! resolves them through this module, so an unanswerable question resolves
 //! toward "still working" here rather than in each caller.
 
+#[cfg(unix)]
 use crate::spans::Timed as _;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
