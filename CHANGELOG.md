@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.114.0](https://github.com/nickderobertis/onepipeline/compare/v0.113.6...v0.114.0) - 2026-11-18
+
+### Added
+
+- let a node's guard settle it as not needed before anything is dispatched ([#1692](https://github.com/nickderobertis/onepipeline/pull/1692))
+
+### Fixed
+
+- *(deps)* link the oneagentgraph, onejudge and oneharness-core that read the Codex git-check setting ([#1697](https://github.com/nickderobertis/onepipeline/pull/1697))
+
 ## [0.113.6](https://github.com/nickderobertis/onepipeline/compare/v0.113.5...v0.113.6) - 2026-11-18
 
 ### Added
