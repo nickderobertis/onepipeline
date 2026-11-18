@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fixtureEnvironment, root } from "./fixture.mjs";
 
@@ -232,6 +232,17 @@ test("the just shim runs a recipe as timed phases only at the run's own level", 
     assert.equal(existsSync(join(run, "phases.jsonl")), false);
   });
 
+  await t.test("a phase or a run it cannot record fails, rather than leaving it out", () => {
+    for (const record of ["phases.jsonl", "run.json"]) {
+      reset();
+      mkdirSync(join(run, record));
+      const result = justShim(dir, ["m"], profiled);
+      assert.equal(result.status, 3, record);
+      assert.match(result.stderr, new RegExp(`could not record \`just m\` in .*${record}`));
+      rmSync(join(run, record), { recursive: true });
+    }
+  });
+
   await t.test("a run directory that is not one is refused, not written around", () => {
     reset();
     const result = justShim(dir, ["m"], {
@@ -381,6 +392,16 @@ case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
     }).status,
     0,
   );
+  // The other places cargo or cargo-llvm-cov put a build's target directory.
+  for (const [where, env] of [
+    [join(dir, "configured"), { CARGO_TARGET_DIR: join(dir, "configured") }],
+    [join(dir, "coverage"), { CARGO_LLVM_COV_TARGET_DIR: join(dir, "coverage") }],
+    [join(dir, "target", "llvm-cov-target"), {}],
+  ])
+    assert.equal(
+      cargo(["test"], { ...env, STANDIN_TARGET: where, STANDIN_UNIT: basename(where) }).status,
+      0,
+    );
   // A build that wrote no page records none, rather than an older build's.
   assert.equal(
     cargo(["test"], { STANDIN_TARGET: join(dir, "nowhere"), STANDIN_UNIT: "x" }).status,
@@ -393,9 +414,50 @@ case " $* " in *" --timings "*) mkdir -p "$STANDIN_TARGET/cargo-timings"
       ["build", ["page of first"]],
       ["clippy", ["page of second"]],
       ["check", ["page of manifest's"]],
+      ["test", ["page of configured"]],
+      ["test", ["page of coverage"]],
+      ["test", ["page of llvm-cov-target"]],
       ["test", []],
     ],
   );
+});
+
+test("the cargo shim says when it cannot keep a page, and fails when it cannot record a build", (t) => {
+  const dir = scratch(t, "cargo-unrecorded");
+  const standin = join(dir, "bin", "cargo");
+  write(
+    standin,
+    "#!/bin/sh\nmkdir -p target/cargo-timings && echo page > target/cargo-timings/cargo-timing-1.html\n",
+    0o755,
+  );
+  const cargo = (run) =>
+    spawnSync("cargo", ["build"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: {
+        ...fixtureEnvironment(),
+        PATH: `${shims}:${dirname(standin)}:${process.env.PATH}`,
+        ONEPIPELINE_GATE_PROFILE_DIR: run,
+        ONEPIPELINE_GATE_PROFILE_ROOT: dir,
+        ONEPIPELINE_GATE_PROFILE_RUN: "run-1",
+      },
+    });
+  // Where the copy would go is a file, so the page cannot be kept.
+  const pageless = join(dir, "pageless");
+  write(join(pageless, "cargo-timings"), "not a directory\n");
+  const kept = cargo(pageless);
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.match(kept.stderr, /could not keep .*cargo-timing-1\.html for `cargo build`/);
+  assert.deepEqual(
+    lines(join(pageless, "cargo.jsonl")).map((r) => [r.argv, r.timings]),
+    [[["build"], []]],
+  );
+  // Where the record would go is a directory, so the build cannot be recorded.
+  const unrecorded = join(dir, "unrecorded");
+  mkdirSync(join(unrecorded, "cargo.jsonl"), { recursive: true });
+  const refused = cargo(unrecorded);
+  assert.equal(refused.status, 3);
+  assert.match(refused.stderr, /could not record `cargo build` in .*cargo\.jsonl/);
 });
 
 test("a shim finds the real tool past every run's shims, and says so when there is none", (t) => {

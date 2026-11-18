@@ -887,10 +887,11 @@ export function renderMarkdown(report) {
           timed.map((u) => [u.unit, u.mode, at(report, u.start), s(u.wall_s), u.load]),
         ),
       );
-    if (timed.length < c.units.length)
+    const idle = c.units.length - timed.length;
+    if (idle)
       out.push(
         "",
-        `${c.units.length - timed.length}${timed.length ? " more" : ""} units took under 0.01s; report.json lists them.`,
+        `${idle}${timed.length ? " more" : ""} unit${idle === 1 ? "" : "s"} took under 0.01s; report.json lists ${idle === 1 ? "it" : "them"}.`,
       );
   });
   if (report.notes.length) out.push("", "## Notes", "", ...report.notes.map((n) => `- ${n}`));

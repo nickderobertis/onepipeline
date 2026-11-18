@@ -280,6 +280,30 @@ test("refolding a run writes its reports, saying what the records did not have",
   assert.match(report.notes.join("\n"), /`cargo build` left no timings page/);
 });
 
+test("report.md lists the units that took time and counts those that took none", (t) => {
+  const dir = handMadeRun(t);
+  const page = join(dir, "cargo-timings", "1-a.html");
+  const html = readFileSync(page, "utf8");
+  const unit = html.match(/ {2}\{"name": "u".*\}/)[0];
+  const idle = unit
+    .replace('"name": "u"', '"name": "idle"')
+    .replace('"duration": 0.5', '"duration": 0');
+  writeFileSync(page, html.replace(unit, `${unit},\n${idle},\n${idle}`));
+  assert.equal(fold(dir).status, 0);
+  const some = readFileSync(join(dir, "report.md"), "utf8");
+  assert.match(some, /\| u v1\.0\.0 \(check\) \|/);
+  assert.doesNotMatch(some, /\| idle v1\.0\.0/);
+  assert.match(some, /^2 more units took under 0\.01s; report\.json lists them\.$/m);
+  assert.equal(JSON.parse(readFileSync(join(dir, "report.json"), "utf8")).cargo[0].units.length, 3);
+
+  writeFileSync(page, html.replace(unit, idle));
+  assert.equal(fold(dir).status, 0);
+  assert.match(
+    readFileSync(join(dir, "report.md"), "utf8"),
+    /^1 unit took under 0\.01s; report\.json lists it\.$/m,
+  );
+});
+
 test("refolding refuses a timings page whose units are not as cargo writes them", (t) => {
   const dir = handMadeRun(t);
   const page = join(dir, "cargo-timings", "1-a.html");

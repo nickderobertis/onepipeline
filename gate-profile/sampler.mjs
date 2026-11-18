@@ -78,7 +78,12 @@ function readEnvironment(pid) {
   return found;
 }
 
-const started = Date.now();
+// Samples are stamped on the monotonic clock, set against the wall clock once: a wall clock the
+// host adjusts mid-run (this one has stepped back 14ms between two samples) would put them out of
+// order. The shims' and Nx's wall-clock stamps stay comparable to within that adjustment.
+const origin = Date.now() - performance.now();
+const clock = () => Math.round(origin + performance.now());
+const started = clock();
 const ticks = [];
 const loads = [];
 const processes = new Map(); // key "pid:starttime" → record
@@ -100,7 +105,7 @@ function taskOf(environment) {
 
 function sample() {
   const tick = ticks.length;
-  const now = Date.now();
+  const now = clock();
   ticks.push(now);
   // The /proc refusals below are untested: staging one takes a mount namespace without /proc,
   // which this host's unprivileged tests cannot make. Each prints and exits 3 exactly as the
@@ -215,7 +220,7 @@ function finish() {
         interval_ms: interval,
         nproc: availableParallelism(),
         started,
-        ended: Date.now(),
+        ended: clock(),
         ticks,
         loads,
         processes: [...processes.values()],

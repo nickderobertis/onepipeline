@@ -15,6 +15,7 @@ fi
 gate_profile_check_dir || exit
 dir=$ONEPIPELINE_GATE_PROFILE_DIR
 parent=${ONEPIPELINE_GATE_PROFILE_PHASE-}
+invocation="$*"
 scratch="$dir/.times.$$"
 trap 'rm -f "$scratch"' EXIT
 
@@ -48,8 +49,14 @@ run_phase() {
   end=$EPOCHREALTIME
   printf '{"id":"%s","parent":%s,"recipe":%s,"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d}\n' \
     "$id" "$(gate_profile_json_string "$parent")" "$(gate_profile_json_string "$recipe")" \
-    "$start" "$end" "$before" "$after" "$status" >>"$dir/phases.jsonl"
+    "$start" "$end" "$before" "$after" "$status" >>"$dir/phases.jsonl" || unrecorded phases.jsonl
   return "$status"
+}
+
+# A phase the report would silently leave out fails the run instead: the profile is not a true one.
+unrecorded() {
+  echo "gate-profile: could not record \`just $invocation\` in $dir/$1 (see above); make the run directory writable and profile again" >&2
+  exit 3
 }
 
 status=0
@@ -69,6 +76,6 @@ if [ -z "$parent" ]; then
   gate_profile_children_cpu "$scratch"
   printf '{"recipe":%s,"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d}\n' \
     "$(gate_profile_json_string "$1")" "$run_start" "$EPOCHREALTIME" "$run_before" \
-    "$gate_profile_cpu" "$status" >"$dir/run.json"
+    "$gate_profile_cpu" "$status" >"$dir/run.json" || unrecorded run.json
 fi
 exit "$status"

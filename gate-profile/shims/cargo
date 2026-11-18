@@ -84,9 +84,15 @@ rm -f "$started"
 copies=()
 if [ -n "$page" ]; then
   copy="$ONEPIPELINE_GATE_PROFILE_DIR/cargo-timings/$$-${start/./}.html"
-  mkdir -p "$(dirname "$copy")" && cp -p "$page" "$copy" && copies=("$copy")
+  if mkdir -p "$(dirname "$copy")" && cp -p "$page" "$copy"; then
+    copies=("$copy")
+  else
+    # The build is still recorded; its report row then says it left no timings page.
+    echo "gate-profile: could not keep $page for \`cargo $*\` (see above); its compile units will be missing from the report" >&2
+  fi
 fi
-printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"timings":%s,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
+# A build the report would silently leave out fails instead: the profile is not a true one.
+if ! printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,"timings":%s,"argv":%s,"cwd":%s,"target_dir":%s,"llvm_cov_target_dir":%s,"invocation":%s,"phase":%s,"task":%s}\n' \
   "$start" "$end" "$before" "$after" "$status" "$(gate_profile_json_array "${copies[@]}")" \
   "$(gate_profile_json_array "$@")" \
   "$(gate_profile_json_string "$(pwd -P)")" "$(gate_profile_json_string "${CARGO_TARGET_DIR-}")" \
@@ -94,5 +100,8 @@ printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit":%d,
   "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_INVOCATION-}")" \
   "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
   "$(gate_profile_json_string "${NX_TASK_TARGET_PROJECT:+$NX_TASK_TARGET_PROJECT:${NX_TASK_TARGET_TARGET-}}")" \
-  >>"$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"
+  >>"$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"; then
+  echo "gate-profile: could not record \`cargo $*\` in $ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl (see above); make the run directory writable and profile again" >&2
+  exit 3
+fi
 exit "$status"
