@@ -28,6 +28,11 @@ const FAILING: &str = "profiling::a_profiled_journey_that_fails";
 /// field renamed on one side fails on that side.
 const GOLDEN: &str = "tests/golden/test-profile-record-v3.json";
 
+/// The figures `onepipeline_testfakes::profile` writes as `null` where a platform has
+/// none: each program's CPU, the host's CPU count and its load. Every other field's type
+/// is held exactly.
+const NULLABLE: [&str; 4] = ["cpu_s", "nproc", "load_1m_start", "load_1m_end"];
+
 /// What a record says, without the values: each object's keys and each leaf's
 /// JSON type, with `programs` — one entry per program a test happened to run —
 /// reduced to the shape of an entry.
@@ -42,6 +47,9 @@ fn shape(value: &Value) -> Value {
                             Value::Null,
                             |entry| serde_json::json!({ "*": shape(entry) }),
                         ),
+                        (key, Value::Number(_) | Value::Null) if NULLABLE.contains(&key) => {
+                            Value::from("number or null")
+                        }
                         _ => shape(field),
                     };
                     (key.clone(), reduced)
@@ -53,6 +61,66 @@ fn shape(value: &Value) -> Value {
         Value::Bool(_) => Value::from("bool"),
         Value::Null => Value::from("null"),
         Value::Array(_) => Value::from("array"),
+    }
+}
+
+fn golden() -> Value {
+    serde_json::from_str(
+        &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
+    )
+    .expect("the golden record is JSON")
+}
+
+fn has_the_goldens_shape(record: &Value) {
+    assert_eq!(
+        shape(record),
+        shape(&golden()),
+        "a record no longer has {GOLDEN}'s shape: bump `profile::SCHEMA` and the golden \
+         together, and the reader with them: {record:#}"
+    );
+}
+
+/// A record from a platform with no `getrusage` or load average — every Windows
+/// record — carries `null` for each program's CPU and for the load, and a host that
+/// cannot say how many CPUs it has carries `null` for `nproc`: that is the golden's
+/// shape too. A `null` anywhere else, a figure of another type, or a missing key is not.
+#[test]
+fn a_record_with_a_platforms_missing_figures_has_the_goldens_shape_and_nothing_looser_does() {
+    let world = World::new("profile-null-figures");
+    let records = world.root.join("profiles");
+    passed(BUSY, &run_alone(&["--exact", BUSY], &records));
+    let mut record = read_record(&records.join("e2e").join(file_of(BUSY)));
+    for field in ["nproc", "load_1m_start", "load_1m_end"] {
+        record[field] = Value::Null;
+    }
+    for program in record["programs"]
+        .as_object_mut()
+        .expect("programs is an object")
+        .values_mut()
+    {
+        program["cpu_s"] = Value::Null;
+    }
+    has_the_goldens_shape(&record);
+
+    let golden = shape(&golden());
+    let mut typed = record.clone();
+    typed["load_1m_end"] = Value::from("high");
+    let mut nulled = record.clone();
+    nulled["wall_s"] = Value::Null;
+    let mut program_nulled = record.clone();
+    program_nulled["programs"]["cargo"]["s"] = Value::Null;
+    let mut missing = record.clone();
+    missing
+        .as_object_mut()
+        .expect("a record is an object")
+        .remove("nproc");
+    for (what, wrong) in [
+        ("a nullable figure of another type", typed),
+        ("a null wall clock", nulled),
+        ("a null program wall clock", program_nulled),
+        ("a missing nullable key", missing),
+    ] {
+        assert_ne!(shape(&wrong), golden, "{what} read as the golden's shape");
     }
 }
 
@@ -212,16 +280,8 @@ fn a_journeys_record_carries_what_it_spent_time_on_and_its_neighbours_does_not()
     let record = |test: &str| read_record(&records.join("e2e").join(file_of(test)));
 
     let busy = record(BUSY);
-    let golden: Value = serde_json::from_str(
-        &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
-    )
-    .expect("the golden record is JSON");
-    assert_eq!(
-        shape(&busy),
-        shape(&golden),
-        "a record no longer has {GOLDEN}'s shape: bump `profile::SCHEMA` and the golden \
-         together, and the reader with them"
-    );
+    let golden = golden();
+    has_the_goldens_shape(&busy);
     assert_eq!(busy["test"], BUSY, "{busy:#}");
     assert_eq!(busy["schema"], profile::SCHEMA, "{busy:#}");
     assert_eq!(

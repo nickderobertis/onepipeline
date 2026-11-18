@@ -24,6 +24,18 @@ const GOLDEN: &str = "tests/golden/span-profile-record-v1.json";
 /// The phase line `onepipeline host` writes for the `host-view-time` budget.
 const HOST_PHASES_ENV: &str = "ONEPIPELINE_HOST_PHASES";
 
+/// The figures `src/spans.rs` writes as `null` where a platform has no `getrusage` or
+/// per-thread CPU clock: the record's CPU and RSS, and each span's own CPU. Every other
+/// field's type is held exactly.
+const NULLABLE: [&str; 6] = [
+    "user_cpu_ms",
+    "system_cpu_ms",
+    "children_user_cpu_ms",
+    "children_system_cpu_ms",
+    "peak_rss_kb",
+    "self_cpu_ms",
+];
+
 /// What a record says, without the values: each object's keys and each leaf's JSON
 /// type, with `spans` — one entry per span a process happened to enter — reduced to
 /// the shape of an entry.
@@ -36,6 +48,9 @@ fn shape(value: &Value) -> Value {
                     let reduced = match (key.as_str(), field) {
                         ("spans", Value::Array(spans)) => {
                             Value::Array(spans.first().map(shape).into_iter().collect())
+                        }
+                        (key, Value::Number(_) | Value::Null) if NULLABLE.contains(&key) => {
+                            Value::from("number or null")
                         }
                         _ => shape(field),
                     };
@@ -81,18 +96,26 @@ fn the_record(dir: &Path) -> Value {
     let mut written = records(dir);
     assert_eq!(written.len(), 1, "one process, one record: {written:#?}");
     let record = written.remove(0);
-    let golden: Value = serde_json::from_str(
+    has_the_goldens_shape(&record);
+    record
+}
+
+fn golden() -> Value {
+    serde_json::from_str(
         &profile::fs::read_to_string(repo_file(GOLDEN)).expect("the golden record"),
     )
-    .expect("the golden record is JSON");
+    .expect("the golden record is JSON")
+}
+
+fn has_the_goldens_shape(record: &Value) {
+    let golden = golden();
     assert_eq!(
-        shape(&record),
+        shape(record),
         shape(&golden),
         "a span record no longer has {GOLDEN}'s shape: bump `spans::SCHEMA` and the golden \
          together, and the report's reader with them: {record:#}"
     );
     assert_eq!(record["schema"], golden["schema"], "{record:#}");
-    record
 }
 
 fn span<'a>(record: &'a Value, name: &str) -> Option<&'a Value> {
@@ -397,4 +420,50 @@ fn a_verb_that_refuses_records_the_status_it_exits_with() {
     assert_eq!(record["verb"], "status", "{record:#}");
     assert_eq!(record["exit_status"], 2, "{record:#}");
     spans_fit_the_process(&record);
+}
+
+/// A record from a platform with no `getrusage` and no per-thread CPU clock — every
+/// Windows record — carries `null` for its CPU and RSS figures and for each span's own
+/// CPU, and that is the golden's shape too; a `null` anywhere else, a figure of
+/// another type, or a missing key is not.
+#[test]
+fn a_record_with_a_platforms_missing_figures_has_the_goldens_shape_and_nothing_looser_does() {
+    let world = World::new("span-null-figures");
+    let spans = world.root.join("spans");
+    run_profiled(&world, &world.root, Some(&spans), &["runs"]).exited(0);
+    let mut record = the_record(&spans);
+    for field in [
+        "user_cpu_ms",
+        "system_cpu_ms",
+        "children_user_cpu_ms",
+        "children_system_cpu_ms",
+        "peak_rss_kb",
+    ] {
+        record[field] = Value::Null;
+    }
+    for span in record["spans"].as_array_mut().expect("spans is a list") {
+        span["self_cpu_ms"] = Value::Null;
+    }
+    has_the_goldens_shape(&record);
+
+    let golden = shape(&golden());
+    let mut typed = record.clone();
+    typed["user_cpu_ms"] = Value::from("fast");
+    let mut nulled = record.clone();
+    nulled["wall_ms"] = Value::Null;
+    let mut span_nulled = record.clone();
+    span_nulled["spans"][0]["self_wall_ms"] = Value::Null;
+    let mut missing = record.clone();
+    missing
+        .as_object_mut()
+        .expect("a record is an object")
+        .remove("peak_rss_kb");
+    for (what, wrong) in [
+        ("a nullable figure of another type", typed),
+        ("a null wall clock", nulled),
+        ("a null span wall clock", span_nulled),
+        ("a missing nullable key", missing),
+    ] {
+        assert_ne!(shape(&wrong), golden, "{what} read as the golden's shape");
+    }
 }
