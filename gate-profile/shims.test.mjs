@@ -74,6 +74,10 @@ fan: m n
     @echo fan >> log
 rest *xs:
     @echo "rest {{xs}}" >> log
+needs x: base
+    @echo "needs {{x}}" >> log
+many +xs: base
+    @echo "many {{xs}}" >> log
 `;
 
 const plan = (dir, ...args) => {
@@ -92,7 +96,10 @@ test("the planner orders prior dependencies as just does, and refuses what it ca
   assert.deepEqual(top.stdout.trim().split("\n"), ["base", "m", "n"]);
   assert.equal(plan(dir, "base").stdout, "");
   assert.equal(plan(dir, "rest", "a", "b", "c").status, 0);
-  for (const args of [["given"], ["then"], ["fan"], ["base", "m"], ["nosuch"]])
+  assert.equal(plan(dir, "needs", "1").stdout.trim(), "base");
+  assert.equal(plan(dir, "many", "1", "2").stdout.trim(), "base");
+  // Too few arguments: just refuses before `base` runs, so the plan must not run it first.
+  for (const args of [["given"], ["then"], ["fan"], ["base", "m"], ["nosuch"], ["needs"], ["many"]])
     assert.equal(plan(dir, ...args).status, 3, args.join(" "));
   // A dump naming a parameter kind this does not know is refused, not read as some other kind.
   const unknown = scratch(t, "phases-unknown");

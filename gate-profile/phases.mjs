@@ -6,9 +6,9 @@
 //
 // Prints the dependencies to run first, one per line (none is an empty plan). Exit 3 when the
 // invocation cannot be split that way without changing what runs — a dependency given arguments,
-// a subsequent (`&&`) dependency, a `[parallel]` recipe, or more arguments than the recipe takes,
-// which `just` reads as further recipes — and the shim then runs it whole as one phase. Exit 2 for
-// a usage error or a justfile `just --dump` cannot read.
+// a subsequent (`&&`) dependency, a `[parallel]` recipe, fewer arguments than the recipe needs, or
+// more than it takes, which `just` reads as further recipes — and the shim then runs it whole as
+// one phase. Exit 2 for a usage error or a justfile `just --dump` cannot read.
 import { execFileSync } from "node:child_process";
 
 const NOT_SPLITTABLE = 3;
@@ -70,6 +70,10 @@ const top = declared(recipe);
 if (!top) process.exit(NOT_SPLITTABLE);
 const variadic = top.parameters.some((p) => p.kind !== "singular");
 if (!variadic && args.length > top.parameters.length) process.exit(NOT_SPLITTABLE);
+// Fewer than the recipe needs: `just` refuses it before any dependency runs, so the unsplit
+// run is what reproduces that refusal. A `+` takes one at least; a default makes either optional.
+const required = top.parameters.filter((p) => p.kind !== "star" && p.default == null).length;
+if (args.length < required) process.exit(NOT_SPLITTABLE);
 
 const order = [];
 const seen = new Set([recipe]);
