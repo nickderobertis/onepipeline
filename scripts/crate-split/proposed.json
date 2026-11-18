@@ -384,6 +384,7 @@
         "tests/e2e/boundary.rs",
         "tests/e2e/recorded_channel.rs",
         "tests/e2e/rulings.rs",
+        "tests/e2e/surface_records.rs",
         "docs/contract.md",
         "docs/contract-divergences.md",
         "scripts/record-channel-answers.sh",
@@ -400,7 +401,8 @@
         "ask",
         "boundary",
         "recorded_channel",
-        "rulings"
+        "rulings",
+        "surface_records"
       ]
     },
     "e2e-runs": {

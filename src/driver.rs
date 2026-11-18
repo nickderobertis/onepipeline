@@ -4522,6 +4522,7 @@ fn journal_verdict(
         ("author", json!(envelope.author.clone())),
         ("completion", json!(envelope.completion)),
         ("reason", json!(envelope.reason)),
+        ("correlation", json!(correlation)),
     ];
     if let Some(message) = &envelope.message {
         replied.push(("message", json!(journal::bounded_text(message))));

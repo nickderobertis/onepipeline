@@ -300,9 +300,73 @@ pub(crate) fn answered(world: &World, program: &Path, args: &[&str]) -> Value {
     json!({
         "args": args,
         "exit": output.status.code(),
-        "stdout": without_the_free_space(&scrubbed(&output.stdout)),
+        "stdout": without_the_reader_fields(&without_the_free_space(&scrubbed(&output.stdout))),
         "stderr": without_the_reset_report(&scrubbed(&output.stderr)),
     })
+}
+
+/// The payload fields this build writes so a reader can join a surface's records
+/// and its reply, which 0.28.2 never wrote: entry 159 of
+/// `docs/contract-divergences.md` records them. They are taken out only of the
+/// events of these kinds that this world journalled — an event the recorded
+/// journal holds, and every other field, is still held byte for byte.
+const READER_FIELDS: [(&str, &[&str]); 3] = [
+    ("planner-surface-queued", &["surface", "correlation"]),
+    ("planner-surfaced", &["surface", "correlation"]),
+    ("planner-replied", &["correlation"]),
+];
+
+/// `text` with [`READER_FIELDS`] taken out of the compact events
+/// [`journalled_here`] marked as this process's.
+pub(crate) fn without_the_reader_fields(text: &str) -> String {
+    const MINE: &str = "\"stream\":\"<this-process>\"";
+    const PAYLOAD: &str = "\"payload\":{";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(MINE) {
+        let (head, tail) = rest.split_at(at + MINE.len());
+        out.push_str(head);
+        let Some(payload) = tail.find(PAYLOAD) else {
+            rest = tail;
+            break;
+        };
+        let header = &tail[..payload];
+        let fields = READER_FIELDS
+            .iter()
+            .find(|(kind, _)| header.contains(&format!("\"kind\":\"{kind}\"")))
+            .map_or(&[][..], |(_, fields)| *fields);
+        let open = payload + PAYLOAD.len() - 1;
+        out.push_str(&tail[..open]);
+        let end = value_end(tail, open);
+        out.push_str(&without_top_level_keys(&tail[open..end], fields));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The compact JSON object `object` with each top-level member named in `keys`
+/// taken out along with its separator.
+fn without_top_level_keys(object: &str, keys: &[&str]) -> String {
+    let mut members = Vec::new();
+    let inner = &object[1..object.len() - 1];
+    let mut start = 0;
+    while start < inner.len() {
+        let key_end = value_end(inner, start);
+        let value_start = key_end + 1;
+        let end = value_end(inner, value_start);
+        members.push(&inner[start..end]);
+        start = end + 1;
+    }
+    let kept: Vec<&str> = members
+        .into_iter()
+        .filter(|member| {
+            !keys
+                .iter()
+                .any(|key| member.starts_with(&format!("\"{key}\":")))
+        })
+        .collect();
+    format!("{{{}}}", kept.join(","))
 }
 
 /// The fields no two runs of the same steps share: when a surface was queued and
@@ -318,7 +382,8 @@ const UNSHARED: [&str; 4] = ["queued_at", "at", "accounted", "seal"];
 const CORRELATION: &str = "correlation";
 
 /// Where the value that starts at `from` ends: past its closing quote for a
-/// string, or at the first separator for anything else.
+/// string, past its matching bracket for an object or array, or at the first
+/// separator for anything else.
 fn value_end(text: &str, from: usize) -> usize {
     let bytes = text.as_bytes();
     if bytes.get(from) == Some(&b'"') {
@@ -327,6 +392,28 @@ fn value_end(text: &str, from: usize) -> usize {
             at += if bytes[at] == b'\\' { 2 } else { 1 };
         }
         return (at + 1).min(bytes.len());
+    }
+    if matches!(bytes.get(from), Some(b'{' | b'[')) {
+        let mut depth = 0usize;
+        let mut at = from;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'"' => {
+                    at = value_end(text, at);
+                    continue;
+                }
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        return bytes.len();
     }
     text[from..]
         .find([',', '}', ']', '\n'])

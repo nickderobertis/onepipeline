@@ -616,17 +616,12 @@ pub(crate) fn failing(stage: &str) -> Result<()> {
 }
 
 fn record_surface(paths: &RunPaths, journal: &mut Journal, surface: &Surface) -> Result<()> {
-    journal.emit(
-        PipelineKind::PlannerSurfaceQueued,
-        journal::labels(&paths.run, surface.workstream.as_deref()),
-        journal::payload(&[
-            ("surface", json!(surface.id)),
-            ("kind", json!(surface.kind)),
-            ("message", json!(journal::bounded_text(&surface.message))),
-            ("source", json!(surface.source)),
-            ("blocking", json!(surface.blocking)),
-            ("correlation", json!(surface.correlation)),
-        ]),
+    crate::engine::record_surface_queued(
+        paths,
+        journal,
+        surface,
+        &journal::bounded_text(&surface.message),
+        &[],
     )
 }
 

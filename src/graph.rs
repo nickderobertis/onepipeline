@@ -1214,6 +1214,10 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
             )
             .field("context"));
         }
+        if let Some(item) = &node.human_item {
+            item.check(&node.deps)
+                .map_err(|why| named(&format!("`human_item`: {why}")).field("human_item"))?;
+        }
         return Ok(());
     }
 

@@ -914,6 +914,12 @@ fn a_verdict_beside_commands_is_journalled_exactly_as_a_commandless_one_is() {
     assert_eq!(alone.len(), 1, "{alone:?}");
     assert_eq!(alone[0]["payload"]["reason"], "keep going");
     assert_eq!(alone[0]["payload"]["completion"], json!(false));
+    // A verdict answering no question says so: its correlation is `null`, not absent.
+    assert_eq!(
+        alone[0]["payload"].get("correlation"),
+        Some(&Value::Null),
+        "{alone:?}"
+    );
 
     // The same verdict with a command riding along.
     world

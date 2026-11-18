@@ -17,7 +17,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, double, human, plan_of, World, REFUSED};
+use crate::harness::{agent, double, human, plan_of, World, REFUSED, STALL_AFTER_ENV};
 
 /// A configuration narrowing the monitor to `retry` alone, taking away the
 /// `cancel` the profile grants it beside `retry`.
@@ -1220,6 +1220,38 @@ fn an_engine_raised_surface_a_hook_drops_or_refuses_is_journalled_and_the_run_co
         assert!(surfaces_read(&world, &run).is_empty());
         world.release("slow.go");
     }
+}
+
+/// A quiet worker whose surface a hook drops is still recorded `quiet-worker`, naming no
+/// `surface`: the channel never queued one, so there is no id for a reader to join on.
+#[test]
+fn a_quiet_worker_whose_surface_a_hook_drops_names_no_surface() {
+    let world = World::new("hook-quiet-drop");
+    let run = "hookquietdrop";
+    let file = hooked(&world, &[("surfaces", &["drop"], "")]);
+    let path = plan(&world, run);
+    world.script("slow.wait", "hold");
+    let mut command = world.cmd(&["start", &path, "--bus-config", &file, "--detach"]);
+    command.env(STALL_AFTER_ENV, "1");
+    command.output().expect("the binary runs");
+    world.until("the quiet worker to be recorded", |world| {
+        !world.events_of(run, "quiet-worker").is_empty()
+    });
+    let reported = world.events_of(run, "quiet-worker");
+    assert_eq!(reported[0]["labels"]["node"], "slow");
+    assert!(
+        reported[0]["payload"].get("surface").is_none(),
+        "{reported:?}"
+    );
+    assert!(world
+        .events_of(run, "planner-surface-dropped")
+        .iter()
+        .any(|event| event["payload"]["kind"] == "quiet-worker"));
+    assert!(world
+        .events_of(run, "planner-surface-queued")
+        .iter()
+        .all(|event| event["payload"]["kind"] != "quiet-worker"));
+    world.release("slow.go");
 }
 
 /// A hook dropping the commands half of a mixed envelope leaves no copy of those

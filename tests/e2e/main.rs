@@ -365,6 +365,7 @@ mod stop_guard;
 mod store;
 mod summary;
 mod surface;
+mod surface_records;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] C4, C6a and C7 are
 // checked in `templates`, `taskgraph`, `plancheck`, `driver` and `filter` at once, and the
 // seam journeys drive the released `onetaskgraph` against the same store the engine links,

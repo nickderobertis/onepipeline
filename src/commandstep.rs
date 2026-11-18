@@ -9,6 +9,12 @@
 //! run the command itself starts joins the same flow and is owned by the same session. Its
 //! stdout and stderr are kept in `<run>/commands/<node>.log`.
 //!
+//! It is also told `ONEPIPELINE_STEP_OUTPUTS`, a path no earlier run of the command used, and
+//! may write a JSON object whose values are strings there: what it publishes for a human node
+//! after it to quote (`human_items::quote`). On exit 0 the engine records that object as the
+//! `outputs` of its `command-exited`, and a file that is not such an object fails the step,
+//! naming what it holds instead. An exit that is not 0 has failed already, and reads none.
+//!
 //! It settles `done` on exit 0, `failed` with outcome [`COMMAND_FAILED`] on any other exit —
 //! the detail its exit status and a bounded tail of its stderr — and `failed` with
 //! [`COMMAND_TIMED_OUT`] when it outlives its `timeout_seconds`, its process tree stopped.
@@ -53,6 +59,12 @@ pub(crate) const PLAN_ENV: &str = "ONEPIPELINE_PLAN";
 pub(crate) const FLOW_ENV: &str = "ONEPIPELINE_FLOW";
 /// The session that launched the run, where the launch recorded one.
 pub(crate) const LAUNCHER_SESSION_ENV: &str = "ONEPIPELINE_LAUNCHER_SESSION";
+/// The file the command may publish its outputs to.
+pub(crate) const STEP_OUTPUTS_ENV: &str = "ONEPIPELINE_STEP_OUTPUTS";
+
+/// The most a step's outputs file may hold: each value is copied into the run's journal,
+/// so one step cannot grow every later read of it without bound.
+const MAX_OUTPUTS_BYTES: u64 = 64 * 1024;
 
 /// How much of a command's stderr its failure's detail carries, from the end.
 const STDERR_TAIL_BYTES: usize = 2048;
@@ -69,6 +81,16 @@ pub(crate) fn log_of(paths: &RunPaths, node: &str) -> PathBuf {
     crate::hooks::run_root(paths)
         .join("commands")
         .join(format!("{node}.log"))
+}
+
+/// Where this run of a command node's command may publish its outputs: a name no earlier
+/// run used, so a file an earlier attempt left is never read as this one's.
+fn outputs_of(paths: &RunPaths, node: &str) -> PathBuf {
+    crate::hooks::run_root(paths).join("commands").join(format!(
+        "{node}.outputs.{}.{}.json",
+        std::process::id(),
+        crate::sys::now_millis()
+    ))
 }
 
 /// What `command-started` records for this node, running `argv`.
@@ -103,7 +125,7 @@ pub(crate) fn spawn(
         .name(format!("command-{}", node.id))
         .spawn(move || {
             let begun = Instant::now();
-            let (ending, settlement) = run(&paths, &launch, &node, &argv, &cancel);
+            let (ending, settlement, outputs) = run(&paths, &launch, &node, &argv, &cancel);
             // The node the loop started, so it has an identity; a node without one is a
             // node the loader refused, and nothing is sent for it but its settlement.
             if let Some(named) = crate::graph::NodeRef::of(&node) {
@@ -112,6 +134,7 @@ pub(crate) fn spawn(
                     CommandExited {
                         ending,
                         duration_ms: u64::try_from(begun.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        outputs,
                     },
                 ))));
             }
@@ -129,13 +152,106 @@ pub(crate) fn spawn(
         })
 }
 
-/// Run the command to its end, and say how it ended and what the node settles as.
+/// Run the command to its end, and say how it ended, what the node settles as, and what it
+/// published.
 fn run(
     paths: &RunPaths,
     launch: &LaunchRecord,
     node: &Node,
     argv: &Argv,
     cancel: &CancellationToken,
+) -> (CommandEnding, Settlement, Option<Outputs>) {
+    let outputs_path = outputs_of(paths, &node.id);
+    let (ending, settlement) = run_to_end(paths, launch, node, argv, cancel, &outputs_path);
+    if settlement.status != NodeStatus::Done {
+        let _ = std::fs::remove_file(&outputs_path);
+        return (ending, settlement, None);
+    }
+    let read = read_outputs(&outputs_path);
+    let _ = std::fs::remove_file(&outputs_path);
+    match read {
+        Ok(outputs) => (ending, settlement, outputs),
+        Err(why) => (
+            ending,
+            Settlement {
+                detail: Some(format!(
+                    "the command exited 0, and the file {STEP_OUTPUTS_ENV} named ({}) {why}",
+                    outputs_path.display()
+                )),
+                ..Settlement::plain(&node.id, NodeStatus::Failed, Some(COMMAND_FAILED))
+            },
+            None,
+        ),
+    }
+}
+
+/// What a step published: a value for each name.
+type Outputs = std::collections::BTreeMap<String, String>;
+
+/// The outputs a command wrote to `path`: none where it wrote no file there.
+///
+/// # Errors
+///
+/// What the file holds instead of a JSON object whose values are strings, in words that
+/// follow "the file … ".
+fn read_outputs(path: &std::path::Path) -> std::result::Result<Option<Outputs>, String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not be read: {error}")),
+    };
+    // Read through the bound rather than checked beside it, so a process the command left
+    // behind cannot grow the file between a size check and the read.
+    let mut text = Vec::new();
+    file.take(MAX_OUTPUTS_BYTES + 1)
+        .read_to_end(&mut text)
+        .map_err(|error| format!("could not be read: {error}"))?;
+    if text.len() as u64 > MAX_OUTPUTS_BYTES {
+        return Err(format!(
+            "holds more than the {MAX_OUTPUTS_BYTES} bytes a step's outputs may"
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&text)
+        .map_err(|error| format!("is not JSON ({error}); it must hold an object of strings"))?;
+    let serde_json::Value::Object(object) = value else {
+        return Err(format!(
+            "holds a JSON {}, not an object whose values are strings",
+            shape(&value)
+        ));
+    };
+    object
+        .into_iter()
+        .map(|(name, value)| match value {
+            serde_json::Value::String(text) => Ok((name, text)),
+            other => Err(format!(
+                "holds an object whose value for {name:?} is a JSON {}, not a string",
+                shape(&other)
+            )),
+        })
+        .collect::<std::result::Result<Outputs, String>>()
+        .map(Some)
+}
+
+/// A JSON value's kind, as a sentence names it.
+fn shape(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "list",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Run the command to its end, and say how it ended and what the node settles as.
+fn run_to_end(
+    paths: &RunPaths,
+    launch: &LaunchRecord,
+    node: &Node,
+    argv: &Argv,
+    cancel: &CancellationToken,
+    outputs: &std::path::Path,
 ) -> (CommandEnding, Settlement) {
     let not_started = |why: String| {
         (
@@ -191,6 +307,7 @@ fn run(
         .env(NODE_ID_ENV, &node.id)
         .env(RUN_ROOT_ENV, crate::hooks::run_root(paths))
         .env(PLAN_ENV, &launch.project)
+        .env(STEP_OUTPUTS_ENV, outputs)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(Stdio::piped());
