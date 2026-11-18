@@ -44,6 +44,9 @@ done
 gate_profile_check_dir || exit
 
 scratch="$ONEPIPELINE_GATE_PROFILE_DIR/.times.$$"
+# An interrupted build is still recorded: bash would otherwise die with a cargo the signal killed.
+# A handler, unlike an ignored signal, leaves cargo's own disposition at its default.
+trap : INT
 start=$EPOCHREALTIME
 gate_profile_children_cpu "$scratch"
 before=$gate_profile_cpu

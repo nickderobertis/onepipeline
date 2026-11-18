@@ -2,7 +2,7 @@
 // Nx and cargo: the unprofiled gate is untouched by it, and a profiled run reports every phase,
 // task, cargo build and compile unit with its CPU and load, and its critical path.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -30,7 +30,7 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
   const { dir, commit } = fixture(t);
 
   await t.test("the gate without the command writes no profile of any kind", () => {
-    const gate = just(dir, "gate");
+    const gate = just(dir, ["gate"]);
     assert.equal(gate.status, 0, gate.stderr);
     assert.equal(markerLines(dir), 1);
     assert.deepEqual(runDirs(dir), []);
@@ -55,7 +55,7 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
   // So that cargo compiles every unit again rather than finding them fresh.
   rmSync(join(dir, "crate/target"), { recursive: true, force: true });
 
-  const profiled = just(dir, "gate-profile");
+  const profiled = just(dir, ["gate-profile"]);
   const [run] = runDirs(dir);
   const report = run ? readReport(dir, run) : null;
 
@@ -184,12 +184,17 @@ test("gate-profile profiles the gate run it makes, and the gate without it recor
 test("gate-profile refuses an unknown recipe, and reports a failing one up to its failure", async (t) => {
   const { dir } = fixture(t);
 
-  const unknown = just(dir, "gate-profile", "nosuch");
+  const unknown = just(dir, ["gate-profile", "nosuch"]);
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /no recipe 'nosuch'/);
   assert.deepEqual(runDirs(dir), []);
 
-  const broken = just(dir, "gate-profile", "broken");
+  // Settings of a profiled run this one is started inside reach none of this run's records.
+  const broken = just(dir, ["gate-profile", "broken"], {
+    ONEPIPELINE_GATE_PROFILE_DIR: join(dir, "not-this-run"),
+    ONEPIPELINE_GATE_PROFILE_PHASE: "an-enclosing-phase",
+    NX_PROFILE: "an-enclosing-profile.json",
+  });
   assert.equal(broken.status, 1, broken.stderr);
   assert.match(broken.stderr, /`just broken` failed \(exit 7\)/);
   const [run] = runDirs(dir);
@@ -201,4 +206,37 @@ test("gate-profile refuses an unknown recipe, and reports a failing one up to it
     [["broken", 7]],
   );
   assert.deepEqual(report.tasks, []);
+  assert.deepEqual(report.phases[0].within, []);
+});
+
+test("an interrupted run still writes its profile of what ran", async (t) => {
+  const { dir } = fixture(t);
+  const child = spawn("just", ["gate-profile", "slow"], {
+    cwd: dir,
+    env: fixtureEnvironment(),
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  // Interrupt once the recipe is under way: its run directory exists and the phase has started.
+  while (
+    !runDirs(dir).some((run) => existsSync(join(dir, "target/gate-profile", run, "meta.json")))
+  )
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // The terminal's Ctrl-C: the whole foreground group, this test's own child and its descendants.
+  process.kill(-child.pid, "SIGINT");
+  assert.equal(await exited, 1, stderr);
+  assert.match(stderr, /`just slow` failed \(exit 130\)/);
+  const report = readReport(dir, runDirs(dir)[0]);
+  assert.deepEqual(validateReport(report), []);
+  assert.equal(report.run.exit, 130);
+  assert.deepEqual(
+    report.phases.map((phase) => [phase.recipe, phase.exit]),
+    [["slow", 130]],
+  );
 });

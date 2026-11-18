@@ -36,26 +36,37 @@ try {
   fail(`cannot read the justfile through \`just --dump\`: ${error.message}`);
 }
 
-/** The recipe `name` as the dump declares it, with the fields the plan reads checked. */
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** The recipe `name` as the dump declares it, with every field the plan reads checked. */
 function declared(name) {
   const entry = recipes[name];
-  if (!entry) return null;
-  if (!Array.isArray(entry.dependencies) || !Array.isArray(entry.parameters))
-    fail(`\`just --dump\` describes recipe ${name} without its dependencies or parameters`);
+  if (entry === undefined) return null;
+  const valid =
+    isObject(entry) &&
+    Array.isArray(entry.dependencies) &&
+    entry.dependencies.every(
+      (d) => isObject(d) && typeof d.recipe === "string" && Array.isArray(d.arguments),
+    ) &&
+    Array.isArray(entry.parameters) &&
+    entry.parameters.every((p) => isObject(p) && typeof p.kind === "string") &&
+    (entry.priors === undefined || Number.isInteger(entry.priors)) &&
+    (entry.attributes === undefined || Array.isArray(entry.attributes));
+  if (!valid) fail(`\`just --dump\` describes recipe ${name} in a shape this does not know`);
   return entry;
 }
 
 function splittable(entry) {
   const priors = entry.priors ?? entry.dependencies.length;
   if (priors !== entry.dependencies.length) return false;
-  if ((entry.attributes ?? []).some((a) => a === "parallel" || a?.parallel !== undefined))
+  if ((entry.attributes ?? []).some((a) => a === "parallel" || (isObject(a) && "parallel" in a)))
     return false;
-  return entry.dependencies.every((d) => Array.isArray(d.arguments) && d.arguments.length === 0);
+  return entry.dependencies.every((d) => d.arguments.length === 0);
 }
 
 const top = declared(recipe);
 if (!top) process.exit(NOT_SPLITTABLE);
-const variadic = top.parameters.some((p) => p.kind && p.kind !== "singular");
+const variadic = top.parameters.some((p) => p.kind !== "singular");
 if (!variadic && args.length > top.parameters.length) process.exit(NOT_SPLITTABLE);
 
 const order = [];

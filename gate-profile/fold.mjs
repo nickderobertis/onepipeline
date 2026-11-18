@@ -160,17 +160,23 @@ export function validateReport(value, schema = REPORT_SCHEMA, path = "$") {
     errors.push(`${path}: ${value} is below ${schema.minimum}`);
   if (schema.format === "date-time" && typeof value === "string" && Number.isNaN(Date.parse(value)))
     errors.push(`${path}: ${value} is not a date-time`);
+  if (TYPES.array(value) && schema.minItems !== undefined && value.length < schema.minItems)
+    errors.push(`${path}: has ${value.length} items, fewer than ${schema.minItems}`);
+  if (TYPES.array(value) && schema.maxItems !== undefined && value.length > schema.maxItems)
+    errors.push(`${path}: has ${value.length} items, more than ${schema.maxItems}`);
   if (TYPES.array(value) && schema.items)
     value.forEach((item, i) => {
       errors.push(...validateReport(item, schema.items, `${path}[${i}]`));
     });
-  if (TYPES.object(value) && schema.properties) {
+  if (TYPES.object(value) && (schema.properties || schema.additionalProperties)) {
     for (const name of schema.required ?? [])
       if (!(name in value)) errors.push(`${path}: missing ${name}`);
     for (const [name, item] of Object.entries(value)) {
-      if (schema.properties[name])
+      if (schema.properties?.[name])
         errors.push(...validateReport(item, schema.properties[name], `${path}.${name}`));
       else if (schema.additionalProperties === false) errors.push(`${path}: unexpected ${name}`);
+      else if (typeof schema.additionalProperties === "object")
+        errors.push(...validateReport(item, schema.additionalProperties, `${path}.${name}`));
     }
   }
   return errors;
@@ -178,31 +184,115 @@ export function validateReport(value, schema = REPORT_SCHEMA, path = "$") {
 
 class RecordError extends Error {}
 
-function readJson(path, what) {
+// What each record the run left must hold before the fold reads it. The writers are this
+// directory's own scripts and Nx, but a run cut short or a newer Nx can leave anything.
+const open = (properties) => ({
+  type: "object",
+  required: Object.keys(properties),
+  properties,
+});
+const count = { type: "integer", minimum: 0 };
+const epoch = { type: "number", minimum: 0 };
+const cpuPair = { type: "array", items: count, minItems: 2, maxItems: 2 };
+const timed = { start: epoch, end: epoch, cpu_ms_before: cpuPair, cpu_ms_after: cpuPair };
+export const RECORD_SCHEMAS = {
+  meta: open({
+    recipe: text,
+    root: text,
+    commit: nullableText,
+    dirty: { type: "boolean" },
+    run: text,
+  }),
+  run: open({ recipe: text, ...timed, exit: { type: "integer" } }),
+  phase: open({ id: text, parent: text, recipe: text, ...timed, exit: { type: "integer" } }),
+  cargo: open({
+    ...timed,
+    exit: { type: "integer" },
+    argv: list(text),
+    cwd: text,
+    target_dir: text,
+    llvm_cov_target_dir: text,
+    invocation: text,
+    phase: text,
+    task: text,
+  }),
+  invocation: open({ id: text, phase: text, args: list(text) }),
+  profile: list({ type: "object", required: ["ph"], properties: { ph: text } }),
+  profileTask: open({
+    name: text,
+    ts: num,
+    dur: { type: "number", minimum: 0 },
+    args: { type: "object" },
+  }),
+  graph: open({
+    tasks: open({ dependencies: { type: "object", additionalProperties: list(text) } }),
+  }),
+  processes: open({
+    clock_ticks_per_second: { type: "integer", minimum: 1 },
+    interval_ms: { type: "integer", minimum: 1 },
+    nproc: { type: "integer", minimum: 1 },
+    loads: list({ type: "array", items: { type: "number", minimum: 0 }, minItems: 2, maxItems: 2 }),
+    processes: list(
+      open({
+        key: text,
+        pid: count,
+        parent: nullableText,
+        comm: text,
+        task: {
+          type: ["object", "null"],
+          required: ["project", "target", "hash", "invocation"],
+          properties: { project: text, target: text, hash: text, invocation: text },
+        },
+        first_tick: count,
+        last_tick: count,
+        self_ticks: count,
+        children_ticks: count,
+      }),
+    ),
+    reaps: list(
+      open({ reaper: text, tick: count, ticks: { type: "integer" }, children: list(text) }),
+    ),
+  }),
+};
+
+function checked(value, schema, what) {
+  const errors = validateReport(value, schema);
+  need(
+    !errors.length,
+    `${what} is not as recorded: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; …" : ""}`,
+  );
+  return value;
+}
+
+function readJson(path, what, schema) {
   let raw;
   try {
     raw = readFileSync(path, "utf8");
   } catch (error) {
     throw new RecordError(`cannot read ${what} (${path}): ${error.message}`);
   }
+  let value;
   try {
-    return JSON.parse(raw);
+    value = JSON.parse(raw);
   } catch (error) {
     throw new RecordError(`${what} (${path}) is not JSON: ${error.message}`);
   }
+  return checked(value, schema, `${what} (${path})`);
 }
 
-function readLines(path, what) {
+function readLines(path, what, schema) {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((line, i) => {
+      let value;
       try {
-        return JSON.parse(line);
+        value = JSON.parse(line);
       } catch (error) {
         throw new RecordError(`${what} line ${i + 1} (${path}) is not JSON: ${error.message}`);
       }
+      return checked(value, schema, `${what} line ${i + 1} (${path})`);
     });
 }
 
@@ -237,6 +327,11 @@ export function loadOver(loads, from, to) {
  * gets exactly what that parent reaped (split by each tree's sampled share when several exited in
  * one interval); any other tree gets what its samples saw, which can miss what it used after its
  * last sample. A tree no process of the run started is the task's delegated CPU, kept apart.
+ *
+ * gate-profile.test.mjs proves the reaped case end to end. Two trees exiting in one interval, a
+ * tree outliving its samples' parent and a daemon's compilers cannot be staged on demand by real
+ * processes without timing races or a daemon in the test, so fold.test.mjs drives this function
+ * with records in the sampler's own shape instead, each case asserting its exact figure.
  */
 export function taskCpu(sampled) {
   const byKey = new Map(sampled.processes.map((p) => [p.key, p]));
@@ -401,21 +496,15 @@ function timingsPages(root, cargoRuns, since) {
 
 /** Fold the run directory `dir` into its report object. */
 export function foldRun(dir) {
-  const meta = readJson(join(dir, "meta.json"), "the run's meta.json");
-  const run = readJson(join(dir, "run.json"), "the whole run's record (run.json)");
-  const sampled = readJson(join(dir, "processes.json"), "the sampler's processes.json");
-  const phaseRecords = readLines(join(dir, "phases.jsonl"), "phases.jsonl");
-  const cargoRuns = readLines(join(dir, "cargo.jsonl"), "cargo.jsonl");
-  need(
-    typeof meta.recipe === "string" && typeof meta.root === "string",
-    "meta.json lacks recipe or root",
+  const meta = readJson(join(dir, "meta.json"), "the run's meta.json", RECORD_SCHEMAS.meta);
+  const run = readJson(join(dir, "run.json"), "the whole run's record", RECORD_SCHEMAS.run);
+  const sampled = readJson(
+    join(dir, "processes.json"),
+    "the sampler's processes.json",
+    RECORD_SCHEMAS.processes,
   );
-  need(
-    Array.isArray(sampled.loads) &&
-      Array.isArray(sampled.processes) &&
-      Array.isArray(sampled.reaps),
-    "processes.json lacks loads, processes or reaps",
-  );
+  const phaseRecords = readLines(join(dir, "phases.jsonl"), "phases.jsonl", RECORD_SCHEMAS.phase);
+  const cargoRuns = readLines(join(dir, "cargo.jsonl"), "cargo.jsonl", RECORD_SCHEMAS.cargo);
   const loads = sampled.loads;
   const notes = [];
   const ms = (epochSeconds) => Math.round(Number(epochSeconds) * 1000);
@@ -433,20 +522,26 @@ export function foldRun(dir) {
   for (const name of existsSync(nxDir) ? readdirSync(nxDir).sort() : []) {
     if (!name.endsWith(".invocation.json")) continue;
     const id = name.slice(0, -".invocation.json".length);
-    const record = readJson(join(nxDir, name), `invocation ${id}`);
+    const record = readJson(join(nxDir, name), `invocation ${id}`, RECORD_SCHEMAS.invocation);
     const profilePath = join(nxDir, `${id}.profile.json`);
     const graphPath = join(nxDir, `${id}.graph.json`);
-    const profile = existsSync(profilePath) ? readJson(profilePath, `Nx's profile of ${id}`) : null;
+    const profile = existsSync(profilePath)
+      ? readJson(profilePath, `Nx's profile of ${id}`, RECORD_SCHEMAS.profile)
+      : null;
     if (!profile)
       notes.push(`Nx wrote no task profile for invocation ${id} (${record.args.join(" ")}).`);
-    const graph = existsSync(graphPath) ? readJson(graphPath, `the task graph of ${id}`) : null;
+    const graph = existsSync(graphPath)
+      ? readJson(graphPath, `the task graph of ${id}`, RECORD_SCHEMAS.graph)
+      : null;
     if (profile && !graph)
       notes.push(`No task graph for invocation ${id}: its critical path is its longest task.`);
     invocations.push({
       id,
       phase: record.phase || null,
       args: record.args,
-      entries: (profile ?? []).filter((e) => e.ph === "X"),
+      entries: (profile ?? [])
+        .filter((e) => e.ph === "X")
+        .map((e, i) => checked(e, RECORD_SCHEMAS.profileTask, `task ${i + 1} of ${id}'s profile`)),
       dependencies: graph?.tasks?.dependencies ?? null,
     });
   }
@@ -810,8 +905,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     writeReports(dir);
     console.log(`gate-profile: folded ${join(dir, "report.md")}`);
   } catch (error) {
-    if (!(error instanceof RecordError)) throw error;
-    console.error(`gate-profile: ${error.message}`);
+    // A record the checks above let through can still fail the fold; that is exit 3 as well.
+    console.error(`gate-profile: ${error instanceof RecordError ? error.message : error.stack}`);
     console.error(
       `gate-profile: the run in ${basename(dir)} is incomplete; profile again with \`just gate-profile\``,
     );

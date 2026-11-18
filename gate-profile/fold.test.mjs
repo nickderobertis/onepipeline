@@ -2,8 +2,15 @@
 // how CPU is attributed when samples miss a process's end, the critical path's chain, the load
 // line between samples, and the report shape REPORT_SCHEMA declares.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { loadOver, longestPath, REPORT_SCHEMA, taskCpu, validateReport } from "./fold.mjs";
+
+const foldScript = join(dirname(fileURLToPath(import.meta.url)), "fold.mjs");
 
 const task = (target, invocation = "i1") => ({ project: "p", target, hash: target, invocation });
 const proc = (key, parent, owner, ticks, extra = {}) => ({
@@ -125,4 +132,120 @@ test("REPORT_SCHEMA refuses a missing field, an unknown one and a wrongly typed 
     }),
     ["$[0].load: -1 is below 0"],
   );
+});
+
+/** A run directory as a run leaves it, built by hand: one phase, one Nx task, two cargo builds. */
+function handMadeRun(t) {
+  const root = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "fold-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, "target", "gate-profile", "x");
+  const put = (path, value) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, typeof value === "string" ? value : `${JSON.stringify(value)}\n`);
+  };
+  const base = Math.floor(Date.now() / 1000) - 100;
+  const cpu = { cpu_ms_before: [0, 0], cpu_ms_after: [500, 100] };
+  put(join(dir, "meta.json"), { recipe: "r", root, commit: null, dirty: false, run: "r1" });
+  put(join(dir, "run.json"), { recipe: "r", start: base, end: base + 10, ...cpu, exit: 0 });
+  put(join(dir, "processes.json"), {
+    clock_ticks_per_second: 100,
+    interval_ms: 100,
+    nproc: 4,
+    loads: [
+      [base * 1000, 1.5],
+      [(base + 10) * 1000, 2.5],
+    ],
+    processes: [],
+    reaps: [],
+  });
+  const phase = {
+    id: "1-1",
+    parent: "",
+    recipe: "r",
+    start: base,
+    end: base + 10,
+    ...cpu,
+    exit: 0,
+  };
+  put(join(dir, "phases.jsonl"), `${JSON.stringify(phase)}\n`);
+  put(join(dir, "nx", "i1.invocation.json"), { id: "i1", phase: "1-1", args: ["run-many"] });
+  put(join(dir, "nx", "i1.profile.json"), [
+    { ph: "M", name: "thread_name" },
+    { ph: "X", name: "p:x", ts: (base + 1) * 1e6, dur: 2e6, args: { status: "success" } },
+  ]);
+  const cargo = (start, end, target_dir) => ({
+    start,
+    end,
+    ...cpu,
+    exit: 0,
+    argv: ["build"],
+    cwd: root,
+    target_dir,
+    llvm_cov_target_dir: "",
+    invocation: "i1",
+    phase: "1-1",
+    task: "p:x",
+  });
+  const elsewhere = join(root, "out", "of", "the", "way");
+  put(
+    join(dir, "cargo.jsonl"),
+    `${JSON.stringify(cargo(base + 2, base + 5, elsewhere))}\n${JSON.stringify(cargo(base + 6, base + 7, ""))}\n`,
+  );
+  const page = (path, built, written) => {
+    const start = new Date(built * 1000).toISOString().replace("Z", "123456Z");
+    put(
+      path,
+      `<td>Build start:</td><td>${start}</td>\nconst UNIT_DATA = [\n  {"name": "u", "version": "1.0.0", "mode": "todo", "target": " (check)", "start": 0.1, "duration": 0.5}\n];\n`,
+    );
+    utimesSync(path, written, written);
+  };
+  // In the first build's own target directory, which no search of the root reaches.
+  page(join(elsewhere, "cargo-timings", "cargo-timing-a.html"), base + 2.5, base + 4.9);
+  // Written during the run by no recorded build, and one from before the run.
+  page(join(root, "sub", "target", "cargo-timings", "cargo-timing-b.html"), base + 8.5, base + 8.9);
+  page(join(root, "sub", "target", "cargo-timings", "cargo-timing-c.html"), base - 50, base - 49);
+  return dir;
+}
+
+const fold = (dir) => spawnSync(process.execPath, [foldScript, dir], { encoding: "utf8" });
+
+test("refolding a run writes its reports, saying what the records did not have", (t) => {
+  const dir = handMadeRun(t);
+  const result = fold(dir);
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(readFileSync(join(dir, "report.json"), "utf8"));
+  assert.deepEqual(validateReport(report), []);
+  assert.ok(readFileSync(join(dir, "report.md"), "utf8").includes("## Notes"));
+  assert.deepEqual(
+    report.cargo.map((c) => [c.timings, c.units.map((u) => u.unit)]),
+    [
+      [["out/of/the/way/cargo-timings/cargo-timing-a.html"], ["u v1.0.0 (check)"]],
+      [[], []],
+    ],
+  );
+  assert.equal(report.critical_path.complete, false);
+  assert.deepEqual(
+    report.critical_path.tasks.map((task) => task.task),
+    ["p:x"],
+  );
+  assert.equal(report.tasks[0].cpu_basis, "none");
+  assert.equal(report.notes.length, 3, report.notes.join("\n"));
+  assert.match(report.notes.join("\n"), /No task graph for invocation i1/);
+  assert.match(report.notes.join("\n"), /cargo-timing-b\.html was written during the run by no/);
+  assert.match(report.notes.join("\n"), /`cargo build` left no timings page/);
+});
+
+test("refolding refuses a missing or malformed record with exit 3, naming it", (t) => {
+  const dir = handMadeRun(t);
+  writeFileSync(join(dir, "phases.jsonl"), `${JSON.stringify({ id: 1, recipe: "r" })}\n`);
+  const malformed = fold(dir);
+  assert.equal(malformed.status, 3);
+  assert.match(malformed.stderr, /phases\.jsonl line 1 .* is not as recorded: \$: missing parent/);
+  rmSync(join(dir, "run.json"));
+  const missing = fold(dir);
+  assert.equal(missing.status, 3);
+  assert.match(missing.stderr, /cannot read the whole run's record/);
+  const usage = spawnSync(process.execPath, [foldScript], { encoding: "utf8" });
+  assert.equal(usage.status, 2);
+  assert.match(usage.stderr, /usage: fold\.mjs <run dir>/);
 });

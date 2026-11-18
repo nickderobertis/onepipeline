@@ -134,6 +134,9 @@ _cargo-build:
 
 broken:
     @echo "broken: failing on purpose" >&2; exit 7
+
+slow:
+    @sleep 60
 `;
 
 /**
@@ -205,12 +208,12 @@ export function fixture(t) {
   return { dir, commit: git(dir, "rev-parse", "HEAD") };
 }
 
-/** Run `just <args>` in the fixture and return its status and output. */
-export function just(dir, ...args) {
+/** Run `just <args>` in the fixture, with `env` over the journeys' own, and return its output. */
+export function just(dir, args, env = {}) {
   const result = spawnSync("just", args, {
     cwd: dir,
     encoding: "utf8",
-    env: fixtureEnvironment(),
+    env: { ...fixtureEnvironment(), ...env },
     maxBuffer: 64 * 1024 * 1024,
   });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };

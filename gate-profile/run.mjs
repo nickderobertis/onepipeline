@@ -25,7 +25,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RecordError, writeReports } from "./fold.mjs";
+import { RECORD_SCHEMAS, RecordError, validateReport, writeReports } from "./fold.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = realpathSync(join(here, ".."));
@@ -62,7 +62,9 @@ try {
 } catch (error) {
   refuse(2, `cannot read the justfile through \`just --dump\`: ${error.message}`);
 }
-if (!recipes?.[recipe])
+if (recipes === null || typeof recipes !== "object" || Array.isArray(recipes))
+  refuse(2, "`just --dump --dump-format json` printed no `recipes` object; is `just` too old?");
+if (typeof recipes[recipe] !== "object" || recipes[recipe] === null)
   refuse(2, `no recipe '${recipe}' in ${join(root, "justfile")}; \`just --list\` shows them`);
 
 function git(...args) {
@@ -142,7 +144,16 @@ const nxDir = join(dir, "nx");
 for (const name of existsSync(nxDir) ? readdirSync(nxDir) : []) {
   if (!name.endsWith(".invocation.json")) continue;
   const id = name.slice(0, -".invocation.json".length);
-  const { args } = JSON.parse(readFileSync(join(nxDir, name), "utf8"));
+  let args;
+  try {
+    const record = JSON.parse(readFileSync(join(nxDir, name), "utf8"));
+    if (validateReport(record, RECORD_SCHEMAS.invocation).length) throw new Error("its shape");
+    args = record.args;
+  } catch (error) {
+    // The fold refuses the same record, naming what is wrong with it.
+    console.error(`gate-profile: invocation record ${name} is unreadable (${error.message})`);
+    continue;
+  }
   const graph = spawnSync(
     "bash",
     ["scripts/nx.sh", ...args, `--graph=${join(nxDir, `${id}.graph.json`)}`],
@@ -166,10 +177,9 @@ for (const name of existsSync(nxDir) ? readdirSync(nxDir) : []) {
 try {
   writeReports(dir);
 } catch (error) {
-  if (!(error instanceof RecordError)) throw error;
   refuse(
     3,
-    `${error.message}\nthe raw records are in ${relative(root, dir)}; fix the cause and fold them again with \`node gate-profile/fold.mjs ${relative(root, dir)}\``,
+    `${error instanceof RecordError ? error.message : error.stack}\nthe raw records are in ${relative(root, dir)}; fix the cause and fold them again with \`node gate-profile/fold.mjs ${relative(root, dir)}\``,
   );
 }
 const report = join(relative(root, dir), "report.md");

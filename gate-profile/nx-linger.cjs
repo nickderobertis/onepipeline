@@ -8,6 +8,9 @@ const before = process.env.ONEPIPELINE_GATE_PROFILE_NODE_OPTIONS;
 if (before) process.env.NODE_OPTIONS = before;
 else delete process.env.NODE_OPTIONS;
 delete process.env.ONEPIPELINE_GATE_PROFILE_NODE_OPTIONS;
+// The wait itself is proved by gate-profile.test.mjs, whose last real task is charged its
+// grandchild's whole CPU only because Nx was sampled after reaping it; a test timing the wait
+// would hold a figure to a fixed bound on a host whose load moves it.
 const linger = Number(process.env.ONEPIPELINE_GATE_PROFILE_LINGER_MS);
 if (Number.isInteger(linger) && linger > 0)
   process.on("exit", () => {

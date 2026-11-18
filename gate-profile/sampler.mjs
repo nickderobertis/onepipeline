@@ -49,15 +49,21 @@ function readStat(pid) {
   } catch {
     return null;
   }
+  const open = text.indexOf("(");
   const close = text.lastIndexOf(")");
+  if (open < 0 || close < open) return null;
   const fields = text.slice(close + 2).split(" ");
   // fields[0] is field 3 (state); utime is field 14, starttime field 22.
+  const numbers = [1, 11, 12, 13, 14, 19].map((i) => Number(fields[i]));
+  // A process being torn down can read short; it is skipped this sample, not misread.
+  if (fields.length < 20 || !numbers.every((n) => Number.isInteger(n) && n >= 0)) return null;
+  const [ppid, utime, stime, cutime, cstime, starttime] = numbers;
   return {
-    comm: text.slice(text.indexOf("(") + 1, close),
-    ppid: Number(fields[1]),
-    self: Number(fields[11]) + Number(fields[12]),
-    children: Number(fields[13]) + Number(fields[14]),
-    starttime: fields[19],
+    comm: text.slice(open + 1, close),
+    ppid,
+    self: utime + stime,
+    children: cutime + cstime,
+    starttime: String(starttime),
   };
 }
 
@@ -102,12 +108,20 @@ function sample() {
   const tick = ticks.length;
   const now = Date.now();
   ticks.push(now);
+  let load;
   try {
-    loads.push([now, Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0])]);
+    load = Number(readFileSync("/proc/loadavg", "utf8").split(" ")[0]);
   } catch (error) {
     console.error(`gate-profile: cannot read /proc/loadavg: ${error.message}`);
     process.exit(3);
   }
+  if (!Number.isFinite(load) || load < 0) {
+    console.error(
+      `gate-profile: /proc/loadavg does not start with a load average; is /proc mounted?`,
+    );
+    process.exit(3);
+  }
+  loads.push([now, load]);
   const before = new Map(live);
   live.clear();
   let pids;
@@ -121,6 +135,9 @@ function sample() {
   pids.sort((a, b) => a - b);
   for (const pid of pids.map(Number)) {
     const previous = before.get(pid);
+    // A pid once found not to be the run's is not read again, so a run process reusing it is
+    // missed: Linux recycles a pid only after pid_max (4194304 here) others, so staging that
+    // costs millions of forks, and nothing in a gate run comes near it.
     if (!previous && ignored.has(pid)) continue;
     const stat = readStat(pid);
     if (!stat) continue;
@@ -149,6 +166,8 @@ function sample() {
     }
     if (record.task === null && record.comm !== stat.comm) {
       // A process sampled between its fork and its exec still showed its parent's environment.
+      // Untested: hitting that microsecond window takes a race no test can stage on demand; the
+      // fixture journey's tasks are each attributed, which a miss here would break only rarely.
       record.comm = stat.comm;
       if (!record.parent || processes.get(record.parent).task === null)
         record.task = taskOf(readEnvironment(pid));
