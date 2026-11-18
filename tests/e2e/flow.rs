@@ -22,6 +22,7 @@
 #![cfg(unix)]
 
 use onepipeline_testfakes::profile::process::{Child, Stdio};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ use serde_json::{json, Value};
 use crate::harness::{
     agent, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING, WATCH_ELAPSED,
 };
+use crate::wake_budget::{millis, now_ms};
 
 use onepipeline::cli::{FLOW_ENV, WAKE_BUDGET_ENV, WAKE_RESERVE_SECONDS};
 use onepipeline::error::{EXIT_FLOW_FAILED, EXIT_RUN_JOINED, EXIT_SUCCESS};
@@ -739,24 +741,69 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "10");
 
-    // No event, no timeout: it gives up at the budget less the reserve.
-    let spawned = Instant::now();
-    let watch = budgeted
-        .cmd(&["watch", "--flow", "quiet"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the watch starts");
-    let output = watch.wait_with_output().expect("the watch returns");
-    let took = spawned.elapsed();
-    assert_eq!(output.status.code(), Some(WATCH_ELAPSED), "{output:?}");
+    // No event, no timeout: it gives up at the budget less the reserve. Timed
+    // from the instant the watch itself armed — the `began_at` its lease
+    // records — to the instant its return record is read, so the process start
+    // before it and the teardown after it, which a loaded host stretches and the
+    // watch does not decide, are not in what is measured.
+    let reserve_ms = i64::try_from(WAKE_RESERVE_SECONDS * 1_000).expect("a few seconds");
+    let mut watch = watching(&budgeted, "quiet", &[]);
+    let mine = format!("{}-", watch.child.id());
+    let flow_dir = world.runs.join(".flows").join("quiet");
+    let lease = std::fs::read_dir(flow_dir.join("watchers"))
+        .expect("the flow's leases")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&mine))
+        })
+        .expect("the watch holds a lease until it returns");
+    let read = |path: &std::path::Path| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the record")).expect("JSON")
+    };
+    let terms = read(
+        &flow_dir
+            .join("watch-terms")
+            .join(lease.file_name().expect("a name")),
+    );
+    let began = millis(read(&lease)["began_at"].as_str().expect("an instant"));
+    // The deadline it armed, from the same instant as `began_at`: exactly the
+    // budget less the reserve, whatever the host's speed.
+    assert_eq!(
+        millis(
+            terms["deadline"]
+                .as_str()
+                .expect("a budgeted watch is bounded")
+        ) - began,
+        10_000 - reserve_ms,
+        "{terms}"
+    );
+    let mut stdout = BufReader::new(watch.child.stdout.take().expect("piped"));
+    let mut line = String::new();
+    let returned_at = loop {
+        line.clear();
+        let read = stdout.read_line(&mut line).expect("the watch's stdout");
+        assert_ne!(read, 0, "the watch closed its stdout with no return record");
+        if serde_json::from_str::<Value>(&line).is_ok_and(|record| record["watch"] == "return") {
+            break now_ms();
+        }
+    };
+    let output = watch.child.wait_with_output().expect("the watch returns");
+    assert_eq!(
+        output.status.code(),
+        Some(WATCH_ELAPSED),
+        "{line}{output:?}"
+    );
+    let waited = returned_at - began;
     assert!(
-        took <= Duration::from_secs(10),
-        "the watch took {took:?} to return under a 10s wake budget"
+        waited <= 10_000,
+        "the watch returned {waited}ms after it armed, past its 10s wake budget"
     );
     assert!(
-        took >= Duration::from_secs(10 - WAKE_RESERVE_SECONDS - 1),
-        "the watch returned after {took:?}, before the budget less the reserve"
+        waited >= 10_000 - reserve_ms - 1_000,
+        "the watch returned {waited}ms after it armed, before the budget less the reserve"
     );
 
     // A watch whose timeout is the budget does not qualify, and says why.
