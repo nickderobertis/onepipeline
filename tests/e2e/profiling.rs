@@ -938,6 +938,59 @@ fn a_journey_ended_before_it_finishes_leaves_an_unfinished_record() {
     assert!(record["wall_s"].as_f64() > Some(0.0), "{record:#}");
 }
 
+/// The check [`a_profiled_journey_that_runs_onepipeline_verbs`] starts spends the CPU
+/// its script asks for and says what it spent, and refuses, by name and with its
+/// double's failure code, a burn that is no count and a CPU file it cannot write.
+#[test]
+fn the_working_check_reports_its_cpu_and_refuses_what_it_cannot_do() {
+    let world = World::new("reviewer-bar-burn");
+    world.script("reviewer-bar.fingerprint", "bar");
+    let bar = || {
+        let mut command = Command::new(double("reviewer-bar"));
+        command.env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes);
+        command.output().expect("the double runs")
+    };
+    let cpu = world.fakes.join("reviewer-bar.cpu");
+
+    world.script("reviewer-bar.burn", "20");
+    let ran = bar();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(ran.stdout, b"bar\n");
+    let spent: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cpu).expect("the CPU it spent"))
+            .expect("JSON");
+    if cfg!(unix) {
+        let ms = spent
+            .as_f64()
+            .expect("a count of milliseconds on a platform with getrusage");
+        assert!(ms >= 20.0, "it spent the CPU it was asked to: {ms}");
+    } else {
+        assert!(spent.is_null(), "{spent}");
+    }
+    std::fs::remove_file(&cpu).expect("the CPU file goes");
+
+    world.script("reviewer-bar.burn", "soon");
+    let ran = bar();
+    assert_eq!(ran.status.code(), Some(78), "{ran:?}");
+    assert!(
+        String::from_utf8_lossy(&ran.stderr)
+            .contains("reviewer-bar.burn is not a count of milliseconds"),
+        "{ran:?}"
+    );
+    assert!(ran.stdout.is_empty(), "{ran:?}");
+    assert!(!cpu.exists(), "a refused burn writes no CPU");
+
+    world.script("reviewer-bar.burn", "1");
+    std::fs::create_dir(&cpu).expect("a directory where the CPU file goes");
+    let ran = bar();
+    assert_eq!(ran.status.code(), Some(78), "{ran:?}");
+    assert!(
+        String::from_utf8_lossy(&ran.stderr).contains("reviewer-bar.cpu is not written"),
+        "{ran:?}"
+    );
+    assert!(ran.stdout.is_empty(), "{ran:?}");
+}
+
 /// A test that runs `onepipeline` verbs crossing the binary's outer boundaries: a
 /// plan check reading the store and starting a registered check that does real
 /// work, twice, and a listing of runs.
