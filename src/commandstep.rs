@@ -410,9 +410,10 @@ pub(crate) fn run_program(
         // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver can write
         // its journal into and not a log beside it is a host condition — a full disk, a
         // permission changed under a live run — that no verb or plan produces; staging it means
-        // editing the run's own layout, which proves the fixture. What it must do is settle the
-        // node `not-started` as an unstartable program does, which `command_step.rs`'s endings
-        // journey and `guard.rs`'s failures journey drive.
+        // editing the run's own layout, which proves the fixture. It answers the same
+        // `NotStarted` ending an unstartable program does; that ending, not this cause, is what
+        // `command_step.rs`'s endings journey and `guard.rs`'s failures journey drive, each
+        // through a program that does not exist.
         Err(error) => {
             return not_started(format!(
                 "its log {} could not be opened: {error}",

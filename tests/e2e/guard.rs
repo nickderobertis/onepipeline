@@ -579,11 +579,14 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
     world.repository("change-open", &[]);
     let launch_dir = world.root.join("launched-here");
     std::fs::create_dir_all(&launch_dir).expect("a launch directory");
+    // The contract's names, and the one a command step is told and a guard is not
+    // (entry 160 of docs/contract-divergences.md).
     let names: Vec<String> = stated("environment")
         .as_array()
         .expect("the contract names the environment")
         .iter()
         .map(|name| name.as_str().expect("a name").to_owned())
+        .chain(["ONEPIPELINE_STEP_OUTPUTS".to_owned()])
         .collect();
     let printed = names
         .iter()
@@ -713,6 +716,10 @@ fn a_guard_exiting_0_leaves_each_kind_to_run_and_runs_once_with_the_runs_coordin
     assert_eq!(
         told["ONEPIPELINE_FLOW"], "unset",
         "a run of no flow named one"
+    );
+    assert_eq!(
+        told["ONEPIPELINE_STEP_OUTPUTS"], "unset",
+        "a guard was told where to publish step outputs"
     );
     #[cfg(unix)]
     assert_eq!(
