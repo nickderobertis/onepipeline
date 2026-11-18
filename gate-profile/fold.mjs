@@ -419,13 +419,16 @@ export function taskCpu(sampled) {
   return tasks;
 }
 
-/** The longest chain of `durations` through `dependencies`, as task ids in run order. */
+/**
+ * The longest chain of `durations` through `dependencies`, as task ids in run order. A task graph
+ * that loops is no graph Nx could have run, so it is refused rather than walked.
+ */
 export function longestPath(durations, dependencies) {
   const finish = new Map();
   const via = new Map();
   const visit = (id, trail = new Set()) => {
     if (finish.has(id)) return finish.get(id);
-    if (trail.has(id)) return 0;
+    need(!trail.has(id), `the task graph loops through ${id}`);
     trail.add(id);
     let before = 0;
     let from = null;

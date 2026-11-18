@@ -138,6 +138,10 @@ test("the critical path follows the longest chain, through a replay that took no
   });
   assert.deepEqual(path, ["build", "slow", "check"]);
   assert.deepEqual(longestPath(new Map(), {}), []);
+  assert.throws(
+    () => longestPath(durations, { build: ["check"], check: ["slow"], slow: ["build"] }),
+    /the task graph loops through/,
+  );
 });
 
 test("load is the samples' mean inside an interval, and their line between samples", () => {
