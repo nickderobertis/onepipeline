@@ -22,7 +22,6 @@
 #![cfg(unix)]
 
 use onepipeline_testfakes::profile::process::{Child, Stdio};
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,7 @@ use serde_json::{json, Value};
 use crate::harness::{
     agent, plan_of, World, NODE_SETTLED, REFUSED, RUNS_UNWATCHED, SURFACE_WAITING, WATCH_ELAPSED,
 };
-use crate::wake_budget::{millis, now_ms};
+use crate::wake_budget::millis;
 
 use onepipeline::cli::{FLOW_ENV, WAKE_BUDGET_ENV, WAKE_RESERVE_SECONDS};
 use onepipeline::error::{EXIT_FLOW_FAILED, EXIT_RUN_JOINED, EXIT_SUCCESS};
@@ -210,6 +209,39 @@ impl Watching {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The `began_at` of the published lease `watch` holds on `flow`, and the
+/// deadline its terms record, each as epoch milliseconds — once the lease is
+/// published, rather than the temporary it is renamed from, which shares its
+/// name's prefix. The terms are published before the lease, so they are there.
+fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (i64, i64) {
+    let flow_dir = world.runs.join(".flows").join(flow);
+    let mine = format!("{}-", watch.child.id());
+    let published = || {
+        std::fs::read_dir(flow_dir.join("watchers"))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&mine) && name.ends_with(".json"))
+            })
+    };
+    world.until("the watch to publish its lease", |_| published().is_some());
+    let lease = published().expect("a live watch holds its lease");
+    let read = |path: &std::path::Path| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the record")).expect("JSON")
+    };
+    let terms = read(
+        &flow_dir
+            .join("watch-terms")
+            .join(lease.file_name().expect("a name")),
+    );
+    let began = millis(read(&lease)["began_at"].as_str().expect("an instant"));
+    let deadline = millis(terms["deadline"].as_str().expect("a bounded watch"));
+    (began, deadline)
 }
 
 impl Returned {
@@ -742,66 +774,50 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .with_env(WAKE_BUDGET_ENV, "10");
 
     // No event, no timeout: it gives up at the budget less the reserve. Timed
-    // from the instant the watch itself armed — the `began_at` its lease
-    // records — to the instant its return record is read, so the process start
-    // before it and the teardown after it, which a loaded host stretches and the
-    // watch does not decide, are not in what is measured.
-    let reserve_ms = i64::try_from(WAKE_RESERVE_SECONDS * 1_000).expect("a few seconds");
-    let mut watch = watching(&budgeted, "quiet", &[]);
-    let mine = format!("{}-", watch.child.id());
-    let flow_dir = world.runs.join(".flows").join("quiet");
-    // The published lease, not the temporary it is renamed from, which shares
-    // its prefix; the terms are published before it, so they are there too.
-    let published = || {
-        std::fs::read_dir(flow_dir.join("watchers"))
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&mine) && name.ends_with(".json"))
-            })
-    };
-    world.until("the watch to publish its lease", |_| published().is_some());
-    let lease = published().expect("the watch holds its lease until it returns");
-    let read = |path: &std::path::Path| -> Value {
-        serde_json::from_str(&std::fs::read_to_string(path).expect("the record")).expect("JSON")
-    };
-    let terms = read(
-        &flow_dir
-            .join("watch-terms")
-            .join(lease.file_name().expect("a name")),
+    // between two instants the kernel stamps on the watch's own writes, read
+    // only after it has exited: the birth of the `watch-terms` directory, made
+    // as it arms, and the last write to the file its standard output goes to,
+    // which is its return record. Neither the process start before arming, the
+    // teardown after returning, nor when this test is scheduled to look is in
+    // what is measured — and nothing has to be read while the watch is live.
+    let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
+    let terms_dir = world.runs.join(".flows").join("quiet").join("watch-terms");
+    assert!(
+        !terms_dir.exists(),
+        "a watch armed on the flow before the timed one: {}",
+        terms_dir.display()
     );
-    let began = millis(read(&lease)["began_at"].as_str().expect("an instant"));
-    // The deadline it armed, from the same instant as `began_at`: exactly the
-    // budget less the reserve, whatever the host's speed.
-    assert_eq!(
-        millis(
-            terms["deadline"]
-                .as_str()
-                .expect("a budgeted watch is bounded")
-        ) - began,
-        10_000 - reserve_ms,
-        "{terms}"
+    let records = world.root.join("reserve-watch.jsonl");
+    let watch = budgeted
+        .cmd(&["watch", "--flow", "quiet"])
+        .stdout(std::fs::File::create(&records).expect("a records file"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the watch starts")
+        .wait_with_output()
+        .expect("the watch returns");
+    let said = std::fs::read_to_string(&records).expect("the watch's records");
+    assert_eq!(watch.status.code(), Some(WATCH_ELAPSED), "{said}{watch:?}");
+    assert!(
+        said.lines()
+            .last()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .is_some_and(|record| record["watch"] == "return"),
+        "the watch's last record is not its return: {said}"
     );
-    let mut stdout = BufReader::new(watch.child.stdout.take().expect("piped"));
-    let mut line = String::new();
-    let returned_at = loop {
-        line.clear();
-        let read = stdout.read_line(&mut line).expect("the watch's stdout");
-        assert_ne!(read, 0, "the watch closed its stdout with no return record");
-        if serde_json::from_str::<Value>(&line).is_ok_and(|record| record["watch"] == "return") {
-            break now_ms();
-        }
-    };
-    let output = watch.child.wait_with_output().expect("the watch returns");
-    assert_eq!(
-        output.status.code(),
-        Some(WATCH_ELAPSED),
-        "{line}{output:?}"
-    );
-    let waited = returned_at - began;
+    let armed = std::fs::metadata(&terms_dir)
+        .and_then(|found| found.created())
+        .expect("the filesystem records when the watch's terms directory was made");
+    let returned = std::fs::metadata(&records)
+        .and_then(|found| found.modified())
+        .expect("the time the watch last wrote its records");
+    let waited = u64::try_from(
+        returned
+            .duration_since(armed)
+            .expect("the watch returned after it armed")
+            .as_millis(),
+    )
+    .expect("a few seconds");
     assert!(
         waited <= 10_000,
         "the watch returned {waited}ms after it armed, past its 10s wake budget"
@@ -810,6 +826,20 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         waited >= 10_000 - reserve_ms - 1_000,
         "the watch returned {waited}ms after it armed, before the budget less the reserve"
     );
+    // The deadline a budgeted watch arms is exactly the budget less the reserve
+    // from the instant its lease records, whatever the host's speed — read off
+    // one under a budget long enough that its lease outlives any delay in
+    // looking at it.
+    let long = world
+        .as_session(&world.session)
+        .with_env(WAKE_BUDGET_ENV, "900");
+    let lasting = watching(&long, "quiet", &[]);
+    let (began, deadline) = armed_terms(&world, "quiet", &lasting);
+    assert_eq!(
+        deadline - began,
+        900_000 - i64::try_from(reserve_ms).expect("a few seconds")
+    );
+    lasting.end();
 
     // A watch whose timeout is the budget does not qualify, and says why.
     let at_the_budget = watching(&budgeted, "quiet", &["--timeout", "10"]);

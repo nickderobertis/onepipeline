@@ -270,7 +270,7 @@ pub(crate) fn millis(instant: &str) -> i64 {
         + field(20, 23)
 }
 
-pub(crate) fn now_ms() -> i64 {
+fn now_ms() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
