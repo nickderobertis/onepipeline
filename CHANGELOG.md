@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.5](https://github.com/nickderobertis/onepipeline/compare/v0.113.4...v0.113.5) - 2026-11-18
+
+### Added
+
+- *(start)* re-dispatch a settled node on the branch it kept with --redo, and print the write-back's own keys ([#1690](https://github.com/nickderobertis/onepipeline/pull/1690))
+
+### Performance
+
+- *(deps)* resolve the privateterms release that builds a matcher with less work ([#1682](https://github.com/nickderobertis/onepipeline/pull/1682))
+- *(deps)* link the onevcs that answers its one-name git reads in process ([#1668](https://github.com/nickderobertis/onepipeline/pull/1668))
+
 ## [0.113.4](https://github.com/nickderobertis/onepipeline/compare/v0.113.3...v0.113.4) - 2026-11-17
 
 ### Fixed
