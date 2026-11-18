@@ -153,6 +153,7 @@ test("load is the samples' mean inside an interval, and their line between sampl
   assert.equal(loadOver(loads, 0, 1000), 2);
   assert.equal(loadOver(loads, 1200, 1400), 3.6);
   assert.equal(loadOver(loads, 5000, 6000), 5);
+  assert.equal(loadOver(loads, -500, -100), 1);
   assert.equal(loadOver([], 0, 1), 0);
 });
 

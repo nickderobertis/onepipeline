@@ -153,15 +153,43 @@ test("the just shim runs a recipe as timed phases only at the run's own level", 
     assert.equal(JSON.parse(readFileSync(join(run, "run.json"), "utf8")).exit, 4);
   });
 
-  await t.test("a recipe it cannot split runs whole, as one phase", () => {
-    reset();
-    const result = justShim(dir, ["given"], profiled);
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(log(), ["takes 1", "given"]);
-    assert.deepEqual(
-      lines(join(run, "phases.jsonl")).map((p) => p.recipe),
-      ["given"],
-    );
+  await t.test("a recipe's own arguments reach it, singular and variadic", () => {
+    for (const [args, expected] of [
+      [["takes", "7"], ["takes 7"]],
+      [["rest", "a", "b"], ["rest a b"]],
+    ]) {
+      reset();
+      const result = justShim(dir, args, profiled);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(log(), expected);
+      assert.deepEqual(
+        lines(join(run, "phases.jsonl")).map((p) => p.recipe),
+        [args[0]],
+      );
+    }
+  });
+
+  await t.test("what it cannot split runs whole, as one phase, exactly as just runs it", () => {
+    // A [parallel] recipe's dependencies finish in either order, so its lines are compared as a set.
+    const ran = (args) => (args[0] === "fan" ? log().sort() : log());
+    for (const args of [["given"], ["then"], ["fan"], ["m", "n"]]) {
+      reset();
+      const plain = spawnSync("just", args, {
+        cwd: dir,
+        encoding: "utf8",
+        env: fixtureEnvironment(),
+      });
+      assert.equal(plain.status, 0, plain.stderr);
+      const expected = ran(args);
+      reset();
+      const result = justShim(dir, args, profiled);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(ran(args), expected, args.join(" "));
+      assert.deepEqual(
+        lines(join(run, "phases.jsonl")).map((p) => p.recipe),
+        [args[0]],
+      );
+    }
   });
 
   await t.test("inside a task, unprofiled, or for an option it is just itself", () => {
