@@ -289,6 +289,28 @@ process.exit(Number(process.env.STANDIN_EXIT ?? 0));
   assert.deepEqual(failed.got, ["build", "--timings", "--features", awkward]);
 });
 
+test("a shim finds the real tool past every run's shims, and says so when there is none", (t) => {
+  const dir = scratch(t, "nested-shims");
+  // A run profiled inside another puts its shims before the other's: both are skipped.
+  const outer = join(dir, "outer-shims");
+  cpSync(shims, outer, { recursive: true });
+  cpSync(join(root, "gate-profile", "lib.sh"), join(dir, "lib.sh"));
+  const standin = join(dir, "bin", "cargo");
+  write(standin, '#!/bin/sh\necho "the real cargo $*"\n', 0o755);
+  const found = spawnSync(join(shims, "cargo"), ["metadata"], {
+    encoding: "utf8",
+    env: { ...fixtureEnvironment(), PATH: `${shims}:${outer}:${dirname(standin)}:/usr/bin:/bin` },
+  });
+  assert.equal(found.status, 0, found.stderr);
+  assert.equal(found.stdout, "the real cargo metadata\n");
+  const none = spawnSync(join(shims, "cargo"), ["metadata"], {
+    encoding: "utf8",
+    env: { ...fixtureEnvironment(), PATH: `${shims}:${outer}:/usr/bin:/bin` },
+  });
+  assert.equal(none.status, 127);
+  assert.match(none.stderr, /no cargo on PATH outside the profiling shims/);
+});
+
 test("an interrupted cargo build is still recorded, with the interrupt as its status", async (t) => {
   const dir = scratch(t, "cargo-interrupt");
   const run = join(dir, "run");
@@ -429,6 +451,19 @@ test("nx.sh's hook profiles a run's own Nx runs and takes itself off nested ones
     assert.equal(status, 2);
     assert.match(stderr, /is not a directory/);
   });
+
+  await t.test(
+    "a run directory outside the checkout is refused, as Nx could not write there",
+    () => {
+      const outside = scratch(t, "outside");
+      const { status, stderr } = nx(dir, ["run-many", "-t", "lint"], {
+        ...top,
+        ONEPIPELINE_GATE_PROFILE_DIR: outside,
+      });
+      assert.equal(status, 2);
+      assert.match(stderr, /is outside .*, where Nx writes its task profile/);
+    },
+  );
 
   await t.test("a copy of nx.sh without the profiler drops every setting of the run", () => {
     const bare = nxWorkspace(t, { profiler: false });

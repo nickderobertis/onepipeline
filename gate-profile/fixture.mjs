@@ -141,6 +141,10 @@ slow:
 # An Nx run that fails before it runs any task: no task profile, and no task graph to read back.
 missing:
     @bash scripts/nx.sh run crate:nosuch
+
+# Leaves an invocation record the fold cannot read.
+garbled:
+    @mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/nx" && echo '{' > "$ONEPIPELINE_GATE_PROFILE_DIR/nx/x.invocation.json"
 `;
 
 /**

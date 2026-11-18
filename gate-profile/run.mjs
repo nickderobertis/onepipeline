@@ -36,6 +36,11 @@ function refuse(status, message) {
   console.error(`gate-profile: ${message}`);
   process.exit(status);
 }
+// Anything unforeseen — a directory it cannot create, a record it cannot write — is a profile
+// that could not be recorded, never the recipe's own failure.
+process.on("uncaughtException", (error) =>
+  refuse(3, `could not record the profile: ${error.stack}`),
+);
 
 const [recipe = "gate", ...extra] = process.argv.slice(2);
 if (extra.length)

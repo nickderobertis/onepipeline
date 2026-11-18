@@ -3,7 +3,15 @@
 // task, cargo build and compile unit with its CPU and load, and its critical path.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { validateReport } from "./fold.mjs";
@@ -251,4 +259,83 @@ test("an interrupted run still writes its profile of what ran", async (t) => {
     report.phases.map((phase) => [phase.recipe, phase.exit]),
     [["slow", 130]],
   );
+});
+
+test("gate-profile exits 3, saying why, when it cannot record or fold the run", async (t) => {
+  const { dir } = fixture(t);
+  const own = (...path) => join(dir, "gate-profile", ...path);
+  const swap = async (path, content, body) => {
+    const kept = readFileSync(path);
+    writeFileSync(path, content);
+    try {
+      await body();
+    } finally {
+      writeFileSync(path, kept);
+    }
+  };
+  const refused = (pattern, args = ["gate-profile", "broken"]) => {
+    const result = just(dir, args);
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, pattern);
+  };
+
+  await t.test("a sampler that never starts", () =>
+    swap(own("sampler.mjs"), "process.exit(4);\n", () =>
+      refused(/the process sampler did not start \(exit 4\)/),
+    ),
+  );
+  await t.test("a sampler that fails", () =>
+    swap(
+      own("sampler.mjs"),
+      'console.log("ready");\nprocess.stdin.on("data", () => {});\nprocess.stdin.on("end", () => process.exit(3));\n',
+      () => refused(/the process sampler failed \(exit 3\)/),
+    ),
+  );
+  await t.test("a run that records nothing", () =>
+    swap(own("shims", "just"), "#!/bin/sh\nexit 0\n", () =>
+      refused(/`just broken` ended \(exit 0\) before its run was recorded/),
+    ),
+  );
+  await t.test("a recipe that cannot be started", () => {
+    chmodSync(own("shims", "just"), 0o644);
+    try {
+      refused(/could not start `just broken`/);
+    } finally {
+      chmodSync(own("shims", "just"), 0o755);
+    }
+  });
+  await t.test("a record the fold cannot read, named with how to fold it again", () => {
+    const result = just(dir, ["gate-profile", "garbled"]);
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, /invocation record x\.invocation\.json is unreadable/);
+    assert.match(result.stderr, /invocation x .* is not JSON/);
+    assert.match(
+      result.stderr,
+      /fold them again with `node gate-profile\/fold\.mjs target\/gate-profile\//,
+    );
+  });
+});
+
+test("a second run within the same second gets a directory of its own", (t) => {
+  const { dir } = fixture(t);
+  // Every stamp the next run could take is taken already.
+  const now = Date.now();
+  const taken = [];
+  for (let s = -1; s < 30; s++) {
+    const stamp = new Date(now + s * 1000)
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d+Z$/, "Z");
+    mkdirSync(join(dir, "target/gate-profile", stamp), { recursive: true });
+    taken.push(stamp);
+  }
+  const result = just(dir, ["gate-profile", "broken"]);
+  assert.equal(result.status, 1, result.stderr);
+  const fresh = runDirs(dir).filter((run) => !taken.includes(run));
+  assert.equal(fresh.length, 1);
+  assert.match(fresh[0], /^\d{8}T\d{6}Z-2$/);
+  assert.ok(taken.includes(fresh[0].slice(0, -2)));
+  for (const stamp of taken)
+    assert.deepEqual(readdirSync(join(dir, "target/gate-profile", stamp)), []);
+  assert.equal(readReport(dir, fresh[0]).run.exit, 7);
 });

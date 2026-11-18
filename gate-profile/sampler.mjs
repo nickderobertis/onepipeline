@@ -10,7 +10,6 @@
 // used, which no sample of their own can see once they have exited. gate-profile/fold.mjs turns
 // these into each Nx task's CPU. Prints `ready` once the first sample is taken; writes <out.json>
 // and exits 0 when stdin ends. Exit 2 for a usage error, 3 when /proc cannot be read.
-import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 
@@ -31,15 +30,9 @@ const WANTED = [
   "ONEPIPELINE_GATE_PROFILE_INVOCATION",
 ];
 
-function clockTicks() {
-  try {
-    const value = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim());
-    if (Number.isInteger(value) && value > 0) return value;
-  } catch {
-    // getconf missing: Linux's USER_HZ is 100 on every architecture it ships for.
-  }
-  return 100;
-}
+// /proc/<pid>/stat counts CPU in USER_HZ, which the kernel fixes at 100 for user space on every
+// architecture this runs on, whatever the kernel's own tick rate.
+const CLOCK_TICKS_PER_SECOND = 100;
 
 /** /proc/<pid>/stat's fields after the command name, which may itself hold spaces or parens. */
 function readStat(pid) {
@@ -209,21 +202,26 @@ function finish() {
     delete record.reaper_ticks_before;
     delete record.ppid;
   }
-  writeFileSync(
-    out,
-    `${JSON.stringify({
-      run: runId,
-      clock_ticks_per_second: clockTicks(),
-      interval_ms: interval,
-      nproc: availableParallelism(),
-      started,
-      ended: Date.now(),
-      ticks,
-      loads,
-      processes: [...processes.values()],
-      reaps,
-    })}\n`,
-  );
+  try {
+    writeFileSync(
+      out,
+      `${JSON.stringify({
+        run: runId,
+        clock_ticks_per_second: CLOCK_TICKS_PER_SECOND,
+        interval_ms: interval,
+        nproc: availableParallelism(),
+        started,
+        ended: Date.now(),
+        ticks,
+        loads,
+        processes: [...processes.values()],
+        reaps,
+      })}\n`,
+    );
+  } catch (error) {
+    console.error(`gate-profile: cannot write the samples to ${out}: ${error.message}`);
+    process.exit(3);
+  }
   process.exit(0);
 }
 

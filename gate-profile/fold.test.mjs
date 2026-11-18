@@ -95,6 +95,35 @@ test("a daemon's work for a task is its delegated CPU, apart from its own trees'
   assert.deepEqual(cpu.get("i1|p:a"), { ticks: 30, basis: "sampled", delegated_ticks: 400 });
 });
 
+test("trees seen to use nothing split what their parent reaped evenly", () => {
+  const cpu = taskCpu({
+    processes: [
+      proc("1:0", null, null, 0, { last_tick: 9 }),
+      proc("2:0", "1:0", task("a"), 0),
+      proc("3:0", "1:0", task("b"), 0),
+    ],
+    reaps: [{ reaper: "1:0", tick: 6, ticks: 10, children: ["2:0", "3:0"] }],
+  });
+  assert.equal(cpu.get("i1|p:a").ticks, 5);
+  assert.equal(cpu.get("i1|p:b").ticks, 5);
+});
+
+test("processes whose parents loop, or one named twice, are refused rather than walked", () => {
+  assert.throws(
+    () =>
+      taskCpu({
+        processes: [proc("1:0", "2:0", null, 0), proc("2:0", "1:0", task("a"), 0)],
+        reaps: [],
+      }),
+    /parents loop through/,
+  );
+  assert.throws(
+    () =>
+      taskCpu({ processes: [proc("1:0", null, null, 0), proc("1:0", null, null, 0)], reaps: [] }),
+    /names a process twice/,
+  );
+});
+
 test("the critical path follows the longest chain, through a replay that took no time", () => {
   const durations = new Map([
     ["build", 0],
@@ -279,4 +308,72 @@ test("refolding refuses a missing or malformed record with exit 3, naming it", (
   const usage = spawnSync(process.execPath, [foldScript], { encoding: "utf8" });
   assert.equal(usage.status, 2);
   assert.match(usage.stderr, /usage: fold\.mjs <run dir>/);
+});
+
+test("refolding refuses records that are not JSON, run backwards or loop, naming each", async (t) => {
+  const cases = [
+    ["meta.json", () => "{", /the run's meta\.json .* is not JSON/],
+    ["phases.jsonl", () => "{not json\n", /phases\.jsonl line 1 .* is not JSON/],
+    [
+      "run.json",
+      (base) =>
+        JSON.stringify({
+          recipe: "r",
+          start: base,
+          end: base - 1,
+          cpu_ms_before: [0, 0],
+          cpu_ms_after: [1, 1],
+          exit: 0,
+        }),
+      /ends at .*, before it starts/,
+    ],
+    [
+      "phases.jsonl",
+      (base) =>
+        ["a", "b"]
+          .map((id) =>
+            JSON.stringify({
+              id,
+              parent: id === "a" ? "b" : "a",
+              recipe: id,
+              start: base,
+              end: base,
+              cpu_ms_before: [0, 0],
+              cpu_ms_after: [0, 0],
+              exit: 0,
+            }),
+          )
+          .join("\n"),
+      /phases\.jsonl's parents loop through/,
+    ],
+  ];
+  for (const [file, content, pattern] of cases)
+    await t.test(`${file}: ${pattern}`, (t) => {
+      const dir = handMadeRun(t);
+      const base = JSON.parse(readFileSync(join(dir, "processes.json"), "utf8")).loads[0][0] / 1000;
+      writeFileSync(join(dir, file), content(base));
+      const result = fold(dir);
+      assert.equal(result.status, 3);
+      assert.match(result.stderr, pattern);
+    });
+});
+
+test("refolding refuses a timings page that is not one cargo wrote", async (t) => {
+  const cases = [
+    [(html) => html.replace("Build start:", "Started:"), /has no build start or unit data/],
+    [(html) => html.replace(/T(\d\d):/, "T99:"), /is not a date/],
+    [(html) => html.replace('"name": "u"', '"name": u'), /unit data is not JSON/],
+  ];
+  for (const [rewrite, pattern] of cases)
+    await t.test(String(pattern), (t) => {
+      const dir = handMadeRun(t);
+      const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
+      const page = join(meta.root, "out/of/the/way/cargo-timings/cargo-timing-a.html");
+      const { mtime } = statSync(page);
+      writeFileSync(page, rewrite(readFileSync(page, "utf8")));
+      utimesSync(page, mtime, mtime);
+      const result = fold(dir);
+      assert.equal(result.status, 3, result.stderr);
+      assert.match(result.stderr, pattern);
+    });
 });

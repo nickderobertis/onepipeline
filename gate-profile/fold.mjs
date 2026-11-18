@@ -222,11 +222,14 @@ export const RECORD_SCHEMAS = {
     name: text,
     ts: num,
     dur: { type: "number", minimum: 0 },
-    args: { type: "object" },
+    args: open({ status: text }),
   }),
   timingUnits: list(
     open({
       name: text,
+      version: text,
+      target: text,
+      mode: text,
       start: { type: "number", minimum: 0 },
       duration: { type: "number", minimum: 0 },
     }),
@@ -264,6 +267,12 @@ export const RECORD_SCHEMAS = {
 
 function checked(value, schema, what) {
   const errors = validateReport(value, schema);
+  // A timed record's end and CPU counters cannot run backwards.
+  if (!errors.length && schema.properties?.cpu_ms_before) {
+    if (value.end < value.start) errors.push(`$: ends at ${value.end}, before it starts`);
+    if (value.cpu_ms_after.some((after, i) => after < value.cpu_ms_before[i]))
+      errors.push("$: its CPU counters fall between start and end");
+  }
   need(
     !errors.length,
     `${what} is not as recorded: ${errors.slice(0, 5).join("; ")}${errors.length > 5 ? "; …" : ""}`,
@@ -342,6 +351,14 @@ export function loadOver(loads, from, to) {
  */
 export function taskCpu(sampled) {
   const byKey = new Map(sampled.processes.map((p) => [p.key, p]));
+  need(byKey.size === sampled.processes.length, "processes.json names a process twice");
+  for (const p of sampled.processes) {
+    const lineage = new Set();
+    for (let up = p; up; up = up.parent ? byKey.get(up.parent) : undefined) {
+      need(!lineage.has(up.key), `processes.json's parents loop through ${up.key}`);
+      lineage.add(up.key);
+    }
+  }
   const kids = new Map();
   for (const p of sampled.processes)
     if (p.parent && byKey.has(p.parent)) {
@@ -558,7 +575,7 @@ export function foldRun(dir) {
         invocation: invocation.id,
         phase: invocation.phase,
         task: entry.name,
-        status: String(entry.args?.status ?? "unknown"),
+        status: entry.args.status,
         start: iso(start),
         end: iso(end),
         wall_s: seconds(end - start),
@@ -575,6 +592,14 @@ export function foldRun(dir) {
 
   // Phases: the recipes that did the run's work, i.e. those no other phase ran inside.
   const byId = new Map(phaseRecords.map((p) => [p.id, p]));
+  need(byId.size === phaseRecords.length, "phases.jsonl names a phase twice");
+  for (const p of phaseRecords) {
+    const lineage = new Set();
+    for (let up = p; up; up = byId.get(up.parent)) {
+      need(!lineage.has(up.id), `phases.jsonl's parents loop through ${up.id}`);
+      lineage.add(up.id);
+    }
+  }
   const parents = new Set(phaseRecords.map((p) => p.parent).filter(Boolean));
   const within = (p) => {
     const chain = [];
@@ -674,11 +699,11 @@ export function foldRun(dir) {
       const from = timing.built + unit.start * 1000;
       const to = from + unit.duration * 1000;
       owner.units.push({
-        unit: `${unit.name} v${unit.version} ${String(unit.target ?? "").trim()}`.trim(),
+        unit: `${unit.name} v${unit.version} ${unit.target.trim()}`.trim(),
         name: unit.name,
-        version: String(unit.version ?? ""),
-        target: String(unit.target ?? "").trim(),
-        mode: String(unit.mode ?? ""),
+        version: unit.version,
+        target: unit.target.trim(),
+        mode: unit.mode,
         start: iso(from),
         end: iso(to),
         wall_s: round2(unit.duration),
