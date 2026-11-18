@@ -166,19 +166,28 @@ fn watching(world: &World, flow: &str, args: &[&str]) -> Watching {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the watch starts");
-    let mine = format!("{}-", child.id());
-    let leases = world.runs.join(".flows").join(flow).join("watchers");
+    let pid = child.id();
     world.until("the flow watch to record itself", |_| {
-        std::fs::read_dir(&leases).is_ok_and(|entries| {
-            entries.flatten().any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(&mine))
-            })
-        }) || child.try_wait().is_ok_and(|exited| exited.is_some())
+        published_lease(world, flow, pid).is_some()
+            || child.try_wait().is_ok_and(|exited| exited.is_some())
     });
     Watching { child }
+}
+
+/// The lease the watch `pid` has **published** on `flow`, once it has: not the
+/// temporary it is written to and renamed from, which shares the lease's name's
+/// `<pid>-` prefix and is there before a reader can count the watch.
+fn published_lease(world: &World, flow: &str, pid: u32) -> Option<std::path::PathBuf> {
+    let mine = format!("{pid}-");
+    std::fs::read_dir(world.runs.join(".flows").join(flow).join("watchers"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&mine) && name.ends_with(".json"))
+        })
 }
 
 /// How one watch returned: its status, its return record, and its human lines.
@@ -217,20 +226,11 @@ impl Watching {
 /// name's prefix. The terms are published before the lease, so they are there.
 fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (u64, u64) {
     let flow_dir = world.runs.join(".flows").join(flow);
-    let mine = format!("{}-", watch.child.id());
-    let published = || {
-        std::fs::read_dir(flow_dir.join("watchers"))
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&mine) && name.ends_with(".json"))
-            })
-    };
-    world.until("the watch to publish its lease", |_| published().is_some());
-    let lease = published().expect("a live watch holds its lease");
+    let pid = watch.child.id();
+    world.until("the watch to publish its lease", |_| {
+        published_lease(world, flow, pid).is_some()
+    });
+    let lease = published_lease(world, flow, pid).expect("a live watch holds its lease");
     let read = |path: &std::path::Path| -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).expect("the record")).expect("JSON")
     };
