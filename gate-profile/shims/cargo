@@ -105,7 +105,6 @@ if ! printf '{"start":%s,"end":%s,"cpu_ms_before":[%s],"cpu_ms_after":[%s],"exit
   "$(gate_profile_json_string "${ONEPIPELINE_GATE_PROFILE_PHASE-}")" \
   "$(gate_profile_json_string "${NX_TASK_TARGET_PROJECT:+$NX_TASK_TARGET_PROJECT:${NX_TASK_TARGET_TARGET-}}")" \
   >>"$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"; then
-  echo "gate-profile: could not record \`cargo $*\` in $ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl (see above); make the run directory writable and profile again" >&2
-  exit 3
+  gate_profile_unrecorded "could not record \`cargo $*\` in $ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl (see above); make the run directory writable and profile again"
 fi
 exit "$status"

@@ -30,7 +30,7 @@ plan="$(node "$here/phases.mjs" "$real" "$@")" || plan_status=$?
 case "$plan_status" in
   0) mapfile -t prior <<<"$plan"; [ -n "$plan" ] || prior=() ;;
   3) prior=() ;;
-  *) echo "gate-profile: could not plan the phases of \`just $*\` (exit $plan_status); fix the error above and run \`just gate-profile\` again" >&2; exit 3 ;;
+  *) gate_profile_unrecorded "could not plan the phases of \`just $*\` (exit $plan_status); fix the error above and run \`just gate-profile\` again" ;;
 esac
 
 sequence=0
@@ -55,8 +55,7 @@ run_phase() {
 
 # A phase the report would silently leave out fails the run instead: the profile is not a true one.
 unrecorded() {
-  echo "gate-profile: could not record \`just $invocation\` in $dir/$1 (see above); make the run directory writable and profile again" >&2
-  exit 3
+  gate_profile_unrecorded "could not record \`just $invocation\` in $dir/$1 (see above); make the run directory writable and profile again"
 }
 
 status=0

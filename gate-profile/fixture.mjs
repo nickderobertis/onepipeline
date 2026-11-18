@@ -142,6 +142,11 @@ slow:
 missing:
     @bash scripts/nx.sh run crate:nosuch
 
+# A cargo build inside an Nx task whose record cannot be written, since cargo.jsonl is a directory.
+unrecordable:
+    @mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"
+    @bash scripts/nx.sh run crate:build
+
 # Leaves an invocation record the fold cannot read.
 garbled:
     @mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/nx" && echo '{' > "$ONEPIPELINE_GATE_PROFILE_DIR/nx/x.invocation.json"

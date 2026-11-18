@@ -60,6 +60,17 @@ gate_profile_at_top() {
   [ "${NX_TASK_HASH-}" = "${ONEPIPELINE_GATE_PROFILE_TOP-}" ]
 }
 
+# Says on stderr that this run's profile could not be recorded, and exits 3. It also notes that in
+# the run's faults file, created by run.mjs before the recipe starts: a shim inside an Nx task
+# reaches run.mjs only as its task's failure, which would otherwise read as the recipe failing.
+gate_profile_unrecorded() {
+  echo "gate-profile: $1" >&2
+  if [ -n "${ONEPIPELINE_GATE_PROFILE_FAULTS-}" ]; then
+    printf '%s\n' "$1" >>"$ONEPIPELINE_GATE_PROFILE_FAULTS" || true
+  fi
+  exit 3
+}
+
 # Refuses a run directory that is not one: a stale variable must fail loudly, not write elsewhere.
 gate_profile_check_dir() {
   [ -d "$ONEPIPELINE_GATE_PROFILE_DIR" ] && return 0

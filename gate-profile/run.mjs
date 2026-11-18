@@ -85,6 +85,10 @@ let dir = join(root, "target", "gate-profile", stamp);
 for (let n = 2; existsSync(dir); n++) dir = join(root, "target", "gate-profile", `${stamp}-${n}`);
 mkdirSync(dir, { recursive: true });
 const runId = randomBytes(8).toString("hex");
+// Where a shim notes a record it could not write (lib.sh's gate_profile_unrecorded). Made now, so
+// that it can still be appended to if the run directory later stops taking new files.
+const faults = join(dir, "faults.log");
+writeFileSync(faults, "");
 const top = process.env.NX_TASK_HASH ?? "";
 const commit = git("rev-parse", "HEAD");
 writeFileSync(
@@ -129,6 +133,7 @@ Object.assign(environment, {
   ONEPIPELINE_GATE_PROFILE_RUN: runId,
   ONEPIPELINE_GATE_PROFILE_TOP: top,
   ONEPIPELINE_GATE_PROFILE_LINGER_MS: String(3 * SAMPLE_INTERVAL_MS),
+  ONEPIPELINE_GATE_PROFILE_FAULTS: faults,
 });
 // The recipe under it gets the terminal's interrupt itself; this process stays to fold what ran.
 process.on("SIGINT", () => {});
@@ -145,6 +150,13 @@ sampler.stdin.end();
 const sampled = await samplerExit;
 if (recipeExit.error) refuse(3, `could not start \`just ${recipe}\`: ${recipeExit.error.message}`);
 if (sampled !== 0) refuse(3, `the process sampler failed (exit ${sampled}); see its error above`);
+// Whatever exit it reached the recipe as, a shim that could not record is a profile not recorded.
+const unrecorded = readFileSync(faults, "utf8").trim();
+if (unrecorded)
+  refuse(
+    3,
+    `\`just ${recipe}\` ran, but its profile is incomplete, so no report is written:\n${unrecorded}`,
+  );
 if (!existsSync(join(dir, "run.json")))
   refuse(
     3,

@@ -324,6 +324,13 @@ test("gate-profile exits 3, saying why, when it cannot record or fold the run", 
       chmodSync(own("shims", "just"), 0o755);
     }
   });
+  await t.test("a cargo build inside an Nx task it cannot record, not a failed recipe", () => {
+    const result = just(dir, ["gate-profile", "unrecordable"]);
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, /`just unrecordable` ran, but its profile is incomplete/);
+    assert.match(result.stderr, /could not record `cargo build [^`]*` in .*cargo\.jsonl/);
+    assert.doesNotMatch(result.stderr, /`just unrecordable` failed/);
+  });
   await t.test("a record the fold cannot read, named with how to fold it again", () => {
     const result = just(dir, ["gate-profile", "garbled"]);
     assert.equal(result.status, 3, result.stderr);
