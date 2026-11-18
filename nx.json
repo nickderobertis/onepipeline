@@ -198,6 +198,7 @@
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/scripts/host-view-measure.mjs",
       "{workspaceRoot}/scripts/host-view-budget.mjs",
+      "{workspaceRoot}/scripts/test-profile-report.mjs",
       "{workspaceRoot}/budgets.yaml",
       "{workspaceRoot}/scripts/review-round-quota-budget.sh"
     ],
