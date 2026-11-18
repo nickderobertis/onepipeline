@@ -265,7 +265,7 @@ gate-profile recipe="gate":
 # onepipeline-gate-profile:lint, here so it runs under bash on every platform: Nx runs a
 # target's command through cmd.exe on Windows. Biome, then each shell file's syntax.
 _gate-profile-lint:
-    @node node_modules/@biomejs/biome/bin/biome lint --config-path gate-profile/biome-standalone.jsonc gate-profile
+    @node node_modules/@biomejs/biome/bin/biome lint --error-on-warnings --config-path gate-profile/biome-standalone.jsonc gate-profile
     @for script in gate-profile/lib.sh gate-profile/nx-hook.sh gate-profile/shims/just gate-profile/shims/cargo; do bash -n "$script"; done
 
 # Escape hatch for Nx itself, e.g. `just nx show projects` or `just nx graph`.
