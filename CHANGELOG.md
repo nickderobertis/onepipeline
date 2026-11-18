@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.113.6](https://github.com/nickderobertis/onepipeline/compare/v0.113.5...v0.113.6) - 2026-11-18
+
+### Added
+
+- record what readers need, and let human items offer choices and quote step outputs ([#1689](https://github.com/nickderobertis/onepipeline/pull/1689))
+
 ## [0.113.5](https://github.com/nickderobertis/onepipeline/compare/v0.113.4...v0.113.5) - 2026-11-18
 
 ### Added
