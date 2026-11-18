@@ -220,13 +220,12 @@ impl Watching {
     }
 }
 
-/// The `began_at` of the published lease `watch` holds on `flow`, and the
-/// deadline its terms record, each as epoch milliseconds — once the lease is
+/// The `began_at` of the published lease the watch `pid` holds on `flow`, and
+/// the deadline its terms record, each as epoch milliseconds — once the lease is
 /// published, rather than the temporary it is renamed from, which shares its
 /// name's prefix. The terms are published before the lease, so they are there.
-fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (u64, u64) {
+fn armed_terms(world: &World, flow: &str, pid: u32) -> (u64, u64) {
     let flow_dir = world.runs.join(".flows").join(flow);
-    let pid = watch.child.id();
     world.until("the watch to publish its lease", |_| {
         published_lease(world, flow, pid).is_some()
     });
@@ -242,6 +241,40 @@ fn armed_terms(world: &World, flow: &str, watch: &Watching) -> (u64, u64) {
     let began = epoch_millis(read(&lease)["began_at"].as_str().expect("an instant"));
     let deadline = epoch_millis(terms["deadline"].as_str().expect("a bounded watch"));
     (began, deadline)
+}
+
+/// A pipe whose buffer is already full. A process handed its writer as standard
+/// output is held at its first write there — at a point of its own choosing,
+/// whenever the host gets round to running it — until the reader is drained.
+fn filled_pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let (reader, mut writer) = std::io::pipe().expect("a pipe");
+    let fd = writer.as_raw_fd();
+    // SAFETY: reads the status flags of a descriptor this function owns.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0, "the pipe's flags could not be read");
+    // SAFETY: the same descriptor, its own flags and `O_NONBLOCK`.
+    let set = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    assert_eq!(set, 0, "the pipe could not be made non-blocking");
+    // Large writes first, which a host that grows a pipe's buffer on demand grows
+    // to its largest for; then single bytes, until not one more fits. Newlines,
+    // so what is drained afterwards is the watch's lines between blank ones.
+    for chunk in [1 << 20, 1] {
+        let filler = vec![b'\n'; chunk];
+        loop {
+            match writer.write(&filler) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("the pipe could not be filled: {error}"),
+            }
+        }
+    }
+    // SAFETY: the same descriptor, its flags as they were, so its writer blocks.
+    let reset = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    assert_eq!(reset, 0, "the pipe could not be made blocking again");
+    (reader, writer)
 }
 
 impl Returned {
@@ -775,25 +808,6 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         .as_session(&world.session)
         .with_env(WAKE_BUDGET_ENV, "10");
 
-    let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
-    // That it gives up inside the budget is read off the deadline it arms, not
-    // off how soon the host lets it run again once that deadline passes: the
-    // deadline its terms record is exactly the budget less the reserve from
-    // the instant its lease records. Read off one under a budget long enough
-    // that its lease outlives any delay in looking at it.
-    let long = world
-        .as_session(&world.session)
-        .with_env(WAKE_BUDGET_ENV, "900");
-    let lasting = watching(&long, "quiet", &[]);
-    let (began, deadline) = armed_terms(&world, "quiet", &lasting);
-    assert_eq!(
-        deadline - began,
-        900_000 - reserve_ms,
-        "a watch under a 900s wake budget armed a deadline {}ms after it began",
-        deadline - began
-    );
-    lasting.end();
-
     // A watch whose timeout is the budget does not qualify, and says why.
     let at_the_budget = watching(&budgeted, "quiet", &["--timeout", "10"]);
     unwatched(&budgeted, &[])
@@ -825,87 +839,117 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
     qualifying.end();
 
     // No event, no timeout: it gives up at the budget less the reserve. Last,
-    // so the surface this may leave on the flow reaches none of the guard's
-    // readings above.
+    // so the surface this puts on the flow reaches none of the guard's readings
+    // above. Two such watches, armed together, one on each of two flows: each
+    // proves one bound from what the watch itself wrote, and neither from how
+    // promptly the host runs the watch or this journey.
     //
-    // No sooner is read off the wall clock: from before the spawn to the time
-    // the filesystem stamps on the watch's last write, its return record. The
-    // watch takes its deadline after it is spawned and writes that record no
-    // sooner, so a slow or loaded host only lengthens that span: it can fail
-    // this for a watch that gave up early, never for a late one, and when this
-    // test gets to look at it plays no part.
+    // Inside the budget, `held`. Its standard output is a pipe this journey
+    // filled before starting it, so the first line it says holds it at that
+    // write until the pipe is drained. A watch says a heartbeat only after it
+    // has read the flow and then asked whether its deadline has come and found
+    // it has not. Held there, its lease and terms stay to be read — the deadline
+    // they record is exactly the budget less the reserve from the instant the
+    // lease records — and that deadline passes while it can do nothing: it took
+    // its deadline before publishing its lease, so the deadline has passed once
+    // the budget less the reserve has since this journey saw the lease. A
+    // surface is then put on the flow and the pipe drained. One that gives up
+    // at its deadline asks again before it reads the flow, and returns
+    // `elapsed`; one still waiting past it reads the flow, and wakes on the
+    // surface. That order is the same however late the host runs either party.
     //
-    // No later is proved by order, not by how long anything took. The watch
-    // takes its deadline before it publishes its lease, so once the budget less
-    // the reserve has passed since this saw the lease, the deadline has too. A
-    // watch says a heartbeat only after asking whether its deadline has come,
-    // and once it has come, its next step after that heartbeat is to ask again
-    // and return, never to read the flow. So a surface put on the flow after a
-    // heartbeat said past that point is never what a watch that gives up at its
-    // deadline returns on, however late the host runs it; a watch still waiting
-    // past that deadline reads the flow again, and wakes on the surface.
-    let records = world.root.join("reserve-watch.jsonl");
-    let human = world.root.join("reserve-watch.stderr");
-    let spawned = std::time::SystemTime::now();
-    let mut watch = budgeted
+    // No sooner, `free`: from before its spawn to the stamp the filesystem puts
+    // on its last write, its return record. It takes its deadline after it is
+    // spawned and writes that record no sooner, so a slow or loaded host only
+    // lengthens that span: it can fail this for a watch that gave up early,
+    // never for one that did not, and when this journey looks plays no part.
+    let reserve_ms = WAKE_RESERVE_SECONDS * 1_000;
+    let still = Flowing::start(&world, "still", &[gate(&world, "still-end")]);
+    let (drain, holding) = filled_pipe();
+    let held_human = world.root.join("held-watch.stderr");
+    let mut held = budgeted
         .cmd(&["watch", "--flow", "quiet", "--tick-interval", "1"])
+        .stdout(holding)
+        .stderr(std::fs::File::create(&held_human).expect("a stderr file"))
+        .spawn()
+        .expect("the held watch starts");
+    let held_pid = held.id();
+    let records = world.root.join("free-watch.jsonl");
+    let human = world.root.join("free-watch.stderr");
+    let spawned = std::time::SystemTime::now();
+    let mut free = budgeted
+        .cmd(&["watch", "--flow", "still"])
         .stdout(std::fs::File::create(&records).expect("a records file"))
         .stderr(std::fs::File::create(&human).expect("a stderr file"))
         .spawn()
-        .expect("the watch starts");
-    let pid = watch.id();
-    world.until("the timed watch to publish its lease", |_| {
-        published_lease(&world, "quiet", pid).is_some()
-            || watch.try_wait().is_ok_and(|exited| exited.is_some())
+        .expect("the free watch starts");
+
+    world.until("the held watch to publish its lease", |_| {
+        published_lease(&world, "quiet", held_pid).is_some()
+            || held.try_wait().is_ok_and(|exited| exited.is_some())
     });
     let past_its_deadline = Instant::now() + Duration::from_millis(10_000 - reserve_ms);
-    let said_from = |offset: usize| -> String {
-        let said = std::fs::read(&records).unwrap_or_default();
-        String::from_utf8_lossy(said.get(offset..).unwrap_or_default()).into_owned()
-    };
-    world.until("the timed watch's deadline to pass", |_| {
-        Instant::now() >= past_its_deadline || watch.try_wait().is_ok_and(|exited| exited.is_some())
+    world.until("the held watch to say its first line", |_| {
+        std::fs::read_to_string(&held_human).is_ok_and(|said| said.contains('\n'))
+            || held.try_wait().is_ok_and(|exited| exited.is_some())
     });
-    let then = std::fs::read(&records).map_or(0, |said| said.len());
-    let mut surfaced = false;
-    world.until("the timed watch to return or say a heartbeat", |world| {
-        if watch.try_wait().is_ok_and(|exited| exited.is_some()) {
-            return true;
-        }
-        let heartbeat = said_from(then)
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|record| record["watch"] == "heartbeat");
-        if heartbeat {
-            world
-                .run(&[
-                    "surface",
-                    "--flow",
-                    "quiet",
-                    "--kind",
-                    "finding",
-                    "--message",
-                    "after the deadline",
-                ])
-                .exited(EXIT_SUCCESS);
-            surfaced = true;
-        }
-        heartbeat
+    let first = std::fs::read_to_string(&held_human).unwrap_or_default();
+    assert!(
+        first.starts_with("-- watching flow quiet "),
+        "the held watch said no heartbeat a tick into its wait, or no longer waits: {first}"
+    );
+    let (began, deadline) = armed_terms(&world, "quiet", held_pid);
+    assert_eq!(
+        deadline - began,
+        10_000 - reserve_ms,
+        "a watch under a 10s wake budget armed a deadline {}ms after it began",
+        deadline - began
+    );
+    world.until("the held watch's deadline to pass", |_| {
+        Instant::now() >= past_its_deadline
     });
-    let status = watch.wait().expect("the watch returns");
+    world
+        .run(&[
+            "surface",
+            "--flow",
+            "quiet",
+            "--kind",
+            "finding",
+            "--message",
+            "after the deadline",
+        ])
+        .exited(EXIT_SUCCESS);
+    let drained = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        let mut drain = drain;
+        std::io::Read::read_to_end(&mut drain, &mut said).expect("the held watch's records");
+        said
+    });
+    let status = held.wait().expect("the held watch returns");
+    let said = String::from_utf8_lossy(&drained.join().expect("the pipe drains")).into_owned();
+    let said: Vec<&str> = said.lines().filter(|line| !line.is_empty()).collect();
+    let human_said = std::fs::read_to_string(&held_human).unwrap_or_default();
+    assert_eq!(
+        status.code(),
+        Some(WATCH_ELAPSED),
+        "the held watch did not give up at its deadline: {said:?}\n{human_said}"
+    );
+    assert!(
+        said.last()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .is_some_and(|record| record["watch"] == "return" && record["condition"] == "elapsed"),
+        "the held watch's last record is not its elapsed return: {said:?}"
+    );
+
+    let status = free.wait().expect("the free watch returns");
     let took = std::fs::metadata(&records)
         .and_then(|found| found.modified())
         .expect("when the watch last wrote its records")
         .duration_since(spawned)
         .unwrap_or_default();
-    let said = said_from(0);
+    let said = std::fs::read_to_string(&records).unwrap_or_default();
     let human = std::fs::read_to_string(&human).unwrap_or_default();
-    assert_eq!(
-        status.code(),
-        Some(WATCH_ELAPSED),
-        "the watch did not give up at its deadline (a surface put on the flow after it: \
-         {surfaced}): {said}{human}"
-    );
+    assert_eq!(status.code(), Some(WATCH_ELAPSED), "{said}{human}");
     assert!(
         said.lines()
             .last()
@@ -917,6 +961,8 @@ fn a_flow_watch_returns_within_its_wake_budget_and_only_a_reserved_one_qualifies
         took >= Duration::from_millis(10_000 - reserve_ms - 1_000),
         "the watch wrote its return {took:?} after its spawn, before the budget less the reserve"
     );
+    still.open("still-end");
+    assert_eq!(still.ended(), 0);
     flow.open("end");
     assert_eq!(flow.ended(), 0);
 }
