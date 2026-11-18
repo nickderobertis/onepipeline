@@ -1423,3 +1423,80 @@ fn adopt_keeps_a_cancellation_its_driver_journalled_and_never_settled() {
     assert_ne!(held["outcome"], json!(word("outcomes", "failed")), "{held}");
     world.run(&["stop", run]);
 }
+
+/// While a guarded human node's guard has not answered, nothing treats the node as waiting
+/// on a person: it reads `running`, no decision is recorded holding its dependents, no item
+/// is raised and an attestation of it is refused. Once the guard says it is needed, the
+/// wait, the decision and the item follow, and the attestation releases what it gates.
+#[test]
+fn a_guarded_human_node_is_no_ones_decision_until_its_guard_answers() {
+    let world = World::new("guard-human-pending");
+    human_items_enabled(&world);
+    let go = at(&world, "guard.go");
+    let guard = script(
+        &world,
+        "pending",
+        &format!(
+            "while [ ! -f '{go}' ]; do sleep 0.1; done\nexit {}",
+            exit("needed")
+        ),
+    );
+    let run = "humanpending";
+    let project = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                guarded(human("approve", &[]), &guard),
+                agent("ship", &["approve"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the human node's guard to start", |world| {
+        position(world, run, "guard-started", "approve").is_some()
+    });
+    assert_eq!(result(&world, run, "approve")["status"], "running");
+    let attested = world.run(&["attest", run, "approve"]);
+    assert_ne!(
+        attested.code, 0,
+        "an attestation of a node whose guard has not answered was accepted"
+    );
+    assert!(
+        world.events_of(run, "decision-pending").is_empty(),
+        "a decision was recorded for a node whose guard has not answered"
+    );
+    assert!(
+        open_items(&world).is_empty(),
+        "an item was raised for a node whose guard has not answered"
+    );
+
+    std::fs::write(world.root.join("guard.go"), "").expect("the guard is released");
+    world.until("the node to wait on its person", |world| {
+        settled_as(world, run, "approve", "waiting")
+    });
+    let key = format!("run:{run}#approve");
+    world.until("the node's item to be raised", |world| {
+        std::fs::read_to_string(world.runs.join("human-items/index.json"))
+            .is_ok_and(|index| index.contains(&key))
+    });
+    assert!(world
+        .events_of(run, "decision-pending")
+        .iter()
+        .any(|event| event["payload"]["reference"] == "approve"));
+    world.run(&["attest", run, "approve"]).exited(0);
+    let adopted = world.run(&["adopt", run]);
+    assert!(
+        adopted.code == 0 || adopted.stderr.contains("still being driven"),
+        "{}",
+        adopted.stderr
+    );
+    world.until("the gated node to run", |world| {
+        settled_as(world, run, "ship", "done")
+    });
+    assert!(
+        position(&world, run, "human-attested", "approve")
+            < position(&world, run, "node-dispatched", "ship")
+    );
+    world.run(&["stop", run]);
+}
