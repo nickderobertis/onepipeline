@@ -1330,6 +1330,10 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             "{run}: settled before the driver stopped"
         );
         let kept = answer_of(&world, &run, &asked);
+        // llmlint: ignore-block[tests_mirror_real_usage] no verb removes or rewrites a kept
+        // answer: an answer lost under a stopped run is a host fault the contract's entry 160
+        // names, reached only by altering the run's directory while no driver holds it. Every
+        // claim after it is read off the compiled binary's stderr and journal.
         if case == "removed" {
             std::fs::remove_file(&kept).expect("the kept answer is there to take away");
         }
@@ -1344,6 +1348,7 @@ fn adopt_settles_a_node_from_a_verdict_its_driver_journalled_and_never_settled()
             answer["attempt"]["seq"] = json!(seq + 1000);
             std::fs::write(&kept, answer.to_string()).expect("the answer is rewritten");
         }
+        // llmlint: ignore-end[tests_mirror_real_usage]
 
         let adopted = world.run(&["adopt", &run]);
         assert!(adopted.code == 0 || status != "done", "{}", adopted.stderr);
@@ -1622,7 +1627,12 @@ fn a_guard_whose_answer_cannot_be_kept_journals_no_verdict_and_adopt_runs_it_aga
         guard_runs(world, "asked") == 1
     });
     let answer = answer_of(&world, run, "asked");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb makes a run's directory refuse a
+    // write: a full disk or a permission changed under a live run is the host fault under
+    // test, and a directory in the answer's place is the one such fault a journey can stage
+    // without root. Every claim after it is read off the driver's log, the journal and `adopt`.
     std::fs::create_dir_all(&answer).expect("the answer's place is taken");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     std::fs::write(world.root.join("guard.go"), "").expect("the guard is released");
 
     let said = "its guard's answer could not be kept";

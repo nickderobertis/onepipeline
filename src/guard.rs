@@ -222,11 +222,18 @@ pub(crate) fn spawn(
             }
         })
         .map(|_| ())
+        // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing the driver a thread is
+        // resource exhaustion no plan or verb arranges, and starving the test host of threads
+        // would fail every concurrent journey before this one. It leaves the node as
+        // `a_guard_whose_answer_cannot_be_kept_journals_no_verdict_and_adopt_runs_it_again`
+        // drives: `guard-started` journalled and no verdict, the driver stopping on the error,
+        // and `adopt` running the guard again.
         .map_err(|error| {
             Error::Invalid(format!(
                 "node '{named}': no thread could be started to run its guard: {error}"
             ))
         })
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// What a guard that ended as `ended`, having said `tail` on stderr, decides about `node`.
