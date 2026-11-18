@@ -326,6 +326,11 @@ mod review_reply;
 mod review_round;
 mod rework;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/redo.rs` and is not restated here; it belongs to this binary for the
+// reason `mod publish_preserve` above does.
+mod redo;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is whose words a ruling is through the whole engine at once — `channel`, the
 // layout, `edits`, `engine`'s reconcile and live delivery, `note`, `plan`'s rendering,

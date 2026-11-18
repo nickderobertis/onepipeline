@@ -1146,6 +1146,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");
         paths

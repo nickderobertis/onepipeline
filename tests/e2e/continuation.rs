@@ -60,7 +60,7 @@ fn remove_the_runs_root(world: &World) {
 
 /// A world on a team repository — `change-open`, approvals required — so a published
 /// node settles `change-review-draft` with its change request held as a draft.
-fn team_world(name: &str) -> World {
+pub(crate) fn team_world(name: &str) -> World {
     let world = World::new(name).with_env("ONEVCS_BRANCH_PREFIX", PREFIX);
     team_repository(&world);
     world.script("gh.checks", GREEN);
@@ -90,7 +90,7 @@ fn launch(world: &World, run: &str, project: &str, extra: &[&str]) -> crate::har
 }
 
 /// Each node's `onepipeline.settlement` as the store holds it, by node id.
-fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
+pub(crate) fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
     world
         .store_tasks(project)
         .into_iter()
@@ -104,7 +104,7 @@ fn stored_settlements(world: &World, project: &str) -> BTreeMap<String, Value> {
 }
 
 /// The project's `onepipeline.driver`, as the store holds it: `null` where it holds none.
-fn stored_claim(world: &World, project: &str) -> Value {
+pub(crate) fn stored_claim(world: &World, project: &str) -> Value {
     world.store_project(project)["items"][0]["item"]["metadata"]
         .get("onepipeline.driver")
         .cloned()
@@ -112,7 +112,7 @@ fn stored_claim(world: &World, project: &str) -> Value {
 }
 
 /// Every `gh pr create` the shared host was asked, by head branch.
-fn created_from(world: &World) -> Vec<String> {
+pub(crate) fn created_from(world: &World) -> Vec<String> {
     world
         .invocations()
         .into_iter()
@@ -135,13 +135,13 @@ fn created_from(world: &World) -> Vec<String> {
 }
 
 /// Whether the shared host holds change request `number` as a draft.
-fn held_as_draft(world: &World, number: &Value) -> bool {
+pub(crate) fn held_as_draft(world: &World, number: &Value) -> bool {
     std::fs::read_to_string(world.fakes.join("gh").join(number.to_string()))
         .is_ok_and(|state| state.trim() == "draft")
 }
 
 /// The change requests the shared host holds from `branch`.
-fn changes_from(world: &World, branch: &str) -> Vec<Value> {
+pub(crate) fn changes_from(world: &World, branch: &str) -> Vec<Value> {
     world
         .changes_opened()
         .into_iter()
@@ -150,7 +150,7 @@ fn changes_from(world: &World, branch: &str) -> Vec<Value> {
 }
 
 /// The newest settlement `node` journalled in `run`.
-fn settled(world: &World, run: &str, node: &str) -> Value {
+pub(crate) fn settled(world: &World, run: &str, node: &str) -> Value {
     world
         .events_of(run, "node-settled")
         .into_iter()
@@ -170,7 +170,7 @@ fn as_stored(settlement: &Value) -> Value {
 }
 
 /// The nodes `run` dispatched, in order.
-fn dispatched(world: &World, run: &str) -> Vec<String> {
+pub(crate) fn dispatched(world: &World, run: &str) -> Vec<String> {
     world
         .events_of(run, "node-dispatched")
         .iter()
@@ -180,7 +180,7 @@ fn dispatched(world: &World, run: &str) -> Vec<String> {
 
 /// The branches `run`'s dispatches opened sessions on, each once: the sibling's own
 /// `session-opened` and the copy the engine relays beside it describe one session.
-fn sessions_opened(world: &World, run: &str) -> Vec<String> {
+pub(crate) fn sessions_opened(world: &World, run: &str) -> Vec<String> {
     world
         .journal(run)
         .iter()
@@ -1067,7 +1067,7 @@ fn fresh_is_refused_while_a_node_holds_a_change_request_nothing_has_landed() {
 }
 
 /// The claim the store holds for `project` once the host `host` has written it.
-fn until_claimed_on(world: &World, project: &str, host: &str) -> Value {
+pub(crate) fn until_claimed_on(world: &World, project: &str, host: &str) -> Value {
     world.until(&format!("{host}'s claim to reach the store"), |world| {
         stored_claim(world, project)["host"] == host
     });
@@ -1357,7 +1357,7 @@ fn a_same_host_takeover_from_a_second_runs_root_repeating_the_public_id_is_ackno
 /// The setting naming the claim interval every host of a journey is given, in whole seconds:
 /// what paces a takeover's reads of the claim while it waits, and nothing a running driver
 /// does.
-const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The failpoint met at the moment a dispatch of the node [`BEGIN_NODE`] names would start.
 const BEGIN_GATE: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE";
@@ -1374,7 +1374,7 @@ fn takeover_world(name: &str, interval: u64) -> World {
 
 /// A displaced host's cancel grace long enough that a takeover of it waits out none of a
 /// journey: it starts on that host's acknowledgement.
-const PATIENT_GRACE: u64 = 120;
+pub(crate) const PATIENT_GRACE: u64 = 120;
 
 /// A [`team_world`] whose every host gives a cancelled dispatch [`PATIENT_GRACE`] seconds,
 /// so a takeover of one of its drivers starts only on that driver's acknowledgement.
@@ -1405,7 +1405,7 @@ fn take_over_in_background(
 }
 
 /// A background takeover's answer: it launched, and what it said on its way.
-fn launched_over(taking: onepipeline_testfakes::profile::process::Child) -> String {
+pub(crate) fn launched_over(taking: onepipeline_testfakes::profile::process::Child) -> String {
     let answered = taking.wait_with_output().expect("the takeover answers");
     let said = String::from_utf8_lossy(&answered.stderr).into_owned();
     assert_eq!(

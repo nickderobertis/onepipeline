@@ -1159,6 +1159,13 @@ pub struct LaunchRecord {
     /// what a record written before this field existed reads as. Omitted when `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub name_withheld: bool,
+    /// The nodes `start --redo` named, sorted: each dispatched again on the branch its
+    /// stored `done` settlement records rather than continued. Kept so a reader of the run
+    /// can say which launch redid them; an `adopt` resumes from the run's journal, where a
+    /// redone node's new settlement already stands, so it dispatches none of them again.
+    /// Omitted when empty, so every record written before it reads unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redo: Vec<String>,
 }
 
 impl LaunchRecord {
@@ -3821,6 +3828,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         }
     }
 
@@ -4759,6 +4767,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4810,6 +4819,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

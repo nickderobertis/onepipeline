@@ -7253,6 +7253,7 @@ mod tests {
             envelope_reviewer_bar: Default::default(),
             public_id: String::new(),
             name_withheld: false,
+            redo: Vec::new(),
         }
     }
 

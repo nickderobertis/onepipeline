@@ -4731,6 +4731,44 @@ fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String
     Ok(())
 }
 
+/// The node fields only a live edit sets, which [`task_document`] renders onto a task under
+/// [`node_field_key`] like every node field, and which no plan authors: a ruling's
+/// `amendment`, a note's `context`, a park's `parked`, a retry's `resume`, and the `branch`
+/// a continuation or an adoption pins a node to. The one statement of them that
+/// `plan writeback-keys` reads.
+pub(crate) const LIVE_EDIT_FIELDS: [&str; 5] =
+    ["amendment", "branch", "context", "parked", "resume"];
+
+/// The store key a node field is rendered onto a task under: `onepipeline.<field>`.
+pub(crate) fn node_field_key(field: &str) -> String {
+    format!("{}{field}", crate::taskgraph::RESERVED)
+}
+
+/// Every plan-store metadata key the write-back writes and no plan authors, by scope, each
+/// sorted and once: what `plan writeback-keys` prints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct WritebackKeys {
+    /// On a task: the projection-only keys, and each live-edit field's key.
+    pub(crate) task: BTreeSet<String>,
+    /// On the project: the projection-only project keys.
+    pub(crate) project: BTreeSet<String>,
+}
+
+/// The keys the write-back owns, read off the constants that decide what it writes.
+pub(crate) fn writeback_keys() -> WritebackKeys {
+    WritebackKeys {
+        task: crate::taskgraph::PROJECTION_ONLY
+            .iter()
+            .map(|key| (*key).to_owned())
+            .chain(LIVE_EDIT_FIELDS.iter().map(|field| node_field_key(field)))
+            .collect(),
+        project: crate::taskgraph::PROJECT_PROJECTION_ONLY
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect(),
+    }
+}
+
 /// One lineage's shadow task document — its front matter and its body — as the snapshot
 /// renders it: the one statement of what each field of a lineage's projection is.
 ///
@@ -4826,7 +4864,7 @@ fn task_document(
         metadata.insert(crate::taskgraph::REWORK_KEY.into(), json!(rework));
     }
     for (key, value) in wire {
-        metadata.insert(format!("onepipeline.{key}"), value);
+        metadata.insert(node_field_key(&key), value);
     }
     if let Some(kept) = snapshot
         .continued_metadata
@@ -8459,6 +8497,150 @@ mod tests {
         let (design, _) = fixture.task_document("design");
         assert_eq!(design["title"], "feat: design it");
         assert_eq!(design["metadata"]["onepipeline.id"], "design");
+    }
+
+    /// Each live-edit field a node carries is written onto its task under the key
+    /// `plan writeback-keys` names for it, and those keys are the projection-only
+    /// constants and the live-edit fields exactly, each once.
+    #[test]
+    fn every_live_edit_field_is_written_under_the_key_writeback_keys_names() {
+        let mut fixture = Fixture::new("live-edited");
+        let node = fixture
+            .snapshot
+            .nodes
+            .get_mut("build")
+            .expect("the fixture holds it");
+        node.amendment = Some("Keep the comment lines.".to_owned());
+        node.context = Some("The reviewer asked for it.".to_owned());
+        node.parked = true;
+        node.branch = Some("me/build".to_owned());
+        node.resume =
+            Some(serde_json::from_value(json!({"branch": "me/build"})).expect("a resume"));
+        fixture.project();
+        let (front, _) = fixture.task_document("build");
+        let keys = super::writeback_keys();
+        for field in super::LIVE_EDIT_FIELDS {
+            let key = super::node_field_key(field);
+            assert!(
+                front["metadata"].get(&key).is_some(),
+                "{key} was not written: {front}"
+            );
+            assert!(keys.task.contains(&key), "{key} is not a write-back key");
+        }
+        let expected: std::collections::BTreeSet<String> = crate::taskgraph::PROJECTION_ONLY
+            .iter()
+            .map(|key| (*key).to_owned())
+            .chain(super::LIVE_EDIT_FIELDS.map(|field| format!("onepipeline.{field}")))
+            .collect();
+        assert_eq!(keys.task, expected);
+        assert_eq!(
+            keys.task.len(),
+            crate::taskgraph::PROJECTION_ONLY.len() + super::LIVE_EDIT_FIELDS.len(),
+            "a key is named twice"
+        );
+        assert_eq!(
+            keys.project,
+            crate::taskgraph::PROJECT_PROJECTION_ONLY
+                .iter()
+                .map(|key| (*key).to_owned())
+                .collect()
+        );
+    }
+
+    /// Every field of a plan node is a live-edit field or one of the rest, each once. The
+    /// destructuring names every field and fails to compile on one it does not, so a field
+    /// added to the node is classified here before `plan writeback-keys` can omit it.
+    #[test]
+    fn every_node_field_is_classified_as_live_edit_or_not() {
+        macro_rules! every_field {
+            ($($field:ident),* $(,)?) => {{
+                let crate::plan::Node { $($field: _),* } = crate::plan::Node::default();
+                [$(stringify!($field)),*]
+            }};
+        }
+        let every: std::collections::BTreeSet<&str> = every_field!(
+            human_item,
+            id,
+            kind,
+            command,
+            timeout_seconds,
+            task,
+            persona,
+            deps,
+            max_turns,
+            sets,
+            expects_no_diff,
+            context,
+            amendment,
+            parked,
+            executor,
+            agent_graph,
+            repo,
+            repo_type,
+            workflow,
+            merge_policy,
+            base_branch,
+            branch,
+            title,
+            body,
+            draft,
+            publish,
+            execution_checkout,
+            pool,
+            overflow,
+            steps,
+            resume,
+            adoption,
+            consumes,
+            delivers,
+            task_record,
+            assets_from,
+            classification,
+        )
+        .into_iter()
+        .collect();
+        // A plan authors these, or `task_document` writes them under no reserved key.
+        let rest = [
+            "human_item",
+            "id",
+            "kind",
+            "command",
+            "timeout_seconds",
+            "task",
+            "persona",
+            "deps",
+            "max_turns",
+            "sets",
+            "expects_no_diff",
+            "executor",
+            "agent_graph",
+            "repo",
+            "repo_type",
+            "workflow",
+            "merge_policy",
+            "base_branch",
+            "title",
+            "body",
+            "draft",
+            "publish",
+            "execution_checkout",
+            "pool",
+            "overflow",
+            "steps",
+            "adoption",
+            "consumes",
+            "delivers",
+            "task_record",
+            "assets_from",
+            "classification",
+        ];
+        let mut classified: Vec<&str> = super::LIVE_EDIT_FIELDS.into_iter().chain(rest).collect();
+        classified.sort_unstable();
+        assert_eq!(
+            classified,
+            every.into_iter().collect::<Vec<_>>(),
+            "a node field is unclassified, or classified twice"
+        );
     }
 
     /// A write-back pass publishes each shadow document by its rename alone: the
