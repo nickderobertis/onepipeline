@@ -2410,6 +2410,56 @@ fn a_decision_landing_as_its_driver_begins_to_wait_still_continues_the_run() {
     assert_eq!(world.until_continued(run), "complete");
 }
 
+/// An attestation that ends the run, applied by the driver waiting on it after that driver's
+/// drive has returned, closes the run out as a drive does: the decision it answered is reported
+/// cleared, and the run's home is marked `done` with its one `home-status` record — not merely
+/// the outcome recorded and the run let go of.
+#[cfg(unix)]
+#[test]
+fn an_attestation_that_ends_the_run_is_closed_out_by_the_driver_waiting_on_it() {
+    let world = World::new("attested-close-out");
+    let run = "last-approval";
+    let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
+    let mut approve = human("approve", &[]);
+    approve["deps"] = json!(["before"]);
+    let path = world.plan(run, &plan_of(run, vec![command_node("before", &fine), approve]));
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
+    // driver once its drive has returned and before it waits, so the attestation is applied by
+    // that waiting loop and not inside a drive; the launch, the attestation and every reading of
+    // the run are the real CLI's own.
+    let gate = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_TEST_AWAIT_GATE", gate.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(start, "start --detach").exited(0);
+    let held = gate.arrived();
+    world
+        .run(&["attest", run, "approve"])
+        .exited(0)
+        .out_has("\"state\":\"queued\"");
+    held.release();
+    gate.release_the_rest();
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("settled".to_owned(), 0)
+    );
+    assert_eq!(world.until_continued(run), "complete");
+    world.until("the driver to exit", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    assert_eq!(
+        world.events_of(run, "decision-cleared").len(),
+        1,
+        "the attested decision was never reported cleared: {:#?}",
+        world.events_of(run, "decision-pending")
+    );
+    assert_eq!(
+        world.events_of(run, "home-status").len(),
+        1,
+        "the run settled without marking its home done"
+    );
+}
+
 /// A driver waiting on a decision never outlives its run. `stop` on a run paused on its decision
 /// ends the driver waiting on it; and a run that reaches an ending from its decision — completed
 /// by an attestation, or ended by a `drop` of the step it waited on — leaves no driver waiting.

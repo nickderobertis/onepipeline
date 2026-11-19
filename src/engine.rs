@@ -1310,24 +1310,14 @@ fn driving(
             moved = true;
         }
         if moved {
-            // An edit that readied a node — a `retry`, an `add` — is work this driver still
-            // owes: it goes back to driving rather than letting go of a run with a node
-            // ready, running or queued, which nothing would then dispatch until an adoption.
-            if any_node_can_still_move(&state.statuses()) {
-                outcome = drive(&mut journal, &mut state)?;
-                continue;
-            }
-            outcome = graph::state_of(&state.statuses());
-            record_result(paths, &state, outcome)?;
-            // The human gate's last pass over what the edit left, as after any drive: an
-            // edit that ended the run — a `drop` of its last waiting step — retires its items.
-            if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
-                let statuses = state.statuses();
-                gate.pass(paths, &mut journal, &state, &statuses);
-                if outcome != GraphState::Waiting {
-                    gate.run_ended();
-                }
-            }
+            // Whatever the edit did, this driver drives again before it looks at letting go.
+            // One that readied a node — a `retry`, an `add` — is work it still owes, which
+            // nothing would dispatch until an adoption. One that ended the run — the
+            // attestation of its last human step, a `drop` of its last waiting one — is a run
+            // whose decision clearing only a pass reports, and whose home and items only a
+            // close-out settles: recording the outcome alone left both undone.
+            outcome = drive(&mut journal, &mut state)?;
+            continue;
         }
         let settlement = crate::driver::settled(&state, paths);
         // A retained driver waits on the decision rather than letting go: the reply or
