@@ -1504,19 +1504,23 @@ onevcs-testing = "0.21.8"
 # `tests/e2e/linear_writeback.rs` fail on 0.14.14.
 # **0.14.16 keeps an attestation valid through a copy that renumbers its dependency edges**
 # (`otg-attest-copy-invariant`, onetaskgraph #4033), so a reviewed plan keeps its review across
-# a board copy. It is the store release ai-orchestrator's own store CLI pin is held to, so it
-# must be the one linked.
+# a board copy.
+# **0.14.17 is a project graph whose nodes name their location** (`otg-graph-location`): each
+# node of `project graph --format json` gains an optional `location` key, so a host's design
+# document can link each task to its issue. The engine draws no project graph and compiles
+# against nothing that moved; it is linked because ai-orchestrator holds its store CLI pin to
+# the release this engine links, so it must be the one linked.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.
-onetaskgraph-core = "=0.14.16"
-onetaskgraph-plugin-api = "=0.14.16"
-onetaskgraph-local-md = "=0.14.16"
+onetaskgraph-core = "=0.14.17"
+onetaskgraph-plugin-api = "=0.14.17"
+onetaskgraph-local-md = "=0.14.17"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.14.16"
+onetaskgraph-linear = "=0.14.17"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.2.0"
