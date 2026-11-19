@@ -957,6 +957,7 @@ fn redone_of(
         match (redoing.held)(repo, &branch) {
             BranchHeld::Held => None,
             BranchHeld::Gone => Some(KeptBecause::BranchGone(branch)),
+            // llmlint: ignore[changed_behavior_has_e2e] onevcs answering a classification with anything but the branch missing needs its registry or a repository unreadable mid-launch — a host fault no journey arranges through either CLI; the line it prints is the kept line the gone-branch journey drives.
             BranchHeld::Unanswered(why) => Some(KeptBecause::BranchUnanswered(branch, why)),
         }
     };

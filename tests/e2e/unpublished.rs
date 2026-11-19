@@ -2486,6 +2486,9 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
         args.extend(extra);
         world.run_from(&world.project, &args).exited(0);
     }
+    // A branch a session of a run this runs root holds no record of preserved — another root's,
+    // or none at all — is never listed for any project here.
+    worked(&world, "work/stray", MANAGER, "s.txt", "s\n", "feat: s");
     let (_, listing) = listed(&world, &["--host"]);
     let (one, two, theirs) = (
         preserved_by(&listing, "discard-first"),
@@ -2523,12 +2526,13 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
         .out_has(&format!(
             "onevcs reclaim {refused} --repo {identity} --discard"
         ))
-        .out_lacks(&theirs[0]);
+        .out_lacks(&theirs[0])
+        .out_lacks("work/stray");
     assert_eq!(dry.stdout.lines().count(), 2, "{}", dry.stdout);
     let (_, unchanged) = listed(&world, &["--host"]);
     assert_eq!(
         branches(&unchanged).len(),
-        3,
+        4,
         "a dry run discarded something"
     );
 
@@ -2541,12 +2545,13 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
             "kept {refused} [{identity}] (run discard-first): `onevcs reclaim --discard` refuses \
              it as keep / checked-out"
         ))
-        .out_lacks(&theirs[0]);
+        .out_lacks(&theirs[0])
+        .out_lacks("work/stray");
     assert_eq!(real.stdout.lines().count(), 2, "{}", real.stdout);
     let (_, after) = listed(&world, &["--host"]);
     let mut left = branches(&after);
     left.sort();
-    let mut expected = vec![refused.clone(), theirs[0].clone()];
+    let mut expected = vec![refused.clone(), theirs[0].clone(), "work/stray".to_owned()];
     expected.sort();
     assert_eq!(left, expected, "{after:#}");
     let on_origin = git(&world, &repository.origin, &["branch", "--list"]);
@@ -2580,8 +2585,12 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
 
     // A run whose record cannot be read is said, never guessed: nothing is listed, and what was
     // not read makes the answer unanswered rather than nothing.
+    // llmlint: ignore-block[tests_mirror_real_usage] a run record a host left half-written is a
+    // fault on disk no verb produces; it is arranged on the record itself, and the discard that
+    // reads it is the compiled CLI's own.
     std::fs::write(world.run_file("discard-other", "launch.json"), "not json")
         .expect("the record is spoiled");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let unread = world.run(&[
         "unpublished",
         "--project",

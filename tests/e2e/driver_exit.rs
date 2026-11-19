@@ -2306,10 +2306,14 @@ fn watch_until_settled_answers_a_run_ended_on_a_decision_or_an_error_at_once() {
     // record of letting go on the decision is the run's last word: this build's own drivers
     // wait on a decision, so no verb of it ends a run there.
     world.paused_and_ended(run);
+    // llmlint: ignore-block[tests_mirror_real_usage] the record an earlier build's driver left on
+    // letting go at a decision, which no verb of this build writes — its drivers wait there — and
+    // the journal is the one place such a record reaches a reader; the watch is the CLI's own.
     let mut exited = world.events_of(run, "driver-exited")[0].clone();
     exited["ts"] = json!("2999-01-01T00:00:00.000Z");
     exited["stream"] = json!("~an-earlier-driver");
     append_to_journal(&world, run, &exited);
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(exited["payload"]["settlement"], "awaiting-planner");
     let began = Instant::now();
     assert_eq!(

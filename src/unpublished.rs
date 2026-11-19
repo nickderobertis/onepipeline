@@ -595,8 +595,6 @@ impl DiscardedBranch {
     }
 }
 
-// llmlint: ignore-end[invalid_states_unrepresentable]
-
 /// What one discard did, or would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discarded {
@@ -610,6 +608,7 @@ pub struct Discarded {
     /// whose run's record could not be read.
     pub unresolved: Vec<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Discarded {
     /// The exit status: [`EXIT_NOTHING_COUNTED`] where every listed branch is discarded — or

@@ -665,6 +665,9 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
 
     // A settlement recording no digest was written before digests were: unchanged, however
     // its task reads now.
+    // llmlint: ignore-block[tests_mirror_real_usage] the settlement an earlier build stored, with
+    // no `task_digest` — no verb of this build writes one without it, and the store is where such
+    // a record reaches a launch; the launch that reads it is the compiled CLI's own.
     let mut stripped = after["b"].clone();
     stripped
         .as_object_mut()
@@ -681,6 +684,7 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
             ..onetaskgraph_plugin_api::TaskUpdate::default()
         },
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     revise(&world, &project, "b", "Name the columns.");
     let stripped_run = format!("{name}-7");
     launch(&world, &stripped_run, &project, &[]).exited(0);
@@ -705,6 +709,13 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         )
         .exited(0);
     let running = held.arrived();
+    // Revised once the store shows the node dispatched: the edit lands on the task as the run's
+    // own write-back of the dispatch left it.
+    world.until("the dispatch to reach the store", |world| {
+        task_of(world, &project, "c")["item"]["metadata"]
+            .get("onepipeline.dispatch")
+            .is_some()
+    });
     revise(&world, &project, "c", "Also index the export.");
     drop(running);
     world.until("the run to settle", |world| {
