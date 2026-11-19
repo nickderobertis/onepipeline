@@ -2285,6 +2285,73 @@ fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
     assert!(began.elapsed() < Duration::from_secs(60));
 }
 
+/// A driver waiting on a decision never outlives its run. `stop` on a run paused on its decision
+/// ends the driver waiting on it; and a run that reaches an ending from its decision — completed
+/// by an attestation, or ended by a `drop` of the step it waited on — leaves no driver waiting.
+#[cfg(unix)]
+#[test]
+fn a_driver_waiting_on_a_decision_never_outlives_its_run() {
+    let world = World::new("waiting-driver-ends");
+    let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
+    let paused = |run: &str| {
+        let mut after = command_node("after", &fine);
+        after["deps"] = json!(["approve"]);
+        let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), after]));
+        world
+            .run(&["start", &path, "--attach"])
+            .exited(0)
+            .out_has("\"settlement\":\"awaiting-planner\"");
+        let driver = world.waiting_driver(run);
+        assert!(
+            !crate::harness::process_ended(driver),
+            "{run}: no driver waits on the decision, so this proves nothing"
+        );
+        driver
+    };
+    let gone = |run: &str, driver: u32| {
+        world.until("the driver waiting on the decision to be gone", |_| {
+            crate::harness::process_ended(driver)
+        });
+        assert!(
+            world.events_of(run, "driver-adopted").len() == 1,
+            "{run}: something adopted the run besides the paused launch's hand-off"
+        );
+    };
+
+    // Stopped: the stop reaches the driver waiting on the decision and ends it.
+    let stopped = "stopped";
+    let driver = paused(stopped);
+    world
+        .run(&["stop", stopped])
+        .exited(0)
+        .out_has("\"stopped\":true");
+    gone(stopped, driver);
+    assert!(world.events_of(stopped, "command-started").is_empty());
+
+    // Completed by its decision: the driver drives the rest and exits with the run.
+    let attested = "attested";
+    let driver = paused(attested);
+    world.run(&["attest", attested, "approve"]).exited(0);
+    gone(attested, driver);
+    assert_eq!(world.until_continued(attested), "complete");
+
+    // Ended by an edit to the step it waited on: dropped with its dependent, nothing is left
+    // to wait for and the driver goes.
+    let dropped = "dropped";
+    let driver = paused(dropped);
+    world
+        .run_with_stdin(
+            &["reply", dropped],
+            &json!({"version": 2, "commands": [
+                {"op": "drop", "id": "approve", "dependents": "drop"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    gone(dropped, driver);
+    assert!(world.events_of(dropped, "command-started").is_empty());
+}
+
 /// `watch --until settled` armed on a run that ended on its decision — let go of there by a
 /// driver of an earlier build, which let go on a decision rather than waiting on it — answers
 /// `surface-waiting` at once, and one whose driver ended on an error of its own answers
