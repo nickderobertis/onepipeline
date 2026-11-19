@@ -2333,6 +2333,46 @@ fn a_human_action_readied_after_a_decision_is_raised_and_its_attestation_continu
     assert_eq!(world.events_of(run, "driver-adopted").len(), 1);
 }
 
+/// Two `kind: human` nodes in sequence: attesting the first readies the second, which the
+/// driver waiting on the run records and raises as a decision of its own — attestable with
+/// nobody adopting the run — and attesting it settles the run. The attestation is an edit, so
+/// the pass after it records the second action; a human action readied *inside* a pass, by a
+/// node that settles without a dispatch, is the close-out case
+/// `a_human_action_readied_after_a_decision_is_raised_and_its_attestation_continues_the_run`
+/// holds.
+#[cfg(unix)]
+#[test]
+fn attesting_one_human_action_readies_the_next_for_attestation_with_no_adoption() {
+    let world = World::new("sequential-human");
+    let run = "two-approvals";
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![human("first", &[]), human("second", &["first"])]),
+    );
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    world.run(&["attest", run, "first"]).exited(0);
+    world.until(
+        "the second human action to be raised as a decision",
+        |world| {
+            world
+                .events_of(run, "decision-pending")
+                .iter()
+                .any(|event| event["payload"]["reference"] == "second")
+        },
+    );
+    world.run(&["attest", run, "second"]).exited(0);
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("settled".to_owned(), 0)
+    );
+    assert_eq!(world.until_continued(run), "complete");
+    // One adoption — the paused launch's hand-off — and no `adopt` anybody ran.
+    assert_eq!(world.events_of(run, "driver-adopted").len(), 1);
+}
+
 /// A decision that lands after a waiting driver's last read of its queue found nothing, and
 /// before that driver begins to wait, still continues the run: the wait is measured from the
 /// channel as it stood before that read, not from a look taken after the decision arrived.
