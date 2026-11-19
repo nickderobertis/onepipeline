@@ -26,6 +26,7 @@ import {
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RECORD_SCHEMAS, RecordError, validateReport, writeReports } from "./fold.mjs";
+import { realTools } from "./real-tools.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = realpathSync(join(here, ".."));
@@ -127,6 +128,8 @@ for (const name of [
   delete inherited[name];
 const environment = { ...inherited };
 Object.assign(environment, {
+  // Each shimmed tool as PATH resolves it now, before anything the run starts can change PATH.
+  ...realTools(process.env.PATH ?? ""),
   PATH: `${shims}:${process.env.PATH ?? ""}`,
   ONEPIPELINE_GATE_PROFILE_DIR: dir,
   ONEPIPELINE_GATE_PROFILE_ROOT: root,

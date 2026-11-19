@@ -249,6 +249,36 @@ test("gate-profile refuses an unknown recipe, and reports a failing one up to it
   assert.match(after.notes.join("\n"), /Nx wrote no task profile for invocation/);
 });
 
+test("a recipe's own fakes of cargo and just, execing the shims, reach the genuine tools", (t) => {
+  const { dir } = fixture(t);
+  const log = join(dir, "faked.log");
+  // Bounded: a shim that exec'd the fake in front of it would loop on one PID until killed.
+  const result = spawnSync("just", ["gate-profile", "faked"], {
+    cwd: dir,
+    encoding: "utf8",
+    timeout: 600_000,
+    killSignal: "SIGKILL",
+    env: { ...fixtureEnvironment(), FAKED_LOG: log },
+  });
+  assert.equal(result.signal, null, "the run did not finish: a shim and a fake exec'd each other");
+  assert.equal(result.status, 0, result.stderr);
+  // Each fake ran once, and its tool's genuine run did the work behind it.
+  assert.deepEqual(
+    readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split(" ").slice(1).join(" ")),
+    ["build --locked --quiet --manifest-path crate/Cargo.toml", "--dump --dump-format json"],
+  );
+  const [run] = runDirs(dir);
+  const report = readReport(dir, run);
+  assert.deepEqual(validateReport(report), []);
+  assert.deepEqual(
+    report.cargo.map((c) => [c.command, c.units.length > 0]),
+    [[["cargo", "build", "--locked", "--quiet", "--manifest-path", "crate/Cargo.toml"], true]],
+  );
+});
+
 test("an interrupted run still writes its profile of what ran", async (t) => {
   const { dir } = fixture(t);
   const child = spawn("just", ["gate-profile", "slow"], {

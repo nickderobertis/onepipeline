@@ -152,6 +152,12 @@ const TYPES = {
 };
 
 /** Every place `value` departs from `schema` (the subset REPORT_SCHEMA uses), as path: problem. */
+// Adds `more` to `errors` one at a time: a list of a long run's samples can hold an error for
+// each, too many to spread into one push call.
+function append(errors, more) {
+  for (const error of more) errors.push(error);
+}
+
 export function validateReport(value, schema = REPORT_SCHEMA, path = "$") {
   const types = [schema.type].flat();
   if (!types.some((type) => TYPES[type](value)))
@@ -169,17 +175,17 @@ export function validateReport(value, schema = REPORT_SCHEMA, path = "$") {
     errors.push(`${path}: has ${value.length} items, more than ${schema.maxItems}`);
   if (TYPES.array(value) && schema.items)
     value.forEach((item, i) => {
-      errors.push(...validateReport(item, schema.items, `${path}[${i}]`));
+      append(errors, validateReport(item, schema.items, `${path}[${i}]`));
     });
   if (TYPES.object(value) && (schema.properties || schema.additionalProperties)) {
     for (const name of schema.required ?? [])
       if (!(name in value)) errors.push(`${path}: missing ${name}`);
     for (const [name, item] of Object.entries(value)) {
       if (schema.properties?.[name])
-        errors.push(...validateReport(item, schema.properties[name], `${path}.${name}`));
+        append(errors, validateReport(item, schema.properties[name], `${path}.${name}`));
       else if (schema.additionalProperties === false) errors.push(`${path}: unexpected ${name}`);
       else if (typeof schema.additionalProperties === "object")
-        errors.push(...validateReport(item, schema.additionalProperties, `${path}.${name}`));
+        append(errors, validateReport(item, schema.additionalProperties, `${path}.${name}`));
     }
   }
   return errors;
@@ -325,6 +331,20 @@ const round2 = (value) => Math.round(value * 100) / 100;
 const cpuMs = ([user, system]) => ({ user, system });
 
 /** Mean of the 1-minute load samples inside [from, to], or the samples' line at its midpoint. */
+// The least and greatest of any number of values, by a loop: spreading them into Math.min or
+// Math.max passes each as an argument, and a long run's samples overflow the call stack.
+// Empty, they are +Infinity and -Infinity, as Math.min() and Math.max() are.
+function least(values) {
+  let found = Number.POSITIVE_INFINITY;
+  for (const value of values) if (value < found) found = value;
+  return found;
+}
+function greatest(values) {
+  let found = Number.NEGATIVE_INFINITY;
+  for (const value of values) if (value > found) found = value;
+  return found;
+}
+
 export function loadOver(loads, from, to) {
   if (!loads.length) return 0;
   const inside = loads.filter(([t]) => t >= from && t <= to);
@@ -661,8 +681,8 @@ export function foldRun(dir) {
       invocation: invocation.id,
       path,
       ms: path.reduce((sum, t) => sum + t.endMs - t.startMs, 0),
-      startMs: Math.min(...mine.map((t) => t.startMs)),
-      endMs: Math.max(...mine.map((t) => t.endMs)),
+      startMs: least(mine.map((t) => t.startMs)),
+      endMs: greatest(mine.map((t) => t.endMs)),
     });
   }
   const pathTasks = chainThroughInvocations(chains).flatMap((chain) =>
@@ -754,8 +774,8 @@ export function foldRun(dir) {
       user_s: seconds(runUser),
       system_s: seconds(runSystem),
       load: loadOver(loads, runStart, runEnd),
-      load_min: runLoads.length ? Math.min(...runLoads) : loadOver(loads, runStart, runEnd),
-      load_max: runLoads.length ? Math.max(...runLoads) : loadOver(loads, runStart, runEnd),
+      load_min: runLoads.length ? least(runLoads) : loadOver(loads, runStart, runEnd),
+      load_max: runLoads.length ? greatest(runLoads) : loadOver(loads, runStart, runEnd),
       exit: run.exit,
       delegated_cpu_s: round2(tasks.reduce((sum, t) => sum + t.delegated_cpu_s, 0)),
       outside_phases: {
@@ -787,7 +807,7 @@ export function foldRun(dir) {
 
 function firstStart(invocation, tasks) {
   const mine = tasks.filter((t) => t.invocation === invocation.id);
-  return mine.length ? Math.min(...mine.map((t) => t.startMs)) : Number.POSITIVE_INFINITY;
+  return least(mine.map((t) => t.startMs));
 }
 
 const s = (value) => `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)}s`;

@@ -1,6 +1,6 @@
 // A coverage tier's cached report against real Nx: what edits move, and what they leave replaying.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
@@ -198,9 +198,11 @@ function captureEdit(dir, edit) {
     "Cargo.toml",
   ];
   const before = new Map(paths.map((path) => [path, readFileSync(join(dir, path))]));
+  afterLastWrite(dir, paths);
   edit();
   return {
     restore() {
+      afterLastWrite(dir, paths);
       for (const [path, bytes] of before) writeFileSync(join(dir, path), bytes);
       try {
         git(dir, "rm", "-q", "--cached", "tests/contract/extra.rs");
@@ -210,4 +212,15 @@ function captureEdit(dir, edit) {
       git(dir, "clean", "-fdq", "--", "tests/contract/extra.rs");
     },
   };
+}
+
+// Nx reuses a file's archived hash (.nx/workspace-data/nx_files.nxt) while its mtime stays in the
+// same whole second as when it was hashed, so a write landing in the second of the one before it
+// is not seen: a case's edit made within a second of the previous restore replays every tier. Each
+// write here therefore waits for the second after the newest mtime among the files it rewrites.
+function afterLastWrite(dir, paths) {
+  const newest = Math.max(...paths.map((path) => statSync(join(dir, path)).mtimeMs));
+  // Past the boundary by a margin, since the kernel stamps files from a coarser clock than Date.
+  const wait = (Math.floor(newest / 1000) + 1) * 1000 + 50 - Date.now();
+  if (wait > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
 }
