@@ -1631,6 +1631,10 @@ fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver() {
         &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: the store refusal below is one under a run nothing drives, which only an adoption
+    // takes up. A driver waiting on the decision would meet the same refusal and end on it.
+    world.paused_and_ended(name);
     let gate = id_of(&items(&world, &[])[0]);
     let run = world.runs.join(name);
     let mode = std::fs::metadata(&run).unwrap().permissions().mode();
@@ -1645,6 +1649,50 @@ fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver() {
         std::time::Duration::from_secs(90),
         "the driver to release the step",
         |w| settled(w, name, "b").as_deref() == Some("done"),
+    );
+}
+
+/// A resolution its resolver could not release while a driver waits on the step — the run's
+/// command queue refused the release — is released by that waiting driver, which reads the
+/// resolution off the item store, with nobody adopting the run.
+#[cfg(unix)]
+#[test]
+fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver_waiting_on_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-waiting-fallback");
+    enabled(&world);
+    let name = "waitingfallback";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let driver = world.waiting_driver(name);
+    let gate = id_of(&items(&world, &[])[0]);
+    // Only the channel the resolver queues its release on refuses: the waiting driver reads it
+    // and writes nothing there while it waits.
+    let queue = world.runs.join(name).join("channel");
+    let mode = std::fs::metadata(&queue).unwrap().permissions().mode();
+    std::fs::set_permissions(&queue, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let answered = world.run(&["human-items", "complete", &gate]);
+    std::fs::set_permissions(&queue, std::fs::Permissions::from_mode(mode)).unwrap();
+    answered.exited(0).err_has("was not released");
+    assert_eq!(state_of(&world, &gate)["state"], "completed");
+    world.until_within(
+        std::time::Duration::from_secs(90),
+        "the waiting driver to release the step",
+        |w| settled(w, name, "b").as_deref() == Some("done"),
+    );
+    let adopted = world
+        .journal(name)
+        .into_iter()
+        .filter(|event| event["kind"] == "driver-adopted")
+        .count();
+    assert_eq!(adopted, 1, "only the hand-off adopted the run");
+    assert_eq!(
+        world.run_json(name, "launch.json")["pid"].as_u64(),
+        Some(u64::from(driver)),
+        "the driver that waited on the step is the one that released it"
     );
 }
 

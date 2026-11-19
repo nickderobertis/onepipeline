@@ -1289,6 +1289,13 @@ fn driving(
     // word on what became of it. It cannot spin, because the queue's cursor only
     // advances, and the release itself is [`let_go_of_saying`]'s.
     let channel = ChannelState::of_run(paths, &launch);
+    // The human items a retained driver waiting on a decision also watches: an item resolved
+    // where its resolver could not release the step reaches the item store and not the channel,
+    // and is a decision made all the same. One gate for the whole wait, so a release it queued
+    // once is never queued again.
+    let mut items = (on_decision == OnDecision::Wait)
+        .then(|| crate::human_items::runtime::Gate::for_launch(paths, &launch))
+        .flatten();
     let (settlement, departure) = loop {
         // The channel as it stood before the queue is read: a driver that goes on to wait on a
         // decision waits for the channel to move from *this*, so a reply or an attestation
@@ -1332,7 +1339,15 @@ fn driving(
             if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_AWAIT_GATE") {
                 eprintln!("onepipeline: {error}");
             }
-            await_channel(&channel, &seen);
+            // What the item store holds as the wait begins is read now: a release it owes is
+            // queued onto the channel, which then reads as moved and is applied by the next turn,
+            // and anything recorded after this read wakes the wait.
+            if let Some(items) = items.as_mut() {
+                items.mark_read();
+                let statuses = state.statuses();
+                items.queue_owed(&channel, &state, &statuses);
+            }
+            await_decision(&channel, &seen, items.as_ref());
             continue;
         }
         // Always here: only a let-go takes the lock out, and one that hands it
@@ -3562,14 +3577,22 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
     Ok(tx)
 }
 
-/// Wait, running no pass, until the run's channel moves from `seen`: a driver waiting on a
-/// decision has nothing in flight and nothing ready, so the only thing that can move it is a
-/// reply or an attestation, which arrives on the channel. `seen` is the channel as it stood
-/// before the driver last read its queue, so nothing that arrived since that read is waited
-/// past. Read as [`wait_for_work`] reads it, by the channel's fingerprint at
-/// [`CHANNEL_POLL`]; a `stop` reaches the driver as it reaches any.
-fn await_channel(channel: &ChannelState, seen: &[onemessagebus::Fingerprint]) {
-    while channel.fingerprint() == seen {
+/// Wait, running no pass, until the run's channel moves from `seen` or its human items move: a
+/// driver waiting on a decision has nothing in flight and nothing ready, so the only thing that
+/// can move it is a reply or an attestation, which arrives on the channel, or a human item
+/// resolved where its resolver could not release the step, which arrives in the item store.
+/// `seen` is the channel as it stood before the driver last read its queue, so nothing that
+/// arrived since that read is waited past. Read as [`wait_for_work`] reads both, by the
+/// channel's fingerprint and the item store's length at [`CHANNEL_POLL`]; a `stop` reaches the
+/// driver as it reaches any.
+fn await_decision(
+    channel: &ChannelState,
+    seen: &[onemessagebus::Fingerprint],
+    items: Option<&crate::human_items::runtime::Gate>,
+) {
+    while channel.fingerprint() == seen
+        && !items.is_some_and(crate::human_items::runtime::Gate::moved)
+    {
         std::thread::sleep(CHANNEL_POLL);
     }
 }
