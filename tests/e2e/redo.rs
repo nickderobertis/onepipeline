@@ -397,6 +397,27 @@ fn metadata_key(key: &str) -> onetaskgraph_plugin_api::MetadataKey {
     onetaskgraph_plugin_api::MetadataKey::new(key).expect("a metadata key")
 }
 
+/// Whether `run`'s projection record holds a landed attempt, started no earlier than `since`,
+/// that wrote metadata on `node`'s item: the write-back appends each attempt's line once the
+/// store has answered it.
+fn projected_metadata_since(world: &World, run: &str, node: &str, since: &str) -> bool {
+    let since = crate::harness::epoch_millis(since);
+    std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|attempt| {
+            attempt["outcome"] == "projected"
+                && attempt["at"]
+                    .as_str()
+                    .is_some_and(|at| crate::harness::epoch_millis(at) >= since)
+                && attempt["items"]
+                    .as_array()
+                    .is_some_and(|items| items.contains(&json!(node)))
+                && attempt["updated_fields"].get("metadata").is_some()
+        })
+}
+
 /// Each `(node, reason, of)` the run's launch record says it redid, in its order.
 fn redone(world: &World, run: &str) -> Vec<Value> {
     world.run_json(run, "launch.json")["redone"]
@@ -725,17 +746,22 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         )
         .exited(0);
     let running = held.arrived();
-    // Revised once the store shows the node dispatched: the edit lands on the task as the run's
-    // own write-back of the dispatch left it.
-    world.until("the dispatch to reach the store", |world| {
-        task_of(world, &project, "c")["item"]["metadata"]
-            .get("onepipeline.dispatch")
-            .is_some()
+    // Revised only once the run's write-back of the dispatch is recorded — the attempt that
+    // put the dispatch on `c`'s task appended to the run's projection record, which the
+    // write-back does after the store has answered — so the edit lands on the task as that
+    // write-back left it rather than beside it.
+    world.until("the dispatch's write-back to be recorded", |world| {
+        task_of(world, &project, "c")["item"]["metadata"]["onepipeline.dispatch"]["opened_at"]
+            .as_str()
+            .is_some_and(|opened| projected_metadata_since(world, &during, "c", opened))
     });
     revise(&world, &project, "c", "Also index the export.");
     drop(running);
-    world.until("the run to settle", |world| {
-        world.run_file(&during, "result.json").is_file()
+    // And the next launch only once this run's driver has recorded its exit, which it writes
+    // after its closeout's write-back: a launch beside that write-back would read the store as
+    // it moved.
+    world.until("the run's driver to record its exit", |world| {
+        !world.events_of(&during, "driver-exited").is_empty()
     });
     world.unscript("c.rendezvous");
     let next = format!("{name}-10");
