@@ -2561,4 +2561,35 @@ fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
     ]);
     none.exited(NOTHING_COUNTED);
     assert!(none.stdout.is_empty(), "{}", none.stdout);
+
+    // A run's recorded group is its effective one: relabelled into the first project, the other
+    // project's run is that project's, and its branch is listed for it.
+    world
+        .run(&["label", "discard-other", "--group", &first])
+        .exited(0);
+    world
+        .run(&["unpublished", "--project", &first, "--discard", "--dry-run"])
+        .exited(COUNTED)
+        .out_has(&format!(
+            "would discard {} [{identity}] (run discard-other)",
+            theirs[0]
+        ))
+        .out_has(&format!(
+            "would keep {refused} [{identity}] (run discard-first)"
+        ));
+
+    // A run whose record cannot be read is said, never guessed: nothing is listed, and what was
+    // not read makes the answer unanswered rather than nothing.
+    std::fs::write(world.run_file("discard-other", "launch.json"), "not json")
+        .expect("the record is spoiled");
+    let unread = world.run(&[
+        "unpublished",
+        "--project",
+        &format!("{}:no-such-board", crate::harness::STORE_SOURCE),
+        "--discard",
+    ]);
+    unread
+        .exited(UNANSWERED)
+        .err_has("the record of run 'discard-other' could not be read");
+    assert!(unread.stdout.is_empty(), "{}", unread.stdout);
 }

@@ -2284,3 +2284,66 @@ fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
     );
     assert!(began.elapsed() < Duration::from_secs(60));
 }
+
+/// `watch --until settled` armed on a run that ended on its decision — let go of there by a
+/// driver of an earlier build, which let go on a decision rather than waiting on it — answers
+/// `surface-waiting` at once, and one whose driver ended on an error of its own answers
+/// `nothing-driving` at once.
+#[cfg(unix)]
+#[test]
+fn watch_until_settled_answers_a_run_ended_on_a_decision_or_an_error_at_once() {
+    let world = World::new("watch-ended-endings");
+    let run = "decided";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![human("approve", &[]), agent("after", &["approve"])],
+        ),
+    );
+    world.run(&["start", &path, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, and an earlier build's driver's
+    // record of letting go on the decision is the run's last word: this build's own drivers
+    // wait on a decision, so no verb of it ends a run there.
+    world.paused_and_ended(run);
+    let mut exited = world.events_of(run, "driver-exited")[0].clone();
+    exited["ts"] = json!("2999-01-01T00:00:00.000Z");
+    exited["stream"] = json!("~an-earlier-driver");
+    append_to_journal(&world, run, &exited);
+    assert_eq!(exited["payload"]["settlement"], "awaiting-planner");
+    let began = Instant::now();
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("surface-waiting".to_owned(), 4)
+    );
+    assert!(began.elapsed() < Duration::from_secs(60));
+
+    // A driver that ended on an error of its own: an adoption over a record naming no node
+    // graph, as a record from before that field was resolved at the launch does.
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb of this build writes a launch
+    // record without its resolved node graph; an older producer's record is the fault arranged,
+    // and the adoption, its ending and the watch are the compiled CLI's own.
+    let record = world.run_file(run, "launch.json");
+    let mut launch: Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).expect("the record reads"))
+            .expect("the record parses");
+    launch["node_graph"] = json!("");
+    std::fs::write(&record, launch.to_string()).expect("the record is rewritten");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world
+        .run(&["adopt", run])
+        .exited(crate::harness::REFUSED)
+        .err_has("has no resolved node graph");
+    let exits = world.events_of(run, "driver-exited");
+    assert_eq!(
+        exits[exits.len() - 1]["payload"]["settlement"],
+        "error",
+        "{exits:?}"
+    );
+    let began = Instant::now();
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("nothing-driving".to_owned(), 3)
+    );
+    assert!(began.elapsed() < Duration::from_secs(60));
+}

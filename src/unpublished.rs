@@ -506,6 +506,11 @@ fn decided(
     })
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] `QualifiedId` and `BranchName` are
+// this crate's private types, which a public field cannot carry without publishing an item the
+// contract does not name; the project is parsed as a qualified id by `discard` before anything
+// is read, and each branch and identity are the strings onevcs's own validated row carries, as
+// the listing's `Row` beside them already spells them.
 /// What `unpublished --project <ID> --discard [--dry-run]` is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardRequest {
@@ -589,6 +594,8 @@ impl DiscardedBranch {
         }
     }
 }
+
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// What one discard did, or would do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +705,12 @@ pub fn discard(request: &DiscardRequest) -> Result<Discarded> {
 /// group, its project's origin or its project, and any label overlay over them — or `None` for
 /// a run this runs root holds no record of, which is another root's.
 fn run_group(root: &Path, run: &str) -> Result<Option<String>> {
+    // The label is another process's word: only a run id names a directory under the root.
+    if !crate::ledger::is_valid_run_id(run) {
+        return Err(Error::Invalid(format!(
+            "'{run}' is not a run id, so it names no run under the runs root"
+        )));
+    }
     let paths = crate::ledger::RunPaths::under(root, run);
     if !paths.launch().is_file() {
         return Ok(None);
@@ -728,6 +741,7 @@ fn discarded(identity: &str, branch: &str, dry_run: bool) -> DiscardOutcome {
                 "`onevcs reclaim --discard` refuses it as {}",
                 retired.retirement.verdict()
             )),
+            // llmlint: ignore[changed_behavior_has_e2e] a deletion that reached some holders and not others needs a holder refusing a ref deletion mid-pass — a filesystem or host fault no journey arranges through either CLI; its line is the kept line every refusal prints, which the discard journey drives.
             onevcs::RetireOutcome::Incomplete => kept(format!(
                 "`onevcs reclaim --discard` deleted it from only some places, and not from {}",
                 retired
@@ -743,6 +757,7 @@ fn discarded(identity: &str, branch: &str, dry_run: bool) -> DiscardOutcome {
                     .join("; ")
             )),
         },
+        // llmlint: ignore[changed_behavior_has_e2e] a branch the listing just named that onevcs then cannot classify needs its registry or repository to vanish between two reads — a host fault no journey arranges; it is the kept line every refusal prints, which the discard journey drives.
         Err(why) => kept(format!(
             "`onevcs reclaim --discard` could not act on it: {why}"
         )),

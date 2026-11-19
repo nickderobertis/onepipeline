@@ -579,9 +579,28 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         )
         .exited(2)
         .err_has("--keep-changed refused: --fresh");
+    // The launch config's `keep_changed` says the same, and is refused beside `--fresh` too.
+    let config = world.root.join("keep-changed.yaml");
+    std::fs::write(&config, "schema_version: 15\nkeep_changed: true\n")
+        .expect("the launch config is written");
+    let config = config.to_string_lossy().into_owned();
+    let configured = format!("{name}-5");
+    launch(&world, &configured, &project, &["--launch-config", &config]).exited(0);
+    assert_eq!(dispatched(&world, &configured), Vec::<String>::new());
+    assert_eq!(
+        world.run_json(&configured, "launch.json")["keep_changed"],
+        json!(true)
+    );
+    world
+        .run_from(
+            &world.project,
+            &["start", &project, "--launch-config", &config, "--fresh"],
+        )
+        .exited(2)
+        .err_has("--keep-changed refused: --fresh");
 
     let before = stored_settlements(&world, &project);
-    let changed = format!("{name}-5");
+    let changed = format!("{name}-6");
     let launched = launch(&world, &changed, &project, &[]);
     launched
         .exited(0)
@@ -663,12 +682,12 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         },
     );
     revise(&world, &project, "b", "Name the columns.");
-    let stripped_run = format!("{name}-6");
+    let stripped_run = format!("{name}-7");
     launch(&world, &stripped_run, &project, &[]).exited(0);
     assert_eq!(dispatched(&world, &stripped_run), Vec::<String>::new());
 
     // `--redo b` redoes `b` and its dependent `c`, and continues `a`.
-    let named = format!("{name}-7");
+    let named = format!("{name}-8");
     launch(&world, &named, &project, &["--redo", "b"]).exited(0);
     let mut redispatched = dispatched(&world, &named);
     redispatched.sort();
@@ -678,7 +697,7 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
     // A task revised while its node runs: the settlement records the task as dispatched, so
     // the next launch redoes it.
     let held = world.rendezvous("c");
-    let during = format!("{name}-8");
+    let during = format!("{name}-9");
     world
         .run_from(
             &world.project,
@@ -692,7 +711,7 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         world.run_file(&during, "result.json").is_file()
     });
     world.unscript("c.rendezvous");
-    let next = format!("{name}-9");
+    let next = format!("{name}-10");
     launch(&world, &next, &project, &[])
         .exited(0)
         .err_has("redoes node 'c', as its task changed since it settled");
@@ -1102,4 +1121,47 @@ fn take_over_in_background_redoing(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     command.spawn().expect("the takeover starts")
+}
+
+/// A node whose task changed is not redone onto a branch that is gone: a person discarded the
+/// branch it settled on, so the launch leaves it settled, says why on stderr, and dispatches
+/// nothing.
+#[test]
+fn a_changed_node_whose_branch_is_gone_stays_settled_and_says_why() {
+    let name = "redo-gone";
+    let (world, _repo) = world_of(name, &["solo"]);
+    let project = author(&world, name, vec![kept("solo")]);
+    launch(&world, name, &project, &[]).exited(0);
+    let branch = stored_settlements(&world, &project)["solo"]["branch"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    // The person discards the work the node kept, everywhere this host holds it.
+    let discarded = world
+        .cmd_on(
+            &crate::harness::onevcs_binary(),
+            &["reclaim", &branch, "--repo", "service", "--discard"],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        discarded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+
+    revise(&world, &project, "solo", "Also cover the export.");
+    let again = format!("{name}-2");
+    launch(&world, &again, &project, &[])
+        .exited(0)
+        .err_has(&format!(
+            "leaves node 'solo' settled rather than redoing it as its task changed since it \
+             settled: the branch it settled on, {branch}, is gone"
+        ));
+    assert_eq!(dispatched(&world, &again), Vec::<String>::new());
+    assert!(redone(&world, &again).is_empty());
+    assert_eq!(
+        settled(&world, &again, "solo")["continued"]["source"],
+        "store"
+    );
 }

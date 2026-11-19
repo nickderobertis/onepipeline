@@ -2328,6 +2328,7 @@ fn hand_off_to_a_waiting_driver(paths: &RunPaths) {
              a reply or an attestation reaches its channel",
             paths.run
         ),
+        // llmlint: ignore[changed_behavior_has_e2e] a retained driver this executable cannot spawn, or one that dies before it claims the run, needs the host to refuse a process or kill one mid-start — no journey arranges either through the CLI; the line it prints is advice beside an unchanged line and status, which the attached journeys hold.
         Err(why) => eprintln!(
             "onepipeline: run '{}' could not be handed to a driver that waits on its decision \
              ({why}); `onepipeline adopt {}` continues it once the decision is made",
