@@ -1192,3 +1192,72 @@ fn a_changed_node_whose_branch_is_gone_stays_settled_and_says_why() {
         "store"
     );
 }
+
+/// What a task's digest reads, end to end: a node a live edit added records no digest, which a
+/// later launch reads as unchanged; a task nobody titled reads the same after the write-back
+/// titles it by its id, so an unedited relaunch redoes nothing; and a dependency a person adds to
+/// a task is a change to it, so the node is redone.
+#[test]
+fn a_digest_reads_a_tasks_edges_not_its_projected_title_and_a_live_added_node_records_none() {
+    let name = "redo-edges";
+    let world = World::new(name);
+    let project = author(&world, name, vec![agent("p", &[]), agent("q", &[])]);
+    // `p`'s dispatch is held, so the run is still going when a node is added to it live.
+    let held = world.rendezvous("p");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let holding = held.arrived();
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("z", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    drop(holding);
+    world.unscript("p.rendezvous");
+    assert_eq!(world.until_continued(name), "complete");
+    world.until("the run to release the project", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+    let stored = stored_settlements(&world, &project);
+    for id in ["p", "q"] {
+        assert!(stored[id]["task_digest"].is_string(), "{id}: {stored:#?}");
+    }
+    assert!(stored["z"].get("task_digest").is_none(), "{stored:#?}");
+    // Authored with no title, and titled by its id by the write-back.
+    assert_eq!(task_of(&world, &project, "p")["item"]["title"], "p");
+
+    let unedited = format!("{name}-2");
+    launch(&world, &unedited, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &unedited), Vec::<String>::new());
+
+    // A person makes `q` depend on `p`: the task is re-authored with the edge, keeping every
+    // metadata key it held.
+    let held = task_of(&world, &project, "q")["item"]["metadata"].clone();
+    world.add_task(name, "001-q", &agent("q", &["p"]), &[("p", "000-p")]);
+    update_task(
+        &world,
+        &project,
+        "q",
+        onetaskgraph_plugin_api::TaskUpdate {
+            metadata_set: held
+                .as_object()
+                .expect("metadata")
+                .iter()
+                .map(|(key, value)| (metadata_key(key), value.clone()))
+                .collect(),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        },
+    );
+    // The unedited run's close-out has released its claim on the project.
+    world.until("the unedited run to release the project", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+    let edged = format!("{name}-3");
+    launch(&world, &edged, &project, &[])
+        .exited(0)
+        .err_has("redoes node 'q', as its task changed since it settled");
+    assert_eq!(dispatched(&world, &edged), ["q"]);
+}
