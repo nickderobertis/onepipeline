@@ -223,11 +223,13 @@ test("Nx's own expanded inputs cover every original cached task's files after th
     // Manager ruling 229: the retired shortcut and its test are deliberately
     // deleted; every other historical input still belongs in the union. The
     // `bus-validator` fake went with the bus's validators, which this engine no
-    // longer runs.
+    // longer runs. The 7a017fa test-profile snapshot was deleted in favour of
+    // docs/gate-profile.md, which the contract tasks read in its place.
     const retired = new Set([
       "scripts/release-pr-shortcut.mjs",
       "tests/ci_jobs/release-pr-shortcut.test.mjs",
       "crates/testfakes/src/bin/bus-validator.rs",
+      "docs/test-profile-report.md",
     ]);
     for (const file of retired) assert.ok(!existsSync(join(current, file)), `${file} must remain retired`);
     for (const id of cached) {
