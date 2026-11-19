@@ -1913,7 +1913,8 @@ fn a_printed_landing_command_runs_this_hosts_drafter() {
     }
 }
 
-/// The synopsis entry 120 and `docs/stop-guard.md` state is the verb's own.
+/// The synopsis entry 120, the contract's discard amendment and `docs/stop-guard.md` state is
+/// the verb's own.
 #[test]
 fn the_documented_synopsis_is_the_verbs_own() {
     let world = World::new("unpub-synopsis");
@@ -1944,10 +1945,24 @@ fn the_documented_synopsis_is_the_verbs_own() {
         .and_then(|rest| rest.split("and amend entry 85").next())
         .expect("the proposal")
         .to_owned();
+    // Entry 120 proposed the listing and its acknowledgement; the discard form is the
+    // contract's own amendment, so its synopsis is read from there.
+    let contract =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"))
+            .expect("the contract");
+    let discard = contract
+        .split("**Discarding a project's preserved branches.**")
+        .nth(1)
+        .and_then(|rest| rest.split("`onepipeline unpublished --project").nth(1))
+        .and_then(|rest| rest.split('`').next())
+        .map(|synopsis| format!("--project{synopsis}"))
+        .expect("the discard amendment's synopsis");
+    let mut documented = crate::stop_guard::flags_of(&proposed);
+    documented.extend(crate::stop_guard::flags_of(&discard));
     assert_eq!(
-        crate::stop_guard::flags_of(&proposed),
+        documented,
         crate::stop_guard::flags_of(&help.stdout),
-        "{proposed}"
+        "{proposed}\n{discard}"
     );
 }
 
