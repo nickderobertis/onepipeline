@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.114.1](https://github.com/nickderobertis/onepipeline/compare/v0.114.0...v0.114.1) - 2026-11-19
+
+### Added
+
+- *(profile)* time each onepipeline invocation by span on request, and attribute it in the test profile ([#1700](https://github.com/nickderobertis/onepipeline/pull/1700))
+
+### Fixed
+
+- *(test)* keep the flow-watch wake-budget journey deterministic on a slow runner ([#1706](https://github.com/nickderobertis/onepipeline/pull/1706))
+
 ## [0.114.0](https://github.com/nickderobertis/onepipeline/compare/v0.113.6...v0.114.0) - 2026-11-18
 
 ### Added
