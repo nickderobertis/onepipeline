@@ -803,6 +803,9 @@ fn a_paused_run_keeps_scratch_and_an_undriven_reply_records_its_failed_ending() 
         "pause",
         vec![agent("build", &[]), crate::harness::human("approve", &[])],
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so the reply below reaches a paused run nothing drives and records its ending itself.
+    world.paused_and_ended(&run);
     let before = snapshot(&world.run_file(&run, "scratch"));
     assert_retained(&world, &run, "paused", 1);
     let journal = std::fs::read(world.run_file(&run, "events.jsonl")).unwrap();
