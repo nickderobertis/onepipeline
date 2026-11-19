@@ -38,9 +38,9 @@ panicked at `tests/e2e/harness.rs:3757:37` with `cannot read
 nextest's summary was `1865/2199 tests run: 1864 passed (13 slow), 1 failed, 1 skipped`, and
 fail-fast left 334 of the 2,199 tests unrun, so that attempt is not a whole-tier figure and none
 of its figures appear below. It took 1,829.0 s wall and 1,424.2 s CPU. The test did not fail
-again. It passed three times run alone (`cargo nextest run --locked -E 'binary(e2e) and
-test(=store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id)'`,
-0.8–0.9 s each), and it passed in the measured run (0.45 s). Its cause is unconfirmed: those
+again. It passed three times run alone, the selection
+`just test-e2e 'test(=store::a_retried_project_launches_again_reading_the_lineage_head_under_the_roots_id)'`
+makes (0.8–0.9 s each), and it passed in the measured run (0.45 s). Its cause is unconfirmed: those
 passes show only that it does not reproduce alone or in a second whole-tier run.
 
 The paths above are where each command writes when you re-run it. The `072b17cd` copies are
