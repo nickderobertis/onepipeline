@@ -4250,13 +4250,6 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
     )
 }
 
-/// Whether any node could still change state without an edit or an attestation.
-///
-/// `ready` and `running` are the obvious two. A node that
-/// [awaits a release](NodeStatus::awaits_release) — draft- or held-complete — is
-/// the third: this loop is what watches for the release that lands it, so breaking
-/// here would settle the run with the temporary pin still unlanded. Everything else
-/// is settled or gated by something only the channel delivers.
 /// Whether a node derives as `waiting` with no settlement recorded for it and nothing pausing
 /// it: a human action readied since the last pass started, which [`start_ready`] — reading
 /// the same three things — records on the pass after, as the record `attest` validates
@@ -4273,6 +4266,13 @@ fn human_action_unrecorded(
     })
 }
 
+/// Whether any node could still change state without an edit or an attestation.
+///
+/// `ready` and `running` are the obvious two. A node that
+/// [awaits a release](NodeStatus::awaits_release) — draft- or held-complete — is
+/// the third: this loop is what watches for the release that lands it, so breaking
+/// here would settle the run with the temporary pin still unlanded. Everything else
+/// is settled or gated by something only the channel delivers.
 fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| {
         matches!(status, NodeStatus::Ready | NodeStatus::Running) || status.awaits_release()
