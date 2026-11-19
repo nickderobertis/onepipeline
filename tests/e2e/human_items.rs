@@ -463,6 +463,9 @@ fn each_manager_sees_its_own_items_and_what_holds_its_work() {
     // A run whose launch record cannot be read is nobody's, as the run views judge
     // it: what its run raised and what holds its plan or run fall out of this
     // session's view, while its own and the host's hold stay.
+    // The driver waiting on the run's decision is ended first, as a host going down would end
+    // it: a record spoiled under a live driver leaves nothing able to stop it.
+    mine.paused_and_ended(name);
     std::fs::write(mine.runs.join(name).join("launch.json"), "{not json").unwrap();
     for verb in ["list", "report"] {
         let text = mine.run(&["human-items", verb]).stdout.clone();
@@ -1821,7 +1824,9 @@ fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
     let shown: Value = serde_json::from_str(&shown.stdout).unwrap();
     assert_eq!(shown["nodes"].as_array().unwrap().len(), 5);
 
-    // The run is removed from the runs root: nothing it held is reported any more.
+    // The run is removed from the runs root: nothing it held is reported any more. The driver
+    // waiting on its decision is ended first, as a host going down would end it.
+    world.paused_and_ended(name);
     std::fs::remove_dir_all(world.runs.join(name)).unwrap();
     let after = items(&world, &[]);
     assert_eq!(after[0]["blocked"]["total"], 0, "{after:?}");
