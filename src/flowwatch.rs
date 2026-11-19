@@ -15,7 +15,7 @@
 //! `unwatched` can ask whether anything is watching the flow.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -343,14 +343,16 @@ pub(crate) fn watch(
         false => &request.until,
     };
     let selected = Selected::resolve(until)?;
-    let deadline = crate::watch::deadline(request.timeout)?;
+    // The host's clock, but where a regression journey names a peer to drive it.
+    let mut clock = crate::ordering::WatchClock::from_environment()?;
+    let deadline = clock.deadline(request.timeout)?;
     let mut known = match &request.cursor {
         Some(token) => resume(root, flow, token)?,
         None => armed_at(root, flow)?,
     };
     let filter = &request.filter;
     let _armed = crate::watchers::Armed::arm(&flow.paths, request.timeout, until);
-    let mut quiet_since = Instant::now();
+    let mut quiet_since = clock.now()?;
     let mut unread = 0_usize;
     let mut first = true;
     let ended = |ending: Ending,
@@ -369,8 +371,7 @@ pub(crate) fn watch(
         // Asked before the pass rather than only after it, so a wait whose
         // deadline came due while it slept does nothing past the deadline but
         // say how it ended.
-        let due = || deadline.is_some_and(|deadline| Instant::now() >= deadline);
-        if !first && due() {
+        if !first && clock.due(deadline)? {
             return ended(Ending::Elapsed, &known, unread, say);
         }
         first = false;
@@ -379,16 +380,14 @@ pub(crate) fn watch(
         if let Some(ending) = ending {
             return ended(ending, &known, unread, say);
         }
-        if due() {
+        if clock.due(deadline)? {
             return ended(Ending::Elapsed, &known, unread, say);
         }
-        if !request.tick.is_zero() && quiet_since.elapsed() >= request.tick {
+        if !request.tick.is_zero() && clock.since(quiet_since)? >= request.tick {
             say(&heartbeat_lines(flow, unread)?)?;
-            quiet_since = Instant::now();
+            quiet_since = clock.now()?;
         }
-        std::thread::sleep(
-            crate::watch::wake_within(deadline, request.tick, quiet_since).min(POLL),
-        );
+        clock.wait(deadline, request.tick, quiet_since, POLL)?;
     }
 }
 
