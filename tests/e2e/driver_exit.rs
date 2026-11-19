@@ -2422,7 +2422,10 @@ fn an_attestation_that_ends_the_run_is_closed_out_by_the_driver_waiting_on_it() 
     let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
     let mut approve = human("approve", &[]);
     approve["deps"] = json!(["before"]);
-    let path = world.plan(run, &plan_of(run, vec![command_node("before", &fine), approve]));
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![command_node("before", &fine), approve]),
+    );
     // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
     // driver once its drive has returned and before it waits, so the attestation is applied by
     // that waiting loop and not inside a drive; the launch, the attestation and every reading of

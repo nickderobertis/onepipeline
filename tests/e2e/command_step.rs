@@ -822,6 +822,13 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
             // Requeued, it runs again — and while it does, it has no settlement whose detail
             // could be read as its own.
             std::fs::remove_file(world.root.join("held.pid")).expect("the pid is cleared");
+            // The run lets go once the node settled; an adoption drives the requeued node. Its
+            // driver can still be exiting when the settlement reads, and a driver that claims
+            // the requeue before it lets go drives it itself, so the requeue waits for it to
+            // let go and reaches a run nothing drives.
+            world.until("the driver to let go of the run", |world| {
+                !world.run_file(&name, "owner.lock").exists()
+            });
             world
                 .run_with_stdin(
                     &["reply", &name],
@@ -829,12 +836,6 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
                         .to_string(),
                 )
                 .exited(0);
-            // The run let go once the node settled; an adoption drives the requeued node. Its
-            // driver can still be exiting when the settlement reads, and an adoption refuses
-            // a run that driver still holds, so the adoption waits for it to let go.
-            world.until("the driver to let go of the run", |world| {
-                !world.run_file(&name, "owner.lock").exists()
-            });
             world.run(&["adopt", &name, "--detach"]).exited(0);
             world.until("the command to run again", |world| {
                 world.root.join("held.pid").is_file()

@@ -398,6 +398,9 @@ fn adopt_goes_ahead_over_a_node_settled_done_that_breaks_c6b() {
         "the agent node never settled: {:?}",
         world.kinds(name)
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so the records below are rewritten under no driver and an adoption takes the run up.
+    world.paused_and_ended(name);
     launched_before_c6b(&world, name, "early", BROKEN[0].0);
     world.run(&["attest", name, "approve"]).exited(0);
     world.run(&["adopt", name]).exited(0);

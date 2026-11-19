@@ -1348,7 +1348,8 @@ fn attestation_after_a_pause_reaches_success_and_reclaims_the_retained_scratch()
     );
     assert_retained(&world, &run, "paused", 1);
     world.run(&["attest", &run, "approve"]).exited(0);
-    world.run(&["adopt", &run]).settled();
+    // The driver waiting on the decision carries the run on to success and reclaims its scratch.
+    world.until_continued(&run);
     assert!(!world.run_file(&run, "scratch").exists());
     assert_eq!(world.events_of(&run, "scratch-removed").len(), 1);
 }

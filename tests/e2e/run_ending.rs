@@ -342,8 +342,11 @@ fn a_human_node_settled_failed_from_evidence_ends_the_run_failed() {
             .to_string(),
         )
         .exited(0);
-    // The driver that judges it fires the hook it ended under, and settles at once.
-    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    // The driver waiting on the decision judges it, lets go, and fires the hook it ended under.
+    world.until_continued(run);
+    world.until("the failure hook to fire", |world| {
+        !invocations(world, run).is_empty()
+    });
     assert_eq!(invocations(&world, run), ["failure"]);
 
     let reading = read_as(&world, run, "ENDED failed");
