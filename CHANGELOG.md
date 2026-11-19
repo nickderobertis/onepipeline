@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.115.0](https://github.com/nickderobertis/onepipeline/compare/v0.114.1...v0.115.0) - 2026-11-19
+
+### Added
+
+- *(deps)* [**breaking**] link the onetaskgraph release whose project graph names each task's location ([#1717](https://github.com/nickderobertis/onepipeline/pull/1717))
+
 ## [0.114.1](https://github.com/nickderobertis/onepipeline/compare/v0.114.0...v0.114.1) - 2026-11-19
 
 ### Added
