@@ -18,9 +18,24 @@ figure that load disturbs least; compare on it first.
 | module, instrumented | `ONEPIPELINE_TEST_PROFILE_SPANS=1 just _tier-test onepipeline-e2e-readjust 'binary(e2e) and test(/^readjust::/)'` (the e2e tier's own recipe, narrowed) | 10:40–10:46, 1.6–2.5 |
 | single verbs | `hyperfine -N` over `target/{debug,release}/onepipeline` with `ONEPIPELINE_RUNS_DIR` set to a copy of `tests/recorded/run-root` | 10:37, 1.0–1.2 |
 | module selection | the partial tier's report, *The 10 costliest modules*: `e2e::readjust` (spawn 92.2% of 482.6 s) and `e2e::lifecycle` (87.1% of 412.4 s) hold the most `spawn` seconds; `retirement` (188 s) and `driver` (133 s) come next | as the tier |
-| sampling | `perf record -F 999 -g` over 200 `goals` runs, and `-F 499 -g` over the `readjust` module; `kernel.perf_event_paranoid` was 1 only for those runs and read 4 afterwards | 10:38–10:39, 1.7–1.9 |
+| sampling | `perf record -F 999 -g` over 200 `goals` runs, and `-F 499 -g` over the `readjust` module; `kernel.perf_event_paranoid` was 1 only for those runs and read 4 afterwards | 10:38:29–10:39:32, 1.66–1.86 |
 
 Wall and CPU for every command come from `/usr/bin/time` (the children's `getrusage`).
+
+The paths above are where each command writes when you re-run it. This run's own copies of
+them are partly gone:
+
+- **Removed with the measuring worktree:** the gate profile's directory,
+  `target/gate-profile/20261118T184839Z/` (`report.{md,json}`, `phases.jsonl`,
+  `processes.json`, `nx-state`), and the e2e tier's `target/test-profile/e2e/` records. The
+  gate report's text survives only as printed in the measuring session's transcript. The
+  figures read from `phases.jsonl` (the `test` row's user and system split) and from
+  `processes.json` (target 1's `ld` and `rustc` ticks) cannot be rechecked.
+- **Kept in that dispatch's scratch directory:** the partial tier's report, both modules' span
+  reports (plain and instrumented), every module run's `/usr/bin/time` and load record,
+  `perf-goals.data` and `perf-readjust.data`, and `sample.log` with the sysctl reading before
+  and after sampling. The `perf report` and `hyperfine` outputs survive as printed in the
+  transcript.
 
 ## The gate profile, and what spoiled it
 
