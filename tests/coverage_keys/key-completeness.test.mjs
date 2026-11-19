@@ -42,8 +42,8 @@ const EXCEPTIONS = {
   },
   "onepipeline-version-contract": {
     "docs/contract-divergences.md": VERSION_ONE_TEST,
+    "docs/gate-profile.md": VERSION_ONE_TEST,
     "docs/stop-guard.md": VERSION_ONE_TEST,
-    "docs/test-profile-report.md": VERSION_ONE_TEST,
     "docs/windows-journey-audit.md": VERSION_ONE_TEST,
     "tests/parity.rs": VERSION_ONE_TEST,
   },

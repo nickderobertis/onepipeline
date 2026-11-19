@@ -254,7 +254,7 @@
       "{workspaceRoot}/docs/contract.md",
       "{workspaceRoot}/docs/contract-divergences.md",
       "{workspaceRoot}/docs/stop-guard.md",
-      "{workspaceRoot}/docs/test-profile-report.md"
+      "{workspaceRoot}/docs/gate-profile.md"
     ],
     "coverageTierKey": [
       "rustBuild",
