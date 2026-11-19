@@ -211,6 +211,10 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
         "the failing node never settled: {:?}",
         world.kinds(name)
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: each edit below is then applied, or refused, by the reply itself, and the journal it
+    // is counted against stops moving once that reply returns.
+    world.paused_and_ended(name);
     let edit = |command: Value| {
         world.run_with_stdin(
             &["reply", name],
