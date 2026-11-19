@@ -1290,6 +1290,10 @@ fn driving(
     // advances, and the release itself is [`let_go_of_saying`]'s.
     let channel = ChannelState::of_run(paths, &launch);
     let (settlement, departure) = loop {
+        // The channel as it stood before the queue is read: a driver that goes on to wait on a
+        // decision waits for the channel to move from *this*, so a reply or an attestation
+        // arriving after the read below found the queue empty still wakes it.
+        let seen = (on_decision == OnDecision::Wait).then(|| channel.fingerprint());
         // Everything the queue is holding, applied and then recorded — the run's
         // last word has to carry an edit applied after it was written.
         let mut moved = false;
@@ -1329,10 +1333,16 @@ fn driving(
         // A retained driver waits on the decision rather than letting go: the reply or
         // attestation that makes it moves the channel, and the next turn of this loop applies
         // it and drives on.
-        if settlement == crate::driver::Settlement::AwaitingPlanner
-            && on_decision == OnDecision::Wait
+        if let Some(seen) =
+            seen.filter(|_| settlement == crate::driver::Settlement::AwaitingPlanner)
         {
-            await_channel(&channel);
+            // Test failpoint only, and nothing at all where its variable is unset: a journey
+            // holds this driver after its read of the queue found nothing and before it waits,
+            // so a decision lands in exactly the window a wait begun from a later look missed.
+            if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_AWAIT_GATE") {
+                eprintln!("onepipeline: {error}");
+            }
+            await_channel(&channel, &seen);
             continue;
         }
         // Always here: only a let-go takes the lock out, and one that hands it
@@ -3562,12 +3572,13 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
     Ok(tx)
 }
 
-/// Wait, running no pass, until the run's channel moves: a driver waiting on a decision
-/// has nothing in flight and nothing ready, so the only thing that can move it is a reply or
-/// an attestation, which arrives on the channel. Read as [`wait_for_work`] reads it, by the
-/// channel's fingerprint at [`CHANNEL_POLL`]; a `stop` reaches the driver as it reaches any.
-fn await_channel(channel: &ChannelState) {
-    let seen = channel.fingerprint();
+/// Wait, running no pass, until the run's channel moves from `seen`: a driver waiting on a
+/// decision has nothing in flight and nothing ready, so the only thing that can move it is a
+/// reply or an attestation, which arrives on the channel. `seen` is the channel as it stood
+/// before the driver last read its queue, so nothing that arrived since that read is waited
+/// past. Read as [`wait_for_work`] reads it, by the channel's fingerprint at
+/// [`CHANNEL_POLL`]; a `stop` reaches the driver as it reaches any.
+fn await_channel(channel: &ChannelState, seen: &[onemessagebus::Fingerprint]) {
     while channel.fingerprint() == seen {
         std::thread::sleep(CHANNEL_POLL);
     }

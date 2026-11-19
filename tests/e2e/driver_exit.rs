@@ -2333,6 +2333,43 @@ fn a_human_action_readied_after_a_decision_is_raised_and_its_attestation_continu
     assert_eq!(world.events_of(run, "driver-adopted").len(), 1);
 }
 
+/// A decision that lands after a waiting driver's last read of its queue found nothing, and
+/// before that driver begins to wait, still continues the run: the wait is measured from the
+/// channel as it stood before that read, not from a look taken after the decision arrived.
+#[cfg(unix)]
+#[test]
+fn a_decision_landing_as_its_driver_begins_to_wait_still_continues_the_run() {
+    let world =
+        World::new("decision-before-wait").with_env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "2");
+    let run = "late-approval";
+    let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
+    let mut after = command_node("after", &fine);
+    after["deps"] = json!(["approve"]);
+    let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), after]));
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
+    // driver between its empty read of the queue and its wait, which no user-facing input can
+    // place; the launch, the attestation and every reading of the run are the real CLI's own.
+    let gate = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_TEST_AWAIT_GATE", gate.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(start, "start --detach").exited(0);
+    let held = gate.arrived();
+    // The held driver applies nothing, so the attestation is queued for it.
+    world
+        .run(&["attest", run, "approve"])
+        .exited(0)
+        .out_has("\"state\":\"queued\"");
+    held.release();
+    gate.release_the_rest();
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("settled".to_owned(), 0),
+        "the attestation queued before its driver began to wait never continued the run"
+    );
+    assert_eq!(world.until_continued(run), "complete");
+}
+
 /// A driver waiting on a decision never outlives its run. `stop` on a run paused on its decision
 /// ends the driver waiting on it; and a run that reaches an ending from its decision — completed
 /// by an attestation, or ended by a `drop` of the step it waited on — leaves no driver waiting.
