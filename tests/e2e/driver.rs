@@ -1630,8 +1630,8 @@ enum Outcome {
     Refuses,
     /// It is killed holding the run's lock, before it has claimed the run.
     Dies,
-    /// It claims the run and — the run still paused on its approval — lets go
-    /// of it and exits.
+    /// It claims the run and — the run still paused on its approval, which it waits on —
+    /// is ended, as a host going down would end it.
     ClaimsAndExits,
 }
 
@@ -1662,11 +1662,20 @@ fn adopt_held(
     let mut adopt = world.cmd(&["adopt", run, "--detach"]);
     adopt.env(side.gate(), launcher.address());
     // llmlint: ignore-end[tests_mirror_real_usage]
+    // The lock the ended driver left behind, which names a process that is gone: the retained
+    // driver is the one whose lock names anybody else.
+    let left = std::fs::read_to_string(world.run_file(run, "owner.lock"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map(|lock| identity_in(&lock));
     std::thread::scope(|scope| {
         let adopting = scope.spawn(|| world.run_on(adopt, "adopt --detach"));
         let held = launcher.arrived();
         world.until("the retained driver to take the run's lock", |world| {
-            world.run_file(run, "owner.lock").is_file()
+            std::fs::read_to_string(world.run_file(run, "owner.lock"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|lock| Some(identity_in(&lock)) != left)
         });
         let driver = identity_in(&world.run_json(run, "owner.lock"));
         let pid = u32::try_from(driver.0).expect("a pid");
@@ -1680,6 +1689,7 @@ fn adopt_held(
             world.until("the retained driver to claim the run", |world| {
                 identity_in(&world.run_json(run, "launch.json")) == driver
             });
+            end_lock_holder(world, run);
         }
         // Ended, not gone: the held launcher is its parent and has not reaped
         // it, so its pid cannot have been handed on and a zombie is all that is
@@ -1722,7 +1732,7 @@ fn a_detached_adoption_reports_its_driver_dying_on_either_side_of_its_first_read
 }
 
 /// A retained driver that claims the run is announced, even when it has
-/// already let go and exited by the time the launcher looks — and when its
+/// already exited by the time the launcher looks — and when its
 /// claim and its exit both land between the launcher's first reading and its
 /// asking whether the driver had exited, which a launcher deciding on that
 /// exit alone reported as a driver that never claimed the run.
@@ -2473,7 +2483,10 @@ fn a_driver_that_let_go_of_its_run_writes_its_record_no_more() {
     let listener = let_go_peer();
     let world = held_at_let_go(world, &listener);
     world.script("observer.wait", "hold");
-    let run = start_detached_observed(&world, "letgo", vec![human("approve", &[])]);
+    // Its one node fails, leaving its driver nothing it can move: a detached driver lets go of
+    // such a run, where one paused on a decision waits on it instead.
+    world.script("build.fail", "1");
+    let run = start_detached_observed(&world, "letgo", vec![agent("build", &[])]);
     let log = world.run_file(&run, "driver.log");
     leaves_the_record_to_the_adoption(&world, &run, &listener, &log);
 }
