@@ -3325,13 +3325,6 @@ impl World {
         profile::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
-    /// Stand where the dispatches scripted at `key` will meet this test.
-    ///
-    /// The test's half of the handshake `fake::meet` is the double's half of.
-    /// This listens on the loopback interface and writes the address into
-    /// `<key>.rendezvous`, which is what sends the double here instead of to a
-    /// file hold; [`Rendezvous::arrived`] then blocks until one connects. Called
-    /// before the run starts, since a dispatch reads its scripts as it begins.
     /// Wait until `run` reads `PAUSED`: waiting on a decision with nothing else able to move —
     /// whether its driver let go there, as an attached launch's does, or, retained, waits on the
     /// decision there.
@@ -3412,6 +3405,13 @@ impl World {
         end_driver(self, run);
     }
 
+    /// Stand where the dispatches scripted at `key` will meet this test.
+    ///
+    /// The test's half of the handshake `fake::meet` is the double's half of.
+    /// This listens on the loopback interface and writes the address into
+    /// `<key>.rendezvous`, which is what sends the double here instead of to a
+    /// file hold; [`Rendezvous::arrived`] then blocks until one connects. Called
+    /// before the run starts, since a dispatch reads its scripts as it begins.
     pub fn rendezvous(&self, key: &str) -> Rendezvous {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
         let address = listener.local_addr().expect("the listener has an address");

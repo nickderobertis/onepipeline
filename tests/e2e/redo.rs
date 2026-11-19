@@ -579,6 +579,22 @@ fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
         )
         .exited(2)
         .err_has("--keep-changed refused: --fresh");
+    // A config declaring a schema before the key's is refused by the key's name.
+    let early = world.root.join("keep-changed-early.yaml");
+    std::fs::write(&early, "schema_version: 14\nkeep_changed: true\n")
+        .expect("the launch config is written");
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &project,
+                "--launch-config",
+                &early.to_string_lossy(),
+            ],
+        )
+        .exited(2)
+        .err_has("`keep_changed` is a schema 15 key");
     // The launch config's `keep_changed` says the same, and is refused beside `--fresh` too.
     let config = world.root.join("keep-changed.yaml");
     std::fs::write(&config, "schema_version: 15\nkeep_changed: true\n")

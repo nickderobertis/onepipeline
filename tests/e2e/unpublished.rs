@@ -2431,6 +2431,42 @@ fn flags_that_mean_nothing_together_are_refused() {
         ),
         (vec!["unpublished", "--reason", "r"], "--acknowledge"),
         (vec!["unpublished", "--repo", "service"], "--acknowledge"),
+        // A project's branches are discarded, or said to be, and listed no other way.
+        (vec!["unpublished", "--project", "plans:board"], "--discard"),
+        (vec!["unpublished", "--discard"], "--project"),
+        (vec!["unpublished", "--dry-run"], "--discard"),
+        (
+            vec![
+                "unpublished",
+                "--project",
+                "plans:board",
+                "--discard",
+                "--host",
+            ],
+            "--host",
+        ),
+        (
+            vec![
+                "unpublished",
+                "--project",
+                "plans:board",
+                "--discard",
+                "--session",
+                MANAGER,
+            ],
+            "--session",
+        ),
+        (
+            vec![
+                "unpublished",
+                "--project",
+                "plans:board",
+                "--discard",
+                "--format",
+                "json",
+            ],
+            "--format",
+        ),
     ] {
         let refused = world.run(&args);
         refused.exited(crate::harness::USAGE_ERROR).err_has(named);
