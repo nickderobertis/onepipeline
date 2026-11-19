@@ -17,6 +17,7 @@ figure that load disturbs least; compare on it first.
 | module, plain | `ONEPIPELINE_TEST_PROFILE_SPANS=1 just test-e2e 'test(/^readjust::/)'` (and `lifecycle`), then the same report script over the records | 2026-11-19 10:30–10:37, 2.2–8.2 |
 | module, instrumented | `ONEPIPELINE_TEST_PROFILE_SPANS=1 just _tier-test onepipeline-e2e-readjust 'binary(e2e) and test(/^readjust::/)'` (the e2e tier's own recipe, narrowed) | 10:40–10:46, 1.6–2.5 |
 | single verbs | `hyperfine -N` over `target/{debug,release}/onepipeline` with `ONEPIPELINE_RUNS_DIR` set to a copy of `tests/recorded/run-root` | 10:37, 1.0–1.2 |
+| module selection | the partial tier's report, *The 10 costliest modules*: `e2e::readjust` (spawn 92.2% of 482.6 s) and `e2e::lifecycle` (87.1% of 412.4 s) hold the most `spawn` seconds; `retirement` (188 s) and `driver` (133 s) come next | as the tier |
 | sampling | `perf record -F 999 -g` over 200 `goals` runs, and `-F 499 -g` over the `readjust` module; `kernel.perf_event_paranoid` was 1 only for those runs and read 4 afterwards | 10:38–10:39, 1.7–1.9 |
 
 Wall and CPU for every command come from `/usr/bin/time` (the children's `getrusage`).
@@ -92,18 +93,52 @@ those slots. Five journeys need all four slots, and their waits ran with nothing
 save roughly half of the roughly 1,460 s that does not run exclusively, if the host holds. An
 estimate.
 
-**3. Strategy B, unscaled intervals: the `wait` category, about 2,220 test-seconds of the
-partial tier.** No shared scale exists. Each interval has its own environment variable
-(`src/continuation.rs:109`, `src/release.rs:57`, `src/engine.rs:165`, `src/pool.rs:76`), and
-the takeover windows are constants (`src/continuation.rs:117-127`). `loopcost` pins 60 s
-windows (`tests/e2e/loopcost.rs:43`) and `adoption` waits out the shipped 60 s release poll
-(`tests/e2e/adoption.rs:3558`). Which interval `dispatch`'s self-wall waits out is not broken
-down by any span. *Rough gain:* up to that `wait` share, in proportion to the scale chosen,
-less what the budget journeys must keep.
+**3. Strategy B, unscaled intervals: about 2,220 test-seconds of `wait` in the partial tier,
+plus the driver's own waits; CPU under 3% of that wall.** No shared scale exists. Each interval
+has its own environment variable (`src/continuation.rs:109`, `src/release.rs:57`,
+`src/engine.rs:165`, `src/pool.rs:76`), and the takeover windows are constants
+(`src/continuation.rs:117-127`). `loopcost` pins 60 s windows (`tests/e2e/loopcost.rs:43`),
+and `adoption` waits out the shipped 60 s release poll (`tests/e2e/adoption.rs:3558`).
 
-**4. `onevcs` landing reads: 142 ms each.** In `readjust`, 128 `onevcs:landing_status` spans
-took 18.2 s, 12.5% of `start`'s wall, and 87–89% of `results` and `status`. In `lifecycle` they
-are 1%. *Rough gain:* about 10% of the restack and review modules' `onepipeline` wall.
+| cost | wall | CPU | how attributed |
+| --- | ---: | ---: | --- |
+| `dispatch` self-time, `readjust` (176 runs) | 165.4 s | 4.8 s | span records' `self_wall_ms` and `self_cpu_ms`, summed |
+| `dispatch` self-time, `lifecycle` (683 runs) | 338.8 s | 6.4 s | the same |
+| the test thread's `wait`, one probe test | 37.0 s | at most 1.0 s | measured once, below |
+| module totals for comparison: `readjust` runs / `lifecycle` runs | 206.1 s / 357.5 s | 35.9 s (+23.9 s children) / 35.3 s (+20.6 s children) | the span records' totals |
+
+The test records give per-category wall, but CPU only per spawned program, so they cannot
+attribute CPU to the test thread's own `wait`. One narrow measurement filled that gap: the
+wait-bound test `continuation::a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication`,
+run directly from the instrumented test binary under `/usr/bin/time` at load 15–20. It took
+301 s wall and 244.0 s CPU. Its record attributes 243.0 s of that to spawned programs (a
+242.6 s build of the doubles, which runs outside nextest), which leaves 1.0 s for the test
+process across 37.0 s of `wait`. Which interval `dispatch`'s self-wall waits out is not broken
+down by any span.
+
+*Evidence:* the spans report of each module, section *Where the `onepipeline` runs went*, the
+`start` table's `dispatch` row (`readjust` 126.37 s self wall, 2.14 s self CPU; `lifecycle`
+313.68 s, 4.17 s), plus the partial tier's *Whole run* row (`wait` 39.4%). *Rough gain:* up to
+the `wait` share in wall, in proportion to the scale chosen, less what the budget journeys must
+keep. Almost no CPU, since the waits use almost none.
+
+**4. `onevcs` landing reads: 142 ms each, about 5% of their wall in CPU.**
+
+| module | spans | wall | CPU in the `onepipeline` process | share |
+| --- | ---: | ---: | ---: | --- |
+| `readjust` | 245 | 35.95 s | 1.83 s | 17% of the runs' 206.1 s wall; 5.1% of their 35.9 s CPU |
+| `lifecycle` | 68 | 9.66 s | 0.42 s | 2.7% of 357.5 s wall; 1.2% of 35.3 s CPU |
+
+These are the span records' self figures for `onevcs:landing_status`, summed over every verb.
+In `readjust`, the 128 spans inside `start` took 18.2 s, 12.5% of `start`'s wall. They also
+take 87–89% of `results`' and `status`' wall. A span's CPU is its own process's. Any `git`
+child that `onevcs` starts is counted in its verb's children CPU, and no span attributes it.
+`perf` over the `readjust` module bounds both. `onevcs::landing_status` holds 7.20% of the
+module's sampled CPU inclusive. All `git` processes together hold 0.99%, so a `git` child of
+the landing read costs at most that. *Evidence:* the `readjust` spans report, the
+`onevcs:landing_status` rows of the `start`, `adopt`, `readjust`, `results`, `status` and
+`review` tables. *Rough gain:* about 10% of the restack and review modules' `onepipeline` wall,
+and up to 5% of their CPU.
 
 ## Not targets
 
