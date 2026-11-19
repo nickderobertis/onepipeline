@@ -1,17 +1,45 @@
 # Sourced by the shims and by nx-hook.sh; never run. Shared helpers for `just gate-profile`.
 
-# The tool `$1` as it would resolve with this run's shims off PATH. Every shim directory
-# carries the marker, so a profiled run nested inside another skips both runs' shims.
+# The genuine tool `$1` a shim execs. Under `just gate-profile` that is the path run.mjs resolved
+# (real-tools.mjs) when the run started, before any test could change PATH, and handed down as
+# ONEPIPELINE_GATE_PROFILE_REAL_<TOOL>: it is never looked up again. A test that puts its own fake
+# of the tool first on PATH, and whose fake execs the tool it finds behind itself — this shim —
+# then still reaches the genuine tool, where a lookup on the current PATH would find the fake and
+# exec it, and the fake the shim, forever. A resolved path that is a shim, or nothing runnable, is
+# refused rather than exec'd. Only with nothing resolved (a shim run outside `just gate-profile`)
+# is the tool looked up: the first on PATH outside every shim directory, each of which carries the
+# marker, so a profiled run nested inside another skips both runs' shims.
 gate_profile_real_tool() {
-  local dir dirs
+  local variable dir dirs resolved
+  variable=ONEPIPELINE_GATE_PROFILE_REAL_${1^^}
+  variable=${variable//[^A-Z0-9_]/_}
+  resolved=${!variable-}
+  if [ -n "$resolved" ]; then
+    if [[ $resolved != /* ]] || [ ! -x "$resolved" ] || [ -d "$resolved" ] || gate_profile_is_shim "$resolved"; then
+      echo "gate-profile: $variable=$resolved is not the real $1 (an absolute path to it, outside the profiling shims); it is set only by \`just gate-profile\`, so unset it and run that instead" >&2
+      return 1
+    fi
+    printf '%s\n' "$resolved"
+    return 0
+  fi
   IFS=: read -ra dirs <<<"$PATH"
   for dir in "${dirs[@]}"; do
-    [ -n "$dir" ] && [ ! -e "$dir/.gate-profile-shims" ] && [ -x "$dir/$1" ] && [ ! -d "$dir/$1" ] || continue
+    [ -n "$dir" ] && [ -x "$dir/$1" ] && [ ! -d "$dir/$1" ] && ! gate_profile_is_shim "$dir/$1" || continue
     printf '%s\n' "$dir/$1"
     return 0
   done
   echo "gate-profile: no $1 on PATH outside the profiling shims; install it, or run without \`just gate-profile\`" >&2
   return 1
+}
+
+# Whether `$1` is one of the profiling shims: it, or the file it links to, sits in a directory
+# carrying the marker. `$1` is a path with a directory part, as every caller's is.
+gate_profile_is_shim() {
+  local target
+  [ -e "${1%/*}/.gate-profile-shims" ] && return 0
+  [ -L "$1" ] || return 1
+  target=$(readlink -f -- "$1") || return 1
+  [ -e "${target%/*}/.gate-profile-shims" ]
 }
 
 # A JSON string literal of `$1`. Records hold recipe names and argv, so quotes, backslashes and

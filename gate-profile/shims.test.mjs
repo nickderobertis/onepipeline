@@ -15,12 +15,14 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fixtureEnvironment, root } from "./fixture.mjs";
+import { realToolVariable, realTools } from "./real-tools.mjs";
 
 const shims = join(root, "gate-profile", "shims");
 // The level these journeys run at, which may itself be inside an Nx task.
@@ -723,5 +725,142 @@ test("nx.sh's hook profiles a run's own Nx runs and takes itself off nested ones
     });
     assert.equal(status, 0, stderr);
     assert.deepEqual(seen.env, {});
+  });
+});
+
+// A test's own fake of a shimmed tool, first on PATH, that execs the tool it finds behind itself —
+// which, under `just gate-profile`, is the shim — as tests/coverage_cache's cargo wrapper and
+// npm/test/workspace-nx.test.mjs's `just` do. Each runs under a deadline, as a loop is the failure.
+const LOOP_DEADLINE_MS = 20_000;
+
+function fakeInFront(dir, tool) {
+  const fake = join(dir, "fake-bin", tool);
+  write(
+    fake,
+    `#!/usr/bin/env bash\necho "$*" >>"$FAKE_LOG"\nexec "$(PATH="\${PATH#*:}"; command -v ${tool})" "$@"\n`,
+    0o755,
+  );
+  return dirname(fake);
+}
+
+test("a test's fake of a shimmed tool that execs the shim reaches the genuine tool, once", async (t) => {
+  const genuinePath = process.env.PATH.split(":")
+    .filter((d) => d && !existsSync(join(d, ".gate-profile-shims")))
+    .join(":");
+
+  await t.test("cargo: the build is the genuine cargo's, with --timings, and is recorded", (t) => {
+    const dir = scratch(t, "fake-cargo");
+    const run = join(dir, "run");
+    mkdirSync(run);
+    const standin = join(dir, "genuine", "cargo");
+    write(
+      standin,
+      `#!/usr/bin/env node
+require("node:fs").appendFileSync(process.env.STANDIN_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
+`,
+      0o755,
+    );
+    // As `just gate-profile` starts: its shims first, then what the run was started with.
+    const atStart = `${shims}:${dirname(standin)}:${genuinePath}`;
+    const resolved = realTools(atStart);
+    assert.equal(resolved[realToolVariable("cargo")], standin);
+    const fakeLog = join(dir, "fake.log");
+    const standinLog = join(dir, "standin.jsonl");
+    const result = spawnSync("cargo", ["build", "-p", "x"], {
+      cwd: dir,
+      encoding: "utf8",
+      timeout: LOOP_DEADLINE_MS,
+      killSignal: "SIGKILL",
+      env: {
+        ...fixtureEnvironment(),
+        ...resolved,
+        // The test then puts its fake first, in front of the shims.
+        PATH: `${fakeInFront(dir, "cargo")}:${atStart}`,
+        FAKE_LOG: fakeLog,
+        STANDIN_LOG: standinLog,
+        ONEPIPELINE_GATE_PROFILE_DIR: run,
+        ONEPIPELINE_GATE_PROFILE_ROOT: dir,
+        ONEPIPELINE_GATE_PROFILE_RUN: "run-1",
+      },
+    });
+    assert.equal(result.signal, null, "the fake and the shim exec'd each other until the deadline");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(fakeLog, "utf8"), "build -p x\n");
+    assert.deepEqual(lines(standinLog), [["build", "--timings", "-p", "x"]]);
+    assert.deepEqual(
+      lines(join(run, "cargo.jsonl")).map((r) => [r.argv, r.exit]),
+      [[["build", "-p", "x"], 0]],
+    );
+  });
+
+  await t.test(
+    "just: a recipe is run by the genuine just as timed phases, and --dump passes",
+    (t) => {
+      const dir = scratch(t, "fake-just");
+      write(join(dir, "justfile"), JUSTFILE);
+      const run = join(dir, "run");
+      mkdirSync(run);
+      const atStart = `${shims}:${genuinePath}`;
+      const resolved = realTools(atStart);
+      const genuine = spawnSync("bash", ["-c", "command -v just"], {
+        encoding: "utf8",
+        env: { PATH: genuinePath },
+      }).stdout.trim();
+      assert.equal(resolved[realToolVariable("just")], genuine);
+      const fakeLog = join(dir, "fake.log");
+      const env = {
+        ...fixtureEnvironment(),
+        ...resolved,
+        PATH: `${fakeInFront(dir, "just")}:${atStart}`,
+        FAKE_LOG: fakeLog,
+        ONEPIPELINE_GATE_PROFILE_DIR: run,
+        ONEPIPELINE_GATE_PROFILE_TOP: here,
+      };
+      const just = (args) =>
+        spawnSync("just", args, {
+          cwd: dir,
+          encoding: "utf8",
+          timeout: LOOP_DEADLINE_MS,
+          killSignal: "SIGKILL",
+          env,
+        });
+      const top = just(["top"]);
+      assert.equal(top.signal, null, "the fake and the shim exec'd each other until the deadline");
+      assert.equal(top.status, 0, top.stderr);
+      assert.deepEqual(readFileSync(join(dir, "log"), "utf8").trim().split("\n"), [
+        "base",
+        "m",
+        "n",
+        "top",
+      ]);
+      assert.deepEqual(
+        lines(join(run, "phases.jsonl")).map((p) => p.recipe),
+        ["base", "m", "n", "top"],
+      );
+      const dump = just(["--dump", "--dump-format", "json"]);
+      assert.equal(dump.signal, null, "the fake and the shim exec'd each other until the deadline");
+      assert.equal(dump.status, 0, dump.stderr);
+      assert.ok(JSON.parse(dump.stdout).recipes.top);
+      assert.equal(readFileSync(fakeLog, "utf8"), "top\n--dump --dump-format json\n");
+    },
+  );
+
+  await t.test("a resolved tool that is itself a shim is refused, not exec'd into a loop", (t) => {
+    const dir = scratch(t, "resolved-shim");
+    const linked = join(dir, "bin", "cargo");
+    mkdirSync(dirname(linked), { recursive: true });
+    symlinkSync(join(shims, "cargo"), linked);
+    for (const resolved of [join(shims, "cargo"), linked, "cargo", join(dir, "nothing")]) {
+      const result = spawnSync(join(shims, "cargo"), ["metadata"], {
+        cwd: dir,
+        encoding: "utf8",
+        timeout: LOOP_DEADLINE_MS,
+        killSignal: "SIGKILL",
+        env: { ...fixtureEnvironment(), [realToolVariable("cargo")]: resolved },
+      });
+      assert.equal(result.signal, null, resolved);
+      assert.equal(result.status, 127, resolved);
+      assert.match(result.stderr, /is not the real cargo/, resolved);
+    }
   });
 });

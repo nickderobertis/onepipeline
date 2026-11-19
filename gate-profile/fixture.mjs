@@ -147,6 +147,21 @@ unrecordable:
     @mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/cargo.jsonl"
     @bash scripts/nx.sh run crate:build
 
+# Fakes of cargo and just, first on PATH, that exec the tool they find behind themselves — under
+# the profiler, its shims — as some of the real gate's tests wrap them.
+faked:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fakes=$(mktemp -d)
+    trap 'rm -rf "$fakes"' EXIT
+    for tool in cargo just; do
+      printf '#!/usr/bin/env bash\\necho "$0 $*" >>"$FAKED_LOG"\\nexec "$(PATH="\${PATH#*:}"; command -v %s)" "$@"\\n' "$tool" >"$fakes/$tool"
+      chmod +x "$fakes/$tool"
+    done
+    export PATH="$fakes:$PATH"
+    cargo build --locked --quiet --manifest-path crate/Cargo.toml
+    just --dump --dump-format json >/dev/null
+
 # Leaves an invocation record the fold cannot read.
 garbled:
     @mkdir -p "$ONEPIPELINE_GATE_PROFILE_DIR/nx" && echo '{' > "$ONEPIPELINE_GATE_PROFILE_DIR/nx/x.invocation.json"
