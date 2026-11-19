@@ -1537,6 +1537,9 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
         &plan_of("settledgraph", vec![human("approve", &[])]),
     );
     world.run(&["start", &path, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("settledgraph");
 
     world
         .run_with_stdin(

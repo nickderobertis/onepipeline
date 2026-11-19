@@ -1061,6 +1061,9 @@ fn launch_checks_refuse_a_launch_before_any_run_exists_and_adopt_runs_none_of_th
     world.until("the driver to pause on the approval", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
     world.run(&["adopt", &run]).exited(0);
     assert_eq!(
         (

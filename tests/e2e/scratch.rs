@@ -1854,6 +1854,9 @@ fn a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly() {
         ],
     );
     let first = assert_retained(&world, &run, "paused", 1);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so what follows reaches a paused run nothing drives.
+    world.paused_and_ended(&run);
     let before = snapshot(&world.run_file(&run, "scratch"));
     reply(
         &world,
@@ -1873,6 +1876,7 @@ fn a_paused_run_dispatches_added_work_and_records_its_next_pause_freshly() {
     for (path, bytes) in before {
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
+    world.paused_and_ended(&run);
     world.run(&["adopt", &run]).settled();
     assert_eq!(
         world.events_of(&run, "scratch-retained").len(),

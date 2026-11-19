@@ -2075,7 +2075,6 @@ fn start(args: &StartArgs) -> Result<i32> {
         keep_changed,
         redone: continuation.redone.clone(),
         task_digests: crate::taskgraph::task_digests(&read),
-        waits_on_decisions: false,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -2304,28 +2303,24 @@ fn start(args: &StartArgs) -> Result<i32> {
     Ok(settlement.exit_code())
 }
 
-/// Hand a run an attached launch let go of on a decision to the detached driver `--detach`
-/// would have retained, marked on the launch record as one that waits on that decision rather
-/// than letting go of the run: it relaunches the observer graph the launch declared, and drives
-/// the run on once a reply or an attestation reaches its channel.
+/// Hand a run an attached launch or adoption let go of on a decision to the detached driver
+/// `--detach` would have retained, which — as every retained driver does — waits on that decision
+/// rather than letting go of the run: it relaunches the observer graph the launch declared, and
+/// drives the run on once a reply or an attestation reaches its channel.
 ///
-/// Best effort, after the launch's line is printed: a hand-off that fails leaves the run as an
+/// Best effort, after the attached line is printed: a hand-off that fails leaves the run as an
 /// attached launch always has, said on stderr with the adoption that continues it, and changes
 /// neither the line nor the status.
 fn hand_off_to_a_waiting_driver(paths: &RunPaths) {
+    // Retained directly, not through `adopt --detach`'s checks: the driver it would displace is
+    // this process, which has just let go of the run and holds nothing, and reads as live only
+    // because it has not exited yet.
     let handed = (|| -> Result<u32> {
-        {
-            let _lock = engine::claim(paths)?;
-            let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
-            record.waits_on_decisions = true;
-            ledger::write_json(&paths.launch(), &record)?;
-        }
         sys::disown_standard_handles();
-        adopt_detached(
-            paths,
-            &retain_this_executable(paths, Retained::Adopting)?,
-            None,
-        )
+        let mut driver = retain_driver(paths, &retain_this_executable(paths, Retained::Adopting)?)?;
+        let pid = driver.id();
+        confirm_driving(paths, &mut driver)?;
+        Ok(pid)
     })();
     match handed {
         Ok(pid) => eprintln!(
@@ -2646,7 +2641,8 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         std::thread::scope(|scope| {
             let letting_go = watch.letting_go();
             scope.spawn(|| keep_the_run_watched(watched, &mut watch, &driving));
-            let settled = engine::drive_holding(&paths, lock, &letting_go);
+            let settled =
+                engine::drive_holding(&paths, lock, &letting_go, engine::OnDecision::Wait);
             // The departing driver's window, held open where a journey asks: the
             // run is let go of and this watch is still polling beside it.
             if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
@@ -3360,7 +3356,8 @@ fn attach(
     let engine = std::thread::Builder::new()
         .name(format!("engine-{}", paths.run))
         .spawn(move || {
-            let driven = engine::drive_holding(&driving, lock, &letting_go);
+            let driven =
+                engine::drive_holding(&driving, lock, &letting_go, engine::OnDecision::LetGo);
             // The same window as a detached driver's, held where a journey asks:
             // the run is let go of and the loop below is still watching it.
             if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_LET_GO_GATE") {
@@ -3613,7 +3610,13 @@ pub(crate) fn adopt_attached(
     // mid-decision: the fold reconstructs the outstanding decision points from
     // the settlements that produced them, so a subtree that was paused stays
     // paused and is released by the same `attest` it always was.
-    attach(paths, observer.as_mut(), &mut watch, lock, said)
+    let settlement = attach(paths, observer.as_mut(), &mut watch, lock, said)?;
+    // Returned on a decision, as an attached launch returns: the run is handed to a retained
+    // driver that waits on it.
+    if settlement == Settlement::AwaitingPlanner {
+        hand_off_to_a_waiting_driver(paths);
+    }
+    Ok(settlement)
 }
 
 /// The checks every adoption makes before anything is written, and the parked
@@ -5848,7 +5851,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         }
     }
 

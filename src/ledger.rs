@@ -1182,11 +1182,6 @@ pub struct LaunchRecord {
     /// launch can tell a task changed since the node ran. Omitted when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub task_digests: BTreeMap<String, onetaskgraph_core::Sha256Digest>,
-    /// Whether the run's driver waits on an outstanding decision rather than letting go of the
-    /// run: set by an attached launch that returned `awaiting-planner` as it hands its run to
-    /// the detached driver that continues it once the decision is made. Omitted when `false`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub waits_on_decisions: bool,
 }
 
 /// One node a launch redid although its store held it `done`, and why.
@@ -3884,7 +3879,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         }
     }
 
@@ -4827,7 +4821,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4883,7 +4876,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

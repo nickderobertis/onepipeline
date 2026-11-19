@@ -2599,10 +2599,11 @@ fn ends_without_its_home(name: &str, nodes: Vec<Value>, ending: &str) {
     );
     let project = world.plan(name, &plan_of(name, nodes));
     start_from(&world, &launch, &project);
-    world.until("the driver to let go", |world| {
-        !world.events_of(name, "driver-exited").is_empty()
+    // Read as it ended, or paused: a paused run's retained driver waits on its decision rather
+    // than letting go, its close-out already projected.
+    world.until("the run to read as it ended or paused", |world| {
+        world.run(&["status", name]).stdout.contains(ending)
     });
-    world.run(&["status", name]).exited(0).out_has(ending);
     assert!(
         homes_of(&world, name).is_empty(),
         "{:#?}",

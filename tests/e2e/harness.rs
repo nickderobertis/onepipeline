@@ -3332,6 +3332,86 @@ impl World {
     /// `<key>.rendezvous`, which is what sends the double here instead of to a
     /// file hold; [`Rendezvous::arrived`] then blocks until one connects. Called
     /// before the run starts, since a dispatch reads its scripts as it begins.
+    /// Wait until `run` reads `PAUSED`: waiting on a decision with nothing else able to move —
+    /// whether its driver let go there, as an attached launch's does, or, retained, waits on the
+    /// decision there.
+    pub fn until_paused(&self, run: &str) {
+        self.until("the run to pause on its decision", |world| {
+            world.run(&["status", run]).stdout.contains("PAUSED")
+        });
+    }
+
+    /// `start` detached with `args` — the project and any flags but `--detach` — and wait
+    /// until its run has paused on a decision, as [`until_paused`](Self::until_paused) says;
+    /// answers the run id. Its retained driver waits on the decision.
+    pub fn start_paused(&self, args: &[&str]) -> String {
+        let mut argv = vec!["start"];
+        argv.extend_from_slice(args);
+        argv.push("--detach");
+        let started = self.run(&argv);
+        started.exited(0);
+        let run = started.json()["run_id"]
+            .as_str()
+            .expect("a detached launch names its run")
+            .to_owned();
+        self.until_paused(&run);
+        run
+    }
+
+    /// Wait until the driver that continued `run` after its decision has let go of it — the
+    /// run's last driver record is a `driver-exited` newer than every `driver-adopted` — and
+    /// answer the settlement it let go at: what an `adopt` used to print once a decision had been
+    /// made, now that the decision continues the run with nobody adopting it.
+    pub fn until_continued(&self, run: &str) -> String {
+        let mut settlement = String::new();
+        self.until(
+            "the run's driver to carry it on past its decision",
+            |world| {
+                let last = world.journal(run).into_iter().rev().find(|event| {
+                    event["kind"] == "driver-exited" || event["kind"] == "driver-adopted"
+                });
+                match last {
+                    Some(event)
+                        if event["kind"] == "driver-exited"
+                            && event["payload"]["settlement"] != "awaiting-planner" =>
+                    {
+                        settlement = event["payload"]["settlement"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        true
+                    }
+                    _ => false,
+                }
+            },
+        );
+        settlement
+    }
+
+    /// Wait until `run` has paused on its decision, then end the driver waiting on it, as a
+    /// crash or a host going down would: the run paused with nothing driving it, which a
+    /// decision no longer continues and only an `adopt` takes up — the run an adoption journey
+    /// adopts.
+    pub fn paused_and_ended(&self, run: &str) {
+        self.until_paused(run);
+        // A driver a hand-off retained holds the run's lock before it names itself on the
+        // launch record: ended only once the record names the live process holding the lock.
+        self.until("the run's record to name the driver holding it", |world| {
+            let launch = world.run_json(run, "launch.json");
+            let pid = launch["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok());
+            let lock = std::fs::read_to_string(world.run_file(run, "owner.lock"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            pid.is_some_and(|pid| {
+                lock.as_ref().and_then(|lock| lock["pid"].as_u64()) == Some(u64::from(pid))
+                    && start_stamp(pid).as_deref() == launch["started"].as_str()
+            })
+        });
+        end_driver(self, run);
+    }
+
     pub fn rendezvous(&self, key: &str) -> Rendezvous {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
         let address = listener.local_addr().expect("the listener has an address");

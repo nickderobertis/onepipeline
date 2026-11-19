@@ -13804,13 +13804,21 @@ the change one of them makes to an approved paragraph.
   one the launch can promise.
 - **The launch config's `keep_changed` arrives at schema version 15**, a boolean refused by its
   name in a document declaring an earlier version; `tests/golden/launch-config-v15.json` pins it.
-- **The paused attached launch's hand-off is an adoption.** The detached driver it retains is
-  started as `adopt --detach` starts one, and journals `driver-adopted`; it relaunches the
-  observer graph the launch declared, as any adoption does. The launch record gains
-  `waits_on_decisions: true` (omitted when false), which is what tells that driver to wait on
-  the decision rather than let go. Only an attached `start` hands off: a detached launch's
-  driver, and an adoption's, let go on a decision as before, so `start --detach` followed by
-  `watch --until settled` reports a paused run's ending at once.
+- **A retained driver waits on a decision; an attached one hands off** (manager ruling `a4`).
+  Whether a driver lets go on a decision is decided by how it runs, and recorded nowhere:
+  the driver `--detach` retains — for `start` or `adopt` — waits, polling the run's channel's
+  fingerprint as the reconcile loop's own wait does, and an attached `start` or `adopt`, whose
+  process returns to its caller, lets go and hands the run to such a driver, started as
+  `adopt --detach` starts one and journalling `driver-adopted`. An explicit `readjust` trigger
+  driving in-process lets go as before. A run whose driver waits reads `PAUSED`, with the advice
+  a paused run is given, while `driven` stays `true`.
+- **This is a breaking change for a script that adopts a run after deciding it.** Before it,
+  `start` → `awaiting-planner` → `attest` (or `reply`) → `adopt` was how a decided run moved on;
+  from this build the decision moves it, and the `adopt` that follows is refused as `still being
+  driven` while the continuing driver works, or adopts a run that has since settled. A run
+  waiting on its decision with no driver — one whose waiting driver was stopped, or died — is
+  adopted exactly as before. The run-end hook a pause used to journal as withheld is journalled
+  only by a driver that lets go there: an attached one.
 - **The driver's three planning-run exits had one cause.** The loop applied the command queue's
   last claims as it was letting go — after `converge` had returned — and then let go whatever
   those edits had readied, journalling `unattended`. It now goes back to driving whenever an

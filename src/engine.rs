@@ -1104,10 +1104,22 @@ pub fn drive_holding(
     paths: &RunPaths,
     lock: OwnershipLock,
     letting_go: &dyn Fn(),
+    on_decision: OnDecision,
 ) -> Result<Driven> {
     exiting_from(paths, lock, letting_go, |paths, held, answered_from| {
-        driving(paths, held, answered_from, None, letting_go)
+        driving(paths, held, answered_from, None, letting_go, on_decision)
     })
+}
+
+/// What a driver does once its run waits on a decision with nothing else able to move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDecision {
+    /// Let go of the run, settling `awaiting-planner`: an attached launch or adoption, whose
+    /// process returns to its caller there, and an explicit trigger driving in-process.
+    LetGo,
+    /// Wait on the decision, running no pass, and drive on once a reply or an attestation
+    /// reaches the run's channel: a retained driver, which nothing waits for to return.
+    Wait,
 }
 
 /// [`drive_holding`], for an explicit trigger that already made its readjustment's read
@@ -1118,7 +1130,14 @@ pub(crate) fn drive_after_readjust(
     readjuster: crate::readjust::Readjuster,
 ) -> Result<Driven> {
     exiting_from(paths, lock, &|| {}, |paths, held, answered_from| {
-        driving(paths, held, answered_from, Some(readjuster), &|| {})
+        driving(
+            paths,
+            held,
+            answered_from,
+            Some(readjuster),
+            &|| {},
+            OnDecision::LetGo,
+        )
     })
 }
 
@@ -1206,6 +1225,7 @@ fn driving(
     answered_from: usize,
     readjuster: Option<crate::readjust::Readjuster>,
     letting_go: &dyn Fn(),
+    on_decision: OnDecision,
 ) -> Result<Driven> {
     let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
     // llmlint: ignore-block[boundary_inputs_validated] graph-reference syntax and
@@ -1295,12 +1315,23 @@ fn driving(
             }
             outcome = graph::state_of(&state.statuses());
             record_result(paths, &state, outcome)?;
+            // The human gate's last pass over what the edit left, as after any drive: an
+            // edit that ended the run — a `drop` of its last waiting step — retires its items.
+            if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
+                let statuses = state.statuses();
+                gate.pass(paths, &mut journal, &state, &statuses);
+                if outcome != GraphState::Waiting {
+                    gate.run_ended();
+                }
+            }
         }
         let settlement = crate::driver::settled(&state, paths);
-        // A driver an attached launch handed its run to waits on the decision rather than
-        // letting go: the reply or attestation that makes it moves the channel, and the next
-        // turn of this loop applies it and drives on.
-        if settlement == crate::driver::Settlement::AwaitingPlanner && launch.waits_on_decisions {
+        // A retained driver waits on the decision rather than letting go: the reply or
+        // attestation that makes it moves the channel, and the next turn of this loop applies
+        // it and drives on.
+        if settlement == crate::driver::Settlement::AwaitingPlanner
+            && on_decision == OnDecision::Wait
+        {
             await_channel(&channel);
             continue;
         }
@@ -16923,7 +16954,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         }
     }
 

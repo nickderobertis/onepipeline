@@ -318,13 +318,10 @@ fn a_driver_that_pauses_on_a_waiting_human_node_records_awaiting_planner() {
     // The launch handed its paused run to a driver that waits on the decision, which the
     // record now names in place of the launcher whose exit is recorded.
     assert_ne!(exited["payload"]["pid"], handed_to);
-    assert_eq!(
-        world.run_json(run, "launch.json")["waits_on_decisions"],
-        json!(true)
-    );
     world
         .run(&["status", run])
         .exited(0)
+        .out_has("PAUSED")
         .out_has("driver: live, adopted");
 }
 
@@ -1726,6 +1723,7 @@ fn readings(world: &World, run: &str) -> Vec<String> {
         .lines()
         .filter(|line| {
             !line.contains("driver exited")
+                && !line.trim_start().starts_with("driver:")
                 && !line.contains("free space")
                 && !line.contains("providers:")
         })
@@ -1760,32 +1758,16 @@ fn readings(world: &World, run: &str) -> Vec<String> {
 fn a_run_reads_the_same_with_its_driver_exit_as_without_it() {
     let world = hooked_world("exit-inert");
     let run = "inert";
-    // Detached, so the run rests with nothing driving it: an attached launch hands a paused
-    // run to a driver that waits on the decision, whose live line `status` would print.
-    let path = world.plan(
+    start_attached(
+        &world,
         run,
-        &plan_of(run, vec![agent("build", &[]), human("approve", &[])]),
-    );
-    let hook = hook(&world);
-    world
-        .run_from(
-            &world.project,
-            &[
-                "start",
-                &path,
-                "--detach",
-                "--success-hook",
-                &hook,
-                "--failure-hook",
-                &hook,
-                "--hook-timeout",
-                HOOK_TIMEOUT,
-            ],
-        )
-        .exited(0);
-    world.until("the driver to pause on the approval", |world| {
-        !world.events_of(run, "driver-exited").is_empty()
-    });
+        vec![agent("build", &[]), human("approve", &[])],
+    )
+    .exited(0)
+    .out_has("\"settlement\":\"awaiting-planner\"");
+    // The run rests with nothing driving it: the driver the paused launch handed it to is
+    // ended, as a host going down would end it.
+    crate::harness::end_driver(&world, run);
     // A second run that writes after this one, so the listing has an order that
     // when each run last wrote decides.
     start_attached(&world, "later", vec![agent("ship", &[])])
@@ -2152,8 +2134,10 @@ fn watched_until_settled(world: &World, run: &str) -> (String, i32) {
 
 /// A run launched attached that returns `awaiting-planner` keeps moving once its decision is
 /// made — a blocking question answered over its channel, a human action attested — from
-/// another process, with nobody adopting it; `watch --until settled` armed after the answer
-/// returns the run's ending, as it does at once when armed after the run has already ended.
+/// another process, with nobody adopting it, and so does a detached one, whose driver waits on
+/// the decision; an adoption after the decision is refused as the run being driven.
+/// `watch --until settled` armed after the answer returns the run's ending, as it does at once
+/// when armed after the run has already ended.
 #[cfg(unix)]
 #[test]
 fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
@@ -2219,6 +2203,8 @@ fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
             ("settled".to_owned(), 0),
             "{run} did not settle once its decision was made"
         );
+        // The graph reads complete a moment before its driver records how it let go.
+        assert_eq!(world.until_continued(run), "complete", "{run}");
         assert!(
             world
                 .events_of(run, "command-started")
@@ -2248,16 +2234,53 @@ fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
         assert!(began.elapsed() < Duration::from_secs(60), "{run}");
     }
 
-    // A run that ended without completing answers the same watch at once with that ending:
-    // a detached run paused on a person, which nothing waits on, is a blocking decision.
-    let paused = "paused-detached";
-    let path = world.plan(paused, &plan_of(paused, vec![human("approve", &[])]));
-    world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the detached run to pause", |world| {
-        !world.events_of(paused, "driver-exited").is_empty()
-    });
-    assert_eq!(
-        watched_until_settled(&world, paused),
-        ("surface-waiting".to_owned(), 4)
+    // A detached launch's driver waits on its decision too: the run reads `PAUSED` with that
+    // driver live, and the attestation alone continues it. While the continued run is still
+    // working, an adoption is refused as the run being driven.
+    let detached = "detached-approval";
+    let held = world.rendezvous("held");
+    let path = world.plan(
+        detached,
+        &plan_of(
+            detached,
+            vec![human("approve", &[]), agent("held", &["approve"])],
+        ),
     );
+    world.start_paused(&[path.as_str()]);
+    assert!(
+        world.events_of(detached, "driver-exited").is_empty(),
+        "the detached driver let go of its run on the decision"
+    );
+    world.run(&["attest", detached, "approve"]).exited(0);
+    let working = held.arrived();
+    world
+        .run(&["adopt", detached])
+        .exited(2)
+        .err_has("still being driven");
+    drop(working);
+    world.unscript("held.rendezvous");
+    assert_eq!(
+        watched_until_settled(&world, detached),
+        ("settled".to_owned(), 0)
+    );
+    assert!(world.events_of(detached, "driver-adopted").is_empty());
+
+    // A run that ended without completing answers the same watch at once with that ending:
+    // one whose node failed, which its driver let go of with nothing it could move.
+    let failed = "failed-detached";
+    let broken = crate::harness::posix_script(&world.root, "broken.sh", "exit 1");
+    let path = world.plan(
+        failed,
+        &plan_of(failed, vec![command_node("broken", &broken)]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the failed run's driver to let go", |world| {
+        !world.events_of(failed, "driver-exited").is_empty()
+    });
+    let began = Instant::now();
+    assert_eq!(
+        watched_until_settled(&world, failed),
+        ("nothing-driving".to_owned(), 3)
+    );
+    assert!(began.elapsed() < Duration::from_secs(60));
 }

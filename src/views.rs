@@ -579,7 +579,8 @@ fn waiting_nodes(statuses: &BTreeMap<String, NodeStatus>) -> Vec<String> {
         .collect()
 }
 
-/// What a run nothing drives has reached: an ending, a pause, or neither.
+/// What a run has reached: an ending — only once nothing drives it — a pause on a decision,
+/// whether its driver let go there or, retained, waits there on it, or neither.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Reached {
     /// It ended, this way.
@@ -608,13 +609,18 @@ impl Reached {
         decision_outstanding: impl FnOnce() -> bool,
         decision: impl FnOnce() -> Paused,
     ) -> Self {
-        if driven {
-            return Self::Neither;
-        }
         let verdict = crate::hooks::verdict(present, decision_outstanding);
         let movable = present.iter().any(|status| {
             matches!(status, NodeStatus::Ready | NodeStatus::Running) || status.awaits_release()
         });
+        // A driven run has not ended, and is paused exactly where its driver has nothing to do
+        // but wait on the decision: a retained driver waits there rather than letting go.
+        if driven {
+            return match verdict {
+                crate::hooks::Verdict::Paused if !movable => Self::Paused(decision()),
+                _ => Self::Neither,
+            };
+        }
         match verdict {
             crate::hooks::Verdict::Success => Self::Ended(EndingKind::Complete),
             _ if stop_recorded => Self::Ended(crate::hooks::ReasonKind::Stopped.ending()),
@@ -2829,16 +2835,20 @@ impl Standing {
     ///
     /// `None` for a run something drives, and for one that ended: its ending is
     /// its whole reading, and a driver attached to it settles it again having
-    /// moved nothing. A paused run needs its decision settled, and is told how.
+    /// moved nothing. A paused run needs its decision settled, and is told how —
+    /// whether nothing drives it or a retained driver waits on that decision.
     /// What is left is a run whose driver went while it had work it could still
     /// move — the run `adopt` exists for.
     ///
-    /// The one driven run given advice is one whose word is `PARKED`: its live
+    /// The other driven run given advice is one whose word is `PARKED`: its live
     /// driver has gone quiet, and the operator is told so and how to end it if it
     /// is wedged. One that settled while quiet reads `SETTLED`, and needs nothing.
     fn intervention(&self) -> Option<Intervention<'_>> {
         if self.word() == DriverLiveness::Parked.as_str() {
             return Some(Intervention::Quiet(self.quiet));
+        }
+        if let Reached::Paused(decision) = &self.reached {
+            return Some(Intervention::Decide(decision));
         }
         if !self.liveness.is_undriven() {
             return None;
@@ -7272,7 +7282,6 @@ mod tests {
             keep_changed: false,
             redone: Vec::new(),
             task_digests: std::collections::BTreeMap::new(),
-            waits_on_decisions: false,
         }
     }
 

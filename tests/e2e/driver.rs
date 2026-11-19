@@ -175,6 +175,9 @@ fn the_launched_graphs_task_names_the_run_and_its_goal_at_start_and_at_adoption(
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
     // Counted with that driver gone, so what follows is the adoption's own.
     let before = dag_launch_tasks(&world).len();
     // A run parked on a person is *awaiting the planner*, not abandoned: the
@@ -1184,6 +1187,9 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
 
     // Waiting on a person, so its word is `PAUSED` and its advice is the action;
     // the verdict on its driver is still `DRIVER DEAD`.
@@ -1205,9 +1211,10 @@ fn a_dead_driver_reads_as_driver_dead_and_adopt_is_the_way_back() {
         .count();
     let adopted = world.run(&["adopt", &run]);
     adopted.exited(0);
+    // The adoption, and — returning on the decision — its hand-off to a driver that waits on it.
     let adoptions = world.events_of(&run, "driver-adopted");
-    assert_eq!(adoptions.len(), 1, "{adoptions:?}");
-    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
+    assert_eq!(adoptions.len(), 2, "{adoptions:?}");
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 2);
     // The dead driver's evidence moves aside rather than being truncated.
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
     let launches = world.invocations();
@@ -1390,14 +1397,19 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     // binary. `dispatch::broken_launch_records_refuse_the_adoption_before_direct_or_lifecycle_dispatch`
     // arranges the neighbouring fault the same way.
     let world = World::new("driver-adopt-detached-refused");
+    // Its one node fails, leaving its driver nothing it can move, and it lets go.
+    world.script("broken.fail", "1");
     let (run, driver) =
-        start_detached_announcing(&world, "half-written", vec![human("approve", &[])]);
+        start_detached_announcing(&world, "half-written", vec![agent("broken", &[])]);
     world.until("the driver to let go of the run", |world| {
-        world.run(&["status", &run]).stdout.contains("PAUSED")
+        world
+            .run(&["status", &run, "--json"])
+            .stdout
+            .contains("\"driven\":false")
     });
     let died = world.run_json(&run, "launch.json")["pid"].clone();
     assert_eq!(died, json!(driver));
-    // `PAUSED` is read once the driver has released the lock this journey is
+    // Undriven is read once the driver has released the lock this journey is
     // about to break; it waits for the process too, so nothing the driver does
     // on its way out lands after the break.
     world.until("the driver to exit", |_| {
@@ -1431,7 +1443,10 @@ fn a_detached_adoption_whose_driver_dies_is_refused_with_what_that_driver_said()
     );
     assert_eq!(record["adoptions"], json!(0));
     assert!(
-        world.run(&["status", &run]).stdout.contains("PAUSED"),
+        world
+            .run(&["status", &run, "--json"])
+            .stdout
+            .contains("\"driven\":false"),
         "a run whose adoption was refused is not reported as one nothing is driving:\n{}",
         world.dump()
     );
@@ -1449,6 +1464,9 @@ fn a_detached_adoption_reports_an_observer_that_refuses_to_relaunch() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
     let mut record = world.run_json(&run, "launch.json");
     record["dir"] = json!(world.run_file(&run, "missing-observer-directory"));
     std::fs::write(world.run_file(&run, "launch.json"), record.to_string())
@@ -1494,6 +1512,8 @@ fn paused_and_observed(world: &World, name: &str) -> (String, Identity) {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it.
+    crate::harness::end_driver(world, &run);
     let displaced = identity_in(&world.run_json(&run, "launch.json"));
     (run, displaced)
 }
@@ -1511,7 +1531,9 @@ fn paused_and_observed(world: &World, name: &str) -> (String, Identity) {
 fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
     let world = World::new("driver-let-go-once-released");
     let run = "releasing";
-    let path = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+    // Its one node fails, leaving its driver nothing it can move: it lets go of the run.
+    world.script("build.fail", "1");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
     // driver between its last record and its release, which no user-facing input can place.
     // The launch, the run, every reading of it and the adoption are the real CLI's own.
@@ -1532,8 +1554,8 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
     let status = world.run(&["status", run, "--json"]);
     status.exited(0).out_has("\"driven\":true");
     assert!(
-        !status.stdout.contains("PAUSED"),
-        "the run read PAUSED while its driver held its lock:\n{}",
+        !status.stdout.contains("ENDED"),
+        "the run read as ended while its driver held its lock:\n{}",
         status.stdout
     );
     world
@@ -1550,7 +1572,7 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
     // Released, it is let go of — while the driver is still running, on its way out.
     held.release();
     world.until("the driver to release the run", |world| {
-        world.run(&["status", run]).stdout.contains("PAUSED")
+        world.run(&["status", run]).stdout.contains("ENDED")
     });
     world
         .run(&["status", run, "--json"])
@@ -1833,13 +1855,17 @@ fn a_restart_finishing_after_its_driver_let_go_writes_nothing_to_the_run() {
     let (held, dispatch) = a_restart_held_inside_its_launch(
         &world,
         "let-go-restart",
-        vec![agent("build", &[]), human("approve", &[])],
+        vec![agent("build", &[]), agent("after", &["build"])],
     );
     let run = held.run.clone();
-    // The run pauses on its human node, and its driver lets go of it.
+    // The run's last node fails, leaving its driver nothing it can move, and it lets go.
+    world.script("after.fail", "1");
     dispatch.release();
     world.until("the driver to let go of the run", |world| {
-        world.run(&["status", &run]).stdout.contains("PAUSED")
+        world
+            .run(&["status", &run, "--json"])
+            .stdout
+            .contains("\"driven\":false")
     });
     the_departed_driver_writes_nothing(&world, held);
 
@@ -2209,6 +2235,9 @@ fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved(
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
     std::fs::create_dir(world.run_file(&run, "launch.pre-adopt-1.json"))
         .expect("the backup destination is occupied by a directory");
 
@@ -2235,6 +2264,9 @@ fn adopt_takes_the_attach_detach_pair_start_takes() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
 
     let both = world.run(&["adopt", &run, "--attach", "--detach"]);
     assert_eq!(
@@ -2249,11 +2281,16 @@ fn adopt_takes_the_attach_detach_pair_start_takes() {
     // bare verb records is recorded by it.
     let adopted = world.run(&["adopt", &run, "--attach"]);
     adopted.exited(0);
-    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
-    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(1));
+    // The attached adoption returns on the decision and hands the run to a driver that waits on
+    // it: a second adoption.
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 2);
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], json!(2));
     assert!(world.run_file(&run, "launch.pre-adopt-1.json").exists());
-    assert!(
-        !world.run_file(&run, "owner.lock").exists(),
+    // The lock is the driver's it handed the run to, never the returned adoption's own.
+    let last = world.events_of(&run, "driver-adopted");
+    assert_eq!(
+        world.run_json(&run, "owner.lock")["pid"],
+        last[last.len() - 1]["payload"]["pid"],
         "an attached adoption returned still holding the run's lock"
     );
 }
@@ -2297,6 +2334,9 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
 
     // Somewhere else entirely, which is the ordinary case: an operator adopts a
     // run from whatever shell noticed it was undriven.
@@ -2305,7 +2345,9 @@ fn start_and_adopt_give_the_sibling_the_same_directory_for_one_run() {
     let mut adopt = world.cmd(&["adopt", &run]);
     adopt.current_dir(&adopted_from);
     world.run_on(adopt, "adopt relocated").exited(0);
-    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    // The attached adoption returns on the decision and hands the run to a driver that waits on
+    // it: a second adoption.
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 2);
 
     let dirs = dag_launch_dirs(&world);
     // At least the two this journey is about — one from `start`, one from
@@ -2585,16 +2627,11 @@ fn leaves_the_record_to_the_adoption(
 fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     let world = World::new("driver-legacy-dir");
     let run = start_detached_observed(&world, "legacy", vec![human("approve", &[])]);
-    // Let go of, not merely paused: the run reads `PAUSED` while its driver still
-    // holds it, and that driver's observer watch writes the record on each
-    // restart — `dir` included — so a rewrite made then can be written over. Once
-    // the run is undriven the driver has let go, and writes it no more.
-    world.until("the driver to let go of the run", |world| {
-        world
-            .run(&["status", &run, "--json"])
-            .stdout
-            .contains("\"driven\":false")
-    });
+    // Undriven, not merely paused: the run reads `PAUSED` while its driver waits on the
+    // decision, and that driver's observer watch writes the record on each restart — `dir`
+    // included — so a rewrite made then can be written over. The waiting driver is ended, as a
+    // host going down would end it, and nothing writes the record any more.
+    world.paused_and_ended(&run);
 
     let rewrite = |record: &mut serde_json::Value| {
         let path = world.run_file(&run, "launch.json");
@@ -2634,6 +2671,9 @@ fn a_launch_record_without_a_directory_is_replayed_from_the_adopting_process() {
     // reads as absolute here and relative there reaches a different guard on
     // each and proves neither. `/no/such/place/here` is exactly that — absolute
     // on Unix, and relative on Windows, where an absolute path carries a drive.
+    // The adoption above returned on the decision and handed the run to a driver that waits on
+    // it; that driver is ended, so each adoption below is refused for its record alone.
+    world.paused_and_ended(&run);
     let occupied = world.root.join("not-a-directory");
     std::fs::write(
         &occupied,
@@ -2672,6 +2712,9 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
 
     let mut record = world.run_json(&run, "launch.json");
     record["project"] = json!("legacy-project");
@@ -2679,8 +2722,10 @@ fn a_legacy_unqualified_project_does_not_prevent_adoption() {
         .expect("the legacy launch record is rewritten");
 
     world.run(&["adopt", &run]).exited(0);
-    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 1);
-    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    // The attached adoption returns on the decision and hands the run to a driver that waits on
+    // it: a second adoption.
+    assert_eq!(world.run_json(&run, "launch.json")["adoptions"], 2);
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 2);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
@@ -5185,6 +5230,9 @@ fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
     world.until("the driver to exit", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
 
     // The stranger the host handed the pid to: a real process, started by this
     // test after the driver exited, so it is one this host describes
@@ -5239,7 +5287,9 @@ fn a_pid_the_host_has_given_to_another_process_is_never_read_as_the_driver() {
         .exited(0)
         .err_lacks("still being driven")
         .err_lacks("ending it to adopt the run");
-    assert_eq!(world.events_of(&run, "driver-adopted").len(), 1);
+    // The attached adoption returns on the decision and hands the run to a driver that waits on
+    // it: a second adoption.
+    assert_eq!(world.events_of(&run, "driver-adopted").len(), 2);
     stranger.kill().expect("this test ends its own process");
     stranger.wait().expect("it is reaped");
 }
@@ -6874,15 +6924,10 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
             vec![human("approve", &[]), agent("build", &["approve"])],
         ),
     );
-    // Detached, so the pause leaves nothing driving the run: an attached launch hands a
-    // paused run to a driver that waits on the decision, which would apply the attestation.
-    world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the driver to pause on the approval", |world| {
-        world
-            .run(&["status", "askableadopted"])
-            .stdout
-            .contains("PAUSED")
-    });
+    world.run(&["start", &path, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: the attestation then leaves work to do and nobody driving it, for the adoption.
+    world.paused_and_ended("askableadopted");
     world
         .run(&["attest", "askableadopted", "approve"])
         .exited(0);

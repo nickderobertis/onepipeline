@@ -680,9 +680,8 @@ fn a_human_step_holds_the_workstream_rather_than_being_inferred() {
     assert_eq!(pending[0]["payload"]["kind"], "attestation");
 
     world.run(&["attest", &run, "service"]).exited(0);
-    // The run had settled on the decision, so a fresh driver picks it up — and
-    // finds the action recorded, which is what releases it.
-    world.run(&["adopt", &run]).exited(0);
+    // The driver waiting on the decision finds the action recorded, which is what releases it.
+    world.until_continued(&run);
     let cleared = world.events_of(&run, "decision-cleared");
     assert_eq!(cleared.len(), 1, "{cleared:?}");
     assert_eq!(cleared[0]["payload"]["reference"], "service");
@@ -4112,7 +4111,9 @@ fn a_conflict_the_worker_never_concludes_spends_the_budget_and_then_asks() {
             .to_string(),
         )
         .exited(0);
-    world.run(&["adopt", &run]).exited(0);
+    // The decision continues the run: the driver waiting on it drives it on, with nobody
+    // adopting it.
+    world.until_continued(&run);
     let replaced = world
         .events_of(&run, "node-settled")
         .into_iter()
@@ -7210,10 +7211,10 @@ fn a_change_that_merges_before_the_run_settles_is_read_again_and_reported_landed
         "{reported}"
     );
 
-    // The person answers the gate, and a fresh driver closes the run out — which
-    // is where the landing is asked about again.
+    // The person answers the gate, and the driver waiting on it closes the run out — which is
+    // where the landing is asked about again.
     world.run(&["attest", run, "approve"]).exited(0);
-    world.run(&["adopt", run]).settled();
+    world.until_continued(run);
 
     let closed = landing_of(&world);
     assert_eq!(

@@ -118,7 +118,9 @@ fn a_human_node_raises_one_item_and_completing_it_releases_only_its_branch() {
     let detail: Value = serde_json::from_str(&detail.stdout).unwrap();
     assert_eq!(detail["nodes"].as_array().unwrap().len(), 2);
 
-    // Adopting again reads the same eligible node: still one item.
+    // Adopting again reads the same eligible node: still one item. The driver waiting on the
+    // decision is ended first, as a host going down would end it, so there is a run to adopt.
+    world.paused_and_ended(name);
     world.run(&["adopt", name]).exited(0);
     assert_eq!(items(&world, &[]).len(), 1);
 
@@ -126,7 +128,7 @@ fn a_human_node_raises_one_item_and_completing_it_releases_only_its_branch() {
     world
         .run(&["human-items", "complete", &id_of(item)])
         .exited(0);
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "build").as_deref(), Some("done"));
     assert_eq!(settled(&world, name, "ship").as_deref(), Some("done"));
     assert_eq!(
@@ -163,7 +165,7 @@ fn dismissing_a_human_items_step_detaches_its_dependents_with_or_without_a_reaso
             dismiss.extend(["--reason", reason]);
         }
         world.run(&dismiss).exited(0);
-        world.run(&["adopt", name]).exited(0);
+        world.until_continued(name);
         // The step was dropped, its dependent detached and run: the run did not fail.
         assert_eq!(settled(&world, name, "build").as_deref(), Some("done"));
         let drop = world
@@ -690,7 +692,7 @@ fn a_settled_run_dismisses_only_its_open_holds_and_tells_only_its_owner() {
     watch(&world, owner);
     watch(&world, "someone-else");
     world.run(&["human-items", "complete", &gate]).exited(0);
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "b").as_deref(), Some("done"));
     let retired = state_of(&world, &hold);
     assert_eq!(retired["state"], "dismissed");
@@ -812,8 +814,12 @@ fn plan_store_launches_raise_one_item_per_human_node_from_its_priority_or_metada
         ),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
-    world.run(&["adopt", name]).exited(0);
-    world.run(&["adopt", name]).exited(0);
+    // Two more drivers read the same eligible nodes, each adopting the run once the driver
+    // waiting on its decisions is ended, as a host going down would end it.
+    for _ in 0..2 {
+        world.paused_and_ended(name);
+        world.run(&["adopt", name]).exited(0);
+    }
     let open = items(&world, &[]);
     assert_eq!(
         open.len(),
@@ -869,7 +875,7 @@ fn plan_store_launches_raise_one_item_per_human_node_from_its_priority_or_metada
             ])
             .exited(0);
     }
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
 }
 
@@ -984,6 +990,9 @@ fn a_dispatch_refused_for_space_raises_one_host_item_that_its_probe_resolves() {
         ),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: the adoption below is what dispatches into the full scratch.
+    world.paused_and_ended(name);
     let gate = id_of(&items(&world, &[])[0]);
     world.run(&["human-items", "complete", &gate]).exited(0);
     let scratch = world.runs.join(name).join("scratch");
@@ -1433,6 +1442,9 @@ fn a_run_its_planner_ends_retires_its_holds_with_the_run_ended() {
             &json!({"version": 3, "commands": [{"op": "drop", "id": "gate", "dependents": "drop", "reason": "Superseded by another plan"}]}).to_string(),
         )
         .exited(0);
+    // The drop ends the run: the driver waiting on its decision applies it and closes the run
+    // out, which is what resolves its holds.
+    world.until_continued(name);
     for id in [&gate, &plan] {
         let item = state_of(&world, id);
         assert_eq!(item["state"], "dismissed", "{item}");
@@ -1588,7 +1600,7 @@ fn a_step_settled_outside_its_item_resolves_the_item() {
     world.run(&["start", &project, "--attach"]).exited(0);
     let gate = id_of(&items(&world, &[])[0]);
     world.run(&["attest", name, "gate"]).exited(0);
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "b").as_deref(), Some("done"));
     let item = state_of(&world, &gate);
     assert_eq!(item["state"], "dismissed", "{item}");
@@ -2253,6 +2265,9 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
         &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
     );
     let started = world.run(&["start", &project, "--attach"]);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(name);
     std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
     started
         .exited(0)
@@ -2260,6 +2275,9 @@ fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
     assert!(items(&world, &[]).is_empty());
     assert!(!dispatched(&world, name).contains(&"b".to_owned()));
     world.run(&["adopt", name]).exited(0);
+    // The adoption above returned on the decision and handed the run to a driver that waits on
+    // it; that driver is ended, as a host going down would end it, so nothing drives the run.
+    world.paused_and_ended(name);
     world.run(&["adopt", name]).exited(0);
     let open = items(&world, &[]);
     assert_eq!(open.len(), 1, "{open:?}");
@@ -3059,6 +3077,9 @@ fn a_refused_surface_stays_owed_and_an_ended_run_or_engine_resolution_surfaces_n
         &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: what surfaces on a run nothing drives is what this journey reads.
+    world.paused_and_ended(name);
     let held = raise(
         &world,
         "held",
@@ -3145,6 +3166,9 @@ fn an_event_its_writer_could_not_carry_is_carried_by_the_next_driver() {
         &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(name);
     let id = raise(
         &world,
         "item",
@@ -3702,7 +3726,7 @@ fn a_batch_answer_releases_the_human_step_it_stands_for() {
         &json!({"answers": [{"id": id, "text": "That way."}]}),
     );
     run.exited(0);
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
     assert_eq!(
         world
@@ -3950,6 +3974,9 @@ fn an_auto_resolved_items_last_history_entry_is_the_engines_own() {
             .to_string(),
         )
         .exited(0);
+    // The drop ends the run: the driver waiting on its decision applies it and closes the run
+    // out, which is what resolves its holds.
+    world.until_continued(name);
     assert_eq!(state_of(&world, &plan)["state"], "dismissed");
     let last = history_of(&world, &plan).pop().expect("a history");
     assert_eq!(last["action"], "human-item-auto-resolved", "{last}");
@@ -4131,7 +4158,7 @@ fn an_attested_steps_record_says_who_resolved_its_item_and_what_they_said() {
     let sign = id("sign");
     as_person(&["human-items", "complete", &sign]);
     world.run(&["attest", name, "plain"]).exited(0);
-    world.run(&["adopt", name]).exited(0);
+    world.until_continued(name);
     assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
 
     let answered = attested(&world, name, "rollout");

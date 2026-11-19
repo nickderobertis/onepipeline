@@ -279,6 +279,9 @@ fn a_dispatch_over_unreadable_records_is_refused_by_its_open_and_the_read_before
             ),
         );
         world.run(&["start", &path, "--attach"]).exited(0);
+        // The driver the paused launch handed its run to is ended, as a host going down
+        // would end it: the run waits on its decision with nothing driving it, for an adoption.
+        world.paused_and_ended(&name);
         world.run(&["attest", &name, "approve"]).exited(0);
 
         break_records(&world, which);
