@@ -477,3 +477,40 @@ test("Nx runs a recipe starts at once are alternatives on the critical path, not
   assert.equal(path.wall_s, 7);
   assert.ok(path.wall_s <= path.run_wall_s);
 });
+
+test("a run of any length folds under node's default stack, its load range from every sample", (t) => {
+  const dir = handMadeRun(t);
+  const path = join(dir, "processes.json");
+  const sampled = JSON.parse(readFileSync(path, "utf8"));
+  // A long gate sampled every 100ms leaves hundreds of thousands of load samples.
+  const from = sampled.loads[0][0];
+  const span = sampled.loads[1][0] - from;
+  const count = 300_000;
+  sampled.loads = Array.from({ length: count }, (_, i) => [from + (span * i) / count, 2 + (i % 7)]);
+  sampled.loads[123_456][1] = 0.25;
+  sampled.loads[234_567][1] = 31.5;
+  writeFileSync(path, JSON.stringify(sampled));
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  const result = spawnSync(process.execPath, [foldScript, dir], { encoding: "utf8", env });
+  assert.equal(result.status, 0, result.stderr);
+  const { run } = JSON.parse(readFileSync(join(dir, "report.json"), "utf8"));
+  assert.equal(run.load_min, 0.25);
+  assert.equal(run.load_max, 31.5);
+});
+
+test("a long run's load samples that are all malformed are refused, not overflowed on", (t) => {
+  const dir = handMadeRun(t);
+  const path = join(dir, "processes.json");
+  const sampled = JSON.parse(readFileSync(path, "utf8"));
+  sampled.loads = Array.from({ length: 300_000 }, (_, i) => [sampled.loads[0][0] + i, -1]);
+  writeFileSync(path, JSON.stringify(sampled));
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  const result = spawnSync(process.execPath, [foldScript, dir], { encoding: "utf8", env });
+  assert.equal(result.status, 3, result.stderr.slice(0, 2000));
+  assert.match(
+    result.stderr,
+    /processes\.json .* is not as recorded: \$\.loads\[0\]\[1\]: -1 is below 0;/,
+  );
+});
