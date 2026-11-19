@@ -617,6 +617,12 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
                 process.kill()
                 process.wait()
     _expect_code(follow.returncode, 0, " ".join(follow.args[1:]))
+    # The watch returns on the run settling, which its driver records before it lets go: the
+    # driver is still closing the run out — its sessions, its last records — and the next
+    # scene's launch would meet the work it still holds. Waited out on its ownership lock,
+    # which only its letting go removes, so every scene reads the run its driver left.
+    lock = world.run_root / "owner.lock"
+    World._until(lambda: not lock.exists(), f"the driver to let go of {world.run_root}")
 
     results = world.cli("results", PLAN_RUN)
     if not results.stdout.startswith(f"{PLAN_RUN}  complete"):
