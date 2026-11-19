@@ -2377,9 +2377,16 @@ fn converge(
             // arrive through the channel — which is the other way this loop is
             // over, and it leaves the same way: not before this driver has taken
             // the queue's last claim.
-            if superseded_by.is_some()
+            //
+            // A human action this very pass readied — its last dependency settled inline,
+            // without a dispatch — derives as `waiting`, which reads as settled, yet it is
+            // recorded, and its decision raised, only by the next pass's start. Closing out
+            // first would leave a decision nobody raised and nothing could answer, so that
+            // pass runs before the close-out does.
+            if (superseded_by.is_some()
                 || graph::is_terminal(&statuses)
-                || !any_node_can_still_move(&statuses)
+                || !any_node_can_still_move(&statuses))
+                && (superseded_by.is_some() || !human_action_unrecorded(state, &statuses, &paused))
             {
                 // The claimer stands down before the run's last claim, and anything
                 // it applied or handed back while this pass ran is folded and judged
@@ -4239,6 +4246,22 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
 /// the third: this loop is what watches for the release that lands it, so breaking
 /// here would settle the run with the temporary pin still unlanded. Everything else
 /// is settled or gated by something only the channel delivers.
+/// Whether a node derives as `waiting` with no settlement recorded for it and nothing pausing
+/// it: a human action readied since the last pass started, which [`start_ready`] — reading
+/// the same three things — records on the pass after, as the record `attest` validates
+/// against and the decision a reply answers.
+fn human_action_unrecorded(
+    state: &Projected,
+    statuses: &BTreeMap<String, NodeStatus>,
+    paused: &BTreeSet<String>,
+) -> bool {
+    statuses.iter().any(|(node, status)| {
+        *status == NodeStatus::Waiting
+            && !state.recorded.contains_key(node)
+            && !paused.contains(node)
+    })
+}
+
 fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| {
         matches!(status, NodeStatus::Ready | NodeStatus::Running) || status.awaits_release()

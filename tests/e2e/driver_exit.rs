@@ -2285,6 +2285,54 @@ fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
     assert!(began.elapsed() < Duration::from_secs(60));
 }
 
+/// A human action readied by a node that settles without a dispatch — an `expects_no_diff`
+/// one — on the pass a decision continued the run is raised as a decision of its own, which the
+/// driver waits on and an attestation answers, so the run completes with nobody adopting it.
+/// The pass that settled that node used to read the graph as over and close out before any
+/// pass recorded the human action, leaving the waiting driver on a decision nobody had raised,
+/// which `attest` refused as no waiting human action.
+#[cfg(unix)]
+#[test]
+fn a_human_action_readied_after_a_decision_is_raised_and_its_attestation_continues_the_run() {
+    let world = World::new("decision-readies-human");
+    let run = "second-approval";
+    let note = json!({
+        "id": "note",
+        "expects_no_diff": true,
+        "task": "## What\nChange nothing.\n\n## Acceptance criteria\n- Nothing changed.",
+        "deps": ["approve"],
+    });
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![human("approve", &[]), note, human("release", &["note"])],
+        ),
+    );
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    world.run(&["attest", run, "approve"]).exited(0);
+    world.until(
+        "the readied human action to be raised as a decision",
+        |world| {
+            world
+                .events_of(run, "decision-pending")
+                .iter()
+                .any(|event| event["payload"]["reference"] == "release")
+        },
+    );
+    world.run(&["attest", run, "release"]).exited(0);
+    assert_eq!(
+        watched_until_settled(&world, run),
+        ("settled".to_owned(), 0)
+    );
+    assert_eq!(world.until_continued(run), "complete");
+    // One adoption — the paused launch's hand-off — and no `adopt` anybody ran.
+    assert_eq!(world.events_of(run, "driver-adopted").len(), 1);
+}
+
 /// A driver waiting on a decision never outlives its run. `stop` on a run paused on its decision
 /// ends the driver waiting on it; and a run that reaches an ending from its decision — completed
 /// by an attestation, or ended by a `drop` of the step it waited on — leaves no driver waiting.
