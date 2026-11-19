@@ -303,10 +303,11 @@ fn a_driver_that_pauses_on_a_waiting_human_node_records_awaiting_planner() {
         .out_has("\"settlement\":\"awaiting-planner\"");
 
     let exited = the_exit(&world, run);
+    let handed_to = recorded_driver(&world, run);
     assert_eq!(
         exited["payload"],
         json!({
-            "pid": recorded_driver(&world, run),
+            "pid": exited["payload"]["pid"],
             "settlement": "awaiting-planner",
             "reason": null,
             "last_answered_command": null,
@@ -314,10 +315,17 @@ fn a_driver_that_pauses_on_a_waiting_human_node_records_awaiting_planner() {
     );
     assert!(first(&world, run, "driver-exited") < first(&world, run, "run-hook-withheld"));
     assert!(world.events_of(run, "run-hook-fired").is_empty());
+    // The launch handed its paused run to a driver that waits on the decision, which the
+    // record now names in place of the launcher whose exit is recorded.
+    assert_ne!(exited["payload"]["pid"], handed_to);
+    assert_eq!(
+        world.run_json(run, "launch.json")["waits_on_decisions"],
+        json!(true)
+    );
     world
         .run(&["status", run])
         .exited(0)
-        .out_has("settled awaiting-planner");
+        .out_has("driver: live, adopted");
 }
 
 /// **A run left with nothing to drive.** Its one node failed, so nothing is
@@ -1655,15 +1663,16 @@ fn status_reads_the_last_driver_exit_when_a_run_has_had_several() {
     )
     .exited(0)
     .out_has("\"settlement\":\"awaiting-planner\"");
-    world
-        .run(&["status", run])
-        .exited(0)
-        .out_has("settled awaiting-planner");
+    // The attestation reaches the driver the paused launch handed its run to, which drives
+    // it to the end: no adoption.
     world.run(&["attest", run, "approve"]).exited(0);
-    world
-        .run(&["adopt", run])
-        .exited(0)
-        .out_has("\"settlement\":\"complete\"");
+    world.until("the waiting driver to complete the run", |world| {
+        world.events_of(run, "driver-exited").len() == 2
+    });
+    assert!(
+        world.events_of(run, "driver-adopted").len() == 1,
+        "only the hand-off adopted the run"
+    );
 
     let exits = world.events_of(run, "driver-exited");
     let settlements: Vec<&Value> = exits
@@ -1751,13 +1760,32 @@ fn readings(world: &World, run: &str) -> Vec<String> {
 fn a_run_reads_the_same_with_its_driver_exit_as_without_it() {
     let world = hooked_world("exit-inert");
     let run = "inert";
-    start_attached(
-        &world,
+    // Detached, so the run rests with nothing driving it: an attached launch hands a paused
+    // run to a driver that waits on the decision, whose live line `status` would print.
+    let path = world.plan(
         run,
-        vec![agent("build", &[]), human("approve", &[])],
-    )
-    .exited(0)
-    .out_has("\"settlement\":\"awaiting-planner\"");
+        &plan_of(run, vec![agent("build", &[]), human("approve", &[])]),
+    );
+    let hook = hook(&world);
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &path,
+                "--detach",
+                "--success-hook",
+                &hook,
+                "--failure-hook",
+                &hook,
+                "--hook-timeout",
+                HOOK_TIMEOUT,
+            ],
+        )
+        .exited(0);
+    world.until("the driver to pause on the approval", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
     // A second run that writes after this one, so the listing has an order that
     // when each run last wrote decides.
     start_attached(&world, "later", vec![agent("ship", &[])])
@@ -1947,4 +1975,289 @@ fn status_says_a_driver_exit_it_cannot_read_could_not_be_read() {
             "({at}): its driver-exited record could not be read"
         ))
         .out_lacks("handed-elsewhere");
+}
+
+/// One edit a planner sends a run whose driver has converged, and what a retried node is.
+#[cfg(unix)]
+enum LiveEdit {
+    /// A `retry` of the failed node.
+    Retry,
+    /// An `add` committed with a `retry`, as one envelope.
+    AddWithRetry,
+    /// A `retry` of the node a first `retry` replaced, once that one failed too.
+    RetryOfARetry,
+}
+
+/// A command node running `script`.
+#[cfg(unix)]
+fn command_node(id: &str, script: &std::path::Path) -> Value {
+    json!({"id": id, "kind": "command", "command": [script.display().to_string()], "deps": []})
+}
+
+/// The `stream` the record of `kind` for `node` was journalled on: which driver wrote it.
+#[cfg(unix)]
+fn stream_of(world: &World, run: &str, kind: &str, node: &str) -> Option<String> {
+    world
+        .events_of(run, kind)
+        .iter()
+        .find(|event| event["labels"]["node"] == node)
+        .and_then(|event| event["stream"].as_str().map(str::to_owned))
+}
+
+/// Land `edit` on a run whose detached driver has converged with its one node failed — held at
+/// the failpoint between its last pass and its let-go, which is where the planning run's three
+/// edits landed — and see the node it readied dispatched by that same driver.
+#[cfg(unix)]
+fn a_live_edit_is_driven_by_the_driver_it_reached(name: &str, edit: &LiveEdit) {
+    let world = World::new(name);
+    let passes = world.root.join("passes");
+    let flaky = crate::harness::posix_script(
+        &world.root,
+        "flaky.sh",
+        &format!("test -f {}", crate::harness::shell_path(&passes)),
+    );
+    let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
+    let project = world.plan(name, &plan_of(name, vec![command_node("a", &flaky)]));
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
+    // driver between its converged pass and its let-go, which no user-facing input can place;
+    // the launch, the replies and every reading of the run are the real CLI's own.
+    let gate = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start.env("ONEPIPELINE_TEST_CONVERGED_GATE", gate.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(start, "start --detach").exited(0);
+    let run = name;
+    let reply = |commands: Value| {
+        // Queued: the held driver is still driving the run, so it is the one to apply it.
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 2, "commands": commands}).to_string(),
+            )
+            .exited(0)
+            .out_has("\"state\":\"queued\"");
+    };
+
+    let held = gate.arrived();
+    let driver = stream_of(&world, run, "node-settled", "a").expect("a settled");
+    let readied = match edit {
+        LiveEdit::Retry => {
+            reply(json!([{"op": "retry", "id": "a", "node": command_node("a-r2", &flaky)}]));
+            std::fs::write(&passes, "").expect("the retry is made to pass");
+            held.release();
+            vec!["a-r2"]
+        }
+        LiveEdit::AddWithRetry => {
+            reply(json!([
+                {"op": "add", "node": command_node("b", &fine)},
+                {"op": "retry", "id": "a", "node": command_node("a-r2", &flaky)},
+            ]));
+            std::fs::write(&passes, "").expect("the retry is made to pass");
+            held.release();
+            vec!["b", "a-r2"]
+        }
+        LiveEdit::RetryOfARetry => {
+            reply(json!([{"op": "retry", "id": "a", "node": command_node("a-r2", &flaky)}]));
+            held.release();
+            // The first retry fails as its node did, and the same driver converges again.
+            let again = gate.arrived();
+            reply(json!([{"op": "retry", "id": "a-r2", "node": command_node("a-r3", &flaky)}]));
+            std::fs::write(&passes, "").expect("the second retry is made to pass");
+            again.release();
+            vec!["a-r2", "a-r3"]
+        }
+    };
+    gate.release_the_rest();
+
+    world.until("the run's driver to exit", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    let exits = world.events_of(run, "driver-exited");
+    assert_eq!(
+        exits.len(),
+        1,
+        "one driver drove the run to its end: {exits:?}"
+    );
+    assert_eq!(
+        exits[0]["payload"]["settlement"], "complete",
+        "the driver let go of a run its edit had readied: {exits:?}"
+    );
+    assert!(
+        world.events_of(run, "driver-adopted").is_empty(),
+        "the run needed an adoption to dispatch what an edit readied"
+    );
+    for node in readied {
+        assert_eq!(
+            // A command node's dispatch is its command starting.
+            stream_of(&world, run, "command-started", node).as_deref(),
+            Some(driver.as_str()),
+            "'{node}' was not dispatched by the driver the edit reached"
+        );
+        assert_eq!(
+            world
+                .events_of(run, "node-settled")
+                .iter()
+                .filter(|event| event["labels"]["node"] == node)
+                .map(|event| event["payload"]["status"].clone())
+                .collect::<Vec<_>>(),
+            [
+                if node == "a-r2" && matches!(edit, LiveEdit::RetryOfARetry) {
+                    json!("failed")
+                } else {
+                    json!("done")
+                }
+            ],
+            "'{node}' settled other than the edit's own run of it"
+        );
+    }
+}
+
+// The planning run's three exits, each reproduced on a running driver: a driver that applies
+// an edit after it has converged goes back to driving rather than letting go `unattended`.
+#[cfg(unix)]
+#[test]
+fn a_live_retry_of_a_failed_node_is_dispatched_by_the_running_driver() {
+    a_live_edit_is_driven_by_the_driver_it_reached("live-retry", &LiveEdit::Retry);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_live_add_with_a_retry_is_dispatched_by_the_running_driver() {
+    a_live_edit_is_driven_by_the_driver_it_reached("live-add-retry", &LiveEdit::AddWithRetry);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_live_retry_of_a_retried_node_is_dispatched_by_the_running_driver() {
+    a_live_edit_is_driven_by_the_driver_it_reached("live-retry-again", &LiveEdit::RetryOfARetry);
+}
+
+/// `watch RUN --until settled`, bounded, and the condition and status it returned on.
+#[cfg(unix)]
+fn watched_until_settled(world: &World, run: &str) -> (String, i32) {
+    let watched = world.run(&["watch", run, "--until", "settled", "--timeout", "120"]);
+    let last: Value = serde_json::from_str(
+        watched
+            .stdout
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("the watch wrote nothing:\n{}", watched.stderr)),
+    )
+    .expect("the watch's last line is its return record");
+    (
+        last["condition"].as_str().unwrap_or_default().to_owned(),
+        watched.code,
+    )
+}
+
+/// A run launched attached that returns `awaiting-planner` keeps moving once its decision is
+/// made — a blocking question answered over its channel, a human action attested — from
+/// another process, with nobody adopting it; `watch --until settled` armed after the answer
+/// returns the run's ending, as it does at once when armed after the run has already ended.
+#[cfg(unix)]
+#[test]
+fn an_attached_run_paused_on_a_decision_continues_once_it_is_made() {
+    let world = World::new("decision-continues");
+    let answered = world.root.join("answered");
+    // A node that raises a blocking question on its run's channel and fails until it is
+    // answered: nothing else can move, so the run waits on the planner.
+    let asks = crate::harness::posix_script(
+        &world.root,
+        "asks.sh",
+        &format!(
+            "test -f {answered} && exit 0\n\
+             printf '%s' '{{\"version\": 2, \"commands\": [{{\"op\": \"finding\", \"blocking\": \
+             true, \"id\": \"ask\", \"message\": \"Which schema does the export use?\"}}]}}' \
+             | {binary} reply \"$ONEPIPELINE_RUN_ID\" >/dev/null\nexit 1",
+            answered = crate::harness::shell_path(&answered),
+            binary = crate::harness::shell_path(&crate::harness::binary()),
+        ),
+    );
+    let fine = crate::harness::posix_script(&world.root, "fine.sh", "exit 0");
+    let after = |deps: &[&str]| {
+        let mut node = command_node("after", &fine);
+        node["deps"] = json!(deps);
+        node
+    };
+
+    let question = "question";
+    let path = world.plan(
+        question,
+        &plan_of(question, vec![command_node("ask", &asks), after(&["ask"])]),
+    );
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+    let human_run = "approval";
+    let path = world.plan(
+        human_run,
+        &plan_of(human_run, vec![human("approve", &[]), after(&["approve"])]),
+    );
+    world
+        .run(&["start", &path, "--attach"])
+        .exited(0)
+        .out_has("\"settlement\":\"awaiting-planner\"");
+
+    // The decisions, each from a process of its own and neither an adoption.
+    std::fs::write(&answered, "").expect("the question is answered");
+    world
+        .run_with_stdin(
+            &["reply", question],
+            &json!({"version": 2, "commands": [
+                {"op": "retry", "id": "ask", "node": command_node("ask-r2", &asks)}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["attest", human_run, "approve"]).exited(0);
+
+    for run in [question, human_run] {
+        // Armed after the answer, the watch waits for the run's ending.
+        assert_eq!(
+            watched_until_settled(&world, run),
+            ("settled".to_owned(), 0),
+            "{run} did not settle once its decision was made"
+        );
+        assert!(
+            world
+                .events_of(run, "command-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == "after"),
+            "{run}'s remaining node was never dispatched"
+        );
+        let exits: Vec<Value> = world
+            .events_of(run, "driver-exited")
+            .iter()
+            .map(|exited| exited["payload"]["settlement"].clone())
+            .collect();
+        assert_eq!(
+            exits,
+            [json!("awaiting-planner"), json!("complete")],
+            "{run}"
+        );
+        // One adoption — the paused launch's hand-off — and no `adopt` anybody ran.
+        assert_eq!(world.events_of(run, "driver-adopted").len(), 1, "{run}");
+        // Armed after the run has ended, the watch returns that ending at once.
+        let began = Instant::now();
+        assert_eq!(
+            watched_until_settled(&world, run),
+            ("settled".to_owned(), 0),
+            "{run}"
+        );
+        assert!(began.elapsed() < Duration::from_secs(60), "{run}");
+    }
+
+    // A run that ended without completing answers the same watch at once with that ending:
+    // a detached run paused on a person, which nothing waits on, is a blocking decision.
+    let paused = "paused-detached";
+    let path = world.plan(paused, &plan_of(paused, vec![human("approve", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the detached run to pause", |world| {
+        !world.events_of(paused, "driver-exited").is_empty()
+    });
+    assert_eq!(
+        watched_until_settled(&world, paused),
+        ("surface-waiting".to_owned(), 4)
+    );
 }

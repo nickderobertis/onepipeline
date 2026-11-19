@@ -731,6 +731,25 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 crate::hostphases::flush();
                 return Ok(acknowledged.listing.exit_code());
             }
+            if let Some(project) = &args.project {
+                let discarded = verbs::discard_unpublished(&verbs::DiscardRequest {
+                    project: project.clone(),
+                    dry_run: args.dry_run,
+                    runs_root: ledger::runs_root(),
+                    acknowledgements,
+                })?;
+                eprint!(
+                    "{}",
+                    discarded
+                        .unresolved
+                        .iter()
+                        .map(|line| format!("unpublished: {line}\n"))
+                        .collect::<String>()
+                );
+                print!("{}", discarded.render());
+                crate::hostphases::flush();
+                return Ok(discarded.exit_code());
+            }
             let (target, acknowledging) = if args.host {
                 (verbs::UnpublishedTarget::Host, environment)
             } else if !args.token.is_empty() {
@@ -1507,13 +1526,6 @@ fn start(args: &StartArgs) -> Result<i32> {
     // anything is minted to being nodes it can redo on the branches they settled on.
     let redo: std::collections::BTreeSet<String> = args.redo.iter().cloned().collect();
     crate::continuation::refuse_redo_beside_fresh(&redo, args.fresh)?;
-    // What the project's last driver left on it, which a launch continues rather than runs
-    // again — unless it is told `--fresh`.
-    let mut continuation = if args.fresh {
-        crate::continuation::Continuation::default()
-    } else {
-        crate::continuation::continuation_of(project.as_str(), &read, claim.as_ref(), &redo)?
-    };
     let launch_dir = launch_dir()?;
     // The launch config is read once, here, and both halves of what it declares
     // are taken off that one strict reading: a second, later read would be a
@@ -1521,6 +1533,33 @@ fn start(args: &StartArgs) -> Result<i32> {
     let declared = match &args.launch_config {
         Some(path) => crate::filter::LaunchConfig::load(path)?,
         None => crate::filter::LaunchConfig::default(),
+    };
+    // Whether a `done` node whose task changed is continued: the flag, or the config's key.
+    let keep_changed = args.keep_changed || declared.keep_changed == Some(true);
+    if keep_changed && args.fresh {
+        return Err(Error::Refused(
+            "--keep-changed refused: --fresh already dispatches every node again on a branch \
+             of its own, so there is no settled work for it to keep; launch without --fresh to \
+             continue changed nodes"
+                .to_owned(),
+        ));
+    }
+    let redoing = crate::continuation::Redoing {
+        keep_changed,
+        held: &crate::continuation::branch_held,
+    };
+    // What the project's last driver left on it, which a launch continues rather than runs
+    // again — unless it is told `--fresh`.
+    let mut continuation = if args.fresh {
+        crate::continuation::Continuation::default()
+    } else {
+        crate::continuation::continuation_of(
+            project.as_str(),
+            &read,
+            claim.as_ref(),
+            &redo,
+            &redoing,
+        )?
     };
     let node_sets = resolved_sets(
         &args.node_sets,
@@ -1862,6 +1901,7 @@ fn start(args: &StartArgs) -> Result<i32> {
                 &read,
                 claim.as_ref(),
                 &redo,
+                &redoing,
             )?;
         }
         plan = launched(&read, &continuation)?;
@@ -2032,6 +2072,10 @@ fn start(args: &StartArgs) -> Result<i32> {
         public_id: public.id.into_string(),
         name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
         redo: redo.into_iter().collect(),
+        keep_changed,
+        redone: continuation.redone.clone(),
+        task_digests: crate::taskgraph::task_digests(&read),
+        waits_on_decisions: false,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -2164,6 +2208,21 @@ fn start(args: &StartArgs) -> Result<i32> {
             settlement.payload(),
         )?;
     }
+    for redone in &continuation.redone {
+        eprintln!(
+            "onepipeline: launch '{run}' redoes node '{}', {}",
+            redone.node,
+            redone_because(&redone.reason)
+        );
+    }
+    for kept in &continuation.kept {
+        eprintln!(
+            "onepipeline: launch '{run}' leaves node '{}' settled rather than redoing it {}: {}",
+            kept.node,
+            redone_because(&kept.reason),
+            kept.because.said()
+        );
+    }
     if !continuation.settled.is_empty() || !continuation.pinned.is_empty() {
         eprintln!(
             "onepipeline: launch '{run}' continues {} from the store{}",
@@ -2236,7 +2295,61 @@ fn start(args: &StartArgs) -> Result<i32> {
             println!("{}", settlement.line(&run));
         },
     )?;
+    // Returned on a decision, as it always has: the run is handed to a retained driver that
+    // waits on it, so answering the question or attesting the action continues the run with
+    // nobody adopting it.
+    if settlement == Settlement::AwaitingPlanner {
+        hand_off_to_a_waiting_driver(&paths);
+    }
     Ok(settlement.exit_code())
+}
+
+/// Hand a run an attached launch let go of on a decision to the detached driver `--detach`
+/// would have retained, marked on the launch record as one that waits on that decision rather
+/// than letting go of the run: it relaunches the observer graph the launch declared, and drives
+/// the run on once a reply or an attestation reaches its channel.
+///
+/// Best effort, after the launch's line is printed: a hand-off that fails leaves the run as an
+/// attached launch always has, said on stderr with the adoption that continues it, and changes
+/// neither the line nor the status.
+fn hand_off_to_a_waiting_driver(paths: &RunPaths) {
+    let handed = (|| -> Result<u32> {
+        {
+            let _lock = engine::claim(paths)?;
+            let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
+            record.waits_on_decisions = true;
+            ledger::write_json(&paths.launch(), &record)?;
+        }
+        sys::disown_standard_handles();
+        adopt_detached(
+            paths,
+            &retain_this_executable(paths, Retained::Adopting)?,
+            None,
+        )
+    })();
+    match handed {
+        Ok(pid) => eprintln!(
+            "onepipeline: run '{}' waits on its decision in driver {pid}, which continues it once \
+             a reply or an attestation reaches its channel",
+            paths.run
+        ),
+        Err(why) => eprintln!(
+            "onepipeline: run '{}' could not be handed to a driver that waits on its decision \
+             ({why}); `onepipeline adopt {}` continues it once the decision is made",
+            paths.run, paths.run
+        ),
+    }
+}
+
+/// Why a launch redid a node, as its stderr line says it.
+fn redone_because(reason: &crate::ledger::RedoReason) -> String {
+    match reason {
+        crate::ledger::RedoReason::Named => "as --redo named it".to_owned(),
+        crate::ledger::RedoReason::Changed => "as its task changed since it settled".to_owned(),
+        crate::ledger::RedoReason::Dependent { of } => {
+            format!("as a done dependent of redone node '{of}'")
+        }
+    }
 }
 
 fn plural(count: usize, what: &str) -> String {
@@ -5732,6 +5845,10 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
+            waits_on_decisions: false,
         }
     }
 

@@ -776,14 +776,29 @@ pub struct StartArgs {
     /// the node to the branch that settlement records, as continuation pins a node
     /// that settled `failed`, `cancelled` or `parked`, so its next dispatch
     /// continues that branch and the branch template renders nothing for it. Its
-    /// new settlement replaces the stored one. Every node it does not name is
-    /// continued as without it, a dependent of a named node included. Refused
+    /// new settlement replaces the stored one. Each transitive dependent of a
+    /// named node whose settlement is `done` is redone with it — on its own
+    /// branch, or afresh where it recorded none — unless its work landed or its
+    /// branch is gone, which leaves it settled and is said on stderr. Refused
     /// before any run exists, naming the node, when it is not a node of the plan,
     /// when its lineage holds no settlement or one that is not `done`, when that
     /// settlement records no branch, when it records the work landed, and beside
-    /// --fresh. The launch record keeps the named nodes.
+    /// --fresh. The launch record keeps the named nodes, and every node redone
+    /// with why.
     #[arg(long = "redo", value_name = "NODE")]
     pub redo: Vec<String>,
+    /// Continue every `done` node whose task changed since it settled, rather
+    /// than redoing it.
+    ///
+    /// Without it, a node whose stored settlement is `done` and records a
+    /// `task_digest` its task's content digest no longer matches is redone as
+    /// `--redo` redoes one, and its done dependents with it; one whose work
+    /// landed, or whose branch is gone, stays settled and is said on stderr. A
+    /// settlement recording no digest counts as unchanged. It does not affect
+    /// `--redo`, and is refused beside --fresh. The launch config's
+    /// `keep_changed` says the same.
+    #[arg(long = "keep-changed")]
+    pub keep_changed: bool,
     /// Launch even though the project's driver claim names another run, and claim it
     /// for this one.
     ///
@@ -1413,6 +1428,25 @@ pub struct UnpublishedArgs {
     /// The identity BRANCH belongs to, where several name it.
     #[arg(long, value_name = "IDENTITY", requires = "acknowledge")]
     pub repo: Option<String>,
+    /// The project whose runs' preserved branches `--discard` discards: every branch
+    /// `--host` lists for a run whose recorded group is this qualified id.
+    #[arg(
+        long,
+        value_name = "QUALIFIED-ID",
+        requires = "discard",
+        conflicts_with_all = ["session", "host", "token", "acknowledge", "disk", "format"]
+    )]
+    pub project: Option<String>,
+    /// Discard each of `--project`'s branches through `onevcs reclaim --discard`, printing one
+    /// line per branch: discarded, or kept with onevcs's refusal and the command that discards
+    /// it. Exits 0 when every listed branch is discarded or none is listed, and 7 when any is
+    /// kept.
+    #[arg(long, requires = "project")]
+    pub discard: bool,
+    /// With `--discard`, discard nothing: say what would become of each branch, as onevcs's own
+    /// dry check answers, and exit as the real run would.
+    #[arg(long, requires = "discard")]
+    pub dry_run: bool,
 }
 
 /// How `unpublished` writes its listing.

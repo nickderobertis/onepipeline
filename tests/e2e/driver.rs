@@ -6874,7 +6874,15 @@ fn an_adopted_runs_worker_can_ask_its_manager() {
             vec![human("approve", &[]), agent("build", &["approve"])],
         ),
     );
-    world.run(&["start", &path, "--attach"]).exited(0);
+    // Detached, so the pause leaves nothing driving the run: an attached launch hands a
+    // paused run to a driver that waits on the decision, which would apply the attestation.
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the driver to pause on the approval", |world| {
+        world
+            .run(&["status", "askableadopted"])
+            .stdout
+            .contains("PAUSED")
+    });
     world
         .run(&["attest", "askableadopted", "approve"])
         .exited(0);

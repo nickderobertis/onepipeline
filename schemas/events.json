@@ -1,5 +1,5 @@
 {
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1099,6 +1099,17 @@
               "$ref": "#/$defs/Awaited"
             },
             "description": "The releases a node held for them still awaits, one per release in the\norder its reference rows list them: present exactly on a `complete-but-held`\nsettlement and on a `complete-but-draft` one awaiting a release, and absent\nfrom every other. What a view reads the wait off, rather than the detail."
+          },
+          "task_digest": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Sha256Digest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The content digest of the node's task as its settling dispatch began, taken as the\nlinked `onetaskgraph` takes an attestation's `content_digest`, leaving out every task\nkey `plan writeback-keys` lists: what a later launch compares the task against to tell\nit changed since the node ran. Absent from a settlement written before it was carried,\nand from one whose task the launch read no record of. Its key is `task_digest`."
           }
         },
         "required": [
@@ -1351,6 +1362,11 @@
               "target"
             ],
             "description": "One release a held node still awaits."
+          },
+          "Sha256Digest": {
+            "description": "`sha256:` and 64 lowercase hex digits.",
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
           }
         }
       }

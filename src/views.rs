@@ -5374,6 +5374,21 @@ fn current_driver_record(view: &RunView) -> Option<&Envelope> {
     })
 }
 
+/// How the run's current driver let go of it: the settlement of its last `driver-exited`,
+/// where that record is newer than the run's last adoption. `None` for a run whose current
+/// driver has recorded no exit — still driving, or gone without recording one.
+pub(crate) fn ended_at(view: &RunView) -> Option<crate::payload::ExitSettlementWord> {
+    let event = current_driver_record(view)?;
+    if PipelineKind::from_wire(&event.kind) != Some(PipelineKind::DriverExited) {
+        return None;
+    }
+    serde_json::from_value::<crate::payload::DriverExited>(serde_json::Value::Object(
+        event.payload.clone(),
+    ))
+    .ok()
+    .map(|exited| exited.settlement)
+}
+
 /// The adopting driver's line: live, or gone without recording an exit.
 fn adopted_driver_line(event: &Envelope, ago: &str, liveness: DriverLiveness) -> String {
     let state = if liveness.is_undriven() {
@@ -7254,6 +7269,10 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
+            waits_on_decisions: false,
         }
     }
 

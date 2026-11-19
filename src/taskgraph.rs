@@ -1588,6 +1588,60 @@ fn refused_plan(id: &str, what: String) -> Refusal {
     Refusal::plain(format!("{id}: {what}"))
 }
 
+/// The content digest of each node's task as `read` holds it, by node id: what a launch records
+/// for every settlement its run writes as `task_digest`, and compares a stored one against.
+///
+/// Computed by the linked `onetaskgraph`'s own public digest,
+/// [`onetaskgraph_core::attestation::content_digest`] — the one an attestation's
+/// `content_digest` is taken with — over the task's title, body, repositories and metadata, and
+/// its dependency edges onto the plan's other tasks, leaving out every task key `plan
+/// writeback-keys` lists. So what the write-back writes, an attestation and a copy link — the
+/// last two in the store's reserved namespace, which that digest never reads — change nothing.
+/// A far end is named by its own qualified id: the lineage root of a task copied from nowhere,
+/// which is what an attestation names it by too. A blank title is read as the node's id, which
+/// is what the write-back writes in its place. A node the read holds no stored task for has no
+/// digest.
+pub(crate) fn task_digests(read: &Read) -> BTreeMap<String, onetaskgraph_core::Sha256Digest> {
+    use onetaskgraph_core::attestation::{content_digest, Authored, AuthoredEdge, FarEnd};
+    use onetaskgraph_plugin_api::{DependencyKind, ItemKind, MetadataKey};
+    let excludes: Vec<MetadataKey> = crate::writeback::writeback_keys()
+        .task
+        .iter()
+        .filter_map(|key| MetadataKey::new(key.as_str()).ok())
+        .collect();
+    read.plan
+        .tasks
+        .iter()
+        .filter_map(|node| {
+            let task = read.tasks.get(&node.id)?;
+            let depends_on = node
+                .deps
+                .iter()
+                .filter_map(|dep| read.tasks.get(dep))
+                .map(|far| AuthoredEdge {
+                    kind: DependencyKind::Blocks,
+                    far: ItemKind::Task,
+                    end: FarEnd::Lineage(far.id.clone()),
+                })
+                .collect();
+            // The title as the write-back writes it: a blank one is projected as the node's
+            // id, so a task nobody titled reads the same before its first run and after it.
+            let title = match task.item.title.trim() {
+                "" => node.id.as_str(),
+                _ => task.item.title.as_str(),
+            };
+            let authored = Authored {
+                title,
+                content: task.item.content.as_deref(),
+                repositories: &task.item.repositories,
+                metadata: &task.item.metadata,
+                depends_on,
+            };
+            Some((node.id.clone(), content_digest(&authored, &excludes)))
+        })
+        .collect()
+}
+
 /// One project, read.
 pub(crate) struct Read {
     /// The plan the engine loaded, every default resolved.

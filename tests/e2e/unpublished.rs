@@ -2438,3 +2438,127 @@ fn flags_that_mean_nothing_together_are_refused() {
         assert!(!file.exists(), "{args:?} wrote an acknowledgement");
     }
 }
+
+/// A lifecycle node that keeps its branch on the origin rather than landing it.
+fn kept_node(id: &str) -> Value {
+    let mut node = crate::harness::lifecycle(id, &[]);
+    node["publish"] = json!("preserve");
+    node
+}
+
+/// The branch each of `run`'s sessions preserved, as the host listing names it.
+fn preserved_by(document: &Value, run: &str) -> Vec<String> {
+    let mut named: Vec<String> = document["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|row| row["run"] == run)
+        .map(|row| row["branch"].as_str().expect("a branch").to_owned())
+        .collect();
+    named.sort();
+    named
+}
+
+/// `unpublished --project <ID> --discard` takes exactly the preserved branches of the runs
+/// whose recorded group is that project: two runs of one project and one of another each
+/// preserve a branch, and one of the first project's is checked out in the registered checkout,
+/// which `onevcs reclaim --discard` refuses. The dry run names both of the first project's
+/// branches with what would become of each, discards nothing and exits as the real run would;
+/// the real run discards the one, keeps the refused one naming onevcs's refusal and the
+/// command that discards it, exits non-zero, and leaves the other project's branch. A project
+/// with no runs lists nothing and exits 0.
+#[test]
+fn a_projects_preserved_branches_are_discarded_or_kept_with_onevcs_refusal() {
+    let (world, repository) = host("unpub-discard");
+    for id in ["first", "other"] {
+        world.script(&format!("{id}.work-anew"), &format!("{id}'s change"));
+    }
+    let first = world.plan(
+        "discard-first",
+        &crate::harness::plan_of("discard-first", vec![kept_node("first")]),
+    );
+    let other = world.plan(
+        "discard-other",
+        &crate::harness::plan_of("discard-other", vec![kept_node("other")]),
+    );
+    for (project, extra) in [(&first, None), (&first, Some("--fresh")), (&other, None)] {
+        let mut args = vec!["start", project.as_str(), "--attach"];
+        args.extend(extra);
+        world.run_from(&world.project, &args).exited(0);
+    }
+    let (_, listing) = listed(&world, &["--host"]);
+    let (one, two, theirs) = (
+        preserved_by(&listing, "discard-first"),
+        preserved_by(&listing, "discard-first-2"),
+        preserved_by(&listing, "discard-other"),
+    );
+    assert_eq!(
+        (one.len(), two.len(), theirs.len()),
+        (1, 1, 1),
+        "{listing:#}"
+    );
+    let (refused, discardable) = (one[0].clone(), two[0].clone());
+    let identity = row(&listing, &refused)["identity"]
+        .as_str()
+        .expect("an identity")
+        .to_owned();
+
+    // The refused one is checked out in the registered checkout.
+    git(
+        &world,
+        &repository.checkout,
+        &["fetch", "-q", "origin", &format!("{refused}:{refused}")],
+    );
+    git(&world, &repository.checkout, &["checkout", "-q", &refused]);
+
+    let dry = world.run(&["unpublished", "--project", &first, "--discard", "--dry-run"]);
+    dry.exited(COUNTED)
+        .out_has(&format!(
+            "would discard {discardable} [{identity}] (run discard-first-2)"
+        ))
+        .out_has(&format!(
+            "would keep {refused} [{identity}] (run discard-first): `onevcs reclaim --discard` \
+             refuses it as keep / checked-out"
+        ))
+        .out_has(&format!(
+            "onevcs reclaim {refused} --repo {identity} --discard"
+        ))
+        .out_lacks(&theirs[0]);
+    assert_eq!(dry.stdout.lines().count(), 2, "{}", dry.stdout);
+    let (_, unchanged) = listed(&world, &["--host"]);
+    assert_eq!(
+        branches(&unchanged).len(),
+        3,
+        "a dry run discarded something"
+    );
+
+    let real = world.run(&["unpublished", "--project", &first, "--discard"]);
+    real.exited(COUNTED)
+        .out_has(&format!(
+            "discarded {discardable} [{identity}] (run discard-first-2)"
+        ))
+        .out_has(&format!(
+            "kept {refused} [{identity}] (run discard-first): `onevcs reclaim --discard` refuses \
+             it as keep / checked-out"
+        ))
+        .out_lacks(&theirs[0]);
+    assert_eq!(real.stdout.lines().count(), 2, "{}", real.stdout);
+    let (_, after) = listed(&world, &["--host"]);
+    let mut left = branches(&after);
+    left.sort();
+    let mut expected = vec![refused.clone(), theirs[0].clone()];
+    expected.sort();
+    assert_eq!(left, expected, "{after:#}");
+    let on_origin = git(&world, &repository.origin, &["branch", "--list"]);
+    assert!(!on_origin.contains(&discardable), "{on_origin}");
+
+    // A project no run belongs to lists nothing.
+    let none = world.run(&[
+        "unpublished",
+        "--project",
+        &format!("{}:no-such-board", crate::harness::STORE_SOURCE),
+        "--discard",
+    ]);
+    none.exited(NOTHING_COUNTED);
+    assert!(none.stdout.is_empty(), "{}", none.stdout);
+}

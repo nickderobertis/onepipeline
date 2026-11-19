@@ -1240,18 +1240,29 @@ fn driving(
         let statuses = state.statuses();
         gate.queue_owed(&ChannelState::of_run(paths, &launch), &state, &statuses);
     }
-    let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
-    record_result(paths, &state, outcome)?;
-    // A human action the last pass readied is raised before the driver lets go,
-    // and a run that settled — rather than one waiting on a person — retires the
-    // items holding its work.
-    if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
-        let statuses = state.statuses();
-        gate.pass(paths, &mut journal, &state, &statuses);
-        if outcome != GraphState::Waiting {
-            gate.run_ended();
+    // Driven until nothing can move, then the human gate's last pass: a human action the
+    // last pass readied is raised before the driver lets go, and a run that settled —
+    // rather than one waiting on a person — retires the items holding its work.
+    let drive = |journal: &mut Journal, state: &mut Projected| -> Result<GraphState> {
+        let outcome = converge(paths, journal, state, &launch)?;
+        record_result(paths, state, outcome)?;
+        if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
+            let statuses = state.statuses();
+            gate.pass(paths, journal, state, &statuses);
+            if outcome != GraphState::Waiting {
+                gate.run_ended();
+            }
         }
-    }
+        // Test failpoint only, and nothing at all where its variable is unset: a journey
+        // holds this driver each time it has converged and before its claims on the queue
+        // below, so an edit lands in exactly the window where one used to be applied and
+        // its node never dispatched.
+        if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_CONVERGED_GATE") {
+            eprintln!("onepipeline: {error}");
+        }
+        Ok(outcome)
+    };
+    let mut outcome = drive(&mut journal, &mut state)?;
     // The **last** claim on the command queue, after everything this driver owed
     // the run is written. Claimed until the queue is empty, and the result
     // written again whenever a claim moved the graph — this is the run's last
@@ -1275,10 +1286,24 @@ fn driving(
             moved = true;
         }
         if moved {
+            // An edit that readied a node — a `retry`, an `add` — is work this driver still
+            // owes: it goes back to driving rather than letting go of a run with a node
+            // ready, running or queued, which nothing would then dispatch until an adoption.
+            if any_node_can_still_move(&state.statuses()) {
+                outcome = drive(&mut journal, &mut state)?;
+                continue;
+            }
             outcome = graph::state_of(&state.statuses());
             record_result(paths, &state, outcome)?;
         }
         let settlement = crate::driver::settled(&state, paths);
+        // A driver an attached launch handed its run to waits on the decision rather than
+        // letting go: the reply or attestation that makes it moves the channel, and the next
+        // turn of this loop applies it and drives on.
+        if settlement == crate::driver::Settlement::AwaitingPlanner && launch.waits_on_decisions {
+            await_channel(&channel);
+            continue;
+        }
         // Always here: only a let-go takes the lock out, and one that hands it
         // back puts it back.
         let Some(lock) = held.take() else {
@@ -3497,6 +3522,17 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
         })
         .map_err(|e| Error::Invalid(format!("cannot start the journal relay: {e}")))?;
     Ok(tx)
+}
+
+/// Wait, running no pass, until the run's channel moves: a driver waiting on a decision
+/// has nothing in flight and nothing ready, so the only thing that can move it is a reply or
+/// an attestation, which arrives on the channel. Read as [`wait_for_work`] reads it, by the
+/// channel's fingerprint at [`CHANNEL_POLL`]; a `stop` reaches the driver as it reaches any.
+fn await_channel(channel: &ChannelState) {
+    let seen = channel.fingerprint();
+    while channel.fingerprint() == seen {
+        std::thread::sleep(CHANNEL_POLL);
+    }
 }
 
 /// Wait until there is a reason to reconcile, and hand back what arrived.
@@ -12398,6 +12434,14 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     if !settlement.awaiting.is_empty() {
         payload.insert(journal::SETTLED_AWAITING.into(), json!(settlement.awaiting));
     }
+    // The digest of the node's task as the launch read it, which is the task its dispatch was
+    // given: a node a live edit added, or a launch that read no store, has none.
+    if let Some(digest) = ledger::read_json::<LaunchRecord>(&paths.launch())
+        .ok()
+        .and_then(|launch| launch.task_digests.get(&settlement.node).cloned())
+    {
+        payload.insert(crate::payload::TASK_DIGEST.into(), json!(digest));
+    }
     journal.emit(
         journal::PipelineKind::NodeSettled,
         journal::labels(&paths.run, Some(&settlement.node)),
@@ -16876,6 +16920,10 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
+            waits_on_decisions: false,
         }
     }
 

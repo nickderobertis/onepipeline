@@ -353,6 +353,13 @@ pub(crate) fn watch(
             ) {
                 return ended(&view, ended_on, None, &cursor, sink);
             }
+            // `--until settled` armed on a run that has already ended answers with that
+            // ending at once, so `start --detach` and one watch wait for any run.
+            if first && wait.armed_undriven && request.until.contains(&WatchUntil::Settled) {
+                if let Some(ended_on) = views::ended_at(&view).map(already_ended) {
+                    return ended(&view, ended_on, None, &cursor, sink);
+                }
+            }
         }
         first = false;
         if expired_at_gate || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1307,6 +1314,18 @@ fn concluded(
         return Some((Ending::NodeSettled(node.to_string()), false));
     }
     run_moved.then_some((Ending::RunChanged, false))
+}
+
+/// The ending a watch reports for a run whose driver has already let go at `settlement`:
+/// complete is settled, a run left on a decision is a blocking surface waiting, and one left
+/// with nothing it can drive — or on a driver's own error — is nothing driving it.
+fn already_ended(settlement: crate::payload::ExitSettlementWord) -> (Ending, bool) {
+    use crate::payload::ExitSettlementWord as Word;
+    match settlement {
+        Word::Complete => (Ending::Settled, false),
+        Word::AwaitingPlanner => (Ending::SurfaceWaiting, true),
+        Word::Unattended | Word::Error => (Ending::NothingDriving, false),
+    }
 }
 
 /// Whether a planner surface is waiting for this watch to report, and if one

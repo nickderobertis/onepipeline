@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("160.")["bundle_versions"]["events"],
+        divergence_block("161.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -12975,10 +12975,10 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
     let path = dir.join("launch.json");
     std::fs::write(&path, block["launch_config"].to_string()).expect("written");
     let config = LaunchConfig::load(&path).expect("a schema-14 launch config reads");
-    assert_eq!(
-        block["launch_config"]["schema_version"],
-        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
-    );
+    // The version the amendment was recorded at: a later key raising the schema leaves this
+    // approved text as it was, so it names one this build still reads.
+    assert_eq!(block["launch_config"]["schema_version"], json!(14));
+    assert!(onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&14));
     assert_eq!(config.checks.len(), 2);
     assert_eq!(config.checks[1].program(), "python3");
     assert_eq!(config.checks[1].arguments(), ["./scripts/check-budget.py"]);
@@ -13124,9 +13124,14 @@ fn the_guards_block_is_what_this_build_reads() {
             "{kind} is not a kind this build emits"
         );
     }
-    assert_eq!(
-        block["events_bundle_version"],
-        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
+    // The bundle the amendment was recorded at: a later amendment raising the bundle leaves
+    // this approved text as it was, so it names one at or below what this build publishes.
+    assert!(
+        bundle_at_or_below(
+            block["events_bundle_version"].as_str().expect("a version"),
+            onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+        ),
+        "the guards amendment names a bundle newer than this build publishes"
     );
 }
 
