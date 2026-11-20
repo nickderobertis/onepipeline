@@ -334,9 +334,10 @@ fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
 /// `crate:engine` alone. So a `published` node of `service` waiting on `wheel` waits on
 /// something it never runs (`uninstalled`), and `tool`, adopting `published` behind
 /// `engine` naming no target, falls to a default that serves `service`'s install
-/// rather than its own (`default-taken`). Both are refused by `plan check` with `source: "onevcs"` and the
-/// rule and reason onevcs's own executable gives; the plan where each names `crate` in
-/// `consumes`, the one target `service` installs, is accepted.
+/// rather than its own (`default-taken`). Both are refused by `plan check` with
+/// `source: "onevcs"` and the rule and reason onevcs's own executable gives; the plan
+/// where each names `crate` in `consumes`, the one target `service` installs, is
+/// accepted.
 #[test]
 fn a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load() {
     let world = World::new("adoption-check-installs");
