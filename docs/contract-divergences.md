@@ -13902,6 +13902,12 @@ to the planner who owns the contract:
   Its loop wakes at the earliest pending time, a check falling due, or a live claim lapsing,
   never sooner than its quarter-second look. A human step its own sweep expired is queued at
   once; one of another run is released through that run's commands, as a resolver's is.
+  A driver retained to wait on a decision sweeps as its wait begins and wakes at that same
+  earliest moment, so an expiry releases a human step the run waits on with nobody adopting it.
+- **What an absolute `cwd` is.** One rule on every platform the engine ships for, the schema's
+  `^(/|\\|[A-Za-z]:[\\/])`: a leading `/` or `\`, or a drive letter, a colon and either
+  separator. A host's own `Path::is_absolute` is not used, because a Windows engine reads
+  `/srv/build` as relative to its drive and would refuse an item a POSIX host raised.
 - **A watch sweeps once, before it looks for what is pending**; a store the sweep cannot read
   is said on stderr and the watch goes on, so delivery reports what it finds there itself.
   A read whose sweep cannot write an expiry a holding condition owes refuses — `query`, `show`

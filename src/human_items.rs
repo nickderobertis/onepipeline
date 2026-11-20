@@ -420,7 +420,7 @@ impl JsonSchema for HumanItemExpiryCondition {
                             "prefixItems": [nonblank]
                         },
                         // Absolute: rooted at `/`, at a drive letter, or a UNC share.
-                        "cwd": {"type": "string", "pattern": r"^(/|[A-Za-z]:[\/]|\\)"},
+                        "cwd": {"type": "string", "pattern": r"^(/|\\|[A-Za-z]:[\\/])"},
                         "timeout_seconds": {
                             "type": "integer",
                             "minimum": *CHECK_TIMEOUT_SECONDS.start(),
@@ -486,9 +486,10 @@ impl HumanItemExpiryCondition {
                 if command.first().is_none_or(|p| p.trim().is_empty()) {
                     return Err("a check names a nonblank program".into());
                 }
-                if cwd.as_deref().is_some_and(|cwd| {
-                    cwd.trim().is_empty() || !std::path::Path::new(cwd).is_absolute()
-                }) {
+                if cwd
+                    .as_deref()
+                    .is_some_and(|cwd| !check_cwd_is_absolute(cwd))
+                {
                     return Err("a check's cwd is an absolute path".into());
                 }
                 if timeout_seconds.is_some_and(|t| !CHECK_TIMEOUT_SECONDS.contains(&t)) {
@@ -508,6 +509,19 @@ impl HumanItemExpiryCondition {
                 Ok(())
             }
         }
+    }
+}
+
+/// Whether a check's `cwd` is absolute, read the same on every platform the engine ships for,
+/// so an item validates identically wherever it is read: a leading `/` or `\` (a POSIX root, a
+/// UNC share) or a drive root (`C:\build`, `C:/build`) — the schema's own `cwd` pattern.
+/// `Path::is_absolute` differs by host — a Windows engine reads `/srv/build` as relative to its
+/// drive — so it would refuse there an item another host raised.
+fn check_cwd_is_absolute(cwd: &str) -> bool {
+    match cwd.as_bytes() {
+        [b'/' | b'\\', ..] => true,
+        [drive, b':', b'\\' | b'/', ..] => drive.is_ascii_alphabetic(),
+        _ => false,
     }
 }
 

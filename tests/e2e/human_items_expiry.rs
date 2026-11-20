@@ -773,20 +773,23 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
         json!([stored]),
         "resolved when its item was raised"
     );
-    // Adopting the run raises its step's item again, which moves no deadline.
-    world.run(&["adopt", name]).exited(0);
+    // The attached start hands its waiting run to a retained driver, the run's next
+    // adoption, which raises its step's item again: that moves no deadline, and it is that
+    // driver's own pass that expires the item and drops the step, with no read between.
+    world.until_within(Duration::from_secs(30), "the retained driver", |w| {
+        w.events_of(name, "driver-adopted").len() == 1
+    });
     let again = shown(&world, &id);
     assert_eq!(again["item"]["expiry"], json!([stored]), "{again}");
     assert_eq!(again["history"].as_array().unwrap().len(), 1, "{again}");
-    world.until_within(Duration::from_secs(30), "its moment", |_| {
-        crate::harness::now_millis() > crate::harness::epoch_millis(stored["at"].as_str().unwrap())
+    world.until_within(Duration::from_secs(60), "the dependent to settle", |w| {
+        settled(w, name, "after").as_deref() == Some("done")
     });
     expired_by(
         &shown(&world, &id)["item"],
         &stored,
         "Nobody needed the sign-off",
     );
-    world.run(&["adopt", name]).exited(0);
     let commands: Vec<Value> = world
         .events_of(name, "edit-committed")
         .into_iter()
@@ -925,6 +928,7 @@ fn expiry_releases_every_hold_and_a_reopen_takes_its_conditions_back() {
 }
 
 /// A check condition running `script` from the world's root.
+#[cfg(unix)]
 fn check_of(world: &World, script: &std::path::Path, extra: Value) -> Value {
     let mut condition = json!({"when": "check", "command": [script.display().to_string()],
         "cwd": world.root.display().to_string()});
@@ -936,6 +940,7 @@ fn check_of(world: &World, script: &std::path::Path, extra: Value) -> Value {
 }
 
 /// The lines a check appended to `file` under the world's root.
+#[cfg(unix)]
 fn lines_of(world: &World, file: &str) -> Vec<String> {
     std::fs::read_to_string(world.root.join(file))
         .unwrap_or_default()
@@ -1190,6 +1195,7 @@ fn every_failing_check_leaves_its_item_open_and_names_the_cause() {
 }
 
 /// Every `human-item-expired` record the journal holds.
+#[cfg(unix)]
 fn expiries_any(world: &World) -> Vec<Value> {
     journal(world)
         .into_iter()
@@ -1487,15 +1493,17 @@ fn a_phase_hook_raises_its_expiry_and_a_malformed_one_is_refused_at_load() {
         "--context",
         context.to_str().unwrap(),
     ]);
+    let after = crate::harness::now_millis();
     raised.exited(0);
     let item = serde_json::from_str::<Value>(&raised.stdout).unwrap()["item"]["item"].clone();
     let expiry = item["expiry"].as_array().unwrap();
     assert_eq!(expiry.len(), 2, "{item}");
     assert_eq!(expiry[0]["reason"], "Stale");
+    // Resolved during the raise: an hour past a moment the raise itself spans.
     let at = crate::harness::epoch_millis(expiry[0]["at"].as_str().unwrap());
     assert!(
-        at >= before + 3_600_000 && at < before + 3_700_000,
-        "{item}"
+        (before + 3_600_000..=after + 3_600_000).contains(&at),
+        "{item} resolved outside the raise ({before}..={after})"
     );
     assert_eq!(expiry[1]["command"], json!(["true"]));
     assert!(

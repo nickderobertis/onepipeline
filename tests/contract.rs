@@ -12517,6 +12517,29 @@ fn the_documented_expiry_contract_is_the_public_types_and_schema() {
         .map(|v| v["properties"]["when"]["const"].as_str().unwrap())
         .collect();
     assert_eq!(shown, declared);
+    // A check's absolute `cwd` reads the same to the types and the schema on every host the
+    // engine ships for: a Windows engine reads a POSIX root, and a POSIX one a drive root.
+    for (cwd, absolute) in [
+        ("/srv/build", true),
+        (r"C:\build", true),
+        ("C:/build", true),
+        (r"\\host\share", true),
+        ("srv/build", false),
+        ("C:build", false),
+        ("", false),
+    ] {
+        let input = with(json!([{"when": "check", "command": ["true"], "cwd": cwd}]));
+        assert_eq!(
+            serde_json::from_value::<HumanItemInput>(input.clone()).is_ok(),
+            absolute,
+            "the types read {cwd:?}"
+        );
+        assert_eq!(
+            valid("HumanItemInput", &input),
+            absolute,
+            "the schema reads {cwd:?}"
+        );
+    }
     // Every bound and word the amendment states is the schema's and the types'.
     let section = human_items_section(CONTRACT);
     let check = &variants[3]["properties"];
