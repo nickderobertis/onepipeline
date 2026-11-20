@@ -843,7 +843,8 @@ fn a_hook_whose_stderr_outlives_it_is_answered_on_its_own_exit() {
 }
 
 /// A hook that says more on stderr than this build reads is still answered on its exit, its
-/// refusal carrying a bounded reason rather than everything it wrote.
+/// refusal carrying a bounded reason rather than everything it wrote, and its `full_reason`
+/// the first of it the contract's stderr bound reads, marked truncated.
 #[test]
 fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
     let world = World::new("plan-edit-hook-overrun");
@@ -876,6 +877,29 @@ fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
         "the journalled reason is unbounded: {} bytes",
         reason.len()
     );
+    let bound = usize::try_from(
+        recorded("read_bounds_bytes")["stderr"]
+            .as_u64()
+            .expect("a bound"),
+    )
+    .expect("it fits");
+    let written = format!(
+        "OPENING-WORDS\n{}",
+        "the bar names a procedure rather than a property of the tree\n".repeat(4000)
+    );
+    assert!(written.len() > bound, "the hook says no more than is read");
+    let full = full_reason(&records[0]);
+    assert_eq!(
+        full.len(),
+        bound,
+        "the full reason is not the bound's worth"
+    );
+    assert_eq!(
+        full,
+        written[..bound],
+        "the full reason is not the first of stderr"
+    );
+    assert_eq!(records[0]["payload"]["full_reason_truncated"], json!(true));
 }
 
 /// An edit the engine's own checks refuse never reaches the hook; and a hook the launch
