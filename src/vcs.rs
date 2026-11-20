@@ -1061,6 +1061,11 @@ fn read_repository(repo: Option<&str>, questions: &[Question<'_>]) -> Vec<Landin
                 Ok(each) if each.len() == references.len() => {
                     each.into_iter().map(read_of).collect()
                 }
+                // The sibling promises one answer per reference, so this is a
+                // linked release breaking its own contract. Told to each question
+                // as a refusal, because a short answer must never be read as some
+                // other branch's. Untested by design: no linked library can be
+                // made to break that promise from here, and the arm is one line.
                 Ok(each) => {
                     let refused = read_of(Err(onevcs::Error::Invalid {
                         reason: format!(
