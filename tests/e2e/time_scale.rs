@@ -72,6 +72,18 @@ fn an_invalid_scale_is_refused_by_the_variables_name() {
             refused.stderr
         );
     }
+    // And a value that is not text at all, which is a value and not an unset variable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut command = world.cmd(&["adopt", "nothing-recorded", "--writeback-item-budget", "0"]);
+        command.env(TIME_SCALE_ENV, std::ffi::OsStr::from_bytes(b"0.\xff"));
+        world
+            .run_on(command, "adopt with a scale that is not UTF-8")
+            .exited(REFUSED)
+            .err_has(TIME_SCALE_ENV)
+            .err_has("must be a positive, finite number");
+    }
 }
 
 /// Unset, and at `1`, the binary applies the shipped wait; at another scale, the shipped

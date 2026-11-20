@@ -48,7 +48,13 @@ fn factor_or_refusal() -> &'static std::result::Result<f64, String> {
 /// A debug build's one read of the variable.
 #[cfg(debug_assertions)]
 fn read() -> std::result::Result<f64, String> {
-    parse(std::env::var(TIME_SCALE_ENV).ok().as_deref())
+    match std::env::var(TIME_SCALE_ENV) {
+        Ok(setting) => parse(Some(&setting)),
+        Err(std::env::VarError::NotPresent) => parse(None),
+        Err(std::env::VarError::NotUnicode(setting)) => Err(format!(
+            "{TIME_SCALE_ENV} must be a positive, finite number, not {setting:?}"
+        )),
+    }
 }
 
 /// A release build reads nothing: its waits are the shipped ones, whatever the environment

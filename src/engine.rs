@@ -2451,57 +2451,78 @@ fn converge(
         // `Duration::MAX` where this run can never need it — a graph naming no
         // cross-DAG edge, a run with no release business, nothing in flight — so a
         // converged driver waits on the channel alone.
+        // Each paired with the span its wait is recorded under, so the name a profile gives a
+        // driver's waiting is written beside the deadline it names.
         let next = [
-            if has_upstreams {
-                until_due(read_upstreams, UPSTREAM_EVERY)
-            } else {
-                Duration::MAX
-            },
-            if releases.names_a_release_dependency() || releases.relays_anything(state) {
-                until_due(took_up_releases, releases.take_up_every())
-            } else {
-                Duration::MAX
-            },
-            next_quiet(&in_flight, stall_after),
+            (
+                if has_upstreams {
+                    until_due(read_upstreams, UPSTREAM_EVERY)
+                } else {
+                    Duration::MAX
+                },
+                "wait:upstream-read",
+            ),
+            (
+                if releases.names_a_release_dependency() || releases.relays_anything(state) {
+                    until_due(took_up_releases, releases.take_up_every())
+                } else {
+                    Duration::MAX
+                },
+                "wait:release-poll",
+            ),
+            (next_quiet(&in_flight, stall_after), "wait:stall"),
             // A followed change request's next read, or its timeout.
-            checks.next_due(),
-            if watching_merge_paths.is_empty() {
-                Duration::MAX
-            } else {
-                until_due(read_unread, unread.every())
-            },
+            (checks.next_due(), "wait:check-follow"),
+            (
+                if watching_merge_paths.is_empty() {
+                    Duration::MAX
+                } else {
+                    until_due(read_unread, unread.every())
+                },
+                "wait:merge-path-read",
+            ),
             // A held identity is re-read on a clock as well as on every pass: a
             // session another run closes is not an event this run sees.
-            workspaces.next_read(),
+            (workspaces.next_read(), "wait:workspace-poll"),
             // And a node held for a source that did not answer, whose answering is
             // not an event this run sees either.
-            sources.next_read(),
+            (sources.next_read(), "wait:source-poll"),
             // The pace at which an idle driver next asks the schedule.
-            maintenance.next_due(),
+            (maintenance.next_due(), "wait:maintenance-pace"),
             // And when an adoption makes the read of its claim a wait the store asked for put
             // off.
-            claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
-                Duration::MAX,
-                crate::continuation::ClaimWatch::until_adoption_read,
+            (
+                claims.as_ref().filter(|_| superseded_by.is_none()).map_or(
+                    Duration::MAX,
+                    crate::continuation::ClaimWatch::until_adoption_read,
+                ),
+                "wait:claim-read",
             ),
             // And when it next writes the publications under way the store last refused, or
-            // reads the claim again before a publication after a read that was not answered.
-            claims.as_ref().map_or(
-                Duration::MAX,
-                crate::continuation::ClaimWatch::until_fence_retry,
+            // reads the claim again before a publication after a read that was not answered,
+            // or clears a fence its linger has outlasted.
+            (
+                claims.as_ref().map_or(
+                    Duration::MAX,
+                    crate::continuation::ClaimWatch::until_fence_retry,
+                ),
+                "wait:fence",
             ),
         ];
         // The wait is recorded under the span of what bounds it — the earliest of the paced
         // reads above, or the run's own events where none of them can come due — so a
-        // profile says what a driver's waiting was for.
+        // profile says what a driver's waiting was for. `profiling`'s
+        // `a_profiled_journeys_waits_are_recorded_under_what_they_waited_on` holds the
+        // choice end to end for the waits the time scale shortens; the names of the reads it
+        // leaves unscaled — and the run's own events — come out of this same choice, and a
+        // profiled journey per name would add a whole driver run apiece to prove a label.
         let (deadline, waiting_on) = if moved {
-            (Duration::ZERO, WAIT_SPANS[0])
+            (Duration::ZERO, "wait:events")
         } else {
             next.into_iter()
-                .zip(&WAIT_SPANS[1..])
                 .filter(|(due, _)| *due != Duration::MAX)
                 .min_by_key(|(due, _)| *due)
-                .map_or((Duration::MAX, WAIT_SPANS[0]), |(due, name)| (due, *name))
+                .unwrap_or((Duration::MAX, "wait:events"))
         };
         // Scoped, because the two things it reads are things the pass writes:
         // the closure's borrows end with the wait, before the messages it hands
@@ -3607,23 +3628,6 @@ fn await_decision(
         std::thread::sleep(CHANNEL_POLL);
     }
 }
-
-/// The span a reconcile loop's wait is recorded under, named for what bounds it: the run's
-/// own events where no paced read can come due, and otherwise the earliest paced read, in
-/// the order the loop lists them.
-const WAIT_SPANS: [&str; 11] = [
-    "wait:events",
-    "wait:upstream-read",
-    "wait:release-poll",
-    "wait:stall",
-    "wait:check-follow",
-    "wait:merge-path-read",
-    "wait:workspace-poll",
-    "wait:source-poll",
-    "wait:maintenance-pace",
-    "wait:claim-read",
-    "wait:fence",
-];
 
 /// Wait until there is a reason to reconcile, and hand back what arrived.
 ///

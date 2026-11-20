@@ -1195,10 +1195,11 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
 /// Journeys whose verbs sit out a scaled wait each, and the span that wait is recorded under:
 /// the stall threshold, a source's re-read, a held release's next ask, a takeover's wait for
 /// the driver it displaces, a fence's retry or linger, a superseded driver's wait for its
-/// settlement to land, and a driver's wait for its first projection. Each already drives its
+/// settlement to land, a driver's wait for its first projection, and a stop's wait for
+/// the projection in flight to land. Each already drives its
 /// wait and ends its driver normally — a driver a `stop` signals writes no record — and is
 /// run here profiled, alone, as nextest runs it.
-const WAITED_ON: [(&str, &str); 7] = [
+const WAITED_ON: [(&str, &str); 8] = [
     (
         "time_scale::a_quiet_worker_is_reported_at_the_shipped_threshold_times_the_scale",
         "wait:stall",
@@ -1226,6 +1227,10 @@ const WAITED_ON: [(&str, &str); 7] = [
     (
         "delivers::every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch",
         "wait:write-back-first-attempt",
+    ),
+    (
+        "multi_source::a_stop_while_an_added_item_is_landing_waits_for_it_and_releases_the_item",
+        "wait:write-back-landing",
     ),
 ];
 
