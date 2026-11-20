@@ -404,6 +404,97 @@ fn a_span_record_that_cannot_be_written_leaves_the_verbs_answer_alone() {
     );
 }
 
+/// The spans the event registry is built under: its own, then the vocabulary's
+/// registry, each payload document's generation and each validator's compilation.
+const REGISTRY_SPANS: [&str; 4] = [
+    "registry:events",
+    "registry:events:vocabulary",
+    "registry:events:generate",
+    "registry:events:compile",
+];
+
+/// How far two sums of one record's span times may disagree: the record writes
+/// nanosecond durations as milliseconds, so they differ by float rounding alone.
+const SUM_SLACK_MS: f64 = 1e-3;
+
+/// What the spans nested in `span` spent: its whole less its own.
+fn nested(span: &Value) -> f64 {
+    figure(&span["wall_ms"]) - figure(&span["self_wall_ms"])
+}
+
+fn the_span<'a>(record: &'a Value, name: &str) -> &'a Value {
+    span(record, name).unwrap_or_else(|| panic!("no {name} span: {record:#}"))
+}
+
+/// Every verb builds the event registry at start, before the verb itself runs —
+/// one that answers and one that refuses alike — and the record says where that
+/// time went: the vocabulary's registry once, then each payload's document
+/// generated and its validator compiled, one of each per payload, all inside
+/// `registry:events`. That span is all `startup` holds besides its own time, and
+/// every span the verb opens is inside `dispatch`, which `startup` has closed
+/// before: the registry is built before any of the verb's work.
+#[test]
+fn every_verb_builds_the_event_registry_at_start_before_its_own_work() {
+    let world = World::new("span-registry");
+    let verbs: [(&[&str], i32); 2] = [(&["runs"], 0), (&["status", "no-such-run"], 2)];
+    for (args, code) in verbs {
+        let spans = world.root.join(format!("spans-{}", args.join("-")));
+        let ran = run_profiled(&world, &world.root, Some(&spans), args);
+        assert_eq!(ran.code, code, "{}", ran.stderr);
+        let record = the_record(&spans);
+        spans_fit_the_process(&record);
+
+        let registry = the_span(&record, "registry:events");
+        assert_eq!(registry["count"], 1, "{record:#}");
+        assert_eq!(
+            the_span(&record, "registry:events:vocabulary")["count"],
+            1,
+            "{record:#}"
+        );
+        let generated = &the_span(&record, "registry:events:generate")["count"];
+        assert!(
+            generated.as_u64().is_some_and(|count| count > 0),
+            "{record:#}"
+        );
+        assert_eq!(
+            &the_span(&record, "registry:events:compile")["count"],
+            generated,
+            "one validator compiled per document generated: {record:#}"
+        );
+        let children: f64 = REGISTRY_SPANS[1..]
+            .iter()
+            .map(|name| figure(&the_span(&record, name)["self_wall_ms"]))
+            .sum();
+        assert!(
+            (nested(registry) - children).abs() < SUM_SLACK_MS,
+            "registry:events holds {}ms of nested spans, and its three parts {children}ms: \
+             {record:#}",
+            nested(registry)
+        );
+
+        let startup = the_span(&record, "startup");
+        assert!(
+            (nested(startup) - figure(&registry["wall_ms"])).abs() < SUM_SLACK_MS,
+            "startup holds other than exactly the registry: {record:#}"
+        );
+        let dispatch = the_span(&record, "dispatch");
+        let verbs_own: f64 = record["spans"]
+            .as_array()
+            .expect("spans is a list")
+            .iter()
+            .filter(|span| {
+                let name = span["name"].as_str().expect("a span's name");
+                !REGISTRY_SPANS.contains(&name) && name != "startup" && name != "dispatch"
+            })
+            .map(|span| figure(&span["self_wall_ms"]))
+            .sum();
+        assert!(
+            (nested(dispatch) - verbs_own).abs() < SUM_SLACK_MS,
+            "a span of the verb's ran outside dispatch: {record:#}"
+        );
+    }
+}
+
 /// A verb that refuses records the status it exits with, not a success.
 #[test]
 fn a_verb_that_refuses_records_the_status_it_exits_with() {
