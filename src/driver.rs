@@ -5073,19 +5073,20 @@ pub(crate) fn submit_offered(
             // process being the run's writer, from the inputs a driver starting on the run
             // composes it from — before anything of the envelope is applied or journalled as
             // an edit. A refusal turns the whole envelope away, journalled `edit-rejected`.
-            if let Err((index, error)) = crate::planedit::judge(
+            if let Err((index, error, account)) = crate::planedit::judge(
                 paths,
                 &view.launch,
                 &envelope.commands,
                 &staged_state.graph,
                 &mut |node| crate::composition::of_a_fresh_driver(paths, &staged_state, node),
             ) {
-                engine::record_rejection(
+                engine::record_accounted_rejection(
                     paths,
                     &mut journal,
                     envelope.author.clone(),
                     &envelope.commands[index],
                     &error,
+                    &account,
                     // Never queued, so no envelope id names it.
                     None,
                 )?;

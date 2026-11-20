@@ -1,5 +1,5 @@
 {
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1869,6 +1869,38 @@
               }
             ],
             "description": "The refusal by kind, where it was one the reconciler names as one; `reason`\nis then its text. Absent otherwise."
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Summary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The refusal on one line, at most 200 characters, cut with `…` where it is\nlonger: a refusing plan-edit hook's `<op> of node '<id>': <line>`, its line the\nfirst non-empty one it wrote on stdout, or else on stderr; and otherwise the\nrefusal's own text without `reason`'s `refused: `. Absent from a record written\nbefore the field existed."
+          },
+          "full_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id, among the record's `artifacts`, of the artifact holding the complete\nrefusal, every line kept: all a refusing plan-edit hook wrote on stderr, up to\nthe 64 KiB the engine reads of it, and otherwise the refusal's text. Absent from\na record written before the field existed."
+          },
+          "full_reason_truncated": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the hook wrote more on stderr than `full_reason` keeps. Absent from a\nrecord written before the field existed."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node the refused command names, whether or not the run's graph holds it,\nwhich the record is also labelled with. Absent where the command names none,\nand from a record written before the field existed."
           }
         },
         "required": [
@@ -1992,6 +2024,10 @@
               }
             ],
             "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
+          },
+          "Summary": {
+            "type": "string",
+            "description": "An `edit-rejected`'s `summary`: one line, never blank, and at most\n[`MAX_SUMMARY_CHARS`] characters. Built by [`Summary::of`], and refused on reading where a\nrecord carries anything else."
           }
         }
       }
@@ -2029,6 +2065,17 @@
           "blocking": {
             "type": "boolean",
             "description": "Whether it holds dependents back."
+          },
+          "rejection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RecordAt"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The `edit-rejected` record the surface was raised for, by its stream and `seq`.\nPresent only on the surface a refused edit raises."
           }
         },
         "required": [
@@ -2039,7 +2086,30 @@
         ],
         "description": "`planner-surface-queued`: a surface sent.",
         "title": "PlannerSurfaceQueued",
-        "$schema": "https://json-schema.org/draft/2020-12/schema"
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "RecordAt": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "stream": {
+                "type": "string",
+                "description": "The writer's stream."
+              },
+              "seq": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "description": "Its place in that stream."
+              }
+            },
+            "required": [
+              "stream",
+              "seq"
+            ],
+            "description": "Where one record stands in a run's journal: its writer's stream and its `seq` there,\nwhich no other record of the run shares."
+          }
+        }
       }
     },
     {

@@ -818,15 +818,17 @@ fn a_requeue_stating_steps_offers_the_next_steps_task() {
     world.run(&["stop", &run]);
 }
 
-/// A hook that exits while a process it started still holds its stderr is answered on its
-/// own exit — its refusal carrying what it said — without waiting on what it left behind.
+/// A hook that exits while a process it started still holds its stdout and stderr is answered
+/// on its own exit — its refusal carrying what it said on each — without waiting on what it
+/// left behind.
 #[test]
-fn a_hook_whose_stderr_outlives_it_is_answered_on_its_own_exit() {
+fn a_hook_whose_streams_outlive_it_is_answered_on_its_own_exit() {
     let world = World::new("plan-edit-hook-held-stderr");
     let leaver = posix_script(
         &world.root,
         "leaving-hook",
-        "cat > /dev/null\nsleep 20 >&2 &\necho 'refused, and left a sleeper' >&2\nexit 1",
+        "cat > /dev/null\nsleep 20 &\necho 'held verdict'\n\
+         echo 'refused, and left a sleeper' >&2\nexit 1",
     );
     let run = paused(
         &world,
@@ -842,11 +844,18 @@ fn a_hook_whose_stderr_outlives_it_is_answered_on_its_own_exit() {
         asked.elapsed() < std::time::Duration::from_secs(15),
         "the reply waited on the process the hook left behind"
     );
-    assert_eq!(rejected(&world, &run).len(), 1);
+    let records = rejected(&world, &run);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        summary(&records[0]),
+        templated("hook_summary", "amend", "later", "held verdict")
+    );
+    assert_eq!(full_reason(&records[0]), "refused, and left a sleeper\n");
 }
 
 /// A hook that says more on stderr than this build reads is still answered on its exit, its
-/// refusal carrying a bounded reason rather than everything it wrote.
+/// refusal carrying a bounded reason rather than everything it wrote, and its `full_reason`
+/// the first of it the contract's stderr bound reads, marked truncated.
 #[test]
 fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
     let world = World::new("plan-edit-hook-overrun");
@@ -879,6 +888,24 @@ fn a_hook_that_says_too_much_is_refused_with_a_bounded_reason() {
         "the journalled reason is unbounded: {} bytes",
         reason.len()
     );
+    let bound = read_bound("stderr");
+    let written = format!(
+        "OPENING-WORDS\n{}",
+        "the bar names a procedure rather than a property of the tree\n".repeat(4000)
+    );
+    assert!(written.len() > bound, "the hook says no more than is read");
+    let full = full_reason(&records[0]);
+    assert_eq!(
+        full.len(),
+        bound,
+        "the full reason is not the bound's worth"
+    );
+    assert_eq!(
+        full,
+        written[..bound],
+        "the full reason is not the first of stderr"
+    );
+    assert_eq!(records[0]["payload"]["full_reason_truncated"], json!(true));
 }
 
 /// An edit the engine's own checks refuse never reaches the hook; and a hook the launch
@@ -1055,4 +1082,376 @@ fn distinct_changes_to_one_node_in_one_envelope_offer_its_final_task_once() {
         body,
         "the hook was shown a task other than the one the node was dispatched with"
     );
+}
+
+/// What the contract's `refusal_records` block states about one of its keys — read rather
+/// than restated, so these journeys are that amendment's drift gate.
+fn recorded(key: &str) -> Value {
+    let contract =
+        std::fs::read_to_string(repo_file("docs/contract.md")).expect("the contract ships");
+    let block = contract
+        .split("```json")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("\"refusal_records\""))
+        .expect("the contract carries the refusal_records block");
+    serde_json::from_str::<Value>(block).expect("a contract block is JSON")["refusal_records"][key]
+        .clone()
+}
+
+/// The most characters the contract lets a summary carry.
+fn summary_max() -> usize {
+    usize::try_from(recorded("summary_max_chars").as_u64().expect("a bound")).expect("it fits")
+}
+
+/// A hook that answers from files this suite arms: `said.out` to stdout, `said.err` to
+/// stderr, and the status `said.exit` names.
+fn speaking_hook(world: &World) -> PathBuf {
+    let base = shell_path(&world.root.join("said"));
+    posix_script(
+        &world.root,
+        "speaking-hook",
+        &format!(
+            "cat > /dev/null\n\
+             if [ -f '{base}.out' ]; then cat '{base}.out'; fi\n\
+             if [ -f '{base}.err' ]; then cat '{base}.err' >&2; fi\n\
+             exit $(cat '{base}.exit')"
+        ),
+    )
+}
+
+/// Arm what [`speaking_hook`] says next: `out` and `err` are written where they are given and
+/// removed where they are not.
+fn arm(world: &World, out: Option<&[u8]>, err: Option<&[u8]>, exit: &str) {
+    for (file, said) in [("said.out", out), ("said.err", err)] {
+        let path = world.root.join(file);
+        match said {
+            Some(said) => std::fs::write(&path, said).expect("the words are armed"),
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    std::fs::write(world.root.join("said.exit"), exit).expect("the exit is armed");
+}
+
+/// Arm [`speaking_hook`] to write `summary` and `full` on the streams the contract gives each.
+fn arm_by_role(world: &World, summary: &str, full: &str, exit: &str) {
+    let streams = recorded("plan_edit_hook_streams");
+    let on = |stream: &str| {
+        [("summary", summary), ("full_reason", full)]
+            .into_iter()
+            .find(|(role, _)| streams[*role] == stream)
+            .map(|(_, said)| said.as_bytes())
+    };
+    arm(world, on("stdout"), on("stderr"), exit);
+}
+
+/// The contract's summary template `key` with its `<op>`, `<id>` and `<line>` filled in.
+fn templated(key: &str, op: &str, id: &str, line: &str) -> String {
+    recorded(key)
+        .as_str()
+        .unwrap_or_else(|| panic!("the contract states no template {key}"))
+        .replace("<op>", op)
+        .replace("<id>", id)
+        .replace("<line>", line)
+}
+
+/// The most bytes the contract says a hook's `stream` is read to.
+fn read_bound(stream: &str) -> usize {
+    usize::try_from(
+        recorded("read_bounds_bytes")[stream]
+            .as_u64()
+            .expect("a bound"),
+    )
+    .expect("it fits")
+}
+
+/// The text the artifact `record`'s `full_reason` names holds, after checking it is one of
+/// the record's own artifacts.
+fn full_reason(record: &Value) -> String {
+    let id = record["payload"]["full_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no full_reason: {record}"));
+    assert!(
+        record["artifacts"]
+            .as_array()
+            .expect("the record's artifacts")
+            .iter()
+            .any(|artifact| artifact["id"] == id),
+        "full_reason names no artifact of its own record: {record}"
+    );
+    let body = std::fs::read(id).unwrap_or_else(|error| panic!("{id} reads: {error}"));
+    serde_json::from_slice::<String>(&body).expect("the full reason is a JSON string")
+}
+
+/// A summary as the contract bounds it: present, on one line, and within its characters.
+fn summary(record: &Value) -> String {
+    let summary = record["payload"]["summary"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no summary: {record}"))
+        .to_owned();
+    assert!(!summary.is_empty(), "{record}");
+    assert!(
+        !summary.contains('\n') && !summary.contains('\r'),
+        "{summary:?}"
+    );
+    assert!(summary.chars().count() <= summary_max(), "{summary:?}");
+    summary
+}
+
+/// The journey a reader of refusals relies on: a hook that refuses with a verdict on stdout
+/// and its findings on stderr leaves an `edit-rejected` carrying the verdict as its summary,
+/// the findings as its reason and — every line kept — as its `full_reason` artifact, naming
+/// the node it concerned and returned by a node-scoped read of that node; and the one surface
+/// raised for it names that record, while no other surface names any.
+#[test]
+fn a_hook_refusal_is_recorded_as_one_attributed_event_its_surface_names() {
+    let world = World::new("plan-edit-hook-summary");
+    let hook = speaking_hook(&world);
+    let run = held(
+        &world,
+        "hooksummary",
+        vec![noted("later", &["slow"])],
+        &["--plan-edit-hook", &hook.display().to_string()],
+    );
+    world
+        .run(&[
+            "surface",
+            &run,
+            "--kind",
+            "finding",
+            "--message",
+            "an unrelated note",
+        ])
+        .exited(0);
+    let verdict = "the amendment restates a procedure; ask for the property instead";
+    let findings = "finding 1: the criterion names a command\n\
+                    finding 2: the command is the repository's own gate\n\
+                    finding 3: a property of the tree says the same\n";
+    arm_by_role(
+        &world,
+        &format!("\n  {verdict}\nnot the summary\n"),
+        findings,
+        &exit("refuse"),
+    );
+
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &envelope(json!([{"op": "amend", "id": "later", "text": RULING}])),
+        )
+        .exited(REFUSED)
+        .err_has("finding 1");
+    let records = rejected(&world, &run);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(
+        summary(record),
+        templated("hook_summary", "amend", "later", verdict)
+    );
+    let reason = record["payload"]["reason"].as_str().expect("a reason");
+    for finding in findings.lines() {
+        assert!(
+            reason.contains(finding),
+            "{finding:?} is not in the reason: {reason}"
+        );
+    }
+    assert!(
+        !reason.contains(verdict),
+        "stdout reached the reason: {reason}"
+    );
+    assert_eq!(
+        full_reason(record),
+        findings,
+        "the full reason is not the hook's stderr"
+    );
+    assert_eq!(record["payload"]["full_reason_truncated"], json!(false));
+    assert_eq!(record["payload"]["node"], "later");
+    assert_eq!(record["labels"]["node"], "later");
+
+    // A node-scoped read of the journal returns it.
+    let scoped = world.run(&[
+        "monitor",
+        &run,
+        "--filter",
+        r#"{"include": [{"node": "later", "kind": "edit-rejected"}]}"#,
+    ]);
+    scoped.exited(0);
+    assert_eq!(
+        scoped
+            .stdout
+            .lines()
+            .filter(|line| line.contains("graph:later") && line.contains("edit-rejected"))
+            .count(),
+        1,
+        "a read scoped to `later` does not return its refusal:\n{}",
+        scoped.stdout
+    );
+
+    let surfaces = world.events_of(&run, "planner-surface-queued");
+    let linked: Vec<&Value> = surfaces
+        .iter()
+        .filter(|surface| surface["payload"].get("rejection").is_some())
+        .collect();
+    assert_eq!(linked.len(), 1, "{surfaces:?}");
+    assert_eq!(linked[0]["payload"]["kind"], "edit-rejected");
+    assert_eq!(
+        linked[0]["payload"]["rejection"],
+        json!({"stream": record["stream"], "seq": record["seq"]})
+    );
+    assert!(
+        surfaces.len() > 1,
+        "the run raised no other surface to tell the link apart from: {surfaces:?}"
+    );
+    world.run(&["stop", &run]);
+}
+
+/// Where a refusing hook writes nothing on stdout its summary is its first stderr line, and
+/// where it writes nothing at all the words the refusal already says; a line longer than the
+/// bound is cut to it with `…`; and a hook that could not judge is summarised as such. Each is
+/// recorded by the replying process, nothing driving the run.
+#[test]
+fn a_hooks_summary_falls_back_to_stderr_is_bounded_and_says_when_it_could_not_judge() {
+    let world = World::new("plan-edit-hook-summaries");
+    let hook = speaking_hook(&world);
+    let run = paused(
+        &world,
+        "hooksummaries",
+        &["--plan-edit-hook", &hook.display().to_string()],
+        &world.root,
+    );
+    let last = |world: &World| {
+        rejected(world, &run)
+            .pop()
+            .expect("a refusal is journalled")
+    };
+    let of_later = |line: &str| templated("hook_summary", "amend", "later", line);
+
+    arm(
+        &world,
+        None,
+        Some(b"\n\nfirst finding\nsecond finding\n"),
+        &exit("refuse"),
+    );
+    amend_later(&world, &run).exited(REFUSED);
+    let record = last(&world);
+    assert_eq!(summary(&record), of_later("first finding"));
+    assert_eq!(record["payload"]["node"], "later");
+
+    arm(&world, None, None, &exit("refuse"));
+    amend_later(&world, &run).exited(REFUSED);
+    let record = last(&world);
+    assert_eq!(
+        summary(&record),
+        of_later(recorded("said_nothing").as_str().expect("the words"))
+    );
+    assert_eq!(full_reason(&record), "");
+
+    // A verdict inside the stdout bound is read; one past it never is, and the summary is
+    // then stderr's.
+    let bound = read_bound("stdout");
+    let near = format!("{}near verdict\n", "\n".repeat(bound - 20));
+    arm(
+        &world,
+        Some(near.as_bytes()),
+        Some(b"early finding"),
+        &exit("refuse"),
+    );
+    amend_later(&world, &run).exited(REFUSED);
+    assert_eq!(summary(&last(&world)), of_later("near verdict"));
+    let late = format!("{}late verdict\n", "\n".repeat(bound + 20));
+    arm(
+        &world,
+        Some(late.as_bytes()),
+        Some(b"early finding"),
+        &exit("refuse"),
+    );
+    amend_later(&world, &run).exited(REFUSED);
+    assert_eq!(summary(&last(&world)), of_later("early finding"));
+
+    // Bytes that are not UTF-8 are read as the replacement character, never refused.
+    arm(
+        &world,
+        Some(b"\xff\xfe bytes before the verdict"),
+        Some(b"why"),
+        &exit("refuse"),
+    );
+    amend_later(&world, &run).exited(REFUSED);
+    assert_eq!(
+        summary(&last(&world)),
+        of_later("\u{FFFD}\u{FFFD} bytes before the verdict")
+    );
+
+    let long = "é".repeat(400);
+    arm(&world, Some(long.as_bytes()), Some(b"why"), &exit("refuse"));
+    amend_later(&world, &run).exited(REFUSED);
+    let cut = summary(&last(&world));
+    let ellipsis = recorded("summary_ellipsis");
+    let ellipsis = ellipsis.as_str().expect("the ellipsis");
+    assert_eq!(cut.chars().count(), summary_max(), "{cut}");
+    assert!(cut.starts_with(&of_later("éé")), "{cut}");
+    assert!(cut.ends_with(ellipsis), "{cut}");
+
+    arm(&world, Some(b"not a verdict"), Some(b"it broke"), "2");
+    amend_later(&world, &run).exited(REFUSED);
+    let record = last(&world);
+    assert_eq!(
+        summary(&record),
+        templated("unjudged_summary", "amend", "later", "")
+    );
+    let full = full_reason(&record);
+    assert!(
+        full.contains("could not judge node 'later'") && full.contains("exited 2"),
+        "{full}"
+    );
+    assert_eq!(record["payload"]["full_reason_truncated"], json!(false));
+}
+
+/// A refusal the engine decides itself — a `finding` naming a node the run does not have,
+/// from a `monitor` author — is summarised by its error's own text without `refused: `, keeps
+/// that text as its `full_reason`, and names the absent node.
+#[test]
+fn an_engine_decided_refusal_is_summarised_by_its_own_text_and_names_the_absent_node() {
+    let world = World::new("plan-edit-hook-engine-refusal");
+    let bus = world.root.join("onemessagebus.yaml");
+    std::fs::write(
+        &bus,
+        "version: 1\ntransport: {kind: local}\nauthors:\n  monitor: {capabilities: [finding]}\n",
+    )
+    .expect("the monitor author is configured");
+    let run = held(
+        &world,
+        "enginerefusal",
+        Vec::new(),
+        &["--bus-config", &bus.to_string_lossy()],
+    );
+
+    // Sent as a host's bus sends it, straight onto the run's queue, so the driver's
+    // reconciler is what refuses it: `reply` would refuse it before queueing anything.
+    crate::malformed_envelopes::sent_by_the_monitor(
+        &world,
+        &run,
+        "finding",
+        &json!({"version": 2, "author": "monitor", "commands": [
+            {"op": "finding", "id": "nowhere", "message": "the branch has no commits yet"}
+        ]}),
+    );
+    world.until("the reconciler's refusal to be journalled", |world| {
+        !rejected(world, &run).is_empty()
+    });
+    let records = rejected(&world, &run);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    let reason = record["payload"]["reason"].as_str().expect("a reason");
+    let text = reason
+        .strip_prefix("refused: ")
+        .expect("the reason is a refusal");
+    assert!(text.contains("nowhere"), "{reason}");
+    assert_eq!(summary(record), text);
+    assert_eq!(full_reason(record), reason);
+    assert_eq!(record["payload"]["full_reason_truncated"], json!(false));
+    assert_eq!(record["payload"]["node"], "nowhere");
+    assert_eq!(record["labels"]["node"], "nowhere");
+    world.run(&["stop", &run]);
 }

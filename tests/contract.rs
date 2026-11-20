@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("161.")["bundle_versions"]["events"],
+        divergence_block("162.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -13132,6 +13132,96 @@ fn the_guards_block_is_what_this_build_reads() {
             onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
         ),
         "the guards amendment names a bundle newer than this build publishes"
+    );
+}
+
+/// The refused-edit amendment, as the contract's `refusal_records` block states it, driven
+/// through the published documents: `edit-rejected` declares the four fields it names and
+/// `planner-surface-queued` the one, each optional so a record written before them still
+/// validates, a record carrying them validates and one carrying a field in another shape is
+/// refused; and the bundle the block names is at or below the one this build publishes. What
+/// the engine writes into those fields is held to the same block by
+/// `tests/e2e/plan_edit_hook.rs`.
+#[test]
+fn the_refusal_records_block_is_what_the_published_documents_declare() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block: Value = serde_json::from_str(&fenced_block_naming("json", "\"refusal_records\""))
+        .expect("the block is JSON");
+    let block = &block["refusal_records"];
+    let registry = registry();
+
+    let rejected = schema_of(PipelineKind::EditRejected);
+    let older = json!({
+        "author": "planner",
+        "command": {"op": "amend", "id": "build", "text": "smaller"},
+        "reason": "refused: amend: the plan-edit hook refused node 'build'",
+    });
+    registry.check(&rejected, &older).unwrap_or_else(|why| {
+        panic!("an edit-rejected written before the fields is refused: {why}")
+    });
+    let fields = block["edit_rejected_fields"]
+        .as_array()
+        .expect("the fields");
+    let written = json!({
+        "summary": "amend of node 'build': the bar names a procedure",
+        "full_reason": "/runs/r/reports/edit-rejected-full-reason-host-4242-17.json",
+        "full_reason_truncated": false,
+        "node": "build",
+    });
+    assert_eq!(
+        fields.len(),
+        written.as_object().expect("an object").len(),
+        "the block names fields this test does not write"
+    );
+    let mut current = older.clone();
+    for field in fields {
+        let field = field.as_str().expect("a field");
+        current[field] = written[field].clone();
+        let mut wrong = older.clone();
+        wrong[field] = json!([field]);
+        assert!(
+            registry.check(&rejected, &wrong).is_err(),
+            "an edit-rejected whose {field} is a list was admitted"
+        );
+    }
+    registry
+        .check(&rejected, &current)
+        .unwrap_or_else(|why| panic!("an edit-rejected carrying the fields is refused: {why}"));
+
+    let queued = schema_of(PipelineKind::PlannerSurfaceQueued);
+    let surface = json!({
+        "surface": 3, "correlation": null, "kind": "edit-rejected",
+        "message": "reconciler: rejected — refused: …", "source": "reconciler", "blocking": false,
+    });
+    registry
+        .check(&queued, &surface)
+        .unwrap_or_else(|why| panic!("a surface written before `rejection` is refused: {why}"));
+    let field = block["surface_field"].as_str().expect("the field");
+    let mut linked = surface.clone();
+    linked[field] = block["surface_rejection"].clone();
+    registry
+        .check(&queued, &linked)
+        .unwrap_or_else(|why| panic!("a surface naming its rejection is refused: {why}"));
+    for broken in [
+        json!({"stream": "host-4242"}),
+        json!({"stream": "host-4242", "seq": "17"}),
+    ] {
+        let mut wrong = surface.clone();
+        wrong[field] = broken.clone();
+        assert!(
+            registry.check(&queued, &wrong).is_err(),
+            "a surface naming its rejection as {broken} was admitted"
+        );
+    }
+    // The bundle the amendment was recorded at: a later amendment raising the bundle leaves
+    // this approved text as it was, so it names one at or below what this build publishes.
+    assert!(
+        bundle_at_or_below(
+            block["events_bundle_version"].as_str().expect("a version"),
+            onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+        ),
+        "the refusal records amendment names a bundle newer than this build publishes"
     );
 }
 
