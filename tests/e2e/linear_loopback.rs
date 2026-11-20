@@ -1697,19 +1697,74 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// The description Linear holds for an item whose visible content is `content` and whose
-/// metadata is `metadata`, in the slot the linked plugin writes: one line, the canonical JSON in
-/// a code span.
+/// The first line of the collapsed block the linked plugin ends a long form with: Linear's own
+/// collapsible section, summarised `onetaskgraph metadata`.
+pub const BLOCK_OPEN: &str = "+++ onetaskgraph metadata";
+
+/// What opens the legacy HTML-comment slot an item written before onetaskgraph-linear 0.14.19
+/// holds, and which reads still accept.
+pub const LEGACY_SLOT_OPEN: &str = "<!-- onetaskgraph.metadata `";
+
+/// The record the block opens with when a `+++ Fields` section stands directly before it.
+const FIELDS_SENTINEL: &str = "`onetaskgraph.fields`";
+
+/// The description Linear holds for an item written before onetaskgraph-linear 0.14.19, whose
+/// visible content is `content` and whose metadata is `metadata`: the legacy slot, one HTML-comment
+/// line holding the canonical JSON in a code span. Linear renders it as visible text; the linked
+/// store still reads it, and writes the item's next long form in [`described_in_block`]'s shape.
 pub fn described(content: &str, metadata: &Value) -> String {
-    format!("{content}\n\n<!-- onetaskgraph.metadata `{metadata}` -->")
+    format!("{content}\n\n{LEGACY_SLOT_OPEN}{metadata}` -->")
 }
 
-/// The metadata a description's slot holds, or an empty map where it holds none.
+/// The description Linear holds for an item the linked store wrote, whose visible content is
+/// `content` and whose metadata is `metadata`: content, one blank line, and the collapsed block —
+/// `+++ onetaskgraph metadata`, a blank line, the canonical JSON in one code span, a blank line,
+/// `+++` — as onetaskgraph's `docs/metadata.md` states it.
+pub fn described_in_block(content: &str, metadata: &Value) -> String {
+    format!("{content}\n\n{BLOCK_OPEN}\n\n`{metadata}`\n\n+++")
+}
+
+/// Where the store's tail starts in `description` and the JSON it holds: the collapsed block,
+/// with the one `+++ Fields` section directly before it when the block opens with the fields
+/// record, or else the legacy slot — or `None` where the description ends in neither.
+fn tail_of(description: &str) -> Option<(usize, &str)> {
+    block_tail(description).or_else(|| {
+        let (above, slot) = description.rsplit_once(LEGACY_SLOT_OPEN)?;
+        let (json, _) = slot.rsplit_once("` -->")?;
+        Some((above.len(), json))
+    })
+}
+
+/// The collapsed block `description` ends in, as [`tail_of`] answers it.
+fn block_tail(description: &str) -> Option<(usize, &str)> {
+    let body = description
+        .trim_end_matches('\n')
+        .strip_suffix("+++")?
+        .strip_suffix("\n\n")?;
+    let line_start = body.rfind('\n').map_or(0, |at| at + 1);
+    let json = body[line_start..].strip_prefix('`')?.strip_suffix('`')?;
+    let before = body[..line_start].strip_suffix("\n\n")?;
+    let (opening, fields) = match before.strip_suffix(FIELDS_SENTINEL) {
+        Some(rest) => (rest.strip_suffix("\n\n")?, true),
+        None => (before, false),
+    };
+    let start = opening.strip_suffix(BLOCK_OPEN)?.len();
+    if start != 0 && !opening[..start].ends_with("\n\n") {
+        return None;
+    }
+    let start = if fields {
+        opening[..start].rfind("+++ Fields\n").unwrap_or(start)
+    } else {
+        start
+    };
+    Some((start, json))
+}
+
+/// The metadata a description's collapsed block or legacy slot holds, or an empty map where it
+/// holds neither.
 pub fn metadata_of(description: &str) -> Map<String, Value> {
-    description
-        .rsplit_once("<!-- onetaskgraph.metadata `")
-        .and_then(|(_, slot)| slot.rsplit_once("` -->"))
-        .and_then(|(json, _)| serde_json::from_str(json).ok())
+    tail_of(description)
+        .and_then(|(_, json)| serde_json::from_str(json).ok())
         .unwrap_or_default()
 }
 
@@ -2266,13 +2321,11 @@ fn heading_id(seed: &str) -> String {
     format!("{}-{}-4000-a000-{}0000", &hex[..8], &hex[8..12], &hex[..8])
 }
 
-/// The content a description holding a metadata slot reports, as a read of it does: the text
-/// above the slot less the one blank line that sets it off — of which only a line break is left
-/// after a table row, which keeps its own.
+/// The content a description holding a metadata block or legacy slot reports, as a read of it
+/// does: the text above the tail less the one blank line that sets it off — of which only a line
+/// break is left after a table row, which keeps its own.
 pub fn content_of(description: &str) -> &str {
-    let above = description
-        .rfind("<!-- onetaskgraph.metadata `")
-        .map_or(description, |slot| &description[..slot]);
+    let above = tail_of(description).map_or(description, |(start, _)| &description[..start]);
     match above.strip_suffix("\n\n") {
         Some(visible) if table_row(visible.rsplit('\n').next().unwrap_or_default().trim()) => {
             &above[..above.len() - 1]
@@ -2588,11 +2641,14 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
             "{probe}, stored again: {kept:?}"
         );
     }
-    // What no measured rewrite names comes back as written: the plugin's own metadata slot, a
+    // What no measured rewrite names comes back as written: the plugin's own metadata block —
+    // which spike `spike-linear-collapsed-slot` measured stored as sent — and its legacy slot, a
     // code span on one line and a numbered list among it.
     for kept in [
         "snake_case_name and file_name.md",
         "<!-- onetaskgraph.metadata `{\"k\":\"[x] ~ _y_ **\"}` -->",
+        "+++ onetaskgraph metadata\n\n`{\"k\":\"[x] ~ _y_ **\"}`\n\n+++",
+        "* item\n\n+++ onetaskgraph metadata\n\n`{}`\n\n+++",
         "a `- [x] **b` c",
         "1. one\n2. two",
         "**bold**, # heading, > quoted - dash",
@@ -2604,10 +2660,25 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
         assert_eq!(linear_stores(kept), kept, "{kept:?}");
         assert_eq!(linear_stores_links(kept), kept, "{kept:?}, links modelled");
     }
-    // A read's content is the text above the slot less its separator, and a table's own line
-    // break survives it.
+    // A read's content is the text above the block or slot less its separator, and a table's own
+    // line break survives it.
     for (stored, content) in [
         ("* a\n\n<!-- onetaskgraph.metadata `{}` -->", "* a"),
+        ("* a\n\n+++ onetaskgraph metadata\n\n`{}`\n\n+++", "* a"),
+        (
+            "| a |\n| -- |\n\n+++ onetaskgraph metadata\n\n`{}`\n\n+++",
+            "| a |\n| -- |\n",
+        ),
+        (
+            "Body.\n\n+++ Fields\n\n* **A**: `1`\n\n+++\n\n+++ onetaskgraph metadata\n\n\
+             `onetaskgraph.fields`\n\n`{}`\n\n+++",
+            "Body.",
+        ),
+        // A caller's own block of that summary, anywhere but last, is content.
+        (
+            "+++ onetaskgraph metadata\n\n`{}`\n\n+++\n\nAfter.",
+            "+++ onetaskgraph metadata\n\n`{}`\n\n+++\n\nAfter.",
+        ),
         (
             "| a |\n| -- |\n\n<!-- onetaskgraph.metadata `{}` -->",
             "| a |\n| -- |\n",
@@ -2615,6 +2686,15 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
         ("no slot", "no slot"),
     ] {
         assert_eq!(content_of(stored), content, "{stored:?}");
+    }
+    // Each seeding is read back as itself, in the block and in the legacy slot alike.
+    let metadata = json!({"k": "v", "n": 1});
+    for seeded in [
+        described("Body.", &metadata),
+        described_in_block("Body.", &metadata),
+    ] {
+        assert_eq!(Value::Object(metadata_of(&seeded)), metadata, "{seeded:?}");
+        assert_eq!(content_of(&seeded), "Body.", "{seeded:?}");
     }
 }
 
