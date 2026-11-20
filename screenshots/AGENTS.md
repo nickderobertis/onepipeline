@@ -10,7 +10,8 @@ request's capture and judgement are steps of `ci.yml`'s `lint`.
 ## Which scenes, and why not the others
 
 `status`, `watch`, `monitor`, `results`, `runs`, `telemetry --breakdown`, the
-`--help` verb list, and `demo.gif` of `start --attach`. Each sits in the README
+`--help` verb list, and `demo.gif` of `start --attach` and the `watch --until settled`
+that follows the run on past its approvals. Each sits in the README
 section that explains that surface.
 
 **The bar for a new one: it must say more than the sentence it would sit

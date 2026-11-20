@@ -514,6 +514,9 @@ fn an_adopted_run_names_its_branches_by_the_template_it_was_launched_with() {
         vec![human("approve", &[]), lifecycle("service", &["approve"])],
         &[FLAG, "launched/{{ node.id }}"],
     );
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(&run);
     world.run(&["attest", &run, "approve"]).exited(0);
     // The adopting process's environment names a different template, and the
     // run goes on with the one it retained.
@@ -687,6 +690,9 @@ fn a_run_whose_records_went_bad_before_adoption_settles_the_node_and_cuts_no_bra
             vec![human("approve", &[]), lifecycle("service", &["approve"])],
             &[],
         );
+        // The driver the paused launch handed its run to is ended, as a host going down
+        // would end it: the run waits on its decision with nothing driving it, for an adoption.
+        world.paused_and_ended(&run);
         spoil(&world, &run);
         world.run(&["attest", &run, "approve"]).exited(0);
         world.run(&["adopt", &run]).settled();
@@ -715,6 +721,9 @@ fn a_run_launched_before_there_was_a_template_goes_on_cutting_derived_branches()
         vec![human("approve", &[]), lifecycle("service", &["approve"])],
         &[],
     );
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(&run);
     // The record as a build before this key wrote it: the same document, without it.
     let path = world.run_file(&run, "launch.json");
     let mut record: Value =

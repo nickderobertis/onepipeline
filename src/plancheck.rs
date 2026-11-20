@@ -314,7 +314,7 @@ fn load_and_check(args: &PlanCheckArgs) -> Result<Answered> {
                     // rather than one handed a plan with a node missing from it.
                     // Where none is registered there is nobody it could not be handed
                     // to, and the loader's acceptance stands on its own.
-                    match document(&read) {
+                    match document(&read, &project) {
                         Ok(document) => {
                             for path in &args.checks {
                                 let answered = Registered::path(path)
@@ -558,12 +558,19 @@ fn engine_refusal(refusal: Refusal) -> Reported {
 /// checks read keys outside this crate's reserved namespace, and dropping them
 /// would leave those checks unable to run here at all.
 ///
+/// `project` is the qualified id — `<source>:<native id>` — of the project the
+/// document was loaded from, so a check that keeps its own record per project
+/// reads which one it is checking rather than recovering it from a task.
+///
 /// Written to bytes once rather than per check, so "one document, handed to every
 /// check" holds by construction. `Err` is a document this build could not write:
 /// the caller turns it into every check being one that could not be run, since a
 /// node replaced by an empty object would have a check answering about a plan the
 /// engine never loaded.
-fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, String> {
+fn document(
+    read: &crate::taskgraph::Read,
+    project: &QualifiedId,
+) -> std::result::Result<Vec<u8>, String> {
     let mut tasks = Vec::with_capacity(read.plan.tasks.len());
     for node in &read.plan.tasks {
         let mut written = serde_json::to_value(node).map_err(|error| {
@@ -583,6 +590,7 @@ fn document(read: &crate::taskgraph::Read) -> std::result::Result<Vec<u8>, Strin
     }
     serde_json::to_vec(&json!({
         "schema_version": read.plan.schema_version,
+        "project": project.as_str(),
         "name": read.plan.name,
         "goal": read.plan.goal,
         "concurrency": read.plan.concurrency,
@@ -870,7 +878,8 @@ pub(crate) fn launch(
     }
     let mut refusals = Vec::new();
     let mut unrunnable = Vec::new();
-    match document(read) {
+    let qualified: QualifiedId = project.parse()?;
+    match document(read, &qualified) {
         Ok(document) => {
             for check in checks {
                 match offer(check, &document) {

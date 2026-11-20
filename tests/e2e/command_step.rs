@@ -222,8 +222,8 @@ fn a_command_runs_after_its_dependency_with_the_runs_coordinates_and_a_human_sti
         "ship ran before the approval"
     );
     world.run(&["attest", run, "approve"]).exited(0);
-    // The driver let go once the run paused on the person; the adoption drives the rest.
-    world.run(&["adopt", run]).exited(0);
+    // The driver waiting on the person drives the rest, with nobody adopting the run.
+    world.until_continued(run);
     assert!(settled_as(&world, run, "ship", "done"), "{}", world.dump());
     assert!(
         position(&world, run, "human-attested", "approve")
@@ -822,6 +822,13 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
             // Requeued, it runs again — and while it does, it has no settlement whose detail
             // could be read as its own.
             std::fs::remove_file(world.root.join("held.pid")).expect("the pid is cleared");
+            // The run lets go once the node settled; an adoption drives the requeued node. Its
+            // driver can still be exiting when the settlement reads, and a driver that claims
+            // the requeue before it lets go drives it itself, so the requeue waits for it to
+            // let go and reaches a run nothing drives.
+            world.until("the driver to let go of the run", |world| {
+                !world.run_file(&name, "owner.lock").exists()
+            });
             world
                 .run_with_stdin(
                     &["reply", &name],
@@ -829,12 +836,6 @@ fn a_cancel_drop_or_retry_stops_a_running_command() {
                         .to_string(),
                 )
                 .exited(0);
-            // The run let go once the node settled; an adoption drives the requeued node. Its
-            // driver can still be exiting when the settlement reads, and an adoption refuses
-            // a run that driver still holds, so the adoption waits for it to let go.
-            world.until("the driver to let go of the run", |world| {
-                !world.run_file(&name, "owner.lock").exists()
-            });
             world.run(&["adopt", &name, "--detach"]).exited(0);
             world.until("the command to run again", |world| {
                 world.root.join("held.pid").is_file()
@@ -927,7 +928,8 @@ fn a_schema_13_launch_and_a_plan_naming_none_of_the_primitives_run_as_before() {
     assert!(settled_as(&world, run, "build", "done"));
     assert!(!dispatched(&world, run, "ship"));
     world.run(&["attest", run, "approve"]).exited(0);
-    world.run(&["adopt", run]).exited(0);
+    // The driver waiting on the person drives the rest, with nobody adopting the run.
+    world.until_continued(run);
     for node in ["build", "approve", "ship"] {
         assert_eq!(result(&world, run, node)["status"], "done", "{node}");
     }
@@ -1381,7 +1383,6 @@ fn an_item_quoting_an_unpublished_output_is_not_raised_and_the_planner_is_told_o
         ),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
-    world.run(&["adopt", run]).exited(0);
 
     assert!(open_items(&world).is_empty(), "an item was raised");
     let kind = named("unraised_surface_kind");
@@ -1402,6 +1403,8 @@ fn an_item_quoting_an_unpublished_output_is_not_raised_and_the_planner_is_told_o
     assert!(!dispatched(&world, run, "ship"));
 
     world.run(&["attest", run, "approve"]).exited(0);
-    world.run(&["adopt", run]).exited(0);
+    // The decision continues the run: the driver waiting on it drives it on, with nobody
+    // adopting it.
+    world.until_continued(run);
     assert!(settled_as(&world, run, "ship", "done"), "{}", world.dump());
 }

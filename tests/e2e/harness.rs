@@ -3325,6 +3325,95 @@ impl World {
         profile::fs::write(self.fakes.join(name), "go").expect("the rendezvous is released");
     }
 
+    /// Wait until `run` reads `PAUSED`: waiting on a decision with nothing else able to move —
+    /// whether its driver let go there, as an attached launch's does, or, retained, waits on the
+    /// decision there.
+    pub fn until_paused(&self, run: &str) {
+        self.until("the run to pause on its decision", |world| {
+            world.run(&["status", run]).stdout.contains("PAUSED")
+        });
+    }
+
+    /// `start` detached with `args` — the project and any flags but `--detach` — and wait
+    /// until its run has paused on a decision, as [`until_paused`](Self::until_paused) says;
+    /// answers the run id. Its retained driver waits on the decision.
+    pub fn start_paused(&self, args: &[&str]) -> String {
+        let mut argv = vec!["start"];
+        argv.extend_from_slice(args);
+        argv.push("--detach");
+        let started = self.run(&argv);
+        started.exited(0);
+        let run = started.json()["run_id"]
+            .as_str()
+            .expect("a detached launch names its run")
+            .to_owned();
+        self.until_paused(&run);
+        run
+    }
+
+    /// Wait until the driver that continued `run` after its decision has let go of it — the
+    /// run's last driver record is a `driver-exited` newer than every `driver-adopted` — and
+    /// answer the settlement it let go at: what an `adopt` used to print once a decision had been
+    /// made, now that the decision continues the run with nobody adopting it.
+    pub fn until_continued(&self, run: &str) -> String {
+        let mut settlement = String::new();
+        self.until(
+            "the run's driver to carry it on past its decision",
+            |world| {
+                let last = world.journal(run).into_iter().rev().find(|event| {
+                    event["kind"] == "driver-exited" || event["kind"] == "driver-adopted"
+                });
+                match last {
+                    Some(event)
+                        if event["kind"] == "driver-exited"
+                            && event["payload"]["settlement"] != "awaiting-planner" =>
+                    {
+                        settlement = event["payload"]["settlement"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        true
+                    }
+                    _ => false,
+                }
+            },
+        );
+        settlement
+    }
+
+    /// Wait until `run` has paused on its decision, then end the driver waiting on it, as a
+    /// crash or a host going down would: the run paused with nothing driving it, which a
+    /// decision no longer continues and only an `adopt` takes up — the run an adoption journey
+    /// adopts.
+    pub fn paused_and_ended(&self, run: &str) {
+        self.waiting_driver(run);
+        end_driver(self, run);
+    }
+
+    /// Wait until `run` has paused on its decision with a driver waiting on it, and answer that
+    /// driver's pid: the live process the launch record names, holding the run's lock.
+    pub fn waiting_driver(&self, run: &str) -> u32 {
+        self.until_paused(run);
+        // A driver a hand-off retained holds the run's lock before it names itself on the
+        // launch record: answered only once the record names the live process holding the lock.
+        let mut driver = 0;
+        self.until("the run's record to name the driver holding it", |world| {
+            let launch = world.run_json(run, "launch.json");
+            let pid = launch["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok());
+            let lock = std::fs::read_to_string(world.run_file(run, "owner.lock"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            let holding = pid.filter(|&pid| {
+                lock.as_ref().and_then(|lock| lock["pid"].as_u64()) == Some(u64::from(pid))
+                    && start_stamp(pid).as_deref() == launch["started"].as_str()
+            });
+            holding.inspect(|&pid| driver = pid).is_some()
+        });
+        driver
+    }
+
     /// Stand where the dispatches scripted at `key` will meet this test.
     ///
     /// The test's half of the handshake `fake::meet` is the double's half of.
@@ -4714,23 +4803,51 @@ impl World {
     /// What it cannot stop it leaves, which is why it promises only the runs it
     /// can: `stop` refuses a run whose dispatch registry it cannot read, and
     /// `driver::a_dispatch_this_run_cannot_record_is_refused_and_does_not_run`
-    /// takes that registry away on purpose.
+    /// takes that registry away on purpose. The driver of such a run is still
+    /// ended — any live process a run's launch record or lock names, proved by
+    /// its start — so no driver outlives the journey that started it.
     fn stop_the_runs_it_can(&self) {
         let Ok(entries) = profile::fs::read_dir(&self.runs) else {
             return;
         };
-        let runs: Vec<_> = entries
-            .flatten()
-            .filter(|entry| entry.path().join("launch.json").is_file())
-            .filter_map(|entry| entry.file_name().into_string().ok())
+        let directories: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        // Every driver a run's records name, read before anything is stopped: a driver a
+        // stop could not reach — one waiting on a decision under a record a journey spoiled —
+        // is ended by its proved pid below, so no journey leaves a driver behind it.
+        let drivers: Vec<(u32, String)> = directories
+            .iter()
+            .flat_map(|run| [run.join("launch.json"), run.join("owner.lock")])
+            .filter_map(|record| {
+                let text = profile::fs::read_to_string(record).ok()?;
+                let record: Value = serde_json::from_str(&text).ok()?;
+                let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
+                let started = record["started"].as_str().filter(|s| !s.is_empty())?;
+                Some((pid, started.to_owned()))
+            })
             .collect();
+        let runs: Vec<_> = directories
+            .iter()
+            .filter(|run| run.join("launch.json").is_file())
+            .filter_map(|run| run.file_name()?.to_str().map(str::to_owned))
+            .collect();
+        self.stop_runs(&runs);
+        for (pid, started) in drivers {
+            if start_stamp(pid).as_deref() == Some(started.as_str()) {
+                end_driver_process(pid);
+            }
+        }
+    }
+
+    /// Stop each of `runs` through the approved `verbs::stop` API, as
+    /// [`stop_the_runs_it_can`](Self::stop_the_runs_it_can) says.
+    fn stop_runs(&self, runs: &[String]) {
         if runs.is_empty() {
             return;
         }
         let command = self.cmd(&[]);
         let _environment = WorldEnvironment::enter(&command);
         for run in runs {
-            let paths = onepipeline::views::RunPaths::under(&self.runs, &run);
+            let paths = onepipeline::views::RunPaths::under(&self.runs, run);
             let _ = onepipeline::verbs::stop(
                 &paths,
                 onepipeline::verbs::StopRequest {
@@ -5114,6 +5231,65 @@ fn a_world_that_is_dropped_while_its_run_is_working_leaves_no_driver_behind() {
         !still_running(driver),
         "driver pid {driver} outlived the world that started it — on Windows it holds \
          the runner's own output pipe, which is what a leaky test is"
+    );
+}
+
+/// A world dropped while its run waits on a decision — the driver an attached launch handed the
+/// paused run to, which nothing will ever answer once the test has gone — leaves that driver gone
+/// too. Unix-only and outside any journey for the reasons the journey above is, and inside the
+/// same suppressed region.
+#[cfg(unix)]
+#[test]
+fn a_world_that_is_dropped_while_its_run_waits_on_a_decision_leaves_no_driver_behind() {
+    let driver = {
+        let world = World::new("teardown-paused");
+        let run = "teardownpaused";
+        let plan = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+        world
+            .run(&["start", &plan, "--attach"])
+            .exited(0)
+            .out_has("\"settlement\":\"awaiting-planner\"");
+        let driver = world.waiting_driver(run);
+        assert!(
+            still_running(u64::from(driver)),
+            "no driver waits on the decision, so this proves nothing about the teardown"
+        );
+        driver
+    };
+
+    assert!(
+        !still_running(u64::from(driver)),
+        "the driver pid {driver} waiting on its run's decision outlived the world that started it"
+    );
+}
+
+/// The same, for a run whose launch record a journey spoiled under its waiting driver: no stop
+/// can reach that run, and the teardown still ends the driver its lock names, proved by its start.
+#[cfg(unix)]
+#[test]
+fn a_world_whose_paused_run_no_stop_can_reach_still_leaves_no_driver_behind() {
+    let driver = {
+        let world = World::new("teardown-spoiled");
+        let run = "teardownspoiled";
+        let plan = world.plan(run, &plan_of(run, vec![human("approve", &[])]));
+        world
+            .run(&["start", &plan, "--attach"])
+            .exited(0)
+            .out_has("\"settlement\":\"awaiting-planner\"");
+        let driver = world.waiting_driver(run);
+        profile::fs::write(world.run_file(run, "launch.json"), "{ not a launch record")
+            .expect("the launch record is spoiled");
+        world.run(&["stop", run]).exited(2);
+        assert!(
+            still_running(u64::from(driver)),
+            "the stop reached the driver after all, so this proves nothing about the teardown"
+        );
+        driver
+    };
+
+    assert!(
+        !still_running(u64::from(driver)),
+        "the driver pid {driver} of a run no stop could reach outlived the world that started it"
     );
 }
 
@@ -6677,7 +6853,13 @@ fn end_driver_process(pid: u32) {
         .stderr(Stdio::null())
         .status()
         .expect("this host ends a process it owns");
-    assert!(ended.success(), "taskkill could not end pid {pid}");
+    // A driver proved by its start can still exit on its own before the signal lands — one
+    // that let go of its run as the teardown read its record — and `taskkill` then fails for a
+    // process that is already gone, which is the outcome asked for.
+    assert!(
+        ended.success() || listed_image(pid).is_none(),
+        "taskkill could not end pid {pid}"
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if listed_image(pid).is_none() {

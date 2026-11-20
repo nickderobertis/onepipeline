@@ -289,11 +289,11 @@ fn a_redo_that_cannot_be_honoured_is_refused_naming_the_node_and_mints_no_run() 
     );
 }
 
-/// A dependent of a redone node is unaffected by the redo: one that settled `done` is
-/// continued, and one with no settlement waits on the redone node, as any dependent waits,
-/// and dispatches once it has settled again.
+/// A redone node's dependents follow it: one that settled `done` is redone with it, recorded
+/// as its dependent, and one with no settlement waits on it, as any dependent waits, and
+/// dispatches once it has settled again.
 #[test]
-fn a_redone_nodes_dependents_are_continued_or_wait_on_it_as_without_the_redo() {
+fn a_redone_nodes_done_dependents_are_redone_with_it_and_the_rest_wait_on_it() {
     let name = "redo-dependents";
     let (world, _repo) = world_of(name, &["base", "child", "late"]);
     let mut child = kept("child");
@@ -307,10 +307,12 @@ fn a_redone_nodes_dependents_are_continued_or_wait_on_it_as_without_the_redo() {
     world.add_task(name, "002-late", &late, &[("base", "000-base")]);
 
     let again = format!("{name}-2");
-    launch(&world, &again, &project, &["--redo", "base"]).exited(0);
+    launch(&world, &again, &project, &["--redo", "base"])
+        .exited(0)
+        .err_has("redoes node 'child', as a done dependent of redone node 'base'");
     assert_eq!(
         dispatched(&world, &again),
-        vec!["base".to_owned(), "late".to_owned()]
+        vec!["base".to_owned(), "child".to_owned(), "late".to_owned()]
     );
     let journal = world.journal(&again);
     let at = |kind: &str, node: &str| {
@@ -323,21 +325,450 @@ fn a_redone_nodes_dependents_are_continued_or_wait_on_it_as_without_the_redo() {
             })
             .unwrap_or_else(|| panic!("no {kind} of {node} in {again}"))
     };
-    assert!(
-        at("node-settled", "base") < at("node-dispatched", "late"),
-        "late was dispatched before base settled again"
-    );
+    for dependent in ["child", "late"] {
+        assert!(
+            at("node-settled", "base") < at("node-dispatched", dependent),
+            "{dependent} was dispatched before base settled again"
+        );
+    }
     assert_eq!(
-        settled(&world, &again, "child")["continued"]["source"],
-        "store"
+        world.run_json(&again, "launch.json")["redone"],
+        json!([
+            {"node": "base", "reason": "named"},
+            {"node": "child", "reason": "dependent", "of": "base"},
+        ])
     );
     let after = stored_settlements(&world, &project);
     assert_eq!(
-        after["child"], before["child"],
-        "the continued dependent moved"
+        after["child"]["branch"], before["child"]["branch"],
+        "{after:#?}"
+    );
+    assert_ne!(
+        after["child"]["head"], before["child"]["head"],
+        "{after:#?}"
     );
     assert_eq!(after["late"]["status"], "done", "{after:#?}");
     assert_eq!(world.run_json(&again, "result.json")["state"], "complete");
+}
+
+/// The store task of `node` in `project`, as the store answers it.
+fn task_of(world: &World, project: &str, node: &str) -> Value {
+    world
+        .store_tasks(project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap_or_else(|| panic!("{project} holds no task of node {node}"))
+}
+
+/// Write `update` to `node`'s task in `project` through the store's own engine, as a person or
+/// a host tool editing the board would.
+fn update_task(
+    world: &World,
+    project: &str,
+    node: &str,
+    update: onetaskgraph_plugin_api::TaskUpdate,
+) {
+    let id = crate::harness::global(
+        task_of(world, project, node)["id"]
+            .as_str()
+            .expect("a task id"),
+    );
+    world
+        .store_call(|engine| async move { engine.update_task(&id, &update).await })
+        .unwrap_or_else(|why| panic!("the store takes the edit of {node}: {why}"));
+}
+
+/// Revise what `node`'s task asks, by adding a sentence to its body.
+fn revise(world: &World, project: &str, node: &str, sentence: &str) {
+    let task = task_of(world, project, node);
+    let body = task["item"]["content"].as_str().unwrap_or_default();
+    update_task(
+        world,
+        project,
+        node,
+        onetaskgraph_plugin_api::TaskUpdate {
+            content: Some(format!("{body}\n\n{sentence}")),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        },
+    );
+}
+
+fn metadata_key(key: &str) -> onetaskgraph_plugin_api::MetadataKey {
+    onetaskgraph_plugin_api::MetadataKey::new(key).expect("a metadata key")
+}
+
+/// Whether `run`'s projection record holds a landed attempt, started no earlier than `since`,
+/// that wrote metadata on `node`'s item: the write-back appends each attempt's line once the
+/// store has answered it.
+fn projected_metadata_since(world: &World, run: &str, node: &str, since: &str) -> bool {
+    let since = crate::harness::epoch_millis(since);
+    std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|attempt| {
+            attempt["outcome"] == "projected"
+                && attempt["at"]
+                    .as_str()
+                    .is_some_and(|at| crate::harness::epoch_millis(at) >= since)
+                && attempt["items"]
+                    .as_array()
+                    .is_some_and(|items| items.contains(&json!(node)))
+                && attempt["updated_fields"].get("metadata").is_some()
+        })
+}
+
+/// Each `(node, reason, of)` the run's launch record says it redid, in its order.
+fn redone(world: &World, run: &str) -> Vec<Value> {
+    world.run_json(run, "launch.json")["redone"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The redo of changed work, end to end: a lifecycle chain `a → b → c` each kept on a branch
+/// as a draft nothing has landed, a direct node `d` on `a`, and a lifecycle node `l` in another
+/// repository whose work landed. A launch with no edit — and one after a run-written key, an
+/// attestation and a copy link land on tasks — redoes nothing; once `a`'s and `l`'s tasks are
+/// revised, `--keep-changed` redoes nothing either, and a launch without it redoes `a` on its
+/// branch and `b`, `c` and `d` as its dependents — `d` afresh — leaves `l` settled and says why, and records on each new settlement the digest of
+/// the task it was dispatched with. A settlement stripped of its digest counts as unchanged,
+/// `--redo b` redoes `b` and `c` and continues `a`, and a task revised while its node runs is
+/// redone by the next launch.
+#[test]
+fn a_launch_redoes_each_node_whose_task_changed_and_its_done_dependents() {
+    let name = "redo-changed";
+    let base = team_world(name);
+    for id in ["a", "b", "c", "d", "l"] {
+        base.script(&format!("{id}.work-anew"), &format!("{id}'s change"));
+    }
+    // A second repository whose work lands: the team's own opens drafts nothing merges.
+    base.extra_repository("engine");
+    std::fs::write(
+        base.onevcs_home().join("rules.yml"),
+        "version: 3\nrules:\n  - match: {name: engine}\n    publication: local-direct\n    \
+         approvals: none\ndefault:\n  publication: change-open\n  approvals: required\n",
+    )
+    .expect("the rules file is written");
+    let origin = base.root.join("origin.git");
+    // A second `local-md` source a task is copied into, so its copy link is a real one.
+    let elsewhere = base.store_apart("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the second source's root");
+    let world = base
+        .with_env("ONETASKGRAPH_SOURCES__ELSEWHERE__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__ELSEWHERE__CONFIG__ROOT",
+            elsewhere.to_str().expect("a path"),
+        );
+    let mut landed = lifecycle("l", &[]);
+    landed["repo"] = json!("engine");
+    let project = author(
+        &world,
+        name,
+        vec![
+            lifecycle("a", &[]),
+            lifecycle("b", &["a"]),
+            lifecycle("c", &["b"]),
+            agent("d", &["a"]),
+            landed,
+        ],
+    );
+    launch(&world, name, &project, &[]).exited(0);
+    let first = stored_settlements(&world, &project);
+    for id in ["a", "b", "c", "d", "l"] {
+        assert_eq!(first[id]["status"], "done", "{id}: {first:#?}");
+        let digest = first[id]["task_digest"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id}'s settlement records no task digest: {first:#?}"));
+        assert!(
+            digest.starts_with("sha256:") && digest.len() == 71,
+            "{id}: {digest}"
+        );
+        assert_eq!(
+            json!(digest),
+            world.run_json(name, "launch.json")["task_digests"][id],
+            "{id}'s settlement is not the digest of the task it was dispatched with"
+        );
+    }
+    assert_eq!(first["l"]["landing"], "landed", "{first:#?}");
+    for id in ["a", "b", "c"] {
+        assert_eq!(first[id]["landing"], "unlanded", "{id}: {first:#?}");
+        assert!(first[id]["branch"].is_string(), "{id}: {first:#?}");
+    }
+    assert!(first["d"].get("branch").is_none(), "{first:#?}");
+
+    // Nothing edited: the write-back's own keys, written by the run just ended, change nothing.
+    let unedited = format!("{name}-2");
+    launch(&world, &unedited, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &unedited), Vec::<String>::new());
+    assert!(redone(&world, &unedited).is_empty());
+
+    // A run-written key, an attestation and a copy link: none is a change to a task.
+    update_task(
+        &world,
+        &project,
+        "b",
+        onetaskgraph_plugin_api::TaskUpdate {
+            metadata_set: [(
+                metadata_key("onepipeline.amendment"),
+                json!("Keep the export format stable."),
+            )]
+            .into_iter()
+            .collect(),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        },
+    );
+    let attested = crate::harness::global(
+        task_of(&world, &project, "c")["id"]
+            .as_str()
+            .expect("an id"),
+    );
+    world
+        .store_call(|engine| async move {
+            engine
+                .attest(
+                    onetaskgraph_plugin_api::MetadataRecord::Task,
+                    &onetaskgraph_core::AttestRequest {
+                        id: attested,
+                        kind: onetaskgraph_core::attestation::AttestationKind::new("review")
+                            .expect("a kind"),
+                        by: onetaskgraph_core::attestation::AttestationLabel::new("by", "reviewer")
+                            .expect("a label"),
+                        bar: onetaskgraph_core::attestation::AttestationLabel::new("bar", "bar-1")
+                            .expect("a label"),
+                        excludes: Vec::new(),
+                        note: None,
+                        if_version: None,
+                    },
+                )
+                .await
+        })
+        .expect("the store records the attestation");
+    let copied = crate::harness::global(
+        task_of(&world, &project, "d")["id"]
+            .as_str()
+            .expect("an id"),
+    );
+    world.store_call(|engine| async move {
+        engine
+            .copy(&onetaskgraph_core::CopyRequest {
+                items: onetaskgraph_core::CopyItems::new(vec![copied]).expect("one item"),
+                scope: onetaskgraph_core::CopyScope::Tasks,
+                destination: onetaskgraph_plugin_api::SourceName::new("elsewhere")
+                    .expect("a source"),
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
+                match_by: None,
+                recreate: false,
+                create: true,
+                dry_run: false,
+                comments: false,
+                no_link: false,
+                expect: None,
+                statuses: Vec::new(),
+                conditions: onetaskgraph_core::CopyConditions::default(),
+            })
+            .await
+            .expect("the store copies the task")
+    });
+    let linked = task_of(&world, &project, "d");
+    assert!(
+        linked["item"]["metadata"]
+            .get("onetaskgraph.copies")
+            .is_some(),
+        "the copy left no link on its source: {linked}"
+    );
+    let bystanders = format!("{name}-3");
+    launch(&world, &bystanders, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &bystanders), Vec::<String>::new());
+
+    // `a`'s and `l`'s tasks are revised: kept with `--keep-changed`, and without it `a` is
+    // redone with its dependents while `l`, whose work landed, stays settled.
+    revise(&world, &project, "a", "Also cover the export.");
+    revise(&world, &project, "l", "Also cover the engine.");
+    let keeping = format!("{name}-4");
+    launch(&world, &keeping, &project, &["--keep-changed"]).exited(0);
+    assert_eq!(dispatched(&world, &keeping), Vec::<String>::new());
+    assert_eq!(
+        world.run_json(&keeping, "launch.json")["keep_changed"],
+        json!(true)
+    );
+    world
+        .run_from(
+            &world.project,
+            &["start", &project, "--keep-changed", "--fresh"],
+        )
+        .exited(2)
+        .err_has("--keep-changed refused: --fresh");
+    // A config declaring a schema before the key's is refused by the key's name.
+    let early = world.root.join("keep-changed-early.yaml");
+    std::fs::write(&early, "schema_version: 14\nkeep_changed: true\n")
+        .expect("the launch config is written");
+    world
+        .run_from(
+            &world.project,
+            &[
+                "start",
+                &project,
+                "--launch-config",
+                &early.to_string_lossy(),
+            ],
+        )
+        .exited(2)
+        .err_has("`keep_changed` is a schema 15 key");
+    // The launch config's `keep_changed` says the same, and is refused beside `--fresh` too.
+    let config = world.root.join("keep-changed.yaml");
+    std::fs::write(&config, "schema_version: 15\nkeep_changed: true\n")
+        .expect("the launch config is written");
+    let config = config.to_string_lossy().into_owned();
+    let configured = format!("{name}-5");
+    launch(&world, &configured, &project, &["--launch-config", &config]).exited(0);
+    assert_eq!(dispatched(&world, &configured), Vec::<String>::new());
+    assert_eq!(
+        world.run_json(&configured, "launch.json")["keep_changed"],
+        json!(true)
+    );
+    world
+        .run_from(
+            &world.project,
+            &["start", &project, "--launch-config", &config, "--fresh"],
+        )
+        .exited(2)
+        .err_has("--keep-changed refused: --fresh");
+
+    let before = stored_settlements(&world, &project);
+    let changed = format!("{name}-6");
+    let launched = launch(&world, &changed, &project, &[]);
+    launched
+        .exited(0)
+        .err_has(&format!(
+            "launch '{changed}' redoes node 'a', as its task changed since it settled"
+        ))
+        .err_has("redoes node 'b', as a done dependent of redone node 'a'")
+        .err_has("redoes node 'd', as a done dependent of redone node 'a'")
+        .err_has(
+            "leaves node 'l' settled rather than redoing it as its task changed since it \
+             settled: its work landed",
+        );
+    let mut redispatched = dispatched(&world, &changed);
+    redispatched.sort();
+    assert_eq!(redispatched, ["a", "b", "c", "d"]);
+    assert_eq!(
+        redone(&world, &changed),
+        [
+            json!({"node": "a", "reason": "changed"}),
+            json!({"node": "b", "reason": "dependent", "of": "a"}),
+            json!({"node": "c", "reason": "dependent", "of": "a"}),
+            json!({"node": "d", "reason": "dependent", "of": "a"}),
+        ]
+    );
+    // The lifecycle nodes continue the branches they settled on; the direct node has none.
+    let mut branches = sessions_opened(&world, &changed);
+    branches.sort();
+    let mut expected: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|id| before[*id]["branch"].as_str().expect("a branch").to_owned())
+        .collect();
+    expected.sort();
+    assert_eq!(branches, expected);
+    let after = stored_settlements(&world, &project);
+    let digests = world.run_json(&changed, "launch.json")["task_digests"].clone();
+    for id in ["a", "b", "c", "d"] {
+        assert_eq!(after[id]["status"], "done", "{id}: {after:#?}");
+        assert_eq!(
+            after[id]["task_digest"], digests[id],
+            "{id}'s new settlement is not the digest of the task it was dispatched with"
+        );
+        assert_eq!(
+            settled(&world, &changed, id)["task_digest"],
+            digests[id],
+            "{id}"
+        );
+    }
+    for id in ["a", "b", "c"] {
+        let (was, is) = (
+            before[id]["head"].as_str().expect("a head"),
+            after[id]["head"].as_str().expect("a head"),
+        );
+        assert_ne!(was, is, "{id}'s redo committed nothing");
+        assert!(descends(&world, &origin, was, is), "{id}: {is} from {was}");
+    }
+    assert_ne!(after["a"]["task_digest"], before["a"]["task_digest"]);
+    assert_eq!(after["l"], before["l"], "the landed node was redone");
+    assert_eq!(
+        settled(&world, &changed, "l")["continued"]["source"],
+        "store"
+    );
+
+    // A settlement recording no digest was written before digests were: unchanged, however
+    // its task reads now.
+    // llmlint: ignore-block[tests_mirror_real_usage] the settlement an earlier build stored, with
+    // no `task_digest` — no verb of this build writes one without it, and the store is where such
+    // a record reaches a launch; the launch that reads it is the compiled CLI's own.
+    let mut stripped = after["b"].clone();
+    stripped
+        .as_object_mut()
+        .expect("a settlement")
+        .remove("task_digest");
+    update_task(
+        &world,
+        &project,
+        "b",
+        onetaskgraph_plugin_api::TaskUpdate {
+            metadata_set: [(metadata_key("onepipeline.settlement"), stripped)]
+                .into_iter()
+                .collect(),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        },
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    revise(&world, &project, "b", "Name the columns.");
+    let stripped_run = format!("{name}-7");
+    launch(&world, &stripped_run, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &stripped_run), Vec::<String>::new());
+
+    // `--redo b` redoes `b` and its dependent `c`, and continues `a`.
+    let named = format!("{name}-8");
+    launch(&world, &named, &project, &["--redo", "b"]).exited(0);
+    let mut redispatched = dispatched(&world, &named);
+    redispatched.sort();
+    assert_eq!(redispatched, ["b", "c"]);
+    assert_eq!(settled(&world, &named, "a")["continued"]["source"], "store");
+
+    // A task revised while its node runs: the settlement records the task as dispatched, so
+    // the next launch redoes it.
+    let held = world.rendezvous("c");
+    let during = format!("{name}-9");
+    world
+        .run_from(
+            &world.project,
+            &["start", &project, "--detach", "--redo", "c"],
+        )
+        .exited(0);
+    let running = held.arrived();
+    // Revised only once the run's write-back of the dispatch is recorded — the attempt that
+    // put the dispatch on `c`'s task appended to the run's projection record, which the
+    // write-back does after the store has answered — so the edit lands on the task as that
+    // write-back left it rather than beside it.
+    world.until("the dispatch's write-back to be recorded", |world| {
+        task_of(world, &project, "c")["item"]["metadata"]["onepipeline.dispatch"]["opened_at"]
+            .as_str()
+            .is_some_and(|opened| projected_metadata_since(world, &during, "c", opened))
+    });
+    revise(&world, &project, "c", "Also index the export.");
+    drop(running);
+    // And the next launch only once this run's driver has recorded its exit, which it writes
+    // after its closeout's write-back: a launch beside that write-back would read the store as
+    // it moved.
+    world.until("the run's driver to record its exit", |world| {
+        !world.events_of(&during, "driver-exited").is_empty()
+    });
+    world.unscript("c.rendezvous");
+    let next = format!("{name}-10");
+    launch(&world, &next, &project, &[])
+        .exited(0)
+        .err_has("redoes node 'c', as its task changed since it settled");
+    assert_eq!(dispatched(&world, &next), ["c"]);
 }
 
 /// While a redo run drives the project, a launch with or without `--redo` is refused naming
@@ -568,6 +999,76 @@ fn an_adopted_redo_run_does_not_redo_a_node_that_already_settled_again() {
     assert_eq!(after["second"]["branch"], before["second"]["branch"]);
 }
 
+/// An `adopt` replays the redo its launch recorded and detects no changed work of its own:
+/// a launch redoes `first`, whose task changed, and `second` as its done dependent, and its
+/// driver is shut down with `second` dispatched once `first` has settled again. `first`'s task
+/// is then revised a second time and `third`'s for the first time, and the adoption dispatches
+/// `second` alone — the one redo its launch recorded and had not finished — leaving `first` and
+/// `third` as they stood, with the launch's record of what it redid unchanged.
+#[test]
+fn an_adoption_replays_the_redo_its_launch_recorded_and_reads_no_later_task_edit() {
+    let name = "redo-replayed";
+    let (world, _repo) = world_of(name, &["first", "second", "third"]);
+    let mut second = kept("second");
+    second["deps"] = json!(["first"]);
+    let project = author(&world, name, vec![kept("first"), second, kept("third")]);
+    launch(&world, name, &project, &[]).exited(0);
+    let before = stored_settlements(&world, &project);
+
+    revise(&world, &project, "first", "Also cover the export.");
+    world.script("second.wait", "hold");
+    let again = format!("{name}-2");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("first's redo to land on the store", |world| {
+        stored_settlements(world, &project)
+            .get("first")
+            .is_some_and(|settlement| settlement["head"] != before["first"]["head"])
+    });
+    world.until("second's redo to be dispatched", |world| {
+        dispatched(world, &again).contains(&"second".to_owned())
+    });
+    let recorded = redone(&world, &again);
+    assert_eq!(
+        recorded,
+        [
+            json!({"node": "first", "reason": "changed"}),
+            json!({"node": "second", "reason": "dependent", "of": "first"}),
+        ]
+    );
+    let shutdown = world.run(&["shutdown", &again, "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    let redone_first = stored_settlements(&world, &project)["first"].clone();
+
+    revise(&world, &project, "first", "And the import.");
+    revise(&world, &project, "third", "Also cover the archive.");
+    world.unscript("second.wait");
+    let adopted = world.run(&["adopt", &again, "--attach"]);
+    adopted.exited(0);
+    assert!(
+        !adopted.stderr.contains("redoes node"),
+        "the adoption decided a redo of its own: {}",
+        adopted.stderr
+    );
+    assert_eq!(world.run_json(&again, "result.json")["state"], "complete");
+    assert_eq!(
+        dispatched(&world, &again),
+        ["first", "second", "second"],
+        "the adoption dispatched other than the second its launch had not finished"
+    );
+    assert_eq!(redone(&world, &again), recorded);
+    let after = stored_settlements(&world, &project);
+    assert_eq!(
+        after["first"], redone_first,
+        "the adoption redid first on its later edit"
+    );
+    assert_eq!(after["third"], before["third"], "the adoption redid third");
+    assert_eq!(after["second"]["status"], "done", "{after:#?}");
+    assert_eq!(after["second"]["branch"], before["second"]["branch"]);
+    assert_ne!(after["second"]["head"], before["second"]["head"]);
+}
+
 /// A `done` node whose change request is open as a draft and unlanded is redone on its
 /// branch, and its publication adopts that change request: the host is asked to open none,
 /// and the draft is still the one change request from the branch.
@@ -743,4 +1244,116 @@ fn take_over_in_background_redoing(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     command.spawn().expect("the takeover starts")
+}
+
+/// A node whose task changed is not redone onto a branch that is gone: a person discarded the
+/// branch it settled on, so the launch leaves it settled, says why on stderr, and dispatches
+/// nothing.
+#[test]
+fn a_changed_node_whose_branch_is_gone_stays_settled_and_says_why() {
+    let name = "redo-gone";
+    let (world, _repo) = world_of(name, &["solo"]);
+    let project = author(&world, name, vec![kept("solo")]);
+    launch(&world, name, &project, &[]).exited(0);
+    let branch = stored_settlements(&world, &project)["solo"]["branch"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    // The person discards the work the node kept, everywhere this host holds it.
+    let discarded = world
+        .cmd_on(
+            &crate::harness::onevcs_binary(),
+            &["reclaim", &branch, "--repo", "service", "--discard"],
+        )
+        .output()
+        .expect("onevcs runs");
+    assert!(
+        discarded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+
+    revise(&world, &project, "solo", "Also cover the export.");
+    let again = format!("{name}-2");
+    launch(&world, &again, &project, &[])
+        .exited(0)
+        .err_has(&format!(
+            "leaves node 'solo' settled rather than redoing it as its task changed since it \
+             settled: the branch it settled on, {branch}, is gone"
+        ));
+    assert_eq!(dispatched(&world, &again), Vec::<String>::new());
+    assert!(redone(&world, &again).is_empty());
+    assert_eq!(
+        settled(&world, &again, "solo")["continued"]["source"],
+        "store"
+    );
+}
+
+/// What a task's digest reads, end to end: a node a live edit added records no digest, which a
+/// later launch reads as unchanged; a task nobody titled reads the same after the write-back
+/// titles it by its id, so an unedited relaunch redoes nothing; and a dependency a person adds to
+/// a task is a change to it, so the node is redone.
+#[test]
+fn a_digest_reads_a_tasks_edges_not_its_projected_title_and_a_live_added_node_records_none() {
+    let name = "redo-edges";
+    let world = World::new(name);
+    let project = author(&world, name, vec![agent("p", &[]), agent("q", &[])]);
+    // `p`'s dispatch is held, so the run is still going when a node is added to it live.
+    let held = world.rendezvous("p");
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let holding = held.arrived();
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "add", "node": agent("z", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    drop(holding);
+    world.unscript("p.rendezvous");
+    assert_eq!(world.until_continued(name), "complete");
+    world.until("the run to release the project", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+    let stored = stored_settlements(&world, &project);
+    for id in ["p", "q"] {
+        assert!(stored[id]["task_digest"].is_string(), "{id}: {stored:#?}");
+    }
+    assert!(stored["z"].get("task_digest").is_none(), "{stored:#?}");
+    // Authored with no title, and titled by its id by the write-back.
+    assert_eq!(task_of(&world, &project, "p")["item"]["title"], "p");
+
+    let unedited = format!("{name}-2");
+    launch(&world, &unedited, &project, &[]).exited(0);
+    assert_eq!(dispatched(&world, &unedited), Vec::<String>::new());
+
+    // A person makes `q` depend on `p`: the task is re-authored with the edge, keeping every
+    // metadata key it held.
+    let held = task_of(&world, &project, "q")["item"]["metadata"].clone();
+    world.add_task(name, "001-q", &agent("q", &["p"]), &[("p", "000-p")]);
+    update_task(
+        &world,
+        &project,
+        "q",
+        onetaskgraph_plugin_api::TaskUpdate {
+            metadata_set: held
+                .as_object()
+                .expect("metadata")
+                .iter()
+                .map(|(key, value)| (metadata_key(key), value.clone()))
+                .collect(),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        },
+    );
+    // The unedited run's close-out has released its claim on the project.
+    world.until("the unedited run to release the project", |world| {
+        stored_claim(world, &project) == Value::Null
+    });
+    let edged = format!("{name}-3");
+    launch(&world, &edged, &project, &[])
+        .exited(0)
+        .err_has("redoes node 'q', as its task changed since it settled");
+    assert_eq!(dispatched(&world, &edged), ["q"]);
 }

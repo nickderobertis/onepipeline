@@ -546,7 +546,9 @@ fn a_workstream_held_at_a_human_step_is_read_when_it_settles_and_not_before() {
     // real — dispatching nothing where the human step was, so there is no second
     // branch to read and no second finding for one thing already said.
     world.run(&["attest", &run, "service"]).exited(0);
-    world.run(&["adopt", &run]).exited(0);
+    // The decision continues the run: the driver waiting on it drives it on, with nobody
+    // adopting it.
+    world.until_continued(&run);
     world.until("the workstream to settle past its human step", |world| {
         world.run_json(&run, "result.json")["nodes"][0]["status"] != "waiting"
     });

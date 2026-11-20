@@ -1367,42 +1367,9 @@ fn attesting_something_that_is_not_a_ready_human_action_is_refused_by_name() {
 /// still executes, which is why it says it rather than failing.
 #[test]
 fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on() {
-    use oneagentgraph::config::{JudgeSide, Member};
-
     let world = World::new("channel-observer-nocommand");
     world.script("observer.supervise", "1");
-    let graphs = world.graphs();
-    std::fs::create_dir_all(&graphs).expect("a directory for the graph configs");
-
-    // The shipped document with its judge side emptied, rather than a graph
-    // written out here: what this journey is about is that *one* field being
-    // unusable, and a hand-written stand-in would drift into proving something
-    // else about a document nobody ships.
-    let mut config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
-        &std::fs::read_to_string(world.shipped_dag_graph()).expect("the shipped dag-scope graph"),
-    )
-    .expect("the shipped dag-scope graph parses");
-    let mut emptied = 0;
-    for member in config.members.values_mut() {
-        if let Member::Onejudge(member) = member {
-            for side in &mut member.judge {
-                if let JudgeSide::Command(command) = side {
-                    command.command.clear();
-                    emptied += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(
-        emptied, 1,
-        "the shipped dag-scope graph no longer declares exactly one command judge"
-    );
-    let broken = graphs.join("dag-scope-nocommand.yaml");
-    std::fs::write(
-        &broken,
-        onepipeline_testfakes::yaml::to_string(&config).expect("the emptied graph serializes"),
-    )
-    .expect("the graph is written");
+    let broken = graph_whose_judge_names_no_command(&world);
 
     let path = world.plan(
         "unwatched",
@@ -1443,6 +1410,104 @@ fn an_observer_graph_whose_judge_names_no_command_is_refused_and_the_run_goes_on
         !world.events_of("unwatched", "node-settled").is_empty(),
         "a misconfigured observer stopped the run it was watching: {:?}",
         world.kinds("unwatched")
+    );
+}
+
+/// The shipped dag-scope graph with its one command judge emptied, written into
+/// `world`'s graph configs.
+///
+/// The shipped document rather than a graph written out here: what these journeys
+/// are about is that *one* field being unusable, and a hand-written stand-in would
+/// drift into proving something else about a document nobody ships.
+fn graph_whose_judge_names_no_command(world: &World) -> std::path::PathBuf {
+    use oneagentgraph::config::{JudgeSide, Member};
+
+    let graphs = world.graphs();
+    std::fs::create_dir_all(&graphs).expect("a directory for the graph configs");
+
+    let mut config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
+        &std::fs::read_to_string(world.shipped_dag_graph()).expect("the shipped dag-scope graph"),
+    )
+    .expect("the shipped dag-scope graph parses");
+    let mut emptied = 0;
+    for member in config.members.values_mut() {
+        if let Member::Onejudge(member) = member {
+            for side in &mut member.judge {
+                if let JudgeSide::Command(command) = side {
+                    command.command.clear();
+                    emptied += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        emptied, 1,
+        "the shipped dag-scope graph no longer declares exactly one command judge"
+    );
+    let broken = graphs.join("dag-scope-nocommand.yaml");
+    std::fs::write(
+        &broken,
+        onepipeline_testfakes::yaml::to_string(&config).expect("the emptied graph serializes"),
+    )
+    .expect("the graph is written");
+
+    broken
+}
+
+/// An observer refused only as its run settles is still said to have stopped
+/// watching.
+///
+/// A run that settles faster than its observer's refusal arrives — a one-node
+/// run on a slow host — has the engine finish while the observer is still
+/// alive, and the observer then stops after the attach loop last looked at it.
+/// Held here rather than raced: the observer is held before it refuses, the
+/// launch is held once it has seen its engine finish, and only then is the
+/// observer let go to refuse, so the stop lands in exactly that window on any
+/// host.
+#[test]
+fn an_observer_refused_as_its_run_settles_is_still_said_to_have_stopped_watching() {
+    let world = World::new("channel-observer-refused-late");
+    world.script("observer.supervise", "1");
+    world.script("observer.wait", "hold");
+    let broken = graph_whose_judge_names_no_command(&world);
+    let path = world.plan("late", &plan_of("late", vec![agent("build", &[])]));
+    // llmlint: ignore-block[tests_mirror_real_usage] where the observer's stop lands
+    // against the engine finishing is the property, and no user-facing input can place
+    // it. The failpoint only orders the real binary; the attached launch, the
+    // observer's refusal and every outcome asserted are the binaries' own.
+    let concluded = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &broken.display().to_string(),
+    ]);
+    start.env(
+        "ONEPIPELINE_TEST_ATTACH_CONCLUDED_GATE",
+        concluded.address(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let launched = std::thread::scope(|scope| {
+        let launching = scope.spawn(|| world.run_on(start, "start late --attach"));
+        let finished =
+            concluded.arrived_within_a_step(&world, "the launch to see its engine finish");
+        assert!(
+            world.observer_supervision().is_empty(),
+            "the observer refused before the engine finished, so this journey staged nothing"
+        );
+        world.release("observer.go");
+        world.until("the observer to refuse its judge side", |world| {
+            !world.observer_supervision().is_empty()
+        });
+        finished.release();
+        launching.join().expect("the attached launch returns")
+    });
+    launched.exited(0).err_has("has stopped watching");
+    assert!(
+        !world.events_of("late", "node-settled").is_empty(),
+        "the run did not settle: {:?}",
+        world.kinds("late")
     );
 }
 
@@ -1537,6 +1602,9 @@ fn an_edit_to_a_run_nothing_is_driving_is_applied_rather_than_refused() {
         &plan_of("settledgraph", vec![human("approve", &[])]),
     );
     world.run(&["start", &path, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("settledgraph");
 
     world
         .run_with_stdin(
