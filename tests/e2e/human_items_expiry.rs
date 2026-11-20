@@ -6,6 +6,12 @@
 //! real — a moment passing, a node or a run settling, a file appearing for a check to
 //! find — and reads what the engine did off the journal, the CLI and the run.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] the task places these journeys
+// in the engine's own e2e tier beside the existing human-items journeys, out of the
+// `human-items-e2e` budget project. They drive the release-built binary, so every crate source
+// they select on is code they exercise: the store, the reconcile loop, the CLI. A project of their
+// own would link a second e2e binary over the whole crate to drop only the sibling e2e files
+// from their inputs.
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes the `oneagentgraph` sibling at its
 // subprocess boundary and nothing inside the crate under test, which is driven as the real
 // compiled binary over real run, plan and human-item stores; `harness.rs` carries the full
@@ -506,6 +512,78 @@ fn sample_with_expiry(world: &World) -> PathBuf {
     let path = world.root.join("expiry-sample.json");
     std::fs::write(&path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
     path
+}
+
+/// What the store refuses at its boundary, naming the fault and writing nothing: a run or
+/// node condition naming a blank run or node, raised through `raise --input`, and a
+/// `--sample` bundle whose check statuses name one check twice or carry no RFC 3339 time,
+/// or whose expired item records a person's provenance.
+#[test]
+fn malformed_conditions_check_statuses_and_expired_resolutions_are_refused() {
+    let world = world("expiry-malformed");
+    for (name, condition, refusal) in [
+        (
+            "blank-run",
+            json!({"when": "run", "run": " ", "on": "settled"}),
+            "a run expiry condition names its run",
+        ),
+        (
+            "blank-node",
+            json!({"when": "node", "run": "r", "node": " "}),
+            "a node expiry condition names its run and node",
+        ),
+    ] {
+        let path = world.root.join(format!("{name}.json"));
+        std::fs::write(&path, item(name, json!([condition])).to_string()).unwrap();
+        world
+            .run(&["human-items", "raise", "--input", path.to_str().unwrap()])
+            .err_has(refusal);
+    }
+    assert!(
+        listed(&world, &["--state", "open"]).is_empty(),
+        "nothing was raised"
+    );
+
+    let sample = sample_with_expiry(&world);
+    let given: Value = serde_json::from_str(&std::fs::read_to_string(&sample).unwrap()).unwrap();
+    let status = given["items"][1]["checks"][0].clone();
+    let mut timeless = status.clone();
+    timeless["last_run_at"] = json!("yesterday");
+    for (name, edit, refusal) in [
+        (
+            "twice",
+            json!({"checks": [status.clone(), status]}),
+            "names one twice",
+        ),
+        (
+            "timeless",
+            json!({"checks": [timeless]}),
+            "an RFC 3339 time",
+        ),
+        (
+            "a person's",
+            json!({"provenance": "user"}),
+            "state, kind and resolution conflict",
+        ),
+    ] {
+        let mut bundle = given.clone();
+        let expired = &mut bundle["items"][1];
+        if let Some(checks) = edit.get("checks") {
+            expired["checks"] = checks.clone();
+        } else {
+            expired["item"]["resolution"]["provenance"] = edit["provenance"].clone();
+        }
+        std::fs::write(&sample, bundle.to_string()).unwrap();
+        let read = world.run(&[
+            "human-items",
+            "--sample",
+            sample.to_str().unwrap(),
+            "list",
+            "--json",
+        ]);
+        assert_ne!(read.code, 0, "{name}: {}", read.stdout);
+        assert!(read.stderr.contains(refusal), "{name}: {}", read.stderr);
+    }
 }
 
 /// A command node that waits for `go` under the world's root, then exits `code`.
@@ -1761,7 +1839,8 @@ fn the_first_condition_that_holds_is_the_one_an_expiry_names() {
 }
 
 /// A check record the host cannot read runs no check and says so, and a journal that
-/// will not take an expiry leaves the item open, said, until a sweep after it does.
+/// will not take an expiry leaves the item open, said, until a sweep after it does; a
+/// watch over that journal says its sweep failed and goes on to delivery.
 #[cfg(unix)]
 #[test]
 fn a_record_or_journal_that_refuses_leaves_items_open_until_it_is_repaired() {
@@ -1815,7 +1894,20 @@ fn a_record_or_journal_that_refuses_leaves_items_open_until_it_is_repaired() {
     let list = world.run(&["human-items", "list", "--json"]);
     let show = world.run(&["human-items", "show", &due, "--json"]);
     let swept = sdk(&world).expire_due();
+    // A watch says its sweep failed and goes on to delivery rather than refuse as a read does;
+    // delivery then says what it finds in that journal itself, after the sweep's line.
+    let watch = world.run(&["human-items", "watch", "--session", OWNER]);
     std::fs::set_permissions(&journal, writable).unwrap();
+    let said: Vec<&str> = watch.stderr.lines().collect();
+    assert!(
+        said.len() == 2
+            && said[0].contains("no expiry condition was swept")
+            && said[0].contains(owed)
+            && said[1].contains("events.ndjson"),
+        "{}",
+        watch.stderr
+    );
+    assert!(watch.stdout.trim().is_empty(), "{}", watch.stdout);
     for read in [&list, &show] {
         assert_ne!(read.code, 0, "{}", read.stderr);
         assert!(read.stdout.trim().is_empty(), "answered: {}", read.stdout);
