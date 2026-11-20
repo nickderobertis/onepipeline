@@ -13757,3 +13757,35 @@ the previous bundle has no document for.
   "bundle_versions": {"events": "2.4.0"}
 }
 ```
+
+## 161. Refused edits as attributed events — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided
+beyond the ruling of the manager of node `engine-refusal-summary`.** The amendment under
+*Refused edits are attributed events* restates that ruling; these are the decisions it left
+to the build:
+
+- **The `full_reason` artifact is a JSON string**, written through the journal's existing
+  artifact path under kind `edit-rejected-full-reason`, so a reader fetches and decodes it
+  as it does every artifact this crate keeps, and the decoded string is the text.
+- **An engine-decided refusal's `full_reason` is its error's whole text**, `refused: `
+  prefix included — exactly what `reason` says, kept without the journal's one-line read of
+  it. A hook that could not judge keeps the same: the refusal that says why, since such a
+  hook may have written nothing.
+- **A line is trimmed before it becomes a summary**, and a hook's stdout and stderr lines
+  are read after the bytes are decoded lossily as UTF-8, as its stderr already was.
+- **An envelope that does not decode is refused per command with a `summary` and
+  `full_reason` from the decoder's message, and names no `node`**: its commands did not
+  decode, so none names a node this build can read. The one surface raised for the whole
+  envelope carries no `rejection`, since it stands for every command of it rather than one
+  record.
+
+Four optional fields are added to `edit-rejected`'s document and one to
+`planner-surface-queued`'s, so the events bundle moves to a new minor: a stream an earlier
+build wrote still validates.
+
+```json
+{
+  "bundle_versions": {"events": "2.5.0"}
+}
+```

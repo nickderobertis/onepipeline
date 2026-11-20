@@ -757,7 +757,7 @@ pub(crate) struct GuardStarted {
 
 /// Where one record stands in a run's journal: its writer's stream and its `seq` there,
 /// which no other record of the run shares.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecordAt {
     /// The writer's stream.
@@ -1022,6 +1022,28 @@ pub(crate) struct EditRejected {
     /// is then its text. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) refusal: Option<crate::channel::Refusal>,
+    /// The refusal on one line, at most 200 characters, cut with `…` where it is
+    /// longer: a refusing plan-edit hook's `<op> of node '<id>': <line>`, its line the
+    /// first non-empty one it wrote on stdout, or else on stderr; and otherwise the
+    /// refusal's own text without `reason`'s `refused: `. Absent from a record written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    /// The id, among the record's `artifacts`, of the artifact holding the complete
+    /// refusal, every line kept: all a refusing plan-edit hook wrote on stderr, up to
+    /// the 64 KiB the engine reads of it, and otherwise the refusal's text. Absent from
+    /// a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) full_reason: Option<String>,
+    /// Whether the hook wrote more on stderr than `full_reason` keeps. Absent from a
+    /// record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) full_reason_truncated: Option<bool>,
+    /// The node the refused command names, whether or not the run's graph holds it,
+    /// which the record is also labelled with. Absent where the command names none,
+    /// and from a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) node: Option<String>,
 }
 
 /// `planner-surface-queued`: a surface sent.
@@ -1055,6 +1077,10 @@ pub(crate) struct PlannerSurfaceQueued {
     pub(crate) source: String,
     /// Whether it holds dependents back.
     pub(crate) blocking: bool,
+    /// The `edit-rejected` record the surface was raised for, by its stream and `seq`.
+    /// Present only on the surface a refused edit raises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rejection: Option<RecordAt>,
 }
 
 /// `planner-surface-dropped`: a hook kept a surface off the channel.
@@ -3339,6 +3365,43 @@ mod tests {
                 "a {kind} naming its envelope by a word was admitted"
             );
         }
+    }
+
+    /// An `edit-rejected` written before a refusal carried its summary, complete text and
+    /// node, and a `planner-surface-queued` written before a surface named its rejection,
+    /// read as records with none of them and write back exactly as they were.
+    #[test]
+    fn a_refusal_and_surface_written_before_they_were_accounted_still_read() {
+        let rejected = serde_json::json!({
+            "author": "planner",
+            "command": {"op": "amend", "id": "build", "text": "smaller"},
+            "reason": "refused: no such node", "envelope": 4, "index": 0,
+        });
+        let read: EditRejected =
+            serde_json::from_value(rejected.clone()).expect("an older refusal reads");
+        assert_eq!(
+            (
+                read.summary.as_deref(),
+                read.full_reason.as_deref(),
+                read.node.as_deref()
+            ),
+            (None, None, None)
+        );
+        assert_eq!(read.full_reason_truncated, None);
+        assert_eq!(serde_json::to_value(&read).expect("it writes"), rejected);
+
+        let surface = serde_json::json!({
+            "surface": 3, "correlation": null, "kind": "edit-rejected",
+            "message": "reconciler: rejected — refused: no such node",
+            "source": "reconciler", "blocking": false,
+        });
+        let read: PlannerSurfaceQueued =
+            serde_json::from_value(surface.clone()).expect("an older surface reads");
+        assert_eq!(read.rejection, None);
+        let mut written = serde_json::to_value(&read).expect("it writes");
+        // `correlation: null` reads as absent, which is how every writer omits it.
+        written["correlation"] = Value::Null;
+        assert_eq!(written, surface);
     }
 
     /// `pool-maintenance` and `branches-retired` each declare `cut_short` and

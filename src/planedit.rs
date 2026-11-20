@@ -11,7 +11,8 @@
 //! the reference block, the stack, a resumed attempt's notes and the boundary section.
 //!
 //! Exit `0` passes the node, `1` refuses the whole reply with the hook's stderr as the
-//! reason, and anything else — another status, a signal, a command that will not start, or
+//! reason and the first non-empty line of its stdout as the refusal's one-line summary, and
+//! anything else — another status, a signal, a command that will not start, or
 //! the hook outliving its timeout, whose process tree is then ended — is *could not be
 //! judged*, which refuses it too. The caller journals either refusal as `edit-rejected`
 //! naming the hook and the node, and answers the sender as it answers any refused reply.
@@ -25,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::channel::Command;
+use crate::engine::RefusalAccount;
 use crate::error::{Error, Result};
 use crate::filter::PlanEditHook;
 use crate::graph::Graph;
@@ -41,7 +43,11 @@ const POLL: Duration = Duration::from_millis(20);
 /// where it becomes one.
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
 
-/// How long a hook's stderr is waited for once the hook itself has ended.
+/// The most of a hook's stdout this build reads: the summary a refusal is shown by is its first
+/// non-empty line, so nothing past this is ever read for it.
+const MAX_STDOUT_BYTES: u64 = 4 * 1024;
+
+/// How long a hook's stdout and stderr are waited for once the hook itself has ended.
 const STDERR_GRACE: Duration = Duration::from_secs(2);
 
 /// The keys of a `requeue`'s amendment that change what a node is judged against, and so
@@ -134,10 +140,26 @@ impl<'a> Document<'a> {
 enum Verdict {
     /// Exit 0.
     Pass,
-    /// Exit 1, with what it said on stderr.
-    Refuse(String),
+    /// Exit 1, with what it wrote.
+    Refuse(Said),
     /// Anything else, and why.
     Unjudged(String),
+}
+
+/// What a refusing hook wrote, as far as this build reads either stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Said {
+    /// Its stdout, up to [`MAX_STDOUT_BYTES`].
+    stdout: String,
+    /// Its stderr, up to [`MAX_STDERR_BYTES`].
+    stderr: String,
+    /// Whether it wrote more to stderr than [`MAX_STDERR_BYTES`].
+    stderr_truncated: bool,
+}
+
+/// The first line of `text` that is not blank, trimmed.
+fn first_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 /// Offer every node a reply's commands introduce or change to the plan-edit hook the run's
@@ -152,14 +174,19 @@ enum Verdict {
 /// # Errors
 ///
 /// The refusal, as [`Error::Refused`] naming the hook and the node, beside the position of the
-/// command that named that node; the caller journals it there.
+/// command that named that node and the account its `edit-rejected` records; the caller
+/// journals it there.
 pub(crate) fn judge(
     paths: &RunPaths,
     launch: &LaunchRecord,
     commands: &[Command],
     edited: &Graph,
     compose: &mut dyn FnMut(&Node) -> Result<String>,
-) -> std::result::Result<(), (usize, Error)> {
+) -> std::result::Result<(), (usize, Error, Box<RefusalAccount>)> {
+    let decided = |index: usize, error: Error| {
+        let account = Box::new(RefusalAccount::of(&error));
+        (index, error, account)
+    };
     let Some(hook) = launch.plan_edit_hook.as_ref() else {
         return Ok(());
     };
@@ -172,34 +199,58 @@ pub(crate) fn judge(
             continue;
         }
         let op = crate::channel::op_of(command);
-        let body = compose(node).map_err(|error| (index, error))?;
+        let body = compose(node).map_err(|error| decided(index, error))?;
         let document =
             serde_json::to_vec(&Document::of(&paths.run, &launch.project, op, node, body))
                 .map_err(|error| {
-                    (
+                    decided(
                         index,
                         Error::Invalid(format!("node '{}' does not serialize: {error}", node.id)),
                     )
                 })?;
         let named = hook.command().spelled();
-        let refusal = match run(hook, &launch.dir, &document) {
+        let of_node = format!("{op} of node '{}'", node.id);
+        let (error, account) = match run(hook, &launch.dir, &document) {
             Verdict::Pass => continue,
-            Verdict::Refuse(said) => format!(
-                "{op}: the plan-edit hook `{named}` refused node '{}', so none of this reply's \
-                 edits were applied: {}",
-                node.id,
-                words(&said, "it refused and said nothing on stderr")
-            ),
-            Verdict::Unjudged(why) => format!(
-                "{op}: the plan-edit hook `{named}` could not judge node '{}' — {why} — so it \
-                 was not judged and none of this reply's edits were applied",
-                node.id
-            ),
+            Verdict::Refuse(said) => {
+                let error = Error::Refused(format!(
+                    "{op}: the plan-edit hook `{named}` refused node '{}', so none of this \
+                     reply's edits were applied: {}",
+                    node.id,
+                    words(&said.stderr, SAID_NOTHING)
+                ));
+                let line = first_line(&said.stdout)
+                    .or_else(|| first_line(&said.stderr))
+                    .unwrap_or(SAID_NOTHING);
+                let account = RefusalAccount {
+                    summary: crate::engine::summary_line(&format!("{of_node}: {line}")),
+                    full: said.stderr,
+                    truncated: said.stderr_truncated,
+                };
+                (error, account)
+            }
+            Verdict::Unjudged(why) => {
+                let error = Error::Refused(format!(
+                    "{op}: the plan-edit hook `{named}` could not judge node '{}' — {why} — so \
+                     it was not judged and none of this reply's edits were applied",
+                    node.id
+                ));
+                let account = RefusalAccount {
+                    summary: crate::engine::summary_line(&format!(
+                        "{of_node}: the plan-edit hook could not judge it"
+                    )),
+                    ..RefusalAccount::of(&error)
+                };
+                (error, account)
+            }
         };
-        return Err((index, Error::Refused(refusal)));
+        return Err((index, error, Box::new(account)));
     }
     Ok(())
 }
+
+/// What a refusal says of a hook that refused on neither stream.
+const SAID_NOTHING: &str = "it refused and said nothing on stderr";
 
 /// What a hook said, as a refusal carries it: bounded, on one line, and never blank.
 fn words(said: &str, otherwise: &str) -> String {
@@ -216,13 +267,13 @@ fn words(said: &str, otherwise: &str) -> String {
 }
 
 /// Run the hook over one document: from the launch directory, the document on its stdin,
-/// its stderr kept, and its process tree ended when it outlives its timeout.
+/// its stdout and stderr kept, and its process tree ended when it outlives its timeout.
 fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
     let mut spawning = Process::new(hook.command().program_from(dir));
     spawning
         .args(hook.arguments())
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // A record from before the launch directory was recorded names none, and the hook
     // starts where this process is.
@@ -247,32 +298,16 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
                 let _ = stdin.write_all(&owned);
             }
         });
-    // Into a buffer this thread shares, so what the hook said is still read when a process it
-    // left behind holds the pipe open past the grace this side waits.
-    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let (drained_tx, drained) = std::sync::mpsc::channel::<()>();
-    let mut stderr = child.stderr.take();
-    let kept = std::sync::Arc::clone(&said);
-    let _ = std::thread::Builder::new()
-        .name("plan-edit-hook-stderr".to_owned())
-        .spawn(move || {
-            let mut buffer = [0_u8; 8192];
-            if let Some(stderr) = stderr.as_mut() {
-                while let Ok(read) = stderr.read(&mut buffer) {
-                    if read == 0 {
-                        break;
-                    }
-                    let mut said = kept
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let room = usize::try_from(MAX_STDERR_BYTES)
-                        .unwrap_or(usize::MAX)
-                        .saturating_sub(said.len());
-                    said.extend_from_slice(&buffer[..read.min(room)]);
-                }
-            }
-            let _ = drained_tx.send(());
-        });
+    let stdout = drain(
+        child.stdout.take(),
+        "plan-edit-hook-stdout",
+        MAX_STDOUT_BYTES,
+    );
+    let stderr = drain(
+        child.stderr.take(),
+        "plan-edit-hook-stderr",
+        MAX_STDERR_BYTES,
+    );
     let timeout: NonZeroU64 = hook.timeout_seconds();
     let deadline = crate::hooks::deadline_after(timeout);
     let status = loop {
@@ -295,24 +330,94 @@ fn run(hook: &PlanEditHook, dir: &Path, document: &[u8]) -> Verdict {
             }
         }
     };
-    let _ = drained.recv_timeout(STDERR_GRACE);
-    let said = String::from_utf8_lossy(
-        &said
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
-    .into_owned();
+    // One grace for both streams, so a hook leaving a process behind holding them open costs
+    // this side the grace once.
+    let grace = Instant::now() + STDERR_GRACE;
+    let (stdout, _) = stdout.read(grace);
+    let (stderr, stderr_truncated) = stderr.read(grace);
     match status.code() {
         Some(0) => Verdict::Pass,
-        Some(1) => Verdict::Refuse(said),
+        Some(1) => Verdict::Refuse(Said {
+            stdout,
+            stderr,
+            stderr_truncated,
+        }),
         Some(code) => Verdict::Unjudged(format!(
             "it exited {code}{}",
-            match words(&said, "") {
+            match words(&stderr, "") {
                 said if said.is_empty() => String::new(),
                 said => format!(" saying: {said}"),
             }
         )),
         None => Verdict::Unjudged("it was ended by a signal before it answered".to_owned()),
+    }
+}
+
+/// One of a hook's output streams, read on a thread into a buffer this side shares — so a
+/// hook that writes more than a pipe holds is never blocked on it, and what it wrote is still
+/// read when a process it left behind holds the pipe open past the grace this side waits.
+struct Drained {
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    overflowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+/// Start reading `stream` to its end, keeping its first `bound` bytes.
+fn drain(stream: Option<impl Read + Send + 'static>, name: &str, bound: u64) -> Drained {
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let overflowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_tx, done) = std::sync::mpsc::channel::<()>();
+    let (into, over) = (
+        std::sync::Arc::clone(&kept),
+        std::sync::Arc::clone(&overflowed),
+    );
+    let bound = usize::try_from(bound).unwrap_or(usize::MAX);
+    let _ = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let mut buffer = [0_u8; 8192];
+            if let Some(mut stream) = stream {
+                while let Ok(read) = stream.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    let mut kept = into
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let room = bound.saturating_sub(kept.len());
+                    if read > room {
+                        over.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    kept.extend_from_slice(&buffer[..read.min(room)]);
+                }
+            }
+            let _ = done_tx.send(());
+        });
+    Drained {
+        kept,
+        overflowed,
+        done,
+    }
+}
+
+impl Drained {
+    /// What was read by `grace`, or by the stream's end if that is sooner, and whether the
+    /// stream carried more than its bound.
+    fn read(self, grace: Instant) -> (String, bool) {
+        let _ = self
+            .done
+            .recv_timeout(grace.saturating_duration_since(Instant::now()));
+        let kept = String::from_utf8_lossy(
+            &self
+                .kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned();
+        (
+            kept,
+            self.overflowed.load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 }
 
