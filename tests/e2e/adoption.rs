@@ -3778,6 +3778,11 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
 /// how often a probe runs — and well short of the minute an unscaled build would wait.
 /// [`a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`] holds the
 /// shipped minute itself, at the shipped time scale.
+// llmlint: ignore-block[tests_mirror_real_usage] how often a held release is asked about is the
+// number of probe subprocesses a held run starts, and a probe that answered "not released"
+// leaves nothing behind for a CLI to report; the driver's own counter is the only place that
+// number exists, as it is for the pacing journey above. Everything else is the real binary,
+// a real probe and a real repository.
 #[test]
 fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
     let world = World::new("adoption-scaled-poll").with_env(LOOP_STATS_ENV, "1");
@@ -3819,10 +3824,9 @@ fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
          than the {interval:?} the binary applies at this world's scale"
     );
     assert!(!dispatched(&world, run, "consumer"));
-    // The release arrives and is noticed at the next scaled ask, and the run settles: a driver
-    // that ends on its own writes the span record `profiling` reads this wait from.
     world.run(&["stop", run]).exited(0);
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The adoption mode resolves through **exactly four rungs**, and each of them
 /// decides a node the rung beneath it would have decided differently.
