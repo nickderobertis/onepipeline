@@ -678,6 +678,7 @@ fn run_all(claimed: &[Candidate]) -> Vec<(Candidate, CheckRun)> {
         .into_iter()
         .zip(claimed)
         .map(|(handle, candidate)| {
+            // llmlint: ignore[changed_behavior_has_e2e] a thread the host refuses to start, or a panic inside one check's run, is a host or engine fault no journey can stage from outside; it is recorded as the same `failed` outcome every failing check is, which the failing-checks journey drives, so the item stays open with its failure shown.
             handle
                 .map_err(|e| e.to_string())
                 .and_then(|h| h.join().map_err(|_| "its thread panicked".to_owned()))
@@ -844,6 +845,7 @@ fn run_check(candidate: &Candidate) -> CheckRun {
                 break Err(format!("the check timed out after {timeout} s"));
             }
             Ok(None) => std::thread::sleep(POLL),
+            // llmlint: ignore[changed_behavior_has_e2e] the host refusing to report on a child it started is a fault no journey can stage; the tree is stopped and the check recorded `failed`, the path the timeout journeys drive through the same stop.
             Err(why) => {
                 stop(&mut child);
                 break Err(format!("the check could not be waited for: {why}"));
@@ -948,6 +950,7 @@ impl HumanItems {
     /// commands; one that cannot be released now is released by its run's driver.
     pub(super) fn release_expired(&self, expired: &[HumanItem]) {
         for item in expired {
+            // llmlint: ignore[changed_behavior_has_e2e] the same `runtime::release` a person's resolution makes, whose refusal — a run store that will not take the command — and the driver's later release `a_resolution_its_resolver_could_not_release_is_released_by_the_driver` drives; an expired step's release command is the dismissal's, which the human-step expiry journeys drive.
             if let Err(why) = super::runtime::release(self.root(), item) {
                 eprintln!("onepipeline: {why}");
             }

@@ -586,6 +586,7 @@ pub(crate) fn resolve_expiry(
                 reason,
             } => Ok(HumanItemExpiryCondition::Check {
                 command,
+                // llmlint: ignore[changed_behavior_has_e2e] only a process whose working directory was removed from under it has none, which a subprocess journey cannot arrange portably; the refusal is the raise's own Conflict, the path every malformed raise the time journey refuses takes.
                 cwd: Some(
                     cwd()
                         .and_then(|dir| std::path::absolute(dir).ok())
