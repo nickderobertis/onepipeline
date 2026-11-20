@@ -285,6 +285,11 @@ pub(crate) struct Gate {
     /// The run's statuses when the last pass read the store: a settlement since is
     /// what a node or run expiry condition naming this run waits on.
     statuses: BTreeMap<String, NodeStatus>,
+    /// Whether a pass raises a waiting step's item. A gate watching a decision wait
+    /// raises nothing: the driving pass before the wait already raised every waiting
+    /// step, and raising again is a journal write that re-projects every task beside the
+    /// writes the run's people are making.
+    raises: bool,
 } // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Gate {
@@ -309,6 +314,21 @@ impl Gate {
             seen: 0,
             due: None,
             statuses: BTreeMap::new(),
+            raises: true,
+        })
+    }
+
+    /// The gate a driver waiting on a decision watches the store through: it sweeps,
+    /// holds and releases as every gate does, and raises nothing.
+    // A raise here changes no item; its only trace is a projection racing a person's write,
+    // which lost that write's projection record. Seeing it directly means counting a board
+    // fake's requests across live drivers, a timing-bound test; what proves it is
+    // `a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_to`, the
+    // journey that race failed, and the decision-wait journeys this gate still sweeps for.
+    pub(crate) fn watching(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
+        Self::for_launch(paths, launch).map(|gate| Self {
+            raises: false,
+            ..gate
         })
     }
 
@@ -335,7 +355,8 @@ impl Gate {
         }
         self.seen = length;
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
-            if statuses.get(&node.id) != Some(&NodeStatus::Waiting)
+            if !self.raises
+                || statuses.get(&node.id) != Some(&NodeStatus::Waiting)
                 || self.raised.contains(&node.id)
             {
                 continue;

@@ -1294,7 +1294,7 @@ fn driving(
     // and is a decision made all the same. One gate for the whole wait, so a release it queued
     // once is never queued again.
     let mut items = (on_decision == OnDecision::Wait)
-        .then(|| crate::human_items::runtime::Gate::for_launch(paths, &launch))
+        .then(|| crate::human_items::runtime::Gate::watching(paths, &launch))
         .flatten();
     let (settlement, departure) = loop {
         // The channel as it stood before the queue is read: a driver that goes on to wait on a
