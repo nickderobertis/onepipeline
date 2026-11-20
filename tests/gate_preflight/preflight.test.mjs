@@ -106,7 +106,8 @@ function workspace(t) {
   return dir;
 }
 
-/** Install every required tool except those named in `absent`, and the counting stand-ins. */
+// A stub executable is a present tool: every probe asks whether a tool is there, never which
+// release it is.
 function provision(dir, absent = []) {
   for (const path of ["bin", "target", "node_modules", "calls", ".gate-time.json"])
     rmSync(join(dir, path), { recursive: true, force: true });
@@ -261,7 +262,6 @@ test("_ensure-node-modules installs the locked tree only when one required modul
     assert.match(named.stderr, new RegExp(`missing: ${missing.replaceAll(".", "\\.")}\\)`));
   }
 
-  // An installer that fails fails the recipe with its status.
   provision(dir, ["node-modules"]);
   executable(join(dir, "bin", "npm"), "echo 'npm ERR! network' >&2\nexit 7\n");
   const failed = run(dir, ["_ensure-node-modules"]);
