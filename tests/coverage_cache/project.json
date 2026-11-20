@@ -37,6 +37,7 @@
         "{workspaceRoot}/scripts/ensure-test-archive.sh",
         "{workspaceRoot}/.config/nextest.toml",
         "{workspaceRoot}/.cargo/config.toml",
+        "{workspaceRoot}/scripts/cc-lld-debug.sh",
         "{workspaceRoot}/rust-toolchain.toml",
         "sharedGlobals",
         {

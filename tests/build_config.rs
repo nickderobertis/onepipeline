@@ -1,12 +1,14 @@
 //! The build configuration every cargo invocation inside this clone reads, held
 //! to what `.cargo/config.toml` promises.
 //!
-//! That file carries two keys, and each is a promise about *every* build under
+//! That file carries three keys, and each is a promise about *every* build under
 //! this clone rather than about the workspace: `build.target-dir` puts a crate
 //! outside the workspace into the same `<clone>/target` the members use, so one
-//! clone never compiles its dependency graph into two trees, and
-//! `profile.dev.debug = 0` builds every dev and test build without debuginfo. Neither can be read off the manifest — a `Cargo.toml` profile
-//! reaches only its own workspace — and neither is proven by the file parsing,
+//! clone never compiles its dependency graph into two trees,
+//! `profile.dev.debug = 0` builds every dev and test build without debuginfo, and
+//! the Linux GNU targets' `linker` links every dev and test build with the
+//! toolchain's own rust-lld while a release links as it would without it. None can be read off the manifest — a `Cargo.toml` profile
+//! reaches only its own workspace — and none is proven by the file parsing,
 //! because cargo merges config files from the working directory *upward* and
 //! resolves each `target-dir` against its own file's location, which is exactly
 //! where a copy of the file goes wrong.
@@ -16,7 +18,8 @@
 //! reports for it and what it hands `rustc` when it builds it. The overrides the
 //! environment may carry (`CARGO_TARGET_DIR`, `RUSTFLAGS`) are stripped from the
 //! probe's environment on purpose: each outranks the file, and what is under
-//! test is the file.
+//! test is the file. The linker probe sets `RUSTFLAGS` back, because the file's
+//! promise there is that the `-D warnings` the recipes set does not undo it.
 //!
 //! Nothing a probe runs may wait on a lock the rest of the clone's cargo work
 //! takes. The clone's `target/debug` and `target/release` are locked for the
@@ -46,6 +49,23 @@ fn repo_root() -> PathBuf {
 fn build_config() -> String {
     let path = repo_root().join(".cargo/config.toml");
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} reads: {error}", path.display()))
+}
+
+/// The table the file names the Linux linker under, and the script it names,
+/// relative to the clone root the way cargo resolves it.
+const LINUX_TARGETS: &str = r#"cfg(all(target_os = "linux", target_env = "gnu"))"#;
+const LINUX_LINKER: &str = "scripts/cc-lld-debug.sh";
+
+/// A copy of the file at `root/.cargo/config.toml`, and of the linker script it
+/// names at the path it names it by, so a build under `root` links as one in
+/// the clone does.
+fn copy_build_config(root: &Path) {
+    fs::create_dir_all(root.join(".cargo")).expect("a checkout config directory");
+    fs::write(root.join(".cargo/config.toml"), build_config()).expect("a copied config");
+    let linker = root.join(LINUX_LINKER);
+    fs::create_dir_all(linker.parent().expect("the linker has a directory"))
+        .expect("a checkout scripts directory");
+    fs::copy(repo_root().join(LINUX_LINKER), &linker).expect("a copied linker script");
 }
 
 /// The clone a case runs in, and the cargo home its environment hands cargo:
@@ -100,8 +120,7 @@ fn probe_crate(root: &Path) {
 /// `a_second_checkout_carrying_its_own_copy_of_the_file_builds_into_its_own_root`
 /// proves.
 fn probe_checkout(case: &Path) -> PathBuf {
-    fs::create_dir_all(case.join(".cargo")).expect("a checkout config directory");
-    fs::write(case.join(".cargo/config.toml"), build_config()).expect("a copied config");
+    copy_build_config(case);
     let probe = case.join("probe");
     probe_crate(&probe);
     probe
@@ -130,7 +149,8 @@ fn cargo_binary() -> PathBuf {
 const LOCK_WAIT: &str = "waiting for file lock";
 
 /// Run cargo from `dir` under `host`'s environment with everything that
-/// outranks the config file removed, and under `own_home` where one is named.
+/// outranks the config file removed, under `own_home` where one is named, and
+/// with `RUSTFLAGS` set to `rustflags` where that is named.
 ///
 /// A cargo that reports it is waiting on a lock is ended there, and what is
 /// returned is the line naming the lock.
@@ -138,6 +158,7 @@ fn cargo_run<I, S>(
     host: &Host,
     dir: &Path,
     own_home: Option<&Path>,
+    rustflags: Option<&str>,
     args: I,
 ) -> Result<Output, String>
 where
@@ -167,6 +188,9 @@ where
         "CARGO_ENCODED_RUSTFLAGS",
     ] {
         command.env_remove(outranking);
+    }
+    if let Some(flags) = rustflags {
+        command.env("RUSTFLAGS", flags);
     }
     let mut child = command.spawn().expect("cargo runs");
     let mut stdout = child.stdout.take().expect("cargo's stdout is piped");
@@ -208,8 +232,23 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output =
-        cargo_run(host, dir, Some(&case.join("cargo-home")), args).unwrap_or_else(|wait| {
+    cargo_with_rustflags(host, dir, case, None, args)
+}
+
+/// [`cargo`], with `RUSTFLAGS` set to `rustflags` where that is named.
+fn cargo_with_rustflags<I, S>(
+    host: &Host,
+    dir: &Path,
+    case: &Path,
+    rustflags: Option<&str>,
+    args: I,
+) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = cargo_run(host, dir, Some(&case.join("cargo-home")), rustflags, args)
+        .unwrap_or_else(|wait| {
             panic!(
                 "cargo in {} waited on a lock the rest of the clone shares: {wait}",
                 dir.display()
@@ -291,12 +330,12 @@ fn keys(table: &toml::Value, name: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_config_file_carries_the_contracts_two_keys_and_nothing_else() {
+fn the_config_file_carries_the_contracts_three_keys_and_nothing_else() {
     let config: toml::Value = toml::from_str(&build_config()).expect(".cargo/config.toml parses");
     assert_eq!(
         keys(&config, ""),
-        ["build", "profile"],
-        "the file holds the two tables the contract names and no other"
+        ["build", "profile", "target"],
+        "the file holds the three tables the contract names and no other"
     );
     assert_eq!(keys(&config["build"], "build"), ["target-dir"]);
     assert_eq!(
@@ -314,6 +353,20 @@ fn the_config_file_carries_the_contracts_two_keys_and_nothing_else() {
         config["profile"]["dev"]["debug"].as_integer(),
         Some(0),
         "profile.dev.debug is the integer 0"
+    );
+    assert_eq!(
+        keys(&config["target"], "target"),
+        [LINUX_TARGETS],
+        "the file names a linker for the Linux GNU targets alone, so macOS and Windows read none"
+    );
+    assert_eq!(
+        keys(&config["target"][LINUX_TARGETS], LINUX_TARGETS),
+        ["linker"]
+    );
+    assert_eq!(
+        config["target"][LINUX_TARGETS]["linker"].as_str(),
+        Some(LINUX_LINKER),
+        "the Linux linker is the clone's own script"
     );
 }
 
@@ -360,8 +413,7 @@ fn a_second_checkout_carrying_its_own_copy_of_the_file_builds_into_its_own_root(
     // against the deeper root, or two checkouts silently share one target.
     let nested_root = case_dir(&Host::this_clone(), "nested-checkout");
     probe_crate(&nested_root);
-    fs::create_dir_all(nested_root.join(".cargo")).expect("a nested config directory");
-    fs::write(nested_root.join(".cargo/config.toml"), build_config()).expect("a copied config");
+    copy_build_config(&nested_root);
     assert_eq!(
         reported_target_directory(&nested_root, &nested_root),
         nested_root.join("target"),
@@ -445,8 +497,7 @@ impl HeldHost {
     fn hold(name: &str) -> Self {
         let root = case_dir(&Host::this_clone(), name);
         let clone = root.join("clone");
-        fs::create_dir_all(clone.join(".cargo")).expect("a fixture clone");
-        fs::write(clone.join(".cargo/config.toml"), build_config()).expect("a copied config");
+        copy_build_config(&clone);
         let home = root.join("inherited-cargo-home");
         let locks = [
             clone.join("target/debug/.cargo-lock"),
@@ -496,6 +547,7 @@ fn the_held_fixture_stops_a_probe_that_builds_into_the_clones_target() {
         &held.host,
         &probe,
         Some(&probe.join("cargo-home")),
+        None,
         ["build", "-v", "--offline"],
     )
     .expect_err("a build into the held clone's target directory waits on its lock");
@@ -511,10 +563,249 @@ fn the_held_fixture_stops_a_probe_that_resolves_against_the_inherited_cargo_home
     // environment handed it.
     let held = HeldHost::hold("held-against-the-inherited-home");
     let probe = probe_checkout(&case_dir(&held.host, "probe"));
-    let wait = cargo_run(&held.host, &probe, None, ["build", "-v", "--offline"])
+    let wait = cargo_run(&held.host, &probe, None, None, ["build", "-v", "--offline"])
         .expect_err("a resolution against the held cargo home waits on its package cache");
     assert!(
         wait.contains("package cache"),
         "the wait is on the package cache: {wait}"
+    );
+}
+
+/// The linker and version lld names in an ELF's `.comment` (`LLD 22.1.6`, from
+/// its `Linker: LLD 22.1.6 (<source>)`), read off the file's bytes: GNU `ld`
+/// writes none, so `None` is a GNU `ld` link.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn recorded_linker(binary: &Path) -> Option<String> {
+    let bytes =
+        fs::read(binary).unwrap_or_else(|error| panic!("{} reads: {error}", binary.display()));
+    let marker = b"Linker: ";
+    let start = bytes.windows(marker.len()).position(|w| w == marker)?;
+    let start = start + marker.len();
+    let end = bytes[start..].iter().position(|&b| b == 0)? + start;
+    let line = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+    Some(
+        line.split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The version the toolchain's own rust-lld reports (`LLD 22.1.6`), found beside
+/// the `rustc` that sits beside [`cargo_binary`], as rustc finds it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn bundled_lld_version() -> String {
+    let cargo = cargo_binary();
+    let rustc = cargo.with_file_name("rustc");
+    let rustc = if rustc.is_file() {
+        rustc
+    } else {
+        PathBuf::from("rustc")
+    };
+    let ask = |args: &[&str]| {
+        let output = Command::new(&rustc)
+            .args(args)
+            .output()
+            .expect("rustc runs");
+        assert!(output.status.success(), "rustc {args:?} fails");
+        String::from_utf8(output.stdout).expect("rustc prints UTF-8")
+    };
+    let sysroot = ask(&["--print", "sysroot"]);
+    let host = ask(&["-vV"])
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+        .expect("rustc -vV names its host");
+    let lld = Path::new(sysroot.trim()).join(format!("lib/rustlib/{host}/bin/rust-lld"));
+    let output = Command::new(&lld)
+        .args(["-flavor", "gnu", "--version"])
+        .output()
+        .unwrap_or_else(|error| panic!("{} runs: {error}", lld.display()));
+    let version = String::from_utf8_lossy(&output.stdout);
+    version
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The test executables a `cargo test --no-run` of the probe wrote: every file
+/// under `deps` named for the crate that carries no extension.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn probe_test_binaries(deps: &Path) -> Vec<PathBuf> {
+    fs::read_dir(deps)
+        .expect("a deps directory")
+        .map(|entry| entry.expect("a deps entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.starts_with("build_config_probe-") && !name.contains('.'))
+        })
+        .collect()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn linux_dev_and_test_builds_link_with_the_bundled_lld_and_release_as_it_would_without_it() {
+    // Under the `-D warnings` the recipes set, which would have replaced a
+    // config `rustflags` and does not reach a `linker`.
+    let deny = Some("-D warnings");
+    let host = Host::this_clone();
+    let checkout = case_dir(&host, "linker");
+    let probe = probe_checkout(&checkout);
+    fs::write(probe.join("src/main.rs"), "fn main() {}\n").expect("a probe binary");
+    let lld = Some(bundled_lld_version());
+
+    cargo_with_rustflags(&host, &probe, &checkout, deny, ["build", "--offline"]);
+    assert_eq!(
+        recorded_linker(&checkout.join("target/debug/build-config-probe")),
+        lld,
+        "a dev build links with the toolchain's own rust-lld"
+    );
+    cargo_with_rustflags(
+        &host,
+        &probe,
+        &checkout,
+        deny,
+        ["test", "--no-run", "--offline"],
+    );
+    let tests = probe_test_binaries(&checkout.join("target/debug/deps"));
+    assert!(!tests.is_empty(), "cargo test --no-run wrote test binaries");
+    for test in tests {
+        assert_eq!(
+            recorded_linker(&test),
+            lld,
+            "{} links with the toolchain's own rust-lld",
+            test.display()
+        );
+    }
+
+    // What a release links with when the file names no linker, which is the
+    // target's default: GNU `ld` on aarch64, rustc's own rust-lld on x86_64.
+    // Outside the clone, because cargo merges every config file upward and the
+    // clone's would hand this checkout the linker it is meant to lack.
+    let unset = std::env::temp_dir().join(format!(
+        "onepipeline-build-config-linker-unset-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&unset);
+    let unset_probe = probe_checkout(&unset);
+    fs::write(unset_probe.join("src/main.rs"), "fn main() {}\n").expect("a probe binary");
+    let without_target_table = build_config()
+        .split("\n[target.")
+        .next()
+        .expect("the file has text before its target table")
+        .to_owned();
+    fs::write(unset.join(".cargo/config.toml"), without_target_table).expect("a trimmed config");
+    for (root, dir) in [(&checkout, &probe), (&unset, &unset_probe)] {
+        cargo_with_rustflags(&host, dir, root, deny, ["build", "--offline", "--release"]);
+    }
+    assert_eq!(
+        recorded_linker(&checkout.join("target/release/build-config-probe")),
+        recorded_linker(&unset.join("target/release/build-config-probe")),
+        "a release build links with what it would without the file's linker"
+    );
+    let _ = fs::remove_dir_all(&unset);
+}
+
+/// The linker script run as rustc runs it — `-o <output>` among its arguments,
+/// under `path` — with a `cc` ahead of it on `path` that prints the arguments it
+/// was handed, one per line.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn linker_script_hands_cc(case: &Path, path: &[&Path], output: &str) -> Vec<String> {
+    let stub = case.join("stub-bin");
+    fs::create_dir_all(&stub).expect("a stub directory");
+    let cc = stub.join("cc");
+    fs::write(&cc, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").expect("a stub cc");
+    make_executable(&cc);
+    let path = std::env::join_paths(path.iter().copied().chain([stub.as_path()])).expect("a PATH");
+    // By path: the PATH handed it holds no system directory.
+    let ran = Command::new("/bin/sh")
+        .arg(repo_root().join(LINUX_LINKER))
+        .args(["main.o", "-o", output, "-nodefaultlibs"])
+        .env("PATH", path)
+        .output()
+        .expect("sh runs the linker script");
+    assert!(ran.status.success(), "the linker script fails: {ran:?}");
+    String::from_utf8(ran.stdout)
+        .expect("UTF-8")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+}
+
+/// A rustlib `bin` directory as rustc puts one on its linker's PATH: `rust-lld`
+/// and the `gcc-ld/ld.lld` that runs it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn bundled_lld_dir(case: &Path) -> PathBuf {
+    let bin = case.join("rustlib-bin");
+    fs::create_dir_all(bin.join("gcc-ld")).expect("a gcc-ld directory");
+    for tool in [bin.join("rust-lld"), bin.join("gcc-ld/ld.lld")] {
+        fs::write(&tool, "#!/bin/sh\n").expect("a stand-in lld");
+        make_executable(&tool);
+    }
+    bin
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn the_linker_script_selects_the_bundled_lld_for_dev_and_test_output_alone() {
+    let case = case_dir(&Host::this_clone(), "linker-script");
+    let bundled = bundled_lld_dir(&case);
+    let unchanged = |output: &str| ["main.o", "-o", output, "-nodefaultlibs"].map(str::to_owned);
+    for output in [
+        "/clone/target/debug/deps/onepipeline-0123",
+        "/clone/target/debug/build/serde-0123/build_script_build-0123",
+        "/clone/target/debug/examples/demo-0123",
+        "/clone/target/aarch64-unknown-linux-gnu/debug/deps/onepipeline-0123",
+        "/clone/target/llvm-cov-target/debug/deps/onepipeline-0123",
+    ] {
+        let mut expected = vec![
+            "-fuse-ld=lld".to_owned(),
+            format!("-B{}", bundled.join("gcc-ld").display()),
+        ];
+        expected.extend(unchanged(output));
+        assert_eq!(
+            linker_script_hands_cc(&case, &[&bundled], output),
+            expected,
+            "{output} links with the bundled lld"
+        );
+    }
+    for output in [
+        "/clone/target/release/deps/onepipeline-0123",
+        "/clone/target/release/build/serde-0123/build_script_build-0123",
+        // A clone under a directory named `debug` is still a release build.
+        "/home/debug/clone/target/release/deps/onepipeline-0123",
+    ] {
+        assert_eq!(
+            linker_script_hands_cc(&case, &[&bundled], output),
+            unchanged(output),
+            "{output} is handed to cc unchanged"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn the_linker_script_hands_cc_the_link_unchanged_where_the_toolchain_ships_no_lld() {
+    let case = case_dir(&Host::this_clone(), "linker-script-no-lld");
+    // A rustlib `bin` holding `rust-lld` but no `gcc-ld`, and one holding
+    // neither: neither can run the bundled lld, so the build keeps cc's default.
+    let partial = case.join("partial-bin");
+    fs::create_dir_all(&partial).expect("a partial rustlib bin");
+    fs::write(partial.join("rust-lld"), "#!/bin/sh\n").expect("a stand-in rust-lld");
+    make_executable(&partial.join("rust-lld"));
+    let empty = case.join("empty-bin");
+    fs::create_dir_all(&empty).expect("an empty rustlib bin");
+    let output = "/clone/target/debug/deps/onepipeline-0123";
+    assert_eq!(
+        linker_script_hands_cc(&case, &[&partial, &empty], output),
+        ["main.o", "-o", output, "-nodefaultlibs"],
+        "with no bundled lld the dev link is cc's default"
     );
 }

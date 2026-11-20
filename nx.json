@@ -36,6 +36,7 @@
       },
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/scripts/cc-lld-debug.sh",
       "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals",
       "{workspaceRoot}/scripts/ensure-test-archive.sh"
@@ -116,6 +117,7 @@
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/scripts/cc-lld-debug.sh",
       "{workspaceRoot}/.config/nextest.toml",
       "sharedGlobals"
     ],
@@ -129,6 +131,7 @@
       "{workspaceRoot}/crates/testfakes/src/bin/fake-codex.rs",
       "{workspaceRoot}/rust-toolchain.toml",
       "{workspaceRoot}/.cargo/config.toml",
+      "{workspaceRoot}/scripts/cc-lld-debug.sh",
       "{workspaceRoot}/.config/nextest.toml",
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/clippy.toml",
