@@ -1523,6 +1523,9 @@ fn an_integrate_train_closes_each_branch_s_issues_with_a_record_of_its_own() {
     read_no_board_whole(&served);
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey waits out the
+// shipped thirty-second close-out window by construction, at the shipped time scale for the
+// reason it gives; the edge it needs is the compiled binary, whose inputs are the whole crate.
 /// A settled run waits for the closures it still owes no longer than their own close-out
 /// window: a board that never answers the Status write leaves the run to end — `driver-exited`
 /// inside that bound — with no record of a call that never finished, which the next adoption
@@ -1566,6 +1569,7 @@ fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
         (json!("Todo"), issue("OPEN", None))
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A landing verb's closure record reaches the journal of every run the landing is associated
 /// with — here the run whose node holds a session on the branch a manager lands — exactly as

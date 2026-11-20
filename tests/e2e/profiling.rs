@@ -1230,6 +1230,10 @@ const WAITED_ON: [(&str, &str); 8] = [
     ),
 ];
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey runs eight short
+// journeys again, profiled — about fifteen seconds — because the span a wait is recorded under
+// is written by the compiled binary at the end of each of their runs; its inputs are the whole
+// crate, and it lives beside the other profile journeys of this binary for that reason.
 /// Under [`profile::SPANS_ENV`], the time a verb spends waiting is recorded under a span named
 /// for what it waited on — each journey in [`WAITED_ON`] leaves its own wait's span in the
 /// records its `onepipeline` runs wrote, with wall time in it — and the report's span table
@@ -1295,3 +1299,4 @@ fn a_profiled_journeys_waits_are_recorded_under_what_they_waited_on() {
         );
     }
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

@@ -3778,6 +3778,10 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
 /// how often a probe runs — and well short of the minute an unscaled build would wait.
 /// [`a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs`] holds the
 /// shipped minute itself, at the shipped time scale.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this journey waits on is
+// two consecutive asks of the release watch, a quarter-minute apart at the suite's time scale,
+// which cannot be observed in less than that; the edge it needs is the compiled binary, whose
+// inputs are the whole crate, as for the pacing journey above, which waits out the shipped minute.
 // llmlint: ignore-block[tests_mirror_real_usage] how often a held release is asked about is the
 // number of probe subprocesses a held run starts, and a probe that answered "not released"
 // leaves nothing behind for a CLI to report; the driver's own counter is the only place that
@@ -3827,6 +3831,7 @@ fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
     world.run(&["stop", run]).exited(0);
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The adoption mode resolves through **exactly four rungs**, and each of them
 /// decides a node the rung beneath it would have decided differently.
