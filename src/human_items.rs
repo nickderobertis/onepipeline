@@ -486,10 +486,9 @@ impl HumanItemExpiryCondition {
                 if command.first().is_none_or(|p| p.trim().is_empty()) {
                     return Err("a check names a nonblank program".into());
                 }
-                if cwd
-                    .as_deref()
-                    .is_some_and(|cwd| cwd.trim().is_empty() || !std::path::Path::new(cwd).is_absolute())
-                {
+                if cwd.as_deref().is_some_and(|cwd| {
+                    cwd.trim().is_empty() || !std::path::Path::new(cwd).is_absolute()
+                }) {
                     return Err("a check's cwd is an absolute path".into());
                 }
                 if timeout_seconds.is_some_and(|t| !CHECK_TIMEOUT_SECONDS.contains(&t)) {
@@ -570,7 +569,9 @@ pub(crate) fn resolve_expiry(
                     .checked_mul(1000)
                     .and_then(|ms| raised_ms.checked_add(ms))
                     .filter(|ms| *ms < 253_402_300_800_000)
-                    .ok_or_else(|| format!("{seconds} seconds after the raise is past year 9999"))?;
+                    .ok_or_else(|| {
+                        format!("{seconds} seconds after the raise is past year 9999")
+                    })?;
                 Ok(HumanItemExpiryCondition::Time {
                     at: Some(crate::sys::rfc3339_from_millis(at)),
                     after_seconds: None,
@@ -644,7 +645,20 @@ pub(crate) fn rfc3339_millis(text: &str) -> Option<u64> {
         _ => return None,
     };
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let in_range = (1..=12).contains(&month)
         && day >= 1
         && day <= month_days[usize::try_from(month - 1).ok()?]
@@ -1037,7 +1051,8 @@ pub enum HumanItemAction {
         provenance: Provenance,
     },
     // llmlint: ignore-block[invalid_states_unrepresentable] The contract fixes reopen and note as flat `{id,actor,on_behalf_of}` variants of JSON strings, as Answer, Complete and Dismiss already are, and a consumer validates against that schema. A validated identity type would change the published action shape; a blank actor is refused at both apply boundaries and an unknown id answers a typed conflict.
-    /// Reopen a completed or dismissed item, taking its resolution back.
+    /// Reopen a completed, dismissed or expired item, taking its resolution back; an
+    /// expired item's conditions go with it.
     Reopen {
         /// Id.
         id: String,
@@ -1094,7 +1109,7 @@ pub struct HumanItemFilter {
     #[arg(long, value_parser = parse_priority)]
     // llmlint: ignore[invalid_states_unrepresentable] The contract requires an optional imported Priority selector; the JSON boundary rejects Some(None) without redeclaring the sibling vocabulary.
     pub priority: Option<Priority>,
-    /// State.
+    /// State: open, answered, completed, dismissed or expired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[arg(long, value_enum)]
     pub state: Option<HumanItemState>,
@@ -1469,7 +1484,8 @@ pub enum HumanItemsCommand {
         #[arg(long = "as", value_name = "PARTY", value_enum, default_value_t = Provenance::Manager)]
         provenance: Provenance,
     },
-    /// Reopen a completed or dismissed item, running its approval adapter's undo if it has one.
+    /// Reopen a completed, dismissed or expired item, running its approval adapter's undo if
+    /// it has one.
     Reopen {
         /// Item identifier.
         id: String,
@@ -1709,11 +1725,10 @@ impl HumanItemSample {
             // The fixture keeps no clock of its own, so an `after_seconds` is resolved
             // against this host's; a sample never sweeps, so nothing reads it until a
             // live store would.
-            let expiry =
-                resolve_expiry(input.expiry, crate::sys::now_millis(), || {
-                    std::env::current_dir().ok()
-                })
-                .map_err(conflict)?;
+            let expiry = resolve_expiry(input.expiry, crate::sys::now_millis(), || {
+                std::env::current_dir().ok()
+            })
+            .map_err(conflict)?;
             let item = HumanItem {
                 schema_version: 1,
                 id: format!("sample-{suffix}"),
@@ -2816,7 +2831,12 @@ impl HumanItem {
         validate_choices(self.kind, &self.choices)?;
         validate_expiry(&self.expiry, true)?;
         let expired = self.state == HumanItemState::Expired;
-        if !expired && self.resolution.as_ref().is_some_and(|r| r.condition.is_some()) {
+        if !expired
+            && self
+                .resolution
+                .as_ref()
+                .is_some_and(|r| r.condition.is_some())
+        {
             return Err("only an expired item's resolution names the condition that held".into());
         }
         if let Some(choice) = self.resolution.as_ref().and_then(|r| r.choice.as_deref()) {
@@ -2846,7 +2866,9 @@ impl HumanItem {
                     && r.choice.is_none()
                     && r.provenance == Provenance::Manager
                     && r.reason.as_ref().is_some_and(|s| !s.trim().is_empty())
-                    && r.condition.as_ref().is_some_and(|c| self.expiry.contains(c))
+                    && r.condition
+                        .as_ref()
+                        .is_some_and(|c| self.expiry.contains(c))
             }
             _ => false,
         };

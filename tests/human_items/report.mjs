@@ -18,7 +18,17 @@ const ms = (value) => `${Number(value).toFixed(2)} ms`;
 const phases = (sample) =>
   `index I/O ${ms(sample.index_io_ms)}, discovery ${ms(sample.discovery_ms)}, ` +
   `replay ${ms(sample.replay_ms)}, blocked work ${ms(sample.blocker_ms)}, ` +
-  `rendering ${ms(sample.render_ms)}, process/capture ${ms(sample.capture_ms)}`;
+  `rendering ${ms(sample.render_ms)}, process/capture ${ms(sample.capture_ms)}, ` +
+  `sweep ${ms(sample.sweep_ms)} over ${sample.conditions_evaluated} conditions`;
+// Each form's slowest sample and its own breakdown, the sweep's share included.
+const forms = [...new Set(recording.warm.map((s) => s.phase))]
+  .map((form) => {
+    const samples = recording.warm.filter((s) => s.phase === form);
+    const worst = samples.reduce((a, b) => (b.elapsed_s > a.elapsed_s ? b : a));
+    return `${form} max ${worst.elapsed_s.toFixed(4)} s (${phases(worst)})`;
+  })
+  .join("; ");
+const due = recording.due_check;
 const slowest = recording.warm.reduce((a, b) => (b.elapsed_s > a.elapsed_s ? b : a));
 const recoveries = [...recording.cold, ...recording.tail]
   .map(
@@ -34,7 +44,9 @@ report(
     `${recording.warm_max_elapsed_s.toFixed(4)} s (${slowest.phase}: ${phases(slowest)}); ` +
     `slowest form ${slowest.phase}; the shown item's history holds ${w.shown_history} events; ` +
     `workload ${w.runs} runs x ${w.events_per_run} events, ${w.open_items} open items, ` +
-    `${w.plans} plans, ${w.steps} steps; disclosed recoveries — ${recoveries}`,
+    `${w.plans} plans, ${w.steps} steps; per form — ${forms}; disclosed recoveries — ` +
+    `${recoveries}; disclosed due-check read: ${due.elapsed_s.toFixed(3)} s, ` +
+    `${due.checks_run} check run, sweep ${ms(due.sweep_ms)}`,
 );
 // llmlint: ignore-end[boundary_inputs_validated]
 // llmlint: ignore-end[changed_behavior_has_e2e]

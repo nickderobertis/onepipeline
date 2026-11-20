@@ -269,6 +269,8 @@ pub struct ReadTelemetry {
     pub sweep_ms: f64,
     /// Expiry conditions the sweep read.
     pub conditions_evaluated: u64,
+    /// Checks the sweep ran.
+    pub checks_run: u32,
 }
 
 impl ReadTelemetry {
@@ -289,6 +291,7 @@ impl ReadTelemetry {
             index_unwritten: None,
             sweep_ms: 0.0,
             conditions_evaluated: 0,
+            checks_run: 0,
         }
     }
 }
@@ -646,6 +649,7 @@ impl HumanItems {
         let started = Instant::now();
         let swept = super::expiry::sweep(self, &snapshot.items, &snapshot.runs);
         telemetry.conditions_evaluated = swept.evaluated;
+        telemetry.checks_run = swept.sweep.checks_run;
         let snapshot = if !swept.expired.is_empty() {
             self.release_expired(&swept.expired);
             self.read()?.0
@@ -1060,7 +1064,10 @@ impl HumanItems {
         named: &BTreeSet<String>,
     ) -> bool {
         let mut moved = false;
-        for run in named.iter().filter(|run| crate::ledger::is_valid_run_id(run)) {
+        for run in named
+            .iter()
+            .filter(|run| crate::ledger::is_valid_run_id(run))
+        {
             let paths = crate::ledger::RunPaths::under(&self.root, run);
             let journal = paths.journal();
             let Ok((length, tail)) = run_key(&journal) else {
@@ -2016,10 +2023,7 @@ impl<'a> Writer<'a> {
 
     /// Expire the item `held` names by its condition, if it is still open and still
     /// declares it. Answers the item as expired, or `None` where nothing was written.
-    fn expire(
-        &mut self,
-        held: super::expiry::Held,
-    ) -> Result<Option<HumanItem>, HumanItemRefusal> {
+    fn expire(&mut self, held: super::expiry::Held) -> Result<Option<HumanItem>, HumanItemRefusal> {
         let Some(item) = self.snapshot.items.get(&held.id).cloned() else {
             return Ok(None);
         };

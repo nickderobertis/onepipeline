@@ -120,7 +120,10 @@ fn holds(condition: &Condition, runs: &BTreeMap<String, RunDag>, now: u64) -> Op
             let dag = runs.get(run)?;
             match on {
                 HumanItemRunEnding::Settled => (!dag.nodes.is_empty()
-                    && dag.nodes.iter().all(|n| n.settled.as_deref() == Some("done")))
+                    && dag
+                        .nodes
+                        .iter()
+                        .all(|n| n.settled.as_deref() == Some("done")))
                 .then(|| format!("run {run} settled")),
                 HumanItemRunEnding::Ended => {
                     let ending = dag.ending.as_deref()?;
@@ -276,10 +279,11 @@ pub(super) fn statuses(
     store: &HumanItems,
     items: &BTreeMap<String, HumanItem>,
 ) -> BTreeMap<String, Vec<HumanItemCheckStatus>> {
-    if !items
-        .values()
-        .any(|item| item.expiry.iter().any(|c| matches!(c, Condition::Check { .. })))
-    {
+    if !items.values().any(|item| {
+        item.expiry
+            .iter()
+            .any(|c| matches!(c, Condition::Check { .. }))
+    }) {
         return BTreeMap::new();
     }
     let record = read_record(store);
@@ -404,6 +408,12 @@ pub(super) fn sweep(
         }
     }
     let mut sweep = HumanItemExpirySweep::default();
+    // Most sweeps find every check fresh: read without the lock, and take it only to
+    // claim what looks due, which the claim then decides again under it.
+    if !candidates.is_empty() {
+        let record = read_record(store);
+        candidates.retain(|candidate| claimable(&record, candidate, now));
+    }
     if !candidates.is_empty() {
         let claimed = claim(store, items, &candidates, now);
         let ran = run_all(&claimed);
@@ -453,6 +463,23 @@ pub(super) fn sweep(
     }
 }
 
+/// Whether `record` leaves `candidate` free to be claimed at `now`: no live claim holds
+/// it, and it has never run or last ran an interval ago.
+fn claimable(record: &Record, candidate: &Candidate, now: u64) -> bool {
+    let Some(entry) = record
+        .checks
+        .get(&candidate.key())
+        .filter(|e| e.digest == digest(&candidate.condition))
+    else {
+        return true;
+    };
+    let live = entry.claim_lapses_ms.is_some_and(|lapses| now < lapses);
+    let due = entry
+        .ran_at_ms
+        .is_none_or(|ran| now >= ran.saturating_add(u64::from(candidate.interval()) * 1000));
+    !live && due
+}
+
 fn program_of(condition: &Condition) -> String {
     match condition {
         Condition::Check { command, .. } => command.first().cloned().unwrap_or_default(),
@@ -481,6 +508,7 @@ fn claim(
         }
     };
     let mut record = read_record(store);
+    let held = record.checks.len();
     // A record only ever speaks for conditions items still declare where it says.
     record.checks.retain(|key, entry| {
         key.rsplit_once('#')
@@ -488,22 +516,20 @@ fn claim(
             .and_then(|(item, index)| item.expiry.get(index))
             .is_some_and(|condition| digest(condition) == entry.digest)
     });
+    let pruned = record.checks.len() != held;
     let mut claimed = Vec::new();
     for candidate in candidates {
-        let fingerprint = digest(&candidate.condition);
-        let entry = record
-            .checks
-            .entry(candidate.key())
-            .or_insert_with(|| Entry {
-                digest: fingerprint.clone(),
-                ..Entry::default()
-            });
-        let live = entry.claim_lapses_ms.is_some_and(|lapses| now < lapses);
-        let due = entry
-            .ran_at_ms
-            .is_none_or(|ran| now >= ran.saturating_add(u64::from(candidate.interval()) * 1000));
-        if live || !due {
+        if !claimable(&record, candidate, now) {
             continue;
+        }
+        let fingerprint = digest(&candidate.condition);
+        let entry = record.checks.entry(candidate.key()).or_default();
+        // Another condition's runs never stand for this one's.
+        if entry.digest != fingerprint {
+            *entry = Entry {
+                digest: fingerprint,
+                ..Entry::default()
+            };
         }
         let window = Duration::from_secs(u64::from(candidate.timeout())) + CLAIM_GRACE;
         entry.claimed_at_ms = Some(now);
@@ -511,6 +537,9 @@ fn claim(
         entry.claim_lapses_ms =
             Some(now.saturating_add(u64::try_from(window.as_millis()).unwrap_or(u64::MAX)));
         claimed.push(candidate.clone());
+    }
+    if claimed.is_empty() && !pruned {
+        return claimed;
     }
     if let Err(why) = keep(store, &record) {
         eprintln!("onepipeline: no check is run, because its claim could not be recorded: {why}");
@@ -621,7 +650,11 @@ fn reader(
     from: Option<impl Read + Send + 'static>,
     keep: usize,
     tail: bool,
-) -> (Shared, Arc<std::sync::atomic::AtomicBool>, std::sync::mpsc::Receiver<()>) {
+) -> (
+    Shared,
+    Arc<std::sync::atomic::AtomicBool>,
+    std::sync::mpsc::Receiver<()>,
+) {
     let into: Shared = Arc::default();
     let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done, ended) = std::sync::mpsc::channel();
@@ -635,7 +668,9 @@ fn reader(
                     if read == 0 {
                         break;
                     }
-                    let mut held = kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut held = kept
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     held.extend_from_slice(&buffer[..read]);
                     if held.len() > keep {
                         past.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -668,7 +703,9 @@ fn run_check(candidate: &Candidate) -> CheckRun {
             format!("its working directory {} does not exist", cwd.display()),
         );
     }
-    let (program, args) = command.split_first().expect("a stored check names its program");
+    let (program, args) = command
+        .split_first()
+        .expect("a stored check names its program");
     // A process the check leaves behind must not hold this one's own streams open
     // behind it: a reader of this command reads them to their end.
     crate::sys::disown_standard_handles();
@@ -859,7 +896,10 @@ mod tests {
             answer(b"{\"expired\": true, \"reason\": \"freed\", \"x\": 1}"),
             Some((true, Some("freed".into())))
         );
-        assert_eq!(answer(b"{\"expired\": true, \"reason\": \"  \"}"), Some((true, None)));
+        assert_eq!(
+            answer(b"{\"expired\": true, \"reason\": \"  \"}"),
+            Some((true, None))
+        );
         assert_eq!(answer(b"{\"expired\": false}"), Some((false, None)));
         for malformed in [
             &b""[..],
@@ -871,7 +911,12 @@ mod tests {
             b"{\"expired\": true, \"reason\": 3}",
             b"{\"expired\": true, \"reason\": null}",
         ] {
-            assert_eq!(answer(malformed), None, "{}", String::from_utf8_lossy(malformed));
+            assert_eq!(
+                answer(malformed),
+                None,
+                "{}",
+                String::from_utf8_lossy(malformed)
+            );
         }
     }
 }

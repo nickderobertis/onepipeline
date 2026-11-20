@@ -57,7 +57,10 @@ fn item(dedup: &str, expiry: Value) -> Value {
 
 /// Raise `value` through `raise --input`; answers the receipt's item.
 fn raise(world: &World, value: &Value) -> Value {
-    let name = value["dedup_key"].as_str().unwrap().replace(['/', ':'], "-");
+    let name = value["dedup_key"]
+        .as_str()
+        .unwrap()
+        .replace(['/', ':'], "-");
     let path = world.root.join(format!("raise-{name}.json"));
     std::fs::write(&path, value.to_string()).unwrap();
     let run = world.run(&["human-items", "raise", "--input", path.to_str().unwrap()]);
@@ -187,8 +190,15 @@ fn a_watch_sweeps_and_delivers_the_expiry_to_its_owner() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let kinds: Vec<&str> = printed.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["human-item-raised", "human-item-expired"], "{printed:?}");
+    let kinds: Vec<&str> = printed
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["human-item-raised", "human-item-expired"],
+        "{printed:?}"
+    );
     // Delivered as a dismissal is: the whole event, its item and resolution with it.
     let expired = &printed[1]["payload"];
     assert_eq!(expired["item_id"], id);
@@ -257,7 +267,10 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
         &item("ahead", json!([{"when": "time", "at": FUTURE}])),
     ));
     let before = crate::harness::now_millis();
-    let soon = raise(&world, &item("soon", json!([{"when": "time", "after_seconds": 5}])));
+    let soon = raise(
+        &world,
+        &item("soon", json!([{"when": "time", "after_seconds": 5}])),
+    );
     let after = crate::harness::now_millis();
     let soon_id = id_of(&soon);
     // Stored as the moment it resolved to, five seconds after the raise, and open on a
@@ -269,15 +282,26 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
         (before + 5000..=after + 5000).contains(&resolved),
         "{at} is not 5 s after the raise"
     );
-    assert_eq!(shown(&world, &soon_id)["item"]["state"], "open", "read before its moment");
+    assert_eq!(
+        shown(&world, &soon_id)["item"]["state"],
+        "open",
+        "read before its moment"
+    );
     // Re-armed: raised again with different conditions, which replace the old ones.
     let rearmed = id_of(&raise(
         &world,
-        &item("rearmed", json!([{"when": "time", "at": FUTURE, "reason": "old"}])),
+        &item(
+            "rearmed",
+            json!([{"when": "time", "at": FUTURE, "reason": "old"}]),
+        ),
     ));
     let replacement = json!({"when": "time", "at": PAST, "reason": "new"});
     let again = raise(&world, &item("rearmed", json!([replacement])));
-    assert_eq!(again["expiry"], json!([replacement]), "the conditions were replaced");
+    assert_eq!(
+        again["expiry"],
+        json!([replacement]),
+        "the conditions were replaced"
+    );
 
     let report = world.run(&["human-items", "report", "--all"]);
     report.exited(0);
@@ -304,12 +328,15 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
     wanted.sort();
     let mut expired_sorted = expired.clone();
     expired_sorted.sort();
-    assert_eq!(expired_sorted, wanted, "every expired item and nothing open");
+    assert_eq!(
+        expired_sorted, wanted,
+        "every expired item and nothing open"
+    );
     let open: Vec<String> = listed(&world, &[])
         .iter()
         .map(|v| v["item"]["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(open, [ahead.clone()]);
+    assert_eq!(open, [ahead.as_str()]);
 
     world
         .run(&["human-items", "show", &ahead])
@@ -320,14 +347,18 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
         .run(&["human-items", "show", &gone])
         .exited(0)
         .out_has(&format!("[0] at {PAST} — The release window has passed"))
-        .out_has(&format!(
-            "expired at {PAST}: The release window has passed"
-        ));
+        .out_has(&format!("expired at {PAST}: The release window has passed"));
 
     // A sample bundle carries expiry, an expired item and its checks as data, and a
     // sample read never sweeps: its open item whose time has passed stays open.
     let sample = sample_with_expiry(&world);
-    let read = world.run(&["human-items", "--sample", sample.to_str().unwrap(), "list", "--json"]);
+    let read = world.run(&[
+        "human-items",
+        "--sample",
+        sample.to_str().unwrap(),
+        "list",
+        "--json",
+    ]);
     read.exited(0);
     let open: Value = serde_json::from_str(&read.stdout).unwrap();
     assert_eq!(open.as_array().unwrap().len(), 1, "{open}");
@@ -418,7 +449,12 @@ fn settled(world: &World, run: &str, node: &str) -> Option<String> {
         .iter()
         .rev()
         .find(|e| e["labels"]["node"] == node)
-        .map(|e| e["payload"]["status"].as_str().unwrap_or_default().to_owned())
+        .map(|e| {
+            e["payload"]["status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
 }
 
 /// Whether `run`'s command `node` has started.
@@ -440,7 +476,13 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
     let (x, y) = ("settling", "failing");
     let settling = world.plan(
         x,
-        &plan_of(x, vec![waiting(&world, "a", "go-a", 0), waiting(&world, "b", "go-b", 0)]),
+        &plan_of(
+            x,
+            vec![
+                waiting(&world, "a", "go-a", 0),
+                waiting(&world, "b", "go-b", 0),
+            ],
+        ),
     );
     let failing = world.plan(y, &plan_of(y, vec![waiting(&world, "c", "go-c", 1)]));
     world.run(&["start", &settling, "--detach"]).exited(0);
@@ -454,7 +496,8 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
         raise(&world, &value)
     };
     let node = json!({"when": "node", "run": x, "node": "a"});
-    let all_done = json!({"when": "run", "run": x, "on": "settled", "reason": "Every step is done"});
+    let all_done =
+        json!({"when": "run", "run": x, "on": "settled", "reason": "Every step is done"});
     let ended = json!({"when": "run", "run": y, "on": "ended"});
     let never_settles = json!({"when": "run", "run": y, "on": "settled"});
     let n = id_of(&owned_elsewhere("node-a", &node));
@@ -463,29 +506,54 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
     let f = id_of(&owned_elsewhere("y-settled", &never_settles));
     // Nothing holds yet: every run is live and every node unsettled.
     assert_eq!(listed(&world, &[]).len(), 4);
-    assert!(journal(&world).iter().all(|e| e["kind"] != "human-item-expired"));
+    assert!(journal(&world)
+        .iter()
+        .all(|e| e["kind"] != "human-item-expired"));
 
     // Its node settles: the run's own driver sweeps and expires it, with no read here.
     release(&world, "go-a");
-    world.until("the driver to expire the node's item", |w| !expiries(w, &n).is_empty());
-    assert!(started(&world, x, "b") && settled(&world, x, "b").is_none(), "x is live");
-    assert!(expiries(&world, &s).is_empty(), "x has a node still unsettled");
-    expired_by(&expiries(&world, &n)[0]["payload"]["item"], &node, &format!("node a of run {x} settled done"));
+    world.until("the driver to expire the node's item", |w| {
+        !expiries(w, &n).is_empty()
+    });
+    assert!(
+        started(&world, x, "b") && settled(&world, x, "b").is_none(),
+        "x is live"
+    );
+    assert!(
+        expiries(&world, &s).is_empty(),
+        "x has a node still unsettled"
+    );
+    expired_by(
+        &expiries(&world, &n)[0]["payload"]["item"],
+        &node,
+        &format!("node a of run {x} settled done"),
+    );
     assert_eq!(shown(&world, &s)["item"]["state"], "open");
 
     // The whole run settles done.
     release(&world, "go-b");
-    world.until("the settled run's item to expire", |w| !expiries(w, &s).is_empty());
+    world.until("the settled run's item to expire", |w| {
+        !expiries(w, &s).is_empty()
+    });
     expired_by(&shown(&world, &s)["item"], &all_done, "Every step is done");
 
     // A run that ends failed has ended, and has not settled.
     assert_eq!(shown(&world, &e)["item"]["state"], "open", "y is live");
     release(&world, "go-c");
-    world.until("the ended run's item to expire", |w| !expiries(w, &e).is_empty());
+    world.until("the ended run's item to expire", |w| {
+        !expiries(w, &e).is_empty()
+    });
     assert_eq!(settled(&world, y, "c").as_deref(), Some("failed"));
-    expired_by(&shown(&world, &e)["item"], &ended, &format!("run {y} ended failed"));
+    expired_by(
+        &shown(&world, &e)["item"],
+        &ended,
+        &format!("run {y} ended failed"),
+    );
     let still = shown(&world, &f)["item"].clone();
-    assert_eq!(still["state"], "open", "a run that ended failed never settled: {still}");
+    assert_eq!(
+        still["state"], "open",
+        "a run that ended failed never settled: {still}"
+    );
     assert!(expiries(&world, &f).is_empty());
 }
 
@@ -499,7 +567,10 @@ fn a_live_driver_wakes_for_a_pending_time_and_its_tied_run_is_told() {
     let plan = world.plan(z, &plan_of(z, vec![waiting(&world, "w", "go-w", 0)]));
     world.run(&["start", &plan, "--detach"]).exited(0);
     world.until("the command to start", |w| started(w, z, "w"));
-    let mut tied = item("tied", json!([{"when": "time", "after_seconds": 3, "reason": "The window closed"}]));
+    let mut tied = item(
+        "tied",
+        json!([{"when": "time", "after_seconds": 3, "reason": "The window closed"}]),
+    );
     tied["owner"]["run"] = json!(z);
     let tied = raise(&world, &tied);
     let id = id_of(&tied);
@@ -512,7 +583,10 @@ fn a_live_driver_wakes_for_a_pending_time_and_its_tied_run_is_told() {
         crate::harness::epoch_millis(written["ts"].as_str().unwrap()) >= at,
         "expired at its moment, not before: {written}"
     );
-    assert!(settled(&world, z, "w").is_none(), "the run was live throughout");
+    assert!(
+        settled(&world, z, "w").is_none(),
+        "the run was live throughout"
+    );
     world.until("the run to be told", |w| {
         surfaces(w, z)
             .iter()
@@ -544,7 +618,8 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
     let world = world("expiry-human");
     let name = "signoff";
     let mut gate = human("gate", &[]);
-    let condition = json!({"when": "time", "after_seconds": 2, "reason": "Nobody needed the sign-off"});
+    let condition =
+        json!({"when": "time", "after_seconds": 2, "reason": "Nobody needed the sign-off"});
     gate["human_item"] = json!({
         "kind": "task", "priority": "low", "title": "Sign off the release",
         "body": "Say it may ship.", "expiry": [condition],
@@ -560,12 +635,19 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
     let raised = open[0]["item"].clone();
     let id = id_of(&raised);
     let stored = json!({"when": "time", "at": raised["expiry"][0]["at"], "reason": "Nobody needed the sign-off"});
-    assert_eq!(raised["expiry"], json!([stored]), "resolved when its item was raised");
+    assert_eq!(
+        raised["expiry"],
+        json!([stored]),
+        "resolved when its item was raised"
+    );
     world.until_within(Duration::from_secs(30), "its moment", |_| {
-        crate::harness::now_millis()
-            > crate::harness::epoch_millis(stored["at"].as_str().unwrap())
+        crate::harness::now_millis() > crate::harness::epoch_millis(stored["at"].as_str().unwrap())
     });
-    expired_by(&shown(&world, &id)["item"], &stored, "Nobody needed the sign-off");
+    expired_by(
+        &shown(&world, &id)["item"],
+        &stored,
+        "Nobody needed the sign-off",
+    );
     world.run(&["adopt", name]).exited(0);
     let commands: Vec<Value> = world
         .events_of(name, "edit-committed")
@@ -573,7 +655,10 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
         .map(|e| e["payload"]["command"].clone())
         .collect();
     assert!(commands.iter().all(|c| c["op"] != "attest"), "{commands:?}");
-    let drop = commands.iter().find(|c| c["op"] == "drop").expect("the step was dropped");
+    let drop = commands
+        .iter()
+        .find(|c| c["op"] == "drop")
+        .expect("the step was dropped");
     assert_eq!(drop["id"], "gate");
     assert_eq!(drop["dependents"], "detach");
     assert_eq!(drop["reason"], "Nobody needed the sign-off");
@@ -586,7 +671,10 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
 
     let mut malformed = gate;
     malformed["human_item"]["expiry"] = json!([{"when": "time"}]);
-    let bad = world.plan("malformed", &plan_of("malformed", vec![malformed, dependent]));
+    let bad = world.plan(
+        "malformed",
+        &plan_of("malformed", vec![malformed, dependent]),
+    );
     world
         .run(&["plan", "check", &bad])
         .exited(1)
@@ -597,7 +685,10 @@ fn a_human_steps_expiry_drops_it_and_its_dependent_runs() {
 
 /// A task raise input holding `block`, expiring `after_seconds` from now.
 fn holding(dedup: &str, block: Value, after_seconds: u64) -> Value {
-    let mut value = item(dedup, json!([{"when": "time", "after_seconds": after_seconds}]));
+    let mut value = item(
+        dedup,
+        json!([{"when": "time", "after_seconds": after_seconds}]),
+    );
     value["kind"] = json!("task");
     value["block"] = block;
     value
@@ -621,9 +712,22 @@ fn expiry_releases_every_hold_and_a_reopen_takes_its_conditions_back() {
                 "command": [script.display().to_string()], "deps": []})],
         ),
     );
-    let work = id_of(&raise(&world, &holding("work", json!({"scope": "work", "run": name, "node": "x"}), 4)));
-    let plan = id_of(&raise(&world, &holding("plan", json!({"scope": "plan", "plan": project}), 4)));
-    let host = id_of(&raise(&world, &holding("host", json!({"scope": "host"}), 4)));
+    let work = id_of(&raise(
+        &world,
+        &holding(
+            "work",
+            json!({"scope": "work", "run": name, "node": "x"}),
+            4,
+        ),
+    ));
+    let plan = id_of(&raise(
+        &world,
+        &holding("plan", json!({"scope": "plan", "plan": project}), 4),
+    ));
+    let host = id_of(&raise(
+        &world,
+        &holding("host", json!({"scope": "host"}), 4),
+    ));
     world.run(&["start", &project, "--detach"]).exited(0);
     let blocking = listed(&world, &["--blocking", "yes"]);
     assert_eq!(blocking.len(), 3, "{blocking:?}");
@@ -644,7 +748,10 @@ fn expiry_releases_every_hold_and_a_reopen_takes_its_conditions_back() {
             .err_has("is already expired");
     }
     assert!(listed(&world, &["--blocking", "yes"]).is_empty());
-    assert_eq!(listed(&world, &["--state", "expired", "--blocking", "no"]).len(), 3);
+    assert_eq!(
+        listed(&world, &["--state", "expired", "--blocking", "no"]).len(),
+        3
+    );
 
     let reopened = world.run(&["human-items", "reopen", &work]);
     reopened.exited(0);
@@ -657,13 +764,25 @@ fn expiry_releases_every_hold_and_a_reopen_takes_its_conditions_back() {
         .iter()
         .map(|v| v["item"]["id"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(back, [work.clone()], "its hold is back");
-    assert_eq!(shown(&world, &work)["item"]["state"], "open", "the next sweep leaves it");
+    assert_eq!(back, [work.as_str()], "its hold is back");
+    assert_eq!(
+        shown(&world, &work)["item"]["state"],
+        "open",
+        "the next sweep leaves it"
+    );
     assert_eq!(expiries(&world, &work).len(), 1);
-    let mut armed = holding("work", json!({"scope": "work", "run": name, "node": "x"}), 1);
+    let mut armed = holding(
+        "work",
+        json!({"scope": "work", "run": name, "node": "x"}),
+        1,
+    );
     armed["expiry"] = json!([{"when": "time", "at": PAST}]);
     raise(&world, &armed);
-    assert_eq!(shown(&world, &work)["item"]["state"], "expired", "armed again");
+    assert_eq!(
+        shown(&world, &work)["item"]["state"],
+        "expired",
+        "armed again"
+    );
     assert_eq!(expiries(&world, &work).len(), 2);
 }
 
@@ -706,7 +825,11 @@ fn a_check_answers_not_yet_until_its_condition_holds_and_expires_with_its_own_wo
              else\n  echo '{{\"expired\": false, \"free\": \"2G\"}}'\nfi"
         ),
     );
-    let condition = check_of(&world, &disk, json!({"interval_seconds": 10, "reason": "Unused"}));
+    let condition = check_of(
+        &world,
+        &disk,
+        json!({"interval_seconds": 10, "reason": "Unused"}),
+    );
     let id = id_of(&raise(&world, &item("disk-space", json!([condition]))));
     let first = shown(&world, &id);
     assert_eq!(first["item"]["state"], "open");
@@ -720,7 +843,11 @@ fn a_check_answers_not_yet_until_its_condition_holds_and_expires_with_its_own_wo
         .run(&["human-items", "show", &id])
         .exited(0)
         .out_has("not yet (it printed \"expired\": false)");
-    assert_eq!(lines_of(&world, "seen"), [id.clone()], "told its own item's id");
+    assert_eq!(
+        lines_of(&world, "seen"),
+        [id.as_str()],
+        "told its own item's id"
+    );
 
     // The disk frees; within the interval the check is not due, so nothing has run.
     std::fs::write(world.root.join("freed"), "40G free on /srv").unwrap();
@@ -735,13 +862,31 @@ fn a_check_answers_not_yet_until_its_condition_holds_and_expires_with_its_own_wo
     assert_eq!(lines_of(&world, "seen"), [id.clone(), id.clone()]);
 
     let bare = posix_script(&world.root, "bare", "echo '{\"expired\": true}'");
-    let blank = posix_script(&world.root, "blank", "echo '{\"expired\": true, \"reason\": \"  \"}'");
-    let own = |script: &std::path::Path| check_of(&world, script, json!({"reason": "The condition's own words"}));
+    let blank = posix_script(
+        &world.root,
+        "blank",
+        "echo '{\"expired\": true, \"reason\": \"  \"}'",
+    );
+    let own = |script: &std::path::Path| {
+        check_of(
+            &world,
+            script,
+            json!({"reason": "The condition's own words"}),
+        )
+    };
     let bare_id = id_of(&raise(&world, &item("bare", json!([own(&bare)]))));
     let blank_id = id_of(&raise(&world, &item("blank", json!([own(&blank)]))));
     listed(&world, &[]);
-    expired_by(&shown(&world, &bare_id)["item"], &own(&bare), "The condition's own words");
-    expired_by(&shown(&world, &blank_id)["item"], &own(&blank), "The condition's own words");
+    expired_by(
+        &shown(&world, &bare_id)["item"],
+        &own(&bare),
+        "The condition's own words",
+    );
+    expired_by(
+        &shown(&world, &blank_id)["item"],
+        &own(&blank),
+        "The condition's own words",
+    );
 }
 
 /// Every way a check can fail leaves its item open with a `failed` status naming the
@@ -752,17 +897,57 @@ fn every_failing_check_leaves_its_item_open_and_names_the_cause() {
     let world = world("expiry-failing");
     let malformed = "its output was not one JSON object with a boolean \"expired\"";
     let cases: Vec<(&str, &str, Value, &str)> = vec![
-        ("exit-one", "echo 'nothing to say' >&2\nexit 1", json!({}), "the check exited with status 1"),
-        ("exit-two", "exit 2", json!({}), "the check exited with status 2"),
-        ("signal", "kill -9 $$", json!({}), "the check was stopped by signal 9"),
-        ("timeout", "sleep 30", json!({"timeout_seconds": 1}), "the check timed out after 1 s"),
+        (
+            "exit-one",
+            "echo 'nothing to say' >&2\nexit 1",
+            json!({}),
+            "the check exited with status 1",
+        ),
+        (
+            "exit-two",
+            "exit 2",
+            json!({}),
+            "the check exited with status 2",
+        ),
+        (
+            "signal",
+            "kill -9 $$",
+            json!({}),
+            "the check was stopped by signal 9",
+        ),
+        (
+            "timeout",
+            "sleep 30",
+            json!({"timeout_seconds": 1}),
+            "the check timed out after 1 s",
+        ),
         ("silent", "exit 0", json!({}), malformed),
         ("text", "echo 'all clear'", json!({}), malformed),
-        ("two", "echo '{\"expired\": true}{\"expired\": true}'", json!({}), malformed),
-        ("array", "echo '[{\"expired\": true}]'", json!({}), malformed),
-        ("unanswered", "echo '{\"free\": \"40G\"}'", json!({}), malformed),
+        (
+            "two",
+            "echo '{\"expired\": true}{\"expired\": true}'",
+            json!({}),
+            malformed,
+        ),
+        (
+            "array",
+            "echo '[{\"expired\": true}]'",
+            json!({}),
+            malformed,
+        ),
+        (
+            "unanswered",
+            "echo '{\"free\": \"40G\"}'",
+            json!({}),
+            malformed,
+        ),
         ("yes", "echo '{\"expired\": \"yes\"}'", json!({}), malformed),
-        ("numbered", "echo '{\"expired\": true, \"reason\": 3}'", json!({}), malformed),
+        (
+            "numbered",
+            "echo '{\"expired\": true, \"reason\": 3}'",
+            json!({}),
+            malformed,
+        ),
         (
             "long",
             "head -c 70000 /dev/zero | tr '\\0' ' '\necho '{\"expired\": true}'",
@@ -773,7 +958,10 @@ fn every_failing_check_leaves_its_item_open_and_names_the_cause() {
     let mut raised = Vec::new();
     for (name, body, extra, cause) in &cases {
         let script = posix_script(&world.root, name, body);
-        let id = id_of(&raise(&world, &item(name, json!([check_of(&world, &script, extra.clone())]))));
+        let id = id_of(&raise(
+            &world,
+            &item(name, json!([check_of(&world, &script, extra.clone())])),
+        ));
         raised.push((id, *cause));
     }
     let missing = check_of(&world, &world.root.join("no-such-check"), json!({}));
@@ -799,17 +987,27 @@ fn every_failing_check_leaves_its_item_open_and_names_the_cause() {
         let check = &view["checks"][0];
         assert_eq!(check["outcome"], "failed", "{view}");
         let detail = check["detail"].as_str().unwrap();
-        assert!(detail.starts_with(cause) || detail.contains(cause), "{id}: {detail}");
+        assert!(
+            detail.starts_with(cause) || detail.contains(cause),
+            "{id}: {detail}"
+        );
         if *cause == malformed {
             assert!(detail.starts_with(malformed), "{detail}");
         }
     }
     assert!(expiries_any(&world).is_empty());
     let exit_one = &raised[0].0;
-    let stderr_tail = &open.iter().find(|v| v["item"]["id"] == *exit_one).unwrap()["checks"][0]["detail"];
-    assert!(stderr_tail.as_str().unwrap().contains("nothing to say"), "{stderr_tail}");
+    let stderr_tail =
+        &open.iter().find(|v| v["item"]["id"] == *exit_one).unwrap()["checks"][0]["detail"];
+    assert!(
+        stderr_tail.as_str().unwrap().contains("nothing to say"),
+        "{stderr_tail}"
+    );
     let gone_detail = format!("its working directory {} does not exist", gone.display());
-    let lost_view = open.iter().find(|v| v["item"]["id"] == raised.last().unwrap().0).unwrap();
+    let lost_view = open
+        .iter()
+        .find(|v| v["item"]["id"] == raised.last().unwrap().0)
+        .unwrap();
     assert_eq!(lost_view["checks"][0]["detail"], gone_detail);
 
     let report = world.run(&["human-items", "report", "--all"]);
@@ -848,7 +1046,10 @@ fn concurrent_readers_run_a_due_check_once_per_interval() {
     );
     let id = id_of(&raise(
         &world,
-        &item("counted", json!([check_of(&world, &script, json!({"interval_seconds": 10}))])),
+        &item(
+            "counted",
+            json!([check_of(&world, &script, json!({"interval_seconds": 10}))]),
+        ),
     ));
     let readers: Vec<_> = (0..2)
         .map(|_| {
@@ -862,16 +1063,30 @@ fn concurrent_readers_run_a_due_check_once_per_interval() {
     for mut reader in readers {
         assert!(reader.wait().unwrap().success());
     }
-    assert_eq!(lines_of(&world, "runs.log").len(), 1, "one run for two readers");
-    let ran = crate::harness::epoch_millis(
-        shown(&world, &id)["checks"][0]["last_run_at"].as_str().unwrap(),
+    assert_eq!(
+        lines_of(&world, "runs.log").len(),
+        1,
+        "one run for two readers"
     );
-    assert_eq!(lines_of(&world, "runs.log").len(), 1, "not due within its interval");
+    let ran = crate::harness::epoch_millis(
+        shown(&world, &id)["checks"][0]["last_run_at"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(
+        lines_of(&world, "runs.log").len(),
+        1,
+        "not due within its interval"
+    );
     world.until_within(Duration::from_secs(30), "the check's interval", |_| {
         crate::harness::now_millis() >= ran + 10_000
     });
     listed(&world, &[]);
-    assert_eq!(lines_of(&world, "runs.log").len(), 2, "due again after its interval");
+    assert_eq!(
+        lines_of(&world, "runs.log").len(),
+        2,
+        "due again after its interval"
+    );
 }
 
 /// A claim whose claimant was killed before its check finished holds the check until its
@@ -892,7 +1107,10 @@ fn a_dead_claimants_check_is_claimed_again_after_its_timeout_and_grace() {
     );
     let id = id_of(&raise(
         &world,
-        &item("stale", json!([check_of(&world, &script, json!({"timeout_seconds": 1}))])),
+        &item(
+            "stale",
+            json!([check_of(&world, &script, json!({"timeout_seconds": 1}))]),
+        ),
     ));
     let claimed = crate::harness::now_millis();
     let mut claimant = world
@@ -900,7 +1118,9 @@ fn a_dead_claimants_check_is_claimed_again_after_its_timeout_and_grace() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    world.until("the claimant's check to start", |w| lines_of(w, "runs.log").len() == 1);
+    world.until("the claimant's check to start", |w| {
+        lines_of(w, "runs.log").len() == 1
+    });
     claimant.kill().unwrap();
     claimant.wait().unwrap();
     // Its claim is live: another reader runs nothing and has nothing to show for it.
@@ -942,7 +1162,10 @@ fn hanging(world: &World, tag: &str) -> Vec<String> {
                 ),
             );
             let condition = check_of(world, &script, json!({"timeout_seconds": 5}));
-            id_of(&raise(world, &item(&format!("{tag}-{n}"), json!([condition]))))
+            id_of(&raise(
+                world,
+                &item(&format!("{tag}-{n}"), json!([condition])),
+            ))
         })
         .collect()
 }
@@ -954,7 +1177,10 @@ fn hanging(world: &World, tag: &str) -> Vec<String> {
 fn ran_at_once_and_were_stopped(world: &World, tag: &str) {
     let dir = world.root.join(tag);
     for n in 0..4 {
-        assert!(dir.join(format!("saw-{n}")).is_file(), "check {n} never saw all four");
+        assert!(
+            dir.join(format!("saw-{n}")).is_file(),
+            "check {n} never saw all four"
+        );
     }
     let pids: Vec<u32> = std::fs::read_to_string(dir.join("pids"))
         .unwrap()
@@ -962,9 +1188,11 @@ fn ran_at_once_and_were_stopped(world: &World, tag: &str) {
         .map(|pid| pid.parse().unwrap())
         .collect();
     assert_eq!(pids.len(), 8, "a check and its child each, four times");
-    world.until_within(Duration::from_secs(20), "every check and child to end", |_| {
-        pids.iter().all(|pid| crate::harness::process_ended(*pid))
-    });
+    world.until_within(
+        Duration::from_secs(20),
+        "every check and child to end",
+        |_| pids.iter().all(|pid| crate::harness::process_ended(*pid)),
+    );
 }
 
 #[cfg(unix)]
@@ -973,7 +1201,10 @@ fn timed_out(world: &World, ids: &[String]) {
         let detail = shown(world, id);
         assert_eq!(detail["item"]["state"], "open", "{detail}");
         assert_eq!(detail["checks"][0]["outcome"], "failed");
-        assert_eq!(detail["checks"][0]["detail"], "the check timed out after 5 s");
+        assert_eq!(
+            detail["checks"][0]["detail"],
+            "the check timed out after 5 s"
+        );
     }
 }
 
@@ -1001,13 +1232,21 @@ fn four_hanging_checks_a_drivers_pass_sweeps_run_at_once_and_are_all_stopped() {
     let z = "sweeping";
     let plan = world.plan(z, &plan_of(z, vec![waiting(&world, "w", "go-w", 0)]));
     world.run(&["start", &plan, "--detach"]).exited(0);
-    world.until_within(Duration::from_secs(60), "the driver to run the checks", |w| {
-        (0..4).all(|n| w.root.join(format!("driver/saw-{n}")).is_file())
-            && lines_of(w, "driver/pids").len() == 4
-    });
+    world.until_within(
+        Duration::from_secs(60),
+        "the driver to run the checks",
+        |w| {
+            (0..4).all(|n| w.root.join(format!("driver/saw-{n}")).is_file())
+                && lines_of(w, "driver/pids").len() == 4
+        },
+    );
     ran_at_once_and_were_stopped(&world, "driver");
     timed_out(&world, &ids);
-    assert_eq!(lines_of(&world, "driver/pids").len(), 4, "the read ran none again");
+    assert_eq!(
+        lines_of(&world, "driver/pids").len(),
+        4,
+        "the read ran none again"
+    );
     release(&world, "go-w");
 }
 
@@ -1016,19 +1255,32 @@ fn four_hanging_checks_a_drivers_pass_sweeps_run_at_once_and_are_all_stopped() {
 #[test]
 fn the_sdks_expire_due_answers_what_it_expired_and_ran() {
     let world = world("expiry-sdk-sweep");
-    let due = id_of(&raise(&world, &item("due", json!([{"when": "time", "at": PAST}]))));
+    let due = id_of(&raise(
+        &world,
+        &item("due", json!([{"when": "time", "at": PAST}])),
+    ));
     let quiet = posix_script(&world.root, "quiet", "echo '{\"expired\": false}'");
     let broken = posix_script(&world.root, "broken", "exit 1");
-    raise(&world, &item("quiet", json!([check_of(&world, &quiet, json!({}))])));
-    raise(&world, &item("broken", json!([check_of(&world, &broken, json!({}))])));
+    raise(
+        &world,
+        &item("quiet", json!([check_of(&world, &quiet, json!({}))])),
+    );
+    raise(
+        &world,
+        &item("broken", json!([check_of(&world, &broken, json!({}))])),
+    );
     let store = sdk(&world);
     let swept = store.expire_due().unwrap();
-    assert_eq!(swept.expired, [due.clone()]);
+    assert_eq!(swept.expired, [due.as_str()]);
     assert_eq!((swept.checks_run, swept.checks_failed), (2, 1));
     assert_eq!(expiries(&world, &due).len(), 1);
     let again = store.expire_due().unwrap();
     assert!(again.expired.is_empty());
-    assert_eq!((again.checks_run, again.checks_failed), (0, 0), "none is due again yet");
+    assert_eq!(
+        (again.checks_run, again.checks_failed),
+        (0, 0),
+        "none is due again yet"
+    );
 }
 
 /// A phase hook carrying `expiry` raises its items with it — an `after_seconds` resolved
@@ -1048,7 +1300,9 @@ fn a_phase_hook_raises_its_expiry_and_a_malformed_one_is_refused_at_load() {
     };
     std::fs::write(
         dir.join("config.yaml"),
-        config("[{when: time, after_seconds: 3600, reason: Stale}, {when: check, command: ['true']}]"),
+        config(
+            "[{when: time, after_seconds: 3600, reason: Stale}, {when: check, command: ['true']}]",
+        ),
     )
     .unwrap();
     let context = world.root.join("context.json");
@@ -1074,7 +1328,10 @@ fn a_phase_hook_raises_its_expiry_and_a_malformed_one_is_refused_at_load() {
     assert_eq!(expiry.len(), 2, "{item}");
     assert_eq!(expiry[0]["reason"], "Stale");
     let at = crate::harness::epoch_millis(expiry[0]["at"].as_str().unwrap());
-    assert!(at >= before + 3_600_000 && at < before + 3_700_000, "{item}");
+    assert!(
+        at >= before + 3_600_000 && at < before + 3_700_000,
+        "{item}"
+    );
     assert_eq!(expiry[1]["command"], json!(["true"]));
     assert!(
         std::path::Path::new(expiry[1]["cwd"].as_str().unwrap()).is_absolute(),
@@ -1150,8 +1407,11 @@ fn an_expired_task_is_closed_cancelled_on_its_tracker() {
         world.run_on(command, &args.join(" "))
     };
     let soon = |kind: &str, dedup: &str| {
-        let mut value = item(dedup, json!([{"when": "time", "after_seconds": 2,
-            "reason": "Superseded by the new rollout"}]));
+        let mut value = item(
+            dedup,
+            json!([{"when": "time", "after_seconds": 2,
+            "reason": "Superseded by the new rollout"}]),
+        );
         value["kind"] = json!(kind);
         let path = world.root.join(format!("{dedup}.json"));
         std::fs::write(&path, value.to_string()).unwrap();
@@ -1174,15 +1434,29 @@ fn an_expired_task_is_closed_cancelled_on_its_tracker() {
     std::thread::sleep(Duration::from_secs(3));
     let read = in_repo(&["human-items", "list", "--json", "--state", "expired"]);
     read.exited(0);
-    assert_eq!(serde_json::from_str::<Value>(&read.stdout).unwrap().as_array().unwrap().len(), 2);
+    assert_eq!(
+        serde_json::from_str::<Value>(&read.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     let state = github.state();
     let issues = projected(&state);
-    assert_eq!(issues.len(), 1, "the question was never projected: {issues:?}");
+    assert_eq!(
+        issues.len(),
+        1,
+        "the question was never projected: {issues:?}"
+    );
     let issue = &issues[0];
     assert_eq!(issue["state"], "CLOSED", "{issue:#}");
     assert_eq!(issue["stateReason"], "NOT_PLANNED", "{issue:#}");
     assert!(
-        issue["body"].as_str().unwrap().contains("Superseded by the new rollout"),
+        issue["body"]
+            .as_str()
+            .unwrap()
+            .contains("Superseded by the new rollout"),
         "{issue:#}"
     );
     let card = state["items"]
@@ -1209,7 +1483,8 @@ fn records_the_release_before_expiry_wrote_read_and_act_unchanged() {
         std::fs::copy(fixture.join(file), store.join(file)).unwrap();
     }
     let reads: serde_json::Map<String, Value> =
-        serde_json::from_str(&std::fs::read_to_string(fixture.join("reads.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("reads.json")).unwrap())
+            .unwrap();
     assert!(reads.len() > 10, "{reads:?}");
     for (command, printed) in &reads {
         let mut args = vec!["human-items"];
@@ -1238,7 +1513,10 @@ fn records_the_release_before_expiry_wrote_read_and_act_unchanged() {
     let sample = world.root.join("sample.json");
     std::fs::copy(fixture.join("sample.json"), &sample).unwrap();
     let path = sample.to_str().unwrap();
-    for (state, printed) in [(None, "sample-open.json"), (Some("dismissed"), "sample-dismissed.json")] {
+    for (state, printed) in [
+        (None, "sample-open.json"),
+        (Some("dismissed"), "sample-dismissed.json"),
+    ] {
         let mut args = vec!["human-items", "--sample", path, "list", "--json"];
         if let Some(state) = state {
             args.extend(["--state", state]);
@@ -1252,9 +1530,20 @@ fn records_the_release_before_expiry_wrote_read_and_act_unchanged() {
         );
     }
     world
-        .run(&["human-items", "--sample", path, "dismiss", "item-1", "--reason", "Restored"])
+        .run(&[
+            "human-items",
+            "--sample",
+            path,
+            "dismiss",
+            "item-1",
+            "--reason",
+            "Restored",
+        ])
         .exited(0);
     let bundle: onepipeline::human_items::HumanItemSample =
         serde_json::from_str(&std::fs::read_to_string(&sample).unwrap()).unwrap();
-    assert!(bundle.items.iter().all(|d| d.item.expiry.is_empty() && d.checks.is_empty()));
+    assert!(bundle
+        .items
+        .iter()
+        .all(|d| d.item.expiry.is_empty() && d.checks.is_empty()));
 }

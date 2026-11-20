@@ -323,7 +323,8 @@ fn validate(config: &HumanItemsConfig) -> Result<(), String> {
                 "{at}: a question carries no approval and no aggregation"
             ));
         }
-        super::validate_expiry(&hook.expiry, false).map_err(|why| format!("{at}: expiry: {why}"))?;
+        super::validate_expiry(&hook.expiry, false)
+            .map_err(|why| format!("{at}: expiry: {why}"))?;
         if let Some(approval) = &hook.approval {
             if !config.approval_adapters.contains_key(&approval.adapter) {
                 return Err(format!(

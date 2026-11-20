@@ -204,7 +204,10 @@ pub(crate) fn condition(condition: &HumanItemExpiryCondition) -> String {
 pub(crate) fn check_outcome(check: &HumanItemCheckStatus) -> String {
     match check.outcome {
         HumanItemCheckOutcome::Holds => {
-            format!("last ran {}: expired (it printed \"expired\": true)", check.last_run_at)
+            format!(
+                "last ran {}: expired (it printed \"expired\": true)",
+                check.last_run_at
+            )
         }
         HumanItemCheckOutcome::NotYet => format!(
             "last ran {}: not yet (it printed \"expired\": false)",
@@ -223,8 +226,10 @@ pub(crate) fn check_outcome(check: &HumanItemCheckStatus) -> String {
 pub(crate) fn expiry(item: &HumanItem, checks: &[HumanItemCheckStatus]) -> String {
     let mut out = String::new();
     if !item.expiry.is_empty() {
-        out.push_str("expires:
-");
+        out.push_str(
+            "expires:
+",
+        );
         for (at, condition) in item.expiry.iter().enumerate() {
             out.push_str(&format!("  [{at}] {}", self::condition(condition)));
             if let Some(reason) = condition.reason() {

@@ -12,19 +12,30 @@ budgets:
     threshold: 0.45
     description: >-
       Elapsed time of a complete host-wide human-items read as a subprocess of the
-      release-built binary: the maximum of ten unchanged warm reads of each of `list --json`,
-      `list`, `report` and `show --json` of the item carrying the longest history, over 100
-      retained runs of 10,000 events, 100 open items and 10 managers whose plans hold 5 to 50
-      steps (275 in all), with full bodies, three-step previews and complete blocked sets.
-      The 90 manager-raised open items each carry a history of 2 to 5 events that leaves
-      them open, one of them carries exactly 50 events and is the item the timed `show --json`
-      reads, and the 10 items that are live runs' human gates keep only the raise their run
-      recorded, so the 275-step blocked set and its 5-to-50 per-plan sizes are unchanged.
-      Detail separates index I/O, run discovery, replay, blocked-work calculation, rendering
-      and process/capture per form, names the slowest form, reports the shown item's history
-      length, and discloses the cold, deleted-index and corrupt-index rebuilds and the
-      ten-event tail separately; those recoveries are not a second ceiling. The threshold is
-      arithmetic headroom, ceil((2 x 0.197229 + 0.025) / 0.05) x 0.05, over the indexed-read
-      spike's largest mutable call (report authoring:human-action-items-spike-indexed-read-report),
-      not a measured percentile; a 50-entry history adds about 10 KB to decode and serialize,
-      well under a millisecond, so the detail read takes no new headroom.
+      release-built binary, now including the expiry sweep each read makes: the maximum of
+      ten unchanged warm reads of each of `list --json`, `list`, `report` and `show --json` of
+      the item carrying the longest history, over 100 retained runs of 10,000 events, 100
+      open items and 10 managers whose plans hold 5 to 50 steps (275 in all), with full
+      bodies, three-step previews and complete blocked sets. The 90 manager-raised open items
+      each carry a history of 2 to 5 events that leaves them open, one of them carries
+      exactly 50 events and is the item the timed `show --json` reads, and the 10 items that
+      are live runs' human gates keep only the raise their run recorded, so the 275-step
+      blocked set and its 5-to-50 per-plan sizes are unchanged. Expiry conditions sit on
+      top, none of them holding: all 100 open items carry a time condition 24 h out, 20 a
+      node condition on an unsettled node of a retained run, 10 a run condition on a run
+      that has not ended, and 10 a check condition whose last run is fresh, so none is due
+      (140 conditions, each read asserted to evaluate all of them and run no check).
+      Detail keeps the per-form breakdown — index I/O, run discovery, replay, blocked-work
+      calculation, rendering and process/capture — and adds each form's sweep time and the
+      number of conditions evaluated; it names the slowest form, reports the shown item's
+      history length, and discloses separately one read that ran a single due check of
+      `true`, the cold, deleted-index and corrupt-index rebuilds and the ten-event tail;
+      those are not a second ceiling. The threshold is arithmetic headroom,
+      ceil((2 x 0.197229 + 0.025) / 0.05) x 0.05, over the indexed-read spike's largest
+      mutable call (report authoring:human-action-items-spike-indexed-read-report) at the
+      workload without expiry conditions, not a measured percentile. The sweep's cost is
+      estimated, not measured before this change: an in-memory evaluation of 140
+      conditions over the snapshot and run states the read already folds, plus one read of
+      the small check record, judged at a few milliseconds, so about 0.20 s against 0.45 s.
+      Seeding the conditions and the extra disclosed read add about 5 s to the check's
+      roughly 60 s.

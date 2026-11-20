@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("160.")["bundle_versions"]["events"],
+        divergence_block("161.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -12494,8 +12494,8 @@ fn the_documented_expiry_contract_is_the_public_types_and_schema() {
     let conditions = block["conditions"].as_array().unwrap();
     for condition in conditions {
         let input = with(json!([condition]));
-        let parsed: HumanItemInput = serde_json::from_value(input.clone())
-            .unwrap_or_else(|e| panic!("{condition}: {e}"));
+        let parsed: HumanItemInput =
+            serde_json::from_value(input.clone()).unwrap_or_else(|e| panic!("{condition}: {e}"));
         assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
         assert!(valid("HumanItemInput", &input), "{condition}");
         let metadata = json!({"kind": "task", "priority": "low", "title": "T", "body": "B",
@@ -12556,7 +12556,10 @@ fn the_documented_expiry_contract_is_the_public_types_and_schema() {
         let word = serde_json::to_value(outcome).unwrap();
         assert!(section.contains(&format!("`{}`", word.as_str().unwrap())));
     }
-    assert_eq!(serde_json::to_value(HumanItemState::Expired).unwrap(), json!("expired"));
+    assert_eq!(
+        serde_json::to_value(HumanItemState::Expired).unwrap(),
+        json!("expired")
+    );
 
     // The expired view: decoded, round-tripped and valid, and never blocking.
     let view = &block["view"];
@@ -12586,7 +12589,10 @@ fn the_documented_expiry_contract_is_the_public_types_and_schema() {
     ] {
         let mut value = item.clone();
         *value.pointer_mut(pointer).unwrap() = wrong;
-        assert!(serde_json::from_value::<HumanItem>(value.clone()).is_err(), "{pointer}");
+        assert!(
+            serde_json::from_value::<HumanItem>(value.clone()).is_err(),
+            "{pointer}"
+        );
         assert!(!valid("HumanItem", &value), "{pointer}");
     }
     let mut unstored = item.clone();
@@ -12630,7 +12636,9 @@ fn the_documented_expiry_contract_is_the_public_types_and_schema() {
     // Each malformed condition is refused by the decoder and by the schema.
     let check = |extra: Value| {
         let mut c = json!({"when": "check", "command": ["true"]});
-        c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        c.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         c
     };
     for bad in [
@@ -13019,7 +13027,8 @@ fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations()
             Value::Null
         } else if state == "expired" {
             // The engine's own retirement, naming the stored condition that held.
-            let held = json!({"when":"time","at":"2026-11-20T00:00:00Z","reason":"Past its moment"});
+            let held =
+                json!({"when":"time","at":"2026-11-20T00:00:00Z","reason":"Past its moment"});
             event_item["expiry"] = json!([held]);
             json!({"actor":"engine","on_behalf_of":null,"text":null,"reason":"Past its moment","condition":held})
         } else {
@@ -13334,9 +13343,14 @@ fn the_guards_block_is_what_this_build_reads() {
             "{kind} is not a kind this build emits"
         );
     }
-    assert_eq!(
-        block["events_bundle_version"],
-        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
+    // The bundle the amendment was recorded at, which carries its two kinds: a later
+    // amendment raising the bundle leaves this approved text as it was.
+    assert!(
+        bundle_at_or_below(
+            block["events_bundle_version"].as_str().expect("a version"),
+            onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+        ),
+        "the guards amendment names a bundle newer than this build publishes"
     );
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -2350,6 +2350,17 @@
               "provenance": {
                 "$ref": "#/$defs/Provenance",
                 "description": "Whose words it is: the manager's own, or the user's relayed. Omitted while\nit is the manager's, and absent from every record written before the field\nexisted, which reads as the manager's."
+              },
+              "condition": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HumanItemExpiryCondition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The expiry condition that held, as the item stored it: present only on an\nexpired item, and omitted otherwise."
               }
             },
             "required": [
@@ -2374,6 +2385,153 @@
               }
             ],
             "description": "Whose words a ruling is. Serialized as the lowercase word; absent, `manager`."
+          },
+          "HumanItemExpiryCondition": {
+            "description": "One declared condition under which an open item stops mattering, tagged by `when`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "when": {
+                    "const": "time"
+                  },
+                  "at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "after_seconds": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                },
+                "required": [
+                  "when"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "at"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "after_seconds"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "when": {
+                    "const": "run"
+                  },
+                  "run": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "on": {
+                    "enum": [
+                      "settled",
+                      "ended"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                },
+                "required": [
+                  "when",
+                  "run",
+                  "on"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "when": {
+                    "const": "node"
+                  },
+                  "run": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "node": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                },
+                "required": [
+                  "when",
+                  "run",
+                  "node"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "when": {
+                    "const": "check"
+                  },
+                  "command": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "prefixItems": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                      }
+                    ]
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "pattern": "^(/|[A-Za-z]:[\\/]|\\\\)"
+                  },
+                  "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60
+                  },
+                  "interval_seconds": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 86400
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  }
+                },
+                "required": [
+                  "when",
+                  "command"
+                ],
+                "additionalProperties": false
+              }
+            ]
           }
         }
       }

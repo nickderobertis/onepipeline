@@ -2871,7 +2871,7 @@
         ]
       },
       {
-        "description": "Reopen a completed or dismissed item, taking its resolution back.",
+        "description": "Reopen a completed, dismissed or expired item, taking its resolution back; an\nexpired item's conditions go with it.",
         "type": "object",
         "properties": {
           "id": {
@@ -3352,7 +3352,7 @@
         ]
       },
       "state": {
-        "description": "State.",
+        "description": "State: open, answered, completed, dismissed or expired.",
         "anyOf": [
           {
             "$ref": "#/$defs/HumanItemState"
