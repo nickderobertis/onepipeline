@@ -5173,8 +5173,16 @@ pub(crate) fn submit_offered(
             // Edits that ended the run — its remaining work dropped — end it here,
             // with nothing driving it to see that: the items holding its work go.
             let after = crate::checkpoint::current(paths);
+            // And the run's claim on its project goes with it, since no closeout will release
+            // it: a driver that ended holding it left it standing for an adoption, and a run
+            // that is over has nothing left to adopt.
             if graph::state_of(&after.statuses()) != GraphState::Waiting {
                 crate::human_items::runtime::run_ended(paths);
+                crate::continuation::release_ended(
+                    paths,
+                    &view.launch,
+                    &crate::boundary::of_run(&crate::boundary::plan_now(&after)).scope,
+                );
             }
             // This process was the run's writer, so it lets go of it the way a
             // driver does: under the handover, and not while the queue holds

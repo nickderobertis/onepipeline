@@ -1722,11 +1722,43 @@ pub(crate) fn release_left_standing(
     launch: &crate::ledger::LaunchRecord,
     term_scope: &[String],
 ) {
+    let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
+        .map(|claim| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]))
+        .unwrap_or_default();
+    release_stored(paths, launch, term_scope, Some(&landed));
+}
+
+/// Release this run's claim on its project where an edit applied with nothing driving the run
+/// has ended it — its remaining work dropped — so no closeout will: a driver that ended while it
+/// held the claim, as a crash or a host going down ends one, leaves it standing so that the run
+/// stays the one to adopt, and once the run is over there is nothing left to adopt, so a claim
+/// left standing would refuse every later launch of the project.
+///
+/// Called by the process applying the edit, which holds the run's ownership lock, so no driver
+/// of this run can be acting: a stored claim naming this run on this host is this run's own,
+/// whether or not the write-back's record of what landed got as far as naming it. Read first
+/// and bounded as [`release_left_standing`] is, and best effort in the same way.
+pub(crate) fn release_ended(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
+) {
+    release_stored(paths, launch, term_scope, None);
+}
+
+/// Write `null` over the project's stored claim where it names this run on this host — and,
+/// given `landed`, only where the write-back's record of what landed names it too.
+fn release_stored(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
+    landed: Option<&BTreeMap<String, Value>>,
+) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
     };
     let host = crate::sys::hostname();
-    // llmlint: ignore[changed_behavior_has_e2e] reached only where a closeout projection outlasts its bounded window without failing, which `engine.rs`'s one caller of this function records no journey can drive (the real store suspended mid-command); the name read here is `publicid::on_store`, the one every release uses, and `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives that name through the closeout's and the stop's releases.
+    // llmlint: ignore[changed_behavior_has_e2e] the name every release uses, `publicid::on_store`; `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives it through the closeout's and the stop's releases, and `continuation::a_reply_ending_a_run_nothing_drives_releases_its_claim_on_the_project` through a reply's.
     let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
@@ -1735,10 +1767,9 @@ pub(crate) fn release_left_standing(
             Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
-    let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
-        .map(|claim| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]))
-        .unwrap_or_default();
-    if !ours(&landed) || crate::writeback::store_asked_to_wait(&paths.dir) {
+    if landed.is_some_and(|landed| !ours(landed))
+        || crate::writeback::store_asked_to_wait(&paths.dir)
+    {
         return;
     }
     let store = Store::at(&launch.dir);
