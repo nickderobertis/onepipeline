@@ -389,6 +389,7 @@ impl Gate {
                     fresh.insert(item.id.clone());
                 }
                 Some(_) => {
+                    // llmlint: ignore[changed_behavior_has_e2e] the same `release` a person's resolution makes, whose refusal is said and left to the owning run's driver — the fallback `a_resolution_its_resolver_could_not_release_is_released_by_the_driver` drives; this branch's success through another run's commands is `a_drivers_sweep_releases_its_own_human_step_and_another_runs`.
                     if let Err(why) = release(self.store.root(), item) {
                         eprintln!("onepipeline: {why}");
                     }

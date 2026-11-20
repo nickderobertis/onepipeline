@@ -1950,3 +1950,59 @@ fn a_drivers_sweep_releases_its_own_human_step_and_another_runs() {
     assert_eq!(settled(&world, other, "far-after").as_deref(), Some("done"));
     release(&world, "go-side");
 }
+
+/// A live driver whose expiry write the journal refuses says so on its log and goes on
+/// holding what the open item holds; once the journal takes writes again its next pass
+/// expires the item and the held step runs, with no read in between.
+#[cfg(unix)]
+#[test]
+fn a_driver_whose_expiry_is_refused_keeps_its_hold_and_expires_once_repaired() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = world("expiry-driver-refused");
+    let name = "refused";
+    let script = posix_script(&world.root, "refused-x", "exit 0");
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                json!({"id": "x", "kind": "command",
+                    "command": [script.display().to_string()], "deps": []}),
+                waiting(&world, "side", "go-side", 0),
+            ],
+        ),
+    );
+    let host = id_of(&raise(
+        &world,
+        &holding("host", json!({"scope": "host"}), 4),
+    ));
+    let at = crate::harness::epoch_millis(
+        shown(&world, &host)["item"]["expiry"][0]["at"]
+            .as_str()
+            .unwrap(),
+    );
+    let journal = world.runs.join("human-items/events.ndjson");
+    let writable = std::fs::metadata(&journal).unwrap().permissions();
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let log = world.run_file(name, "driver.log");
+    world.until_within(Duration::from_secs(60), "the driver to say it", |_| {
+        crate::harness::now_millis() > at
+            && std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("an expiry condition holds and the item could not be expired")
+    });
+    assert!(
+        !started(&world, name, "x"),
+        "the hold stands while the item is open"
+    );
+    assert!(expiries(&world, &host).is_empty());
+    std::fs::set_permissions(&journal, writable).unwrap();
+    world.until_within(
+        Duration::from_secs(60),
+        "the repaired journal's expiry",
+        |w| settled(w, name, "x").as_deref() == Some("done"),
+    );
+    assert_eq!(expiries(&world, &host).len(), 1);
+    release(&world, "go-side");
+}
