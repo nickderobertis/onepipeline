@@ -801,6 +801,45 @@ fn the_claim_is_held_while_a_run_drives_and_released_at_closeout_and_at_stop() {
     );
 }
 
+/// A run whose driver a shutdown ended keeps its claim, so it stays the run to adopt; a reply
+/// that then ends it — its remaining work dropped, applied by the reply as the run's writer,
+/// since nothing drives it — lets go of the project as a closeout does, so the next launch of
+/// the project is admitted rather than refused over a run that is over.
+#[test]
+fn a_reply_ending_a_run_nothing_drives_releases_its_claim_on_the_project() {
+    let world = World::new("claim-reply-ends");
+    world.script("work.wait", "hold");
+    let project = launch_detached(
+        &world,
+        "ends",
+        vec![agent("work", &[]), agent("after", &["work"])],
+    );
+    let claim = until_claimed_by(&world, &project, "ends");
+    let shutdown = world.run(&["shutdown", "ends", "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    assert_eq!(stored_claim(&world, &project), claim);
+
+    world
+        .run_with_stdin(
+            &["reply", "ends"],
+            &json!({"version": 3, "commands": [
+                {"op": "drop", "id": "work", "dependents": "drop",
+                 "reason": "Superseded by a later launch"}]})
+            .to_string(),
+        )
+        .exited(0);
+    assert_eq!(
+        stored_claim(&world, &project),
+        Value::Null,
+        "the reply that ended the run left its claim standing"
+    );
+    world.unscript("work.wait");
+    world
+        .run_from(&world.project, &["start", &project, "--attach"])
+        .exited(0);
+    assert_eq!(world.run_json("ends-2", "result.json")["state"], "complete");
+}
+
 /// A claim naming a run of **this** host refuses a launch whether that run's driver is
 /// live or gone, naming the run to `adopt` and `--take-over`; and `--take-over` passes the
 /// claim of a run whose driver a shutdown ended, journalling the claim it passed.

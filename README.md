@@ -1,6 +1,6 @@
 # onepipeline
 
-![the stderr of onepipeline start --attach driving a six-node plan: node-ready, node-dispatched and node-settled lines arriving as each node runs, a decision-pending line pausing the run on a human approval and clearing once it is attested, and a closing status line reading 6/6 done, 1 not landed, SETTLED, complete](screenshots/images/demo.gif) <!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the hero renders the same
+![the stderr of onepipeline start --attach driving a six-node plan until it pauses on a human approval, then of onepipeline watch --until settled following the run on once that approval is attested: node-ready, node-dispatched and node-settled lines arriving as each node runs, each decision-pending line clearing once its approval is attested, and a closing line reading watch tracked-release settled](screenshots/images/demo.gif) <!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the hero renders the same
 run the hash-gated stills come from, and a GIF is not byte-reproducible, so it is
 deliberately the one image with no hash gate. `screenshots/AGENTS.md` holds that ruling
 and what to re-render on. -->

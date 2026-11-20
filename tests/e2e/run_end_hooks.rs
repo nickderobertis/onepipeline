@@ -1455,14 +1455,13 @@ fn an_edit_that_leaves_a_ready_human_action_reopens_the_run_and_the_next_ending_
     );
     assert_eq!(invocations(&world, run), ["failure"]);
 
+    // The adoption handed the run to a driver that waits on the decision, which the
+    // attestation continues to the run's next ending.
     world.run(&["attest", run, "approve"]).exited(0);
-    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
-    assert_eq!(
-        invocations(&world, run),
-        ["failure", "failure"],
-        "{}",
-        world.dump()
-    );
+    assert_eq!(world.until_continued(run), "unattended");
+    world.until("the next ending's failure hook to fire", |world| {
+        invocations(world, run) == ["failure", "failure"]
+    });
     assert_eq!(world.events_of(run, "run-hook-fired").len(), 2);
 }
 
@@ -1819,6 +1818,9 @@ fn a_run_paused_on_a_decision_withholds_its_hook_and_the_adopting_driver_fires_t
          hook fired",
     );
 
+    // The driver the paused launch handed its run to is ended, as a host going down would
+    // end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
     world
         .run(&["adopt", run])
@@ -1848,6 +1850,9 @@ fn a_withheld_hook_from_an_earlier_epoch_reads_as_superseded_by_the_edit_that_en
     )
     .exited(0)
     .out_has("\"settlement\":\"awaiting-planner\"");
+    // The driver the paused launch handed its run to is ended, as a host going down would
+    // end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
     world.run(&["adopt", run]).exited(NOTHING_DRIVING);
     assert_eq!(invocations(&world, run), ["failure"], "{}", world.dump());
@@ -2032,6 +2037,9 @@ fn failed_over_a_live_retry(world: &World, run: &str) {
     )
     .exited(0)
     .out_has("\"settlement\":\"awaiting-planner\"");
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so what follows reaches a paused run nothing drives.
+    world.paused_and_ended(run);
 
     // The retry, committed while nothing has fired: its replacement is an agent
     // node, `ready` and never dispatched.
@@ -2082,9 +2090,10 @@ fn a_run_adopted_live_after_its_failure_hook_fired_fires_success_once_it_complet
         "the run completed after an adoption and fired no success hook: {}",
         world.dump()
     );
+    // The paused launch's hand-off, then this adoption.
     let adopted = world.events_of(run, "driver-adopted");
-    assert_eq!(adopted.len(), 1);
-    assert_eq!(adopted[0]["payload"]["hook_epoch"], json!(true));
+    assert_eq!(adopted.len(), 2);
+    assert_eq!(adopted[1]["payload"]["hook_epoch"], json!(true));
     assert!(
         first_of(&world, run, "driver-adopted") < first_of(&world, run, "node-dispatched"),
         "the adoption's epoch was recorded after something was dispatched: {:?}",
@@ -2111,8 +2120,9 @@ fn a_run_adopted_live_after_its_failure_hook_fired_fires_success_once_it_complet
     // again fires nothing and starts no epoch.
     world.run(&["adopt", run]).exited(0);
     assert_eq!(invocations(&world, run), ["failure", "success"]);
+    let adopted = world.events_of(run, "driver-adopted");
     assert_eq!(
-        world.events_of(run, "driver-adopted")[1]["payload"].get("hook_epoch"),
+        adopted[adopted.len() - 1]["payload"].get("hook_epoch"),
         None
     );
 }
@@ -2136,7 +2146,8 @@ fn a_run_adopted_live_after_its_failure_hook_fired_fires_failure_again_once_if_i
         world.dump()
     );
     assert_eq!(
-        world.events_of(run, "driver-adopted")[0]["payload"]["hook_epoch"],
+        // The paused launch's hand-off, then this adoption.
+        world.events_of(run, "driver-adopted")[1]["payload"]["hook_epoch"],
         json!(true)
     );
     let fired = world.events_of(run, "run-hook-fired");

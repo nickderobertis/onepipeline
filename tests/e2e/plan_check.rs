@@ -341,6 +341,8 @@ fn a_registered_check_is_handed_the_loaded_plan_and_each_tasks_own_metadata() {
     assert_eq!(handed["schema_version"], json!(3), "{handed}");
     assert_eq!(handed["concurrency"], json!(2), "{handed}");
     assert_eq!(handed["name"], json!("carried"), "{handed}");
+    // Which project it is checking, by the qualified id the verb was given.
+    assert_eq!(handed["project"], json!(project), "{handed}");
     assert_eq!(handed["goal"]["text"], json!("ship it"), "{handed}");
     let tasks = handed["tasks"].as_array().expect("the tasks").clone();
     assert_eq!(tasks.len(), 2, "one entry per task: {handed}");
@@ -1046,6 +1048,12 @@ fn launch_checks_refuse_a_launch_before_any_run_exists_and_adopt_runs_none_of_th
         "`start` handed its checks a document other than the one `plan check` hands"
     );
     let document: Value = serde_json::from_slice(&launched).expect("the document is JSON");
+    // Both the launch and `plan check` name the project they loaded, by its qualified id.
+    assert_eq!(document["project"], json!(project), "{document}");
+    assert!(
+        project.starts_with(&format!("{}:", crate::harness::STORE_SOURCE)),
+        "{project}"
+    );
     assert_eq!(document["tasks"][0]["id"], "approve", "{document}");
     assert_eq!(document["tasks"][0]["kind"], "human", "{document}");
 
@@ -1053,6 +1061,9 @@ fn launch_checks_refuse_a_launch_before_any_run_exists_and_adopt_runs_none_of_th
     world.until("the driver to pause on the approval", |world| {
         world.run(&["status", &run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, &run);
     world.run(&["adopt", &run]).exited(0);
     assert_eq!(
         (

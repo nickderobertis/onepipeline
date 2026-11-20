@@ -707,6 +707,9 @@ fn a_hook_that_fails_times_out_cannot_start_or_prints_a_malformed_document_refus
     )
     .settled();
     std::fs::write(world.runs.join(run).join("hooks"), "in the way").expect("a file in the way");
+    // The driver the paused launch handed its run to is ended, as a host going down would
+    // end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
     world.run(&["adopt", run]).settled();
     let settled = settlement(&world, run, "build");
@@ -1798,6 +1801,9 @@ fn a_launch_resolves_the_hook_flag_over_config_refuses_a_zero_timeout_and_adopt_
     )
     .settled();
     assert!(invocations(&world, run).is_empty(), "{}", world.dump());
+    // The driver the paused launch handed its run to is ended, as a host going down would
+    // end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
     world.run(&["adopt", run]).exited(0);
     assert_eq!(invocations(&world, run), ["build"], "{}", world.dump());

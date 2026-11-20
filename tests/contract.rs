@@ -1036,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("161.")["bundle_versions"]["events"],
+        divergence_block("162.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -12975,10 +12975,10 @@ fn the_generic_primitives_block_is_what_this_build_reads() {
     let path = dir.join("launch.json");
     std::fs::write(&path, block["launch_config"].to_string()).expect("written");
     let config = LaunchConfig::load(&path).expect("a schema-14 launch config reads");
-    assert_eq!(
-        block["launch_config"]["schema_version"],
-        json!(LAUNCH_CONFIG_SCHEMA_VERSION)
-    );
+    // The version the amendment was recorded at: a later key raising the schema leaves this
+    // approved text as it was, so it names one this build still reads.
+    assert_eq!(block["launch_config"]["schema_version"], json!(14));
+    assert!(onepipeline::filter::LAUNCH_CONFIG_SCHEMA_VERSIONS_READ.contains(&14));
     assert_eq!(config.checks.len(), 2);
     assert_eq!(config.checks[1].program(), "python3");
     assert_eq!(config.checks[1].arguments(), ["./scripts/check-budget.py"]);
@@ -13124,14 +13124,14 @@ fn the_guards_block_is_what_this_build_reads() {
             "{kind} is not a kind this build emits"
         );
     }
-    // The bundle the amendment was recorded at, which carries its two kinds; a later
-    // amendment raising the bundle leaves this approved text as it was.
+    // The bundle the amendment was recorded at: a later amendment raising the bundle leaves
+    // this approved text as it was, so it names one at or below what this build publishes.
     assert!(
         bundle_at_or_below(
             block["events_bundle_version"].as_str().expect("a version"),
             onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
         ),
-        "the guards block names a bundle newer than this build publishes"
+        "the guards amendment names a bundle newer than this build publishes"
     );
 }
 
@@ -13139,8 +13139,9 @@ fn the_guards_block_is_what_this_build_reads() {
 /// through the published documents: `edit-rejected` declares the four fields it names and
 /// `planner-surface-queued` the one, each optional so a record written before them still
 /// validates, a record carrying them validates and one carrying a field in another shape is
-/// refused; and the bundle the block names is the one this build publishes. What the engine
-/// writes into those fields is held to the same block by `tests/e2e/plan_edit_hook.rs`.
+/// refused; and the bundle the block names is at or below the one this build publishes. What
+/// the engine writes into those fields is held to the same block by
+/// `tests/e2e/plan_edit_hook.rs`.
 #[test]
 fn the_refusal_records_block_is_what_the_published_documents_declare() {
     use onepipeline::event::PipelineKind;
@@ -13213,9 +13214,14 @@ fn the_refusal_records_block_is_what_the_published_documents_declare() {
             "a surface naming its rejection as {broken} was admitted"
         );
     }
-    assert_eq!(
-        block["events_bundle_version"],
-        json!(onepipeline::vocabulary::EVENTS_BUNDLE_VERSION)
+    // The bundle the amendment was recorded at: a later amendment raising the bundle leaves
+    // this approved text as it was, so it names one at or below what this build publishes.
+    assert!(
+        bundle_at_or_below(
+            block["events_bundle_version"].as_str().expect("a version"),
+            onepipeline::vocabulary::EVENTS_BUNDLE_VERSION
+        ),
+        "the refusal records amendment names a bundle newer than this build publishes"
     );
 }
 
@@ -13352,4 +13358,93 @@ fn the_rulings_paragraph_is_what_the_provenance_and_declined_ruling_types_are() 
         );
     }
     assert!(passage.contains("never from the surface's `message`"));
+}
+
+/// The discard verb is published exactly as its paragraphs state it: the signature and every
+/// field and outcome the verbs paragraph names are the SDK's own, and the lines, the dry run's
+/// words and the statuses the amendment states are what its rendering and status answer.
+#[test]
+fn the_discard_verb_is_the_shape_its_paragraphs_state() {
+    use onepipeline::verbs::{
+        DiscardOutcome, DiscardRequest, UnpublishedDiscarded, UnpublishedDiscardedBranch,
+        EXIT_COUNTED, EXIT_NOTHING_COUNTED, EXIT_UNANSWERED,
+    };
+    let doc =
+        std::fs::read_to_string(repo_root().join("docs/contract.md")).expect("the contract reads");
+    for named in [
+        "`discard_unpublished(&DiscardRequest) -> UnpublishedDiscarded { project, dry_run, branches, unresolved }`",
+        "`UnpublishedDiscardedBranch { identity, branch, run, outcome }`",
+        "`Discarded`, `WouldDiscard`, `Kept(refusal)` or `WouldKeep(refusal)`",
+        "`onepipeline unpublished --project <QUALIFIED-ID> --discard [--dry-run]`",
+    ] {
+        assert!(doc.contains(named), "the contract does not state {named}");
+    }
+    let _ = DiscardRequest {
+        project: "plans:board".to_owned(),
+        dry_run: true,
+        runs_root: std::path::PathBuf::from("runs"),
+        acknowledgements: std::path::PathBuf::from("acknowledged"),
+    };
+    let branch = |outcome: DiscardOutcome| UnpublishedDiscardedBranch {
+        identity: "github.com/owner/service".to_owned(),
+        branch: "work/a".to_owned(),
+        run: "board".to_owned(),
+        outcome,
+    };
+    let discarded =
+        |branches: Vec<UnpublishedDiscardedBranch>, unresolved: Vec<String>| UnpublishedDiscarded {
+            project: "plans:board".to_owned(),
+            dry_run: false,
+            branches,
+            unresolved,
+        };
+    let named = "work/a [github.com/owner/service] (run board)";
+    let reclaim = "`onevcs reclaim work/a --repo github.com/owner/service --discard` discards it";
+    assert_eq!(
+        branch(DiscardOutcome::Discarded).line(),
+        format!("discarded {named}")
+    );
+    assert_eq!(
+        branch(DiscardOutcome::WouldDiscard).line(),
+        format!("would discard {named}")
+    );
+    assert_eq!(
+        branch(DiscardOutcome::Kept("refused".to_owned())).line(),
+        format!("kept {named}: refused; once that is resolved, {reclaim}")
+    );
+    assert_eq!(
+        branch(DiscardOutcome::WouldKeep("refused".to_owned())).line(),
+        format!("would keep {named}: refused; once that is resolved, {reclaim}")
+    );
+    // `0` when every listed branch is discarded or none is, `7` when any is kept, and `1` when
+    // the listing could not be read and nothing listed was kept.
+    assert_eq!(
+        discarded(vec![branch(DiscardOutcome::Discarded)], Vec::new()).exit_code(),
+        EXIT_NOTHING_COUNTED
+    );
+    assert_eq!(
+        discarded(Vec::new(), Vec::new()).exit_code(),
+        EXIT_NOTHING_COUNTED
+    );
+    assert_eq!(
+        discarded(
+            vec![
+                branch(DiscardOutcome::Discarded),
+                branch(DiscardOutcome::Kept("refused".to_owned()))
+            ],
+            vec!["unread".to_owned()]
+        )
+        .exit_code(),
+        EXIT_COUNTED
+    );
+    assert_eq!(
+        discarded(Vec::new(), vec!["unread".to_owned()]).exit_code(),
+        EXIT_UNANSWERED
+    );
+    assert_eq!(
+        (EXIT_NOTHING_COUNTED, EXIT_COUNTED, EXIT_UNANSWERED),
+        (0, 7, 1)
+    );
+    assert!(doc.contains("exits `0` when every listed branch is discarded or none is listed"));
+    assert!(doc.contains("and `7` when any is kept; a host listing that could not be read is `1`"));
 }

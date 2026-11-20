@@ -506,6 +506,263 @@ fn decided(
     })
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] `QualifiedId` and `BranchName` are
+// this crate's private types, which a public field cannot carry without publishing an item the
+// contract does not name; the project is parsed as a qualified id by `discard` before anything
+// is read, and each branch and identity are the strings onevcs's own validated row carries, as
+// the listing's `Row` beside them already spells them.
+/// What `unpublished --project <ID> --discard [--dry-run]` is asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardRequest {
+    /// The project, by its qualified id: every branch the host listing names for a run whose
+    /// recorded group it is.
+    pub project: String,
+    /// Say what would become of each branch, and discard nothing.
+    pub dry_run: bool,
+    /// The runs root each listed branch's run is read under.
+    pub runs_root: PathBuf,
+    /// The acknowledgements directory the host listing is read beside; it applies none.
+    pub acknowledgements: PathBuf,
+}
+
+/// What became of one branch a discard listed, or would become of it in a dry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// `onevcs reclaim --discard` deleted it everywhere this host held it.
+    Discarded,
+    /// A dry run: onevcs's own dry check says it would be deleted.
+    WouldDiscard,
+    /// onevcs refused it, or deleted it from only some places, in these words.
+    Kept(String),
+    /// A dry run: onevcs's own dry check says it would refuse it, in these words.
+    WouldKeep(String),
+}
+
+impl DiscardOutcome {
+    /// Whether the branch stays, or would.
+    #[must_use]
+    pub const fn kept(&self) -> bool {
+        matches!(self, Self::Kept(_) | Self::WouldKeep(_))
+    }
+}
+
+/// One branch a discard listed, and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardedBranch {
+    /// The identity it belongs to.
+    pub identity: String,
+    /// The branch.
+    pub branch: String,
+    /// The run whose session preserved it.
+    pub run: String,
+    /// What became of it.
+    pub outcome: DiscardOutcome,
+}
+
+impl DiscardedBranch {
+    /// The `onevcs` argv that discards it.
+    #[must_use]
+    pub fn command(&self) -> Vec<String> {
+        [
+            "onevcs",
+            "reclaim",
+            self.branch.as_str(),
+            "--repo",
+            self.identity.as_str(),
+            "--discard",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    /// Its one line.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let named = format!("{} [{}] (run {})", self.branch, self.identity, self.run);
+        match &self.outcome {
+            DiscardOutcome::Discarded => format!("discarded {named}"),
+            DiscardOutcome::WouldDiscard => format!("would discard {named}"),
+            DiscardOutcome::Kept(refusal) => format!(
+                "kept {named}: {refusal}; once that is resolved, `{}` discards it",
+                shell_line(&self.command())
+            ),
+            DiscardOutcome::WouldKeep(refusal) => format!(
+                "would keep {named}: {refusal}; once that is resolved, `{}` discards it",
+                shell_line(&self.command())
+            ),
+        }
+    }
+}
+
+/// What one discard did, or would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discarded {
+    /// The project asked about.
+    pub project: String,
+    /// Whether it was a dry run.
+    pub dry_run: bool,
+    /// Every branch listed for the project's runs, in the host listing's order.
+    pub branches: Vec<DiscardedBranch>,
+    /// What could not be read, one line each: the host listing's own, and each listed branch
+    /// whose run's record could not be read.
+    pub unresolved: Vec<String>,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
+impl Discarded {
+    /// The exit status: [`EXIT_NOTHING_COUNTED`] where every listed branch is discarded — or
+    /// would be — or none is listed; [`EXIT_COUNTED`] where any is kept, or would be; and
+    /// [`EXIT_UNANSWERED`] where the listing could not be read, so which branches are the
+    /// project's is not known.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        if self.branches.iter().any(|branch| branch.outcome.kept()) {
+            EXIT_COUNTED
+        } else if !self.unresolved.is_empty() {
+            EXIT_UNANSWERED
+        } else {
+            EXIT_NOTHING_COUNTED
+        }
+    }
+
+    /// The lines it prints, one per branch.
+    #[must_use]
+    pub fn render(&self) -> String {
+        self.branches
+            .iter()
+            .map(|branch| format!("{}\n", branch.line()))
+            .collect()
+    }
+}
+
+/// Discard — or, in a dry run, say what would become of — every preserved branch the host
+/// listing names for a run whose recorded group is `request.project`, each through the linked
+/// `onevcs`'s `reclaim --discard` ([`onevcs::retire`] at [`onevcs::RetireMode::Discard`]), so
+/// a branch is refused exactly as that command refuses it, and the others still proceed.
+///
+/// # Errors
+///
+/// A project that is not a qualified id, refused before anything is read.
+pub fn discard(request: &DiscardRequest) -> Result<Discarded> {
+    let project: crate::taskgraph::QualifiedId = request.project.parse()?;
+    let listing = unpublished(&UnpublishedRequest {
+        target: Target::Host,
+        acknowledging: None,
+        acknowledgements: request.acknowledgements.clone(),
+        disk: false,
+        pr_author_graph: None,
+    })?;
+    let mut unresolved = if listing.verdict == Verdict::Unanswered {
+        listing.unresolved.clone()
+    } else {
+        Vec::new()
+    };
+    let mut groups: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut branches = Vec::new();
+    for row in &listing.rows {
+        let Some(run) = &row.run else {
+            continue;
+        };
+        let group = match groups.get(run) {
+            Some(group) => group.clone(),
+            None => {
+                let group = run_group(&request.runs_root, run).unwrap_or_else(|why| {
+                    unresolved.push(format!(
+                        "{} [{}]: the record of run '{run}' could not be read, so whether it \
+                         is {}'s is not known: {why}",
+                        row.branch,
+                        row.identity,
+                        project.as_str()
+                    ));
+                    None
+                });
+                groups.insert(run.clone(), group.clone());
+                group
+            }
+        };
+        if group.as_deref() != Some(project.as_str()) {
+            continue;
+        }
+        let outcome = discarded(&row.identity, &row.branch, request.dry_run);
+        branches.push(DiscardedBranch {
+            identity: row.identity.clone(),
+            branch: row.branch.clone(),
+            run: run.clone(),
+            outcome,
+        });
+    }
+    Ok(Discarded {
+        project: project.as_str().to_owned(),
+        dry_run: request.dry_run,
+        branches,
+        unresolved,
+    })
+}
+
+/// The recorded group of `run` under `root`, as a grouped listing reads it — the launch's
+/// group, its project's origin or its project, and any label overlay over them — or `None` for
+/// a run this runs root holds no record of, which is another root's.
+fn run_group(root: &Path, run: &str) -> Result<Option<String>> {
+    // The label is another process's word: only a run id names a directory under the root.
+    if !crate::ledger::is_valid_run_id(run) {
+        return Err(Error::Invalid(format!(
+            "'{run}' is not a run id, so it names no run under the runs root"
+        )));
+    }
+    let paths = crate::ledger::RunPaths::under(root, run);
+    if !paths.launch().is_file() {
+        return Ok(None);
+    }
+    let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
+    Ok(crate::labels::effective(&paths, &launch)?.1)
+}
+
+/// One branch through `onevcs reclaim --discard`, or its dry check.
+fn discarded(identity: &str, branch: &str, dry_run: bool) -> DiscardOutcome {
+    let request = onevcs::RetireRequest {
+        repo: Some(identity.to_owned()),
+        branch: branch.to_owned(),
+        mode: onevcs::RetireMode::Discard,
+        dry_run,
+    };
+    let kept = |refusal: String| match dry_run {
+        true => DiscardOutcome::WouldKeep(refusal),
+        false => DiscardOutcome::Kept(refusal),
+    };
+    match onevcs::retire(&onevcs::Providers::real(), &request) {
+        Ok(retired) => match retired.outcome {
+            onevcs::RetireOutcome::Retired | onevcs::RetireOutcome::AlreadyRetired => {
+                DiscardOutcome::Discarded
+            }
+            onevcs::RetireOutcome::WouldRetire => DiscardOutcome::WouldDiscard,
+            onevcs::RetireOutcome::Kept => kept(format!(
+                "`onevcs reclaim --discard` refuses it as {}",
+                retired.retirement.verdict()
+            )),
+            // llmlint: ignore[changed_behavior_has_e2e] a deletion that reached some holders and not others needs a holder refusing a ref deletion mid-pass — a filesystem or host fault no journey arranges through either CLI; its line is the kept line every refusal prints, which the discard journey drives.
+            onevcs::RetireOutcome::Incomplete => kept(format!(
+                "`onevcs reclaim --discard` deleted it from only some places, and not from {}",
+                retired
+                    .failed
+                    .iter()
+                    .map(|failed| format!(
+                        "{} {} ({})",
+                        failed.kind.as_str(),
+                        failed.location,
+                        failed.error
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+        },
+        // llmlint: ignore[changed_behavior_has_e2e] a branch the listing just named that onevcs then cannot classify needs its registry or repository to vanish between two reads — a host fault no journey arranges; it is the kept line every refusal prints, which the discard journey drives.
+        Err(why) => kept(format!(
+            "`onevcs reclaim --discard` could not act on it: {why}"
+        )),
+    }
+}
+
 /// The acknowledgement standing for `row`, if one does: its identity and branch,
 /// and its tip equal to the row's.
 fn standing(

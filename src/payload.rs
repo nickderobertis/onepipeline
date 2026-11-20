@@ -561,7 +561,20 @@ pub(crate) struct NodeSettled {
     /// from every other. What a view reads the wait off, rather than the detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) awaiting: Option<Vec<Awaited>>,
+    /// The content digest of the node's task as its settling dispatch began, taken as the
+    /// linked `onetaskgraph` takes an attestation's `content_digest`, leaving out every task
+    /// key `plan writeback-keys` lists: what a later launch compares the task against to tell
+    /// it changed since the node ran. Absent from a settlement written before it was carried,
+    /// and from one whose task the launch read no record of. Its key is `task_digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_digest: Option<onetaskgraph_core::Sha256Digest>,
 }
+
+/// The one declaration of the settlement field a node's task digest is stored under — on the
+/// journal's `node-settled`, and on the store's `onepipeline.settlement` the write-back copies
+/// it to — which [`NodeSettled::task_digest`] serialises as, the settling writer writes, and a
+/// continuing launch reads.
+pub(crate) const TASK_DIGEST: &str = "task_digest";
 
 // llmlint: ignore-block[invalid_states_unrepresentable] a wire document: a repository
 // identity is a `String` on every surface `onevcs` publishes and on the reference row it is

@@ -82,6 +82,9 @@ fn config_of(world: &World, run: &str, member: &str) -> String {
 fn ready_and_undriven(world: &World, run: &str, node: Value) {
     let path = world.plan(run, &plan_of(run, vec![human("approve", &[]), node]));
     world.run(&["start", &path, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would
+    // end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
 }
 
@@ -317,6 +320,10 @@ fn a_lifecycle_nodes_two_graphs_are_the_ones_its_launch_resolved() {
     world
         .run_on(start, "start recorded lifecycle graph")
         .exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("recorded-lifecycle-graph");
+
     // Recorded, which is what makes it replayable at all: a launcher that
     // resolved the reference and kept it to itself would leave every later
     // driver to guess.
@@ -2168,6 +2175,9 @@ fn an_adoption_the_graph_refuses_fails_rather_than_leaving_the_run_undriven() {
             .stdout
             .contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, "orphaned");
 
     // The graph the launch record names goes away under it, so the relaunch the
     // adoption performs is refused by the sibling.
@@ -6111,6 +6121,9 @@ fn an_adoption_relaunches_the_observer_under_the_launchs_own_filter() {
             r#"{"exclude": [{"kind": "turn-*"}]}"#,
         ])
         .exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("readopted");
     world.run(&["attest", "readopted", "approve"]).exited(0);
     let before = observed("readopted").len();
 
@@ -6364,6 +6377,9 @@ fn an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cann
     );
     world.unscript("turn.go");
     world.unscript("turn.settle");
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: the adoption below takes up a run nothing drives.
+    world.paused_and_ended(run);
     world.run(&["attest", run, "approve"]).exited(0);
 
     // Adopted from elsewhere: the recorded launch directory is what the
@@ -7562,6 +7578,9 @@ fn run_labels_survive_real_start_and_adopt() {
             "authoring:example",
         ])
         .exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("labelled");
     let launch = world.run_json("labelled", "launch.json");
     assert_eq!(launch["labels"], json!({"kind":"spikes"}));
     assert_eq!(launch["group"], "authoring:example");

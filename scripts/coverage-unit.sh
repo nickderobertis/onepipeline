@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copied from dero-skills' create-repo skill; edit only the source.
 # source: github.com/nickderobertis/dero-skills/skills/bootstrap/create-repo/assets/ci/coverage-unit.sh
-# version: 3
-# sha256: 9512ddce254386450d066aa55ed30a4e1af187bef307fad11442ee816d959968
+# version: 4
+# sha256: 2ac3287f4c453dcec23f5c6b607afa68836bdf0ad39ab0c54b3c0a11231c4fd7
 #
 # One coverage unit: one crate's tests, or one test tier's, run under cargo-llvm-cov and
 # reduced to one LCOV report Nx can cache.
@@ -28,16 +28,21 @@
 #   unit's own raw profiles there, target/llvm-cov-target/<unit>.*.profraw.
 # Writes: target/coverage-units/<unit>.lcov, one LCOV report whose every SF: path is
 #   relative to the workspace root, and target/llvm-cov-target/<unit>.profdata. Removes only
-#   that report and this unit's raw profiles. No other unit's output is read or deleted.
+#   that report and this unit's raw profiles: the previous run's before the tests, and, once
+#   `llvm-profdata merge` has written the indexed profile, every raw profile it merged. One it
+#   warned about is kept, silently, for diagnosis, as are all of them when a test fails or none
+#   merges. That bounds what a completed unit leaves behind, not the peak of a run still
+#   writing. No other unit's output is read or deleted.
 # Environment: COVERAGE_UNIT_IGNORE_REGEX adds an alternative to the ignore rule, which is
 #   otherwise the one `cargo llvm-cov report` uses (standard library, tests, examples and
 #   benches, build output, the Cargo registry and the toolchain). It must be a valid POSIX
 #   extended regular expression that cannot match every file. LLVM_PROFDATA and LLVM_COV
 #   name those tools; otherwise PATH, then the toolchain's llvm-tools component.
 # Exit: 0 when the report is written (or, off Linux, the tests passed); the cargo status when
-#   a test fails; 1 when no profile was written, every profile was unmergeable, no
-#   instrumented object was found, or `cargo llvm-cov show-env` printed anything but shell
-#   assignments; 2 for a usage error or an unusable COVERAGE_UNIT_IGNORE_REGEX.
+#   a test fails; 1 when no profile was written, every profile was unmergeable, a merged
+#   profile could not be removed, no instrumented object was found, or `cargo llvm-cov
+#   show-env` printed anything but shell assignments; 2 for a usage error or an unusable
+#   COVERAGE_UNIT_IGNORE_REGEX.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -197,6 +202,20 @@ printf '%s\n' "${profiles[@]}" >"$work/profiles"
 if ! "$(profdata_tool)" merge -sparse -failure-mode=all -f "$work/profiles" -o "$indexed" 2>"$work/merge.err"; then
   cat "$work/merge.err" >&2
   echo "coverage-unit.sh: every profile of $unit was unmergeable. ACTION: check for a run killed before it wrote one" >&2
+  exit 1
+fi
+# -failure-mode=all merges past a profile it cannot read, naming it in a `warning: <path>: `
+# line, so only the profiles no warning names are in the indexed profile and removed. A named
+# one stays on disk for diagnosis, without output: the report is written, so the run succeeds
+# quietly. The list is this unit's own glob, never a file another unit is writing into the same
+# directory.
+awk -v kept="$work/kept" -v merged="$work/merged" 'NR == FNR { listed[$0] = 1; next }
+  /^warning: / { for (path in listed) if (index($0, "warning: " path ": ") == 1) warned[path] = 1 }
+  END { for (path in listed) print path >(path in warned ? kept : merged) }' \
+  "$work/profiles" "$work/merge.err"
+if [ -s "$work/merged" ] && ! xargs -d '\n' rm -f -- <"$work/merged" 2>"$work/rm.err"; then
+  cat "$work/rm.err" >&2
+  echo "coverage-unit.sh: could not remove the merged raw profiles of $unit. ACTION: check the permissions of $coverage_target" >&2
   exit 1
 fi
 

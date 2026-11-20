@@ -918,6 +918,9 @@ fn the_flag_beats_the_key_a_blank_names_none_and_a_bad_schedule_is_refused_befor
         0,
         "a run paused on a human gate swept the registry"
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so the attestation leaves the run for the adoption below.
+    world.paused_and_ended("adopted");
     world.run(&["attest", "adopted", "approve"]).exited(0);
     let meeting = world.rendezvous("build");
     let adopting = world

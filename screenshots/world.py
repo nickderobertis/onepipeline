@@ -545,40 +545,48 @@ def clear_inherited_engine_and_git_settings() -> None:
 
 
 def drive(world: World, attach_log: Path, while_held=None) -> None:
-    """Drive the shipped six-node plan from launch to `complete`, attached.
+    """Drive the shipped six-node plan from launch to `complete`.
 
     The journey is exactly what a planner does. `start --attach` streams the
-    run's own monitor lines to stderr as the DAG is driven; each `kind: human`
-    approval is cleared with `onepipeline attest`, as the README documents; and
-    the last approval — the one the plan puts at the end, which nothing depends
-    on — is reached after the driver has converged and handed the run back, so
-    it takes an `adopt --attach` to resume, which is the product's own shape.
-    Every attached stream is appended to `attach_log` in the order it was
-    produced: that is the run's own append-only monitor document, and it is what
-    the animated hero renders.
+    run's own monitor lines to stderr as the DAG is driven, and returns
+    `awaiting-planner` once the run waits on its first approval with nothing
+    else able to move. It hands the run to a driver that waits on that decision,
+    so each `kind: human` approval is cleared with `onepipeline attest`, as the
+    README documents, and the run goes on with nobody adopting it. `watch --until
+    settled` follows it from there to its ending — the documented way a script
+    waits on a run — and its stream is appended to `attach_log` after the
+    launch's, in the order each was produced: that is what the animated hero
+    renders.
 
-    **Nothing here races the driver.** A run whose only way forward is an
-    attestation has no node that can still move, so the driver converges and
-    hands the run back rather than waiting on the channel — the plan's two
-    mid-run approvals (`design-approval`, and `service`'s staging step once
-    `docs` has settled) are each raised with nothing else in flight. Each is
-    therefore answered only once the driver that raised it has exited, and the
-    run is resumed with `adopt --attach`, exactly as the tail below does for the
-    last one. Attesting while that driver was still closing out would race it:
-    whether its last look at the queue saw the attestation — and so whether the
-    run went on under `start` or needed an `adopt` — would be decided by how
-    long the close-out took, not by this capture. The two lifecycle dispatches
-    are held by the double until this capture writes their release file, so
-    `while_held` is called with both of them genuinely in flight, and they are
-    released one at a time so the order they settle in is stated here rather
-    than decided by the host.
+    **Nothing here races the driver.** Every approval is answered once the
+    journal records it raised: the driver waiting on the decision applies it
+    whenever it lands. The two lifecycle dispatches are held by the double until
+    this capture writes their release file, so `while_held` is called with both
+    of them genuinely in flight, and they are released one at a time so the
+    order they settle in is stated here rather than decided by the host.
     """
     attach_log.write_text("")
-    driver = _attached(
-        world, attach_log, "start", PLAN_PROJECT, "--attach", fresh=True
-    )
+    launch = _attached(world, attach_log, "start", PLAN_PROJECT, "--attach", fresh=True)
+    follow = None
     try:
-        driver = _answer_once_handed_back(world, attach_log, driver)
+        _next_pending(world)
+        try:
+            launch.wait(timeout=DEADLINE_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise Waited(
+                "screenshots: `start --attach` raised its first approval and did "
+                f"not return within {DEADLINE_SECONDS:g}s. An attached launch "
+                "returns `awaiting-planner` once nothing but a decision can move "
+                "its run, so one still running here has work in flight the "
+                "capture did not expect. Read the run's `events.jsonl` under the "
+                "runs root for what is still moving."
+            ) from None
+        _expect_code(launch.returncode, 0, " ".join(launch.args[1:]))
+        _clear_next_approval(world)
+        follow = _attached(
+            world, attach_log, "watch", PLAN_RUN, "--until", "settled",
+            "--timeout", "none", "--tick-interval", "0",
+        )
         for key in HELD:
             world.until_journal("node-dispatched", key.split(".", 1)[0])
         if while_held is not None:
@@ -596,29 +604,25 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
             node = key.split(".", 1)[0]
             world.release(key)
             if _pending_attestations(world.run_root / "events.jsonl") or "." in key:
-                driver = _answer_once_handed_back(world, attach_log, driver)
+                _clear_next_approval(world)
             world.until_journal("node-settled", node)
-        driver.wait(timeout=DEADLINE_SECONDS)
+        # The last approval is the one the plan puts at the end, which nothing
+        # depends on: the driver raises it once its dependency settles and waits
+        # on it, and the attestation carries the run to `complete`.
+        _clear_next_approval(world)
+        follow.wait(timeout=DEADLINE_SECONDS)
     finally:
-        if driver.poll() is None:
-            driver.kill()
-            driver.wait()
-    _expect_code(driver.returncode, 0, " ".join(driver.args[1:]))
-
-    # The last approval is the one the plan puts at the end, and **nothing
-    # depends on it** — so the engine converges and hands the run back before
-    # the decision is even raised, rather than waiting on the channel as it does
-    # for the two an unfinished subtree sits behind. That is the product's own
-    # shape, and it is why the tail of this journey is two `adopt --attach`
-    # calls: the first raises the decision and hands the run back again, the
-    # attestation clears it, and the second carries the run to `complete`.
-    for _ in range(2):
-        resumed = world.cli("adopt", PLAN_RUN, "--attach")
-        with attach_log.open("a") as out:
-            out.write(resumed.stderr)
-        _expect(resumed, 0, "adopt --attach")
-        if _pending_attestations(world.run_root / "events.jsonl"):
-            _clear_next_approval(world)
+        for process in (launch, follow):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+    _expect_code(follow.returncode, 0, " ".join(follow.args[1:]))
+    # The watch returns on the run settling, which its driver records before it lets go: the
+    # driver is still closing the run out — its sessions, its last records — and the next
+    # scene's launch would meet the work it still holds. Waited out on its ownership lock,
+    # which only its letting go removes, so every scene reads the run its driver left.
+    lock = world.run_root / "owner.lock"
+    World._until(lambda: not lock.exists(), f"the driver to let go of {world.run_root}")
 
     results = world.cli("results", PLAN_RUN)
     if not results.stdout.startswith(f"{PLAN_RUN}  complete"):
@@ -629,11 +633,11 @@ def drive(world: World, attach_log: Path, while_held=None) -> None:
 
 
 def _attached(world: World, attach_log: Path, *args: str, fresh: bool = False) -> subprocess.Popen:
-    """One attached driver, its stream appended to `attach_log`.
+    """One streaming verb, its stream appended to `attach_log`.
 
-    The attached stream is on **stderr**: the descriptor split is deliberate —
-    human progress on stderr, the one machine-readable settlement record on
-    stdout — so the capture takes stderr and says so.
+    The stream is on **stderr**: the descriptor split is deliberate — human
+    progress on stderr, the one machine-readable record on stdout — so the
+    capture takes stderr and says so.
     """
     return subprocess.Popen(
         [str(world.bin / "onepipeline"), *args],
@@ -643,31 +647,6 @@ def _attached(world: World, attach_log: Path, *args: str, fresh: bool = False) -
         stderr=attach_log.open("w" if fresh else "a"),
         text=True,
     )
-
-
-def _answer_once_handed_back(
-    world: World, attach_log: Path, driver: subprocess.Popen
-) -> subprocess.Popen:
-    """Attest the next approval after `driver` hands the run back, then resume it.
-
-    Returns the driver now carrying the run: an `adopt --attach` whose stream
-    continues the same log. Waited for on the approval being raised first, so a
-    driver that exits for any other reason is still read as the failure it is.
-    """
-    _next_pending(world)
-    try:
-        driver.wait(timeout=DEADLINE_SECONDS)
-    except subprocess.TimeoutExpired:
-        raise Waited(
-            "screenshots: the driver raised a human action and did not hand the "
-            f"run back within {DEADLINE_SECONDS:g}s. This journey answers an "
-            "approval only once nothing else can move, so a driver still running "
-            "here has work in flight the capture did not expect. Read the run's "
-            "`events.jsonl` under the runs root for what is still moving."
-        ) from None
-    _expect_code(driver.returncode, 0, " ".join(driver.args[1:]))
-    _clear_next_approval(world)
-    return _attached(world, attach_log, "adopt", PLAN_RUN, "--attach")
 
 
 def _next_pending(world: World) -> str:

@@ -181,6 +181,10 @@ fn paused(world: &World, run: &str, nodes: Vec<Value>, extra: &[&str]) {
         .run_from(&world.project, &args)
         .exited(0)
         .out_has("\"settlement\":\"awaiting-planner\"");
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: these journeys are about what reaches a paused run nothing drives, and what the
+    // adoption that takes it up answers.
+    world.paused_and_ended(run);
 }
 
 /// Six records no build decodes reach a run with a waiting human node, and the
@@ -611,6 +615,9 @@ fn a_superseded_human_action_is_retired_with_a_drop_that_states_why() {
     assert_eq!(status(&result, "sign-off-2"), Some(json!("waiting")));
     assert!(invocations(&world, run).is_empty());
 
+    // The adoption above returned on the decision and handed the run to a driver that waits on
+    // it; that driver is ended, as a host going down would end it, so nothing drives the run.
+    world.paused_and_ended(run);
     sent_through_the_bus(&world, run, &drop("sign-off-2", "superseded"));
     world
         .run(&["adopt", run])
@@ -904,11 +911,10 @@ fn a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again() {
     assert!(at("docs", "done") < at("approve", "waiting"), "{settled:?}");
     awaits_approval(&world, run);
 
+    // The adoption returned on the decision and handed the run to a driver that waits on it,
+    // which the attestation continues.
     world.run(&["attest", run, "approve"]).exited(0);
-    world
-        .run(&["adopt", run])
-        .exited(0)
-        .out_has("\"settlement\":\"complete\"");
+    assert_eq!(world.until_continued(run), "complete");
     assert!(statuses(&world, run)
         .values()
         .all(|status| status == "done"));
@@ -1007,6 +1013,9 @@ fn refused_whole_on_both_paths(world: &World, run: &str, envelope: &Value, reaso
     assert_eq!(read["ship"], json!("blocked"));
     assert!(!read.contains_key("docs"), "{read:?}");
     awaits_approval(world, run);
+    // The adoption above returned on the decision and handed the run to a driver that waits on
+    // it; that driver is ended, as a host going down would end it, so nothing drives the run.
+    world.paused_and_ended(run);
 }
 
 /// An envelope that reparents a waiting approval onto work that has not run and

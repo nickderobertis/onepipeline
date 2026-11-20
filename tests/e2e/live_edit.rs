@@ -353,6 +353,9 @@ fn a_run_wide_set_edit_is_replayed_when_a_driver_adopts() {
             .stdout
             .contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, "sets-adopted");
     world.run(&["status", "sets-adopted"]).exited(0);
     let checkpoint = world.run_json("sets-adopted", "checkpoint.json");
     assert_eq!(

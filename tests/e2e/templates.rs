@@ -424,7 +424,9 @@ fn the_host_root_is_the_flag_then_the_variable_then_the_schema_12_key_and_adopt_
     assert!(record.get(ROOT_KEY).is_none() && record.get("require_rendered").is_none());
 
     // An adopting process's own environment names another root and turns the check off,
-    // and the run keeps what it was launched with.
+    // and the run keeps what it was launched with. The driver its paused launch handed it to
+    // is ended first, as a host going down would end it, so there is a run to adopt.
+    world.paused_and_ended("configured");
     world.run(&["attest", "configured", "approve"]).exited(0);
     let mut command = world.cmd(&["adopt", "configured"]);
     command

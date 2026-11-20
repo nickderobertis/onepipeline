@@ -489,6 +489,9 @@ fn an_adopted_run_still_offers_its_edits_to_the_hook_its_launch_named() {
     world.until("the driver to pause on the approval", |world| {
         world.run(&["status", run]).stdout.contains("PAUSED")
     });
+    // The driver waiting on the decision is ended, as a host going down would end it, so
+    // the run is paused with nothing driving it: the run an adoption takes up.
+    crate::harness::end_driver(&world, run);
     let recorded = &world.run_json(run, "launch.json")[stated("launch_record_key")
         .as_str()
         .expect("the record's key")];

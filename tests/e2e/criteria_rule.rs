@@ -211,6 +211,10 @@ fn an_add_retry_or_requeue_stating_a_task_that_breaks_c6b_is_refused_and_changes
         "the failing node never settled: {:?}",
         world.kinds(name)
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: each edit below is then applied, or refused, by the reply itself, and the journal it
+    // is counted against stops moving once that reply returns.
+    world.paused_and_ended(name);
     let edit = |command: Value| {
         world.run_with_stdin(
             &["reply", name],
@@ -335,6 +339,9 @@ fn adopt_refuses_a_run_whose_undone_node_breaks_c6b_before_writing_anything() {
         ),
     );
     world.run(&["start", &project, "--attach"]);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(name);
     world
         .run_with_stdin(
             &["reply", name],
@@ -364,9 +371,12 @@ fn adopt_refuses_a_run_whose_undone_node_breaks_c6b_before_writing_anything() {
         launch,
         "a refused adoption rewrote the launch record"
     );
-    assert!(!world.run_file(name, "launch.pre-adopt-1.json").exists());
-    assert!(
-        world.events_of(name, "driver-adopted").is_empty(),
+    // The one adoption the run has is the paused launch's hand-off; the refused ones added
+    // none, and kept no record of one.
+    assert!(!world.run_file(name, "launch.pre-adopt-2.json").exists());
+    assert_eq!(
+        world.events_of(name, "driver-adopted").len(),
+        1,
         "{:?}",
         world.kinds(name)
     );
@@ -392,6 +402,9 @@ fn adopt_goes_ahead_over_a_node_settled_done_that_breaks_c6b() {
         "the agent node never settled: {:?}",
         world.kinds(name)
     );
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it, so the records below are rewritten under no driver and an adoption takes the run up.
+    world.paused_and_ended(name);
     launched_before_c6b(&world, name, "early", BROKEN[0].0);
     world.run(&["attest", name, "approve"]).exited(0);
     world.run(&["adopt", name]).exited(0);
@@ -413,6 +426,10 @@ fn a_run_launched_before_c6b_still_takes_edits_that_state_no_task_text() {
         ),
     );
     world.run(&["start", &project, "--attach"]).exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down would end
+    // it: the run's records are rewritten below as an older build left them, which only a run
+    // nothing drives keeps.
+    world.paused_and_ended(name);
     let edit = |command: Value| {
         world.run_with_stdin(
             &["reply", name],
