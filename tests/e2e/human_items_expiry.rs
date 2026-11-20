@@ -262,6 +262,20 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
     let world = world("expiry-time");
     let past = json!({"when": "time", "at": PAST, "reason": "The release window has passed"});
     let gone = id_of(&raise(&world, &item("gone", json!([past]))));
+    // A moment past what a clock can say is refused, and nothing is raised.
+    let path = world.root.join("overflow.json");
+    std::fs::write(
+        &path,
+        item(
+            "overflow",
+            json!([{"when": "time", "after_seconds": 1_000_000_000_000_000_u64}]),
+        )
+        .to_string(),
+    )
+    .unwrap();
+    world
+        .run(&["human-items", "raise", "--input", path.to_str().unwrap()])
+        .err_has("seconds after the raise is past year 9999");
     let ahead = id_of(&raise(
         &world,
         &item("ahead", json!([{"when": "time", "at": FUTURE}])),
@@ -946,7 +960,18 @@ fn a_check_answers_not_yet_until_its_condition_holds_and_expires_with_its_own_wo
     };
     let bare_id = id_of(&raise(&world, &item("bare", json!([own(&bare)]))));
     let blank_id = id_of(&raise(&world, &item("blank", json!([own(&blank)]))));
+    // Neither the check nor its condition says why: the engine names the check's program.
+    let unsaid = check_of(&world, &bare, json!({}));
+    let unsaid_id = id_of(&raise(&world, &item("unsaid", json!([unsaid]))));
     listed(&world, &[]);
+    expired_by(
+        &shown(&world, &unsaid_id)["item"],
+        &unsaid,
+        &format!(
+            "the check {} answered that the item no longer matters",
+            bare.display()
+        ),
+    );
     expired_by(
         &shown(&world, &bare_id)["item"],
         &own(&bare),
@@ -1691,6 +1716,19 @@ fn a_record_or_journal_that_refuses_leaves_items_open_until_it_is_repaired() {
     std::fs::remove_dir(&record).unwrap();
     assert_eq!(shown(&world, &checked)["checks"][0]["outcome"], "not-yet");
     assert_eq!(lines_of(&world, "ran").len(), 1);
+    // An entry this build never writes — a claim with no lapse — is dropped and said, and
+    // its check is due again.
+    std::fs::write(
+        &record,
+        json!({"version": 1, "checks": {format!("{checked}#0"): {"digest": "x", "claimed_at_ms": 1}}})
+            .to_string(),
+    )
+    .unwrap();
+    world
+        .run(&["human-items", "list", "--json"])
+        .exited(0)
+        .err_has("check entries this build never writes");
+    assert_eq!(lines_of(&world, "ran").len(), 2);
 
     let due = id_of(&raise(
         &world,
@@ -1718,4 +1756,32 @@ fn a_record_or_journal_that_refuses_leaves_items_open_until_it_is_repaired() {
         "expired",
         "the next sweep writes it"
     );
+}
+
+/// A raise that replaces an item's check gives the replacement none of the old check's
+/// runs: it is due at once, whatever the old one's interval, and its own outcome shows.
+#[cfg(unix)]
+#[test]
+fn a_replaced_check_inherits_nothing_of_the_check_it_replaced() {
+    let world = world("expiry-replaced");
+    let counted = |name: &str, answer: &str| {
+        let log = shell_path(&world.root.join(format!("{name}.log")));
+        let script = posix_script(
+            &world.root,
+            name,
+            &format!("echo ran >> '{log}'\necho '{answer}'"),
+        );
+        check_of(&world, &script, json!({"interval_seconds": 86400}))
+    };
+    let old = counted("old", "{\"expired\": false}");
+    let id = id_of(&raise(&world, &item("replaced", json!([old]))));
+    assert_eq!(shown(&world, &id)["checks"][0]["outcome"], "not-yet");
+    assert_eq!(lines_of(&world, "old.log").len(), 1);
+    let new = counted("new", "garbled");
+    raise(&world, &item("replaced", json!([new])));
+    let detail = shown(&world, &id);
+    assert_eq!(lines_of(&world, "new.log").len(), 1, "due at once");
+    assert_eq!(lines_of(&world, "old.log").len(), 1);
+    assert_eq!(detail["checks"][0]["outcome"], "failed", "{detail}");
+    assert_eq!(detail["item"]["expiry"], json!([new]));
 }

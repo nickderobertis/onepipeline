@@ -61,41 +61,81 @@ pub(super) struct Swept {
     pub(super) evaluated: u64,
 }
 
-/// A node's settlement word, where it has one of any outcome.
-pub(super) fn settlement_of(status: crate::graph::NodeStatus) -> Option<String> {
-    use crate::graph::NodeStatus as S;
-    matches!(status, S::Done | S::Failed | S::Skipped).then(|| status.as_str().to_owned())
+/// How a node settled, once it has a settlement of any outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Settlement {
+    Done,
+    Failed,
+    Skipped,
 }
 
-/// How a run has ended, in the engine's run-state words, or `None` while it has not:
-/// `settled`, `ended failed`, `ended unfinished` or `ended stopped`, judged as the views
-/// judge an ending and as a run's end retires its holds.
-pub(super) fn ending_of(state: &crate::projection::RunState) -> Option<String> {
-    use crate::graph::{GraphState, NodeStatus};
-    let statuses = state.statuses();
-    if state.stop_recorded() {
-        return Some("ended stopped".into());
+impl Settlement {
+    /// The node's settlement, where it has one.
+    pub(super) fn of(status: crate::graph::NodeStatus) -> Option<Self> {
+        use crate::graph::NodeStatus as S;
+        match status {
+            S::Done => Some(Self::Done),
+            S::Failed => Some(Self::Failed),
+            S::Skipped => Some(Self::Skipped),
+            _ => None,
+        }
     }
-    if statuses.is_empty()
-        || !crate::graph::is_terminal(&statuses)
-        || crate::graph::state_of(&statuses) == GraphState::Waiting
-    {
-        return None;
+    fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
     }
-    Some(
-        if statuses.values().all(|s| *s == NodeStatus::Done) {
-            "settled"
+}
+
+/// How a run ended, judged as the views judge an ending and as a run's end retires its
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Ending {
+    Settled,
+    EndedFailed,
+    EndedUnfinished,
+    EndedStopped,
+}
+
+impl Ending {
+    /// How the run has ended, or `None` while it has not.
+    pub(super) fn of(state: &crate::projection::RunState) -> Option<Self> {
+        use crate::graph::{GraphState, NodeStatus};
+        let statuses = state.statuses();
+        if state.stop_recorded() {
+            return Some(Self::EndedStopped);
+        }
+        if statuses.is_empty()
+            || !crate::graph::is_terminal(&statuses)
+            || crate::graph::state_of(&statuses) == GraphState::Waiting
+        {
+            return None;
+        }
+        Some(if statuses.values().all(|s| *s == NodeStatus::Done) {
+            Self::Settled
         } else if statuses
             .values()
             .any(|s| matches!(s, NodeStatus::Failed | NodeStatus::Skipped))
         {
-            "ended failed"
+            Self::EndedFailed
         } else {
             // llmlint: ignore[changed_behavior_has_e2e] the same terminal, not-waiting reading the stopped, failed and settled endings take, which the run journeys drive; staging an unfinished ending needs a planner park over an otherwise settled run, a journey that would prove `graph::state_of` rather than this word.
-            "ended unfinished"
+            Self::EndedUnfinished
+        })
+    }
+    /// The engine's run-state words for it.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::EndedFailed => "ended failed",
+            Self::EndedUnfinished => "ended unfinished",
+            Self::EndedStopped => "ended stopped",
         }
-        .into(),
-    )
+    }
 }
 
 /// Every run a time-free condition of an open item names: the runs a sweep must read.
@@ -124,16 +164,9 @@ fn holds(condition: &Condition, runs: &BTreeMap<String, RunDag>, now: u64) -> Op
                     && dag
                         .nodes
                         .iter()
-                        .all(|n| n.settled.as_deref() == Some("done")))
+                        .all(|n| n.settled == Some(Settlement::Done)))
                 .then(|| format!("run {run} settled")),
-                HumanItemRunEnding::Ended => {
-                    let ending = dag.ending.as_deref()?;
-                    Some(if ending == "settled" {
-                        format!("run {run} settled")
-                    } else {
-                        format!("run {run} {ending}")
-                    })
-                }
+                HumanItemRunEnding::Ended => Some(format!("run {run} {}", dag.ending?.word())),
             }
         }
         Condition::Node { run, node, .. } => {
@@ -142,9 +175,11 @@ fn holds(condition: &Condition, runs: &BTreeMap<String, RunDag>, now: u64) -> Op
                 .nodes
                 .iter()
                 .find(|n| n.id == *node)?
-                .settled
-                .clone()?;
-            Some(format!("node {node} of run {run} settled {outcome}"))
+                .settled?;
+            Some(format!(
+                "node {node} of run {run} settled {}",
+                outcome.word()
+            ))
         }
         Condition::Time { at: None, .. } | Condition::Check { .. } => None,
     }

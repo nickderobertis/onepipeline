@@ -163,8 +163,8 @@ pub(crate) struct DagNode {
     pub human: bool,
     /// Not yet dispatched: pending, ready, waiting or blocked.
     pub undispatched: bool,
-    /// The node's settlement, `done`, `failed` or `skipped`, once it has one.
-    pub settled: Option<String>,
+    /// The node's settlement, once it has one.
+    pub settled: Option<super::expiry::Settlement>,
 }
 
 /// One run's DAG, cached under its journal's position.
@@ -175,8 +175,8 @@ pub(crate) struct RunDag {
     tail: String,
     pub plan: String,
     pub nodes: Vec<DagNode>,
-    /// How the run ended, in the engine's run-state words, once it has.
-    pub ending: Option<String>,
+    /// How the run ended, once it has.
+    pub ending: Option<super::expiry::Ending>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -1405,7 +1405,7 @@ fn derive_dag(
                         | crate::graph::NodeStatus::Waiting
                         | crate::graph::NodeStatus::Blocked
                 ),
-                settled: super::expiry::settlement_of(status),
+                settled: super::expiry::Settlement::of(status),
             }
         })
         .collect();
@@ -1414,7 +1414,7 @@ fn derive_dag(
         tail,
         plan: launch.project,
         nodes,
-        ending: super::expiry::ending_of(&state),
+        ending: super::expiry::Ending::of(&state),
     })
 }
 
