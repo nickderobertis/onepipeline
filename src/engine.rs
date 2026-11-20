@@ -2042,7 +2042,7 @@ fn converge(
         let mut watching_merge_paths = unread.watching(state, &statuses);
         if !watching_merge_paths.is_empty() && due(read_unread, unread.every()) {
             read_unread = Some(Instant::now());
-            if unread.read_again(state, &watching_merge_paths) {
+            if unread.read_again(&paths.run, state, &watching_merge_paths) {
                 derived = None;
                 unpublished = true;
                 moved = true;
@@ -13280,16 +13280,23 @@ fn landings_after_asking_again(run: &str, state: &RunState) -> BTreeMap<String, 
         .filter(|node| !streamed.contains_key(*node))
         .collect();
     let taken = std::time::Instant::now();
-    let read: Vec<(String, crate::vcs::LandingRead, std::time::Instant)> =
+    // One reconcile pass of the driver, its own: each repository is read once
+    // however many of its nodes are unlanded, and nothing a render read before it
+    // is reused — see `vcs::LandingPass`.
+    let fresh = {
+        let _pass = crate::rendercost::rendering(crate::rendercost::Rendered::Reconcile, run);
+        let _passing = crate::vcs::passing();
         crate::vcs::landings_now(state, &unread)
-            .into_iter()
-            .map(|(node, read)| (node, read, taken))
-            .chain(
-                streamed
-                    .into_iter()
-                    .map(|(node, (read, asked))| (node, read, asked)),
-            )
-            .collect();
+    };
+    let read: Vec<(String, crate::vcs::LandingRead, std::time::Instant)> = fresh
+        .into_iter()
+        .map(|(node, read)| (node, read, taken))
+        .chain(
+            streamed
+                .into_iter()
+                .map(|(node, (read, asked))| (node, read, asked)),
+        )
+        .collect();
     crate::views::closed_out(run, &read);
     for (node, read, _) in read {
         if read.proves_landed() {

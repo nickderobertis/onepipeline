@@ -1,4 +1,5 @@
-//! What one render of a view did **per node**, counted while it does it.
+//! What one render of a view — or one reconcile pass of the driver — did **per
+//! node**, counted while it does it.
 //!
 //! A view that decides a node's landing when it renders pays for that decision
 //! on every supervisory look, and what it costs a host is work rather than
@@ -14,6 +15,11 @@
 //! not per-node work and is recorded by nothing: the journal read that
 //! [`crate::views::RunView::open`] makes is one read for the whole render, and
 //! counting it against a node would report it growing with the graph.
+//!
+//! The one act that is not a node's is the **repository read**: a pass asks the
+//! sibling about each repository once, for every node of it the pass decides —
+//! see [`crate::vcs::LandingPass`] — so [`repository_asked`] records it once per
+//! repository, naming how many references it answered, and against no node.
 //!
 //! Counted **always** — appending nothing costs nothing measurable — and
 //! **written** only where [`RENDER_COST_ENV`] names a file, which is every run
@@ -58,6 +64,9 @@ pub(crate) enum Rendered {
     /// One read of the run by `onepipeline watch`: a watch reads the run again
     /// only when it changed, and this is how a journey counts that it did.
     Watch,
+    /// One reconcile pass of the driver that asked about landings: the loop's
+    /// re-read of a merge path nothing could read, and the run's close-out.
+    Reconcile,
 }
 
 impl Rendered {
@@ -67,6 +76,7 @@ impl Rendered {
             Rendered::Summary => "summary",
             Rendered::Status => "status",
             Rendered::Watch => "watch",
+            Rendered::Reconcile => "reconcile",
         }
     }
 }
@@ -290,15 +300,20 @@ impl Drop for Deciding {
     }
 }
 
-/// Record that one landing decision asked the sibling about a repository.
+/// Record that a pass asked the sibling about one repository, answering
+/// `references` landing questions of it at once.
 ///
 /// Named for the asking rather than for a *resolution* or an *open*, because
-/// asking is the whole of what this crate can witness: the read takes the
-/// repository from scratch every time, and whether it got as far as resolving or
-/// opening one is inside an answer this does not read. What it counts is
-/// therefore exactly the cost [`crate::vcs::landing_now`] cannot collapse.
-pub(crate) fn repository_asked(repo: Option<&str>) {
-    record(Act::RepositoryAsked, json!({ "repo": repo }));
+/// asking is the whole of what this crate can witness: whether the sibling got as
+/// far as resolving or opening one is inside an answer this does not read. It is
+/// recorded **outside** any node's decision, because it is every node's of that
+/// repository the pass decided at once: [`crate::vcs::LandingPass`] asks each
+/// repository once a pass, and a second ask of one is that pass reading it again.
+pub(crate) fn repository_asked(repo: Option<&str>, references: usize) {
+    record(
+        Act::RepositoryAsked,
+        json!({ "repo": repo, "references": references }),
+    );
 }
 
 pub(crate) fn landing_read_taken(reference: &str, repo: Option<&str>) {
@@ -364,10 +379,15 @@ mod tests {
             (Rendered::Summary, "summary"),
             (Rendered::Status, "status"),
             (Rendered::Watch, "watch"),
+            (Rendered::Reconcile, "reconcile"),
         ] {
-            // Exhaustive, so a fifth view cannot be added without a word.
+            // Exhaustive, so another view cannot be added without a word.
             match view {
-                Rendered::Results | Rendered::Summary | Rendered::Status | Rendered::Watch => {}
+                Rendered::Results
+                | Rendered::Summary
+                | Rendered::Status
+                | Rendered::Watch
+                | Rendered::Reconcile => {}
             }
             assert_eq!(view.as_str(), word, "{view:?} is read by another name");
         }

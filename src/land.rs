@@ -764,14 +764,14 @@ impl Landing {
 
     fn land(&self) -> onevcs::Result<onevcs::PublishOutcome> {
         let providers = onevcs::Providers::real();
-        match self {
+        crate::vcs::moving_branches(|| match self {
             Self::PublishBranch(request) => crate::spans::within("onevcs:publish_branch", || {
                 onevcs::publish_branch(&providers, request)
             }),
             Self::Recover(request) => {
                 crate::spans::within("onevcs:recover", || onevcs::recover(&providers, request))
             }
-        }
+        })
     }
 
     /// The same landing, into the one invocation `operation` reserved.
@@ -780,7 +780,7 @@ impl Landing {
         operation: &onevcs::OperationHandle,
     ) -> onevcs::Result<onevcs::PublishOutcome> {
         let providers = onevcs::Providers::real();
-        match self {
+        crate::vcs::moving_branches(|| match self {
             Self::PublishBranch(request) => {
                 crate::spans::within("onevcs:publish_branch_in_operation", || {
                     onevcs::publish_branch_in_operation(&providers, request, operation)
@@ -789,7 +789,7 @@ impl Landing {
             Self::Recover(request) => crate::spans::within("onevcs:recover_in_operation", || {
                 onevcs::recover_in_operation(&providers, request, operation)
             }),
-        }
+        })
     }
 
     /// The invocation selector a handle for this landing is prepared against, in

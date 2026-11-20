@@ -1241,7 +1241,15 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
 /// ask every node twice.
-struct Rendering(crate::rendercost::Render);
+///
+/// The outermost scope is also one **pass** of landing reads — see
+/// [`crate::vcs::LandingPass`] — so each repository is asked once for every node
+/// of it the render reports on, and nothing it read outlives the render.
+struct Rendering(
+    crate::rendercost::Render,
+    #[allow(dead_code, reason = "held for its drop, which ends the render's pass")]
+    Option<crate::vcs::Passing>,
+);
 
 impl Rendering {
     /// Record that this render reported on one node's landing, which is the set
@@ -1612,7 +1620,8 @@ fn rendering(view: Rendered, run: &str) -> Rendering {
             Renders::AsOneStream => reads.retain(|_, carried| carried.still_carried(now)),
         });
     }
-    Rendering(render)
+    let pass = render.outermost().then(crate::vcs::passing);
+    Rendering(render, pass)
 }
 
 /// Where one node's change stands, as the render printing it can tell.
@@ -1775,13 +1784,12 @@ fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<Land
     {
         return read;
     }
-    // Everything the decision costs is counted against this node, which is what
-    // makes "no other per-node work" a measurement rather than a promise.
+    // Asked of the render's pass, which hands back what the render already read
+    // of this repository together and reads only what it did not — counted
+    // against this node, which is what makes "no other per-node work" a
+    // measurement rather than a promise.
     let asked = std::time::Instant::now();
-    let read = {
-        let _deciding = crate::rendercost::deciding(node);
-        std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
-    };
+    let read = std::rc::Rc::new(crate::vcs::landing_now(node, branch, Some(repo)));
     hold(run, node, std::rc::Rc::clone(&read), asked);
     read
 }
@@ -3116,6 +3124,26 @@ impl<'a> Row<'a> {
     /// The one fact on this path that is deliberately *not* served out of the
     /// document. See [`RunSummary::landings`].
     fn outstanding(&self, render: &Rendering) -> Outstanding {
+        // Every landing below asked together, so each repository is read once for
+        // the whole count — the same nodes [`reported_landing_of`] reads, by the
+        // same rules: a drafted node is not counted, and a node recorded landed or
+        // naming no branch or repository is never read.
+        let asked: Vec<crate::vcs::Question<'_>> = self
+            .summary
+            .landings
+            .iter()
+            .filter(|(_, landing)| {
+                !landing.drafted && Landing::parse(&landing.landing) != Some(Landing::Landed)
+            })
+            .filter_map(|(node, landing)| {
+                Some(crate::vcs::Question {
+                    node,
+                    branch: landing.branch.as_deref()?,
+                    repo: Some(landing.repo.as_deref()?),
+                })
+            })
+            .collect();
+        crate::vcs::landings_of(&asked);
         let mut outstanding = Outstanding::default();
         for (node, landing) in &self.summary.landings {
             if landing.drafted {
@@ -3606,6 +3634,17 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         // carries and the outstanding-landing lines below it are one render and
         // ask each node once between them.
         let render = rendering(Rendered::Status, &view.paths.run);
+        // The nodes this render reports a landing on — the summary's, and every
+        // node holding a change request — asked together, so each repository is
+        // read once for all of them.
+        let statuses = view.state.statuses();
+        let mut reported = summarised(view);
+        reported.extend(
+            statuses
+                .keys()
+                .filter(|id| view.state.change_urls.contains_key(*id)),
+        );
+        read_side_by_side(view, &reported);
         let standing = Standing::of(view);
         out.push_str(&status_run_lines(
             &view.paths,
@@ -5815,6 +5854,17 @@ fn provisioning_failures<'state>(
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the second source is `docs/contract-divergences.md` entry 33, and the gate reconciling it is `tests/contract.rs`: it refuses an entry that is neither marked resolved with the contract naming what its ruling adopted, nor marked open with the proposal it waits on. Entry 33 is open and states this exact proposal, because the contract is approved verbatim and amending it is the planner's, never this repository's.
 pub fn results(view: &RunView) -> String {
     let render = rendering(Rendered::Results, &view.paths.run);
+    // Every node has a line here, so every node is asked about at once, and each
+    // repository is read once for all of them.
+    read_side_by_side(
+        view,
+        &view
+            .state
+            .graph
+            .iter()
+            .map(|node| &node.id)
+            .collect::<Vec<_>>(),
+    );
     // The run and how its graph stands — deliberately not the node tally the
     // other views carry, because every line under this one is a node's own
     // status and a header that also said `done` would read as one of them.
