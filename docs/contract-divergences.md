@@ -13811,7 +13811,10 @@ to the planner who owns the contract:
   once; one of another run is released through that run's commands, as a resolver's is.
 - **A watch sweeps once, before it looks for what is pending**; a store the sweep cannot read
   is said on stderr and the watch goes on, so delivery reports what it finds there itself.
-  A read whose sweep cannot write an expiry says so and answers; the next sweep writes it.
+  A read whose sweep cannot write an expiry a holding condition owes refuses — `query`, `show`
+  and `expire_due` answer the journal's refusal as a Conflict, so `list`, `report` and `show`
+  exit nonzero — rather than answer the item open; a driver's pass and a watch say it on
+  stderr and go on, and the next sweep writes it.
 - **Notes stay for completed and dismissed items**; an expired item takes none.
 - **The projection proof** (manager ruling `a0`). The task named the local store plugin; the
   linked `onetaskgraph-local-md` 0.14.17 cannot bind a projection, since its created task

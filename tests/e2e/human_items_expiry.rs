@@ -1801,25 +1801,32 @@ fn a_record_or_journal_that_refuses_leaves_items_open_until_it_is_repaired() {
     let journal = world.runs.join("human-items/events.ndjson");
     let writable = std::fs::metadata(&journal).unwrap().permissions();
     std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o444)).unwrap();
-    let refused = world.run(&["human-items", "list", "--json"]);
+    // The journal will not take the expiry the item is owed: every read refuses, naming
+    // why, rather than answer the item open, and the SDK's own sweep does too.
+    let owed = "an expiry condition holds and the item could not be expired";
+    let list = world.run(&["human-items", "list", "--json"]);
+    let show = world.run(&["human-items", "show", &due, "--json"]);
+    let swept = sdk(&world).expire_due();
     std::fs::set_permissions(&journal, writable).unwrap();
-    refused
-        .exited(0)
-        .err_has("an expiry condition holds and the item could not be expired");
-    let open: Value = serde_json::from_str(&refused.stdout).unwrap();
-    assert!(
-        open.as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v["item"]["id"] == due),
-        "answered open: {open}"
-    );
-    assert!(expiries(&world, &due).is_empty());
-    assert_eq!(
-        shown(&world, &due)["item"]["state"],
-        "expired",
-        "the next sweep writes it"
-    );
+    for read in [&list, &show] {
+        assert_ne!(read.code, 0, "{}", read.stderr);
+        assert!(read.stdout.trim().is_empty(), "answered: {}", read.stdout);
+        assert!(read.stderr.contains(owed), "{}", read.stderr);
+    }
+    match swept {
+        Err(onepipeline::human_items::HumanItemRefusal::Conflict { reason }) => {
+            assert!(reason.contains(owed), "{reason}");
+        }
+        other => panic!("the SDK's sweep answered {other:?}"),
+    }
+    assert!(expiries(&world, &due).is_empty(), "nothing was written");
+
+    // Repaired, the next read expires it and the journal holds its one expiry.
+    let repaired = shown(&world, &due);
+    assert_eq!(repaired["item"]["state"], "expired", "{repaired}");
+    let written = expiries(&world, &due);
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0]["payload"]["item"]["state"], "expired");
 }
 
 /// A raise that replaces an item's check gives the replacement none of the old check's

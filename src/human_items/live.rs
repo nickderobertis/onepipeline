@@ -647,7 +647,7 @@ impl HumanItems {
     fn swept(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
         let (snapshot, mut telemetry) = self.recovered()?;
         let started = Instant::now();
-        let swept = super::expiry::sweep(self, &snapshot.items, &snapshot.runs);
+        let swept = super::expiry::sweep(self, &snapshot.items, &snapshot.runs)?;
         telemetry.conditions_evaluated = swept.evaluated;
         telemetry.checks_run = swept.sweep.checks_run;
         let snapshot = if !swept.expired.is_empty() {

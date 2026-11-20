@@ -449,11 +449,16 @@ pub(super) fn next_wake(
 /// Sweep every open item of `snapshot`: retire each whose time, run or node condition
 /// holds, run the due checks of the rest, and retire each whose check answered that it
 /// holds. Answers what it did and the items as their expiry left them.
+///
+/// # Errors
+///
+/// The journal's refusal of an expiry a condition that holds owes: the item is still
+/// open, and a caller answering as though the sweep had run would hide that.
 pub(super) fn sweep(
     store: &HumanItems,
     items: &BTreeMap<String, HumanItem>,
     runs: &BTreeMap<String, RunDag>,
-) -> Swept {
+) -> Result<Swept, super::HumanItemRefusal> {
     let now = crate::sys::now_millis();
     let mut held = Vec::new();
     let mut candidates = Vec::new();
@@ -521,23 +526,21 @@ pub(super) fn sweep(
     let expired = if held.is_empty() {
         Vec::new()
     } else {
-        match store.expire(held) {
-            Ok(expired) => expired,
-            Err(why) => {
-                eprintln!(
-                    "onepipeline: an expiry condition holds and the item could not be expired: \
-                     {why}; the next sweep expires it"
-                );
-                Vec::new()
-            }
-        }
+        store
+            .expire(held)
+            .map_err(|why| super::HumanItemRefusal::Conflict {
+                reason: format!(
+                    "an expiry condition holds and the item could not be expired: {why}; the \
+                     next sweep expires it"
+                ),
+            })?
     };
     sweep.expired = expired.iter().map(|item| item.id.clone()).collect();
-    Swept {
+    Ok(Swept {
         sweep,
         expired,
         evaluated,
-    }
+    })
 }
 
 /// Whether `record` leaves `candidate` free to be claimed at `now`: no live claim holds
@@ -937,11 +940,12 @@ impl HumanItems {
     ///
     /// # Errors
     ///
-    /// A store that cannot be read. A check that fails, or an expiry the journal will not
-    /// take, is said and leaves its item open.
+    /// A store that cannot be read, or a journal that will not take an expiry a condition
+    /// that holds owes; that item stays open and the next sweep expires it. A check that
+    /// fails is no error: it is recorded on its item, which stays open.
     pub fn expire_due(&self) -> Result<HumanItemExpirySweep, super::HumanItemRefusal> {
         let (snapshot, _) = self.read_referenced()?;
-        let swept = sweep(self, &snapshot.items, &snapshot.runs);
+        let swept = sweep(self, &snapshot.items, &snapshot.runs)?;
         self.release_expired(&swept.expired);
         Ok(swept.sweep)
     }
@@ -972,7 +976,16 @@ impl HumanItems {
     /// expired are the driver's to release.
     pub(crate) fn driver_sweep(&self) -> Result<DriverSweep, super::HumanItemRefusal> {
         let (snapshot, _) = self.read_referenced()?;
-        let swept = sweep(self, &snapshot.items, &snapshot.runs);
+        // A driver holds and releases by what the store says even when an expiry it owes
+        // cannot be written: that is said, and the next pass sweeps again.
+        let swept = sweep(self, &snapshot.items, &snapshot.runs).unwrap_or_else(|why| {
+            eprintln!("onepipeline: {why}");
+            Swept {
+                sweep: HumanItemExpirySweep::default(),
+                expired: Vec::new(),
+                evaluated: 0,
+            }
+        });
         let items = if swept.expired.is_empty() {
             snapshot.items
         } else {
