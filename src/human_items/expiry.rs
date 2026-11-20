@@ -751,8 +751,9 @@ type Shared = Arc<Mutex<Vec<u8>>>;
 
 /// Read `from` on a thread of its own into `into`, keeping at most `keep` bytes — the
 /// first of them, or with `tail` the last — and draining the rest so the program is
-/// never blocked writing. Answers a receiver told when the stream ends, and whether
-/// more than `keep` arrived.
+/// never blocked writing. Answers a receiver told only when the stream ends cleanly —
+/// never on a read error, nor when the reader could not start — and whether more than
+/// `keep` arrived.
 fn reader(
     from: Option<impl Read + Send + 'static>,
     keep: usize,
@@ -766,15 +767,23 @@ fn reader(
     let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done, ended) = std::sync::mpsc::channel();
     let (kept, past) = (Arc::clone(&into), Arc::clone(&over));
+    // llmlint: ignore-block[changed_behavior_has_e2e] a reader thread the host refuses to start, or a pipe that errors mid-read, is a host fault no journey can stage; either leaves the stream unreported as ended, which `run_check` reads as output not read whole — the `failed` outcome the lingering-output journey drives — so a partial answer never decides a check.
     let _ = std::thread::Builder::new()
         .name("check-output".into())
         .spawn(move || {
             let mut buffer = [0_u8; 8192];
+            let mut ended_cleanly = from.is_none();
             if let Some(mut from) = from {
-                while let Ok(read) = from.read(&mut buffer) {
-                    if read == 0 {
-                        break;
-                    }
+                loop {
+                    let read = match from.read(&mut buffer) {
+                        Ok(0) => {
+                            ended_cleanly = true;
+                            break;
+                        }
+                        Ok(read) => read,
+                        Err(why) if why.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    };
                     let mut held = kept
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -790,8 +799,11 @@ fn reader(
                     }
                 }
             }
-            let _ = done.send(());
+            if ended_cleanly {
+                let _ = done.send(());
+            }
         });
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     (into, over, ended)
 }
 
