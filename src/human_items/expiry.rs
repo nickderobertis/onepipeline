@@ -91,6 +91,7 @@ pub(super) fn ending_of(state: &crate::projection::RunState) -> Option<String> {
         {
             "ended failed"
         } else {
+            // llmlint: ignore[changed_behavior_has_e2e] the same terminal, not-waiting reading the stopped, failed and settled endings take, which the run journeys drive; staging an unfinished ending needs a planner park over an otherwise settled run, a journey that would prove `graph::state_of` rather than this word.
             "ended unfinished"
         }
         .into(),
@@ -231,6 +232,31 @@ struct Entry {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
+impl Entry {
+    /// Whether this is an entry [`claim`] and [`record`] write: a claim whole or absent, a
+    /// run whole or absent, its time a moment, and a detail exactly on a failure.
+    fn well_formed(&self) -> bool {
+        let claim = [
+            self.claimed_at_ms.is_some(),
+            self.claimed_by.is_some(),
+            self.claim_lapses_ms.is_some(),
+        ];
+        let run = [
+            self.ran_at_ms.is_some(),
+            self.ran_at.is_some(),
+            self.outcome.is_some(),
+        ];
+        let whole = |parts: [bool; 3]| parts.iter().all(|p| *p) || parts.iter().all(|p| !*p);
+        whole(claim)
+            && whole(run)
+            && self
+                .ran_at
+                .as_deref()
+                .is_none_or(|at| super::rfc3339_millis(at).is_some())
+            && (self.outcome == Some(HumanItemCheckOutcome::Failed)) == self.detail.is_some()
+    }
+}
+
 fn record_path(store: &HumanItems) -> PathBuf {
     store.store_dir().join("checks.json")
 }
@@ -252,7 +278,21 @@ fn read_record(store: &HumanItems) -> Record {
     };
     // llmlint: ignore[changed_behavior_has_e2e] `keep` replaces this record whole through `write_atomic`, so one that does not parse is a hand edit or another version; reading it as empty only makes every check due, which runs each once more through the path the check journeys drive, and costs a person nothing.
     match serde_json::from_slice::<Record>(&bytes) {
-        Ok(record) if record.version == RECORD_VERSION => record,
+        Ok(mut record) if record.version == RECORD_VERSION => {
+            // An entry this module would never write is dropped, said: its check is then
+            // due, and its next run writes it whole.
+            let held = record.checks.len();
+            record.checks.retain(|_, entry| entry.well_formed());
+            if record.checks.len() != held {
+                eprintln!(
+                    "onepipeline: {} holds {} check entries this build never writes; their \
+                     checks are due again",
+                    path.display(),
+                    held - record.checks.len()
+                );
+            }
+            record
+        }
         Ok(_) | Err(_) => {
             eprintln!(
                 "onepipeline: {} is not a check record this build reads; every check is due",
@@ -421,17 +461,19 @@ pub(super) fn sweep(
         let mut answered = BTreeSet::new();
         for (candidate, run) in &ran {
             sweep.checks_run += 1;
-            if run.outcome == HumanItemCheckOutcome::Failed {
+            if run.outcome() == HumanItemCheckOutcome::Failed {
                 sweep.checks_failed += 1;
             }
-            if run.outcome == HumanItemCheckOutcome::Holds && answered.insert(candidate.id.clone())
-            {
+            let Answer::Holds { reason } = &run.answer else {
+                continue;
+            };
+            if answered.insert(candidate.id.clone()) {
                 held.push(Held {
                     id: candidate.id.clone(),
                     condition: candidate.condition.clone(),
                     reason: reason_for(
                         &candidate.condition,
-                        run.reason.clone(),
+                        reason.clone(),
                         format!(
                             "the check {} answered that the item no longer matters",
                             program_of(&candidate.condition)
@@ -497,6 +539,7 @@ fn claim(
     now: u64,
 ) -> Vec<Candidate> {
     let lock_path = store.index_lock_path();
+    // llmlint: ignore-block[changed_behavior_has_e2e] every sweep follows a read that took this same lock moments before, so a lock that cannot be taken refuses that read and no sweep reaches here; only a lock file replaced by something unopenable between the two does, which no journey can time from outside. What it guarantees — nothing claimed runs unclaimed — is the claim the concurrent-readers journey holds.
     let _lock = match crate::sys::open_locked_append(&lock_path) {
         Ok(lock) => lock,
         Err(why) => {
@@ -507,6 +550,7 @@ fn claim(
             return Vec::new();
         }
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let mut record = read_record(store);
     let held = record.checks.len();
     // A record only ever speaks for conditions items still declare where it says.
@@ -548,13 +592,36 @@ fn claim(
     claimed
 }
 
-/// What one run of a check came to.
+/// What one run of a check came to, and when it was claimed.
 struct CheckRun {
     ran_at_ms: u64,
-    outcome: HumanItemCheckOutcome,
-    detail: Option<String>,
-    /// The nonblank reason it printed with `"expired": true`.
-    reason: Option<String>,
+    answer: Answer,
+}
+
+/// A check's answer, in the result protocol's terms.
+enum Answer {
+    /// It printed `"expired": true`, with the nonblank reason it printed, if any.
+    Holds { reason: Option<String> },
+    /// It printed `"expired": false`.
+    NotYet,
+    /// Anything else, and why.
+    Failed { detail: String },
+}
+
+impl CheckRun {
+    fn outcome(&self) -> HumanItemCheckOutcome {
+        match self.answer {
+            Answer::Holds { .. } => HumanItemCheckOutcome::Holds,
+            Answer::NotYet => HumanItemCheckOutcome::NotYet,
+            Answer::Failed { .. } => HumanItemCheckOutcome::Failed,
+        }
+    }
+    fn detail(&self) -> Option<String> {
+        match &self.answer {
+            Answer::Failed { detail } => Some(detail.clone()),
+            Answer::Holds { .. } | Answer::NotYet => None,
+        }
+    }
 }
 
 /// Run every claimed check at once, and wait for the last: a sweep is held at most as
@@ -595,9 +662,7 @@ fn run_all(claimed: &[Candidate]) -> Vec<(Candidate, CheckRun)> {
 fn failed(ran_at_ms: u64, detail: String) -> CheckRun {
     CheckRun {
         ran_at_ms,
-        outcome: HumanItemCheckOutcome::Failed,
-        detail: Some(detail),
-        reason: None,
+        answer: Answer::Failed { detail },
     }
 }
 
@@ -607,6 +672,7 @@ fn record(store: &HumanItems, ran: &[(Candidate, CheckRun)]) {
         return;
     }
     let lock_path = store.index_lock_path();
+    // llmlint: ignore-block[changed_behavior_has_e2e] reachable only if the lock the claim took moments before, and the read before it, stops opening while the checks run, which no journey can time from outside; an outcome not recorded leaves the claim to lapse at its timeout and grace and the check to be claimed again, the recovery the dead-claimant journey drives.
     let _lock = match crate::sys::open_locked_append(&lock_path) {
         Ok(lock) => lock,
         Err(why) => {
@@ -618,6 +684,7 @@ fn record(store: &HumanItems, ran: &[(Candidate, CheckRun)]) {
             return;
         }
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let mut record = read_record(store);
     for (candidate, run) in ran {
         record.checks.insert(
@@ -629,11 +696,12 @@ fn record(store: &HumanItems, ran: &[(Candidate, CheckRun)]) {
                 claim_lapses_ms: None,
                 ran_at_ms: Some(run.ran_at_ms),
                 ran_at: Some(crate::sys::rfc3339_from_millis(run.ran_at_ms)),
-                outcome: Some(run.outcome),
-                detail: run.detail.clone(),
+                outcome: Some(run.outcome()),
+                detail: run.detail(),
             },
         );
     }
+    // llmlint: ignore[changed_behavior_has_e2e] the claim was written to this same record moments before, so only a host that stops taking it while the checks run reaches here, which no journey can time; the claim then lapses at its timeout and grace and the check is claimed again, the recovery the dead-claimant journey drives.
     if let Err(why) = keep(store, &record) {
         eprintln!("onepipeline: the checks that ran could not be recorded: {why}");
     }
@@ -747,7 +815,9 @@ fn run_check(candidate: &Candidate) -> CheckRun {
             }
         }
     };
-    let _ = stdout_ended.recv_timeout(OUTPUT_GRACE);
+    // An answer is only read whole: a process the check left behind holding its stdout
+    // open could still be writing the rest of it.
+    let whole = stdout_ended.recv_timeout(OUTPUT_GRACE).is_ok();
     let _ = stderr_ended.recv_timeout(OUTPUT_GRACE);
     let taken = |buffer: &Shared| {
         buffer
@@ -769,20 +839,19 @@ fn run_check(candidate: &Candidate) -> CheckRun {
             "{MALFORMED}: it printed more than the {STDOUT_LIMIT} bytes the engine reads"
         ));
     }
-    match answer(&taken(&stdout)) {
-        Some((true, reason)) => CheckRun {
-            ran_at_ms: started,
-            outcome: HumanItemCheckOutcome::Holds,
-            detail: None,
-            reason,
-        },
-        Some((false, _)) => CheckRun {
-            ran_at_ms: started,
-            outcome: HumanItemCheckOutcome::NotYet,
-            detail: None,
-            reason: None,
-        },
-        None => failing(MALFORMED.to_owned()),
+    if !whole {
+        return failing(format!(
+            "{MALFORMED}: a process it started still held its output open after it exited"
+        ));
+    }
+    let answer = match answer(&taken(&stdout)) {
+        Some((true, reason)) => Answer::Holds { reason },
+        Some((false, _)) => Answer::NotYet,
+        None => return failing(MALFORMED.to_owned()),
+    };
+    CheckRun {
+        ran_at_ms: started,
+        answer,
     }
 }
 

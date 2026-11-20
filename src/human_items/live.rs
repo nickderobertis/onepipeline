@@ -2027,6 +2027,9 @@ impl<'a> Writer<'a> {
         let Some(item) = self.snapshot.items.get(&held.id).cloned() else {
             return Ok(None);
         };
+        // Judged again under the append lock: a resolution, a reopen or a raise replacing
+        // the conditions since the sweep read the item leaves it as that left it.
+        // llmlint: ignore[changed_behavior_has_e2e] the window is a sweep's unlocked read and this locked write inside one process, which no journey can land another writer in without a failpoint the engine does not carry; the rule is the one every resolution here keeps — judged against the item under the lock — and a sweep after the change reads the item as it stands, as the rearm journey drives.
         if item.state != HumanItemState::Open || !item.expiry.contains(&held.condition) {
             return Ok(None);
         }

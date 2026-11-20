@@ -984,6 +984,7 @@ const HOOKS: &str = r#"human_items:
       priority: high
       block: {scope: plan}
       approval: {adapter: approve-design}
+      expiry: [{when: time, at: "2099-01-02T03:04:05Z", reason: "The design window closed"}]
     - phase: ticket-review
       kind: task
       title: "Review the tickets of {{ plan }}"
@@ -1103,6 +1104,12 @@ fn a_design_review_completes_through_the_configured_authority_or_is_replaced() {
         "Approve the design for plans:alpha"
     );
     assert_eq!(raised["item"]["item"]["approval"]["key"], "v1");
+    let expiry = json!([{"when": "time", "at": "2099-01-02T03:04:05Z",
+        "reason": "The design window closed"}]);
+    assert_eq!(
+        raised["item"]["item"]["expiry"], expiry,
+        "the hook's conditions"
+    );
 
     // The authority refuses: nothing recorded, the task stays open.
     std::fs::write(world.root.join("refuse"), "").unwrap();
@@ -1132,6 +1139,10 @@ fn a_design_review_completes_through_the_configured_authority_or_is_replaced() {
     assert_eq!(open.as_array().unwrap().len(), 1);
     let replacement = open[0]["item"]["id"].as_str().unwrap().to_owned();
     assert_eq!(open[0]["item"]["approval"]["key"], "v2");
+    assert_eq!(
+        open[0]["item"]["expiry"], expiry,
+        "the replacement stops mattering when the review it replaces would have"
+    );
     // Completing the obsolete task again creates nothing.
     world.refused(Some("mgr"), &["complete", &id], "already dismissed");
     assert_eq!(
@@ -1939,7 +1950,11 @@ fn a_batch_cut_short_or_followed_by_a_broken_record_loses_nothing_and_is_never_d
     std::fs::remove_file(&document).unwrap();
     let failed = world.run(Some("s2"), &["watch"]);
     assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("not an item event"));
+    // The sweep a watch makes first cannot read the journal either: that is said, and
+    // the watch goes on to deliver what it can and say where it stopped.
+    let said = String::from_utf8_lossy(&failed.stderr);
+    assert!(said.contains("no expiry condition was swept"), "{said}");
+    assert!(said.contains("not an item event"), "{said}");
     let cursor: Value = serde_json::from_slice(&std::fs::read(&document).unwrap()).unwrap();
     assert_eq!(cursor["through"].as_u64(), Some(bytes.len() as u64));
     std::fs::write(&journal, &bytes).unwrap();
