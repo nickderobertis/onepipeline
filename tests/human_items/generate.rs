@@ -89,6 +89,11 @@ pub fn generate(world: &World) -> Vec<String> {
                 .next()
                 .cloned()
                 .expect("the launch made a run");
+            // The launch hands its paused run to a driver that waits on the gate. It is ended
+            // here, as a host going down would end it, so the item store this workload measures
+            // is read by the verbs it times and by nothing else, and the drop below is applied
+            // by the reply itself.
+            world.paused_and_ended(&run);
             // Every launch but the last is retained history: its planner ends it by
             // dropping its gate and everything behind it.
             if launch + 1 < RUNS / PLANS {
