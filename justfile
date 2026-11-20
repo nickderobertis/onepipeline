@@ -119,15 +119,26 @@ _ensure-userns:
         sudo -n sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null && unshare -rm true \
           || { echo "an unprivileged user namespace could not be enabled, and the Linux-only full-disk journeys refuse without one" >&2; exit 1; }; \
       else \
-        echo "unprivileged user namespaces are unavailable — the Linux-only full-disk journeys in tests/human_items_live.rs and tests/e2e/human_items.rs refuse without them: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (or your distribution's equivalent), then re-run" >&2; exit 1; \
+        just _userns-preflight; \
       fi
 
-# The locked Node packages `host-view-budget` reads — the onebudgetspec SDK and
-# its prebuilt checker — installed from `package-lock.json` when they are absent,
-# so a fresh CI runner and a laptop reach them through the same recipe.
+# The locked Node packages the tiers run from: Nx itself, Biome, the pinned onemessagebus
+# CLI the layout-document journey drives, and the onebudgetspec SDK and prebuilt checker
+# the workload budgets and `host-view-budget` check through. npm writes a `.cmd` shim
+# beside each `.bin` entry on Windows.
+node-modules-required := "node_modules/.bin/nx node_modules/.bin/onemessagebus node_modules/.bin/onebudgetspec node_modules/@onebudgetspec/sdk/package.json node_modules/@biomejs/biome/bin/biome"
+
+# Installed from `package-lock.json` when any is absent, so a fresh CI runner and a laptop
+# reach them through the same recipe.
 _ensure-node-modules:
-    @[ -e node_modules/.bin/onebudgetspec ] && [ -e node_modules/@onebudgetspec/sdk/package.json ] \
-      || npm ci --silent --no-audit --no-fund
+    @for module in {{node-modules-required}}; do [ -e "$module" ] || [ -e "$module.cmd" ] || exec npm ci --silent --no-audit --no-fund; done
+
+# Asked by `_preflight`: `scripts/nx.sh` heals a tree missing Nx itself, but only once a
+# recipe has reached it, and never one missing what a tier alone reads.
+_node-modules-preflight:
+    @missing=""; for module in {{node-modules-required}}; do [ -e "$module" ] || [ -e "$module.cmd" ] || missing="$missing $module"; done; \
+      [ -z "$missing" ] \
+      || { echo "the locked Node modules are not installed (missing:$missing) — Nx, Biome and the budget checks run from them: run 'just bootstrap' (or 'npm ci'), then re-run" >&2; exit 1; }
 
 # Asked ahead of the tiers that hold those journeys, so the missing tool is
 # named up front rather than by a panic inside a journey.
@@ -135,6 +146,12 @@ _strace-preflight:
     @[ "$(uname -s)" = Linux ] || exit 0; \
       command -v strace >/dev/null 2>&1 \
       || { echo "strace not installed — the Linux-only e2e journeys in tests/e2e/agents.rs, channel.rs, listing.rs and unwatched.rs run the binary under it and refuse without it: sudo apt-get install -y strace (or your distribution's strace package), then re-run" >&2; exit 1; }
+
+# Asked by `_ensure-userns` where it may not lift the restriction itself, and by `_preflight`.
+_userns-preflight:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      unshare -rm true 2>/dev/null \
+      || { echo "unprivileged user namespaces are unavailable — the Linux-only full-disk journeys in tests/human_items_live.rs and tests/e2e/human_items.rs refuse without them: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (or your distribution's equivalent), then re-run" >&2; exit 1; }
 
 # The released `onetaskgraph` the template journeys drive, at the release the lock
 # links. Network, so it is installed by `bootstrap` and only asked for by the tiers.
@@ -160,6 +177,12 @@ _ensure-onebudgetspec:
       || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
+# Asked ahead of every recipe that runs it: `budgets`, `_pool-maintenance-budgets`, and
+# `_preflight` for report-job's journeys and the gate's own timing check.
+_onebudgetspec-preflight:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+
 # The released `cargo-prune-superseded` `just pool-maintenance` runs, skipped when that
 # release is already the one on `PATH`. Network, so only `bootstrap` installs it.
 _ensure-prune-superseded:
@@ -174,20 +197,53 @@ _ensure-prune-superseded:
 _ensure-tool tool:
     @command -v {{tool}} >/dev/null 2>&1 || cargo install {{tool}} --locked --quiet
 
+# Asked by `_preflight` for the two runners every test tier starts.
+_tool-preflight tool:
+    @command -v {{tool}} >/dev/null 2>&1 \
+      || { echo "{{tool}} is not installed — the test tiers run under it and refuse without it: run 'just bootstrap' (or 'just _ensure-tool {{tool}}'), then re-run" >&2; exit 1; }
+
+# The onepipeline-llmlint-diff journeys run the judged lint's binary, and `gate` ends with it.
+_llmlint-preflight:
+    @command -v llmlint >/dev/null 2>&1 \
+      || { echo "llmlint is not on PATH — the onepipeline-llmlint-diff journeys and the judged lint tier 'just gate' ends with run it and refuse without it: run 'just bootstrap' (or 'just setup-llmlint'), then re-run" >&2; exit 1; }
+
+# report-job's journeys run under `uv run`, and `bootstrap` installs maturin and llmlint
+# through it, so it is named with its installer rather than with `bootstrap`.
+_uv-preflight:
+    @command -v uv >/dev/null 2>&1 \
+      || { echo "uv is not installed — report-job's journeys (.github/reporting/test_report_job.py) run under 'uv run' and refuse without it: install uv (https://docs.astral.sh/uv/getting-started/installation/), then re-run" >&2; exit 1; }
+
+# Every tool a tier that `check`, `test`, `check-affected` or `gate` schedules refuses
+# without, each asked through the same preflight its own tier asks. `gate` reaches it through
+# `check`. `check-affected` asks for all of them: which projects are affected is Nx's answer,
+# and this runs ahead of Nx. A `recipe=arg` entry is a recipe and its one argument.
+preflight-probes := "_node-modules-preflight _tool-preflight=cargo-nextest _tool-preflight=cargo-llvm-cov _strace-preflight _userns-preflight _onetaskgraph-preflight _onebudgetspec-preflight _llmlint-preflight _uv-preflight"
+
+# Asked before Nx schedules any build or test, so a missing tool is a refusal in seconds
+# rather than hours in, and every missing one is named at once. Silent when nothing is
+# missing. `just`'s own line about each failed probe is dropped: the probe's says more.
+_preflight:
+    @missing=0; for probe in {{preflight-probes}}; do \
+        said="$(just ${probe/=/ } 2>&1)" && continue; \
+        missing=$((missing + 1)); printf '%s\n' "$said" | grep -v '^error: recipe `' >&2 || true; \
+      done; \
+      [ "$missing" -eq 0 ] \
+      || { echo "refusing before any build or test: $missing required tool(s) above are missing" >&2; exit 1; }
+
 # The tiers run in fail-fast order as dependencies, each fanned across every
 # project by Nx. The body then runs the per-project `check` aggregate — the same
 # target `just check-affected` uses — which replays from the cache in a second
 # and is what stops the full sweep and the affected sweep from covering
 # different tiers.
 # Deterministic quality gate, every project.
-check: fmt-check lint test doc
+check: _preflight fmt-check lint test doc
     @bash scripts/nx.sh run-many -t check
     @echo "check: ok"
 
 # What PR CI runs: the same gate, scoped to the projects this branch's diff can
 # reach. Fails closed — with no derivable merge base it runs everything.
 # Deterministic quality gate, affected projects only.
-check-affected:
+check-affected: _preflight
     @bash scripts/nx-affected.sh -t check
     @echo "check-affected: ok"
 
@@ -293,7 +349,7 @@ lint:
     @bash scripts/nx.sh run-many -t lint
 
 # Every project's test suite; the crate's enforces its coverage floor.
-test:
+test: _preflight
     @bash scripts/nx.sh run-many -t test
 
 # Build the docs with warnings denied (kept in the gate so doc links don't rot).
@@ -796,9 +852,7 @@ pool-maintenance-budget:
     @bash pool-maintenance/measure.sh
 
 # Measure every budget in budgets.yaml against its threshold.
-budgets:
-    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
-      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+budgets: _onebudgetspec-preflight
     @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable --save-results target/budget-results/onepipeline.json
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -834,9 +888,7 @@ budgets-host:
     @bash scripts/nx.sh run-many -t budgets-host
 
 # The `pool-maintenance` project's `budgets-host` target.
-_pool-maintenance-budgets:
-    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
-      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+_pool-maintenance-budgets: _onebudgetspec-preflight
     @"{{onebudgetspec-root}}/bin/onebudgetspec" check pool-maintenance/budgets.yaml --label host
 
 # Both are outside `check` for the reason `deps-check` is: they read the
