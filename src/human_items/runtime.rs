@@ -261,7 +261,7 @@ const EVERY: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(10);
 
 /// A run driver's view of the human items that concern its run.
-// llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is.
+// llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is. `raises` is a mode, set true by `for_launch` and false by `watching`, and either value is a valid gate.
 pub(crate) struct Gate {
     store: HumanItems,
     run: String,
