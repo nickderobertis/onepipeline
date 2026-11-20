@@ -70,6 +70,7 @@
         "{workspaceRoot}/schemas/**/*",
         "{workspaceRoot}/rust-toolchain.toml",
         "{workspaceRoot}/.cargo/config.toml",
+        "{workspaceRoot}/scripts/cc-lld-debug.sh",
         "{workspaceRoot}/.config/nextest.toml",
         {
           "runtime": "node scripts/nx-version-free-inputs.mjs --ecosystem python"
