@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.116.1](https://github.com/nickderobertis/onepipeline/compare/v0.116.0...v0.116.1) - 2026-11-20
+
+### Added
+
+- *(edits)* record a one-line summary and the node on every refused edit, and link its surface to it ([#1747](https://github.com/nickderobertis/onepipeline/pull/1747))
+
 ## [0.116.0](https://github.com/nickderobertis/onepipeline/compare/v0.115.1...v0.116.0) - 2026-11-20
 
 ### Added
