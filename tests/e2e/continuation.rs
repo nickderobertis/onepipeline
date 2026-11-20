@@ -2105,8 +2105,10 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
         "the fence was written again only {retried_after:?} after the refusal, which is no \
          sooner than the shipped retry"
     );
+    // Ended on its own — its lock let go — so the span record a profile reads this journey's
+    // fence waits from is written before the world is torn down.
     world.until("the driver to end", |world| {
-        world.run_file(run, "result.json").is_file()
+        world.run_file(run, "result.json").is_file() && !world.run_file(run, "owner.lock").exists()
     });
     let x = settled(&world, run, "x");
     assert_eq!(x["outcome"], "change-review-draft", "{x}");

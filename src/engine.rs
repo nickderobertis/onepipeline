@@ -3622,7 +3622,7 @@ const WAIT_SPANS: [&str; 11] = [
     "wait:source-poll",
     "wait:maintenance-pace",
     "wait:claim-read",
-    "wait:fence-retry",
+    "wait:fence",
 ];
 
 /// Wait until there is a reason to reconcile, and hand back what arrived.

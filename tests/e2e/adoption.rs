@@ -2524,6 +2524,11 @@ fn a_published_node_is_held_until_the_release_answers_and_by_nothing_else() {
             "a node the wait held was failed: {event}"
         );
     }
+    // And its driver lets the run go on its own, so the span record a profile reads this
+    // journey's release waits from is written before the world is torn down.
+    world.until("the driver to let the run go", |world| {
+        !world.run_file(&run, "owner.lock").exists()
+    });
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs
@@ -3814,6 +3819,8 @@ fn a_held_release_is_asked_about_on_the_shipped_interval_times_the_scale() {
          than the {interval:?} the binary applies at this world's scale"
     );
     assert!(!dispatched(&world, run, "consumer"));
+    // The release arrives and is noticed at the next scaled ask, and the run settles: a driver
+    // that ends on its own writes the span record `profiling` reads this wait from.
     world.run(&["stop", run]).exited(0);
 }
 

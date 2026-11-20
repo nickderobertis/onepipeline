@@ -1194,7 +1194,7 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
 
 /// Journeys whose verbs sit out a scaled wait each, and the span that wait is recorded under:
 /// the stall threshold, a source's re-read, a held release's next ask, a takeover's wait for
-/// the driver it displaces, a refused fence's retry, a superseded driver's wait for its
+/// the driver it displaces, a fence's retry or linger, a superseded driver's wait for its
 /// settlement to land, and a driver's wait for its first projection. Each already drives its
 /// wait and ends its driver normally — a driver a `stop` signals writes no record — and is
 /// run here profiled, alone, as nextest runs it.
@@ -1208,7 +1208,7 @@ const WAITED_ON: [(&str, &str); 7] = [
         "wait:source-poll",
     ),
     (
-        "adoption::a_hold_whose_preservation_the_origin_refuses_fails_the_node_by_name",
+        "adoption::a_published_node_is_held_until_the_release_answers_and_by_nothing_else",
         "wait:release-poll",
     ),
     (
@@ -1217,7 +1217,7 @@ const WAITED_ON: [(&str, &str); 7] = [
     ),
     (
         "continuation::a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands",
-        "wait:fence-retry",
+        "wait:fence",
     ),
     (
         "continuation::a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has",
