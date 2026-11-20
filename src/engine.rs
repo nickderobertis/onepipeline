@@ -10931,6 +10931,9 @@ pub(crate) fn drain(
     // stopped one is raised with.
     let mut chains = ChainRecords::default();
     let mut asked_at: Option<Instant> = None;
+    // From the ask until the dispatch has exited, the profile's `wait:cancel-grace`: this
+    // thread, not the verb's, sits the grace out.
+    let mut graced = None;
     let mut killed = false;
     // The merge this dispatch's session opened with, read off the opening the
     // executor relays: the executor composed it into the task, and this is how
@@ -10988,6 +10991,7 @@ pub(crate) fn drain(
                 let said = interrupt_turns(tx, node, &addresses, grace);
                 report(tx, node, CancelPhase::Interrupted, said);
                 asked_at = Some(Instant::now());
+                graced = Some(crate::spans::waiting_elsewhere("wait:cancel-grace"));
             }
             // It was asked and it is still here. The work it has committed is
             // safe on its branch; whatever it has not is what the ask was for,
@@ -11012,6 +11016,7 @@ pub(crate) fn drain(
     }
 
     let waited = handle.wait();
+    drop(graced);
     // Where a session token stops being text and starts addressing a session.
     // `DispatchOutcome::session` is the contract's own `Option<String>` — the
     // seam is a wire shape and carries no sibling types — so this is the one

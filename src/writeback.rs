@@ -2644,6 +2644,8 @@ fn should_retry_after(pending: &(Mutex<Pending>, Condvar), interval: Interval) -
         Interval::Scheduled(wait) => (wait, false),
         Interval::Asked(wait) => (wait, true),
     };
+    // Sat out on the worker's thread rather than the verb's, so recorded from here.
+    let _waiting = crate::spans::waiting_elsewhere("wait:write-back-retry");
     // A wait past what the clock can name is waited out until the run stops: a store asking
     // for longer than a host runs is not asked again, rather than the sum overflowing.
     let due = Instant::now().checked_add(wait);

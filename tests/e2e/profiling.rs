@@ -1195,7 +1195,9 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
 /// Journeys that already sit out a wait each, paired with the span it is recorded under, and
 /// run here profiled, alone, as nextest runs them. Each ends its verb on its own: a driver a
 /// `stop` signals writes no record.
-const WAITED_ON: [(&str, &str); 8] = [
+/// The last two are waits a thread the verb started sits out, which the record carries with
+/// none of their time as the verb thread's own.
+const WAITED_ON: [(&str, &str); 10] = [
     (
         "time_scale::a_quiet_worker_is_reported_at_the_shipped_threshold_times_the_scale",
         "wait:stall",
@@ -1228,9 +1230,17 @@ const WAITED_ON: [(&str, &str); 8] = [
         "multi_source::a_stop_while_an_added_item_is_landing_waits_for_it_and_releases_the_item",
         "wait:write-back-landing",
     ),
+    (
+        "cancellation::a_dispatch_that_ignores_the_ask_is_killed_at_the_deadline",
+        "wait:cancel-grace",
+    ),
+    (
+        "delivers::a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_deliverer_alone",
+        "wait:write-back-retry",
+    ),
 ];
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey runs eight short
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey runs ten short
 // journeys again, profiled — about fifteen seconds — because the span a wait is recorded under
 // is written by the compiled binary at the end of each of their runs; its inputs are the whole
 // crate, and it lives beside the other profile journeys of this binary for that reason.
@@ -1253,22 +1263,27 @@ fn a_profiled_journeys_waits_are_recorded_under_what_they_waited_on() {
             .expect("the suite runs");
         passed(test, &ran);
     }
-    for (test, waited) in WAITED_ON {
-        let spans_dir = records
-            .join("e2e")
-            .join(file_of(test).replace(".json", ".spans"));
-        let spent: f64 = profile::fs::read_dir(&spans_dir)
-            .expect("the journey's span directory")
-            .map(|entry| read_record(&entry.expect("a span record").path()))
-            .flat_map(|record| record["spans"].as_array().cloned().unwrap_or_default())
-            .filter(|span| span["name"] == waited)
-            .map(|span| number(&span["wall_ms"]))
-            .sum();
-        assert!(
-            spent > 0.0,
-            "{test} left no time under `{waited}` in the span records its runs wrote"
-        );
-    }
+    let unrecorded: Vec<String> = WAITED_ON
+        .iter()
+        .filter(|(test, waited)| {
+            let spans_dir = records
+                .join("e2e")
+                .join(file_of(test).replace(".json", ".spans"));
+            let spent: f64 = profile::fs::read_dir(&spans_dir)
+                .expect("the journey's span directory")
+                .map(|entry| read_record(&entry.expect("a span record").path()))
+                .flat_map(|record| record["spans"].as_array().cloned().unwrap_or_default())
+                .filter(|span| span["name"] == *waited)
+                .map(|span| number(&span["wall_ms"]))
+                .sum();
+            spent <= 0.0
+        })
+        .map(|(test, waited)| format!("{test} left no time under `{waited}`"))
+        .collect();
+    assert!(
+        unrecorded.is_empty(),
+        "in the span records their runs wrote: {unrecorded:#?}"
+    );
 
     let out = world.root.join("report.json");
     let reported = Command::new("node")
