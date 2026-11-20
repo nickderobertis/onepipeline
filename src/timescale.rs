@@ -36,7 +36,6 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-/// The variable naming the factor.
 pub(crate) const TIME_SCALE_ENV: &str = "ONEPIPELINE_TEST_TIME_SCALE";
 
 /// The factor this process applies, or the refusal of the value it was given.

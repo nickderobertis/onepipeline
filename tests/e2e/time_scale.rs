@@ -23,8 +23,8 @@ use crate::harness::{agent, plan_of, World, REFUSED, STALL_AFTER_ENV, TIME_SCALE
 const SHIPPED_ITEM_BUDGET: u64 = onepipeline::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get();
 
 /// How long a dispatch may record nothing before it is reported quiet, shipped, in seconds:
-/// the suite's copy of `engine::DEFAULT_STALL_AFTER_SECONDS`, whose module is private. The
-/// journey below fails on the journal's figure if the two part.
+/// the suite's copy of `engine::DEFAULT_STALL_AFTER_SECONDS`, whose module is private, held
+/// exact by `engine::tests::the_suites_copy_of_the_shipped_stall_threshold_is_this_one`.
 const SHIPPED_STALL_AFTER: u64 = 2_400;
 
 /// The per-item budget this world's binary takes where a launch names none, as it says when

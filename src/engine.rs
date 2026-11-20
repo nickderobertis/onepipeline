@@ -16448,6 +16448,29 @@ mod tests {
         );
     }
 
+    /// `tests/e2e/time_scale.rs` carries its own copy of [`DEFAULT_STALL_AFTER_SECONDS`],
+    /// because this module is private, and its journey compares the scaled figure the binary
+    /// reports, which whole-second rounding at a thousandth cannot tell from a neighbouring
+    /// default. This reads the copy out of the suite's source and holds it exact.
+    #[test]
+    fn the_suites_copy_of_the_shipped_stall_threshold_is_this_one() {
+        let suite = include_str!("../tests/e2e/time_scale.rs");
+        let declaration = "const SHIPPED_STALL_AFTER: u64 = ";
+        let start = suite
+            .find(declaration)
+            .expect("tests/e2e/time_scale.rs declares SHIPPED_STALL_AFTER")
+            + declaration.len();
+        let copied: u64 = suite[start..]
+            .split(';')
+            .next()
+            .expect("the declaration ends in a semicolon")
+            .trim()
+            .replace('_', "")
+            .parse()
+            .expect("SHIPPED_STALL_AFTER is a plain integer literal");
+        assert_eq!(copied, DEFAULT_STALL_AFTER_SECONDS);
+    }
+
     #[test]
     fn the_stall_threshold_falls_back_when_the_environment_is_unusable() {
         // Read through the same helper the loop uses, so an unusable value
