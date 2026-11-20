@@ -13758,7 +13758,100 @@ the previous bundle has no document for.
 }
 ```
 
-## 161. Expiry of human items — OPEN
+## 161. Redoing changed work, moving on after a decision, a check's project, and discarding a project's branches — OPEN
+
+**Proposal to the planner who owns `docs/contract.md`, recording what this build decided beyond
+the four contracts its amendments state** — *A launch redoes changed work, and a redone node's
+done dependents with it*, *A run keeps moving after a decision*, the check document's `project`
+under *A plan is checkable without launching it*, and `unpublished --project --discard` — and
+the change one of them makes to an approved paragraph.
+
+- **`--redo` now redoes a named node's done dependents.** The approved paragraph *Continuing a
+  project from its store, and `--redo`* says `--redo` "changes nothing for a node it does not
+  name: a dependent of a named node that settled `done` is still continued". From this build
+  every node a launch redoes — named by `--redo`, or chosen because its task changed — also
+  redoes each transitive dependent whose settlement is `done`, under the eligibility the
+  amendment states (manager ruling `a2`). That sentence of the approved paragraph no longer
+  describes this build; the paragraph is left as approved and this entry is the record. A
+  dependent with no settlement still waits on the redone node, as before.
+- **The digest is the linked `onetaskgraph`'s own.** `task_digest` is
+  `onetaskgraph_core::attestation::content_digest` — the public function an attestation's
+  `content_digest` is computed by in the `onetaskgraph` 0.14.16 this build links — over the
+  stored task's title, body, repositories and metadata, leaving out every task key `plan
+  writeback-keys` lists. Its type is `onetaskgraph_core::Sha256Digest`, the sibling's own, and
+  nothing here re-declares the shape. The digest's edges are the plan's own dependency edges,
+  each far end named by its qualified id — the lineage root of a task copied from nowhere, which
+  is how an attestation names it too; a far end the plan read as a copy is named by its own id
+  rather than the root of its chain of copies. Both digests a comparison reads are this build's,
+  so the two always agree on that reading. A task whose stored title is blank is digested
+  with its node's id as its title, because that is the title the write-back projects in its
+  place: without it, a task nobody titled would read as changed after its first run's own
+  write-back and be redone by the next launch. Until `onetaskgraph` publishes the content-digest
+  function the change request `otg-plan-records` adds, this is the narrowest public surface the
+  linked release has, and the digest moves onto that function once a release carrying it is
+  linked here (manager ruling `c0.1`).
+- **The digest a settlement records is the one the launch read.** The launch record keeps every
+  node's digest, `task_digests`, as the launch's store read computed it, and each settlement the
+  run journals carries its node's. A node a live edit added — a `retry`'s replacement among them —
+  has none, and its settlement records none, which a later launch reads as unchanged.
+- **Changed work is detected when a project is started, not when a run is adopted** (manager
+  ruling `a0`). `adopt` replays the run's journal and the decision its launch recorded, reads
+  no store and no launch config, and has no `--keep-changed`.
+- **A branch is gone** where the linked `onevcs` classifies it as held by no copy — nothing
+  this host keeps holds it, and only a recorded retirement or nothing at all answers for it. A
+  classification that fails for any other reason leaves the node settled too, said on stderr
+  as a branch that could not be asked about: a redo onto a branch nobody could confirm is not
+  one the launch can promise.
+- **The launch config's `keep_changed` arrives at schema version 15**, a boolean refused by its
+  name in a document declaring an earlier version; `tests/golden/launch-config-v15.json` pins it.
+- **A retained driver waits on a decision; an attached one hands off** (manager ruling `a4`).
+  Whether a driver lets go on a decision is decided by how it runs, and recorded nowhere:
+  the driver `--detach` retains — for `start` or `adopt` — waits, polling the run's channel's
+  fingerprint as the reconcile loop's own wait does, and an attached `start` or `adopt`, whose
+  process returns to its caller, lets go and hands the run to such a driver, started as
+  `adopt --detach` starts one and journalling `driver-adopted`. An explicit `readjust` trigger
+  driving in-process lets go as before. A run whose driver waits reads `PAUSED`, with the advice
+  a paused run is given, while `driven` stays `true`.
+- **This is a breaking change for a script that adopts a run after deciding it.** Before it,
+  `start` → `awaiting-planner` → `attest` (or `reply`) → `adopt` was how a decided run moved on;
+  from this build the decision moves it, and the `adopt` that follows is refused as `still being
+  driven` while the continuing driver works, or adopts a run that has since settled. A run
+  waiting on its decision with no driver — one whose waiting driver was stopped, or died — is
+  adopted exactly as before. The run-end hook a pause used to journal as withheld is journalled
+  only by a driver that lets go there: an attached one.
+- **The driver's three planning-run exits had one cause.** The loop applied the command queue's
+  last claims as it was letting go — after `converge` had returned — and then let go whatever
+  those edits had readied, journalling `unattended`. It now goes back to driving whenever an
+  edit applied there leaves a node ready, running or awaiting a release.
+- **`watch --until settled` on an ended run** maps the last `driver-exited` settlement to the
+  existing endings: `complete` → `settled` (0), `awaiting-planner` → `surface-waiting` with
+  `blocking: true` (4), `unattended` and `error` → `nothing-driving` (3). It applies only where
+  `settled` is named and the run was undriven when the watch armed.
+- **`unpublished --project <ID> --discard [--dry-run]`** reads `--host`'s listing, and takes each
+  row whose session's `run` label names a run of this runs root whose effective group — the
+  launch's group, its project's origin or its project, under any label overlay — is the
+  project. A row naming a run this runs root holds no record of is another root's, and is
+  not listed. Each branch is put through `onevcs::retire` at `RetireMode::Discard`, the library
+  form of `onevcs reclaim --discard`, with `dry_run` for the dry run. Its line is
+  `discarded <branch> [<identity>] (run <run>)`, `would discard …`, or `kept …` / `would keep …`
+  followed by onevcs's refusal — its retirement verdict — and the `onevcs reclaim <branch> --repo
+  <identity> --discard` that discards it. It exits `0` when every listed branch is discarded or
+  none is listed, `7` — `unpublished`'s own *counted* status — when any is kept, and `1` where
+  the listing could not be read and nothing listed was kept. It never changes a listing's
+  acknowledgements.
+- **The check document's `project`** is the qualified id as `plan check` or `start` parsed it.
+
+`node-settled` gains an optional field, so the events bundle moves to a new minor: a stream an
+earlier build wrote still validates, and one this build writes may carry a field a validator
+pinned at the previous bundle does not name.
+
+```json
+{
+  "bundle_versions": {"events": "2.5.0"}
+}
+```
+
+## 162. Expiry of human items — OPEN
 
 **Proposal to the planner who owns `docs/contract.md`, recording what this build decided
 beyond the task of node `engine-expiry`**, whose contract the *Expiry* amendment
@@ -13834,6 +13927,6 @@ the planner who owns the contract.
 
 ```json
 {
-  "bundle_versions": {"events": "2.5.0"}
+  "bundle_versions": {"events": "2.6.0"}
 }
 ```

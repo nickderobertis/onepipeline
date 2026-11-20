@@ -163,10 +163,12 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         reading["ending"].is_null() || reading["paused"].is_null(),
         "a reading both ended and paused: {reading}"
     );
+    // A driven run has not ended — though it may be paused, where its driver waits on the
+    // decision.
     if reading["driven"] == json!(true) {
         assert!(
-            reading["ending"].is_null() && reading["paused"].is_null(),
-            "a driven run read as ended or paused: {reading}"
+            reading["ending"].is_null(),
+            "a driven run read as ended: {reading}"
         );
     }
 
@@ -190,7 +192,8 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
 
     // An ended run is given no advice naming `adopt`, by either view.
     if word.starts_with("ENDED") || word == "SETTLED" {
-        status.out_lacks("adopt");
+        // No advice to adopt it: the driver's own history line may say it was adopted.
+        status.out_lacks("onepipeline adopt");
         assert!(
             !listing.stdout.contains(&format!("onepipeline adopt {run}")),
             "`runs` advises adopting the ended run {run}:\n{}",
@@ -279,8 +282,9 @@ fn a_run_paused_on_a_human_action_reads_paused_and_once_attested_reads_settled()
         .exited(0)
         .out_has("\"settlement\":\"awaiting-planner\"");
 
+    // Paused, with the driver the launch handed it to waiting on the decision.
     let reading = read_as(&world, run, "PAUSED");
-    assert_eq!(reading["driven"], false);
+    assert_eq!(reading["driven"], true);
     assert_eq!(reading["ending"], Value::Null);
     assert_eq!(
         reading["paused"],
@@ -290,12 +294,13 @@ fn a_run_paused_on_a_human_action_reads_paused_and_once_attested_reads_settled()
     assert!(invocations(&world, run).is_empty());
     unwatched_reads_as(&world, run, "PAUSED");
 
+    // The attestation continues the run, with nobody adopting it.
     world.run(&["attest", run, "approve"]).exited(0);
-    world
-        .run(&["adopt", run])
-        .exited(0)
-        .out_has("\"settlement\":\"complete\"");
-    assert_eq!(invocations(&world, run), ["success"]);
+    assert_eq!(world.until_continued(run), "complete");
+    // The success hook fires once the driver has recorded how it let go of the run.
+    world.until("the success hook to fire", |world| {
+        invocations(world, run) == ["success"]
+    });
 
     let reading = read_as(&world, run, "SETTLED");
     assert_eq!(reading["driven"], false);
@@ -337,8 +342,11 @@ fn a_human_node_settled_failed_from_evidence_ends_the_run_failed() {
             .to_string(),
         )
         .exited(0);
-    // The driver that judges it fires the hook it ended under, and settles at once.
-    world.run(&["adopt", run]).exited(NOTHING_DRIVING);
+    // The driver waiting on the decision judges it, lets go, and fires the hook it ended under.
+    world.until_continued(run);
+    world.until("the failure hook to fire", |world| {
+        !invocations(world, run).is_empty()
+    });
     assert_eq!(invocations(&world, run), ["failure"]);
 
     let reading = read_as(&world, run, "ENDED failed");

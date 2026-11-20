@@ -2754,6 +2754,9 @@ fn a_published_node_whose_dependency_cannot_be_resolved_is_held_until_it_can_be(
         "adoption-unresolved",
         vec![engine(), packager, human("approve", &[]), consumer],
     );
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(&run);
     for landed in [ENGINE, "packager"] {
         assert_eq!(
             settled_status(&world, &run, landed).as_deref(),
@@ -6695,6 +6698,9 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
         "adoption-cadence",
         vec![engine(), packager, human("approve", &[]), consumer],
     );
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(&run);
     world.releases("version: 1\nrepositories: [\n");
     world.run(&["attest", &run, "approve"]).exited(0);
     world.run(&["adopt", &run, "--detach"]).exited(0);

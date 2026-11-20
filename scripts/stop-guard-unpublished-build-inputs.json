@@ -5,6 +5,7 @@
     "Cargo.lock",
     "rust-toolchain.toml",
     ".cargo/config.toml",
+    "scripts/cc-lld-debug.sh",
     ".config/nextest.toml",
     ".github/ci-tool-versions.json",
     ".github/read-ci-tool-versions.mjs",

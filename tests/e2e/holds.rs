@@ -338,6 +338,9 @@ fn a_hold_survives_the_driver_that_reported_it() {
     );
     // Settles waiting on the person, with `ship` held behind them.
     world.run(&["start", &plan, "--attach"]).settled();
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("adopted");
     let opened = held(&world, "adopted", "ship");
     assert_eq!(opened.len(), 1, "{opened:?}");
     let reported = opened[0]["payload"]["reasons"].clone();
@@ -358,6 +361,9 @@ fn a_hold_survives_the_driver_that_reported_it() {
 
     // The person takes the action while nothing is driving, and the next driver
     // is the one that reports the release.
+    // The adoption above returned on the decision and handed the run to a driver that waits on
+    // it; that driver is ended, as a host going down would end it, so nothing drives the run.
+    world.paused_and_ended("adopted");
     world.run(&["attest", "adopted", "approve"]).exited(0);
     world.run(&["adopt", "adopted"]).settled();
     world.until("the run to settle", |world| {
@@ -409,6 +415,9 @@ fn a_hold_reason_written_by_a_later_build_is_restated_rather_than_assumed() {
         ),
     );
     world.run(&["start", &plan, "--attach"]).settled();
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended("unreadable");
     let opened = held(&world, "unreadable", "ship");
     assert_eq!(opened.len(), 1, "{opened:?}");
 

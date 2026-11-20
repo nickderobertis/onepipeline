@@ -69,10 +69,11 @@ pub use crate::unpublished::{
     default_acknowledgements as default_unpublished_acknowledgements,
     pr_author_graph as unpublished_pr_author_graph, AcknowledgeRequest,
     Acknowledged as UnpublishedAcknowledged, AcknowledgedBranch, AcknowledgementFile,
-    Disk as UnpublishedDisk, Row as UnpublishedRow, Target as UnpublishedTarget, Unpublished,
-    UnpublishedRequest, Verdict as UnpublishedVerdict, ACKNOWLEDGEMENTS_UNDER,
-    ACKNOWLEDGEMENT_FILE_VERSION, BUILD_OUTPUT_DIRECTORIES, EXIT_COUNTED, EXIT_NOTHING_COUNTED,
-    EXIT_UNANSWERED,
+    DiscardOutcome, DiscardRequest, Discarded as UnpublishedDiscarded,
+    DiscardedBranch as UnpublishedDiscardedBranch, Disk as UnpublishedDisk, Row as UnpublishedRow,
+    Target as UnpublishedTarget, Unpublished, UnpublishedRequest, Verdict as UnpublishedVerdict,
+    ACKNOWLEDGEMENTS_UNDER, ACKNOWLEDGEMENT_FILE_VERSION, BUILD_OUTPUT_DIRECTORIES, EXIT_COUNTED,
+    EXIT_NOTHING_COUNTED, EXIT_UNANSWERED,
 };
 pub use crate::unwatched::{
     Acknowledgement, Unwatched, UnwatchedRun, WakeBudget, ACKNOWLEDGEMENT_SCHEMA_VERSION,
@@ -652,6 +653,17 @@ pub fn render_unwatched(unwatched: &Unwatched) -> String {
 /// token. A read that fails is [`UnpublishedVerdict::Unanswered`], not an error.
 pub fn unpublished(request: &UnpublishedRequest) -> Result<Unpublished> {
     crate::unpublished::unpublished(request)
+}
+
+/// `onepipeline unpublished --project ID --discard [--dry-run]`: discard, or say what would
+/// become of, every preserved branch the host listing names for a run whose recorded group is
+/// the project, each through `onevcs reclaim --discard`.
+///
+/// # Errors
+///
+/// A project that is not a qualified id.
+pub fn discard_unpublished(request: &DiscardRequest) -> Result<UnpublishedDiscarded> {
+    crate::unpublished::discard(request)
 }
 
 /// The text `onepipeline unpublished` prints on standard output. What could not

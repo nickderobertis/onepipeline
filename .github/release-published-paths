@@ -27,6 +27,7 @@ examples/
 # Toolchain and recipes that compile and package the crate, wheel and npm packages.
 rust-toolchain.toml
 .cargo/config.toml
+scripts/cc-lld-debug.sh
 pyproject.toml
 justfile
 release-targets.toml

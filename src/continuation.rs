@@ -428,7 +428,8 @@ pub(crate) fn dispatch_of(
 /// Every key a stored settlement may carry: the registered `node-settled` document's, and
 /// `remote`, which the settling writer adds beside them for a node whose branch it put on an
 /// origin. `continued` is this build's own record of a launch, and never a stored field.
-const SETTLEMENT_KEYS: [&str; 13] = [
+const SETTLEMENT_KEYS: [&str; 14] = [
+    crate::payload::TASK_DIGEST,
     "status",
     "outcome",
     "detail",
@@ -570,6 +571,91 @@ impl Stored {
             .as_str()
             .and_then(crate::vcs::BranchName::checked)
     }
+
+    /// Whether it records the node's work landed.
+    fn landed(&self) -> bool {
+        self.fields.get("landing").and_then(Value::as_str)
+            == Some(crate::graph::Landing::Landed.as_str())
+    }
+
+    /// The digest of the node's task its settling dispatch began with, where it records one:
+    /// [`settlement_of`] read it through the settlement's own document, so it is one.
+    fn task_digest(&self) -> Option<onetaskgraph_core::Sha256Digest> {
+        self.fields
+            .get(crate::payload::TASK_DIGEST)
+            .and_then(Value::as_str)
+            .and_then(|digest| onetaskgraph_core::Sha256Digest::parse(digest).ok())
+    }
+}
+
+/// What the host's repositories say of a branch a settlement records, asked before a node that
+/// did not name itself is redone on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchHeld {
+    /// Something this host keeps still holds it.
+    Held,
+    /// Nothing holds it any more.
+    Gone,
+    /// The question could not be answered, and why.
+    Unanswered(String),
+}
+
+/// Whether anything this host keeps still holds `branch` of the repository `repo` names, as the
+/// linked `onevcs` classifies a retirement of it: a branch with no copy left — only a recorded
+/// retirement, or nothing at all — is gone.
+pub(crate) fn branch_held(repo: &str, branch: &crate::vcs::BranchName) -> BranchHeld {
+    let query = onevcs::RetirementQuery {
+        repo: Some(repo.to_owned()),
+        branch: branch.as_str().to_owned(),
+    };
+    match onevcs::classify_retirement(&onevcs::Providers::real(), &query) {
+        Ok(retirement) if retirement.holders.is_empty() => BranchHeld::Gone,
+        Ok(_) => BranchHeld::Held,
+        Err(onevcs::Error::UnresolvableReference { .. }) => BranchHeld::Gone,
+        Err(why) => BranchHeld::Unanswered(why.to_string()),
+    }
+}
+
+/// Why a node a launch would have redone — changed, or a done dependent of a redone node —
+/// stays settled instead, which the launch says on stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeptBecause {
+    /// Its settlement records its work landed, and redoing landed work would be a new change.
+    Landed,
+    /// The branch its settlement records is gone, so there is nothing to continue.
+    BranchGone(crate::vcs::BranchName),
+    /// Whether the branch its settlement records is still held could not be asked.
+    BranchUnanswered(crate::vcs::BranchName, String),
+}
+
+/// A node a launch would have redone and keeps settled instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Kept {
+    /// The node.
+    pub(crate) node: String,
+    /// Why the launch would have redone it.
+    pub(crate) reason: crate::ledger::RedoReason,
+    /// Why it stays settled.
+    pub(crate) because: KeptBecause,
+}
+
+impl KeptBecause {
+    /// The reason, as the launch's stderr line ends.
+    pub(crate) fn said(&self) -> String {
+        match self {
+            Self::Landed => "its work landed, and redoing landed work would be a new change \
+                             rather than a continuation"
+                .to_owned(),
+            Self::BranchGone(branch) => format!(
+                "the branch it settled on, {}, is gone, so there is no work to continue",
+                branch.as_str()
+            ),
+            Self::BranchUnanswered(branch, why) => format!(
+                "whether the branch it settled on, {}, is still held could not be asked: {why}",
+                branch.as_str()
+            ),
+        }
+    }
 }
 
 /// Whether a launch may go ahead over the claim its read found: any claim refuses it, by
@@ -708,7 +794,12 @@ pub(crate) struct Continuation {
     pub(crate) settled: Vec<(String, Continued)>,
     /// Each node pinned to the branch it left, in plan order.
     pub(crate) pinned: Vec<(String, crate::vcs::BranchName)>,
+    /// Each node settled `done` that this launch would have redone and keeps settled, in plan
+    /// order, with why: said on stderr as the launch goes on.
+    pub(crate) kept: Vec<Kept>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Each node redone although its store held it `done`, in plan order, with why.
+    pub(crate) redone: Vec<crate::ledger::Redone>,
 }
 
 /// A `node-settled` a launch journals for a node its store held `done`: the stored settlement
@@ -739,9 +830,12 @@ pub(crate) fn continuation_of(
     read: &Read,
     claim: Option<&DriverClaim>,
     redo: &std::collections::BTreeSet<String>,
+    redoing: &Redoing<'_>,
 ) -> Result<Continuation> {
     refuse_unredoable(project, read, redo)?;
     let mut continued = Continuation::default();
+    let (redone, kept) = redone_of(read, redo, redoing)?;
+    continued.kept = kept;
     let from = json!({"source": "store", "run": claim.map(|claim| claim.run.clone())});
     for node in &read.plan.tasks {
         // Both are external input, read through the shape each is held to before anything
@@ -752,7 +846,7 @@ pub(crate) fn continuation_of(
             Some(metadata) => dispatch_of(&node.id, metadata)?,
             None => None,
         };
-        let redone = redo.contains(&node.id);
+        let redone = redone.iter().any(|redone| redone.node == node.id);
         if let Some(done) = settlement
             .as_ref()
             .filter(|settlement| settlement.status == crate::payload::Status::Done)
@@ -810,7 +904,155 @@ pub(crate) fn continuation_of(
             continued.pinned.push((node.id.clone(), branch));
         }
     }
+    continued.redone = redone;
     Ok(continued)
+}
+
+/// What a launch is told about redoing `done` nodes beyond the ones `--redo` names.
+pub(crate) struct Redoing<'a> {
+    /// `--keep-changed`: continue each `done` node whose task changed, as a launch did before
+    /// task digests were recorded. A named node's dependents are redone either way.
+    pub(crate) keep_changed: bool,
+    /// Whether a repository still holds a branch: [`branch_held`] for a real launch.
+    pub(crate) held: &'a dyn Fn(&str, &crate::vcs::BranchName) -> BranchHeld,
+}
+
+/// Every node a launch redoes although its store held it `done`, in plan order, with why, and
+/// every one it would have and keeps settled instead.
+///
+/// The redone are the nodes `redo` names — already held by [`refuse_unredoable`] — then, unless
+/// changed nodes are kept, each `done` node whose stored `task_digest` is not its task's digest
+/// now ([`crate::taskgraph::task_digests`]), and then every transitive dependent of a redone
+/// node whose settlement is `done`, attributed to the first redone node it was reached from. A
+/// settlement recording no `task_digest` was written before one was recorded and counts as
+/// unchanged. A node that did not name itself is held to two more rules: one whose work landed
+/// is kept, and one whose recorded branch is gone — or could not be asked about — is kept;
+/// one recording no branch at all, a direct or command node's, is redone afresh.
+fn redone_of(
+    read: &Read,
+    redo: &std::collections::BTreeSet<String>,
+    redoing: &Redoing<'_>,
+) -> Result<(Vec<crate::ledger::Redone>, Vec<Kept>)> {
+    use crate::ledger::{RedoReason, Redone};
+    let mut done = BTreeMap::new();
+    for node in &read.plan.tasks {
+        if let Some(settlement) = settlement_of(&node.id, read.metadata.get(&node.id))?
+            .filter(|settlement| settlement.status == crate::payload::Status::Done)
+        {
+            done.insert(node.id.as_str(), settlement);
+        }
+    }
+    // Whether a node that did not name itself may be redone, by its stored settlement.
+    let eligible = |node: &str, settlement: &Stored| -> Option<KeptBecause> {
+        if settlement.landed() {
+            return Some(KeptBecause::Landed);
+        }
+        let repo = read
+            .plan
+            .tasks
+            .iter()
+            .find(|planned| planned.id == node)
+            .and_then(|planned| planned.repo.as_deref())?;
+        let branch = settlement.branch()?;
+        match (redoing.held)(repo, &branch) {
+            BranchHeld::Held => None,
+            BranchHeld::Gone => Some(KeptBecause::BranchGone(branch)),
+            // llmlint: ignore[changed_behavior_has_e2e] onevcs answering a classification with anything but the branch missing needs its registry or a repository unreadable mid-launch — a host fault no journey arranges through either CLI; the line it prints is the kept line the gone-branch journey drives.
+            BranchHeld::Unanswered(why) => Some(KeptBecause::BranchUnanswered(branch, why)),
+        }
+    };
+
+    let mut decided: BTreeMap<String, RedoReason> = BTreeMap::new();
+    let mut kept = Vec::new();
+    let mut roots: Vec<String> = Vec::new();
+    for node in &read.plan.tasks {
+        if redo.contains(&node.id) {
+            decided.insert(node.id.clone(), RedoReason::Named);
+            roots.push(node.id.clone());
+        }
+    }
+    if !redoing.keep_changed {
+        let now = crate::taskgraph::task_digests(read);
+        for node in &read.plan.tasks {
+            let Some(settlement) = done.get(node.id.as_str()) else {
+                continue;
+            };
+            if decided.contains_key(&node.id) {
+                continue;
+            }
+            let Some(stored) = settlement.task_digest() else {
+                continue;
+            };
+            if now.get(&node.id) == Some(&stored) {
+                continue;
+            }
+            match eligible(&node.id, settlement) {
+                None => {
+                    decided.insert(node.id.clone(), RedoReason::Changed);
+                    roots.push(node.id.clone());
+                }
+                Some(because) => kept.push(Kept {
+                    node: node.id.clone(),
+                    reason: RedoReason::Changed,
+                    because,
+                }),
+            }
+        }
+    }
+    // Every transitive dependent of each redone root, the roots in plan order and each
+    // dependent attributed to the first root it is reached from.
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for node in &read.plan.tasks {
+        for dep in &node.deps {
+            dependents
+                .entry(dep.as_str())
+                .or_default()
+                .push(node.id.as_str());
+        }
+    }
+    let mut reached: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for root in &roots {
+        let mut frontier: Vec<&str> = vec![root.as_str()];
+        while let Some(at) = frontier.pop() {
+            for &dependent in dependents.get(at).into_iter().flatten() {
+                if !reached.insert(dependent) {
+                    continue;
+                }
+                frontier.push(dependent);
+                if decided.contains_key(dependent) {
+                    continue;
+                }
+                let Some(settlement) = done.get(dependent) else {
+                    continue;
+                };
+                let reason = RedoReason::Dependent { of: root.clone() };
+                match eligible(dependent, settlement) {
+                    None => {
+                        decided.insert(dependent.to_owned(), reason);
+                    }
+                    Some(because) => kept.push(Kept {
+                        node: dependent.to_owned(),
+                        reason,
+                        because,
+                    }),
+                }
+            }
+        }
+    }
+    let order = |node: &str| {
+        read.plan
+            .tasks
+            .iter()
+            .position(|planned| planned.id == node)
+            .unwrap_or(usize::MAX)
+    };
+    let mut redone: Vec<Redone> = decided
+        .into_iter()
+        .map(|(node, reason)| Redone { node, reason })
+        .collect();
+    redone.sort_by_key(|redone| order(&redone.node));
+    kept.sort_by_key(|kept| order(&kept.node));
+    Ok((redone, kept))
 }
 
 /// What a driver knows about its project's claim.
@@ -1480,11 +1722,43 @@ pub(crate) fn release_left_standing(
     launch: &crate::ledger::LaunchRecord,
     term_scope: &[String],
 ) {
+    let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
+        .map(|claim| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]))
+        .unwrap_or_default();
+    release_stored(paths, launch, term_scope, Some(&landed));
+}
+
+/// Release this run's claim on its project where an edit applied with nothing driving the run
+/// has ended it — its remaining work dropped — so no closeout will: a driver that ended while it
+/// held the claim, as a crash or a host going down ends one, leaves it standing so that the run
+/// stays the one to adopt, and once the run is over there is nothing left to adopt, so a claim
+/// left standing would refuse every later launch of the project.
+///
+/// Called by the process applying the edit, which holds the run's ownership lock, so no driver
+/// of this run can be acting: a stored claim naming this run on this host is this run's own,
+/// whether or not the write-back's record of what landed got as far as naming it. Read first
+/// and bounded as [`release_left_standing`] is, and best effort in the same way.
+pub(crate) fn release_ended(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
+) {
+    release_stored(paths, launch, term_scope, None);
+}
+
+/// Write `null` over the project's stored claim where it names this run on this host — and,
+/// given `landed`, only where the write-back's record of what landed names it too.
+fn release_stored(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
+    landed: Option<&BTreeMap<String, Value>>,
+) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
     };
     let host = crate::sys::hostname();
-    // llmlint: ignore[changed_behavior_has_e2e] reached only where a closeout projection outlasts its bounded window without failing, which `engine.rs`'s one caller of this function records no journey can drive (the real store suspended mid-command); the name read here is `publicid::on_store`, the one every release uses, and `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives that name through the closeout's and the stop's releases.
+    // llmlint: ignore[changed_behavior_has_e2e] the name every release uses, `publicid::on_store`; `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives it through the closeout's and the stop's releases, and `continuation::a_reply_ending_a_run_nothing_drives_releases_its_claim_on_the_project` through a reply's.
     let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
@@ -1493,10 +1767,9 @@ pub(crate) fn release_left_standing(
             Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
-    let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
-        .map(|claim| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]))
-        .unwrap_or_default();
-    if !ours(&landed) || crate::writeback::store_asked_to_wait(&paths.dir) {
+    if landed.is_some_and(|landed| !ours(landed))
+        || crate::writeback::store_asked_to_wait(&paths.dir)
+    {
         return;
     }
     let store = Store::at(&launch.dir);
@@ -2190,6 +2463,14 @@ mod tests {
         }
     }
 
+    /// A launch keeping changed nodes, on a host holding every branch: what `--redo` alone does.
+    fn kept() -> Redoing<'static> {
+        Redoing {
+            keep_changed: true,
+            held: &|_, _| BranchHeld::Held,
+        }
+    }
+
     fn named(nodes: &[&str]) -> std::collections::BTreeSet<String> {
         nodes.iter().map(|node| (*node).to_owned()).collect()
     }
@@ -2212,7 +2493,8 @@ mod tests {
                 json!({"status": "done", "branch": "me/c", "remote": "pushed"}),
             ),
         ]);
-        let continued = continuation_of("p", &read, None, &named(&["a", "b"])).expect("continued");
+        let continued =
+            continuation_of("p", &read, None, &named(&["a", "b"]), &kept()).expect("continued");
         assert_eq!(
             continued
                 .settled
@@ -2230,7 +2512,7 @@ mod tests {
             vec![("a", "me/a"), ("b", "me/b")]
         );
         // Naming none is the continuation it always was.
-        let unnamed = continuation_of("p", &read, None, &named(&[])).expect("continued");
+        let unnamed = continuation_of("p", &read, None, &named(&[]), &kept()).expect("continued");
         assert_eq!(unnamed.settled.len(), 3);
         assert!(unnamed.pinned.is_empty());
     }
@@ -2254,7 +2536,7 @@ mod tests {
             ("b", "settled `done` on no branch"),
             ("c", "settled `done` and landed"),
         ] {
-            let refused = continuation_of("p", &read, None, &named(&[node]))
+            let refused = continuation_of("p", &read, None, &named(&[node]), &kept())
                 .expect_err("refused")
                 .to_string();
             assert!(
@@ -2274,7 +2556,7 @@ mod tests {
             "a",
             json!({"status": "done", "branch": "me/a", "landing": "unlanded"}),
         )]);
-        continuation_of("p", &drafted, None, &named(&["a"])).expect("redoable");
+        continuation_of("p", &drafted, None, &named(&["a"]), &kept()).expect("redoable");
         refuse_redo_beside_fresh(&named(&[]), true).expect("no redo, nothing refused");
         refuse_redo_beside_fresh(&named(&["c"]), false).expect("continuing, nothing refused");
     }

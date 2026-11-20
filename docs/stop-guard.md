@@ -389,6 +389,7 @@ Without `--unpublished` the guard is exactly the contract above.
 ```
 onepipeline unpublished [--session <ID> | --host | --token <S-TOKEN>...] [--format text|json] [--disk] [--acknowledgements <DIR>] [--pr-author-graph <PATH>]
 onepipeline unpublished --acknowledge <BRANCH> --reason <TEXT> [--repo <IDENTITY>] [--session <ID>] [--acknowledgements <DIR>]
+onepipeline unpublished --project <QUALIFIED-ID> --discard [--dry-run]
 ```
 
 `--session` (default `ONEPIPELINE_LAUNCHER_SESSION`; blank is refused) lists the
@@ -419,6 +420,11 @@ at its current tip, in
 "identity", "tip", "reason", "at"}]}`, ai-orchestrator's version-1 format — and then
 answers as the session listing does. A branch that moves past the recorded tip
 counts again.
+
+`--project <QUALIFIED-ID> --discard` discards every preserved branch `--host` lists for
+a run whose recorded group is that project, through onevcs's `reclaim --discard`, one
+line per branch; `--dry-run` says what would become of each and discards nothing. The
+contract's "Discarding a project's preserved branches" states its lines and exit status.
 
 <!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the two harness
 sections below restate contracts owned by Claude Code and Codex, neither of which publishes

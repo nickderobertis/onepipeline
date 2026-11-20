@@ -1166,6 +1166,47 @@ pub struct LaunchRecord {
     /// Omitted when empty, so every record written before it reads unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redo: Vec<String>,
+    /// Whether `start --keep-changed` (or the launch config's `keep_changed`) told this launch
+    /// to continue every `done` node whose task changed since it settled rather than redo it.
+    /// Omitted when `false`, so every record written before it reads unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_changed: bool,
+    /// Every node this launch redid although its store held it `done`, in plan order, with
+    /// why: named by `--redo`, its task changed, or a done dependent of a redone node.
+    /// Decided once, at the launch, and replayed by an adoption, which reads no store.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redone: Vec<Redone>,
+    /// The content digest of each node's task as this launch read it from its store, by node
+    /// id — `sha256:` and 64 lowercase hex digits, the linked `onetaskgraph`'s own digest type: what each settlement this run records carries as its `task_digest`, so the next
+    /// launch can tell a task changed since the node ran. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_digests: BTreeMap<String, onetaskgraph_core::Sha256Digest>,
+}
+
+/// One node a launch redid although its store held it `done`, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redone {
+    /// The node.
+    pub node: String,
+    /// Why it was redone.
+    #[serde(flatten)]
+    pub reason: RedoReason,
+}
+
+/// Why a launch redid a node its store held `done`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "kebab-case")]
+pub enum RedoReason {
+    /// `start --redo` named it.
+    Named,
+    /// Its task's content digest is not the `task_digest` its settlement records.
+    Changed,
+    /// It depends, directly or not, on a node the launch redid, which `of` names.
+    Dependent {
+        /// The redone node it was redone with: one `--redo` named or one that changed.
+        of: String,
+    },
 }
 
 impl LaunchRecord {
@@ -3835,6 +3876,9 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4774,6 +4818,9 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4826,6 +4873,9 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

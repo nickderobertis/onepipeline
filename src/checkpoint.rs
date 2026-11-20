@@ -1147,6 +1147,9 @@ mod tests {
             public_id: String::new(),
             name_withheld: false,
             redo: Vec::new(),
+            keep_changed: false,
+            redone: Vec::new(),
+            task_digests: std::collections::BTreeMap::new(),
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");
         paths

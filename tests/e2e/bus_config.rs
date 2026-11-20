@@ -974,8 +974,11 @@ fn a_bus_config_declaring_hooks_is_kept_and_read_by_status_and_adopt() {
     assert_eq!(declared["command"][1], "keep", "{launch}");
     world.run(&["status", "hookrecorded"]).exited(0);
     world.release("slow.go");
+    // Settled, and let go of: a driver still exiting after its result is written holds the run,
+    // which an adoption refuses.
     world.until("the run to settle", |world| {
         world.run_file("hookrecorded", "result.json").is_file()
+            && !world.run_file("hookrecorded", "owner.lock").exists()
     });
     world.run(&["adopt", "hookrecorded"]).settled();
 }

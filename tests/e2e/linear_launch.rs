@@ -21,16 +21,21 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::harness::{
     global, lifecycle, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE,
 };
-use crate::linear_loopback::{content_of, metadata_of, Fault, Linear, Operation};
+use crate::linear_loopback::{
+    content_of, described, metadata_of, Fault, Linear, Operation, BLOCK_OPEN, LEGACY_SLOT_OPEN,
+};
 use crate::linear_writeback::{
     configuration, from_the_launch_directory, KEY_ENV, SETTLEMENT, SOURCE, STATES, STATUSES,
 };
 use onepipeline::templates::{BUILT_IN, RULE_BODY_CHANGED};
+
+/// A metadata key of an operator's own, which no write of the engine's or the store's names.
+const OPERATOR_KEY: &str = "operator.note";
 
 /// The plan's name, which is its project's title in both sources and the name its run takes.
 const NAME: &str = "linear-launch";
@@ -174,8 +179,9 @@ fn homed_by(name: &str, copy: impl FnOnce(&World, &Linear, &Path, &str) -> Strin
         "the design document is not held as Linear stores it:\n{held}"
     );
     assert!(
-        held.contains(&format!("{DESIGN_STORED}\n<!-- onetaskgraph.metadata `")),
-        "the slot after the design's closing table is not set off by one line break:\n{held}"
+        held.contains(&format!("{DESIGN_STORED}\n{BLOCK_OPEN}\n\n`"))
+            && !held.contains(LEGACY_SLOT_OPEN),
+        "the metadata block after the design's closing table is not set off by one line break:\n{held}"
     );
 
     let issues = linear
@@ -707,7 +713,9 @@ fn launched(homed: &Homed) {
 
 /// A plan of `plan-task` renderings, copied into a Linear that rewrites Markdown on write,
 /// launches from there under `--require-rendered true`: every node is dispatched, and every
-/// settlement is written back to its issue. An edit made to one issue in Linear afterwards is
+/// settlement is written back to its issue, ending it in the collapsed metadata block — one
+/// seeded before the launch in the legacy HTML-comment slot among them, which is read with all
+/// its metadata and keeps every key through the write. An edit made to one issue in Linear afterwards is
 /// refused by the next launch, naming that task.
 #[test]
 fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_only_check() {
@@ -747,8 +755,28 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
             "build does not hold {stored:?} as Linear stores it:\n{build}"
         );
     }
+    // `design` is then held as an item written before the store kept its metadata in a collapsed
+    // block: every key it carries in the legacy HTML-comment slot, with one key of an operator's
+    // own beside them that no write of the engine's names.
+    let legacy = homed.issue_of("design");
+    let mut seeded = serde_json::Map::new();
+    homed.linear.edit_description(legacy, |held| {
+        let mut metadata = metadata_of(held);
+        metadata.insert(OPERATOR_KEY.to_owned(), json!("kept through the engine"));
+        seeded = metadata.clone();
+        described(content_of(held), &Value::Object(metadata))
+    });
+    assert!(
+        homed
+            .linear
+            .description_of(legacy)
+            .contains(LEGACY_SLOT_OPEN),
+        "design was not seeded in the legacy slot"
+    );
     let before_launch = homed.linear.log().len();
 
+    // Read with all its metadata: the launch finds its node, persona and rendering provenance in
+    // the legacy slot, so nothing is refused.
     launched(&homed);
 
     // Each settlement reaches its issue, as Linear stores it: the issue moved to the state
@@ -762,6 +790,35 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
                     .is_some_and(|settlement| settlement["status"] == "done")
         })
     });
+    // Every issue the engine wrote ends in the collapsed block holding its settlement, and no
+    // longer holds the HTML-comment slot Linear shows as text. The one seeded in that slot keeps
+    // every key it held there.
+    for (node, _) in NODES {
+        let held = homed.linear.description_of(homed.issue_of(node));
+        let block = held
+            .rsplit_once(&format!("\n\n{BLOCK_OPEN}\n\n`"))
+            .map(|(_, block)| block.trim_end_matches('\n'));
+        assert!(
+            block.is_some_and(|block| block.ends_with("`\n\n+++") && block.lines().count() == 3)
+                && !held.contains(LEGACY_SLOT_OPEN),
+            "{node}'s settled issue does not end in the collapsed metadata block alone:\n{held}"
+        );
+        assert_eq!(
+            metadata_of(&held)[SETTLEMENT]["status"],
+            "done",
+            "{node}'s block does not hold its settlement:\n{held}"
+        );
+    }
+    let written = metadata_of(&homed.linear.description_of(legacy));
+    for (key, value) in &seeded {
+        assert!(
+            written.contains_key(key),
+            "the engine's write of design dropped {key} from its legacy slot: {written:?}"
+        );
+        if key == OPERATOR_KEY || key == "onetaskgraph.template" {
+            assert_eq!(&written[key], value, "design's {key} changed: {written:?}");
+        }
+    }
     // A write-back's own answer is what Linear stores, so it reads its item only to merge into,
     // before writing it: once the launch has written an issue, every read of it is followed
     // straight away by a write of it, and the last request it is sent is a write — no read of it

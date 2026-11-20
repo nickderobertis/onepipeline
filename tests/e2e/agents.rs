@@ -514,6 +514,9 @@ fn an_adopted_run_whose_record_predates_the_field_names_the_file_and_lists_its_d
     world
         .run_on_agentgraph(&["start", &path, "--attach"])
         .exited(0);
+    // The driver the paused launch handed its run to is ended, as a host going down
+    // would end it: the run waits on its decision with nothing driving it, for an adoption.
+    world.paused_and_ended(run);
     world
         .run_on_agentgraph(&["attest", run, "approve"])
         .exited(0);

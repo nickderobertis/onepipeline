@@ -2002,8 +2002,8 @@ fn launched_with_fields(name: &str, fields: &str) -> (World, Linear, String, cra
 /// ai-orchestrator host's store writes its follow-up tickets' fields through — launches its plan
 /// from that configuration without refusal, and the run settles its one node: the issue moves to
 /// `Done`, and the write-back that moved it sent the issue's metadata shown in its collapsed
-/// `Fields` section, one line for the host and one per owning run, while the metadata slot stays
-/// the record's one home.
+/// `Fields` section, one line for the host and one per owning run, directly before the collapsed
+/// metadata block that stays the record's one home.
 #[test]
 fn a_linear_source_configured_with_metadata_fields_launches_and_shows_them_on_write_back() {
     let name = "linear-metadata-fields";
@@ -2035,9 +2035,13 @@ fn a_linear_source_configured_with_metadata_fields_launches_and_shows_them_on_wr
     let last = written
         .last()
         .unwrap_or_else(|| panic!("no write-back sent {only} a description: {log:#?}"));
+    assert!(
+        !last.contains("<!--"),
+        "the write-back's description holds an HTML comment Linear shows as text:\n{last}"
+    );
     for shown in [
-        "<!-- `onetaskgraph.fields` -->",
-        "Fields",
+        "+++ Fields\n",
+        "\n\n+++ onetaskgraph metadata\n\n`onetaskgraph.fields`\n\n`",
         "**Host**",
         "ai-orchestrator",
         "**Owning runs**",
@@ -2053,7 +2057,7 @@ fn a_linear_source_configured_with_metadata_fields_launches_and_shows_them_on_wr
     assert_eq!(
         held["orchestrator.follow-up"],
         json!({"host": "ai-orchestrator", "runs": ["run-one", "run-two"]}),
-        "the metadata slot no longer holds the follow-up record: {held:?}"
+        "the metadata block no longer holds the follow-up record: {held:?}"
     );
 }
 

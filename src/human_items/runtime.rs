@@ -637,6 +637,12 @@ impl Gate {
         }
     }
 
+    /// Take the item store as it stands now as read, so [`moved`](Self::moved) answers only
+    /// for what is recorded after this.
+    pub(crate) fn mark_read(&mut self) {
+        self.seen = self.length();
+    }
+
     fn length(&self) -> u64 {
         std::fs::metadata(self.store.journal()).map_or(0, |m| m.len())
     }

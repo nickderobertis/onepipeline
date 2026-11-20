@@ -16,3 +16,15 @@ target-dir = "target"
 # binary drops the 2-3x of its size debuginfo was. `release` is untouched.
 [profile.dev]
 debug = 0
+
+# Linux dev and test builds — `cargo build`, the nextest binaries, and the
+# `cargo llvm-cov` builds under `target/llvm-cov-target` — link with the
+# toolchain's bundled rust-lld instead of GNU `ld`, which `docs/gate-profile.md`
+# measured spending ~14x rustc's CPU linking the test binaries. x86_64 already
+# defaults to rust-lld; aarch64 and the rest do not, and stable rustc selects it
+# only through unstable flags. It is a `linker` rather than `rustflags` because
+# the `RUSTFLAGS` the `-D warnings` recipes and `cargo llvm-cov` set replace a
+# config `rustflags` outright, and nothing replaces this. The script hands
+# release output, and a toolchain without rust-lld, to plain `cc` unchanged.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))']
+linker = "scripts/cc-lld-debug.sh"

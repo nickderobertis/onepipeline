@@ -483,6 +483,7 @@
         "tests/e2e/unpublished.rs",
         "docs/stop-guard.md",
         "docs/contract-divergences.md",
+        "docs/contract.md",
         "tests/e2e/budget_result.rs",
         "tests/e2e/dispatch.rs",
         "graphs/node-scope.yaml",

@@ -110,6 +110,19 @@ pub fn generate(world: &World) -> Vec<String> {
                 .next()
                 .cloned()
                 .expect("the launch made a run");
+            // The launch says on stderr whether it handed its paused run to a driver that waits
+            // on the decision; a hand-off it could not make is that line's reason, read here
+            // rather than as the wait for a driver that never came.
+            let said = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                said.contains(&format!("run '{run}' waits on its decision in driver")),
+                "the launch of {run} handed its paused run to no waiting driver: {said}"
+            );
+            // The launch hands its paused run to a driver that waits on the gate. It is ended
+            // here, as a host going down would end it, so the item store this workload measures
+            // is read by the verbs it times and by nothing else, and the drop below is applied
+            // by the reply itself.
+            world.paused_and_ended(&run);
             // Every launch but the last is retained history: its planner ends it by
             // dropping its gate and everything behind it.
             if launch + 1 < RUNS / PLANS {

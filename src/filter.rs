@@ -57,8 +57,9 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// rendered-only check, `template_root` and `require_rendered`, **13** the
 /// graph a review comment's reply is drafted by, `review_reply_graph`, and **14**
 /// the checks a launch is refused by and the hook a live edit is offered to,
-/// `checks` and `plan_edit_hook`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 14;
+/// `checks` and `plan_edit_hook`, and **15** whether a launch continues a `done` node whose
+/// task changed since it settled rather than redoing it, `keep_changed`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 15;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -74,12 +75,13 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 14;
 /// schedule, a version-9 one says nothing about graph overrides, and a
 /// version-10 one says nothing about a branch-name template, a version-11
 /// one says nothing about templates, a version-12 one says nothing about a
-/// reply drafter, and a version-13 one says nothing about launch checks or a
-/// plan-edit hook, which is what a launch naming none of them means — and
+/// reply drafter, a version-13 one says nothing about launch checks or a
+/// plan-edit hook, and a version-14 one says nothing about keeping changed work, which is what a launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 14] = [
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 15] = [
     LAUNCH_CONFIG_SCHEMA_VERSION,
+    14,
     13,
     12,
     11,
@@ -165,7 +167,18 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         LAUNCH_CHECKS_SCHEMA_VERSION,
         BlankValue::Refused,
     ),
+    (
+        KEEP_CHANGED_KEY,
+        KEEP_CHANGED_SCHEMA_VERSION,
+        BlankValue::Refused,
+    ),
 ];
+
+/// The launch-config version that added `keep_changed`.
+const KEEP_CHANGED_SCHEMA_VERSION: u32 = 15;
+
+/// The launch-config key saying a launch continues every `done` node whose task changed.
+const KEEP_CHANGED_KEY: &str = "keep_changed";
 
 /// The launch-config version that added `checks` and `plan_edit_hook`.
 const LAUNCH_CHECKS_SCHEMA_VERSION: u32 = 14;
@@ -889,6 +902,15 @@ pub struct LaunchConfig {
     /// refused by this key's name. Omitted when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_edit_hook: Option<PlanEditHook>,
+    /// Whether this launch continues every `done` node whose task changed since it settled,
+    /// rather than redoing it and its done dependents. `start --keep-changed` says `true`
+    /// inline; neither can say `false` over the other. An adoption replays the decision its
+    /// launch recorded and reads no launch config.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may not carry
+    /// one. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_changed: Option<bool>,
 }
 
 impl Default for LaunchConfig {
@@ -916,6 +938,7 @@ impl Default for LaunchConfig {
             review_reply_graph: None,
             checks: Vec::new(),
             plan_edit_hook: None,
+            keep_changed: None,
         }
     }
 }
@@ -978,7 +1001,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 18] = [
+        let carried: [(&str, Carried); 19] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -1072,6 +1095,14 @@ impl LaunchConfig {
                 config
                     .plan_edit_hook
                     .as_ref()
+                    .map_or(Carried::Absent, |_| Carried::Named),
+            ),
+            // Never `Blank`: a boolean has no blank to be read as, so the document's own
+            // reading refused one before this existed.
+            (
+                KEEP_CHANGED_KEY,
+                config
+                    .keep_changed
                     .map_or(Carried::Absent, |_| Carried::Named),
             ),
         ];
@@ -1278,11 +1309,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v14.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v15.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 13] = [
+    const GOLDEN_EARLIER: [(u32, &str); 14] = [
+        (14, include_str!("../tests/golden/launch-config-v14.json")),
         (13, include_str!("../tests/golden/launch-config-v13.json")),
         (12, include_str!("../tests/golden/launch-config-v12.json")),
         (11, include_str!("../tests/golden/launch-config-v11.json")),
@@ -1418,6 +1450,7 @@ mod tests {
                 )
                 .expect("the golden's hook names a program"),
             ),
+            keep_changed: Some(true),
         }
     }
 
@@ -1493,15 +1526,21 @@ mod tests {
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
                     // Version 11 declared the branch-name template, version 12 the
                     // template root and the rendered-only check, version 13 the reply
-                    // drafter, and none of them a launch check or a plan-edit hook.
+                    // drafter, version 14 the launch checks and the plan-edit hook, and
+                    // none of them whether a launch keeps changed work.
                     branch_template: (version >= 11)
                         .then(|| "{{ task.key }}/{{ node.id }}".to_string()),
                     template_root: (version >= 12).then(|| "./templates".to_string()),
                     require_rendered: (version >= 12).then_some(true),
                     review_reply_graph: (version >= 13)
                         .then(|| "./graphs/review-reply.yaml".to_string()),
-                    checks: Vec::new(),
-                    plan_edit_hook: None,
+                    checks: if version >= 14 {
+                        self::golden().checks
+                    } else {
+                        Vec::new()
+                    },
+                    plan_edit_hook: self::golden().plan_edit_hook.filter(|_| version >= 14),
+                    keep_changed: None,
                 }
             );
             assert!(
