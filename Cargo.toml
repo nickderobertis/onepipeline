@@ -1507,6 +1507,11 @@ onevcs-testing = "0.21.8"
 # a board copy.
 # **0.14.17 is a project graph whose nodes name their location** (`otg-graph-location`). It is
 # linked because ai-orchestrator holds its store CLI pin to the release this engine links.
+# **0.14.19 keeps a Linear item's metadata in one collapsed block** (`otg-collapsed-slot`),
+# `+++ onetaskgraph metadata` … `+++`, where earlier releases wrote an HTML comment Linear shows
+# as text; reads still take that legacy slot. The engine's write-back goes through it unchanged:
+# `tests/e2e/linear_launch.rs`'s rendered-plan journey fails on 0.14.17, whose settlements write
+# the comment back.
 # `privateterms`, which builds the publication-boundary matcher each `onepipeline start` runs, is
 # no requirement here: it arrives through this crate's and `onevcs`'s own caret requirements, so a
 # release of it is taken by moving `Cargo.lock` alone.
