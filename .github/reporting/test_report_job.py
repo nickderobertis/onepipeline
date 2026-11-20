@@ -626,8 +626,11 @@ class SavedResults(Journey):
         (records / 'stacked-spikes-stage.json').write_text('{"wall_ms": 1234, "run_id": "run"}')
         (records / 'human-items.json').write_text(json.dumps({
             'host': 'runner', 'warm_max_elapsed_s': 0.25, 'warm': [{'elapsed_s': 0.25, 'phase': 'warm', **dict.fromkeys(
-                ('index_io_ms', 'discovery_ms', 'replay_ms', 'blocker_ms', 'render_ms', 'capture_ms'), 1)}],
-            'cold': [], 'tail': [], 'workload': dict.fromkeys(('runs', 'events_per_run', 'open_items', 'plans', 'steps'), 1)}))
+                ('index_io_ms', 'discovery_ms', 'replay_ms', 'blocker_ms', 'render_ms', 'capture_ms', 'sweep_ms',
+                 'conditions_evaluated', 'checks_run'), 1)}],
+            'due_check': {'elapsed_s': 0.25, 'phase': 'due-check', 'sweep_ms': 1, 'conditions_evaluated': 1, 'checks_run': 1},
+            'cold': [], 'tail': [], 'workload': dict.fromkeys(('runs', 'events_per_run', 'open_items', 'plans', 'steps',
+                                                               'shown_history'), 1)}))
 
     def checker(self, *arguments, cwd=None):
         """The pinned checker with the flag a saving target passes, leaving exactly what that target leaves."""
