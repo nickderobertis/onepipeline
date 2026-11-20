@@ -331,10 +331,10 @@ fn every_rule_a_plan_breaks_is_reported_and_stops_the_registered_checks() {
 ///
 /// `engine` declares two artifacts of its own — `crate` (`crate:engine`), its default,
 /// and `wheel` (`pypi:engine`) — and this host's `releases.yml` says `service` installs
-/// `crate:engine` alone. So `service` waiting on `wheel` waits on something it never
-/// runs (`uninstalled`), and `tool`, adopting `published` behind `engine` naming no
-/// target, falls to a default that serves `service`'s install rather than its own
-/// (`default-taken`). Both are refused by `plan check` with `source: "onevcs"` and the
+/// `crate:engine` alone. So a `published` node of `service` waiting on `wheel` waits on
+/// something it never runs (`uninstalled`), and `tool`, adopting `published` behind
+/// `engine` naming no target, falls to a default that serves `service`'s install
+/// rather than its own (`default-taken`). Both are refused by `plan check` with `source: "onevcs"` and the
 /// rule and reason onevcs's own executable gives; the plan where each names `crate` in
 /// `consumes`, the one target `service` installs, is accepted.
 #[test]
@@ -411,7 +411,11 @@ fn a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load() {
         assert_eq!(refusals[0]["rule"], rule, "{consumer}: {verdict}");
         refusals[0]["reason"].as_str().expect("a reason").to_owned()
     };
-    let uninstalled = says("service", &["--consumes", "wheel"], "uninstalled");
+    let uninstalled = says(
+        "service",
+        &["--adoption", "published", "--consumes", "wheel"],
+        "uninstalled",
+    );
     let taken = says("tool", &["--adoption", "published"], "default-taken");
 
     let tool = |fields: Value| {
@@ -425,7 +429,10 @@ fn a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load() {
             "installs",
             vec![
                 engine(),
-                consumer("service-wheel", json!({"consumes": {"engine": "wheel"}})),
+                consumer(
+                    "service-wheel",
+                    json!({"adoption": "published", "consumes": {"engine": "wheel"}}),
+                ),
                 tool(json!({"adoption": "published"})),
             ],
         ),
@@ -469,7 +476,10 @@ fn a_wait_on_an_artifact_the_consumer_does_not_install_is_refused_at_load() {
             "installs-repaired",
             vec![
                 engine(),
-                consumer("service-crate", json!({"consumes": {"engine": "crate"}})),
+                consumer(
+                    "service-crate",
+                    json!({"adoption": "published", "consumes": {"engine": "crate"}}),
+                ),
                 tool(json!({"adoption": "published", "consumes": {"engine": "crate"}})),
             ],
         ),
