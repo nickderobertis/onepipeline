@@ -1529,7 +1529,12 @@ fn an_integrate_train_closes_each_branch_s_issues_with_a_record_of_its_own() {
 /// makes.
 #[test]
 fn a_settled_run_waits_for_its_closures_no_longer_than_their_window() {
+    // At the shipped time scale: what this proves is the close-out window ending before a
+    // call it bounds, and the call's own deadline — the write-back floor and one item —
+    // scales while that window, which a board's real pacing has to fit inside, does not. At
+    // the shipped figures the call is allowed 72 seconds and the window ends at 30.
     let (world, served, launch) = landing_closing_seven("closures-window");
+    let world = world.at_shipped_time();
     served.fault("hold");
     let run = "window";
     let project = world.plan(run, &plan_of(run, vec![lifecycle("service", &[])]));

@@ -1971,8 +1971,10 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
     if off == OffTheStore::HeldPastTheWait {
         // Past the driver's one wait for the settlement, the driver says it is still owed,
         // where one that had given up on it would have cleared its fence or acknowledged
-        // instead.
-        world.until(
+        // instead. That wait is the shipped twenty seconds at the suite's time scale, so it
+        // passes inside fifteen, which the shipped wait would not.
+        world.until_within(
+            std::time::Duration::from_secs(15),
             "the displaced driver's wait for x's settlement to pass",
             |world| {
                 std::fs::read_to_string(world.run_file(run, "driver.log"))

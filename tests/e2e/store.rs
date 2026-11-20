@@ -2258,8 +2258,11 @@ fn utc(at_ms: u64) -> String {
 /// The spike's workload: two tasks, only `changelog` carrying an edge into `vault`, which is
 /// configured, declared private, and refusing as `refuse` scripts it — at the shipped minute
 /// interval, as a manager meets it.
+///
+/// At the shipped time scale: the words these journeys hold are the operator's, stating the
+/// shipped minute and half hour, and they wait out none of it.
 fn spike_world(label: &str) -> (World, String, String) {
-    let world = with_private_source(World::new(label), "vault").with_env(
+    let world = with_private_source(World::new(label).at_shipped_time(), "vault").with_env(
         "ONETASKGRAPH_SOURCES__VAULT__PUBLIC_ALIAS",
         &alias_of("vault"),
     );
@@ -4145,7 +4148,12 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
         outage.replied();
 
         let records = failed(&world);
-        for (pair, scheduled_ms) in records.windows(2).take(3).zip([250, 1_000, 4_000]) {
+        // The shipped schedule at the world's time scale, which is the one the binary applies.
+        let schedule = [250, 1_000, 4_000].map(|shipped| {
+            u64::try_from(world.scaled(Duration::from_millis(shipped)).as_millis())
+                .expect("a schedule step's milliseconds")
+        });
+        for (pair, scheduled_ms) in records.windows(2).take(3).zip(schedule) {
             let started =
                 |record: &Value| millis(record["at"].as_str().expect("attempt timestamp"));
             let ended =
@@ -5900,9 +5908,18 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
             pair[1]
         );
     }
+    // Half the shipped fourth step at the world's time scale, which the binary applies — and
+    // asked before the shipped sixteen-second step would have come due, which a schedule the
+    // scale did not reach would not be.
     assert!(
-        waited[3] >= Duration::from_secs(8),
+        waited[3] >= world.scaled(Duration::from_secs(8)),
         "four failures in, the destination is still being asked every {:?}: {waited:?}",
+        waited[3]
+    );
+    assert!(
+        waited[3] < Duration::from_secs(16),
+        "four failures in, the destination waited {:?}, the shipped step rather than the one \
+         the binary applies at the world's time scale: {waited:?}",
         waited[3]
     );
 
@@ -5994,7 +6011,7 @@ fn a_run_settles_on_time_while_its_projection_is_waiting_out_a_long_interval() {
     let waited = retry_intervals(&world, run, &outage, 4, Duration::from_secs(90));
     outage.replied();
     assert!(
-        waited[3] >= Duration::from_secs(8),
+        waited[3] >= world.scaled(Duration::from_secs(8)),
         "the outstanding interval is only {:?}, so a run settling inside it proves nothing",
         waited[3]
     );

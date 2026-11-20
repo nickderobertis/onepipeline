@@ -1191,3 +1191,106 @@ fn a_journeys_onepipeline_runs_leave_their_span_records_with_it_and_the_report_f
         }
     }
 }
+
+/// Journeys whose verbs sit out a scaled wait each, and the span that wait is recorded under:
+/// the stall threshold, a source's re-read, a held release's next ask, a takeover's wait for
+/// the driver it displaces, a refused fence's retry, a superseded driver's wait for its
+/// settlement to land, and a driver's wait for its first projection. Each already drives its
+/// wait and ends its driver normally — a driver a `stop` signals writes no record — and is
+/// run here profiled, alone, as nextest runs it.
+const WAITED_ON: [(&str, &str); 7] = [
+    (
+        "time_scale::a_quiet_worker_is_reported_at_the_shipped_threshold_times_the_scale",
+        "wait:stall",
+    ),
+    (
+        "store::a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is",
+        "wait:source-poll",
+    ),
+    (
+        "adoption::a_hold_whose_preservation_the_origin_refuses_fails_the_node_by_name",
+        "wait:release-poll",
+    ),
+    (
+        "continuation::a_takeover_of_a_driver_with_nothing_to_publish_starts_on_the_acknowledgement_its_closeout_writes",
+        "wait:takeover",
+    ),
+    (
+        "continuation::a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands",
+        "wait:fence-retry",
+    ),
+    (
+        "continuation::a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has",
+        "wait:settlement-landing",
+    ),
+    (
+        "delivers::every_task_and_every_delivered_ticket_reads_queued_at_the_first_dispatch",
+        "wait:write-back-first-attempt",
+    ),
+];
+
+/// Under [`profile::SPANS_ENV`], the time a verb spends waiting is recorded under a span named
+/// for what it waited on — each journey in [`WAITED_ON`] leaves its own wait's span in the
+/// records its `onepipeline` runs wrote, with wall time in it — and the report's span table
+/// carries those names, so the tier's profile says which waits its wall went to.
+#[test]
+fn a_profiled_journeys_waits_are_recorded_under_what_they_waited_on() {
+    let world = World::new("profile-waits");
+    let records = world.root.join("profiles");
+    for (test, _) in WAITED_ON {
+        let ran = Command::new(std::env::current_exe().expect("this suite's own binary"))
+            .args(["--exact", test, "--nocapture"])
+            .env(profile::DIR_ENV, &records)
+            .env(profile::SPANS_ENV, "1")
+            .env_remove("ONEPIPELINE_PROFILE_SPANS")
+            .env_remove("NEXTEST_TEST_NAME")
+            .output()
+            .expect("the suite runs");
+        passed(test, &ran);
+    }
+    for (test, waited) in WAITED_ON {
+        let spans_dir = records
+            .join("e2e")
+            .join(file_of(test).replace(".json", ".spans"));
+        let spent: f64 = profile::fs::read_dir(&spans_dir)
+            .expect("the journey's span directory")
+            .map(|entry| read_record(&entry.expect("a span record").path()))
+            .flat_map(|record| record["spans"].as_array().cloned().unwrap_or_default())
+            .filter(|span| span["name"] == waited)
+            .map(|span| number(&span["wall_ms"]))
+            .sum();
+        assert!(
+            spent > 0.0,
+            "{test} left no time under `{waited}` in the span records its runs wrote"
+        );
+    }
+
+    let out = world.root.join("report.json");
+    let reported = Command::new("node")
+        .arg(repo_file("scripts/test-profile-report.mjs"))
+        .args(["--json", "--top-spans", "1000", "--out"])
+        .arg(&out)
+        .arg(format!("linux={}", records.display()))
+        .output()
+        .expect("node runs the report");
+    assert!(
+        reported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reported.stderr)
+    );
+    let report = read_record(&out);
+    let tabled: std::collections::BTreeSet<String> = report["platforms"][0]["spans"]["modules"]
+        .as_array()
+        .expect("the span fold's modules")
+        .iter()
+        .flat_map(|module| module["verbs"].as_array().cloned().unwrap_or_default())
+        .flat_map(|verb| verb["spans"].as_array().cloned().unwrap_or_default())
+        .filter_map(|span| span["name"].as_str().map(str::to_owned))
+        .collect();
+    for (_, waited) in WAITED_ON {
+        assert!(
+            tabled.contains(waited),
+            "the report's span tables do not show `{waited}`: {tabled:?}"
+        );
+    }
+}
