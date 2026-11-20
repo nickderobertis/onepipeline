@@ -262,6 +262,29 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
     let world = world("expiry-time");
     let past = json!({"when": "time", "at": PAST, "reason": "The release window has passed"});
     let gone = id_of(&raise(&world, &item("gone", json!([past]))));
+    // A moment with an offset and a fraction is the same moment in UTC; a date no calendar
+    // holds, and one before 1970, are refused as no moment at all.
+    let offset = json!({"when": "time", "at": "2020-01-01T05:00:00.5+05:00"});
+    let offset_id = id_of(&raise(&world, &item("offset", json!([offset]))));
+    for (name, at) in [
+        ("no-day", "2026-02-30T00:00:00Z"),
+        ("pre-epoch", "1969-12-31T23:59:59Z"),
+    ] {
+        let path = world.root.join(format!("{name}.json"));
+        std::fs::write(
+            &path,
+            item(name, json!([{"when": "time", "at": at}])).to_string(),
+        )
+        .unwrap();
+        world
+            .run(&["human-items", "raise", "--input", path.to_str().unwrap()])
+            .err_has("is not an RFC 3339 moment");
+    }
+    expired_by(
+        &shown(&world, &offset_id)["item"],
+        &offset,
+        "its expiry time 2020-01-01T05:00:00.5+05:00 was reached",
+    );
     // A moment past what a clock can say is refused, and nothing is raised.
     let path = world.root.join("overflow.json");
     std::fs::write(
@@ -338,7 +361,12 @@ fn time_conditions_expire_on_the_next_read_with_their_reason_or_the_engines_word
         .iter()
         .map(|v| v["item"]["id"].as_str().unwrap().to_owned())
         .collect();
-    let mut wanted = vec![gone.clone(), soon_id.clone(), rearmed.clone()];
+    let mut wanted = vec![
+        gone.clone(),
+        soon_id.clone(),
+        rearmed.clone(),
+        offset_id.clone(),
+    ];
     wanted.sort();
     let mut expired_sorted = expired.clone();
     expired_sorted.sort();
@@ -583,6 +611,19 @@ fn node_and_run_conditions_follow_real_runs_of_command_nodes() {
         .all(|e| e["kind"] != "human-item-expired"));
 
     // Its node settles: the run's own driver sweeps and expires it, with no read here.
+    // `show` says what each waits for.
+    world
+        .run(&["human-items", "show", &n])
+        .exited(0)
+        .out_has(&format!("[0] when node a of run {x} settles"));
+    world
+        .run(&["human-items", "show", &s])
+        .exited(0)
+        .out_has(&format!("[0] when run {x} settles — Every step is done"));
+    world
+        .run(&["human-items", "show", &e])
+        .exited(0)
+        .out_has(&format!("[0] when run {y} ends"));
     release(&world, "go-a");
     world.until("the driver to expire the node's item", |w| {
         !expiries(w, &n).is_empty()
@@ -956,6 +997,16 @@ fn a_check_answers_not_yet_until_its_condition_holds_and_expires_with_its_own_wo
     let after = shown(&world, &id);
     expired_by(&after["item"], &condition, "40G free on /srv");
     assert_eq!(after["checks"][0]["outcome"], "holds");
+    world
+        .run(&["human-items", "show", &id])
+        .exited(0)
+        .out_has(&format!(
+            "[0] when the check `{}` says so (every 10 s, timeout 10 s, in {}) — Unused",
+            disk.display(),
+            world.root.display()
+        ))
+        .out_has("expired (it printed \"expired\": true)")
+        .out_has("expired when the check");
     assert_eq!(lines_of(&world, "seen"), [id.clone(), id.clone()]);
 
     let bare = posix_script(&world.root, "bare", "echo '{\"expired\": true}'");
@@ -1797,4 +1848,98 @@ fn a_replaced_check_inherits_nothing_of_the_check_it_replaced() {
     assert_eq!(lines_of(&world, "old.log").len(), 1);
     assert_eq!(detail["checks"][0]["outcome"], "failed", "{detail}");
     assert_eq!(detail["item"]["expiry"], json!([new]));
+}
+
+/// A live driver with nothing else due runs a check again once its interval passes, with
+/// no read in between: the check falling due is what wakes it.
+#[cfg(unix)]
+#[test]
+fn a_live_driver_runs_a_check_again_once_its_interval_passes() {
+    let world = world("expiry-driver-interval");
+    let z = "rechecking";
+    let plan = world.plan(z, &plan_of(z, vec![waiting(&world, "w", "go-w", 0)]));
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the command to start", |w| started(w, z, "w"));
+    let log = shell_path(&world.root.join("checked.log"));
+    let script = posix_script(
+        &world.root,
+        "interval",
+        &format!("echo ran >> '{log}'\necho '{{\"expired\": false}}'"),
+    );
+    raise(
+        &world,
+        &item(
+            "interval",
+            json!([check_of(&world, &script, json!({"interval_seconds": 10}))]),
+        ),
+    );
+    world.until("the driver to run the check", |w| {
+        lines_of(w, "checked.log").len() == 1
+    });
+    world.until_within(Duration::from_secs(45), "the driver to run it again", |w| {
+        lines_of(w, "checked.log").len() == 2
+    });
+    release(&world, "go-w");
+}
+
+/// A driver's own sweep expires its run's human step and drops it at once, and expires
+/// another run's, releasing that step through the other run's commands: both with no
+/// read in between.
+#[test]
+fn a_drivers_sweep_releases_its_own_human_step_and_another_runs() {
+    let world = world("expiry-driver-steps");
+    let gated = |id: &str, reason: &str, deps: &[&str]| {
+        let mut gate = human(id, deps);
+        gate["human_item"] = json!({"kind": "task", "priority": "low", "title": format!("Sign off {id}"),
+            "body": "Say it may go.", "expiry": [{"when": "time", "after_seconds": 4, "reason": reason}]});
+        gate
+    };
+    let then = |id: &str, gate: &str| {
+        let script = posix_script(&world.root, id, "exit 0");
+        json!({"id": id, "kind": "command", "command": [script.display().to_string()], "deps": [gate]})
+    };
+    let other = "elsewhere";
+    let elsewhere = world.plan(
+        other,
+        &plan_of(
+            other,
+            vec![
+                gated("far", "Not needed there", &[]),
+                then("far-after", "far"),
+            ],
+        ),
+    );
+    world.run(&["start", &elsewhere, "--attach"]).exited(0);
+    let own = "sweeping";
+    let sweeping = world.plan(
+        own,
+        &plan_of(
+            own,
+            vec![
+                gated("near", "Not needed here", &[]),
+                then("near-after", "near"),
+                waiting(&world, "side", "go-side", 0),
+            ],
+        ),
+    );
+    world.run(&["start", &sweeping, "--detach"]).exited(0);
+    world.until_within(Duration::from_secs(60), "its own step to be dropped", |w| {
+        settled(w, own, "near-after").as_deref() == Some("done")
+    });
+    let drop = world
+        .events_of(own, "edit-committed")
+        .into_iter()
+        .map(|e| e["payload"]["command"].clone())
+        .find(|c| c["op"] == "drop")
+        .expect("dropped");
+    assert_eq!(drop["reason"], "Not needed here");
+    // The other run has no driver: its drop waits on its own command queue.
+    world.until_within(Duration::from_secs(60), "the other run's release", |w| {
+        std::fs::read_to_string(w.run_file(other, "channel/commands.jsonl"))
+            .unwrap_or_default()
+            .contains("Not needed there")
+    });
+    world.run(&["adopt", other]).exited(0);
+    assert_eq!(settled(&world, other, "far-after").as_deref(), Some("done"));
+    release(&world, "go-side");
 }

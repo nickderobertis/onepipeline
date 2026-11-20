@@ -3197,3 +3197,39 @@ fn event_constraints() -> serde_json::Value {
     .collect::<Vec<_>>();
     serde_json::json!(constraints)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::rfc3339_millis;
+
+    #[test]
+    fn an_rfc3339_moment_reads_as_its_utc_milliseconds() {
+        assert_eq!(rfc3339_millis("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_millis("1970-01-01T00:00:01.5Z"), Some(1500));
+        assert_eq!(rfc3339_millis("1970-01-01T00:00:01.123456Z"), Some(1123));
+        assert_eq!(rfc3339_millis("1970-01-01T01:00:00+01:00"), Some(0));
+        assert_eq!(rfc3339_millis("1969-12-31T23:00:00-01:00"), Some(0));
+        assert_eq!(
+            rfc3339_millis("2024-02-29T00:00:00z"),
+            Some(1_709_164_800_000)
+        );
+        assert_eq!(
+            rfc3339_millis("2026-11-20T09:05:00.000Z"),
+            Some(crate::projection::millis_of("2026-11-20T09:05:00.000Z").unwrap())
+        );
+        for refused in [
+            "1969-12-31T23:59:59Z",
+            "2026-02-29T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-01-01T24:00:00Z",
+            "2026-01-01T00:00:00",
+            "2026-01-01T00:00:00.Z",
+            "2026-01-01T00:00:00+0100",
+            "2026-01-01T00:00:00+24:00",
+            "tomorrow",
+            "",
+        ] {
+            assert_eq!(rfc3339_millis(refused), None, "{refused}");
+        }
+    }
+}
